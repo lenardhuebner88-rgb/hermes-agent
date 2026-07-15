@@ -1133,6 +1133,48 @@ def test_route_runs_returns_history(client, tmp_home):
     assert any(r["request_id"] == "x1" and r["tokens"] == 42 for r in body["runs"])
 
 
+def test_proposals_payload_exposes_honest_outcome_metrics(tmp_home):
+    proposals.save_proposal(
+        {
+            "id": "legacy-integrated",
+            "schema": proposals.PROPOSAL_SCHEMA,
+            "mode": "code",
+            "target": "hermes_cli/example.py",
+            "status": "routed_to_kanban",
+            "finding_state": "verified",
+            "decision_state": "accepted",
+            "delivery_state": "integrated",
+            "lifecycle_source": "explicit",
+        }
+    )
+    proposals.save_proposal(
+        {
+            "id": "dismissed",
+            "schema": proposals.PROPOSAL_SCHEMA,
+            "mode": "code",
+            "target": "hermes_cli/example.py",
+            "status": "skipped",
+            "finding_state": "rejected",
+            "decision_state": "dismissed",
+            "delivery_state": "none",
+            "lifecycle_source": "explicit",
+        }
+    )
+
+    payload = proposals.proposals_payload()
+    by_id = {item["id"]: item for item in payload["proposals"]}
+    outcomes = payload["metrics"]["outcomes"]
+
+    assert by_id["legacy-integrated"]["measurement_status"] == "exhausted"
+    assert by_id["legacy-integrated"]["outcome_verdict"] == "unmeasurable"
+    assert by_id["legacy-integrated"]["evidence_grade"] == "legacy_observational"
+    assert by_id["dismissed"]["outcome_applicability"] == "not_applicable"
+    assert outcomes["applicable"] == 1
+    assert outcomes["not_applicable"] == 1
+    assert outcomes["improved"] == 0
+    assert outcomes["measurement_coverage"] == 0.0
+
+
 # ---------------------------------------------------------------------------
 # AR2: relevance ranking (deterministic; cap; criticality; usage; "why first")
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ import { getTestFoundryResultSummary } from "../lib/autoresearchTestFoundrySumma
 import { getProposalOperatorBrief } from "../lib/autoresearchProposalBrief";
 import { DeepAuditFindings, LatestActivityPanel } from "./AutoresearchView";
 import { LastRun } from "./autoresearch/panels";
+import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { de } from "../i18n/de";
 import type { AutoresearchRun, Proposal } from "../lib/types";
 import type { DeepAuditFinding } from "../hooks/useControlData";
@@ -1504,5 +1505,48 @@ describe("AutoresearchView keyboard safety", () => {
     expect(getAutoresearchKeyboardAction({ key: "t", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-top");
     expect(getAutoresearchKeyboardAction({ key: "v", hasTopProposal: true, hasVisibleProposals: true, hasSelection: false })).toBe("select-visible");
     expect(getAutoresearchKeyboardAction({ key: "Escape", hasTopProposal: true, hasVisibleProposals: true, hasSelection: true })).toBe("clear-selection");
+  });
+});
+
+describe("AutoresearchView measured outcomes", () => {
+  it("separates integration from verified benefit and renders evidence", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "measured-1", title: "Silent exception removed", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      probe_contract: { contract_id: "outcome:source_pattern.v1:abc", contract_hash: "abc" },
+      outcome_baseline: { metric: "occurrences", value: 1 },
+      outcome_observation: { metric: "occurrences", value: 0 },
+      outcome_integration_sha: "a".repeat(40),
+      outcome_cost_usd: 0.25,
+    };
+    const integratedOnly: Proposal = {
+      ...proposal({ id: "integrated-only", title: "Integrated without measurement", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "exhausted",
+      outcome_verdict: "unmeasurable",
+      evidence_grade: "legacy_observational",
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured, integratedOnly]} />);
+
+    expect(html).toContain("Integriert ist nicht gleich verbessert.");
+    expect(html).toContain("Nutzen bestätigt");
+    expect(html).toContain("Silent exception removed");
+    expect(html).toContain("outcome:source_pattern.v1:abc");
+    expect(html).toContain("aaaaaaaaaaaa");
+    expect(html).toContain("occurrences: 1");
+    expect(html).toContain("occurrences: 0");
+    expect(html).not.toContain("Integrated without measurement");
+  });
+
+  it("shows an honest empty state when no contract has measured benefit", () => {
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
+    expect(html).toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
+    expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
   });
 });

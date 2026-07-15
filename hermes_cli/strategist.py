@@ -49,12 +49,14 @@ import math
 import os
 import re
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
+from hermes_cli import outcome_verification as outcomes
 from hermes_cli import vision_metrics
 
 logger = logging.getLogger(__name__)
@@ -1747,12 +1749,73 @@ def _read_lever_outcomes(path: Any) -> list[dict[str, Any]]:
 
 
 def _write_lever_outcomes_atomic(path: Path, records: list[dict[str, Any]]) -> None:
-    """Persist *records* to *path* atomically via tmp+rename (os.replace)."""
+    """Persist the canonical shared outcome projection without torn writes."""
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(records, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    with outcomes.shared_state_lock(path):
+        incoming = [outcomes.normalize_strategist_record(record) for record in records]
+        current = _read_lever_outcomes(path)
+        by_root = {
+            str(record.get("root_task_id")): dict(record)
+            for record in current
+            if record.get("root_task_id") is not None
+        }
+        order = [str(record.get("root_task_id")) for record in current if record.get("root_task_id") is not None]
+        unkeyed = [dict(record) for record in current if record.get("root_task_id") is None]
+        status_rank = {"proposed": 0, "shipped": 1, "measured": 2}
+        for record in incoming:
+            root = record.get("root_task_id")
+            if root is None:
+                if record not in unkeyed:
+                    unkeyed.append(record)
+                continue
+            key = str(root)
+            prior = by_root.get(key)
+            if prior is None:
+                by_root[key] = record
+                order.append(key)
+                continue
+            merged = dict(prior)
+            merged.update(record)
+            # Delivery and measurement timestamps/status are monotonic facts;
+            # a stale RMW writer must not erase a concurrent ship/measure stamp.
+            for field in ("shipped_at", "measured_at"):
+                candidates = [value for value in (prior.get(field), record.get(field)) if value is not None]
+                merged[field] = max(candidates) if candidates else None
+            if status_rank.get(str(prior.get("status")), -1) > status_rank.get(str(record.get("status")), -1):
+                merged["status"] = prior.get("status")
+            if prior.get("outcome_applicability") == "not_applicable":
+                for field in (
+                    "outcome_applicability", "measurement_status", "outcome_verdict",
+                    "evidence_grade", "calibration_eligible", "delivery_state",
+                    "delivery_disposition",
+                ):
+                    if field in prior:
+                        merged[field] = prior[field]
+            prior_measured = int(prior.get("measured_at") or 0)
+            incoming_measured = int(record.get("measured_at") or 0)
+            if prior_measured > incoming_measured:
+                for field in (
+                    "current", "delta", "verdict", "stale_metrics", "confounded_with",
+                    "measurement_status", "outcome_verdict", "evidence_grade",
+                ):
+                    if field in prior:
+                        merged[field] = prior[field]
+            by_root[key] = outcomes.normalize_strategist_record(merged)
+        normalized = unkeyed + [by_root[key] for key in order]
+        outcomes.atomic_write_json(path, normalized, lock=False)
+
+
+@contextmanager
+def _locked_lever_outcomes(path: Path, *, write: bool = True):
+    """Hold the shared lock across a complete outcome read/modify/write."""
+    target = Path(path)
+    with outcomes.shared_state_lock(target):
+        records = _read_lever_outcomes(target)
+        before = json.dumps(records, ensure_ascii=False, sort_keys=True)
+        yield records
+        after = json.dumps(records, ensure_ascii=False, sort_keys=True)
+        if write and after != before:
+            _write_lever_outcomes_atomic(target, records)
 
 
 def default_lever_outcomes_path() -> Path:
@@ -1819,9 +1882,13 @@ def compute_lever_calibration(
     """
     by_class: dict[str, list[float]] = {}
     for rec in records:
+        # Autoresearch outcome rows may share the projection for operator
+        # visibility, but must never train Strategist ranking calibration.
+        if rec.get("calibration_eligible") is False or rec.get("outcome_source") == "autoresearch":
+            continue
         if rec.get("status") != "measured":
             continue
-        score = _VERDICT_SCORE.get(rec.get("verdict"))
+        score = _VERDICT_SCORE.get(rec.get("outcome_verdict", rec.get("verdict")))
         if score is None:
             continue
         lever_key = rec.get("lever_key")
@@ -1860,35 +1927,60 @@ def stamp_lever_outcome_shipped(
         if not path.exists():
             logger.info("lever-outcomes ship stamp skipped; file missing: %s", path)
             return False
-        records = _read_lever_outcomes(path)
-        if not records:
-            return False
+        # `complete_freigabe_hold` means "resolved elsewhere", not delivered.
+        # The kernel currently calls this stamp hook for that legacy path, so
+        # the outcome projection explicitly applies the stronger event truth.
+        done_elsewhere = False
+        try:
+            with kanban_db.connect() as conn:
+                done_elsewhere = conn.execute(
+                    "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_completed' LIMIT 1",
+                    (root_task_id,),
+                ).fetchone() is not None
+        except Exception:
+            done_elsewhere = False
         now_ts = int(time.time() if shipped_at is None else shipped_at)
         changed = False
         matched = False
-        for rec in records:
-            if rec.get("root_task_id") != root_task_id:
-                continue
-            matched = True
-            if rec.get("shipped_at") is None:
-                rec["shipped_at"] = now_ts
-                changed = True
-            if rec.get("status") == "proposed":
-                rec["status"] = "shipped"
-                changed = True
-                # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — warn
-                # now, ~MATURITY_DAYS before the operator would otherwise learn
-                # the metric_key can never yield a real verdict.
-                mk = rec.get("metric_key")
-                measurability = _lever_measurability(mk)
-                rec["measurability"] = measurability
-                _warn_if_unmeasurable(
-                    stage="ship-stamp", lever_key=rec.get("lever_key"),
-                    root_task_id=root_task_id, metric_key=mk, measurability=measurability,
-                )
+        with _locked_lever_outcomes(path) as records:
+            if not records:
+                return False
+            for rec in records:
+                if rec.get("root_task_id") != root_task_id:
+                    continue
+                matched = True
+                if done_elsewhere:
+                    desired = {
+                        "outcome_applicability": "not_applicable",
+                        "measurement_status": "exhausted",
+                        "outcome_verdict": None,
+                        "evidence_grade": "contract_verified",
+                        "calibration_eligible": False,
+                        "delivery_state": "none",
+                        "delivery_disposition": "done_elsewhere",
+                    }
+                    if any(rec.get(key) != value for key, value in desired.items()):
+                        rec.update(desired)
+                        changed = True
+                    continue
+                if rec.get("shipped_at") is None:
+                    rec["shipped_at"] = now_ts
+                    changed = True
+                if rec.get("status") == "proposed":
+                    rec["status"] = "shipped"
+                    changed = True
+                    # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — warn
+                    # now, ~MATURITY_DAYS before the operator would otherwise learn
+                    # the metric_key can never yield a real verdict.
+                    mk = rec.get("metric_key")
+                    measurability = _lever_measurability(mk)
+                    rec["measurability"] = measurability
+                    _warn_if_unmeasurable(
+                        stage="ship-stamp", lever_key=rec.get("lever_key"),
+                        root_task_id=root_task_id, metric_key=mk, measurability=measurability,
+                    )
         if not matched or not changed:
             return False
-        _write_lever_outcomes_atomic(path, records)
         return True
     except Exception:
         logger.warning(
@@ -2073,43 +2165,55 @@ def _outcomes_write_baselines(
     Skips levers whose ``root_task_id`` already has a record (idempotent on
     re-ingest / ``already_ingested=True``).  Writes atomically.
     """
-    records = _read_lever_outcomes(outcomes_path)
-    existing_ids = {r.get("root_task_id") for r in records if r.get("root_task_id") is not None}
-    now_ts = int(time.time())
-    changed = False
-    for item in ingested:
-        root_id = item.get("root_task_id")
-        if root_id is None or root_id in existing_ids:
-            continue
-        lever = next((lv for lv in capped if lv.key == item["key"]), None)
-        mk = _lever_metric_key(lever, flat_metrics) if lever is not None else None
-        # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — computed at
-        # baseline creation so an unmeasurable metric_key surfaces in the run
-        # log before the operator ever releases the drafted PlanSpec.
-        measurability = _lever_measurability(mk)
-        _warn_if_unmeasurable(
-            stage="ingest", lever_key=item["key"], root_task_id=root_id,
-            metric_key=mk, measurability=measurability,
-        )
-        records.append({
-            "schema_version": 1,
-            "lever_key": item["key"],
-            "root_task_id": root_id,
-            "proposed_at": now_ts,
-            "baseline": flat_metrics,
-            "metric_key": mk,
-            "measurability": measurability,
-            "shipped_at": None,
-            "measured_at": None,
-            "current": None,
-            "delta": None,
-            "verdict": None,
-            "status": "proposed",
-        })
-        existing_ids.add(root_id)
-        changed = True
-    if changed:
-        _write_lever_outcomes_atomic(outcomes_path, records)
+    with _locked_lever_outcomes(outcomes_path) as records:
+        existing_ids = {r.get("root_task_id") for r in records if r.get("root_task_id") is not None}
+        now_ts = int(time.time())
+        for item in ingested:
+            root_id = item.get("root_task_id")
+            if root_id is None or root_id in existing_ids:
+                continue
+            lever = next((lv for lv in capped if lv.key == item["key"]), None)
+            mk = _lever_metric_key(lever, flat_metrics) if lever is not None else None
+            # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — computed at
+            # baseline creation so an unmeasurable metric_key surfaces in the run
+            # log before the operator ever releases the drafted PlanSpec.
+            measurability = _lever_measurability(mk)
+            _warn_if_unmeasurable(
+                stage="ingest", lever_key=item["key"], root_task_id=root_id,
+                metric_key=mk, measurability=measurability,
+            )
+            probe_contract = None
+            if mk is not None:
+                direction = _resolve_verdict_direction(mk)
+                if direction is not None:
+                    probe_contract = outcomes.build_vision_metric_contract(mk, direction=direction)
+            record = {
+                "schema_version": 1,
+                "outcome_schema_version": outcomes.OUTCOME_SCHEMA_VERSION,
+                "outcome_source": "strategist",
+                "lever_key": item["key"],
+                "root_task_id": root_id,
+                "proposed_at": now_ts,
+                "baseline": flat_metrics,
+                "metric_key": mk,
+                "measurability": measurability,
+                "shipped_at": None,
+                "measured_at": None,
+                "current": None,
+                "delta": None,
+                "verdict": None,
+                "status": "proposed",
+                "outcome_applicability": "applicable",
+                "measurement_status": "pending" if probe_contract is not None else "not_started",
+                "outcome_verdict": None,
+                "evidence_grade": "contract_verified" if probe_contract is not None else "legacy_observational",
+                "calibration_eligible": True,
+            }
+            if probe_contract is not None:
+                record["probe_contract"] = probe_contract
+                record["contract_hash"] = probe_contract["contract_hash"]
+            records.append(record)
+            existing_ids.add(root_id)
 
 
 def _event_payload(raw: Any) -> dict[str, Any]:
@@ -2165,18 +2269,31 @@ def _recalculate_outcome_measurement(
     now_ts: int,
 ) -> tuple[dict[str, Any], bool]:
     """Return an updated measured outcome record and whether relevant fields changed."""
+    if rec.get("status") == "measured" and rec.get("evidence_grade") in {None, "legacy_observational"}:
+        # Migration honesty: historical measured rows retain the verdict and
+        # measurement time that were actually observed.  Backfill only adds
+        # the shared dimensions and legacy grade; it never manufactures a new
+        # directional result from a later snapshot.
+        desired = outcomes.normalize_strategist_record(rec)
+        relevant = (
+            "outcome_schema_version", "outcome_source", "outcome_applicability",
+            "measurement_status", "outcome_verdict", "evidence_grade",
+            "calibration_eligible",
+        )
+        return desired, any(rec.get(field) != desired.get(field) for field in relevant)
     flat_current = _flatten_numeric(_metrics_payload(metrics))
     flat_baseline = rec.get("baseline") or {}
     mk = rec.get("metric_key")
     current_val: float | None = None
     baseline_val: float | None = None
     delta_val: float | None = None
-    verdict = "unmeasurable"
+    verdict = "confounded" if rec.get("verdict") == "confounded" else "unmeasurable"
     if mk and mk in flat_current and mk in flat_baseline:
         current_val = float(flat_current[mk])
         baseline_val = float(flat_baseline[mk])
         delta_val = round(current_val - baseline_val, 9)
-        verdict = _compute_verdict(delta_val, mk, baseline_val)
+        if verdict != "confounded":
+            verdict = _compute_verdict(delta_val, mk, baseline_val)
 
     desired = dict(rec)
     desired["current"] = current_val
@@ -2186,8 +2303,14 @@ def _recalculate_outcome_measurement(
     gen_epoch = _epoch_from_generated_at(metrics.get("generated_at"))
     if gen_epoch is not None and now_ts - gen_epoch > 86400:
         desired["stale_metrics"] = True
+        if verdict != "confounded":
+            desired["verdict"] = "unmeasurable"
     else:
         desired.pop("stale_metrics", None)
+
+    desired.update(outcomes.normalize_outcome_fields(desired, source="strategist"))
+    desired["measurement_status"] = "measured"
+    desired["outcome_verdict"] = desired["verdict"]
 
     relevant_fields = ("current", "delta", "status", "verdict", "stale_metrics")
     changed = any(rec.get(field) != desired.get(field) for field in relevant_fields)
@@ -2454,12 +2577,17 @@ def reflect(
                         gen_epoch = _epoch_from_generated_at(_current_metrics.get("generated_at"))
                         if gen_epoch is not None and now_ts - gen_epoch > 86400:
                             rec["stale_metrics"] = True
+                            if verdict != "confounded":
+                                verdict = "unmeasurable"
                         rec["verdict"] = verdict
                         rec["measurability"] = _lever_measurability(mk)
                         if confounded_with:
                             rec["confounded_with"] = confounded_with
                         else:
                             rec.pop("confounded_with", None)
+                        rec.update(outcomes.normalize_outcome_fields(rec, source="strategist"))
+                        rec["measurement_status"] = "measured"
+                        rec["outcome_verdict"] = verdict
                         outcomes_measured += 1
                         outcomes_verdicts.append(
                             {"lever_key": rec.get("lever_key"), "verdict": verdict}

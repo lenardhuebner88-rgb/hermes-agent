@@ -179,3 +179,25 @@ explicit operator/runtime action.
 The strategist **never** pushes, deploys, restarts, or edits outside the board +
 its own state directory. It only ingests held proposals (operator-gated) and
 writes its own learning notes.
+
+## Shared outcome vocabulary
+
+Strategist outcome records now project the same independent applicability,
+measurement, verdict and evidence dimensions used by Autoresearch. The existing
+`~/.hermes/state/strategist/lever-outcomes.json` list remains the compatibility
+read model; historical verdicts and timestamps are preserved and explicitly
+graded `legacy_observational`.
+
+New measurable Strategist baselines carry an immutable
+`vision_metric_snapshot.v1` contract for a reviewed metric/direction pair.
+Stale snapshots and records without an observed baseline cannot produce a new
+directional verdict. A task completed through the explicit "done elsewhere"
+event is terminal `not_applicable`, not shipped and not training evidence.
+
+Autoresearch may be visible through the common operator outcome surface, but
+its rows are always `calibration_eligible=false`; they are excluded from
+`compute_lever_calibration`. Delivery and measurement remain separate:
+`integrated` or `shipped` alone never means `improved`.
+
+The detailed contract, source hierarchy, shadow rollout and rollback procedure
+is in [`autoresearch-outcome-verification.md`](autoresearch-outcome-verification.md).

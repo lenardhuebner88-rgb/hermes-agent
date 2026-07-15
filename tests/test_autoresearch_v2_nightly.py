@@ -293,6 +293,7 @@ def test_main_runs_reconciler_after_prune_before_summary(monkeypatch):
     monkeypatch.setattr(nightly, "run_deep_audit_lane", lambda *_a, **_k: order.append("deep-audit") or _da())
     monkeypatch.setattr(nightly, "run_test_foundry_lane", lambda *_a, **_k: order.append("test-foundry") or [_tf("x.py")])
     monkeypatch.setattr(nightly, "_run_reconciler", lambda: order.append("reconcile") or {"ok": True}, raising=False)
+    monkeypatch.setattr(nightly, "_run_shadow_verifier", lambda: order.append("shadow") or {"ok": True}, raising=False)
 
     def fake_prune():
         order.append("prune")
@@ -306,7 +307,7 @@ def test_main_runs_reconciler_after_prune_before_summary(monkeypatch):
     monkeypatch.setattr(nightly, "build_summary", fake_build_summary)
 
     assert nightly.main(["--no-send", "--date", "2026-06-04"]) == 0
-    assert order == ["deep-audit", "test-foundry", "prune", "reconcile", "summary"]
+    assert order == ["deep-audit", "test-foundry", "prune", "reconcile", "shadow", "summary"]
 
 
 

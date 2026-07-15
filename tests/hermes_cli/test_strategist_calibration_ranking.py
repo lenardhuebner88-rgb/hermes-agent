@@ -111,6 +111,28 @@ def test_calibration_ignores_unmeasurable_and_confounded():
     assert calib == {}
 
 
+def test_calibration_excludes_autoresearch_rows_even_with_directional_verdicts():
+    records = [
+        {
+            **_measured_record("GATE-FIX-PY-aaaaaaaa", "improved", root_task_id="t_1"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+        {
+            **_measured_record("GATE-FIX-PY-bbbbbbbb", "improved", root_task_id="t_2"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+        {
+            **_measured_record("GATE-FIX-PY-cccccccc", "improved", root_task_id="t_3"),
+            "outcome_source": "autoresearch",
+            "calibration_eligible": False,
+        },
+    ]
+
+    assert strategist.compute_lever_calibration(records) == {}
+
+
 def test_lever_class_of_key_only_strips_known_dynamic_prefixes():
     """Only GATE-FIX-/GATE-TRIAGE- keys carry a stripped trailing 8-hex digest;
     any other key ending in an 8-hex-looking segment (e.g. a pack literally

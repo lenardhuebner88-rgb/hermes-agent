@@ -41,6 +41,7 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
 from hermes_cli import autoresearch_budget as arb  # noqa: E402
 from hermes_cli import autoresearch_proposals as _proposals  # noqa: E402
 from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
+from hermes_cli import outcome_verification as outcome_verifier  # noqa: E402
 from hermes_cli import deep_audit, test_foundry  # noqa: E402
 from hermes_cli.autoresearch_lane_contracts import (  # noqa: E402
     LaneOutcome,
@@ -392,6 +393,12 @@ def _run_reconciler() -> dict:
     return summary
 
 
+def _run_shadow_verifier() -> dict:
+    summary = outcome_verifier.run_shadow_verifier(phase="shadow", max_measurements=3)
+    print(json.dumps({"lane": "outcome-shadow", **summary}, indent=2, ensure_ascii=False))
+    return summary
+
+
 def _record_lane_cooldown(lane: str, outcome: LaneOutcome, summary: dict[str, Any]) -> None:
     """Best-effort zero-yield streak bookkeeping (never sinks the report)."""
     try:
@@ -594,6 +601,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # Reconcile darf den Report nie killen
         traceback.print_exc()
         print(f"[autoresearch-v2-nightly] reconcile fehlgeschlagen: {exc}", file=sys.stderr)
+
+    try:
+        _run_shadow_verifier()
+    except Exception as exc:  # Shadow-Messung darf den Forschungsbericht nie killen
+        traceback.print_exc()
+        print(f"[autoresearch-v2-nightly] outcome shadow fehlgeschlagen: {exc}", file=sys.stderr)
 
     message = build_summary(when, da_summary, tf_summary, tf_error=tf_error)
     print(message)

@@ -188,6 +188,13 @@ def test_ingest_writes_baseline_record(board_home, monkeypatch, tmp_path):
     # dotted keys for nested values
     assert "autonomy_pct" in baseline
     assert "green_gate_streak.streak" in baseline
+    assert rec["outcome_source"] == "strategist"
+    assert rec["outcome_applicability"] == "applicable"
+    assert rec["calibration_eligible"] is True
+    if rec["metric_key"] is not None:
+        assert rec["probe_contract"]["probe_id"] == "vision_metric_snapshot.v1"
+        assert rec["contract_hash"] == rec["probe_contract"]["contract_hash"]
+        assert rec["evidence_grade"] == "contract_verified"
     assert baseline["autonomy_pct"] == pytest.approx(75.0)
     assert baseline["green_gate_streak.streak"] == pytest.approx(3.0)
     # non-numeric / nested dict values must NOT appear as raw values
@@ -249,8 +256,8 @@ def test_complete_task_without_lever_outcome_entry_is_noop(board_home):
     assert rec["status"] == "proposed"
 
 
-def test_complete_freigabe_hold_stamps_matching_lever_outcome_shipped(board_home):
-    """The done-elsewhere freigabe completion path also stamps shipments."""
+def test_complete_freigabe_hold_is_terminal_without_delivery(board_home):
+    """Done elsewhere is explicitly inapplicable, never a shipment claim."""
     outcomes_path = _canonical_outcomes_path(board_home)
     outcomes_path.parent.mkdir(parents=True, exist_ok=True)
     with kb.connect() as conn:
@@ -277,12 +284,16 @@ def test_complete_freigabe_hold_stamps_matching_lever_outcome_shipped(board_home
 
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert rec["root_task_id"] == root
-    assert isinstance(rec["shipped_at"], int)
-    assert rec["status"] == "shipped"
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "proposed"
     assert rec["measured_at"] is None
     assert rec["current"] is None
     assert rec["delta"] is None
     assert rec["verdict"] is None
+    assert rec["outcome_applicability"] == "not_applicable"
+    assert rec["measurement_status"] == "exhausted"
+    assert rec["outcome_verdict"] is None
+    assert rec["delivery_disposition"] == "done_elsewhere"
 
 
 def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
@@ -860,6 +871,8 @@ def test_stale_metrics_flagged_when_generated_at_is_old(board_home, tmp_path):
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
     assert rec.get("stale_metrics") is True
+    assert rec["verdict"] == "unmeasurable"
+    assert rec["outcome_verdict"] == "unmeasurable"
 
 
 def test_non_stale_metrics_no_stale_flag(board_home, tmp_path):
@@ -918,6 +931,7 @@ def test_stale_metrics_with_iso_generated_at_regression(board_home, tmp_path):
     rec = json.loads(outcomes_path.read_text(encoding="utf-8"))[0]
     assert rec["status"] == "measured"
     assert rec.get("stale_metrics") is True
+    assert rec["verdict"] == "unmeasurable"
 
 
 def test_verdict_resolves_fully_qualified_flat_metric_key():
@@ -1061,13 +1075,15 @@ def test_backfill_lever_outcomes_recalculates_existing_measured_rows(tmp_path: P
     updated_records = json.loads(path.read_text(encoding="utf-8"))
     assert len(updated_records) == 2
     rec = updated_records[0]
-    assert rec["current"] == 4.0
-    assert rec["delta"] == 2.0
-    assert rec["verdict"] == "improved"
-    assert rec["measured_at"] == 5_000
+    assert rec["current"] == 1.0
+    assert rec["delta"] == -1.0
+    assert rec["verdict"] == "worsened"
+    assert rec["measured_at"] == 3_000
     assert rec["status"] == "measured"
-    assert "stale_metrics" not in rec
-    assert updated_records[1] == records[1]
+    assert rec["stale_metrics"] is True
+    assert rec["evidence_grade"] == "legacy_observational"
+    assert rec["outcome_verdict"] == "worsened"
+    assert updated_records[1]["verdict"] == records[1]["verdict"]
 
     second = strategist.backfill_lever_outcomes(
         outcomes_path=path,

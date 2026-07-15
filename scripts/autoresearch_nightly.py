@@ -39,6 +39,7 @@ import autoresearch_request as arr  # noqa: E402
 import run_autoresearch_request as runner  # noqa: E402
 from hermes_cli import autoresearch_budget as arb  # noqa: E402
 from hermes_cli import autoresearch_reconcile as reconciler  # noqa: E402
+from hermes_cli import outcome_verification as outcome_verifier  # noqa: E402
 from hermes_cli.autoresearch_lane_contracts import (  # noqa: E402
     FATAL_OUTCOMES,
     classify_lane_outcome,
@@ -151,6 +152,12 @@ def _run_reconciler() -> dict:
     return summary
 
 
+def _run_shadow_verifier() -> dict:
+    summary = outcome_verifier.run_shadow_verifier(phase="shadow", max_measurements=3)
+    print(json.dumps({"lane": "outcome-shadow", **summary}, indent=2, ensure_ascii=False))
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     """Rotating, unattended coverage, followed by proposal reconciliation."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -181,6 +188,11 @@ def main(argv: list[str] | None = None) -> int:
         _run_reconciler()
     except Exception as exc:
         print(f"[autoresearch-nightly] reconciler failed: {exc}", file=sys.stderr)
+        return rc or 1
+    try:
+        _run_shadow_verifier()
+    except Exception as exc:
+        print(f"[autoresearch-nightly] outcome shadow failed: {exc}", file=sys.stderr)
         return rc or 1
     return rc
 

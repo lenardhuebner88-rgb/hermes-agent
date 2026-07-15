@@ -144,8 +144,12 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     with kb.connect() as conn:
         summary = reconcile.reconcile_proposals(conn=conn)
         rows = conn.execute(
-            "SELECT id, title, body, acceptance_criteria, assignee, idempotency_key, "
+            "SELECT id, title, body, acceptance_criteria, assignee, idempotency_key, status, "
             "review_tier, scope_contract FROM tasks"
+        ).fetchall()
+        outcome_events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? AND kind IN (?, ?) ORDER BY id",
+            (rows[0]["id"], "outcome_contract_registered", "unblocked"),
         ).fetchall()
 
     assert summary["routed_to_kanban"] == 1
@@ -155,6 +159,7 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert rows[0]["assignee"] == "coder"
     assert rows[0]["idempotency_key"] == "autoresearch:F-123"
     assert rows[0]["review_tier"] == "review"
+    assert rows[0]["status"] == "ready"
     assert json.loads(rows[0]["acceptance_criteria"])
     assert "AC-AR1" in rows[0]["body"]
     contract = json.loads(rows[0]["scope_contract"])
@@ -168,6 +173,49 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert len(routed) == len(duplicate) == 1
     assert routed[0]["kanban_task_id"] == rows[0]["id"]
     assert duplicate[0]["last_outcome"] == "rejected_duplicate"
+    assert routed[0]["measurement_status"] == "pending"
+    assert routed[0]["evidence_grade"] == "contract_verified"
+    assert routed[0]["outcome_baseline_recorded_at"]
+    assert routed[0]["probe_contract"]["contract_hash"]
+    assert [row["kind"] for row in outcome_events] == ["outcome_contract_registered", "unblocked"]
+
+
+def test_contract_failure_leaves_task_blocked_and_next_run_recovers(reconcile_env, monkeypatch):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "code-recover",
+        mode="code",
+        finding_id="F-RECOVER",
+        target="hermes_cli/auth.py",
+        target_path="hermes_cli/auth.py",
+        category="bug_risk",
+        theme="silent-except",
+    )
+    real_register = reconcile.outcomes.register_contract
+    monkeypatch.setattr(
+        reconcile.outcomes,
+        "register_contract",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("crash after create")),
+    )
+    with kb.connect() as conn:
+        first = reconcile.reconcile_proposals(conn=conn)
+        row = conn.execute(
+            "SELECT id, status FROM tasks WHERE idempotency_key = ?", ("autoresearch:F-RECOVER",)
+        ).fetchone()
+    assert first["errors"] == 1
+    assert row["status"] == "blocked"
+    assert _load("code-recover")["outcome_baseline_recorded_at"]
+
+    monkeypatch.setattr(reconcile.outcomes, "register_contract", real_register)
+    with kb.connect() as conn:
+        second = reconcile.reconcile_proposals(conn=conn)
+        recovered = conn.execute("SELECT status FROM tasks WHERE id = ?", (row["id"],)).fetchone()
+        contract_count = conn.execute("SELECT COUNT(*) FROM outcome_contracts").fetchone()[0]
+    assert second["errors"] == 0
+    assert second["new_tasks"] == 0
+    assert recovered["status"] == "ready"
+    assert contract_count == 1
 
 
 def test_code_finding_missing_grounded_contract_is_held(reconcile_env):

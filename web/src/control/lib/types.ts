@@ -947,6 +947,10 @@ export type ProposalLastOutcome = string | null;
 export type ProposalFindingState = "detected" | "verified" | "rejected" | "stale";
 export type ProposalDecisionState = "needs_operator" | "accepted" | "dismissed";
 export type ProposalDeliveryState = "none" | "queued" | "running" | "review" | "integrated" | "failed";
+export type OutcomeApplicability = "applicable" | "not_applicable";
+export type OutcomeMeasurementStatus = "not_started" | "pending" | "measuring" | "measured" | "retryable_failure" | "exhausted";
+export type OutcomeVerdict = "improved" | "neutral" | "worsened" | "unmeasurable" | "confounded" | null;
+export type OutcomeEvidenceGrade = "legacy_observational" | "contract_verified";
 
 export type GatePhase = "running" | "passed" | "failed" | "crashed";
 
@@ -1009,6 +1013,39 @@ export interface Proposal {
   risk_summary?: string | null;
   test_plan?: string | null;
   recommendation?: string | null;
+  outcome_schema_version?: number;
+  outcome_applicability?: OutcomeApplicability;
+  measurement_status?: OutcomeMeasurementStatus;
+  outcome_verdict?: OutcomeVerdict;
+  evidence_grade?: OutcomeEvidenceGrade;
+  calibration_eligible?: boolean;
+  probe_contract?: {
+    contract_id?: string;
+    contract_hash?: string;
+    baseline_recorded_at?: number;
+    release_fingerprint?: string;
+  } | null;
+  outcome_baseline?: Record<string, unknown> | null;
+  outcome_measured_at?: number | null;
+  outcome_observation?: Record<string, unknown> | null;
+  outcome_cost_usd?: number | null;
+  outcome_integration_sha?: string | null;
+}
+
+export interface AutoresearchOutcomeMetrics {
+  applicable: number;
+  not_applicable: number;
+  pending: number;
+  measured: number;
+  measurement_coverage: number;
+  improved: number;
+  neutral: number;
+  worsened: number;
+  unmeasurable: number;
+  confounded: number;
+  measurement_cost_usd: number;
+  cost_per_measured_usd: number | null;
+  cost_per_improved_usd: number | null;
 }
 
 export interface AutoresearchQualityMetrics {
@@ -1020,6 +1057,7 @@ export interface AutoresearchQualityMetrics {
   stale_rate: number;
   duplicate_rate: number;
   cost_per_accepted_usd: number | null;
+  outcomes?: AutoresearchOutcomeMetrics;
 }
 
 export interface ProposalsResponse {

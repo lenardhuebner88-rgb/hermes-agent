@@ -548,7 +548,12 @@ def save_proposal(proposal: dict[str, Any]) -> Path:
             proposal.setdefault(key, value)
     path = _proposal_path(proposal["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(proposal, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Shared outcome verification and the dashboard/reconciler can write from
+    # different OS processes.  A unique-temp + fsync + replace projection keeps
+    # every reader on a complete JSON record and avoids fixed-temp collisions.
+    from hermes_cli.outcome_verification import atomic_write_json
+
+    atomic_write_json(path, proposal)
     return path
 
 
@@ -603,6 +608,11 @@ _LIST_FIELDS = (
     "kanban_task_id", "escalation_task_id", "linked_task_id", "linked_task_title", "linked_task_status",
     "test_code", "caught_mutant", "affected_tests", "expected_benefit", "risk_summary",
     "test_plan", "recommendation",
+    "outcome_schema_version", "outcome_applicability", "measurement_status",
+    "outcome_verdict", "evidence_grade", "calibration_eligible",
+    "probe_contract", "outcome_baseline", "outcome_baseline_recorded_at",
+    "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+    "outcome_integration_sha",
 )
 
 
@@ -627,6 +637,9 @@ def _is_reverted_no_improvement(p: dict[str, Any]) -> bool:
 
 def proposals_payload() -> dict[str, Any]:
     items = _enriched_items(list_proposals())
+    from hermes_cli.outcome_verification import enrich_autoresearch_outcomes, outcome_metrics
+
+    items = enrich_autoresearch_outcomes(items)
     cards = [_to_card(p) for p in items]
     open_count = sum(1 for p in items if _is_actionable(p))
     accepted = sum(1 for p in items if p.get("decision_state") == "accepted")
@@ -667,6 +680,7 @@ def proposals_payload() -> dict[str, Any]:
             "stale_rate": stale / total if total else 0.0,
             "duplicate_rate": duplicates / total if total else 0.0,
             "cost_per_accepted_usd": measured_cost / accepted if accepted and measured_cost else None,
+            "outcomes": outcome_metrics(items),
         },
         "proposals": cards,
         "proposals_dir": str(_proposals_dir()),
