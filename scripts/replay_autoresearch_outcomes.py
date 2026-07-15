@@ -116,10 +116,7 @@ def flood_worker(args: argparse.Namespace) -> int:
     reconcile._route_to_kanban = _slow_route
     while time.time() < float(args.start_at):
         time.sleep(0.005)
-    summary = reconcile.reconcile_proposals(
-        max_new_tasks=int(args.max_new),
-        min_task_severity=str(args.min_severity),
-    )
+    summary = reconcile.reconcile_proposals(max_new_tasks=int(args.max_new))
     print(_json(summary), flush=True)
     return 0
 
@@ -674,7 +671,10 @@ def e2e_reconcile_worker(args: argparse.Namespace) -> int:
     from hermes_cli import autoresearch_reconcile as reconcile
 
     reconcile.REPO_ROOT = repo
-    summary = reconcile.reconcile_proposals(max_new_tasks=int(args.max_new))
+    summary = reconcile.reconcile_proposals(
+        max_new_tasks=int(args.max_new),
+        min_task_severity=str(args.min_severity),
+    )
     print(_json(summary))
     return 0
 
