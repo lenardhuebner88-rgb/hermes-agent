@@ -288,7 +288,8 @@ def test_repeated_crashes_escalates_on_many_crashes():
 
 def test_stuck_in_blocked_fires_past_threshold():
     now = int(time.time())
-    task = _task(status="blocked")
+    # Typed kind so blocked_without_kind does not also fire.
+    task = _task(status="blocked", block_kind="needs_input")
     events = [
         _event("blocked", ts=now - 3600 * 48, reason="needs approval"),
     ]
@@ -304,7 +305,7 @@ def test_stuck_in_blocked_fires_past_threshold():
 
 def test_stuck_in_blocked_silent_with_recent_comment():
     now = int(time.time())
-    task = _task(status="blocked")
+    task = _task(status="blocked", block_kind="needs_input")
     events = [
         _event("blocked", ts=now - 3600 * 48),
         _event("commented", ts=now - 3600 * 2, author="human"),
@@ -316,6 +317,32 @@ def test_stuck_in_blocked_silent_when_not_blocked():
     task = _task(status="ready")
     events = [_event("blocked", ts=1000)]
     assert kd.compute_task_diagnostics(task, events, [], now=9999999) == []
+
+
+def test_blocked_without_kind_fires_when_kind_missing():
+    now = int(time.time())
+    task = _task(status="blocked", block_kind=None)
+    events = [_event("blocked", ts=now - 60, reason="token cap")]
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+    kinds = {d.kind for d in diags}
+    assert "blocked_without_kind" in kinds
+    d = next(d for d in diags if d.kind == "blocked_without_kind")
+    assert d.severity == "warning"
+    assert d.data.get("requires_operator_classification") is True
+
+
+def test_blocked_without_kind_silent_when_kind_set():
+    now = int(time.time())
+    task = _task(status="blocked", block_kind="capacity")
+    events = [
+        {
+            "kind": "blocked",
+            "created_at": now - 60,
+            "payload": {"reason": "token cap", "kind": "capacity"},
+        }
+    ]
+    diags = kd.compute_task_diagnostics(task, events, [], now=now)
+    assert all(d.kind != "blocked_without_kind" for d in diags)
 
 
 def test_reviewer_role_tool_mismatch_fires_on_imperative_gate_request():

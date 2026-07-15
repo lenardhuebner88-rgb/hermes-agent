@@ -136,7 +136,20 @@ TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 VALID_BLOCK_KINDS = frozenset(
-    {"needs_input", "capability", "dependency", "review_revision", "transient"}
+    {
+        "needs_input",
+        "capability",
+        "dependency",
+        "review_revision",
+        "transient",
+        # System parks (dispatcher/heiler/integrator) — never leave block_kind NULL.
+        "capacity",  # token/iteration budget, stall resource parks
+        "integration",  # worktree/merge/post-merge gate parks
+    }
+)
+# Parks that are never auto-retryable: operator or policy must act.
+OPERATOR_ONLY_BLOCK_KINDS = frozenset(
+    {"needs_input", "capability", "dependency", "capacity", "integration"}
 )
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
@@ -4390,15 +4403,24 @@ def _ensure_code_task_contract_in_txn(
     if reason is None:
         _append_event(conn, task_id, _CODE_TASK_CONTRACT_EVENT, payload)
         return None
-    conn.execute(
-        "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-        "claim_expires = NULL, worker_pid = NULL "
-        "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
-        (task_id,),
-    )
+    if (
+        _system_park_set_blocked(
+            conn,
+            task_id,
+            kind="needs_input",
+            where_sql="status IN ('todo', 'ready', 'running', 'blocked')",
+        )
+        < 1
+    ):
+        return None
     _append_event(conn, task_id, _NEEDS_CONTRACT_EVENT, payload)
     _append_event(conn, task_id, _NEEDS_CONTRACT_BLOCKED_EVENT, payload)
-    _append_event(conn, task_id, "blocked", {"reason": reason})
+    _append_event(
+        conn,
+        task_id,
+        "blocked",
+        _system_blocked_event_payload(reason, "needs_input", contract=True),
+    )
     return reason
 
 
@@ -8215,7 +8237,12 @@ def _schedule_continuation_after_closed_run(
             UPDATE tasks
                SET status = 'blocked', result = ?, completed_at = ?,
                    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
-                   last_continuation_reason = ?
+                   last_continuation_reason = ?,
+                   block_kind = 'capacity',
+                   block_recurrences = CASE
+                       WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                       ELSE 1
+                   END
              WHERE id = ? AND status = 'running' AND current_run_id IS NULL
             """,
             (message, now, reason, task_id),
@@ -8226,7 +8253,14 @@ def _schedule_continuation_after_closed_run(
             conn,
             task_id,
             "auto_continuation_disabled",
-            {"reason": reason, "limit": limit, "message": message},
+            {"reason": reason, "limit": limit, "message": message, "kind": "capacity"},
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(message, "capacity", limit=limit),
             run_id=run_id,
         )
         return True
@@ -8284,7 +8318,12 @@ def _schedule_continuation_after_closed_run(
             UPDATE tasks
                SET status = 'blocked', result = ?, completed_at = ?,
                    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL,
-                   last_continuation_reason = ?
+                   last_continuation_reason = ?,
+                   block_kind = 'capacity',
+                   block_recurrences = CASE
+                       WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                       ELSE 1
+                   END
              WHERE id = ? AND status = 'running' AND current_run_id IS NULL
             """,
             (message, now, reason, task_id),
@@ -8296,6 +8335,7 @@ def _schedule_continuation_after_closed_run(
             "count": int(task.continuation_count or 0),
             "limit": limit,
             "message": message,
+            "kind": "capacity",
         }
         if _ext_enabled:
             # Observability: WHY no extension — distinguishes a looping task
@@ -8315,6 +8355,13 @@ def _schedule_continuation_after_closed_run(
             task_id,
             "auto_continuation_exhausted",
             payload,
+            run_id=run_id,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(message, "capacity", limit=limit),
             run_id=run_id,
         )
         return True
@@ -9836,14 +9883,15 @@ def hold_task(
         signal_fn=signal_fn,
     )
     with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks "
-            "SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status = 'running'",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="needs_input",
+                where_sql="status = 'running'",
+            )
+            != 1
+        ):
             return False
         # Close the active run and synthesize one if none was open, so the
         # block reason is preserved in attempt history.
@@ -9867,7 +9915,9 @@ def hold_task(
             conn,
             task_id,
             "blocked",
-            {"reason": reason, "manual": True, **termination},
+            _system_blocked_event_payload(
+                reason, "needs_input", manual=True, **termination
+            ),
             run_id=run_id,
         )
     return True
@@ -13436,33 +13486,24 @@ def _park_integration(
     reason = f"integration parked: {outcome.get('reason', 'unknown')}"
     with write_txn(conn):
         if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                """,
-                (task_id,),
+            rowcount = _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="integration",
+                where_sql="status IN ('running', 'ready', 'blocked')",
             )
         else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                   AND current_run_id = ?
-                """,
-                (task_id, int(expected_run_id)),
+            rowcount = _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="integration",
+                where_sql=(
+                    "status IN ('running', 'ready', 'blocked') "
+                    "AND current_run_id = ?"
+                ),
+                where_params=(int(expected_run_id),),
             )
-        if cur.rowcount != 1:
+        if rowcount != 1:
             return False
         run_id = _end_run(
             conn,
@@ -13474,7 +13515,17 @@ def _park_integration(
         )
         if _run_originated_from_review(conn, task_id, run_id):
             _set_run_verdict(conn, run_id, "APPROVED")
-        _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(
+                reason,
+                "integration",
+                park_class=outcome.get("park_class"),
+            ),
+            run_id=run_id,
+        )
         park_class = outcome.get("park_class")
         if park_class in {
             "DIRTY_WORKTREE",
@@ -13644,6 +13695,73 @@ def _latest_unblocked_block_recurrence(
     return None
 
 
+def _normalize_block_kind(kind: Optional[str]) -> Optional[str]:
+    """Return a validated block kind, or ``None`` for an untyped block."""
+    if kind is None:
+        return None
+    block_kind = str(kind).strip().lower()
+    if block_kind == "":
+        return None
+    if block_kind not in VALID_BLOCK_KINDS:
+        raise ValueError(
+            f"unknown block kind {block_kind!r}; expected one of {sorted(VALID_BLOCK_KINDS)}"
+        )
+    return block_kind
+
+
+def _system_park_set_blocked(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    kind: str,
+    where_sql: str,
+    where_params: Sequence[Any] = (),
+) -> int:
+    """Flip a task to ``blocked`` with a mandatory ``block_kind``.
+
+    Caller must already hold a write transaction. Returns ``cursor.rowcount``.
+    System parks (budget runaway, stall, integration, hold, contract) must use
+    this path so the board never shows operator-actionable blocked cards with
+    ``block_kind IS NULL`` — that null erases auto-retry classification and
+    forces prose forensics.
+    """
+    block_kind = _normalize_block_kind(kind)
+    if block_kind is None:
+        raise ValueError("system parks require a non-null block kind")
+    cur = conn.execute(
+        f"""
+        UPDATE tasks
+           SET status = 'blocked',
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               block_kind = ?,
+               block_recurrences = CASE
+                   WHEN COALESCE(block_recurrences, 0) > 0 THEN block_recurrences
+                   ELSE 1
+               END
+         WHERE id = ? AND ({where_sql})
+        """,
+        (block_kind, task_id, *tuple(where_params)),
+    )
+    return int(cur.rowcount)
+
+
+def _system_blocked_event_payload(
+    reason: str,
+    kind: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Structured blocked-event payload for system parks (always includes kind)."""
+    payload: dict[str, Any] = {
+        "reason": reason,
+        "kind": kind,
+        "source": "system_park",
+    }
+    payload.update(extra)
+    return payload
+
+
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -13660,13 +13778,7 @@ def block_task(
     into ``task_runs.metadata`` so the auto-retry feedback can render them for
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
-    block_kind = str(kind).strip().lower() if kind is not None else None
-    if block_kind == "":
-        block_kind = None
-    if block_kind is not None and block_kind not in VALID_BLOCK_KINDS:
-        raise ValueError(
-            f"unknown block kind {block_kind!r}; expected one of {sorted(VALID_BLOCK_KINDS)}"
-        )
+    block_kind = _normalize_block_kind(kind)
     with write_txn(conn):
         if _reject_code_worker_review_required_block(
             conn, task_id, reason=reason, expected_run_id=expected_run_id
@@ -18567,16 +18679,25 @@ def _park_stall_once(
             return False
         if _has_stall_marker(conn, task_id, stall_class):
             return False
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status NOT IN ('done', 'archived')",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="capacity",
+                where_sql="status NOT IN ('done', 'archived')",
+            )
+            != 1
+        ):
             return False
         if fresh["status"] != "blocked":
-            _append_event(conn, task_id, "blocked", {"reason": reason})
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                _system_blocked_event_payload(
+                    reason, "capacity", stall_class=stall_class
+                ),
+            )
         esc_event_id = _append_event(
             conn,
             task_id,
@@ -19048,17 +19169,32 @@ def _park_budget_runaway(
             return False
         if _is_funnel_root_task(conn, fresh):
             return False
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL, "
-            "block_kind = 'needs_operator', block_recurrences = 1 "
-            "WHERE id = ? AND status NOT IN ('done', 'archived')",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
+        # Prefer typed capacity (VALID_BLOCK_KINDS + autonomy hold_capacity)
+        # over main's raw needs_operator stamp, which is not in VALID_BLOCK_KINDS
+        # and would force silent-block escalate instead of 0-token hold.
+        if (
+            _system_park_set_blocked(
+                conn,
+                task_id,
+                kind="capacity",
+                where_sql="status NOT IN ('done', 'archived')",
+            )
+            != 1
+        ):
             return False
         if fresh["status"] != "blocked":
-            _append_event(conn, task_id, "blocked", {"reason": reason})
+            _append_event(
+                conn,
+                task_id,
+                "blocked",
+                _system_blocked_event_payload(
+                    reason,
+                    "capacity",
+                    input_token_sum=token_sum,
+                    cap=cap,
+                    runs=runs,
+                ),
+            )
         _append_event(
             conn,
             task_id,
@@ -22243,6 +22379,9 @@ def _blocked_kind_for_auto_retry(
     if explicit_block_kind is not None:
         if explicit_block_kind == "transient":
             return "retryable"
+        # review_revision has its own bounded body-hash retry path below.
+        if explicit_block_kind in OPERATOR_ONLY_BLOCK_KINDS:
+            return explicit_block_kind
         if explicit_block_kind != "review_revision":
             return explicit_block_kind
     text = (reason or "").strip()
@@ -26409,6 +26548,15 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     ):
         by_assignee.setdefault(row["assignee"], {})[row["status"]] = int(row["n"])
 
+    # Operator triage: blocked cards classified by block_kind so review rework
+    # (auto-retryable) is not mixed with capacity/integration/human holds.
+    blocked_by_kind: dict[str, int] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(NULLIF(TRIM(block_kind), ''), '(unclassified)') AS kind, "
+        "COUNT(*) AS n FROM tasks WHERE status = 'blocked' GROUP BY 1"
+    ):
+        blocked_by_kind[str(row["kind"])] = int(row["n"])
+
     oldest_row = conn.execute(
         "SELECT MIN(created_at) AS ts FROM tasks WHERE status = 'ready'"
     ).fetchone()
@@ -26468,6 +26616,7 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     return {
         "by_status": by_status,
         "by_assignee": by_assignee,
+        "blocked_by_kind": blocked_by_kind,
         "oldest_ready_age_seconds": oldest_ready_age,
         "now": now,
         "completed_last_24h": completed_last_24h,
