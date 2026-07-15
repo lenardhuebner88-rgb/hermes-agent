@@ -1,0 +1,2569 @@
+{
+  "audit_schema_version": 1,
+  "duplicates_and_profile_forks": [
+    {
+      "classification": "divergent",
+      "copies": 2,
+      "files": [
+        "profile:research/research/ai-model-intelligence-reporting/SKILL.md",
+        "profile:scout/research/ai-model-intelligence-reporting/SKILL.md"
+      ],
+      "name": "ai-model-intelligence-reporting"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/media/ai-music-workflows/SKILL.md",
+        "profile:scout/media/ai-music-workflows/SKILL.md"
+      ],
+      "name": "ai-music-workflows"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/productivity/airtable/SKILL.md",
+        "profile:admin/productivity/airtable/SKILL.md",
+        "profile:critic/productivity/airtable/SKILL.md",
+        "profile:family-ui/productivity/airtable/SKILL.md",
+        "profile:premium/productivity/airtable/SKILL.md",
+        "profile:research/productivity/airtable/SKILL.md",
+        "profile:scout/productivity/airtable/SKILL.md",
+        "profile:verifier/productivity/airtable/SKILL.md"
+      ],
+      "name": "airtable"
+    },
+    {
+      "classification": "divergent",
+      "copies": 2,
+      "files": [
+        "profile:fo-brain/apple/apple-ecosystem-tools/SKILL.md",
+        "profile:reviewer/apple/apple-ecosystem-tools/SKILL.md"
+      ],
+      "name": "apple-ecosystem-tools"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/apple/apple-integrations/SKILL.md",
+        "profile:scout/apple/apple-integrations/SKILL.md"
+      ],
+      "name": "apple-integrations"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/apple/apple-notes/SKILL.md",
+        "profile:admin/apple/apple-notes/SKILL.md",
+        "profile:coder/apple/apple-notes/SKILL.md",
+        "profile:critic/apple/apple-notes/SKILL.md",
+        "profile:family-ui/apple/apple-notes/SKILL.md",
+        "profile:premium/apple/apple-notes/SKILL.md",
+        "profile:verifier/apple/apple-notes/SKILL.md"
+      ],
+      "name": "apple-notes"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/apple/apple-reminders/SKILL.md",
+        "profile:admin/apple/apple-reminders/SKILL.md",
+        "profile:coder/apple/apple-reminders/SKILL.md",
+        "profile:critic/apple/apple-reminders/SKILL.md",
+        "profile:family-ui/apple/apple-reminders/SKILL.md",
+        "profile:premium/apple/apple-reminders/SKILL.md",
+        "profile:verifier/apple/apple-reminders/SKILL.md"
+      ],
+      "name": "apple-reminders"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/creative/architecture-diagram/SKILL.md",
+        "profile:admin/creative/architecture-diagram/SKILL.md",
+        "profile:critic/creative/architecture-diagram/SKILL.md",
+        "profile:family-ui/creative/architecture-diagram/SKILL.md",
+        "profile:premium/creative/architecture-diagram/SKILL.md",
+        "profile:verifier/creative/architecture-diagram/SKILL.md"
+      ],
+      "name": "architecture-diagram"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/research/arxiv/SKILL.md",
+        "profile:admin/research/arxiv/SKILL.md",
+        "profile:coder/research/arxiv/SKILL.md",
+        "profile:critic/research/arxiv/SKILL.md",
+        "profile:family-ui/research/arxiv/SKILL.md",
+        "profile:premium/research/arxiv/SKILL.md",
+        "profile:research/research/arxiv/SKILL.md",
+        "profile:scout/research/arxiv/SKILL.md",
+        "profile:verifier/research/arxiv/SKILL.md"
+      ],
+      "name": "arxiv"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/creative/ascii-art/SKILL.md",
+        "profile:admin/creative/ascii-art/SKILL.md",
+        "profile:critic/creative/ascii-art/SKILL.md",
+        "profile:family-ui/creative/ascii-art/SKILL.md",
+        "profile:premium/creative/ascii-art/SKILL.md",
+        "profile:research/creative/ascii-art/SKILL.md",
+        "profile:scout/creative/ascii-art/SKILL.md",
+        "profile:verifier/creative/ascii-art/SKILL.md"
+      ],
+      "name": "ascii-art"
+    },
+    {
+      "classification": "divergent",
+      "copies": 2,
+      "files": [
+        "default/creative/ascii-media/SKILL.md",
+        "profile:fo-brain/creative/ascii-media/SKILL.md"
+      ],
+      "name": "ascii-media"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/ascii-video/SKILL.md",
+        "profile:admin/creative/ascii-video/SKILL.md",
+        "profile:critic/creative/ascii-video/SKILL.md",
+        "profile:family-ui/creative/ascii-video/SKILL.md",
+        "profile:premium/creative/ascii-video/SKILL.md",
+        "profile:research/creative/ascii-video/SKILL.md",
+        "profile:reviewer/creative/ascii-video/SKILL.md",
+        "profile:scout/creative/ascii-video/SKILL.md",
+        "profile:verifier/creative/ascii-video/SKILL.md"
+      ],
+      "name": "ascii-video"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/mlops/models/audiocraft/SKILL.md",
+        "profile:admin/mlops/models/audiocraft/SKILL.md",
+        "profile:critic/mlops/models/audiocraft/SKILL.md",
+        "profile:family-ui/mlops/models/audiocraft/SKILL.md",
+        "profile:premium/mlops/models/audiocraft/SKILL.md",
+        "profile:verifier/mlops/models/audiocraft/SKILL.md"
+      ],
+      "name": "audiocraft-audio-generation"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/mlops/training/axolotl/SKILL.md",
+        "profile:admin/mlops/training/axolotl/SKILL.md",
+        "profile:critic/mlops/training/axolotl/SKILL.md",
+        "profile:research/mlops/training/axolotl/SKILL.md",
+        "profile:scout/mlops/training/axolotl/SKILL.md",
+        "profile:verifier/mlops/training/axolotl/SKILL.md"
+      ],
+      "name": "axolotl"
+    },
+    {
+      "classification": "identisch",
+      "copies": 6,
+      "files": [
+        "default/creative/baoyu-article-illustrator/SKILL.md",
+        "profile:admin/creative/baoyu-article-illustrator/SKILL.md",
+        "profile:critic/creative/baoyu-article-illustrator/SKILL.md",
+        "profile:research/creative/baoyu-article-illustrator/SKILL.md",
+        "profile:scout/creative/baoyu-article-illustrator/SKILL.md",
+        "profile:verifier/creative/baoyu-article-illustrator/SKILL.md"
+      ],
+      "name": "baoyu-article-illustrator"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/creative/baoyu-comic/SKILL.md",
+        "profile:admin/creative/baoyu-comic/SKILL.md",
+        "profile:critic/creative/baoyu-comic/SKILL.md",
+        "profile:family-ui/creative/baoyu-comic/SKILL.md",
+        "profile:premium/creative/baoyu-comic/SKILL.md",
+        "profile:research/creative/baoyu-comic/SKILL.md",
+        "profile:scout/creative/baoyu-comic/SKILL.md",
+        "profile:verifier/creative/baoyu-comic/SKILL.md"
+      ],
+      "name": "baoyu-comic"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/creative/baoyu-infographic/SKILL.md",
+        "profile:admin/creative/baoyu-infographic/SKILL.md",
+        "profile:critic/creative/baoyu-infographic/SKILL.md",
+        "profile:family-ui/creative/baoyu-infographic/SKILL.md",
+        "profile:premium/creative/baoyu-infographic/SKILL.md",
+        "profile:research/creative/baoyu-infographic/SKILL.md",
+        "profile:scout/creative/baoyu-infographic/SKILL.md",
+        "profile:verifier/creative/baoyu-infographic/SKILL.md"
+      ],
+      "name": "baoyu-infographic"
+    },
+    {
+      "classification": "divergent",
+      "copies": 2,
+      "files": [
+        "profile:fo-brain/creative/baoyu-visual-content/SKILL.md",
+        "profile:reviewer/creative/baoyu-visual-content/SKILL.md"
+      ],
+      "name": "baoyu-visual-content"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/research/blogwatcher/SKILL.md",
+        "profile:admin/research/blogwatcher/SKILL.md",
+        "profile:critic/research/blogwatcher/SKILL.md",
+        "profile:family-ui/research/blogwatcher/SKILL.md",
+        "profile:premium/research/blogwatcher/SKILL.md",
+        "profile:research/research/blogwatcher/SKILL.md",
+        "profile:scout/research/blogwatcher/SKILL.md",
+        "profile:verifier/research/blogwatcher/SKILL.md"
+      ],
+      "name": "blogwatcher"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/creative/brainstorming/SKILL.md",
+        "profile:admin/creative/brainstorming/SKILL.md",
+        "profile:coder/creative/brainstorming/SKILL.md",
+        "profile:research/creative/brainstorming/SKILL.md",
+        "profile:scout/creative/brainstorming/SKILL.md",
+        "profile:verifier/creative/brainstorming/SKILL.md"
+      ],
+      "name": "brainstorming"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:admin/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:coder/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:critic/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:family-ui/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:premium/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/claude-code/SKILL.md"
+      ],
+      "name": "claude-code"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/creative/claude-design/SKILL.md",
+        "profile:admin/creative/claude-design/SKILL.md",
+        "profile:critic/creative/claude-design/SKILL.md",
+        "profile:family-ui/creative/claude-design/SKILL.md",
+        "profile:premium/creative/claude-design/SKILL.md",
+        "profile:research/creative/claude-design/SKILL.md",
+        "profile:scout/creative/claude-design/SKILL.md",
+        "profile:verifier/creative/claude-design/SKILL.md"
+      ],
+      "name": "claude-design"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/codebase-inspection/SKILL.md",
+        "profile:admin/github/codebase-inspection/SKILL.md",
+        "profile:coder/github/codebase-inspection/SKILL.md",
+        "profile:critic/github/codebase-inspection/SKILL.md",
+        "profile:family-ui/github/codebase-inspection/SKILL.md",
+        "profile:premium/github/codebase-inspection/SKILL.md",
+        "profile:verifier/github/codebase-inspection/SKILL.md"
+      ],
+      "name": "codebase-inspection"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/autonomous-ai-agents/codex/SKILL.md",
+        "profile:admin/autonomous-ai-agents/codex/SKILL.md",
+        "profile:coder/autonomous-ai-agents/codex/SKILL.md",
+        "profile:critic/autonomous-ai-agents/codex/SKILL.md",
+        "profile:family-ui/autonomous-ai-agents/codex/SKILL.md",
+        "profile:premium/autonomous-ai-agents/codex/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/codex/SKILL.md"
+      ],
+      "name": "codex"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/autonomous-ai-agents/coding-agent-clis/SKILL.md",
+        "profile:scout/autonomous-ai-agents/coding-agent-clis/SKILL.md"
+      ],
+      "name": "coding-agent-clis"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/comfyui/SKILL.md",
+        "profile:admin/creative/comfyui/SKILL.md",
+        "profile:critic/creative/comfyui/SKILL.md",
+        "profile:family-ui/creative/comfyui/SKILL.md",
+        "profile:premium/creative/comfyui/SKILL.md",
+        "profile:research/creative/comfyui/SKILL.md",
+        "profile:reviewer/creative/comfyui/SKILL.md",
+        "profile:scout/creative/comfyui/SKILL.md",
+        "profile:verifier/creative/comfyui/SKILL.md"
+      ],
+      "name": "comfyui"
+    },
+    {
+      "classification": "identisch",
+      "copies": 10,
+      "files": [
+        "default/computer-use/SKILL.md",
+        "profile:admin/computer-use/SKILL.md",
+        "profile:coder/computer-use/SKILL.md",
+        "profile:critic/computer-use/SKILL.md",
+        "profile:fo-brain/computer-use/SKILL.md",
+        "profile:premium/computer-use/SKILL.md",
+        "profile:research/computer-use/SKILL.md",
+        "profile:reviewer/computer-use/SKILL.md",
+        "profile:scout/computer-use/SKILL.md",
+        "profile:verifier/computer-use/SKILL.md"
+      ],
+      "name": "computer-use"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:admin/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:coder/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:critic/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:family-ui/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:fo-brain/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:premium/software-development/debugging-hermes-tui-commands/SKILL.md",
+        "profile:verifier/software-development/debugging-hermes-tui-commands/SKILL.md"
+      ],
+      "name": "debugging-hermes-tui-commands"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/creative/design-md/SKILL.md",
+        "profile:admin/creative/design-md/SKILL.md",
+        "profile:critic/creative/design-md/SKILL.md",
+        "profile:family-ui/creative/design-md/SKILL.md",
+        "profile:premium/creative/design-md/SKILL.md",
+        "profile:research/creative/design-md/SKILL.md",
+        "profile:scout/creative/design-md/SKILL.md",
+        "profile:verifier/creative/design-md/SKILL.md"
+      ],
+      "name": "design-md"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/creative/diagram-authoring/SKILL.md",
+        "profile:scout/creative/diagram-authoring/SKILL.md"
+      ],
+      "name": "diagram-authoring"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/dogfood/SKILL.md",
+        "profile:admin/dogfood/SKILL.md",
+        "profile:coder/dogfood/SKILL.md",
+        "profile:critic/dogfood/SKILL.md",
+        "profile:family-ui/dogfood/SKILL.md",
+        "profile:premium/dogfood/SKILL.md",
+        "profile:research/dogfood/SKILL.md",
+        "profile:scout/dogfood/SKILL.md",
+        "profile:verifier/dogfood/SKILL.md"
+      ],
+      "name": "dogfood"
+    },
+    {
+      "classification": "identisch",
+      "copies": 11,
+      "files": [
+        "default/mlops/research/dspy/SKILL.md",
+        "profile:admin/mlops/research/dspy/SKILL.md",
+        "profile:coder/mlops/research/dspy/SKILL.md",
+        "profile:critic/mlops/research/dspy/SKILL.md",
+        "profile:family-ui/mlops/research/dspy/SKILL.md",
+        "profile:fo-brain/mlops/research/dspy/SKILL.md",
+        "profile:premium/mlops/research/dspy/SKILL.md",
+        "profile:research/mlops/research/dspy/SKILL.md",
+        "profile:reviewer/mlops/research/dspy/SKILL.md",
+        "profile:scout/mlops/research/dspy/SKILL.md",
+        "profile:verifier/mlops/research/dspy/SKILL.md"
+      ],
+      "name": "dspy"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:admin/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:critic/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:family-ui/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:premium/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:research/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:scout/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "profile:verifier/mlops/evaluation/lm-evaluation-harness/SKILL.md"
+      ],
+      "name": "evaluating-llms-harness"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/creative/excalidraw/SKILL.md",
+        "profile:admin/creative/excalidraw/SKILL.md",
+        "profile:critic/creative/excalidraw/SKILL.md",
+        "profile:family-ui/creative/excalidraw/SKILL.md",
+        "profile:premium/creative/excalidraw/SKILL.md",
+        "profile:verifier/creative/excalidraw/SKILL.md"
+      ],
+      "name": "excalidraw"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/apple/findmy/SKILL.md",
+        "profile:admin/apple/findmy/SKILL.md",
+        "profile:coder/apple/findmy/SKILL.md",
+        "profile:critic/apple/findmy/SKILL.md",
+        "profile:family-ui/apple/findmy/SKILL.md",
+        "profile:premium/apple/findmy/SKILL.md",
+        "profile:verifier/apple/findmy/SKILL.md"
+      ],
+      "name": "findmy"
+    },
+    {
+      "classification": "identisch",
+      "copies": 6,
+      "files": [
+        "default/mlops/training/trl-fine-tuning/SKILL.md",
+        "profile:admin/mlops/training/trl-fine-tuning/SKILL.md",
+        "profile:critic/mlops/training/trl-fine-tuning/SKILL.md",
+        "profile:research/mlops/training/trl-fine-tuning/SKILL.md",
+        "profile:scout/mlops/training/trl-fine-tuning/SKILL.md",
+        "profile:verifier/mlops/training/trl-fine-tuning/SKILL.md"
+      ],
+      "name": "fine-tuning-with-trl"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/firecrawl/firecrawl-cli-readiness/SKILL.md",
+        "profile:scout/firecrawl/firecrawl-cli-readiness/SKILL.md"
+      ],
+      "name": "firecrawl-cli-readiness"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/research/free-model-audit/SKILL.md",
+        "profile:admin/research/free-model-audit/SKILL.md",
+        "profile:coder/research/free-model-audit/SKILL.md",
+        "profile:critic/research/free-model-audit/SKILL.md",
+        "profile:research/research/free-model-audit/SKILL.md",
+        "profile:reviewer/research/free-model-audit/SKILL.md",
+        "profile:scout/research/free-model-audit/SKILL.md",
+        "profile:verifier/research/free-model-audit/SKILL.md"
+      ],
+      "name": "free-model-audit"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/media/gif-search/SKILL.md",
+        "profile:admin/media/gif-search/SKILL.md",
+        "profile:critic/media/gif-search/SKILL.md",
+        "profile:family-ui/media/gif-search/SKILL.md",
+        "profile:premium/media/gif-search/SKILL.md",
+        "profile:research/media/gif-search/SKILL.md",
+        "profile:scout/media/gif-search/SKILL.md",
+        "profile:verifier/media/gif-search/SKILL.md"
+      ],
+      "name": "gif-search"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/github-auth/SKILL.md",
+        "profile:admin/github/github-auth/SKILL.md",
+        "profile:coder/github/github-auth/SKILL.md",
+        "profile:critic/github/github-auth/SKILL.md",
+        "profile:family-ui/github/github-auth/SKILL.md",
+        "profile:premium/github/github-auth/SKILL.md",
+        "profile:verifier/github/github-auth/SKILL.md"
+      ],
+      "name": "github-auth"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/github-code-review/SKILL.md",
+        "profile:admin/github/github-code-review/SKILL.md",
+        "profile:coder/github/github-code-review/SKILL.md",
+        "profile:critic/github/github-code-review/SKILL.md",
+        "profile:family-ui/github/github-code-review/SKILL.md",
+        "profile:premium/github/github-code-review/SKILL.md",
+        "profile:verifier/github/github-code-review/SKILL.md"
+      ],
+      "name": "github-code-review"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/github-issues/SKILL.md",
+        "profile:admin/github/github-issues/SKILL.md",
+        "profile:coder/github/github-issues/SKILL.md",
+        "profile:critic/github/github-issues/SKILL.md",
+        "profile:family-ui/github/github-issues/SKILL.md",
+        "profile:premium/github/github-issues/SKILL.md",
+        "profile:verifier/github/github-issues/SKILL.md"
+      ],
+      "name": "github-issues"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/github-pr-workflow/SKILL.md",
+        "profile:admin/github/github-pr-workflow/SKILL.md",
+        "profile:coder/github/github-pr-workflow/SKILL.md",
+        "profile:critic/github/github-pr-workflow/SKILL.md",
+        "profile:family-ui/github/github-pr-workflow/SKILL.md",
+        "profile:premium/github/github-pr-workflow/SKILL.md",
+        "profile:verifier/github/github-pr-workflow/SKILL.md"
+      ],
+      "name": "github-pr-workflow"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/github/github-repo-management/SKILL.md",
+        "profile:admin/github/github-repo-management/SKILL.md",
+        "profile:coder/github/github-repo-management/SKILL.md",
+        "profile:critic/github/github-repo-management/SKILL.md",
+        "profile:family-ui/github/github-repo-management/SKILL.md",
+        "profile:premium/github/github-repo-management/SKILL.md",
+        "profile:verifier/github/github-repo-management/SKILL.md"
+      ],
+      "name": "github-repo-management"
+    },
+    {
+      "classification": "divergent",
+      "copies": 4,
+      "files": [
+        "default/github/github-workflows/SKILL.md",
+        "profile:fo-brain/github/github-workflows/SKILL.md",
+        "profile:research/github/github-workflows/SKILL.md",
+        "profile:scout/github/github-workflows/SKILL.md"
+      ],
+      "name": "github-workflows"
+    },
+    {
+      "classification": "divergent",
+      "copies": 10,
+      "files": [
+        "default/red-teaming/godmode/SKILL.md",
+        "profile:admin/red-teaming/godmode/SKILL.md",
+        "profile:critic/red-teaming/godmode/SKILL.md",
+        "profile:family-ui/red-teaming/godmode/SKILL.md",
+        "profile:fo-brain/red-teaming/godmode/SKILL.md",
+        "profile:premium/red-teaming/godmode/SKILL.md",
+        "profile:research/red-teaming/godmode/SKILL.md",
+        "profile:reviewer/red-teaming/godmode/SKILL.md",
+        "profile:scout/red-teaming/godmode/SKILL.md",
+        "profile:verifier/red-teaming/godmode/SKILL.md"
+      ],
+      "name": "godmode"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/productivity/google-workspace/SKILL.md",
+        "profile:admin/productivity/google-workspace/SKILL.md",
+        "profile:critic/productivity/google-workspace/SKILL.md",
+        "profile:family-ui/productivity/google-workspace/SKILL.md",
+        "profile:premium/productivity/google-workspace/SKILL.md",
+        "profile:research/productivity/google-workspace/SKILL.md",
+        "profile:scout/productivity/google-workspace/SKILL.md",
+        "profile:verifier/productivity/google-workspace/SKILL.md"
+      ],
+      "name": "google-workspace"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/software-development/grill-me/SKILL.md",
+        "profile:admin/software-development/grill-me/SKILL.md",
+        "profile:coder/software-development/grill-me/SKILL.md",
+        "profile:research/software-development/grill-me/SKILL.md",
+        "profile:scout/software-development/grill-me/SKILL.md",
+        "profile:verifier/software-development/grill-me/SKILL.md"
+      ],
+      "name": "grill-me"
+    },
+    {
+      "classification": "identisch",
+      "copies": 6,
+      "files": [
+        "default/media/heartmula/SKILL.md",
+        "profile:admin/media/heartmula/SKILL.md",
+        "profile:critic/media/heartmula/SKILL.md",
+        "profile:family-ui/media/heartmula/SKILL.md",
+        "profile:premium/media/heartmula/SKILL.md",
+        "profile:verifier/media/heartmula/SKILL.md"
+      ],
+      "name": "heartmula"
+    },
+    {
+      "classification": "divergent",
+      "copies": 11,
+      "files": [
+        "default/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:admin/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:coder/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:critic/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:family-ui/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:fo-brain/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:premium/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:research/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:reviewer/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/hermes-agent/SKILL.md"
+      ],
+      "name": "hermes-agent"
+    },
+    {
+      "classification": "divergent",
+      "copies": 7,
+      "files": [
+        "default/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:admin/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:coder/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:critic/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:family-ui/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:premium/software-development/hermes-agent-skill-authoring/SKILL.md",
+        "profile:verifier/software-development/hermes-agent-skill-authoring/SKILL.md"
+      ],
+      "name": "hermes-agent-skill-authoring"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:admin/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:coder/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:critic/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:fo-brain/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:research/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:reviewer/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:scout/software-development/hermes-kanban-ingest-worker-system/SKILL.md",
+        "profile:verifier/software-development/hermes-kanban-ingest-worker-system/SKILL.md"
+      ],
+      "name": "hermes-kanban-ingest-worker-system"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:admin/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:coder/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:critic/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:fo-brain/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:research/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:reviewer/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:scout/software-development/hermes-s6-container-supervision/SKILL.md",
+        "profile:verifier/software-development/hermes-s6-container-supervision/SKILL.md"
+      ],
+      "name": "hermes-s6-container-supervision"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/email/himalaya/SKILL.md",
+        "profile:admin/email/himalaya/SKILL.md",
+        "profile:critic/email/himalaya/SKILL.md",
+        "profile:family-ui/email/himalaya/SKILL.md",
+        "profile:premium/email/himalaya/SKILL.md",
+        "profile:research/email/himalaya/SKILL.md",
+        "profile:scout/email/himalaya/SKILL.md",
+        "profile:verifier/email/himalaya/SKILL.md"
+      ],
+      "name": "himalaya"
+    },
+    {
+      "classification": "identisch",
+      "copies": 2,
+      "files": [
+        "profile:research/devops/homeserver-ops-and-timers/SKILL.md",
+        "profile:scout/devops/homeserver-ops-and-timers/SKILL.md"
+      ],
+      "name": "homeserver-ops-and-timers"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/mlops/huggingface-hub/SKILL.md",
+        "profile:admin/mlops/huggingface-hub/SKILL.md",
+        "profile:critic/mlops/huggingface-hub/SKILL.md",
+        "profile:family-ui/mlops/huggingface-hub/SKILL.md",
+        "profile:premium/mlops/huggingface-hub/SKILL.md",
+        "profile:research/mlops/huggingface-hub/SKILL.md",
+        "profile:scout/mlops/huggingface-hub/SKILL.md",
+        "profile:verifier/mlops/huggingface-hub/SKILL.md"
+      ],
+      "name": "huggingface-hub"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/creative/humanizer/SKILL.md",
+        "profile:admin/creative/humanizer/SKILL.md",
+        "profile:critic/creative/humanizer/SKILL.md",
+        "profile:family-ui/creative/humanizer/SKILL.md",
+        "profile:premium/creative/humanizer/SKILL.md",
+        "profile:research/creative/humanizer/SKILL.md",
+        "profile:scout/creative/humanizer/SKILL.md",
+        "profile:verifier/creative/humanizer/SKILL.md"
+      ],
+      "name": "humanizer"
+    },
+    {
+      "classification": "divergent",
+      "copies": 10,
+      "files": [
+        "default/creative/creative-ideation/SKILL.md",
+        "profile:admin/creative/creative-ideation/SKILL.md",
+        "profile:critic/creative/creative-ideation/SKILL.md",
+        "profile:family-ui/creative/creative-ideation/SKILL.md",
+        "profile:fo-brain/creative/creative-ideation/SKILL.md",
+        "profile:premium/creative/creative-ideation/SKILL.md",
+        "profile:research/creative/creative-ideation/SKILL.md",
+        "profile:reviewer/creative/creative-ideation/SKILL.md",
+        "profile:scout/creative/creative-ideation/SKILL.md",
+        "profile:verifier/creative/creative-ideation/SKILL.md"
+      ],
+      "name": "ideation"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/apple/imessage/SKILL.md",
+        "profile:admin/apple/imessage/SKILL.md",
+        "profile:coder/apple/imessage/SKILL.md",
+        "profile:critic/apple/imessage/SKILL.md",
+        "profile:family-ui/apple/imessage/SKILL.md",
+        "profile:premium/apple/imessage/SKILL.md",
+        "profile:verifier/apple/imessage/SKILL.md"
+      ],
+      "name": "imessage"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:admin/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:coder/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:critic/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:family-ui/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:premium/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:research/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:scout/data-science/jupyter-live-kernel/SKILL.md",
+        "profile:verifier/data-science/jupyter-live-kernel/SKILL.md"
+      ],
+      "name": "jupyter-live-kernel"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:admin/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:coder/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:critic/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:research/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:reviewer/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:scout/autonomous-ai-agents/kanban-codex-lane/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/kanban-codex-lane/SKILL.md"
+      ],
+      "name": "kanban-codex-lane"
+    },
+    {
+      "classification": "divergent",
+      "copies": 2,
+      "files": [
+        "default/devops/kanban-critic/SKILL.md",
+        "profile:critic/devops/kanban-critic/SKILL.md"
+      ],
+      "name": "kanban-critic"
+    },
+    {
+      "classification": "divergent",
+      "copies": 5,
+      "files": [
+        "default/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:admin/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:coder/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:critic/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:verifier/devops/kanban-execution-worker-readiness/SKILL.md"
+      ],
+      "name": "kanban-execution-worker-readiness"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/devops/kanban-orchestrator/SKILL.md",
+        "profile:admin/devops/kanban-orchestrator/SKILL.md",
+        "profile:coder/devops/kanban-orchestrator/SKILL.md",
+        "profile:critic/devops/kanban-orchestrator/SKILL.md",
+        "profile:family-ui/devops/kanban-orchestrator/SKILL.md",
+        "profile:premium/devops/kanban-orchestrator/SKILL.md",
+        "profile:research/devops/kanban-orchestrator/SKILL.md",
+        "profile:scout/devops/kanban-orchestrator/SKILL.md",
+        "profile:verifier/devops/kanban-orchestrator/SKILL.md"
+      ],
+      "name": "kanban-orchestrator"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/devops/kanban-worker/SKILL.md",
+        "profile:admin/devops/kanban-worker/SKILL.md",
+        "profile:coder/devops/kanban-worker/SKILL.md",
+        "profile:critic/devops/kanban-worker/SKILL.md",
+        "profile:family-ui/devops/kanban-worker/SKILL.md",
+        "profile:premium/devops/kanban-worker/SKILL.md",
+        "profile:research/devops/kanban-worker/SKILL.md",
+        "profile:scout/devops/kanban-worker/SKILL.md",
+        "profile:verifier/devops/kanban-worker/SKILL.md"
+      ],
+      "name": "kanban-worker"
+    },
+    {
+      "classification": "divergent",
+      "copies": 10,
+      "files": [
+        "default/productivity/linear/SKILL.md",
+        "profile:admin/productivity/linear/SKILL.md",
+        "profile:coder/productivity/linear/SKILL.md",
+        "profile:critic/productivity/linear/SKILL.md",
+        "profile:family-ui/productivity/linear/SKILL.md",
+        "profile:fo-brain/productivity/linear/SKILL.md",
+        "profile:premium/productivity/linear/SKILL.md",
+        "profile:research/productivity/linear/SKILL.md",
+        "profile:scout/productivity/linear/SKILL.md",
+        "profile:verifier/productivity/linear/SKILL.md"
+      ],
+      "name": "linear"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/mlops/inference/llama-cpp/SKILL.md",
+        "profile:admin/mlops/inference/llama-cpp/SKILL.md",
+        "profile:critic/mlops/inference/llama-cpp/SKILL.md",
+        "profile:family-ui/mlops/inference/llama-cpp/SKILL.md",
+        "profile:premium/mlops/inference/llama-cpp/SKILL.md",
+        "profile:research/mlops/inference/llama-cpp/SKILL.md",
+        "profile:scout/mlops/inference/llama-cpp/SKILL.md",
+        "profile:verifier/mlops/inference/llama-cpp/SKILL.md"
+      ],
+      "name": "llama-cpp"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/research/llm-wiki/SKILL.md",
+        "profile:admin/research/llm-wiki/SKILL.md",
+        "profile:coder/research/llm-wiki/SKILL.md",
+        "profile:critic/research/llm-wiki/SKILL.md",
+        "profile:family-ui/research/llm-wiki/SKILL.md",
+        "profile:premium/research/llm-wiki/SKILL.md",
+        "profile:research/research/llm-wiki/SKILL.md",
+        "profile:scout/research/llm-wiki/SKILL.md",
+        "profile:verifier/research/llm-wiki/SKILL.md"
+      ],
+      "name": "llm-wiki"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/apple/macos-computer-use/SKILL.md",
+        "profile:admin/apple/macos-computer-use/SKILL.md",
+        "profile:coder/apple/macos-computer-use/SKILL.md",
+        "profile:critic/apple/macos-computer-use/SKILL.md",
+        "profile:family-ui/apple/macos-computer-use/SKILL.md",
+        "profile:premium/apple/macos-computer-use/SKILL.md",
+        "profile:research/apple/macos-computer-use/SKILL.md",
+        "profile:scout/apple/macos-computer-use/SKILL.md",
+        "profile:verifier/apple/macos-computer-use/SKILL.md"
+      ],
+      "name": "macos-computer-use"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/manim-video/SKILL.md",
+        "profile:admin/creative/manim-video/SKILL.md",
+        "profile:critic/creative/manim-video/SKILL.md",
+        "profile:family-ui/creative/manim-video/SKILL.md",
+        "profile:premium/creative/manim-video/SKILL.md",
+        "profile:research/creative/manim-video/SKILL.md",
+        "profile:reviewer/creative/manim-video/SKILL.md",
+        "profile:scout/creative/manim-video/SKILL.md",
+        "profile:verifier/creative/manim-video/SKILL.md"
+      ],
+      "name": "manim-video"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/productivity/maps/SKILL.md",
+        "profile:admin/productivity/maps/SKILL.md",
+        "profile:critic/productivity/maps/SKILL.md",
+        "profile:family-ui/productivity/maps/SKILL.md",
+        "profile:premium/productivity/maps/SKILL.md",
+        "profile:research/productivity/maps/SKILL.md",
+        "profile:scout/productivity/maps/SKILL.md",
+        "profile:verifier/productivity/maps/SKILL.md"
+      ],
+      "name": "maps"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:admin/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:critic/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:family-ui/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:fo-brain/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:premium/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:research/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:scout/gaming/minecraft-modpack-server/SKILL.md",
+        "profile:verifier/gaming/minecraft-modpack-server/SKILL.md"
+      ],
+      "name": "minecraft-modpack-server"
+    },
+    {
+      "classification": "identisch",
+      "copies": 5,
+      "files": [
+        "profile:admin/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:coder/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:research/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:scout/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:verifier/devops/minimax-openclaw-token-plan/SKILL.md"
+      ],
+      "name": "minimax-openclaw-token-plan"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/productivity/nano-pdf/SKILL.md",
+        "profile:admin/productivity/nano-pdf/SKILL.md",
+        "profile:critic/productivity/nano-pdf/SKILL.md",
+        "profile:family-ui/productivity/nano-pdf/SKILL.md",
+        "profile:premium/productivity/nano-pdf/SKILL.md",
+        "profile:research/productivity/nano-pdf/SKILL.md",
+        "profile:scout/productivity/nano-pdf/SKILL.md",
+        "profile:verifier/productivity/nano-pdf/SKILL.md"
+      ],
+      "name": "nano-pdf"
+    },
+    {
+      "classification": "divergent",
+      "copies": 10,
+      "files": [
+        "default/mcp/native-mcp/SKILL.md",
+        "profile:admin/mcp/native-mcp/SKILL.md",
+        "profile:coder/mcp/native-mcp/SKILL.md",
+        "profile:critic/mcp/native-mcp/SKILL.md",
+        "profile:family-ui/mcp/native-mcp/SKILL.md",
+        "profile:fo-brain/mcp/native-mcp/SKILL.md",
+        "profile:premium/mcp/native-mcp/SKILL.md",
+        "profile:research/mcp/native-mcp/SKILL.md",
+        "profile:scout/mcp/native-mcp/SKILL.md",
+        "profile:verifier/mcp/native-mcp/SKILL.md"
+      ],
+      "name": "native-mcp"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/software-development/node-inspect-debugger/SKILL.md",
+        "profile:admin/software-development/node-inspect-debugger/SKILL.md",
+        "profile:coder/software-development/node-inspect-debugger/SKILL.md",
+        "profile:critic/software-development/node-inspect-debugger/SKILL.md",
+        "profile:family-ui/software-development/node-inspect-debugger/SKILL.md",
+        "profile:premium/software-development/node-inspect-debugger/SKILL.md",
+        "profile:research/software-development/node-inspect-debugger/SKILL.md",
+        "profile:scout/software-development/node-inspect-debugger/SKILL.md",
+        "profile:verifier/software-development/node-inspect-debugger/SKILL.md"
+      ],
+      "name": "node-inspect-debugger"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/productivity/notion/SKILL.md",
+        "profile:admin/productivity/notion/SKILL.md",
+        "profile:critic/productivity/notion/SKILL.md",
+        "profile:family-ui/productivity/notion/SKILL.md",
+        "profile:premium/productivity/notion/SKILL.md",
+        "profile:research/productivity/notion/SKILL.md",
+        "profile:scout/productivity/notion/SKILL.md",
+        "profile:verifier/productivity/notion/SKILL.md"
+      ],
+      "name": "notion"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/mlops/inference/obliteratus/SKILL.md",
+        "profile:admin/mlops/inference/obliteratus/SKILL.md",
+        "profile:critic/mlops/inference/obliteratus/SKILL.md",
+        "profile:family-ui/mlops/inference/obliteratus/SKILL.md",
+        "profile:premium/mlops/inference/obliteratus/SKILL.md",
+        "profile:research/mlops/inference/obliteratus/SKILL.md",
+        "profile:reviewer/mlops/inference/obliteratus/SKILL.md",
+        "profile:scout/mlops/inference/obliteratus/SKILL.md",
+        "profile:verifier/mlops/inference/obliteratus/SKILL.md"
+      ],
+      "name": "obliteratus"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/note-taking/obsidian/SKILL.md",
+        "profile:admin/note-taking/obsidian/SKILL.md",
+        "profile:critic/note-taking/obsidian/SKILL.md",
+        "profile:family-ui/note-taking/obsidian/SKILL.md",
+        "profile:premium/note-taking/obsidian/SKILL.md",
+        "profile:research/note-taking/obsidian/SKILL.md",
+        "profile:scout/note-taking/obsidian/SKILL.md",
+        "profile:verifier/note-taking/obsidian/SKILL.md"
+      ],
+      "name": "obsidian"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/productivity/ocr-and-documents/SKILL.md",
+        "profile:admin/productivity/ocr-and-documents/SKILL.md",
+        "profile:critic/productivity/ocr-and-documents/SKILL.md",
+        "profile:family-ui/productivity/ocr-and-documents/SKILL.md",
+        "profile:premium/productivity/ocr-and-documents/SKILL.md",
+        "profile:research/productivity/ocr-and-documents/SKILL.md",
+        "profile:scout/productivity/ocr-and-documents/SKILL.md",
+        "profile:verifier/productivity/ocr-and-documents/SKILL.md"
+      ],
+      "name": "ocr-and-documents"
+    },
+    {
+      "classification": "identisch",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:research/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:scout/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:verifier/devops/openclaw-config-change-safe/SKILL.md"
+      ],
+      "name": "openclaw-config-change-safe"
+    },
+    {
+      "classification": "identisch",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-discord-ops/SKILL.md",
+        "profile:research/devops/openclaw-discord-ops/SKILL.md",
+        "profile:scout/devops/openclaw-discord-ops/SKILL.md",
+        "profile:verifier/devops/openclaw-discord-ops/SKILL.md"
+      ],
+      "name": "openclaw-discord-ops"
+    },
+    {
+      "classification": "identisch",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-incident-rca/SKILL.md",
+        "profile:research/devops/openclaw-incident-rca/SKILL.md",
+        "profile:scout/devops/openclaw-incident-rca/SKILL.md",
+        "profile:verifier/devops/openclaw-incident-rca/SKILL.md"
+      ],
+      "name": "openclaw-incident-rca"
+    },
+    {
+      "classification": "identisch",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-model-routing/SKILL.md",
+        "profile:research/devops/openclaw-model-routing/SKILL.md",
+        "profile:scout/devops/openclaw-model-routing/SKILL.md",
+        "profile:verifier/devops/openclaw-model-routing/SKILL.md"
+      ],
+      "name": "openclaw-model-routing"
+    },
+    {
+      "classification": "divergent",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-operator/SKILL.md",
+        "profile:research/devops/openclaw-operator/SKILL.md",
+        "profile:scout/devops/openclaw-operator/SKILL.md",
+        "profile:verifier/devops/openclaw-operator/SKILL.md"
+      ],
+      "name": "openclaw-operator"
+    },
+    {
+      "classification": "identisch",
+      "copies": 4,
+      "files": [
+        "profile:admin/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:research/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:scout/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:verifier/devops/openclaw-stability-hardening/SKILL.md"
+      ],
+      "name": "openclaw-stability-hardening"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:admin/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:coder/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:critic/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:family-ui/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:premium/autonomous-ai-agents/opencode/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/opencode/SKILL.md"
+      ],
+      "name": "opencode"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/smart-home/openhue/SKILL.md",
+        "profile:admin/smart-home/openhue/SKILL.md",
+        "profile:critic/smart-home/openhue/SKILL.md",
+        "profile:family-ui/smart-home/openhue/SKILL.md",
+        "profile:fo-brain/smart-home/openhue/SKILL.md",
+        "profile:premium/smart-home/openhue/SKILL.md",
+        "profile:research/smart-home/openhue/SKILL.md",
+        "profile:scout/smart-home/openhue/SKILL.md",
+        "profile:verifier/smart-home/openhue/SKILL.md"
+      ],
+      "name": "openhue"
+    },
+    {
+      "classification": "identisch",
+      "copies": 7,
+      "files": [
+        "default/mlops/inference/outlines/SKILL.md",
+        "profile:admin/mlops/inference/outlines/SKILL.md",
+        "profile:critic/mlops/inference/outlines/SKILL.md",
+        "profile:research/mlops/inference/outlines/SKILL.md",
+        "profile:reviewer/mlops/inference/outlines/SKILL.md",
+        "profile:scout/mlops/inference/outlines/SKILL.md",
+        "profile:verifier/mlops/inference/outlines/SKILL.md"
+      ],
+      "name": "outlines"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/p5js/SKILL.md",
+        "profile:admin/creative/p5js/SKILL.md",
+        "profile:critic/creative/p5js/SKILL.md",
+        "profile:family-ui/creative/p5js/SKILL.md",
+        "profile:premium/creative/p5js/SKILL.md",
+        "profile:research/creative/p5js/SKILL.md",
+        "profile:reviewer/creative/p5js/SKILL.md",
+        "profile:scout/creative/p5js/SKILL.md",
+        "profile:verifier/creative/p5js/SKILL.md"
+      ],
+      "name": "p5js"
+    },
+    {
+      "classification": "identisch",
+      "copies": 10,
+      "files": [
+        "default/productivity/petdex/SKILL.md",
+        "profile:admin/productivity/petdex/SKILL.md",
+        "profile:coder/productivity/petdex/SKILL.md",
+        "profile:critic/productivity/petdex/SKILL.md",
+        "profile:fo-brain/productivity/petdex/SKILL.md",
+        "profile:premium/productivity/petdex/SKILL.md",
+        "profile:research/productivity/petdex/SKILL.md",
+        "profile:reviewer/productivity/petdex/SKILL.md",
+        "profile:scout/productivity/petdex/SKILL.md",
+        "profile:verifier/productivity/petdex/SKILL.md"
+      ],
+      "name": "petdex"
+    },
+    {
+      "classification": "divergent",
+      "copies": 10,
+      "files": [
+        "default/creative/pixel-art/SKILL.md",
+        "profile:admin/creative/pixel-art/SKILL.md",
+        "profile:critic/creative/pixel-art/SKILL.md",
+        "profile:family-ui/creative/pixel-art/SKILL.md",
+        "profile:fo-brain/creative/pixel-art/SKILL.md",
+        "profile:premium/creative/pixel-art/SKILL.md",
+        "profile:research/creative/pixel-art/SKILL.md",
+        "profile:reviewer/creative/pixel-art/SKILL.md",
+        "profile:scout/creative/pixel-art/SKILL.md",
+        "profile:verifier/creative/pixel-art/SKILL.md"
+      ],
+      "name": "pixel-art"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/plan/SKILL.md",
+        "profile:admin/software-development/plan/SKILL.md",
+        "profile:coder/software-development/plan/SKILL.md",
+        "profile:critic/software-development/plan/SKILL.md",
+        "profile:family-ui/software-development/plan/SKILL.md",
+        "profile:premium/software-development/plan/SKILL.md",
+        "profile:research/software-development/plan/SKILL.md",
+        "profile:scout/software-development/plan/SKILL.md",
+        "profile:verifier/software-development/plan/SKILL.md"
+      ],
+      "name": "plan"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/gaming/pokemon-player/SKILL.md",
+        "profile:admin/gaming/pokemon-player/SKILL.md",
+        "profile:critic/gaming/pokemon-player/SKILL.md",
+        "profile:family-ui/gaming/pokemon-player/SKILL.md",
+        "profile:fo-brain/gaming/pokemon-player/SKILL.md",
+        "profile:premium/gaming/pokemon-player/SKILL.md",
+        "profile:research/gaming/pokemon-player/SKILL.md",
+        "profile:scout/gaming/pokemon-player/SKILL.md",
+        "profile:verifier/gaming/pokemon-player/SKILL.md"
+      ],
+      "name": "pokemon-player"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/research/polymarket/SKILL.md",
+        "profile:admin/research/polymarket/SKILL.md",
+        "profile:coder/research/polymarket/SKILL.md",
+        "profile:critic/research/polymarket/SKILL.md",
+        "profile:family-ui/research/polymarket/SKILL.md",
+        "profile:premium/research/polymarket/SKILL.md",
+        "profile:research/research/polymarket/SKILL.md",
+        "profile:scout/research/polymarket/SKILL.md",
+        "profile:verifier/research/polymarket/SKILL.md"
+      ],
+      "name": "polymarket"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/creative/popular-web-designs/SKILL.md",
+        "profile:admin/creative/popular-web-designs/SKILL.md",
+        "profile:critic/creative/popular-web-designs/SKILL.md",
+        "profile:family-ui/creative/popular-web-designs/SKILL.md",
+        "profile:premium/creative/popular-web-designs/SKILL.md",
+        "profile:research/creative/popular-web-designs/SKILL.md",
+        "profile:scout/creative/popular-web-designs/SKILL.md",
+        "profile:verifier/creative/popular-web-designs/SKILL.md"
+      ],
+      "name": "popular-web-designs"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/productivity/powerpoint/SKILL.md",
+        "profile:admin/productivity/powerpoint/SKILL.md",
+        "profile:critic/productivity/powerpoint/SKILL.md",
+        "profile:family-ui/productivity/powerpoint/SKILL.md",
+        "profile:premium/productivity/powerpoint/SKILL.md",
+        "profile:research/productivity/powerpoint/SKILL.md",
+        "profile:scout/productivity/powerpoint/SKILL.md",
+        "profile:verifier/productivity/powerpoint/SKILL.md"
+      ],
+      "name": "powerpoint"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/pretext/SKILL.md",
+        "profile:admin/creative/pretext/SKILL.md",
+        "profile:critic/creative/pretext/SKILL.md",
+        "profile:family-ui/creative/pretext/SKILL.md",
+        "profile:premium/creative/pretext/SKILL.md",
+        "profile:research/creative/pretext/SKILL.md",
+        "profile:reviewer/creative/pretext/SKILL.md",
+        "profile:scout/creative/pretext/SKILL.md",
+        "profile:verifier/creative/pretext/SKILL.md"
+      ],
+      "name": "pretext"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/software-development/python-debugpy/SKILL.md",
+        "profile:admin/software-development/python-debugpy/SKILL.md",
+        "profile:coder/software-development/python-debugpy/SKILL.md",
+        "profile:critic/software-development/python-debugpy/SKILL.md",
+        "profile:family-ui/software-development/python-debugpy/SKILL.md",
+        "profile:premium/software-development/python-debugpy/SKILL.md",
+        "profile:research/software-development/python-debugpy/SKILL.md",
+        "profile:scout/software-development/python-debugpy/SKILL.md",
+        "profile:verifier/software-development/python-debugpy/SKILL.md"
+      ],
+      "name": "python-debugpy"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/requesting-code-review/SKILL.md",
+        "profile:admin/software-development/requesting-code-review/SKILL.md",
+        "profile:coder/software-development/requesting-code-review/SKILL.md",
+        "profile:critic/software-development/requesting-code-review/SKILL.md",
+        "profile:family-ui/software-development/requesting-code-review/SKILL.md",
+        "profile:premium/software-development/requesting-code-review/SKILL.md",
+        "profile:research/software-development/requesting-code-review/SKILL.md",
+        "profile:scout/software-development/requesting-code-review/SKILL.md",
+        "profile:verifier/software-development/requesting-code-review/SKILL.md"
+      ],
+      "name": "requesting-code-review"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/research/research-paper-writing/SKILL.md",
+        "profile:admin/research/research-paper-writing/SKILL.md",
+        "profile:critic/research/research-paper-writing/SKILL.md",
+        "profile:family-ui/research/research-paper-writing/SKILL.md",
+        "profile:premium/research/research-paper-writing/SKILL.md",
+        "profile:research/research/research-paper-writing/SKILL.md",
+        "profile:scout/research/research-paper-writing/SKILL.md",
+        "profile:verifier/research/research-paper-writing/SKILL.md"
+      ],
+      "name": "research-paper-writing"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/mlops/models/segment-anything/SKILL.md",
+        "profile:admin/mlops/models/segment-anything/SKILL.md",
+        "profile:critic/mlops/models/segment-anything/SKILL.md",
+        "profile:family-ui/mlops/models/segment-anything/SKILL.md",
+        "profile:fo-brain/mlops/models/segment-anything/SKILL.md",
+        "profile:premium/mlops/models/segment-anything/SKILL.md",
+        "profile:research/mlops/models/segment-anything/SKILL.md",
+        "profile:scout/mlops/models/segment-anything/SKILL.md",
+        "profile:verifier/mlops/models/segment-anything/SKILL.md"
+      ],
+      "name": "segment-anything-model"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/mlops/inference/vllm/SKILL.md",
+        "profile:admin/mlops/inference/vllm/SKILL.md",
+        "profile:critic/mlops/inference/vllm/SKILL.md",
+        "profile:family-ui/mlops/inference/vllm/SKILL.md",
+        "profile:premium/mlops/inference/vllm/SKILL.md",
+        "profile:research/mlops/inference/vllm/SKILL.md",
+        "profile:scout/mlops/inference/vllm/SKILL.md",
+        "profile:verifier/mlops/inference/vllm/SKILL.md"
+      ],
+      "name": "serving-llms-vllm"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/software-development/simplify-code/SKILL.md",
+        "profile:admin/software-development/simplify-code/SKILL.md",
+        "profile:coder/software-development/simplify-code/SKILL.md",
+        "profile:critic/software-development/simplify-code/SKILL.md",
+        "profile:family-ui/software-development/simplify-code/SKILL.md",
+        "profile:premium/software-development/simplify-code/SKILL.md",
+        "profile:research/software-development/simplify-code/SKILL.md",
+        "profile:scout/software-development/simplify-code/SKILL.md",
+        "profile:verifier/software-development/simplify-code/SKILL.md"
+      ],
+      "name": "simplify-code"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/creative/sketch/SKILL.md",
+        "profile:admin/creative/sketch/SKILL.md",
+        "profile:critic/creative/sketch/SKILL.md",
+        "profile:family-ui/creative/sketch/SKILL.md",
+        "profile:premium/creative/sketch/SKILL.md",
+        "profile:research/creative/sketch/SKILL.md",
+        "profile:scout/creative/sketch/SKILL.md",
+        "profile:verifier/creative/sketch/SKILL.md"
+      ],
+      "name": "sketch"
+    },
+    {
+      "classification": "identisch",
+      "copies": 6,
+      "files": [
+        "default/media/songsee/SKILL.md",
+        "profile:admin/media/songsee/SKILL.md",
+        "profile:critic/media/songsee/SKILL.md",
+        "profile:family-ui/media/songsee/SKILL.md",
+        "profile:premium/media/songsee/SKILL.md",
+        "profile:verifier/media/songsee/SKILL.md"
+      ],
+      "name": "songsee"
+    },
+    {
+      "classification": "identisch",
+      "copies": 6,
+      "files": [
+        "default/creative/songwriting-and-ai-music/SKILL.md",
+        "profile:admin/creative/songwriting-and-ai-music/SKILL.md",
+        "profile:critic/creative/songwriting-and-ai-music/SKILL.md",
+        "profile:family-ui/creative/songwriting-and-ai-music/SKILL.md",
+        "profile:premium/creative/songwriting-and-ai-music/SKILL.md",
+        "profile:verifier/creative/songwriting-and-ai-music/SKILL.md"
+      ],
+      "name": "songwriting-and-ai-music"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/software-development/spike/SKILL.md",
+        "profile:admin/software-development/spike/SKILL.md",
+        "profile:coder/software-development/spike/SKILL.md",
+        "profile:critic/software-development/spike/SKILL.md",
+        "profile:family-ui/software-development/spike/SKILL.md",
+        "profile:premium/software-development/spike/SKILL.md",
+        "profile:research/software-development/spike/SKILL.md",
+        "profile:scout/software-development/spike/SKILL.md",
+        "profile:verifier/software-development/spike/SKILL.md"
+      ],
+      "name": "spike"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/media/spotify/SKILL.md",
+        "profile:admin/media/spotify/SKILL.md",
+        "profile:critic/media/spotify/SKILL.md",
+        "profile:family-ui/media/spotify/SKILL.md",
+        "profile:fo-brain/media/spotify/SKILL.md",
+        "profile:premium/media/spotify/SKILL.md",
+        "profile:research/media/spotify/SKILL.md",
+        "profile:scout/media/spotify/SKILL.md",
+        "profile:verifier/media/spotify/SKILL.md"
+      ],
+      "name": "spotify"
+    },
+    {
+      "classification": "identisch",
+      "copies": 9,
+      "files": [
+        "default/software-development/subagent-driven-development/SKILL.md",
+        "profile:admin/software-development/subagent-driven-development/SKILL.md",
+        "profile:coder/software-development/subagent-driven-development/SKILL.md",
+        "profile:critic/software-development/subagent-driven-development/SKILL.md",
+        "profile:family-ui/software-development/subagent-driven-development/SKILL.md",
+        "profile:premium/software-development/subagent-driven-development/SKILL.md",
+        "profile:research/software-development/subagent-driven-development/SKILL.md",
+        "profile:scout/software-development/subagent-driven-development/SKILL.md",
+        "profile:verifier/software-development/subagent-driven-development/SKILL.md"
+      ],
+      "name": "subagent-driven-development"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/systematic-debugging/SKILL.md",
+        "profile:admin/software-development/systematic-debugging/SKILL.md",
+        "profile:coder/software-development/systematic-debugging/SKILL.md",
+        "profile:critic/software-development/systematic-debugging/SKILL.md",
+        "profile:family-ui/software-development/systematic-debugging/SKILL.md",
+        "profile:premium/software-development/systematic-debugging/SKILL.md",
+        "profile:research/software-development/systematic-debugging/SKILL.md",
+        "profile:scout/software-development/systematic-debugging/SKILL.md",
+        "profile:verifier/software-development/systematic-debugging/SKILL.md"
+      ],
+      "name": "systematic-debugging"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:admin/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:critic/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:family-ui/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:premium/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:research/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:scout/productivity/teams-meeting-pipeline/SKILL.md",
+        "profile:verifier/productivity/teams-meeting-pipeline/SKILL.md"
+      ],
+      "name": "teams-meeting-pipeline"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/test-driven-development/SKILL.md",
+        "profile:admin/software-development/test-driven-development/SKILL.md",
+        "profile:coder/software-development/test-driven-development/SKILL.md",
+        "profile:critic/software-development/test-driven-development/SKILL.md",
+        "profile:family-ui/software-development/test-driven-development/SKILL.md",
+        "profile:premium/software-development/test-driven-development/SKILL.md",
+        "profile:research/software-development/test-driven-development/SKILL.md",
+        "profile:scout/software-development/test-driven-development/SKILL.md",
+        "profile:verifier/software-development/test-driven-development/SKILL.md"
+      ],
+      "name": "test-driven-development"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/creative/touchdesigner-mcp/SKILL.md",
+        "profile:admin/creative/touchdesigner-mcp/SKILL.md",
+        "profile:critic/creative/touchdesigner-mcp/SKILL.md",
+        "profile:family-ui/creative/touchdesigner-mcp/SKILL.md",
+        "profile:premium/creative/touchdesigner-mcp/SKILL.md",
+        "profile:research/creative/touchdesigner-mcp/SKILL.md",
+        "profile:reviewer/creative/touchdesigner-mcp/SKILL.md",
+        "profile:scout/creative/touchdesigner-mcp/SKILL.md",
+        "profile:verifier/creative/touchdesigner-mcp/SKILL.md"
+      ],
+      "name": "touchdesigner-mcp"
+    },
+    {
+      "classification": "divergent",
+      "copies": 6,
+      "files": [
+        "default/mlops/training/unsloth/SKILL.md",
+        "profile:admin/mlops/training/unsloth/SKILL.md",
+        "profile:critic/mlops/training/unsloth/SKILL.md",
+        "profile:research/mlops/training/unsloth/SKILL.md",
+        "profile:scout/mlops/training/unsloth/SKILL.md",
+        "profile:verifier/mlops/training/unsloth/SKILL.md"
+      ],
+      "name": "unsloth"
+    },
+    {
+      "classification": "divergent",
+      "copies": 11,
+      "files": [
+        "default/devops/webhook-subscriptions/SKILL.md",
+        "profile:admin/devops/webhook-subscriptions/SKILL.md",
+        "profile:coder/devops/webhook-subscriptions/SKILL.md",
+        "profile:critic/devops/webhook-subscriptions/SKILL.md",
+        "profile:family-ui/devops/webhook-subscriptions/SKILL.md",
+        "profile:fo-brain/devops/webhook-subscriptions/SKILL.md",
+        "profile:premium/devops/webhook-subscriptions/SKILL.md",
+        "profile:research/devops/webhook-subscriptions/SKILL.md",
+        "profile:reviewer/devops/webhook-subscriptions/SKILL.md",
+        "profile:scout/devops/webhook-subscriptions/SKILL.md",
+        "profile:verifier/devops/webhook-subscriptions/SKILL.md"
+      ],
+      "name": "webhook-subscriptions"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:admin/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:critic/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:family-ui/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:premium/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:research/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:scout/mlops/evaluation/weights-and-biases/SKILL.md",
+        "profile:verifier/mlops/evaluation/weights-and-biases/SKILL.md"
+      ],
+      "name": "weights-and-biases"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/workflow-library/SKILL.md",
+        "profile:admin/software-development/workflow-library/SKILL.md",
+        "profile:coder/software-development/workflow-library/SKILL.md",
+        "profile:critic/software-development/workflow-library/SKILL.md",
+        "profile:family-ui/software-development/workflow-library/SKILL.md",
+        "profile:premium/software-development/workflow-library/SKILL.md",
+        "profile:research/software-development/workflow-library/SKILL.md",
+        "profile:scout/software-development/workflow-library/SKILL.md",
+        "profile:verifier/software-development/workflow-library/SKILL.md"
+      ],
+      "name": "workflow-library"
+    },
+    {
+      "classification": "divergent",
+      "copies": 9,
+      "files": [
+        "default/software-development/writing-plans/SKILL.md",
+        "profile:admin/software-development/writing-plans/SKILL.md",
+        "profile:coder/software-development/writing-plans/SKILL.md",
+        "profile:critic/software-development/writing-plans/SKILL.md",
+        "profile:family-ui/software-development/writing-plans/SKILL.md",
+        "profile:premium/software-development/writing-plans/SKILL.md",
+        "profile:research/software-development/writing-plans/SKILL.md",
+        "profile:scout/software-development/writing-plans/SKILL.md",
+        "profile:verifier/software-development/writing-plans/SKILL.md"
+      ],
+      "name": "writing-plans"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/social-media/xurl/SKILL.md",
+        "profile:admin/social-media/xurl/SKILL.md",
+        "profile:critic/social-media/xurl/SKILL.md",
+        "profile:family-ui/social-media/xurl/SKILL.md",
+        "profile:premium/social-media/xurl/SKILL.md",
+        "profile:research/social-media/xurl/SKILL.md",
+        "profile:scout/social-media/xurl/SKILL.md",
+        "profile:verifier/social-media/xurl/SKILL.md"
+      ],
+      "name": "xurl"
+    },
+    {
+      "classification": "divergent",
+      "copies": 8,
+      "files": [
+        "default/media/youtube-content/SKILL.md",
+        "profile:admin/media/youtube-content/SKILL.md",
+        "profile:critic/media/youtube-content/SKILL.md",
+        "profile:family-ui/media/youtube-content/SKILL.md",
+        "profile:premium/media/youtube-content/SKILL.md",
+        "profile:research/media/youtube-content/SKILL.md",
+        "profile:scout/media/youtube-content/SKILL.md",
+        "profile:verifier/media/youtube-content/SKILL.md"
+      ],
+      "name": "youtube-content"
+    },
+    {
+      "classification": "identisch",
+      "copies": 8,
+      "files": [
+        "default/yuanbao/SKILL.md",
+        "profile:admin/yuanbao/SKILL.md",
+        "profile:critic/yuanbao/SKILL.md",
+        "profile:family-ui/yuanbao/SKILL.md",
+        "profile:premium/yuanbao/SKILL.md",
+        "profile:research/yuanbao/SKILL.md",
+        "profile:scout/yuanbao/SKILL.md",
+        "profile:verifier/yuanbao/SKILL.md"
+      ],
+      "name": "yuanbao"
+    }
+  ],
+  "frontmatter": {
+    "issues": [
+      {
+        "error": "yaml_parsefehler",
+        "file": "default/design-board/SKILL.md"
+      },
+      {
+        "error": "yaml_parsefehler",
+        "file": "profile:reviewer/devops/reviewer-verdict-hygiene/SKILL.md"
+      }
+    ],
+    "name_directory_mismatches": [
+      {
+        "directory": "creative-ideation",
+        "file": "default/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "default/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "default/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "default/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "default/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "default/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:admin/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:admin/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:admin/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "profile:admin/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:admin/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "profile:admin/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:critic/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:critic/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:critic/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "profile:critic/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:critic/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "profile:critic/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:family-ui/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:family-ui/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:family-ui/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "profile:family-ui/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:family-ui/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:fo-brain/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:fo-brain/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:premium/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:premium/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:premium/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "profile:premium/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:premium/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:research/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:research/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:research/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:research/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "profile:research/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:reviewer/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:scout/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:scout/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:scout/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:scout/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "profile:scout/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      },
+      {
+        "directory": "creative-ideation",
+        "file": "profile:verifier/creative/creative-ideation/SKILL.md",
+        "frontmatter_name": "ideation"
+      },
+      {
+        "directory": "lm-evaluation-harness",
+        "file": "profile:verifier/mlops/evaluation/lm-evaluation-harness/SKILL.md",
+        "frontmatter_name": "evaluating-llms-harness"
+      },
+      {
+        "directory": "vllm",
+        "file": "profile:verifier/mlops/inference/vllm/SKILL.md",
+        "frontmatter_name": "serving-llms-vllm"
+      },
+      {
+        "directory": "audiocraft",
+        "file": "profile:verifier/mlops/models/audiocraft/SKILL.md",
+        "frontmatter_name": "audiocraft-audio-generation"
+      },
+      {
+        "directory": "segment-anything",
+        "file": "profile:verifier/mlops/models/segment-anything/SKILL.md",
+        "frontmatter_name": "segment-anything-model"
+      },
+      {
+        "directory": "trl-fine-tuning",
+        "file": "profile:verifier/mlops/training/trl-fine-tuning/SKILL.md",
+        "frontmatter_name": "fine-tuning-with-trl"
+      }
+    ],
+    "required_fields": [
+      "name",
+      "description"
+    ]
+  },
+  "inventory": {
+    "active_skill_files": 967,
+    "by_root": {
+      "default": 145,
+      "profile:admin": 110,
+      "profile:coder": 49,
+      "profile:critic": 102,
+      "profile:family-ui": 89,
+      "profile:fo-brain": 38,
+      "profile:premium": 91,
+      "profile:research": 96,
+      "profile:reviewer": 40,
+      "profile:scout": 96,
+      "profile:verifier": 111
+    },
+    "roots_found": 11
+  },
+  "largest_files": {
+    "by_bytes": [
+      {
+        "bytes": 105752,
+        "file": "default/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:admin/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:critic/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:premium/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:research/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:scout/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:verifier/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103375,
+        "file": "profile:family-ui/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 99619,
+        "file": "default/devops/hermes-agent-operations/SKILL.md",
+        "lines": 573
+      },
+      {
+        "bytes": 88143,
+        "file": "profile:research/devops/openclaw-operator/SKILL.md",
+        "lines": 987
+      }
+    ],
+    "by_lines": [
+      {
+        "bytes": 105752,
+        "file": "default/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:admin/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:critic/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103375,
+        "file": "profile:family-ui/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:premium/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:research/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:scout/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 103674,
+        "file": "profile:verifier/research/research-paper-writing/SKILL.md",
+        "lines": 2377
+      },
+      {
+        "bytes": 50424,
+        "file": "profile:reviewer/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "lines": 1126
+      },
+      {
+        "bytes": 51586,
+        "file": "profile:critic/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "lines": 1111
+      }
+    ]
+  },
+  "legacy_references": {
+    "by_type": {
+      "atlas": 38,
+      "coordinator": 38,
+      "mission_control": 45,
+      "openclaw": 88
+    },
+    "definition": "Textuelle Treffer in aktiven SKILL.md; kein Nachweis einer laufenden Integration oder Ausfuehrung.",
+    "files_by_type": {
+      "atlas": [
+        "default/devops/defensive-hardening-verification/SKILL.md",
+        "default/devops/hermes-agent-operations/SKILL.md",
+        "default/devops/hermes-dispatcher-worker-runner/SKILL.md",
+        "default/devops/hermes-kanban-worker-scope-control/SKILL.md",
+        "default/devops/hermes-mode-router/SKILL.md",
+        "default/devops/hermes-planner-task-decomposition/SKILL.md",
+        "default/devops/hermes-toolset-allowlist-hardening/SKILL.md",
+        "default/devops/kanban-execution-worker-readiness/SKILL.md",
+        "default/devops/kanban-reviewer/SKILL.md",
+        "default/devops/openclaw-bridge/SKILL.md",
+        "default/hermes-kanban/kanban-review-operations/SKILL.md",
+        "default/software-development/use-claude-cli/SKILL.md",
+        "default/software-development/writing-plans/SKILL.md",
+        "profile:admin/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:admin/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:admin/devops/openclaw-incident-rca/SKILL.md",
+        "profile:admin/devops/openclaw-model-routing/SKILL.md",
+        "profile:admin/devops/openclaw-operator/SKILL.md",
+        "profile:admin/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:coder/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:research/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:research/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:research/devops/openclaw-incident-rca/SKILL.md",
+        "profile:research/devops/openclaw-model-routing/SKILL.md",
+        "profile:research/devops/openclaw-operator/SKILL.md",
+        "profile:research/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:scout/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:scout/devops/openclaw-incident-rca/SKILL.md",
+        "profile:scout/devops/openclaw-model-routing/SKILL.md",
+        "profile:scout/devops/openclaw-operator/SKILL.md",
+        "profile:scout/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:verifier/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:verifier/devops/openclaw-incident-rca/SKILL.md",
+        "profile:verifier/devops/openclaw-model-routing/SKILL.md",
+        "profile:verifier/devops/openclaw-operator/SKILL.md",
+        "profile:verifier/devops/openclaw-stability-hardening/SKILL.md"
+      ],
+      "coordinator": [
+        "default/devops/hermes-agent-operations/SKILL.md",
+        "default/devops/hermes-dispatcher-worker-runner/SKILL.md",
+        "default/devops/hermes-kanban-worker-scope-control/SKILL.md",
+        "default/devops/hermes-mode-router/SKILL.md",
+        "default/devops/hermes-modelrouting-codex/SKILL.md",
+        "default/devops/hermes-planner-task-decomposition/SKILL.md",
+        "default/devops/hermes-toolset-allowlist-hardening/SKILL.md",
+        "default/devops/hub-discord-msg/SKILL.md",
+        "default/devops/hub-pending-pickup/SKILL.md",
+        "default/devops/kanban-critic/SKILL.md",
+        "default/devops/kanban-execution-worker-readiness/SKILL.md",
+        "default/devops/kanban-reviewer/SKILL.md",
+        "default/devops/openclaw-bridge/SKILL.md",
+        "default/hermes-kanban/kanban-review-operations/SKILL.md",
+        "default/productivity/family-organizer-operations/SKILL.md",
+        "default/productivity/linear/SKILL.md",
+        "default/software-development/frontend-idle-polling/SKILL.md",
+        "default/software-development/karpathy-coding-guardrails/SKILL.md",
+        "default/software-development/writing-plans/SKILL.md",
+        "profile:admin/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:admin/devops/kanban-worker/SKILL.md",
+        "profile:admin/devops/openclaw-operator/SKILL.md",
+        "profile:coder/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:coder/devops/kanban-worker/SKILL.md",
+        "profile:critic/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:critic/devops/kanban-worker/SKILL.md",
+        "profile:family-ui/devops/kanban-worker/SKILL.md",
+        "profile:premium/devops/kanban-worker/SKILL.md",
+        "profile:research/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:research/devops/kanban-worker/SKILL.md",
+        "profile:research/devops/openclaw-operator/SKILL.md",
+        "profile:reviewer/devops/reviewer-stop-code-emit/SKILL.md",
+        "profile:scout/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/devops/kanban-worker/SKILL.md",
+        "profile:scout/devops/openclaw-operator/SKILL.md",
+        "profile:verifier/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:verifier/devops/kanban-worker/SKILL.md",
+        "profile:verifier/devops/openclaw-operator/SKILL.md"
+      ],
+      "mission_control": [
+        "default/devops/hermes-agent-operations/SKILL.md",
+        "default/devops/hermes-dispatcher-worker-runner/SKILL.md",
+        "default/devops/hermes-kanban-worker-scope-control/SKILL.md",
+        "default/devops/hermes-mode-router/SKILL.md",
+        "default/devops/hermes-modelrouting-codex/SKILL.md",
+        "default/devops/hermes-planner-task-decomposition/SKILL.md",
+        "default/devops/hermes-toolset-allowlist-hardening/SKILL.md",
+        "default/devops/hub-discord-msg/SKILL.md",
+        "default/devops/kanban-critic/SKILL.md",
+        "default/devops/kanban-execution-worker-readiness/SKILL.md",
+        "default/devops/kanban-reviewer/SKILL.md",
+        "default/devops/openclaw-bridge/SKILL.md",
+        "default/hermes-kanban/kanban-review-operations/SKILL.md",
+        "default/openclaw/openclaw-runtime-operations/SKILL.md",
+        "default/productivity/linear/SKILL.md",
+        "default/software-development/use-claude-cli/SKILL.md",
+        "default/software-development/writing-plans/SKILL.md",
+        "profile:admin/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:admin/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:admin/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:admin/devops/openclaw-incident-rca/SKILL.md",
+        "profile:admin/devops/openclaw-model-routing/SKILL.md",
+        "profile:admin/devops/openclaw-operator/SKILL.md",
+        "profile:admin/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:coder/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:critic/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:research/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:research/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:research/devops/openclaw-incident-rca/SKILL.md",
+        "profile:research/devops/openclaw-model-routing/SKILL.md",
+        "profile:research/devops/openclaw-operator/SKILL.md",
+        "profile:research/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:scout/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:scout/devops/openclaw-incident-rca/SKILL.md",
+        "profile:scout/devops/openclaw-model-routing/SKILL.md",
+        "profile:scout/devops/openclaw-operator/SKILL.md",
+        "profile:scout/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:verifier/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:verifier/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:verifier/devops/openclaw-incident-rca/SKILL.md",
+        "profile:verifier/devops/openclaw-model-routing/SKILL.md",
+        "profile:verifier/devops/openclaw-operator/SKILL.md",
+        "profile:verifier/devops/openclaw-stability-hardening/SKILL.md"
+      ],
+      "openclaw": [
+        "default/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "default/creative/brainstorming/SKILL.md",
+        "default/devops/defensive-hardening-verification/SKILL.md",
+        "default/devops/hermes-agent-operations/SKILL.md",
+        "default/devops/hermes-dispatcher-worker-runner/SKILL.md",
+        "default/devops/hermes-kanban-worker-scope-control/SKILL.md",
+        "default/devops/hermes-mode-router/SKILL.md",
+        "default/devops/hermes-modelrouting-codex/SKILL.md",
+        "default/devops/hermes-planner-task-decomposition/SKILL.md",
+        "default/devops/hermes-toolset-allowlist-hardening/SKILL.md",
+        "default/devops/hub-discord-msg/SKILL.md",
+        "default/devops/hub-pending-pickup/SKILL.md",
+        "default/devops/kanban-critic/SKILL.md",
+        "default/devops/kanban-execution-worker-readiness/SKILL.md",
+        "default/devops/kanban-reviewer/SKILL.md",
+        "default/devops/memsearch-recall/SKILL.md",
+        "default/devops/openclaw-bridge/SKILL.md",
+        "default/hermes-kanban/kanban-review-operations/SKILL.md",
+        "default/mcp/native-mcp/SKILL.md",
+        "default/openclaw/openclaw-runtime-operations/SKILL.md",
+        "default/social-media/xurl/SKILL.md",
+        "default/software-development/grill-me/SKILL.md",
+        "default/software-development/karpathy-coding-guardrails/SKILL.md",
+        "default/software-development/use-claude-cli/SKILL.md",
+        "default/software-development/writing-plans/SKILL.md",
+        "profile:admin/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:admin/autonomous-ai-agents/codex/SKILL.md",
+        "profile:admin/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:admin/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:admin/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:admin/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:admin/devops/openclaw-discord-ops/SKILL.md",
+        "profile:admin/devops/openclaw-incident-rca/SKILL.md",
+        "profile:admin/devops/openclaw-model-routing/SKILL.md",
+        "profile:admin/devops/openclaw-operator/SKILL.md",
+        "profile:admin/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:admin/social-media/xurl/SKILL.md",
+        "profile:admin/software-development/grill-me/SKILL.md",
+        "profile:coder/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:coder/autonomous-ai-agents/codex/SKILL.md",
+        "profile:coder/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:coder/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:coder/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:coder/software-development/grill-me/SKILL.md",
+        "profile:critic/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:critic/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:critic/social-media/xurl/SKILL.md",
+        "profile:family-ui/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:family-ui/social-media/xurl/SKILL.md",
+        "profile:fo-brain/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:premium/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:premium/social-media/xurl/SKILL.md",
+        "profile:research/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:research/devops/homeserver-ops-and-timers/SKILL.md",
+        "profile:research/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:research/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:research/devops/openclaw-discord-ops/SKILL.md",
+        "profile:research/devops/openclaw-incident-rca/SKILL.md",
+        "profile:research/devops/openclaw-model-routing/SKILL.md",
+        "profile:research/devops/openclaw-operator/SKILL.md",
+        "profile:research/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:research/social-media/xurl/SKILL.md",
+        "profile:research/software-development/grill-me/SKILL.md",
+        "profile:reviewer/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:scout/devops/homeserver-ops-and-timers/SKILL.md",
+        "profile:scout/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:scout/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:scout/devops/openclaw-discord-ops/SKILL.md",
+        "profile:scout/devops/openclaw-incident-rca/SKILL.md",
+        "profile:scout/devops/openclaw-model-routing/SKILL.md",
+        "profile:scout/devops/openclaw-operator/SKILL.md",
+        "profile:scout/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:scout/social-media/xurl/SKILL.md",
+        "profile:scout/software-development/grill-me/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/claude-code/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/codex/SKILL.md",
+        "profile:verifier/autonomous-ai-agents/hermes-agent/SKILL.md",
+        "profile:verifier/devops/kanban-execution-worker-readiness/SKILL.md",
+        "profile:verifier/devops/minimax-openclaw-token-plan/SKILL.md",
+        "profile:verifier/devops/openclaw-config-change-safe/SKILL.md",
+        "profile:verifier/devops/openclaw-discord-ops/SKILL.md",
+        "profile:verifier/devops/openclaw-incident-rca/SKILL.md",
+        "profile:verifier/devops/openclaw-model-routing/SKILL.md",
+        "profile:verifier/devops/openclaw-operator/SKILL.md",
+        "profile:verifier/devops/openclaw-stability-hardening/SKILL.md",
+        "profile:verifier/social-media/xurl/SKILL.md",
+        "profile:verifier/software-development/grill-me/SKILL.md"
+      ]
+    }
+  },
+  "local_links": {
+    "false_positive_boundaries": [
+      "Geprueft werden nur Inline- und Referenz-Markdown-Links mit relativem Dateiziel.",
+      "HTTP(S), andere URI-Schemata, Anker, absolute Pfade, Home-Pfade und data:-Links werden bewusst uebersprungen.",
+      "Code-Fences, HTML-Attribute, dynamisch erzeugte Pfade und Link-Title-Syntax sind nicht vollstaendig geparst.",
+      "Es wird nur die Existenz geprueft; Link-Ziele werden nicht gelesen und Symlink-Semantik nicht bewertet."
+    ],
+    "missing": [
+      {
+        "file": "default/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "default/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "default/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "default/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:admin/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "profile:admin/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:admin/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:admin/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:critic/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "profile:critic/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:critic/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:critic/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:critic/note-taking/obsidian/SKILL.md",
+        "target": "00-Canon/vision.md"
+      },
+      {
+        "file": "profile:family-ui/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:family-ui/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:family-ui/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:fo-brain/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:fo-brain/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:premium/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:premium/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:premium/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:premium/note-taking/obsidian/SKILL.md",
+        "target": "00-Canon/vision.md"
+      },
+      {
+        "file": "profile:research/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "profile:research/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:research/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:research/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:reviewer/mlops/ml-ops-workflows/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h.pth\""
+      },
+      {
+        "file": "profile:scout/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "profile:scout/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:scout/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:scout/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      },
+      {
+        "file": "profile:verifier/creative/baoyu-article-illustrator/SKILL.md",
+        "target": "{relative-path}/NN-{type}-{slug}.png"
+      },
+      {
+        "file": "profile:verifier/media/gif-search/SKILL.md",
+        "target": "url"
+      },
+      {
+        "file": "profile:verifier/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_b_01ec64.pth\""
+      },
+      {
+        "file": "profile:verifier/mlops/models/segment-anything/SKILL.md",
+        "target": "checkpoint=\"sam_vit_h_4b8939.pth\""
+      }
+    ]
+  },
+  "redacted_pattern_summary": {
+    "pii_types": {
+      "email_address": 284,
+      "phone_number": 2132
+    },
+    "placeholder_markers": 272,
+    "redaction_guarantee": "Nur Musterarten und Anzahlen; keine Trefferwerte oder Fundstellen werden ausgegeben.",
+    "secret_types": {
+      "api_key_assignment": 87,
+      "bearer_token": 20,
+      "provider_token_prefix": 28
+    }
+  },
+  "scope": {
+    "active_definition": "SKILL.md unter den Wurzeln, mit Ausnahme jedes Pfads unter einer .archive-Komponente",
+    "read_only": true,
+    "roots": [
+      {
+        "label": "default",
+        "path": "/home/piet/.hermes/skills"
+      },
+      {
+        "label": "profile:admin",
+        "path": "/home/piet/.hermes/profiles/admin/skills"
+      },
+      {
+        "label": "profile:coder",
+        "path": "/home/piet/.hermes/profiles/coder/skills"
+      },
+      {
+        "label": "profile:critic",
+        "path": "/home/piet/.hermes/profiles/critic/skills"
+      },
+      {
+        "label": "profile:family-ui",
+        "path": "/home/piet/.hermes/profiles/family-ui/skills"
+      },
+      {
+        "label": "profile:fo-brain",
+        "path": "/home/piet/.hermes/profiles/fo-brain/skills"
+      },
+      {
+        "label": "profile:premium",
+        "path": "/home/piet/.hermes/profiles/premium/skills"
+      },
+      {
+        "label": "profile:research",
+        "path": "/home/piet/.hermes/profiles/research/skills"
+      },
+      {
+        "label": "profile:reviewer",
+        "path": "/home/piet/.hermes/profiles/reviewer/skills"
+      },
+      {
+        "label": "profile:scout",
+        "path": "/home/piet/.hermes/profiles/scout/skills"
+      },
+      {
+        "label": "profile:verifier",
+        "path": "/home/piet/.hermes/profiles/verifier/skills"
+      }
+    ]
+  }
+}
