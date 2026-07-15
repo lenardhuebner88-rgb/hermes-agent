@@ -22724,6 +22724,21 @@ def _blocked_kind_for_auto_retry(
     body_hash: Optional[str] = None,
     last_auto_retry_body_hash: Optional[str] = None,
 ) -> str:
+    """Classify a blocked task for auto-retry / silent-block autonomy.
+
+    Review feedback (``review_revision`` / ``REQUEST_CHANGES``) must NEVER be
+    routed through :data:`_AUTO_RETRY_QUESTION_RE`. That regex matches common
+    technical English in findings (``?``, ``token``, ``migration``, ``delete``,
+    ``push``, ``deploy``, …). After the first auto-retry (``auto_retry_count
+    >= 1``) a false ``operator_question`` would:
+
+    1. skip the remaining auto-retry budget, and
+    2. force silent-block autonomy to escalate (operator_question is
+       operator-only) instead of ``reready_review``.
+
+    Same-body after a prior retry still returns ``needs_operator`` (quality
+    brake). Real human holds use ``block_kind=needs_input`` / hold_task.
+    """
     if explicit_block_kind is not None:
         if explicit_block_kind == "transient":
             return "retryable"
@@ -22734,15 +22749,19 @@ def _blocked_kind_for_auto_retry(
             return explicit_block_kind
     text = (reason or "").strip()
     normalized_verdict = str(verdict or "").strip().upper()
-    if (
-        normalized_verdict == "REQUEST_CHANGES"
-        and int(auto_retry_count or 0) >= 1
-        and body_hash
-        and last_auto_retry_body_hash
-        and body_hash == last_auto_retry_body_hash
-    ):
-        return "needs_operator"
-    if normalized_verdict == "REQUEST_CHANGES" and int(auto_retry_count or 0) == 0:
+    is_review_feedback = (
+        explicit_block_kind == "review_revision"
+        or normalized_verdict == "REQUEST_CHANGES"
+    )
+    if is_review_feedback:
+        if (
+            int(auto_retry_count or 0) >= 1
+            and body_hash
+            and last_auto_retry_body_hash
+            and body_hash == last_auto_retry_body_hash
+        ):
+            return "needs_operator"
+        # First pass, or body changed after a retry: stay in the self-heal lane.
         return "retryable"
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"

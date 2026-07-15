@@ -5498,7 +5498,10 @@ def test_dispatch_auto_retry_keeps_operator_hold_blocked(
         assert res.auto_retried_blocked == []
         assert kb.get_task(conn, t).status == "blocked"
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
-        assert event.payload["blocked_kind"] == "operator_question"
+        # hold_task stamps block_kind=needs_input (typed system park); that is
+        # the authoritative skip signal (not the prose question-regex).
+        assert event.payload["blocked_kind"] == "needs_input"
+        assert kb.get_task(conn, t).block_kind == "needs_input"
 
 
 def test_operator_hold_never_duplicates_run_and_answer_resumes_once(
@@ -6690,6 +6693,125 @@ def test_silent_block_autonomy_hold_integration(
         res = kb.escalate_silent_blocks_sweep(conn, now=base)
         assert res["escalated"] == []
         assert any(h["action"] == "hold_integration" for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
+
+
+def test_review_request_changes_never_false_operator_question():
+    """Autonomy gap: review findings often contain regex bait (token, ?,
+    migration, delete). After the first auto-retry those must stay retryable
+    so the second budget slot and reready_review still fire — not operator_question.
+    """
+    bait = (
+        "Urteil: NEEDS_REVISION\n"
+        "Warum: token accounting wrong; which migration to delete?\n"
+        "Fix: push deploy-safe alter path."
+    )
+    # First pass — already protected historically
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait, verdict="REQUEST_CHANGES", auto_retry_count=0
+        )
+        == "retryable"
+    )
+    # Second pass after auto-retry with CHANGED body — previously false operator_question
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash="aaa",
+            last_auto_retry_body_hash="bbb",
+        )
+        == "retryable"
+    )
+    # review_revision kind without explicit verdict still protected
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            explicit_block_kind="review_revision",
+            auto_retry_count=1,
+            body_hash="aaa",
+            last_auto_retry_body_hash="bbb",
+        )
+        == "retryable"
+    )
+    # Same-body brake still holds (quality, not thrash)
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            bait,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash="same",
+            last_auto_retry_body_hash="same",
+        )
+        == "needs_operator"
+    )
+    # Non-review prose still pages for real operator questions
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            "Which credential should I use?", auto_retry_count=0
+        )
+        == "operator_question"
+    )
+
+
+def test_review_prose_bait_uses_second_auto_retry_not_operator(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """End-to-end: REQUEST_CHANGES with regex bait after one auto_retry still
+    gets attempt 2 — does not settle as operator_question."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    bait = "NEEDS_REVISION: fix token path; which delete/migration is safe?"
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="review bait", assignee="coder", body="v1")
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, t, "claimed",
+                {"source_status": "review", "run_id": run_id},
+                run_id=run_id,
+            )
+        assert kb.block_task(
+            conn, t, reason=bait, expected_run_id=run_id,
+        )
+        assert kb.get_task(conn, t).block_kind == "review_revision"
+        # First auto-retry
+        retried = kb.auto_retry_blocked_tasks(
+            conn, backoff_seconds=0, retry_limit=2
+        )
+        assert retried == [(t, 1)]
+        assert kb.get_task(conn, t).status == "ready"
+        # Second review block with changed body (coder attempted a fix)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET body = ? WHERE id = ?", ("v2-fix", t))
+        kb.claim_task(conn, t)
+        run_id2 = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, t, "claimed",
+                {"source_status": "review", "run_id": run_id2},
+                run_id=run_id2,
+            )
+        assert kb.block_task(
+            conn, t, reason=bait + " still", expected_run_id=run_id2,
+        )
+        # Must still be retryable — not operator_question
+        kind = kb._blocked_kind_for_auto_retry(
+            bait + " still",
+            explicit_block_kind=kb.get_task(conn, t).block_kind,
+            verdict="REQUEST_CHANGES",
+            auto_retry_count=1,
+            body_hash=kb._task_body_hash("v2-fix"),
+            last_auto_retry_body_hash=kb._latest_auto_retry_body_hash(conn, t),
+        )
+        assert kind == "retryable"
+        retried2 = kb.auto_retry_blocked_tasks(
+            conn, backoff_seconds=0, retry_limit=2
+        )
+        assert retried2 == [(t, 2)]
+        assert kb.get_task(conn, t).status == "ready"
         assert _operator_escalations(conn, t) == []
 
 
