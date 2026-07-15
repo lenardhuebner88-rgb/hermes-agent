@@ -15683,6 +15683,11 @@ _RESPAWN_BLOCKER_RE = re.compile(
 # Within this window a completed run counts as "recent proof"; don't re-spawn.
 _RESPAWN_GUARD_SUCCESS_WINDOW = 3600  # 1 hour
 
+# A quota/auth-flavoured failure still gets a short quiet period, but must not
+# pin a ready task forever. Anchor this cooldown on existing run timestamps;
+# no task-schema field is needed.
+_RESPAWN_BLOCKER_AUTH_COOLDOWN_SECONDS = 300  # 5 minutes
+
 # Cooldown after a rate-limited (quota-wall) requeue before the dispatcher
 # re-spawns the worker. Without this, a task released by the rate-limit path
 # would be re-spawned on the very next tick and immediately bounce off the
@@ -15760,7 +15765,7 @@ class DispatchResult:
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """Tasks skipped by the respawn guard, as ``(task_id, reason)`` pairs.
 
-    Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
+    Reasons: ``"blocker_auth"`` (quota/auth error inside its cooldown),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
     held_role_mismatch: list[tuple[str, str]] = field(default_factory=list)
@@ -20859,12 +20864,11 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     ``"blocker_auth"``
         The task's last failure error matches a quota / authentication
         pattern. Retrying immediately is unlikely to help (rate limits
-        reset on a timer; auth needs human action), so we defer to the
-        next tick. The existing ``consecutive_failures`` counter still
-        trips the auto-block circuit breaker after ``failure_limit``
-        consecutive failures, so a persistent auth error eventually
-        blocks via the normal path — but a transient 429 gets a few
-        ticks of recovery first.
+        reset on a timer; auth needs human action), so defer for
+        ``_RESPAWN_BLOCKER_AUTH_COOLDOWN_SECONDS`` after the latest run.
+        Once the cooldown expires, allow one probe. A persistent error can
+        then increment ``consecutive_failures`` and trip the normal circuit
+        breaker instead of leaving the task silently ready forever.
 
     ``"recent_success"``
         A completed run exists within ``_RESPAWN_GUARD_SUCCESS_WINDOW``
@@ -20882,7 +20886,8 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     genuinely dead (no live PID on this host).
     """
     row = conn.execute(
-        "SELECT last_failure_error, workflow_template_id FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, workflow_template_id, created_at "
+        "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -20955,10 +20960,23 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
         ):
             return "transient_retry_backoff"
 
-    # 2. Quota / auth blocker: retrying immediately will not help.
+    # 2. Quota / auth blocker: retrying immediately will not help. Bound the
+    #    quiet period by the latest persisted run timestamp so a task with a
+    #    below-threshold failure count eventually reaches another attempt.
+    #    Fresh tasks with legacy/synthetic failure metadata have no run yet;
+    #    their existing created_at is a safe schema-free fallback anchor.
     err = row["last_failure_error"]
     if err and _RESPAWN_BLOCKER_RE.search(err):
-        return "blocker_auth"
+        blocker_at = (
+            latest_run["ended_at"]
+            if latest_run is not None and latest_run["ended_at"] is not None
+            else row["created_at"]
+        )
+        if (
+            blocker_at is not None
+            and (now - int(blocker_at)) < _RESPAWN_BLOCKER_AUTH_COOLDOWN_SECONDS
+        ):
+            return "blocker_auth"
 
     # 3. Latest completed run within guard window — proof of recent success.
     #    Older successful proof must not mask a newer failed attempt; otherwise
