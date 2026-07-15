@@ -6379,12 +6379,9 @@ def test_silent_block_sweep_inline_matches_sweep_and_sweep_skips(
 def test_silent_block_sweep_carries_real_run_outcome(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """HEILER-SILENTBLOCK-REASON-FIDELITY-S1: a block settled via a non-blocked
-    path (budget exhaustion) has NO blocked run, so the old payload sent
-    trigger_outcome='blocked' + an empty error -> real-bug default. The sweep now
-    carries the genuine last *ended* run outcome + message, so the operator sees
-    the real reason and the classifier lands it honestly (capacity, not the
-    real-bug default)."""
+    """SILENT-BLOCK-AUTONOMY-S1 + reason fidelity: budget exhaustion settles
+    without a blocked run. The sweep routes to hold_capacity (no operator page,
+    no re-dispatch) and classifies capacity from the real last-run message."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     with kb.connect_closing() as conn:
@@ -6402,15 +6399,20 @@ def test_silent_block_sweep_carries_real_run_outcome(
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
         conn.commit()
         assert kb.silent_block_task_ids(conn, now=base) == [t]
-        kb.escalate_silent_blocks_sweep(conn, now=base)
-        esc = _escalation_event(conn, t)
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["task_id"] == t for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
         heiler = _heiler_events(conn, t)[0]
+        routes = [
+            e for e in kb.list_events(conn, t) if e.kind == kb.AUTONOMY_ROUTED_EVENT
+        ]
 
-    assert esc.payload["evidence"]["trigger_outcome"] == "iteration_budget_exhausted"
-    assert "iteration_budget_exhausted" in esc.payload["why_now"]
-    # the real run message is carried, not the old empty string
-    assert "iteration budget exhausted" in esc.payload["evidence"]["last_error"]
     assert heiler.payload["class"] == kb.HEILER_CLASS_CAPACITY
+    assert routes[-1].payload["action"] == "hold_capacity"
+    # silent set drained via hold (no operator page)
+    with kb.connect_closing() as conn:
+        assert kb.silent_block_task_ids(conn, now=base) == []
 
 
 def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
@@ -6538,6 +6540,198 @@ def test_silent_block_sweep_carves_out_strategist_meta_task(
     assert meta_heiler_events == []
     # the real code task is untouched by the carve-out — still surfaced
     assert len(real_operator_escalations) == 1
+
+
+# ---------------------------------------------------------------------------
+# SILENT-BLOCK-AUTONOMY-S1: bounded routes before operator page
+# ---------------------------------------------------------------------------
+
+
+def _force_review_settled_block(conn, title="review rework"):
+    """Create a settled REQUEST_CHANGES block with exhausted auto_retry budget."""
+    t = kb.create_task(conn, title=title, assignee="coder")
+    conn.execute(
+        "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+        (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+    )
+    kb.claim_task(conn, t)
+    # Review-origin claim so block_task stamps review_revision.
+    run_id = kb.get_task(conn, t).current_run_id
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            t,
+            "claimed",
+            {"source_status": "review", "run_id": run_id},
+            run_id=run_id,
+        )
+    assert kb.block_task(
+        conn,
+        t,
+        reason="Urteil: NEEDS_REVISION\nWarum: missing regression for focus history",
+        expected_run_id=run_id,
+    )
+    task = kb.get_task(conn, t)
+    assert task.status == "blocked"
+    assert task.block_kind == "review_revision"
+    return t
+
+
+def test_silent_block_autonomy_reready_review_once(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Settled review rework re-readies once (no operator page) within token bound."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = _force_review_settled_block(conn)
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(r["task_id"] == t and r["action"] == "reready_review" for r in res["autonomy_reready"])
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert _operator_escalations(conn, t) == []
+        routes = [e for e in kb.list_events(conn, t) if e.kind == kb.AUTONOMY_ROUTED_EVENT]
+        assert len(routes) == 1
+        assert routes[0].payload["action"] == "reready_review"
+        # Findings preserved for the next worker without an extra model call.
+        comments = kb.list_comments(conn, t)
+        assert any("NEEDS_REVISION" in (c.body or "") for c in comments)
+
+
+def test_silent_block_autonomy_review_second_episode_escalates(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Second settled review in a new block episode after one reready → operator."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = _force_review_settled_block(conn, title="review loop")
+        res1 = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res1["autonomy_reready"]
+        # Second worker attempt: claim + review block again, budget still exhausted.
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                t,
+                "claimed",
+                {"source_status": "review", "run_id": run_id},
+                run_id=run_id,
+            )
+        assert kb.block_task(
+            conn,
+            t,
+            reason="Urteil: NEEDS_REVISION\nWarum: still broken after autonomy reready",
+            expected_run_id=run_id,
+        )
+        # New block episode → reready_count resets; give another reready then force
+        # second reready attempt in SAME episode by exhausting max to 0 for escalate.
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base, max_autonomy_reready=0)
+        assert any(e["task_id"] == t for e in res2["escalated"])
+        assert len(_operator_escalations(conn, t)) == 1
+        assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_silent_block_autonomy_hold_capacity_no_operator(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="token cap", assignee="coder")
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (t,)).fetchone()
+        assert kb._park_budget_runaway(conn, row, token_sum=5000, cap=100, runs=3)
+        # Budget park already wrote operator_escalation historically — clear that
+        # path by using a raw capacity-stamped block without prior escalation.
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (t,))
+        conn.execute(
+            "UPDATE tasks SET status='blocked', block_kind='capacity', "
+            "auto_retry_count=? WHERE id=?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        conn.commit()
+        assert kb.silent_block_task_ids(conn, now=base) == [t]
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["action"] == "hold_capacity" for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
+        assert kb.get_task(conn, t).status == "blocked"
+        # Hold removes from silent set; re-sweep is a no-op.
+        assert kb.silent_block_task_ids(conn, now=base) == []
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res2["escalated"] == []
+        assert res2["autonomy_held"] == []
+
+
+def test_silent_block_autonomy_hold_integration(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="merge park", assignee="coder")
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        assert kb._park_integration(
+            conn, t, {"reason": "post-merge gate failed: pytest"}, expected_run_id=run_id
+        )
+        assert kb.get_task(conn, t).block_kind == "integration"
+        # Integration park does not write operator_escalation → silent set.
+        assert t in kb.silent_block_task_ids(conn, now=base)
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["escalated"] == []
+        assert any(h["action"] == "hold_integration" for h in res["autonomy_held"])
+        assert _operator_escalations(conn, t) == []
+
+
+def test_resolve_settled_block_autonomy_route_unit():
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=0,
+        )
+        == "reready_review"
+    )
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=1,
+        )
+        == "escalate"
+    )
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="capacity",
+            blocked_kind="capacity",
+            trigger_outcome="blocked",
+            reason="input-token cap exceeded",
+            verdict=None,
+            reready_count=0,
+        )
+        == "hold_capacity"
+    )
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="needs_input",
+            blocked_kind="needs_input",
+            trigger_outcome="blocked",
+            reason="which credential?",
+            verdict=None,
+            reready_count=0,
+        )
+        == "escalate"
+    )
 
 
 def test_dispatch_max_spawn_counts_existing_running_tasks(

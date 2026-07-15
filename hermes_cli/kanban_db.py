@@ -3931,6 +3931,17 @@ HEILER_SOURCE_SILENT_BLOCK = "silent_block_escalation"
 # safety-net sweep (SILENT-BLOCK-GUARD-S1): a block the self-healing retry lane
 # is done with but that never raised an escalation on its own block path.
 SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
+# Autonomy routing (SILENT-BLOCK-AUTONOMY-S1): when a block is settled for the
+# auto-retry lane, prefer a *bounded* machine next-step over paging the operator.
+# Token discipline: at most one re-ready per block episode; hold-classes do not
+# re-dispatch workers (zero token burn) and only observe/classify.
+AUTONOMY_ROUTED_EVENT = "autonomy_routed"
+MAX_AUTONOMY_REREADY_PER_EPISODE = 1
+# Routes that re-dispatch a worker (token cost). Holds do not.
+# Only review rework is re-dispatched; generic exhausted/stuck blocks still
+# escalate so silent failures do not burn unbounded tokens.
+AUTONOMY_REREADY_ACTIONS = frozenset({"reready_review"})
+AUTONOMY_HOLD_ACTIONS = frozenset({"hold_capacity", "hold_integration"})
 RELEASE_GATE_BLOCK_REASON = "awaiting release-gate GO"
 # Author the Stratege stamps on every PlanSpec chain it ingests (propose()).
 # Single source of truth for the silent-block strategist carve-out
@@ -20625,6 +20636,232 @@ def _block_is_settled(
     return False
 
 
+def _latest_blocked_event_id(conn: sqlite3.Connection, task_id: str) -> Optional[int]:
+    row = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events WHERE task_id = ? AND kind = 'blocked'",
+        (task_id,),
+    ).fetchone()
+    if row is None or row["m"] is None:
+        return None
+    return int(row["m"])
+
+
+def _autonomy_routes_in_current_block_episode(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    """``autonomy_routed`` payloads since the latest ``blocked`` event (episode)."""
+    last_blocked_id = _latest_blocked_event_id(conn, task_id)
+    if last_blocked_id is None:
+        min_id = 0
+    else:
+        min_id = last_blocked_id
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = ? AND id > ? ORDER BY id ASC",
+        (task_id, AUTONOMY_ROUTED_EVENT, min_id),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def _autonomy_hold_active(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when this block episode already has a hold route (no re-dispatch)."""
+    for payload in _autonomy_routes_in_current_block_episode(conn, task_id):
+        action = str(payload.get("action") or "")
+        if action in AUTONOMY_HOLD_ACTIONS:
+            return True
+    return False
+
+
+def _autonomy_reready_count(conn: sqlite3.Connection, task_id: str) -> int:
+    return sum(
+        1
+        for payload in _autonomy_routes_in_current_block_episode(conn, task_id)
+        if str(payload.get("action") or "") in AUTONOMY_REREADY_ACTIONS
+    )
+
+
+def _resolve_settled_block_autonomy_route(
+    *,
+    block_kind: Optional[str],
+    blocked_kind: str,
+    trigger_outcome: str,
+    reason: str,
+    verdict: Optional[str],
+    reready_count: int,
+    max_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
+) -> str:
+    """Pick a bounded autonomy action for a settled silent block.
+
+    Returns one of:
+    * ``reready_review`` — re-dispatch worker once (token cost, hard-capped)
+    * ``hold_capacity`` / ``hold_integration`` — observe, no worker (0 tokens)
+    * ``escalate`` — operator must act
+    """
+    kind = (block_kind or "").strip().lower() or None
+    bk = (blocked_kind or "").strip().lower()
+    outcome = (trigger_outcome or "").strip().lower()
+    reason_l = (reason or "").lower()
+    verd = str(verdict or "").strip().upper()
+
+    # Explicit human / policy gates — never auto-reready.
+    if kind in {"needs_input"} or bk in {
+        "needs_input",
+        "operator_question",
+        "needs_operator",
+        "capability",
+    }:
+        return "escalate"
+    if (reason or "").strip() == RELEASE_GATE_BLOCK_REASON:
+        return "escalate"
+
+    # Capacity parks: observe only (already burned tokens; do not re-dispatch).
+    if kind == "capacity" or outcome in {
+        "iteration_budget_exhausted",
+        "gave_up",
+    } or "input-token cap" in reason_l or "iteration budget exhausted" in reason_l:
+        return "hold_capacity"
+
+    # Integration parks: hold (0 tokens). Operator only if a later path escalates
+    # deliberately; silent-block no longer pages for pure merge/gate parks.
+    if kind == "integration" or outcome == "integration_parked" or reason_l.startswith(
+        "integration parked"
+    ):
+        return "hold_integration"
+
+    # Review rework: one bounded re-ready with existing findings in the run trail.
+    # Do NOT treat generic "retryable" as review — that would re-dispatch every
+    # exhausted block and burn tokens without quality signal.
+    reviewish = (
+        kind == "review_revision"
+        or bk == "review_revision"
+        or verd in {"REQUEST_CHANGES", "NEEDS_REVISION"}
+        or "needs_revision" in reason_l
+        or "request_changes" in reason_l
+        or "request changes" in reason_l
+        or "review verdict:" in reason_l
+    )
+    if reviewish:
+        if reready_count < max_reready:
+            return "reready_review"
+        return "escalate"
+
+    return "escalate"
+
+
+def _apply_autonomy_reready(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    reason: str,
+    blocked_kind: str,
+    run_id: Optional[int],
+) -> bool:
+    """Flip settled blocked → ready for one bounded autonomy attempt.
+
+    Leaves ``auto_retry_count`` untouched so the auto-retry lane does not
+    stack another full retry budget on top of this one-shot autonomy route.
+    """
+    cur = conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'ready',
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               block_kind = NULL,
+               block_recurrences = 0
+         WHERE id = ? AND status = 'blocked'
+        """,
+        (task_id,),
+    )
+    if cur.rowcount != 1:
+        return False
+    _append_event(
+        conn,
+        task_id,
+        AUTONOMY_ROUTED_EVENT,
+        {
+            "action": action,
+            "reason": (reason or "")[:500],
+            "blocked_kind": blocked_kind,
+            "max_reready": MAX_AUTONOMY_REREADY_PER_EPISODE,
+            "token_policy": "bounded_reready",
+        },
+        run_id=run_id,
+    )
+    # Surface findings for the next worker without burning an extra model call.
+    snippet = (reason or "").strip()
+    if snippet:
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO task_comments (task_id, author, body, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                task_id,
+                "dispatcher",
+                (
+                    f"[autonomy_routed:{action}] Bounded re-ready "
+                    f"(≤{MAX_AUTONOMY_REREADY_PER_EPISODE}/episode). "
+                    "Prior block reason for this attempt:\n\n"
+                    f"{snippet[:3000]}"
+                ),
+                now,
+            ),
+        )
+    return True
+
+
+def _apply_autonomy_hold(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    action: str,
+    reason: str,
+    blocked_kind: str,
+    heiler_class: str,
+    run_id: Optional[int],
+) -> None:
+    """Mark a capacity/integration park as autonomously held (no worker, no page)."""
+    _append_event(
+        conn,
+        task_id,
+        AUTONOMY_ROUTED_EVENT,
+        {
+            "action": action,
+            "reason": (reason or "")[:500],
+            "blocked_kind": blocked_kind,
+            "token_policy": "hold_no_redispatch",
+            "heiler_class": heiler_class,
+        },
+        run_id=run_id,
+    )
+    _append_event(
+        conn,
+        task_id,
+        HEILER_CLASSIFICATION_EVENT,
+        _heiler_classification_payload(
+            heiler_class=heiler_class,
+            evidence={
+                "matched": action,
+                "signal_source": "autonomy_route",
+                "excerpt": (reason or "")[:240],
+            },
+            source=HEILER_SOURCE_SILENT_BLOCK,
+            blocked=True,
+        ),
+        run_id=run_id,
+    )
+
+
 def silent_block_task_ids(
     conn: sqlite3.Connection,
     *,
@@ -20637,10 +20874,14 @@ def silent_block_task_ids(
     :func:`_block_is_settled`) without an active ``operator_escalation``.
 
     Single source of truth shared by :func:`escalate_silent_blocks_sweep` (which
-    fixes the gap by emitting the missing escalation) and the vision
-    ``silent_blocks`` metric (which measures it), so the guard and the metric can
-    never drift: every id the metric counts is one the sweep will escalate, so
-    the metric converges to 0 within one dispatcher tick.
+    fixes the gap by emitting the missing escalation **or** a bounded autonomy
+    route) and the vision ``silent_blocks`` metric (which measures it), so the
+    guard and the metric can never drift: every id the metric counts is one the
+    sweep will act on, so the metric converges to 0 within one dispatcher tick.
+
+    Tasks already handled by an in-episode autonomy *hold* (capacity/integration)
+    are excluded — they are not silent gaps; they are deliberate non-operator
+    parks with zero further token burn until a human or a new block episode.
     """
     ts = int(time.time()) if now is None else int(now)
     rows = conn.execute(
@@ -20650,6 +20891,8 @@ def silent_block_task_ids(
     out: list[str] = []
     for row in rows:
         if _operator_escalation_is_active(conn, row["id"]):
+            continue
+        if _autonomy_hold_active(conn, row["id"]):
             continue
         # STRATEGIST-META-CARVEOUT (HEILER-SILENTBLOCK-REASON-FIDELITY-S1):
         # the Stratege's own ingested chains are excluded from BOTH the sweep
@@ -20760,30 +21003,34 @@ def escalate_silent_blocks_sweep(
     retry_limit: int = DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
     failure_limit: int = DEFAULT_FAILURE_LIMIT,
     backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+    max_autonomy_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
 ) -> dict:
-    """Safety net guaranteeing no *settled* block stays silent (AC-1).
+    """Safety net: no *settled* block stays silent — with bounded autonomy first.
 
-    Most block-writing paths (``block_task``, integration/contract parks, the
-    iteration-budget cap, the recoverable crash flip) transition a task to
-    ``blocked`` without emitting ``operator_escalation`` — only the failure
-    circuit-breaker, the stall park and the budget-runaway park do. A block that
-    never escalates "looks like progress from the outside" while nobody is
-    pulled in. This deterministic, idempotent sweep closes the gap regardless of
-    call site: every blocked task the self-healing lane is done with gets an
-    ``operator_escalation`` event, so the ``silent_blocks`` metric → 0.
+    Most block-writing paths transition a task to ``blocked`` without
+    ``operator_escalation``. The auto-retry lane handles *transient* blocks;
+    once a block is settled (see :func:`_block_is_settled`), this sweep acts.
 
-    It deliberately leaves transient blocks alone (see :func:`_block_is_settled`)
-    so self-healing retries do not flood the operator (AC-2), and is idempotent
-    (a task that already escalated is never re-escalated). Because this sweep is
-    itself an escalation writer, it classifies each surfaced escalation INLINE in
-    the same ``write_txn`` (ESCALATION-INLINE-CLASSIFY-S1) — coverage is complete
-    the instant the escalation is written, not a poll later. The downstream
-    :func:`classify_escalations_sweep` therefore finds these already paired and
-    skips them; it remains only the backfill net for a forgotten/legacy/future
-    writer. Safe to call from a cron or by hand — a pure DB sweep.
+    **SILENT-BLOCK-AUTONOMY-S1 (token-bounded):** before paging the operator,
+    apply a deterministic route:
+
+    * review / REQUEST_CHANGES → at most one ``reready_*`` (worker re-dispatch)
+    * capacity → ``hold_capacity`` (classify, **no** worker, **no** operator page)
+    * integration → ``hold_integration`` (same hold policy)
+    * needs_input / operator_question / release-gate / budget exhausted after
+      autonomy → ``operator_escalation`` (unchanged human path)
+
+    The ``silent_blocks`` metric still converges to 0 within one tick: every id
+    from :func:`silent_block_task_ids` is either re-readied, hold-routed (then
+    excluded), or escalated. Idempotent for holds and escalations.
     """
     ts = int(time.time()) if now is None else int(now)
-    summary: dict = {"checked_at": ts, "escalated": []}
+    summary: dict = {
+        "checked_at": ts,
+        "escalated": [],
+        "autonomy_reready": [],
+        "autonomy_held": [],
+    }
     ids = silent_block_task_ids(
         conn,
         now=ts,
@@ -20802,6 +21049,8 @@ def escalate_silent_blocks_sweep(
             ).fetchone()
             if row is None or row["status"] != "blocked":
                 continue  # unblocked between the scan and this txn
+            if _autonomy_hold_active(conn, tid):
+                continue
             blocked_run = _latest_blocked_run_for_auto_retry(conn, tid)
             # REASON-FIDELITY (HEILER-SILENTBLOCK-REASON-FIDELITY-S1): the
             # blocked-only query above misses the TRUE terminal outcome when a
@@ -20835,18 +21084,73 @@ def escalate_silent_blocks_sweep(
             if not reason:
                 reason = _latest_release_gate_block_reason(conn, tid)
             body_hash = _task_body_hash(row["body"])
+            verdict = (
+                blocked_run["verdict"]
+                if blocked_run is not None
+                else (last_run["verdict"] if last_run is not None else None)
+            )
             blocked_kind = _blocked_kind_for_auto_retry(
                 reason,
                 explicit_block_kind=row["block_kind"],
-                verdict=(
-                    blocked_run["verdict"]
-                    if blocked_run is not None
-                    else (last_run["verdict"] if last_run is not None else None)
-                ),
+                verdict=verdict,
                 auto_retry_count=int(row["auto_retry_count"] or 0),
                 body_hash=body_hash,
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
+            reready_count = _autonomy_reready_count(conn, tid)
+            route = _resolve_settled_block_autonomy_route(
+                block_kind=row["block_kind"],
+                blocked_kind=blocked_kind,
+                trigger_outcome=str(trigger_outcome),
+                reason=reason,
+                verdict=verdict,
+                reready_count=reready_count,
+                max_reready=max_autonomy_reready,
+            )
+
+            if route in AUTONOMY_REREADY_ACTIONS:
+                if _apply_autonomy_reready(
+                    conn,
+                    tid,
+                    action=route,
+                    reason=reason,
+                    blocked_kind=blocked_kind,
+                    run_id=run_id,
+                ):
+                    summary["autonomy_reready"].append(
+                        {
+                            "task_id": tid,
+                            "action": route,
+                            "blocked_kind": blocked_kind,
+                        }
+                    )
+                continue
+
+            if route in AUTONOMY_HOLD_ACTIONS:
+                heiler_class = (
+                    HEILER_CLASS_CAPACITY
+                    if route == "hold_capacity"
+                    else HEILER_CLASS_CONFLICT
+                )
+                _apply_autonomy_hold(
+                    conn,
+                    tid,
+                    action=route,
+                    reason=reason,
+                    blocked_kind=blocked_kind,
+                    heiler_class=heiler_class,
+                    run_id=run_id,
+                )
+                summary["autonomy_held"].append(
+                    {
+                        "task_id": tid,
+                        "action": route,
+                        "blocked_kind": blocked_kind,
+                    }
+                )
+                continue
+
+            # Default: operator escalation (human-required or autonomy budget spent).
             esc_payload = _silent_block_escalation_payload(
                 row=row,
                 reason=reason,
@@ -20856,6 +21160,13 @@ def escalate_silent_blocks_sweep(
                     int(blocked_event["id"]) if blocked_event is not None else None
                 ),
             )
+            # Annotate when we already spent the autonomy re-ready budget.
+            if reready_count >= max_autonomy_reready:
+                esc_payload = dict(esc_payload)
+                esc_payload["autonomy_reready_exhausted"] = True
+                esc_payload["attempts_already_made"] = int(
+                    esc_payload.get("attempts_already_made") or 0
+                ) + reready_count
             esc_event_id = _append_event(
                 conn,
                 tid,
@@ -20865,12 +21176,7 @@ def escalate_silent_blocks_sweep(
             )
             # ESCALATION-INLINE-CLASSIFY-S1: this sweep is itself an escalation
             # writer, so it must classify atomically too — not lean on the
-            # later classify_escalations_sweep poll. Derive the class from the
-            # escalation's own persisted evidence via the exact same
-            # deterministic function the backfill sweep uses, so an inline
-            # classification is byte-identical to a swept one (defense-in-depth,
-            # no divergence, no guess). Carries the escalation event id + run_id
-            # as the AC-2 belegter ledger/run reference.
+            # later classify_escalations_sweep poll.
             h_class, h_ev = _classify_escalation_payload(esc_payload)
             _append_event(
                 conn,
