@@ -1874,8 +1874,9 @@ def _measurement_accounting(
     if _table_exists(conn, "task_runs"):
         columns = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()}
         if {"id", "task_id", "profile", "cost_usd"}.issubset(columns):
+            metadata_select = "metadata" if "metadata" in columns else "NULL AS metadata"
             rows = conn.execute(
-                "SELECT id, profile, cost_usd, metadata FROM task_runs "
+                f"SELECT id, profile, cost_usd, {metadata_select} FROM task_runs "
                 "WHERE task_id = ? ORDER BY id",
                 (task_id,),
             ).fetchall()

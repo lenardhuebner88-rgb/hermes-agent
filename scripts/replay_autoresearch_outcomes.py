@@ -714,19 +714,34 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
             }:
                 break
         time.sleep(1)
-    with kb.connect() as conn:
-        cost_backfilled_runs = kb.backfill_run_costs(conn, limit=10)
-        task = kb.get_task(conn, task_id)
-        runs = conn.execute(
-            "SELECT id, status, profile, cost_usd, cost_status, requested_provider, "
-            "requested_model, metadata FROM task_runs WHERE task_id=? ORDER BY id",
-            (task_id,),
-        ).fetchall()
-        review_skips = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id=? "
-            "AND kind='review_skipped_deterministic' ORDER BY id",
-            (task_id,),
-        ).fetchall()
+    # `hermes kanban complete` closes the task just before the Claude CLI emits
+    # its final result JSON. Poll the existing deferred backfill for a bounded
+    # interval so this E2E records the real subscription-equivalent burn rather
+    # than racing that final log line. Missing evidence remains partial below.
+    cost_deadline = time.monotonic() + 30
+    cost_backfilled_runs = 0
+    task = None
+    runs = []
+    review_skips = []
+    while True:
+        with kb.connect() as conn:
+            cost_backfilled_runs += kb.backfill_run_costs(conn, limit=10)
+            task = kb.get_task(conn, task_id)
+            runs = conn.execute(
+                "SELECT id, status, profile, cost_usd, cost_status, requested_provider, "
+                "requested_model, metadata FROM task_runs WHERE task_id=? ORDER BY id",
+                (task_id,),
+            ).fetchall()
+            review_skips = conn.execute(
+                "SELECT payload FROM task_events WHERE task_id=? "
+                "AND kind='review_skipped_deterministic' ORDER BY id",
+                (task_id,),
+            ).fetchall()
+        if runs and all(row["cost_usd"] is not None for row in runs):
+            break
+        if time.monotonic() >= cost_deadline:
+            break
+        time.sleep(0.5)
     if task is None or task.status != "done":
         log_path = state / "home" / "logs" / f"{task_id}.log"
         log_tail = ""
