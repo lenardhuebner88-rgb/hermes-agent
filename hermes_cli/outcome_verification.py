@@ -706,6 +706,8 @@ def seal_historical_replay_observation(
             "cost_accounting": {
                 "status": "complete",
                 "known_task_runs": 0,
+                "actual_task_run_usd": 0.0,
+                "equivalent_task_run_usd": 0.0,
                 "unknown_task_runs": 0,
                 "unknown_task_run_refs": [],
             },
@@ -1849,6 +1851,8 @@ def _measurement_accounting(
         ),
         "delivery_usd": 0.0,
         "review_usd": 0.0,
+        "delivery_equivalent_usd": 0.0,
+        "review_equivalent_usd": 0.0,
         "baseline_probe_usd": (
             max(0.0, float(baseline.get("cost_usd") or 0.0))
             if baseline_unbooked else 0.0
@@ -1865,11 +1869,13 @@ def _measurement_accounting(
     ]
     known_task_runs = 0
     unknown_task_run_refs: list[str] = []
+    actual_task_run_usd = 0.0
+    equivalent_task_run_usd = 0.0
     if _table_exists(conn, "task_runs"):
         columns = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()}
         if {"id", "task_id", "profile", "cost_usd"}.issubset(columns):
             rows = conn.execute(
-                "SELECT id, profile, cost_usd FROM task_runs "
+                "SELECT id, profile, cost_usd, metadata FROM task_runs "
                 "WHERE task_id = ? ORDER BY id",
                 (task_id,),
             ).fetchall()
@@ -1878,17 +1884,42 @@ def _measurement_accounting(
                 if run_ref in booked_refs:
                     continue
                 refs.append(run_ref)
-                if row["cost_usd"] is None:
-                    unknown_task_run_refs.append(run_ref)
-                    continue
-                known_task_runs += 1
-                value = max(0.0, float(row["cost_usd"]))
+                try:
+                    metadata = json.loads(row["metadata"] or "{}")
+                except (TypeError, ValueError):
+                    metadata = {}
+                if not isinstance(metadata, Mapping):
+                    metadata = {}
+                equivalent: float | None = None
+                raw_equivalent = metadata.get("cost_usd_equivalent")
+                if isinstance(raw_equivalent, (int, float)) and not isinstance(
+                    raw_equivalent, bool
+                ):
+                    equivalent = max(0.0, float(raw_equivalent))
+                value = (
+                    max(0.0, float(row["cost_usd"]))
+                    if row["cost_usd"] is not None else None
+                )
                 component = (
                     "review_usd"
                     if "review" in str(row["profile"] or "").lower()
                     else "delivery_usd"
                 )
-                breakdown[component] += value
+                equivalent_component = component.replace("_usd", "_equivalent_usd")
+                if value is not None:
+                    breakdown[component] += value
+                    actual_task_run_usd += value
+                if equivalent is not None:
+                    breakdown[equivalent_component] += equivalent
+                    equivalent_task_run_usd += equivalent
+                subscription_needs_equivalent = (
+                    metadata.get("billing_mode") == "subscription_included"
+                    and equivalent is None
+                )
+                if value is None or subscription_needs_equivalent:
+                    unknown_task_run_refs.append(run_ref)
+                else:
+                    known_task_runs += 1
     interventions = 0
     if _table_exists(conn, "task_events"):
         placeholders = ",".join("?" for _ in _INTERVENTION_EVENT_KINDS)
@@ -1907,6 +1938,8 @@ def _measurement_accounting(
     cost_accounting = {
         "status": "partial" if unknown_task_run_refs else "complete",
         "known_task_runs": known_task_runs,
+        "actual_task_run_usd": round(actual_task_run_usd, 8),
+        "equivalent_task_run_usd": round(equivalent_task_run_usd, 8),
         "unknown_task_runs": len(unknown_task_run_refs),
         "unknown_task_run_refs": sorted(unknown_task_run_refs),
     }
@@ -2373,6 +2406,7 @@ def run_shadow_verifier(
         "exhausted": 0,
         "skipped_existing": 0,
         "cost_usd": 0.0,
+        "cost_backfilled_runs": 0,
         "outcomes": [],
     }
     try:
@@ -2382,6 +2416,16 @@ def run_shadow_verifier(
             return summary
         if not dry_run:
             recover_expired_attempts(conn)
+            try:
+                from hermes_cli import kanban_db
+
+                summary["cost_backfilled_runs"] = int(
+                    kanban_db.backfill_run_costs(conn, limit=max(20, limit * 10))
+                )
+            except Exception:
+                # Missing/deferred cost evidence remains explicit as partial
+                # in _measurement_accounting; it must not block measurement.
+                summary["cost_backfilled_runs"] = 0
         rows = conn.execute(
             "SELECT c.*, t.status AS task_status FROM outcome_contracts c "
             "JOIN tasks t ON t.id = c.task_id ORDER BY c.created_at, c.proposal_id"

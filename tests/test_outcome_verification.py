@@ -497,6 +497,21 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
         review_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute(
             "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, cost_usd, metadata) "
+            "VALUES (?, 'coder', 'done', 2.5, 0.0, ?)",
+            (
+                task_id,
+                json.dumps(
+                    {
+                        "billing_mode": "subscription_included",
+                        "cost_usd_equivalent": 0.40,
+                    }
+                ),
+            ),
+        )
+        subscription_run = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO task_runs "
             "(task_id, profile, status, started_at, cost_usd) "
             "VALUES (?, 'coder', 'done', 3, NULL)",
             (task_id,),
@@ -521,16 +536,21 @@ def test_measurement_accounting_includes_every_component_once(outcome_home: Path
         "research_usd": 0.10,
         "delivery_usd": 0.20,
         "review_usd": 0.30,
+        "delivery_equivalent_usd": 0.40,
+        "review_equivalent_usd": 0.0,
         "baseline_probe_usd": 0.01,
         "outcome_probe_usd": 0.02,
     }
     assert f"task-run:{delivery_run}" in refs
     assert f"task-run:{review_run}" in refs
+    assert f"task-run:{subscription_run}" in refs
     assert f"task-run:{unknown_run}" in refs
     assert interventions == 1
     assert cost_accounting == {
         "status": "partial",
-        "known_task_runs": 2,
+        "known_task_runs": 3,
+        "actual_task_run_usd": 0.50,
+        "equivalent_task_run_usd": 0.40,
         "unknown_task_runs": 1,
         "unknown_task_run_refs": [f"task-run:{unknown_run}"],
     }

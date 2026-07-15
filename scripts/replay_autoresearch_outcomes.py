@@ -715,6 +715,7 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 break
         time.sleep(1)
     with kb.connect() as conn:
+        cost_backfilled_runs = kb.backfill_run_costs(conn, limit=10)
         task = kb.get_task(conn, task_id)
         runs = conn.execute(
             "SELECT id, status, profile, cost_usd, cost_status, requested_provider, "
@@ -757,6 +758,13 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                     )
                     or ("actual" if row["cost_usd"] is not None else "unknown")
                 ),
+                "cost_usd_equivalent": (
+                    float(metadata["cost_usd_equivalent"])
+                    if isinstance(metadata.get("cost_usd_equivalent"), (int, float))
+                    and not isinstance(metadata.get("cost_usd_equivalent"), bool)
+                    else None
+                ),
+                "billing_mode": metadata.get("billing_mode"),
                 "requested_provider": row["requested_provider"],
                 "requested_model": row["requested_model"],
                 "commit": metadata.get("commit") if isinstance(metadata, dict) else None,
@@ -772,9 +780,17 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 "worker_runs": run_evidence,
                 "review_skipped_deterministic": len(review_skips),
                 "provider_calls": len(run_evidence),
+                "cost_backfilled_runs": int(cost_backfilled_runs),
                 "provider_cost_status": (
                     "complete"
-                    if all(item["cost_usd"] is not None for item in run_evidence)
+                    if all(
+                        item["cost_usd"] is not None
+                        and (
+                            item["billing_mode"] != "subscription_included"
+                            or item["cost_usd_equivalent"] is not None
+                        )
+                        for item in run_evidence
+                    )
                     else "partial"
                 ),
                 "known_provider_cost_usd": round(
@@ -783,6 +799,40 @@ def e2e_dispatch_worker(args: argparse.Namespace) -> int:
                 "provider_cost_usd": (
                     round(sum(float(item["cost_usd"] or 0.0) for item in run_evidence), 8)
                     if all(item["cost_usd"] is not None for item in run_evidence)
+                    else None
+                ),
+                "provider_cost_usd_equivalent": (
+                    round(
+                        sum(
+                            float(item["cost_usd_equivalent"] or 0.0)
+                            for item in run_evidence
+                        ),
+                        8,
+                    )
+                    if all(
+                        item["billing_mode"] != "subscription_included"
+                        or item["cost_usd_equivalent"] is not None
+                        for item in run_evidence
+                    )
+                    else None
+                ),
+                "provider_effective_cost_usd": (
+                    round(
+                        sum(float(item["cost_usd"] or 0.0) for item in run_evidence)
+                        + sum(
+                            float(item["cost_usd_equivalent"] or 0.0)
+                            for item in run_evidence
+                        ),
+                        8,
+                    )
+                    if all(
+                        item["cost_usd"] is not None
+                        and (
+                            item["billing_mode"] != "subscription_included"
+                            or item["cost_usd_equivalent"] is not None
+                        )
+                        for item in run_evidence
+                    )
                     else None
                 ),
             }
@@ -980,10 +1030,11 @@ def e2e_canary(args: argparse.Namespace) -> int:
             "category": "bug_risk",
             "theme": "regression-counter",
             "fix_hint": (
-                "In hermes_cli/outcome_e2e_counter.py set value() to return 1 and add "
-                "a module string named COUNTER_EVIDENCE containing exactly a try: work() / "
-                "except Exception: pass example. Do not alter the test. Run the focused "
-                "test and commit the target-only change."
+                "In hermes_cli/outcome_e2e_counter.py set value() to return 1. Also add "
+                "this exact multiline module string, using real newlines (never slash-"
+                "separated text):\nCOUNTER_EVIDENCE = '''\ntry:\n    work()\nexcept "
+                "Exception:\n    pass\n'''\nDo not alter the test. Run the focused test and "
+                "commit the target-only change."
             ),
             "gate": [
                 "scripts/run_tests.sh",
@@ -1225,6 +1276,12 @@ def e2e_canary(args: argparse.Namespace) -> int:
                     dispatch_payload.get("known_provider_cost_usd") or 0.0
                 ),
                 "provider_cost_usd": dispatch_payload.get("provider_cost_usd"),
+                "provider_cost_usd_equivalent": dispatch_payload.get(
+                    "provider_cost_usd_equivalent"
+                ),
+                "provider_effective_cost_usd": dispatch_payload.get(
+                    "provider_effective_cost_usd"
+                ),
                 "verifier_process": verifier_process,
                 "verifier": verifier,
                 "integration_events": integration_events,
@@ -1331,6 +1388,22 @@ def e2e_canary(args: argparse.Namespace) -> int:
         "provider_cost_usd": (
             round(sum(float(item["provider_cost_usd"]) for item in case_results), 8)
             if all(item["provider_cost_usd"] is not None for item in case_results)
+            else None
+        ),
+        "provider_cost_usd_equivalent": (
+            round(
+                sum(float(item["provider_cost_usd_equivalent"]) for item in case_results),
+                8,
+            )
+            if all(item["provider_cost_usd_equivalent"] is not None for item in case_results)
+            else None
+        ),
+        "provider_effective_cost_usd": (
+            round(
+                sum(float(item["provider_effective_cost_usd"]) for item in case_results),
+                8,
+            )
+            if all(item["provider_effective_cost_usd"] is not None for item in case_results)
             else None
         ),
         "outcome_metrics": api["metrics"]["outcomes"],
