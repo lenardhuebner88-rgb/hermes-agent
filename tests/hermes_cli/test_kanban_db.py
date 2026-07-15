@@ -8276,6 +8276,62 @@ def test_dispatch_worktree_task_persists_materialized_workspace_and_branch(kanba
     assert f"branch refs/heads/wt/{tid}" in listed
 
 
+@pytest.mark.parametrize(
+    ("workspace_kind", "managed_isolation"),
+    (("worktree", False), ("dir", True)),
+)
+def test_first_dispatch_injects_materialized_branch_into_worker_env(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+    all_assignees_spawnable,
+    workspace_kind,
+    managed_isolation,
+):
+    """The claimed Task must see the branch created during materialization."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    repo = tmp_path / f"repo-{workspace_kind}"
+    _init_git_repo(repo)
+    captured_envs = []
+    monkeypatch.setattr(
+        kwt,
+        "isolation_mode",
+        lambda: "worktree" if managed_isolation else "off",
+    )
+    monkeypatch.setattr(
+        kb,
+        "_persisted_spawn_identity",
+        lambda task, board=None: {
+            "worker_runtime": "hermes",
+            "route_provider": "test-provider",
+            "model": "test-model",
+            "fallback_providers": [],
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "_launch_worker_process",
+        lambda spec: captured_envs.append(dict(spec.env)) or 4242,
+    )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="first dispatch branch",
+            assignee="coder",
+            workspace_kind=workspace_kind,
+            workspace_path=str(repo),
+        )
+        result = kb.dispatch_once(conn)
+        stored = kb.get_task(conn, tid)
+
+    assert result.spawned and result.spawned[0][0] == tid
+    assert stored is not None and stored.branch_name
+    assert len(captured_envs) == 1
+    assert captured_envs[0]["HERMES_KANBAN_BRANCH"] == stored.branch_name
+
+
 def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch(kanban_home, tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     _init_git_repo(repo)

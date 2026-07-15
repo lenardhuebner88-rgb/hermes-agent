@@ -15675,6 +15675,31 @@ def set_branch_name(conn: sqlite3.Connection, task_id: str, branch_name: str) ->
         )
 
 
+def _apply_materialized_dispatch_workspace(
+    conn: sqlite3.Connection,
+    task: Task,
+    workspace: Path,
+    resolved_branch_name: Optional[str],
+) -> None:
+    """Persist materialization and refresh the already-claimed task view.
+
+    The spawn path consumes ``task`` immediately after the facade returns, so
+    updating SQLite alone leaves first-dispatch environment construction one
+    generation behind. This helper is the common persistence seam for normal
+    and review claims.
+    """
+    workspace_text = str(workspace)
+    set_workspace_path(conn, task.id, workspace_text)
+    task.workspace_path = workspace_text
+
+    effective_branch = (resolved_branch_name or "").strip()
+    if not effective_branch and task.workspace_kind == "worktree":
+        effective_branch = (task.branch_name or "").strip() or f"wt/{task.id}"
+    if effective_branch:
+        set_branch_name(conn, task.id, effective_branch)
+        task.branch_name = effective_branch
+
+
 # ---------------------------------------------------------------------------
 def schedule_task(
     conn: sqlite3.Connection,
@@ -23962,16 +23987,10 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist the resolved workspace path so the worker can cd there.
-        set_workspace_path(conn, claimed.id, str(workspace))
-        if claimed.workspace_kind == "worktree":
-            set_branch_name(
-                conn,
-                claimed.id,
-                resolved_branch_name
-                or (claimed.branch_name or "").strip()
-                or f"wt/{claimed.id}",
-            )
+        # Persist and refresh the claim object consumed by the immediate spawn.
+        _apply_materialized_dispatch_workspace(
+            conn, claimed, workspace, resolved_branch_name
+        )
         try:
             _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
         except _kwt.WorktreeError as exc:
@@ -24228,7 +24247,9 @@ def _dispatch_once_locked(
         # NOTE: resolve_workspace() above is task-keyed (not assignee-keyed),
         # so the verifier inherits the coder's preserved workspace and can
         # inspect the real changes.
-        set_workspace_path(conn, claimed.id, str(workspace))
+        _apply_materialized_dispatch_workspace(
+            conn, claimed, workspace, resolved_branch_name
+        )
         # Worker isolation: surface uncommitted leftovers in a provisioned
         # worktree to the verifier as a task comment — the worker contract
         # requires committing on green gates, so leftovers are grounds for
@@ -24239,14 +24260,6 @@ def _dispatch_once_locked(
             _kwt.note_dirty_worktree(conn, claimed.id, str(workspace))
         except Exception:
             pass
-        if claimed.workspace_kind == "worktree":
-            set_branch_name(
-                conn,
-                claimed.id,
-                resolved_branch_name
-                or (claimed.branch_name or "").strip()
-                or f"wt/{claimed.id}",
-            )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         claimed.assignee = _spawn_profile
         claimed.skills = []
