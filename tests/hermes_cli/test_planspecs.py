@@ -464,12 +464,18 @@ def test_list_planspecs_defaults_to_open_and_allows_all_scope(tmp_path: Path):
 
 def test_list_planspecs_treats_archived_kanban_root_as_closed(tmp_path: Path, monkeypatch):
     plans_root = tmp_path / "03-Agents"
-    _write_planspec(plans_root, "2026-06-21-archived.md")
+    path = _write_planspec(plans_root, "2026-06-21-archived.md")
 
-    def _fake_state(path: Path, *, board: str | None = None) -> dict[str, object]:
-        return {"state": "archived", "root_task_id": "t_archived"}
+    def _fake_states(paths: list[Path]) -> dict[str, dict[str, dict[str, object]]]:
+        return {
+            "default": {
+                str(item.resolve(strict=False)): {"state": "archived", "root_task_id": "t_archived"}
+                for item in paths
+            }
+        }
 
-    monkeypatch.setattr(planspecs, "_planspec_kanban_state", _fake_state)
+    assert path.exists()
+    monkeypatch.setattr(planspecs, "_planspec_kanban_states", _fake_states)
 
     open_records = planspecs.list_planspecs(plans_root=plans_root, include_kanban_status=True)
     all_records = planspecs.list_planspecs(
@@ -850,6 +856,114 @@ def test_list_planspecs_derives_blocked_and_running_kanban_state(kanban_home, tm
     assert blocked["kanban_state"] == "blocked"
     assert blocked["kanban_child_blocked"] == 1
     assert blocked["kanban_child_running"] == 1
+
+
+def test_list_planspecs_does_not_reopen_terminal_legacy_ingest_on_other_board(
+    kanban_home, tmp_path: Path
+):
+    """A terminal default ingest must not become health-track open work again."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    result = planspecs.ingest_planspec(path, plans_root=plans_root, board="default")
+    with kb.connect_closing(board="default") as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (result["root_task_id"],))
+
+    kb.create_board("health-track", name="Health track")
+    records = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="health-track", scope="all"
+    )
+
+    assert len(records) == 1
+    assert records[0]["kanban_state"] == "completed"
+    assert records[0]["open"] is False
+
+
+def test_list_planspecs_only_surfaces_uningested_explicit_board_on_its_owner(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    _set_planspec_board(path, "health-track")
+    kb.create_board("health-track", name="Health track")
+
+    health = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="health-track", scope="all"
+    )
+    default = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="default", scope="all"
+    )
+
+    assert health[0]["kanban_state"] == "not_ingested"
+    assert health[0]["open"] is True
+    assert default[0]["open"] is False
+
+
+def test_list_planspecs_only_surfaces_never_ingested_legacy_source_on_default(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    _write_planspec(plans_root)
+    kb.create_board("health-track", name="Health track")
+
+    default = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="default", scope="all"
+    )
+    health = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="health-track", scope="all"
+    )
+
+    assert default[0]["open"] is True
+    assert health[0]["open"] is False
+
+
+def test_list_planspecs_uses_local_state_when_same_source_is_ingested_on_two_boards(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    default = planspecs.ingest_planspec(path, plans_root=plans_root, board="default")
+    kb.create_board("health-track", name="Health track")
+    health = planspecs.ingest_planspec(path, plans_root=plans_root, board="health-track")
+    with kb.connect_closing(board="default") as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (default["root_task_id"],))
+
+    default_records = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="default", scope="all"
+    )
+    health_records = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="health-track", scope="all"
+    )
+
+    assert default_records[0]["kanban_root_task_id"] == default["root_task_id"]
+    assert default_records[0]["kanban_state"] == "completed"
+    assert health_records[0]["kanban_root_task_id"] == health["root_task_id"]
+    assert health_records[0]["kanban_state"] == "queued"
+
+
+def test_list_planspecs_explicit_board_wins_over_old_terminal_foreign_ingest(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    default = planspecs.ingest_planspec(path, plans_root=plans_root, board="default")
+    with kb.connect_closing(board="default") as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (default["root_task_id"],))
+    _set_planspec_board(path, "health-track")
+    kb.create_board("health-track", name="Health track")
+
+    health = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="health-track", scope="all"
+    )
+    default_records = planspecs.list_planspecs(
+        plans_root=plans_root, include_kanban_status=True, board="default", scope="all"
+    )
+
+    assert health[0]["kanban_state"] == "not_ingested"
+    assert health[0]["open"] is True
+    assert default_records[0]["open"] is False
 
 
 def test_ingest_planspec_is_idempotent_on_reingest(kanban_home, tmp_path: Path):
