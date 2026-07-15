@@ -814,20 +814,26 @@ def _write_e2e_worker_policy(
     *,
     provider: str,
     model: str,
+    worker_runtime: str,
     gate_command: Sequence[str],
 ) -> None:
     root_home = state / "home"
     profile = root_home / "profiles" / "coder"
     profile.mkdir(parents=True, exist_ok=True)
+    profile_config: dict[str, Any] = {
+        "worker_runtime": worker_runtime,
+        "agent": {"max_turns": 30},
+    }
+    if worker_runtime == "claude-cli":
+        profile_config["claude_model"] = model
+    else:
+        profile_config["model"] = {
+            "provider": provider,
+            "name": model,
+            "default": model,
+        }
     (profile / "config.yaml").write_text(
-        json.dumps(
-            {
-                "model": {"provider": provider, "name": model, "default": model},
-                "worker_runtime": "hermes",
-                "agent": {"max_turns": 30},
-            },
-            indent=2,
-        )
+        json.dumps(profile_config, indent=2)
         + "\n",
         encoding="utf-8",
     )
@@ -1017,6 +1023,7 @@ def e2e_canary(args: argparse.Namespace) -> int:
             state,
             provider=str(args.worker_provider),
             model=str(args.worker_model),
+            worker_runtime=str(args.worker_runtime),
             gate_command=case["gate"],
         )
         proposals.save_proposal(payload)
@@ -1347,6 +1354,9 @@ def build_parser() -> argparse.ArgumentParser:
     e2e.add_argument("--auth-home", required=True)
     e2e.add_argument("--worker-provider", required=True)
     e2e.add_argument("--worker-model", required=True)
+    e2e.add_argument(
+        "--worker-runtime", choices=("hermes", "claude-cli"), default="hermes"
+    )
     e2e.set_defaults(func=e2e_canary)
 
     e2e_reconcile = sub.add_parser("_e2e-reconcile-worker")
