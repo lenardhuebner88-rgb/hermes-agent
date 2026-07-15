@@ -42,6 +42,11 @@ PII_PATTERNS = {
     "email_address": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     "phone_number": re.compile(r"(?<!\w)\+?\d[\d .()/-]{7,}\d(?!\w)"),
 }
+PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
+    r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    re.DOTALL,
+)
 PLACEHOLDER_RE = re.compile(
     r"(?:<[^>]*(?:TOKEN|KEY|SECRET|PASSWORD)[^>]*>|\$\{[^}]*"
     r"(?:TOKEN|KEY|SECRET|PASSWORD)[^}]*\}|\b(?:YOUR|REPLACE_ME|EXAMPLE)_"
@@ -116,8 +121,30 @@ def classify_patterns(text: str) -> tuple[Counter[str], Counter[str], int]:
     return secrets, pii, len(PLACEHOLDER_RE.findall(text))
 
 
-def audit() -> dict[str, Any]:
-    skill_roots = roots()
+def redact_text(value: str) -> str:
+    """Replace detected secret/PII values before an audit artifact is emitted."""
+    value = PRIVATE_KEY_BLOCK_RE.sub("[REDACTED_SECRET]", value)
+    for pattern in SECRET_PATTERNS.values():
+        value = pattern.sub("[REDACTED_SECRET]", value)
+    for pattern in PII_PATTERNS.values():
+        value = pattern.sub("[REDACTED_PII]", value)
+    return value
+
+
+def redact_result(value: Any) -> Any:
+    """Recursively redact strings (including mapping keys) in audit output."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_result(item) for item in value]
+    if isinstance(value, dict):
+        return {redact_text(str(key)): redact_result(item) for key, item in value.items()}
+    return value
+
+
+def audit(skill_roots: list[tuple[str, Path]] | None = None) -> dict[str, Any]:
+    if skill_roots is None:
+        skill_roots = roots()
     files = active_skill_files(skill_roots)
     inventory = Counter()
     frontmatter_errors: list[dict[str, Any]] = []
@@ -284,13 +311,34 @@ def markdown_report(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def validate_output_paths(
+    results_path: Path, report_path: Path, skill_roots: list[tuple[str, Path]]
+) -> None:
+    """Reject artifact destinations that could modify an inspected skill root."""
+    resolved_results = results_path.expanduser().resolve(strict=False)
+    resolved_report = report_path.expanduser().resolve(strict=False)
+    if resolved_results == resolved_report:
+        raise ValueError("--results und --report muessen verschiedene Ziele haben")
+    for _label, root in skill_roots:
+        resolved_root = root.expanduser().resolve(strict=False)
+        for output_path in (resolved_results, resolved_report):
+            if output_path.is_relative_to(resolved_root):
+                raise ValueError(
+                    f"Ausgabeziel {output_path} liegt innerhalb einer Audit-Wurzel: {resolved_root}"
+                )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", type=Path, default=Path("results.json"))
     parser.add_argument("--report", type=Path, default=Path("report.md"))
     args = parser.parse_args()
-    result = audit()
+    skill_roots = roots()
+    validate_output_paths(args.results, args.report, skill_roots)
+    result = redact_result(audit(skill_roots))
+    validate_output_paths(args.results, args.report, skill_roots)
     args.results.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    validate_output_paths(args.results, args.report, skill_roots)
     args.report.write_text(markdown_report(result), encoding="utf-8")
 
 
