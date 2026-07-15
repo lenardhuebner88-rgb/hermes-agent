@@ -8943,6 +8943,7 @@ def claim_task(
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    budget_review_extension: Optional[tuple[int, int]] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
@@ -9027,6 +9028,19 @@ def claim_task(
         )
         if cur.rowcount != 1:
             return None
+        if budget_review_extension is not None:
+            token_sum, cap = budget_review_extension
+            if not _grant_budget_runaway_review_extension(
+                conn,
+                task_id,
+                token_sum=token_sum,
+                cap=cap,
+                expected_status="running",
+                in_write_txn=True,
+            ):
+                raise RuntimeError(
+                    "budget review extension became ineligible after task claim"
+                )
         # Look up the current task row so we can populate the run with
         # its assignee / step / runtime cap.
         trow = conn.execute(
@@ -18898,6 +18912,8 @@ def _grant_budget_runaway_review_extension(
     *,
     token_sum: int,
     cap: int,
+    expected_status: str = "ready",
+    in_write_txn: bool = False,
 ) -> bool:
     """Atomically consume one configured extension for actionable review work."""
     policy = _budget_extension_config()
@@ -18908,12 +18924,13 @@ def _grant_budget_runaway_review_extension(
         return False
 
     now = int(time.time())
-    with write_txn(conn):
+    txn = contextlib.nullcontext(conn) if in_write_txn else write_txn(conn)
+    with txn:
         task = conn.execute(
             "SELECT status, budget_extension_count FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
-        if task is None or task["status"] != "ready":
+        if task is None or task["status"] != expected_status:
             return False
         current_count = int(task["budget_extension_count"] or 0)
         if current_count >= max_extensions:
@@ -18935,8 +18952,8 @@ def _grant_budget_runaway_review_extension(
         extension = current_count + 1
         updated = conn.execute(
             "UPDATE tasks SET budget_extension_count = ? "
-            "WHERE id = ? AND status = 'ready' AND budget_extension_count = ?",
-            (extension, task_id, current_count),
+            "WHERE id = ? AND status = ? AND budget_extension_count = ?",
+            (extension, task_id, expected_status, current_count),
         )
         if updated.rowcount != 1:
             return False
@@ -18967,6 +18984,37 @@ def _grant_budget_runaway_review_extension(
             },
         )
     return True
+
+
+def _can_grant_budget_runaway_review_extension(
+    conn: sqlite3.Connection, task_id: str
+) -> bool:
+    """Check recovery eligibility without consuming its single-use grant."""
+    policy = _budget_extension_config()
+    max_extensions = int(
+        policy.get("max_extensions", BUDGET_PROGRESS_EXTENSION_LIMIT) or 0
+    )
+    if not policy.get("enabled") or max_extensions <= 0:
+        return False
+    task = conn.execute(
+        "SELECT status, budget_extension_count FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if task is None or task["status"] != "ready":
+        return False
+    if int(task["budget_extension_count"] or 0) >= max_extensions:
+        return False
+    review = _latest_actionable_terminal_review_run(conn, task_id)
+    if review is None:
+        return False
+    return (
+        conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'budget_review_extension_granted' "
+            "AND json_extract(payload, '$.review_run_id') = ? LIMIT 1",
+            (task_id, int(review["run_id"])),
+        ).fetchone()
+        is None
+    )
 
 
 def _park_budget_runaway(
@@ -23132,18 +23180,13 @@ def _dispatch_once_locked(
         # rather than (re)spawn, record the sum in ``budget_runaway_parked``, and
         # route it to the decision-queue via the operator_escalation path. No
         # mid-run kill, no parallel dispatch path — caught only here, at preflight.
+        _budget_review_extension: Optional[tuple[int, int]] = None
         if _per_task_input_cap is not None:
             _input_sum, _input_runs = _per_task_input_usage.get(row["id"], (0, 0))
             if _input_sum > _per_task_input_cap:
-                extended = False
-                if not dry_run:
-                    extended = _grant_budget_runaway_review_extension(
-                        conn,
-                        row["id"],
-                        token_sum=_input_sum,
-                        cap=_per_task_input_cap,
-                    )
-                if not extended:
+                if _can_grant_budget_runaway_review_extension(conn, row["id"]):
+                    _budget_review_extension = (_input_sum, _per_task_input_cap)
+                else:
                     result.budget_runaway_parked.append((row["id"], _input_sum))
                     if not dry_run:
                         _park_budget_runaway(
@@ -23603,7 +23646,12 @@ def _dispatch_once_locked(
                 if _ctr is not None:
                     _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
             continue
-        claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
+        claimed = claim_task(
+            conn,
+            row["id"],
+            ttl_seconds=ttl_seconds,
+            budget_review_extension=_budget_review_extension,
+        )
         if claimed is None:
             continue
         try:

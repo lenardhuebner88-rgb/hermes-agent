@@ -7088,6 +7088,151 @@ def test_dispatch_budget_runaway_grants_first_actionable_review_extension(
     )
 
 
+def test_dispatch_budget_runaway_hold_defers_extension_until_claim(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A temporary profile hold cannot spend the one recovery extension."""
+    spawned_ids = []
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="held review recovery", assignee="alice")
+        blocker_id = kb.create_task(conn, title="temporary profile hold", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the held path"],
+            },
+        )
+        assert kb.claim_task(conn, blocker_id) is not None
+
+        held = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            max_in_progress_per_profile=1,
+            per_task_input_token_cap=1_000,
+        )
+        assert held.skipped_per_profile_capped == [(task_id, "alice", 1)]
+        assert kb.get_task(conn, task_id).budget_extension_count == 0
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', claim_lock = NULL, "
+                "claim_expires = NULL WHERE id = ?",
+                (blocker_id,),
+            )
+        released = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda task, workspace: spawned_ids.append(task.id),
+            max_in_progress_per_profile=1,
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        grants = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "budget_review_extension_granted"
+        ]
+
+    assert not released.budget_runaway_parked
+    assert spawned_ids == [task_id]
+    assert task.status == "running"
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+
+
+def test_dispatch_budget_runaway_dry_run_reports_recovery_without_mutation(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Dry-run simulates the recovery claim and leaves grant state untouched."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="dry-run review recovery", assignee="alice")
+        _seed_input_token_run(conn, task_id, input_tokens=1_300)
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the dry-run path"],
+            },
+        )
+        before_events = kb.list_events(conn, task_id)
+        before_comments = kb.list_comments(conn, task_id)
+
+        result = kb.dispatch_once(
+            conn,
+            dry_run=True,
+            per_task_input_token_cap=1_000,
+        )
+        task = kb.get_task(conn, task_id)
+        after_events = kb.list_events(conn, task_id)
+        after_comments = kb.list_comments(conn, task_id)
+
+    assert result.spawned == [(task_id, "alice", "")]
+    assert not result.budget_runaway_parked
+    assert task.status == "ready"
+    assert task.budget_extension_count == 0
+    assert after_events == before_events
+    assert after_comments == before_comments
+
+
+def test_concurrent_budget_review_extension_claims_only_consume_once(
+    kanban_home, monkeypatch
+):
+    """The recovery grant shares the task claim transaction's CAS winner."""
+    monkeypatch.setattr(
+        kb,
+        "_budget_extension_config",
+        lambda: {"enabled": True, "min_progress_delta": 1, "max_extensions": 1},
+    )
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="concurrent review recovery", assignee="alice")
+        _seed_terminal_review_run(
+            conn,
+            task_id,
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["fix the concurrent path"],
+            },
+        )
+
+    def attempt(index):
+        with kb.connect_closing() as conn:
+            return kb.claim_task(
+                conn,
+                task_id,
+                claimer=f"test:{index}",
+                budget_review_extension=(1_300, 1_000),
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        winners = [result for result in executor.map(attempt, range(8)) if result]
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, task_id)
+        grants = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "budget_review_extension_granted"
+        ]
+
+    assert len(winners) == 1
+    assert task.budget_extension_count == 1
+    assert len(grants) == 1
+
+
 def test_dispatch_budget_runaway_does_not_reconsume_same_review_finding(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
