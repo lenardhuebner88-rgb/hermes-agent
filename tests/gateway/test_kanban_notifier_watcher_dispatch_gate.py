@@ -126,7 +126,6 @@ def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatc
     monkeypatch.setattr(_kb, "connect_closing", lambda *a, **k: nullcontext(MagicMock()))
     monkeypatch.setattr(_kb, "dispatch_once", lambda *a, **k: dispatch_result)
     monkeypatch.setattr(_kb, "reap_worker_zombies", lambda: [])
-    monkeypatch.setattr(_kb, "poll_openclaw_results", lambda *a, **k: None)
     monkeypatch.setattr(_kb, "no_silent_stall_sweep", lambda *a, **k: None)
     monkeypatch.setattr(_kb, "escalate_silent_blocks_sweep", lambda *a, **k: None)
     monkeypatch.setattr(_kb, "escalate_blocking_scouts_sweep", lambda *a, **k: None)

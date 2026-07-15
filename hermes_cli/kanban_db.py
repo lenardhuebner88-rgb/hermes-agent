@@ -15873,12 +15873,6 @@ class DispatchResult:
     evidence task. A verdict-only reviewer task is exempt and dispatches
     normally. Separate bucket so telemetry distinguishes "held for role
     mis-fit" from "genuinely stuck"."""
-    openclaw_dispatched: list[tuple[str, str]] = field(default_factory=list)
-    """Tasks routed to OpenClaw (Mission-Control) instead of a local spawn,
-    as ``(task_id, operation)`` pairs. The task stays ``running`` while MC
-    executes; ``poll_openclaw_results`` polls it back to done/blocked on a
-    later tick. Separate bucket so a cross-system dispatch is never confused
-    with a local worker spawn in telemetry."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
@@ -22002,9 +21996,8 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
 # Instead the dispatcher intercepts it BEFORE the profile_exists gate, signs a
 # Mission-Control envelope via the EXISTING signer module
 # (``mc_mutation_triage_server`` under ~/.hermes/mcp) and POSTs it to MC. The
-# task stays ``running``; ``poll_openclaw_results`` polls MC and closes the
-# task to done/blocked on a later tick. No DB migration: the correlation state
-# lives on ``task_runs.metadata`` JSON under the ``openclaw`` key.
+# Historical correlation state remains readable in ``task_runs.metadata``;
+# native Kanban no longer submits or polls this decommissioned runtime.
 
 OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
 
@@ -22019,21 +22012,13 @@ OPENCLAW_AGENT_TO_OPERATION = {
     "pixel": "request_pixel_ui_qa",
 }
 
-# Default Discord channel for the audit-result aggregate (hub parent channel
-# #hermes-oc). 19 digits — matches the lens-audit ``deliver_to`` regex
-# ``^[0-9]{17,20}$``. Overridable per-dispatch (see _dispatch_to_openclaw).
+# Default Discord channel retained only for decoding/building historical
+# envelope fixtures during the P2 compatibility window.
 OPENCLAW_DEFAULT_DELIVER_TO = "1500203113867378789"
 
 # Where the signer module lives. Importing it is lazy + guarded so a missing
 # module never crashes the dispatcher — it degrades to a normal spawn failure.
 _MC_SIGNER_DIR = str(Path.home() / ".hermes" / "mcp")
-
-# MC task-status read endpoint (poll-back). Reuses the openclaw_view read
-# headers (service / read), 6s timeout.
-_MC_TASK_STATUS_URL = "http://127.0.0.1:3000/api/tasks/{mc_task_id}"
-_MC_READ_HEADERS = {"x-actor-kind": "service", "x-request-class": "read"}
-_MC_READ_TIMEOUT_SECONDS = 6.0
-
 
 def _parse_openclaw_assignee(assignee: Optional[str]) -> Optional[str]:
     """Return the MC operation for an ``openclaw:<agent>`` assignee, else None.
@@ -22301,265 +22286,13 @@ def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
 
 
 # Map each MC operation to its envelope builder. All four converge on the same
-# envelope shape so the success-persist path below (and poll_openclaw_results)
-# handle every agent identically.
+# envelope shape for historical compatibility fixtures.
 _OPENCLAW_ENVELOPE_BUILDERS = {
     "request_lens_audit": _build_lens_envelope,
     "trigger_atlas_sprint": _build_atlas_envelope,
     "request_forge_review": _build_forge_envelope,
     "request_pixel_ui_qa": _build_pixel_envelope,
 }
-
-
-def _dispatch_to_openclaw(
-    conn: sqlite3.Connection,
-    claimed_task: "Task",
-    operation: str,
-) -> None:
-    """Sign + submit an OpenClaw envelope for an already-claimed (running) task.
-
-    On success: persist the MC correlation on ``task_runs.metadata.openclaw``
-    for the task's current run, leave the task ``running``, emit an
-    ``openclaw_dispatched`` event + a human-trail comment.
-
-    On rejection or any exception: raise, so the caller routes the task
-    through the existing ``_record_spawn_failure`` path (consistent with a
-    local spawn failure — task released, failure counted).
-    """
-    signer = _import_mc_signer()  # may raise -> caller treats as spawn failure
-
-    builder = _OPENCLAW_ENVELOPE_BUILDERS.get(operation)
-    if builder is None:
-        # Unknown / mis-routed operation: raising here means it degrades
-        # through the normal spawn-failure path rather than silently stranding
-        # in ``running``.
-        raise NotImplementedError(
-            f"OpenClaw operation {operation!r} not implemented yet"
-        )
-    envelope = builder(claimed_task, signer)
-
-    result = signer.submit_to_mission_control(envelope)
-    if not isinstance(result, dict) or result.get("status") != "ok":
-        # Structured rejection (local-validate / mc-rejected / mc-unreachable).
-        stage = (result or {}).get("stage") if isinstance(result, dict) else None
-        reason = (result or {}).get("reason") if isinstance(result, dict) else None
-        raise RuntimeError(f"openclaw submit rejected (stage={stage}, reason={reason})")
-
-    mc_response = result.get("mc_response") or {}
-    # MC returns the created/idempotent task id under ``taskId`` and the
-    # workflow id it stored under ``workflowId`` (mirror the envelope's
-    # workflow_id if MC echoes nothing).
-    mc_task_id = (
-        mc_response.get("taskId") or mc_response.get("task_id") or mc_response.get("id")
-    )
-    workflow_id = (
-        mc_response.get("workflowId")
-        or mc_response.get("workflow_id")
-        or envelope["workflow_id"]
-    )
-    if not mc_task_id:
-        raise RuntimeError("openclaw submit ok but MC returned no taskId")
-
-    submitted_at = int(time.time())
-    openclaw_meta = {
-        "mc_task_id": str(mc_task_id),
-        "workflow_id": str(workflow_id),
-        "operation": operation,
-        "poll_state": "submitted",
-        "submitted_at": submitted_at,
-    }
-    # Persist on the in-flight run's metadata WITHOUT closing the run (the task
-    # must stay ``running`` until poll-back resolves it). Merge into any
-    # existing metadata JSON rather than clobbering it.
-    with write_txn(conn):
-        run_id = _current_run_id(conn, claimed_task.id)
-        if run_id is None:
-            raise RuntimeError(
-                f"openclaw dispatch: task {claimed_task.id} has no active run"
-            )
-        row = conn.execute(
-            "SELECT metadata FROM task_runs WHERE id = ?",
-            (run_id,),
-        ).fetchone()
-        existing = {}
-        if row and row["metadata"]:
-            try:
-                parsed = json.loads(row["metadata"])
-                if isinstance(parsed, dict):
-                    existing = parsed
-            except Exception:
-                existing = {}
-        existing["openclaw"] = openclaw_meta
-        conn.execute(
-            "UPDATE task_runs SET metadata = ? WHERE id = ?",
-            (json.dumps(existing, ensure_ascii=False), run_id),
-        )
-        _append_event(
-            conn,
-            claimed_task.id,
-            "openclaw_dispatched",
-            {
-                "operation": operation,
-                "mc_task_id": str(mc_task_id),
-                "workflow_id": str(workflow_id),
-            },
-            run_id=run_id,
-        )
-    # Human trail comment (separate — add_comment opens its own txn).
-    try:
-        add_comment(
-            conn,
-            claimed_task.id,
-            "dispatcher",
-            f"Dispatched to OpenClaw ({operation}) → MC task {mc_task_id} "
-            f"(workflow {workflow_id}). Polling for result.",
-        )
-    except Exception:
-        # The comment is a convenience trail; never fail the dispatch on it.
-        _log.debug(
-            "openclaw dispatch: comment failed for task %s",
-            claimed_task.id,
-            exc_info=True,
-        )
-
-
-def poll_openclaw_results(
-    conn: sqlite3.Connection, board: Optional[str] = None
-) -> None:
-    """Poll Mission-Control for each in-flight OpenClaw dispatch and close it.
-
-    Selects open runs (``task_runs.ended_at IS NULL``) whose metadata JSON has
-    ``openclaw.poll_state == "submitted"`` and whose parent task is still
-    ``running``. For each, GET MC's task-status endpoint with the read headers
-    (reused from the openclaw_view proxy pattern) and a 6s timeout. All
-    exceptions are swallowed — a transient MC blip just retries next tick.
-
-    Terminal handling, idempotent:
-      * MC ``done``/``completed`` -> flip ``poll_state`` to ``completed`` on
-        the run metadata, then ``complete_task`` (run-safe via expected_run_id).
-      * MC ``failed``/``canceled``/``cancelled``/``blocked`` -> flip to
-        ``failed`` then ``block_task``.
-    The ``ended_at`` filter excludes runs we've already closed, so a second
-    tick is a no-op.
-    """
-    rows = conn.execute(
-        """
-        SELECT r.id AS run_id, r.task_id AS task_id, r.metadata AS metadata
-          FROM task_runs r
-          JOIN tasks t ON t.id = r.task_id
-         WHERE r.ended_at IS NULL
-           AND t.status = 'running'
-           AND r.metadata LIKE '%"poll_state"%'
-        """,
-    ).fetchall()
-    for row in rows:
-        try:
-            meta = json.loads(row["metadata"]) if row["metadata"] else {}
-        except Exception:
-            continue
-        oc = meta.get("openclaw") if isinstance(meta, dict) else None
-        if not isinstance(oc, dict) or oc.get("poll_state") != "submitted":
-            continue
-        mc_task_id = oc.get("mc_task_id")
-        if not mc_task_id:
-            continue
-        run_id = int(row["run_id"])
-        task_id = row["task_id"]
-
-        # --- MC read (best-effort, all exceptions swallowed) ---
-        try:
-            import httpx  # local import: keeps httpx out of the import-time path
-
-            url = _MC_TASK_STATUS_URL.format(mc_task_id=mc_task_id)
-            resp = httpx.get(
-                url,
-                headers=_MC_READ_HEADERS,
-                timeout=_MC_READ_TIMEOUT_SECONDS,
-            )
-            resp.raise_for_status()
-            mc_task = resp.json()
-        except Exception:
-            # Transient MC failure / unreachable / parse error: retry next tick.
-            continue
-        if not isinstance(mc_task, dict):
-            continue
-
-        mc_status = (
-            str(mc_task.get("status") or mc_task.get("state") or "").strip().lower()
-        )
-        if not mc_status:
-            continue
-
-        result_summary = (
-            mc_task.get("resultSummary")
-            or mc_task.get("result_summary")
-            or mc_task.get("summary")
-            or mc_task.get("result")
-        )
-        if isinstance(result_summary, (dict, list)):
-            result_summary = json.dumps(result_summary, ensure_ascii=False)
-        elif result_summary is not None:
-            result_summary = str(result_summary)
-
-        done_states = {"done", "completed", "complete", "succeeded", "success"}
-        failed_states = {
-            "failed",
-            "failure",
-            "canceled",
-            "cancelled",
-            "blocked",
-            "error",
-        }
-
-        if mc_status in done_states:
-            terminal_state = "completed"
-        elif mc_status in failed_states:
-            terminal_state = "failed"
-        else:
-            # Still in-flight on MC (queued/running/...). Leave for next tick.
-            continue
-
-        # Idempotency: flip poll_state on the run metadata BEFORE the terminal
-        # call. complete_task / block_task close the run (ended_at set), so the
-        # ended_at filter excludes this run on every future tick regardless.
-        oc["poll_state"] = terminal_state
-        oc["mc_status"] = mc_status
-        merged = dict(meta)
-        merged["openclaw"] = oc
-        try:
-            with write_txn(conn):
-                conn.execute(
-                    "UPDATE task_runs SET metadata = ? WHERE id = ? AND ended_at IS NULL",
-                    (json.dumps(merged, ensure_ascii=False), run_id),
-                )
-        except Exception:
-            # If we can't even flip the flag, skip — next tick retries.
-            continue
-
-        try:
-            if terminal_state == "completed":
-                complete_task(
-                    conn,
-                    task_id,
-                    result=result_summary,
-                    summary=result_summary,
-                    metadata=merged,
-                    expected_run_id=run_id,
-                )
-            else:
-                block_task(
-                    conn,
-                    task_id,
-                    reason=(result_summary or f"OpenClaw MC status: {mc_status}"),
-                    expected_run_id=run_id,
-                )
-        except Exception:
-            _log.debug(
-                "poll_openclaw_results: terminal transition failed for task %s",
-                task_id,
-                exc_info=True,
-            )
-            continue
 
 
 def reviewer_role_fit_hold_reason(

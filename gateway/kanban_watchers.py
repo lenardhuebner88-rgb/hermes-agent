@@ -2310,19 +2310,6 @@ class GatewayKanbanWatchersMixin:
                     auto_retry_blocked=auto_retry_blocked,
                     auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
                 )
-                # Poll Mission-Control for any in-flight OpenClaw dispatches on
-                # this board and close their kanban tasks to done/blocked. Runs
-                # on the same connection, inside this try (so the conn-closing
-                # finally still fires), before we return the dispatch result.
-                # Best-effort: a poll-back failure must never break dispatch, so
-                # it is guarded independently.
-                try:
-                    _kb.poll_openclaw_results(conn, board=slug)
-                except Exception:
-                    logger.debug(
-                        "kanban dispatcher: openclaw poll-back failed on board %s",
-                        slug, exc_info=True,
-                    )
                 # Visibility only: after 180s without productive model/tool
                 # activity, surface one deduplicated attention event for the
                 # current review run. This never cancels, reclaims, or retries.
