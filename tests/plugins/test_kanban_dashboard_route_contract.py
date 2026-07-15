@@ -1,5 +1,7 @@
 """Ownership contract for the reconciled Kanban dashboard API surface."""
 
+from pathlib import Path
+
 from plugins.kanban.dashboard import plugin_api
 
 
@@ -67,3 +69,31 @@ def test_local_dashboard_strengths_live_in_edge_namespaces():
     assert owners[("GET", "/planspecs")] == "planspec"
     assert owners[("POST", "/tasks/{task_id}/release-gate")] == "flow_release"
 
+
+def test_extension_handlers_are_physically_outside_the_core_api_module():
+    """Owner metadata must correspond to a real source-file boundary."""
+    core_path = Path(plugin_api.__file__).resolve()
+    core_source = core_path.read_text(encoding="utf-8")
+
+    assert len(core_source.splitlines()) < 4_000
+    for owner in (
+        "evidence",
+        "control",
+        "lanes",
+        "observability",
+        "delivery",
+        "planspec",
+        "flow_release",
+    ):
+        assert f"@{owner}_routes" not in core_source
+
+    for record, route in zip(
+        plugin_api.route_contract.records,
+        plugin_api.router.routes,
+        strict=True,
+    ):
+        endpoint_path = Path(route.endpoint.__code__.co_filename).resolve()
+        if record.owner == "core":
+            assert endpoint_path == core_path
+        else:
+            assert endpoint_path != core_path

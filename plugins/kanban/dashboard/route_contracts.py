@@ -95,4 +95,3 @@ class DashboardRouteContract:
 
     def owner_by_key(self) -> dict[tuple[str, str], str]:
         return {record.key: record.owner for record in self.records}
-
