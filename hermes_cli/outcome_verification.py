@@ -17,14 +17,19 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
+import resource
+import select
 import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Iterator, Mapping, MutableMapping, Sequence
@@ -46,14 +51,11 @@ CONTRACT_EVENT = "outcome_contract_registered"
 MEASUREMENT_STARTED_EVENT = "outcome_measurement_started"
 MEASUREMENT_COMPLETED_EVENT = "outcome_measurement_completed"
 
-_INTEGRATION_EVENT_KINDS = (
-    "integration_merged",
-    "INTEGRATOR_VERIFIED",
-    "deployment_verified",
-    "deployed",
-)
-_SHA_KEYS = ("commit_sha", "merged_sha", "deployed_sha", "head_sha", "sha")
+_INTEGRATION_EVENT_KINDS = ("integration_merged", "INTEGRATOR_VERIFIED")
+_DEPLOYMENT_EVENT_KINDS = ("deployment_verified", "deployed")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_CONTENT_SHA_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+_CONTRACT_ID_RE = re.compile(r"^outcome:[a-z0-9_.-]+:[0-9a-f]{16}$")
 
 _SAFE_ROOTS = frozenset(
     {
@@ -111,6 +113,45 @@ def _canonical_json(value: Any) -> str:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _source_epoch(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _pytest_version() -> str:
+    try:
+        return importlib.metadata.version("pytest")
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable"
+
+
+def _seal_evidence(evidence: MutableMapping[str, Any]) -> dict[str, Any]:
+    material = {key: value for key, value in evidence.items() if key != "evidence_ref"}
+    evidence["evidence_ref"] = "outcome-evidence:sha256:" + hashlib.sha256(
+        _canonical_json(material).encode("utf-8")
+    ).hexdigest()
+    return dict(evidence)
+
+
+def seal_evidence(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Seal structured bounded evidence after adding reviewed metadata."""
+    return _seal_evidence(dict(evidence))
+
+
+def _evidence_ref_is_valid(evidence: Mapping[str, Any]) -> bool:
+    material = {key: value for key, value in evidence.items() if key != "evidence_ref"}
+    expected = "outcome-evidence:sha256:" + hashlib.sha256(
+        _canonical_json(material).encode("utf-8")
+    ).hexdigest()
+    return evidence.get("evidence_ref") == expected
 
 
 def _lock_depths() -> dict[str, tuple[int, Any]]:
@@ -237,10 +278,12 @@ def normalize_outcome_fields(record: Mapping[str, Any], *, source: str) -> dict[
     else:
         applicability = "not_applicable" if terminal_no_delivery else "applicable"
 
-    if explicit_status in MEASUREMENT_STATUSES:
+    if applicability == "not_applicable":
+        # Terminal no-delivery has no measurement workflow. Explicit stale
+        # fields from legacy projections cannot turn it into exhausted work.
+        measurement_status = "not_started"
+    elif explicit_status in MEASUREMENT_STATUSES:
         measurement_status = explicit_status
-    elif applicability == "not_applicable":
-        measurement_status = "exhausted"
     elif lifecycle_status == "measured" or record.get("measured_at") is not None:
         measurement_status = "measured"
     elif lifecycle_status == "shipped":
@@ -262,12 +305,16 @@ def normalize_outcome_fields(record: Mapping[str, Any], *, source: str) -> dict[
     if measurement_status == "exhausted" and applicability == "applicable" and verdict is None:
         verdict = "unmeasurable"
 
-    if explicit_grade in EVIDENCE_GRADES:
-        evidence_grade = explicit_grade
-    elif has_contract or (src == "autoresearch" and terminal_no_delivery):
-        evidence_grade = "contract_verified"
-    else:
+    if (
+        applicability != "applicable"
+        or measurement_status not in {"measured", "exhausted"}
+        or not has_contract
+    ):
         evidence_grade = "legacy_observational"
+    elif explicit_grade in EVIDENCE_GRADES:
+        evidence_grade = explicit_grade
+    else:
+        evidence_grade = "contract_verified"
 
     calibration_eligible = bool(record.get("calibration_eligible", src != "autoresearch"))
     if src == "autoresearch":
@@ -290,7 +337,9 @@ def normalize_strategist_record(record: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _validated_repo_path(raw: Any, *, tests_only: bool = False) -> str:
+def _validated_repo_path(
+    raw: Any, *, tests_only: bool = False, repo_root: Path | None = None
+) -> str:
     text = str(raw or "").strip().replace("\\", "/")
     path = PurePosixPath(text)
     if not text or path.is_absolute():
@@ -301,22 +350,129 @@ def _validated_repo_path(raw: Any, *, tests_only: bool = False) -> str:
         raise ContractError(f"probe path root {path.parts[0]!r} is not allowlisted")
     if tests_only and path.parts[0] != "tests":
         raise ContractError("pytest probe targets must live under tests/")
+    if repo_root is not None:
+        root = Path(repo_root).resolve()
+        cursor = root
+        for part in path.parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ContractError("probe paths may not traverse symlinks")
+        resolved = (root / path.as_posix()).resolve()
+        if root not in resolved.parents:
+            raise ContractError("probe path escaped repository root")
     return path.as_posix()
 
 
-def _probe_blueprint(proposal: Mapping[str, Any]) -> dict[str, Any]:
-    affected = proposal.get("affected_tests")
-    if isinstance(affected, Sequence) and not isinstance(affected, (str, bytes)) and affected:
-        targets = [_validated_repo_path(item, tests_only=True) for item in list(affected)[:4]]
+def _probe_blueprint(proposal: Mapping[str, Any], *, repo_root: Path) -> dict[str, Any]:
+    measurement_kind = str(proposal.get("measurement_kind") or "").strip()
+    if measurement_kind == "runtime_observation" or str(proposal.get("mode") or "") == "runtime":
+        key = str(proposal.get("metric_key") or "").strip()
+        basename = key.rsplit(".", 1)[-1]
+        direction = _VISION_METRIC_DIRECTIONS.get(key, _VISION_METRIC_DIRECTIONS.get(basename))
+        if direction is None:
+            raise ContractError(f"runtime metric {key!r} is not allowlisted")
+        rule = "higher_is_better" if direction == 1 else "lower_is_better"
         return {
-            "probe_id": "pytest_target.v1",
-            "args": {"targets": targets},
-            "comparator": {"metric": "returncode", "rule": "failing_to_passing"},
-            "requires_delivery_sha": True,
-            "budget": {"max_attempts": 3, "max_samples": 1, "timeout_seconds": 120},
+            "probe_id": "vision_metric_snapshot.v1",
+            "probe_args": {"metric_key": key},
+            "claim": f"The deployed runtime moves {key} in the reviewed {rule} direction.",
+            "measurement_kind": "runtime_observation",
+            "success_template_id": "vision_metric_direction.v1",
+            "success_parameters": {
+                "metric_key": key,
+                "direction": direction,
+                "neutral_tolerance": 0.05,
+            },
+            "success_rule": {
+                "metric": key,
+                "operator": rule,
+                "neutral_tolerance": 0.05,
+            },
+            "outcome_class": f"vision-metric:{key}:{rule}/v1",
+            "counter_probes": [],
+            "counter_rules": [],
+            "trigger": "deployed_runtime",
+            "timeout_seconds": 5,
+            # Preserve the Strategist's reviewed three-day maturity contract.
+            # The upper bound prevents an arbitrarily late snapshot from being
+            # treated as attributable to this deployment.
+            "observation_window": {
+                "kind": "bounded",
+                "min_age_seconds": 3 * 86_400,
+                "max_age_seconds": 7 * 86_400,
+            },
+            "max_source_age_seconds": 86_400,
         }
 
-    target = _validated_repo_path(proposal.get("target_path") or proposal.get("target"))
+    affected = proposal.get("affected_tests")
+    if isinstance(affected, Sequence) and not isinstance(affected, (str, bytes)) and affected:
+        targets = [
+            _validated_repo_path(item, tests_only=True, repo_root=repo_root)
+            for item in list(affected)[:4]
+        ]
+        counters_raw = proposal.get("counter_tests")
+        counters = (
+            [
+                _validated_repo_path(item, tests_only=True, repo_root=repo_root)
+                for item in list(counters_raw)[:4]
+            ]
+            if isinstance(counters_raw, Sequence)
+            and not isinstance(counters_raw, (str, bytes))
+            else []
+        )
+        pattern_counters_raw = proposal.get("counter_patterns")
+        pattern_counters: list[dict[str, Any]] = []
+        if isinstance(pattern_counters_raw, Sequence) and not isinstance(
+            pattern_counters_raw, (str, bytes)
+        ):
+            for raw in list(pattern_counters_raw)[:4]:
+                if not isinstance(raw, Mapping):
+                    raise ContractError("counter pattern must be an object")
+                pattern_rule = str(raw.get("pattern_rule") or "").strip()
+                if pattern_rule not in _SOURCE_PATTERN_RULES:
+                    raise ContractError(f"unknown counter pattern rule: {pattern_rule!r}")
+                pattern_counters.append(
+                    {
+                        "probe_id": "source_pattern.v1",
+                        "probe_args": {
+                            "path": _validated_repo_path(
+                                raw.get("path"), repo_root=repo_root
+                            ),
+                            "pattern_rule": pattern_rule,
+                        },
+                    }
+                )
+        counter_probes = (
+            [{"probe_id": "pytest_target.v1", "probe_args": {"targets": counters}}]
+            if counters
+            else []
+        ) + pattern_counters
+        counter_rules = (
+            [{"metric": "returncode", "operator": "must_remain_passing"}]
+            if counters
+            else []
+        ) + [
+            {"metric": "occurrences", "operator": "must_not_increase"}
+            for _ in pattern_counters
+        ]
+        return {
+            "probe_id": "pytest_target.v1",
+            "probe_args": {"targets": targets},
+            "claim": "The reviewed regression changes from failing to passing while counter tests remain passing.",
+            "measurement_kind": "invariant",
+            "success_template_id": "pytest_failing_to_passing.v1",
+            "success_parameters": {"failing_values": [1], "passing_value": 0},
+            "success_rule": {"metric": "returncode", "operator": "failing_to_passing"},
+            "outcome_class": "pytest-regression:failing-to-passing/v1",
+            "counter_probes": counter_probes,
+            "counter_rules": counter_rules,
+            "trigger": "integrated_commit",
+            "timeout_seconds": 120,
+        }
+
+    target = _validated_repo_path(
+        proposal.get("target_path") or proposal.get("target"), repo_root=repo_root
+    )
     category_text = " ".join(
         str(proposal.get(key) or "").strip().lower().replace("-", "_")
         for key in ("category", "theme")
@@ -325,19 +481,111 @@ def _probe_blueprint(proposal: Mapping[str, Any]) -> dict[str, Any]:
     if rule:
         return {
             "probe_id": "source_pattern.v1",
-            "args": {"path": target, "pattern_rule": rule},
-            "comparator": {"metric": "occurrences", "rule": "lower_is_better"},
-            "requires_delivery_sha": True,
-            "budget": {"max_attempts": 3, "max_samples": 1, "timeout_seconds": 30},
+            "probe_args": {"path": target, "pattern_rule": rule},
+            "claim": f"The integrated change reduces occurrences of the reviewed {rule} pattern.",
+            "measurement_kind": "metric_delta",
+            "success_template_id": "source_occurrences_lower.v1",
+            "success_parameters": {"minimum_delta": 1},
+            "success_rule": {"metric": "occurrences", "operator": "lower_is_better", "minimum_delta": 1},
+            "outcome_class": f"source-pattern:{rule}/v1",
+            "counter_probes": [],
+            "counter_rules": [],
+            "trigger": "integrated_commit",
+            "timeout_seconds": 30,
         }
 
     return {
         "probe_id": "delivery_evidence.v1",
-        "args": {"target": target},
-        "comparator": {"metric": "delivery", "rule": "no_benefit_claim"},
-        "requires_delivery_sha": True,
-        "budget": {"max_attempts": 3, "max_samples": 1, "timeout_seconds": 30},
+        "probe_args": {"target": target},
+        "claim": "Delivery is recorded without claiming a measurable benefit.",
+        "measurement_kind": "invariant",
+        "success_template_id": "delivery_no_benefit_claim.v1",
+        "success_parameters": {"benefit_claim_allowed": False},
+        "success_rule": {"metric": "delivery", "operator": "no_benefit_claim"},
+        "outcome_class": "delivery-evidence:unmeasurable/v1",
+        "counter_probes": [],
+        "counter_rules": [],
+        "trigger": "integrated_commit",
+        "timeout_seconds": 30,
     }
+
+
+def _materialize_contract(blueprint: Mapping[str, Any]) -> dict[str, Any]:
+    timeout = int(blueprint["timeout_seconds"])
+    payload = {
+        "schema_version": OUTCOME_SCHEMA_VERSION,
+        "outcome_contract_version": OUTCOME_SCHEMA_VERSION,
+        "claim": blueprint["claim"],
+        "measurement_kind": blueprint["measurement_kind"],
+        "probe_id": blueprint["probe_id"],
+        "probe_args": blueprint["probe_args"],
+        "success_template_id": blueprint["success_template_id"],
+        "success_parameters": blueprint["success_parameters"],
+        "success_rule": blueprint["success_rule"],
+        "outcome_class": blueprint["outcome_class"],
+        "counter_probes": blueprint["counter_probes"],
+        "counter_rules": blueprint["counter_rules"],
+        "sampling_plan": {
+            "sample_count": 1,
+            "aggregation": "single_observation",
+            "noise_rule": "no_retry_cherry_picking",
+        },
+        "observation_window": blueprint.get(
+            "observation_window", {"kind": "immediate", "max_age_seconds": 900}
+        ),
+        "trigger": blueprint["trigger"],
+        "environment_requirements": blueprint.get("environment_requirements")
+        or {
+            "fingerprint_schema": "hermes-outcome-env/v1",
+            "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "platform_system": platform.system().lower(),
+            "platform_machine": platform.machine().lower(),
+            "pytest_version": _pytest_version(),
+            "max_source_age_seconds": int(
+                blueprint.get("max_source_age_seconds", 900)
+            ),
+        },
+        "measurement_budget": {
+            "max_attempts": 3,
+            "max_samples": 1,
+            "timeout_seconds": timeout,
+            "max_output_bytes": 262_144,
+            "max_memory_mb": 1024,
+            "max_cost_usd": 0.0,
+        },
+        "calibration_eligible": False,
+    }
+    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    payload["contract_sha256"] = digest
+    payload["contract_hash"] = digest
+    payload["contract_id"] = f"outcome:{payload['probe_id']}:{digest[:16]}"
+    # Compatibility aliases for the first common-adapter readers. They are
+    # derived, hashed fields and cannot diverge from the full contract.
+    payload["args"] = payload["probe_args"]
+    payload["comparator"] = {
+        "metric": payload["success_rule"]["metric"],
+        "rule": payload["success_rule"]["operator"],
+    }
+    payload["requires_delivery_sha"] = payload["trigger"] in {
+        "integrated_commit", "deployed_runtime"
+    }
+    payload["sampling"] = {"samples": 1, "aggregation": "single_observation"}
+    payload["budget"] = {
+        "max_attempts": payload["measurement_budget"]["max_attempts"],
+        "max_samples": payload["measurement_budget"]["max_samples"],
+        "timeout_seconds": payload["measurement_budget"]["timeout_seconds"],
+    }
+    # Aliases are also immutable. Rehash the complete payload without the
+    # derived identity so legacy and current readers share one integrity bit.
+    identity_free = {
+        key: value for key, value in payload.items()
+        if key not in {"contract_id", "contract_hash", "contract_sha256"}
+    }
+    digest = hashlib.sha256(_canonical_json(identity_free).encode("utf-8")).hexdigest()
+    payload["contract_sha256"] = digest
+    payload["contract_hash"] = digest
+    payload["contract_id"] = f"outcome:{payload['probe_id']}:{digest[:16]}"
+    return payload
 
 
 def build_probe_contract(proposal: Mapping[str, Any], *, repo_root: Path) -> dict[str, Any]:
@@ -345,45 +593,187 @@ def build_probe_contract(proposal: Mapping[str, Any], *, repo_root: Path) -> dic
     root = Path(repo_root)
     if not root.is_absolute():
         raise ContractError("repo_root must be absolute")
-    blueprint = _probe_blueprint(proposal)
-    payload = {
-        "schema_version": OUTCOME_SCHEMA_VERSION,
-        "probe_id": blueprint["probe_id"],
-        "args": blueprint["args"],
-        "comparator": blueprint["comparator"],
-        "requires_delivery_sha": blueprint["requires_delivery_sha"],
-        "sampling": {"samples": 1, "aggregation": "single_observation"},
-        "budget": blueprint["budget"],
-    }
-    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-    payload["contract_hash"] = digest
-    payload["contract_id"] = f"outcome:{payload['probe_id']}:{digest[:16]}"
-    return payload
+    return _materialize_contract(_probe_blueprint(proposal, repo_root=root))
 
 
 def build_vision_metric_contract(metric_key: str, *, direction: int) -> dict[str, Any]:
-    """Build the Strategist's fixed snapshot probe contract."""
+    """Build the Strategist's fixed snapshot intent contract."""
     key = str(metric_key or "").strip()
     basename = key.rsplit(".", 1)[-1]
     expected = _VISION_METRIC_DIRECTIONS.get(key, _VISION_METRIC_DIRECTIONS.get(basename))
     if expected is None or direction not in {-1, 1} or expected != direction:
         raise ContractError(f"vision metric {key!r} is not in the reviewed direction allowlist")
-    payload = {
-        "schema_version": OUTCOME_SCHEMA_VERSION,
-        "probe_id": "vision_metric_snapshot.v1",
-        "args": {"metric_key": key},
-        "comparator": {
+    return _materialize_contract(
+        _probe_blueprint(
+            {
+                "mode": "runtime",
+                "measurement_kind": "runtime_observation",
+                "metric_key": key,
+                "target": "hermes_cli/vision_metrics.py",
+            },
+            repo_root=Path(__file__).resolve().parents[1],
+        )
+    )
+
+
+def capture_vision_snapshot_baseline(
+    contract: Mapping[str, Any], snapshot: Mapping[str, Any], *, now: float | None = None
+) -> dict[str, Any]:
+    """Turn one real vision-metrics snapshot into a preregistered baseline."""
+    validated = validate_probe_contract(contract)
+    if validated.get("probe_id") != "vision_metric_snapshot.v1":
+        raise ContractError("vision baseline requires the vision metric probe")
+    generated_at = snapshot.get("generated_at")
+    if generated_at is None:
+        raise ContractError("vision baseline source timestamp is missing")
+    if isinstance(generated_at, (int, float)) and not isinstance(generated_at, bool):
+        generated_epoch = float(generated_at)
+    elif isinstance(generated_at, str):
+        try:
+            generated_epoch = datetime.fromisoformat(generated_at.replace("Z", "+00:00")).timestamp()
+        except ValueError as exc:
+            raise ContractError("vision baseline source timestamp is invalid") from exc
+    else:
+        raise ContractError("vision baseline source timestamp is invalid")
+    if (time.time() if now is None else float(now)) - generated_epoch > 86_400:
+        raise ContractError("vision baseline source snapshot is stale")
+    payload = snapshot.get("metrics") if isinstance(snapshot.get("metrics"), Mapping) else snapshot
+    key = str(validated["probe_args"]["metric_key"])
+    value = _metric_value(payload, key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ContractError(f"vision baseline metric {key!r} is missing")
+    source_schema = snapshot.get("schema_version") or snapshot.get("schema")
+    if source_schema is None:
+        raise ContractError("vision baseline source schema is missing")
+    evidence: dict[str, Any] = {
+        "ok": True,
+        "contract_sha256": validated["contract_sha256"],
+        "target_sha": hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest(),
+        "expected_target_sha": None,
+        "observed_value": {
+            "ok": True,
             "metric": key,
-            "rule": "higher_is_better" if direction == 1 else "lower_is_better",
+            "value": float(value),
+            "sample_count": 1,
         },
-        "requires_delivery_sha": False,
-        "sampling": {"samples": 1, "aggregation": "single_snapshot"},
-        "budget": {"max_attempts": 1, "max_samples": 1, "timeout_seconds": 5},
+        "counter_observations": [],
+        "source_generated_at": generated_at,
+        "source_schema_version": str(source_schema),
+        "environment": _environment_descriptor(validated),
+        "environment_fingerprint": _environment_fingerprint(validated),
+        "captured_at": _utc_now(),
+        "sample_count": 1,
+        "cost_usd": 0.0,
+        "metric": key,
+        "value": float(value),
     }
-    digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
-    payload["contract_hash"] = digest
-    payload["contract_id"] = f"outcome:{payload['probe_id']}:{digest[:16]}"
-    return payload
+    return _seal_evidence(evidence)
+
+
+def _blueprint_from_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    probe_id = str(contract.get("probe_id") or "")
+    args = contract.get("probe_args")
+    if not isinstance(args, Mapping):
+        raise ContractError("probe_args must be an object")
+
+    def _immutable_context(blueprint: dict[str, Any]) -> dict[str, Any]:
+        requirements = contract.get("environment_requirements")
+        if not isinstance(requirements, Mapping):
+            raise ContractError("environment requirements must be an object")
+        blueprint["environment_requirements"] = dict(requirements)
+        window = contract.get("observation_window")
+        if not isinstance(window, Mapping):
+            raise ContractError("observation window must be an object")
+        blueprint["observation_window"] = dict(window)
+        return blueprint
+    if probe_id == "pytest_target.v1":
+        targets = args.get("targets")
+        if not isinstance(targets, Sequence) or isinstance(targets, (str, bytes)) or not targets:
+            raise ContractError("pytest targets must be a non-empty list")
+        counter_probes = contract.get("counter_probes")
+        counters: list[str] = []
+        pattern_counters: list[dict[str, str]] = []
+        if counter_probes:
+            if not isinstance(counter_probes, list) or len(counter_probes) > 5:
+                raise ContractError("pytest contract has an invalid counter probe set")
+            for counter in counter_probes:
+                if not isinstance(counter, Mapping):
+                    raise ContractError("counter probe must be an object")
+                counter_id = str(counter.get("probe_id") or "")
+                counter_args = counter.get("probe_args") or {}
+                if counter_id == "pytest_target.v1":
+                    if counters:
+                        raise ContractError("pytest counter probe may appear only once")
+                    raw = counter_args.get("targets")
+                    if not isinstance(raw, list):
+                        raise ContractError("counter targets must be a list")
+                    counters = [
+                        _validated_repo_path(item, tests_only=True) for item in raw
+                    ]
+                elif counter_id == "source_pattern.v1":
+                    rule = str(counter_args.get("pattern_rule") or "")
+                    if rule not in _SOURCE_PATTERN_RULES:
+                        raise ContractError("unknown counter source pattern rule")
+                    pattern_counters.append(
+                        {
+                            "path": _validated_repo_path(counter_args.get("path")),
+                            "pattern_rule": rule,
+                        }
+                    )
+                else:
+                    raise ContractError(f"unknown counter probe: {counter_id!r}")
+        return _immutable_context(_probe_blueprint(
+            {
+                "affected_tests": list(targets),
+                "counter_tests": counters,
+                "counter_patterns": pattern_counters,
+            },
+            repo_root=Path.cwd().resolve(),
+        ))
+    if probe_id == "source_pattern.v1":
+        rule = str(args.get("pattern_rule") or "")
+        if rule not in _SOURCE_PATTERN_RULES:
+            raise ContractError("unknown source pattern rule")
+        return _immutable_context(_probe_blueprint(
+            {"target": args.get("path"), "category": rule},
+            repo_root=Path.cwd().resolve(),
+        ))
+    if probe_id == "delivery_evidence.v1":
+        return _immutable_context(_probe_blueprint(
+            {"target": args.get("target"), "category": "delivery"},
+            repo_root=Path.cwd().resolve(),
+        ))
+    if probe_id == "vision_metric_snapshot.v1":
+        return _immutable_context(_probe_blueprint(
+            {
+                "mode": "runtime",
+                "measurement_kind": "runtime_observation",
+                "metric_key": args.get("metric_key"),
+                "target": "hermes_cli/vision_metrics.py",
+            },
+            repo_root=Path.cwd().resolve(),
+        ))
+    raise ContractError(f"unknown probe_id: {probe_id!r}")
+
+
+def validate_probe_contract(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Reject forged hashes, altered rules/budgets and unknown template data."""
+    if not isinstance(contract, Mapping):
+        raise ContractError("outcome contract must be an object")
+    identity_free = {
+        key: value for key, value in contract.items()
+        if key not in {"contract_id", "contract_hash", "contract_sha256"}
+    }
+    digest = hashlib.sha256(_canonical_json(identity_free).encode("utf-8")).hexdigest()
+    if contract.get("contract_hash") != digest or contract.get("contract_sha256") != digest:
+        raise ContractError("contract hash does not match canonical contract data")
+    expected_id = f"outcome:{contract.get('probe_id')}:{digest[:16]}"
+    if contract.get("contract_id") != expected_id or not _CONTRACT_ID_RE.fullmatch(expected_id):
+        raise ContractError("contract id does not match canonical hash")
+    expected = _materialize_contract(_blueprint_from_contract(contract))
+    if _canonical_json(contract) != _canonical_json(expected):
+        raise ContractError("contract differs from its versioned allowlisted template")
+    return dict(contract)
 
 
 def release_fingerprint(
@@ -398,22 +788,220 @@ def release_fingerprint(
     return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
 
 
-def capture_probe(contract: Mapping[str, Any], *, repo_root: Path) -> dict[str, Any]:
-    """Execute one bounded allowlisted probe without a shell or network."""
+def _resolve_probe_path(repo_root: Path, raw: Any, *, tests_only: bool = False) -> Path:
+    relative = _validated_repo_path(raw, tests_only=tests_only, repo_root=repo_root)
+    return (Path(repo_root).resolve() / relative).resolve()
+
+
+def _probe_paths(contract: Mapping[str, Any]) -> list[str]:
     probe_id = contract.get("probe_id")
-    args = contract.get("args") if isinstance(contract.get("args"), Mapping) else {}
+    args = contract.get("probe_args") or contract.get("args") or {}
+    if probe_id == "pytest_target.v1":
+        paths = list(args.get("targets") or [])
+        for counter in contract.get("counter_probes") or []:
+            counter_args = counter.get("probe_args") or {}
+            if counter.get("probe_id") == "pytest_target.v1":
+                paths.extend(counter_args.get("targets") or [])
+            elif counter.get("probe_id") == "source_pattern.v1":
+                paths.append(str(counter_args.get("path") or ""))
+        return [str(path) for path in paths]
+    if probe_id == "source_pattern.v1":
+        return [str(args.get("path") or "")]
+    if probe_id == "delivery_evidence.v1":
+        return [str(args.get("target") or "")]
+    return []
+
+
+def _environment_descriptor(contract: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "hermes-outcome-env/v1",
+        "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "platform_system": platform.system().lower(),
+        "platform_machine": platform.machine().lower(),
+        "pytest_version": _pytest_version(),
+        "probe_id": contract.get("probe_id"),
+    }
+
+
+def _environment_satisfies_contract(
+    contract: Mapping[str, Any], environment: Mapping[str, Any]
+) -> bool:
+    requirements = contract.get("environment_requirements") or {}
+    pairs = {
+        "schema": requirements.get("fingerprint_schema"),
+        "python_major_minor": requirements.get("python_major_minor"),
+        "platform_system": requirements.get("platform_system"),
+        "platform_machine": requirements.get("platform_machine"),
+        "pytest_version": requirements.get("pytest_version"),
+    }
+    return all(
+        expected is not None and environment.get(key) == expected
+        for key, expected in pairs.items()
+    )
+
+
+def _environment_fingerprint(contract: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        _canonical_json(_environment_descriptor(contract)).encode("utf-8")
+    ).hexdigest()
+
+
+def _git_head(repo_root: Path) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(Path(repo_root).resolve()), "rev-parse", "HEAD"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip().lower()
+    return value if completed.returncode == 0 and _SHA_RE.fullmatch(value) else None
+
+
+def _content_sha(repo_root: Path, paths: Sequence[str]) -> str:
+    material: list[dict[str, Any]] = []
+    for relative in sorted(set(paths)):
+        path = _resolve_probe_path(Path(repo_root), relative, tests_only=relative.startswith("tests/"))
+        try:
+            data = path.read_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+        except OSError:
+            digest = "missing"
+        material.append({"path": relative, "sha256": digest})
+    return hashlib.sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+
+
+def _target_sha(repo_root: Path, paths: Sequence[str]) -> str:
+    head = _git_head(repo_root)
+    if head is not None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(Path(repo_root).resolve()), "status", "--porcelain", "--", *paths],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+                check=False,
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LANG": "C.UTF-8"},
+            )
+            if completed.returncode == 0 and not completed.stdout.strip():
+                return head
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _content_sha(repo_root, paths)
+
+
+def _run_bounded_pytest(
+    targets: Sequence[str], *, repo_root: Path, budget: Mapping[str, Any]
+) -> dict[str, Any]:
+    timeout = min(120, max(1, int(budget.get("timeout_seconds") or 120)))
+    max_output = min(1_048_576, max(1024, int(budget.get("max_output_bytes") or 262_144)))
+    memory_bytes = min(2_048, max(256, int(budget.get("max_memory_mb") or 1024))) * 1024 * 1024
+    with tempfile.TemporaryDirectory(prefix="hermes-outcome-probe-") as temp_home:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": temp_home,
+            "HERMES_HOME": str(Path(temp_home) / ".hermes"),
+            "PYTHONHASHSEED": "0",
+            "PYTHONPATH": str(Path(repo_root).resolve()),
+            "TZ": "UTC",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "HERMES_SANDBOX_MODE": "1",
+        }
+
+        def _limit_memory() -> None:
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+
+        started = time.monotonic()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "pytest", "-q", *targets],
+            cwd=str(Path(repo_root).resolve()),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+            preexec_fn=_limit_memory,
+        )
+        assert proc.stdout is not None
+        fd = proc.stdout.fileno()
+        output = bytearray()
+        deadline = time.monotonic() + timeout
+        error: str | None = None
+        while True:
+            if time.monotonic() >= deadline:
+                error = "timeout"
+                proc.kill()
+                break
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if ready:
+                chunk = os.read(fd, min(65_536, max_output + 1 - len(output)))
+                if chunk:
+                    output.extend(chunk)
+                    if len(output) > max_output:
+                        error = "output_limit"
+                        proc.kill()
+                        break
+                elif proc.poll() is not None:
+                    break
+            elif proc.poll() is not None:
+                break
+        proc.wait(timeout=5)
+        if error is not None:
+            return {
+                "ok": False,
+                "metric": "returncode",
+                "value": None,
+                "error": error,
+                "output_sha256": hashlib.sha256(bytes(output[:max_output])).hexdigest(),
+                "duration_ms": round((time.monotonic() - started) * 1000, 3),
+            }
+        return {
+            "ok": proc.returncode in {0, 1},
+            "metric": "returncode",
+            "value": int(proc.returncode),
+            "sample_count": 1,
+            "output_sha256": hashlib.sha256(bytes(output)).hexdigest(),
+            "output_bytes": len(output),
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
+
+def _metric_value(payload: Mapping[str, Any], dotted: str) -> Any:
+    current: Any = payload
+    for part in dotted.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def _execute_probe(
+    probe_id: str, args: Mapping[str, Any], *, repo_root: Path, budget: Mapping[str, Any]
+) -> dict[str, Any]:
     started = time.monotonic()
     if probe_id == "source_pattern.v1":
-        relative = _validated_repo_path(args.get("path"))
         rule = str(args.get("pattern_rule") or "")
         pattern = _SOURCE_PATTERN_RULES.get(rule)
         if pattern is None:
             raise ContractError(f"unknown source pattern rule: {rule!r}")
-        path = (Path(repo_root) / relative).resolve()
-        root = Path(repo_root).resolve()
-        if root not in path.parents:
-            raise ContractError("probe path escaped repository root")
+        path = _resolve_probe_path(repo_root, args.get("path"))
         try:
+            if path.stat().st_size > 2_000_000:
+                return {
+                    "ok": False,
+                    "metric": "occurrences",
+                    "value": None,
+                    "error": "input_limit",
+                }
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             return {"ok": False, "metric": "occurrences", "value": None, "error": type(exc).__name__}
@@ -430,40 +1018,14 @@ def capture_probe(contract: Mapping[str, Any], *, repo_root: Path) -> dict[str, 
         targets_raw = args.get("targets")
         if not isinstance(targets_raw, Sequence) or isinstance(targets_raw, (str, bytes)):
             raise ContractError("pytest targets must be a list")
-        targets = [_validated_repo_path(item, tests_only=True) for item in list(targets_raw)[:4]]
-        timeout = min(120, max(1, int((contract.get("budget") or {}).get("timeout_seconds") or 120)))
-        try:
-            completed = subprocess.run(
-                [sys.executable, "-m", "pytest", "-q", *targets],
-                cwd=str(Path(repo_root)),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env={**os.environ, "PYTHONHASHSEED": "0", "TZ": "UTC", "LANG": "C.UTF-8"},
-            )
-            output_digest = hashlib.sha256(completed.stdout.encode("utf-8", errors="replace")).hexdigest()
-            return {
-                "ok": completed.returncode in {0, 1},
-                "metric": "returncode",
-                "value": int(completed.returncode),
-                "sample_count": 1,
-                "output_sha256": output_digest,
-                "duration_ms": round((time.monotonic() - started) * 1000, 3),
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                "ok": False,
-                "metric": "returncode",
-                "value": None,
-                "error": "timeout",
-                "duration_ms": round((time.monotonic() - started) * 1000, 3),
-            }
+        targets = [
+            _validated_repo_path(item, tests_only=True, repo_root=repo_root)
+            for item in list(targets_raw)[:4]
+        ]
+        return _run_bounded_pytest(targets, repo_root=repo_root, budget=budget)
 
     if probe_id == "delivery_evidence.v1":
-        _validated_repo_path(args.get("target"))
+        _resolve_probe_path(repo_root, args.get("target"))
         return {
             "ok": True,
             "metric": "delivery",
@@ -472,7 +1034,144 @@ def capture_probe(contract: Mapping[str, Any], *, repo_root: Path) -> dict[str, 
             "duration_ms": round((time.monotonic() - started) * 1000, 3),
         }
 
+    if probe_id == "vision_metric_snapshot.v1":
+        key = str(args.get("metric_key") or "")
+        from hermes_constants import get_hermes_home
+
+        path = Path(get_hermes_home()) / "state" / "vision-metrics.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            return {
+                "ok": False,
+                "metric": key,
+                "value": None,
+                "error": type(exc).__name__,
+            }
+        metric_payload = payload.get("metrics") if isinstance(payload.get("metrics"), Mapping) else payload
+        value = _metric_value(metric_payload, key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return {"ok": False, "metric": key, "value": None, "error": "metric_missing"}
+        return {
+            "ok": True,
+            "metric": key,
+            "value": float(value),
+            "sample_count": 1,
+            "source_generated_at": payload.get("generated_at"),
+            "source_schema_version": payload.get("schema_version") or payload.get("schema"),
+            "duration_ms": round((time.monotonic() - started) * 1000, 3),
+        }
+
     raise ContractError(f"unknown probe_id: {probe_id!r}")
+
+
+def capture_probe(
+    contract: Mapping[str, Any], *, repo_root: Path, expected_target_sha: str | None = None
+) -> dict[str, Any]:
+    """Execute the complete bounded probe plan and return safe structured evidence."""
+    validated = validate_probe_contract(contract)
+    root = Path(repo_root).resolve()
+    paths = _probe_paths(validated)
+    target_sha = _target_sha(root, paths)
+    primary = _execute_probe(
+        str(validated["probe_id"]),
+        validated["probe_args"],
+        repo_root=root,
+        budget=validated["measurement_budget"],
+    )
+    counters = [
+        _execute_probe(
+            str(counter["probe_id"]),
+            counter["probe_args"],
+            repo_root=root,
+            budget=validated["measurement_budget"],
+        )
+        for counter in validated["counter_probes"]
+    ]
+    if validated["probe_id"] == "vision_metric_snapshot.v1":
+        source_generated_at = primary.get("source_generated_at")
+        raw_source_schema = primary.get("source_schema_version")
+        source_schema_version = str(raw_source_schema) if raw_source_schema is not None else None
+    else:
+        source_generated_at = primary.get("source_generated_at") or _utc_now()
+        source_schema_version = str(
+            primary.get("source_schema_version") or str(validated["probe_id"])
+        )
+    evidence = {
+        "ok": bool(primary.get("ok")) and all(bool(counter.get("ok")) for counter in counters),
+        "contract_sha256": validated["contract_sha256"],
+        "target_sha": target_sha,
+        "expected_target_sha": expected_target_sha,
+        "observed_value": primary,
+        "counter_observations": counters,
+        "source_generated_at": source_generated_at,
+        "source_schema_version": source_schema_version,
+        "environment": _environment_descriptor(validated),
+        "environment_fingerprint": _environment_fingerprint(validated),
+        "captured_at": _utc_now(),
+        "sample_count": 1,
+        "cost_usd": 0.0,
+    }
+    confounded_reasons: list[str] = []
+    if expected_target_sha is not None and target_sha != expected_target_sha:
+        confounded_reasons.append("target_sha_mismatch")
+    if validated["probe_id"] == "vision_metric_snapshot.v1":
+        generated_epoch = _source_epoch(source_generated_at)
+        max_source_age = int(
+            validated["environment_requirements"].get("max_source_age_seconds") or 0
+        )
+        source_age = time.time() - generated_epoch if generated_epoch is not None else None
+        if generated_epoch is None:
+            confounded_reasons.append("source_timestamp_invalid")
+        elif source_age is not None and (
+            source_age > max_source_age or source_age < -300
+        ):
+            confounded_reasons.append("stale_source_snapshot")
+    if confounded_reasons:
+        evidence["confounded_reasons"] = sorted(set(confounded_reasons))
+    # Compatibility flat fields remain projections of the structured value.
+    for key in ("metric", "value", "duration_ms", "output_sha256", "error"):
+        if key in primary:
+            evidence[key] = primary[key]
+    return _seal_evidence(evidence)
+
+
+def validate_baseline(contract: Mapping[str, Any], baseline: Mapping[str, Any]) -> None:
+    validated = validate_probe_contract(contract)
+    required = {
+        "contract_sha256",
+        "target_sha",
+        "observed_value",
+        "counter_observations",
+        "source_generated_at",
+        "source_schema_version",
+        "environment_fingerprint",
+        "evidence_ref",
+    }
+    missing = sorted(key for key in required if key not in baseline)
+    if missing:
+        raise ContractError("baseline is missing required evidence: " + ", ".join(missing))
+    if baseline.get("contract_sha256") != validated["contract_sha256"]:
+        raise ContractError("baseline contract hash mismatch")
+    target_sha = str(baseline.get("target_sha") or "")
+    if not (_SHA_RE.fullmatch(target_sha) or _CONTENT_SHA_RE.fullmatch(target_sha)):
+        raise ContractError("baseline target SHA is invalid")
+    if not baseline.get("ok"):
+        raise ContractError("baseline probe did not produce valid evidence")
+    environment = baseline.get("environment")
+    if not isinstance(environment, Mapping):
+        raise ContractError("baseline environment descriptor is missing")
+    expected_environment_fingerprint = hashlib.sha256(
+        _canonical_json(environment).encode("utf-8")
+    ).hexdigest()
+    if baseline.get("environment_fingerprint") != expected_environment_fingerprint:
+        raise ContractError("baseline environment fingerprint is invalid")
+    if not _environment_satisfies_contract(validated, environment):
+        raise ContractError("baseline environment does not satisfy its contract")
+    if not str(baseline.get("evidence_ref") or "").startswith("outcome-evidence:sha256:"):
+        raise ContractError("baseline evidence reference is invalid")
+    if not _evidence_ref_is_valid(baseline):
+        raise ContractError("baseline evidence seal does not match its contents")
 
 
 def compare_observations(
@@ -480,9 +1179,58 @@ def compare_observations(
 ) -> str:
     if not baseline.get("ok") or not current.get("ok"):
         return "unmeasurable"
-    rule = (contract.get("comparator") or {}).get("rule")
-    before = baseline.get("value")
-    after = current.get("value")
+    if baseline.get("environment_fingerprint") != current.get("environment_fingerprint"):
+        return "confounded"
+    if baseline.get("source_schema_version") != current.get("source_schema_version"):
+        return "confounded"
+    if current.get("confounded_reasons"):
+        return "confounded"
+    baseline_counters = baseline.get("counter_observations") or []
+    current_counters = current.get("counter_observations") or []
+    rules = contract.get("counter_rules") or []
+    if len(rules) != len(baseline_counters) or len(rules) != len(current_counters):
+        return "unmeasurable"
+    for rule_spec, before_counter, after_counter in zip(
+        rules, baseline_counters, current_counters, strict=True
+    ):
+        if not before_counter.get("ok") or not after_counter.get("ok"):
+            return "unmeasurable"
+        if rule_spec.get("operator") == "must_remain_passing":
+            if before_counter.get("value") != 0:
+                return "unmeasurable"
+            if after_counter.get("value") != 0:
+                return "worsened"
+        elif rule_spec.get("operator") == "must_not_increase":
+            before_value = before_counter.get("value")
+            after_value = after_counter.get("value")
+            if not isinstance(before_value, (int, float)) or not isinstance(
+                after_value, (int, float)
+            ):
+                return "unmeasurable"
+            if after_value > before_value:
+                return "worsened"
+        else:
+            return "unmeasurable"
+
+    rule_spec = contract.get("success_rule") or contract.get("comparator") or {}
+    rule = rule_spec.get("operator") or rule_spec.get("rule")
+    baseline_value = baseline.get("observed_value") or baseline
+    current_value = current.get("observed_value") or current
+    before = baseline_value.get("value")
+    after = current_value.get("value")
+    tolerance = float(rule_spec.get("neutral_tolerance") or 0.0)
+    if (
+        rule in {"lower_is_better", "higher_is_better"}
+        and isinstance(before, (int, float))
+        and isinstance(after, (int, float))
+        and tolerance > 0
+    ):
+        delta = abs(float(after) - float(before))
+        if abs(float(before)) > 1e-9:
+            if delta / abs(float(before)) < tolerance:
+                return "neutral"
+        elif delta < 1e-9:
+            return "neutral"
     if rule == "lower_is_better" and isinstance(before, (int, float)) and isinstance(after, (int, float)):
         if after < before:
             return "improved"
@@ -495,6 +1243,12 @@ def compare_observations(
         if before == 0 and after != 0:
             return "worsened"
         return "neutral" if before == after == 0 else "unmeasurable"
+    if rule == "higher_is_better" and isinstance(before, (int, float)) and isinstance(after, (int, float)):
+        if after > before:
+            return "improved"
+        if after < before:
+            return "worsened"
+        return "neutral"
     return "unmeasurable"
 
 
@@ -530,6 +1284,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             observation_json TEXT,
             verdict TEXT,
             cost_usd REAL NOT NULL DEFAULT 0,
+            cost_breakdown_json TEXT,
+            source_refs_json TEXT,
             integration_sha TEXT,
             created_at INTEGER NOT NULL,
             completed_at INTEGER,
@@ -539,9 +1295,18 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_outcome_contracts_task ON outcome_contracts(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_outcome_attempts_task ON outcome_attempts(task_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_outcome_attempts_status ON outcome_attempts(status, lease_expires_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_attempts_one_active "
+        "ON outcome_attempts(task_id, contract_hash) WHERE status = 'measuring'",
     )
     for statement in statements:
         conn.execute(statement)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(outcome_attempts)").fetchall()
+    }
+    if "cost_breakdown_json" not in columns:
+        conn.execute("ALTER TABLE outcome_attempts ADD COLUMN cost_breakdown_json TEXT")
+    if "source_refs_json" not in columns:
+        conn.execute("ALTER TABLE outcome_attempts ADD COLUMN source_refs_json TEXT")
 
 
 def _missing_outcome_schema_objects(conn: sqlite3.Connection) -> list[str]:
@@ -551,6 +1316,7 @@ def _missing_outcome_schema_objects(conn: sqlite3.Connection) -> list[str]:
         ("index", "idx_outcome_contracts_task"),
         ("index", "idx_outcome_attempts_task"),
         ("index", "idx_outcome_attempts_status"),
+        ("index", "idx_outcome_attempts_one_active"),
     )
     missing: list[str] = []
     for object_type, name in expected:
@@ -599,12 +1365,12 @@ def register_contract(
     source: str = "autoresearch",
 ) -> bool:
     """Persist baseline/contract and its task event exactly once."""
+    validated_contract = validate_probe_contract(contract)
+    validate_baseline(validated_contract, baseline)
     ensure_schema(conn)
     now = int(time.time())
-    contract_hash = str(contract.get("contract_hash") or "")
-    contract_id = str(contract.get("contract_id") or "")
-    if not contract_hash or not contract_id:
-        raise ContractError("contract id/hash are required")
+    contract_hash = str(validated_contract["contract_hash"])
+    contract_id = str(validated_contract["contract_id"])
     with _immediate_txn(conn):
         existing = conn.execute(
             "SELECT task_id, contract_hash, baseline_json, release_fingerprint "
@@ -632,7 +1398,7 @@ def register_contract(
                 task_id,
                 contract_id,
                 contract_hash,
-                _canonical_json(contract),
+                _canonical_json(validated_contract),
                 _canonical_json(baseline),
                 now,
                 release_fingerprint,
@@ -650,8 +1416,22 @@ def register_contract(
                 "proposal_id": proposal_id,
                 "contract_id": contract_id,
                 "contract_hash": contract_hash,
+                "claim": validated_contract["claim"],
+                "outcome_class": validated_contract["outcome_class"],
+                "trigger": validated_contract["trigger"],
+                "baseline_target_sha": baseline["target_sha"],
+                "baseline_evidence_ref": baseline["evidence_ref"],
+                "baseline_source_generated_at": baseline["source_generated_at"],
+                "baseline_source_schema_version": baseline["source_schema_version"],
+                "baseline_environment_fingerprint": baseline["environment_fingerprint"],
+                "baseline_cost_usd": float(baseline.get("cost_usd") or 0.0),
                 "baseline_recorded_at": now,
                 "release_fingerprint": release_fingerprint,
+                # Append-only replay material. Probe output is already bounded
+                # and represented only by structured values/hashes; no raw
+                # stdout or secret-bearing environment is persisted here.
+                "contract": validated_contract,
+                "baseline": dict(baseline),
             },
             now=now,
         )
@@ -674,6 +1454,8 @@ def claim_measurement_attempt(
         raise ValueError("unknown measurement phase")
     if attempt_no < 1:
         raise ValueError("attempt_no must be positive")
+    if not _CONTENT_SHA_RE.fullmatch(str(contract_hash or "")):
+        raise ValueError("contract_hash must be a full sha256")
     now = int(time.time())
     lease = now + min(900, max(30, int(lease_seconds)))
     material = f"{task_id}\0{contract_hash}\0{phase_value}\0{attempt_no}"
@@ -725,14 +1507,26 @@ def finalize_measurement_attempt(
     verdict: str | None,
     observation: Mapping[str, Any],
     cost_usd: float = 0.0,
+    cost_breakdown: Mapping[str, float] | None = None,
+    source_refs: Sequence[str] | None = None,
     integration_sha: str | None = None,
 ) -> bool:
     if status not in {"measured", "retryable_failure", "exhausted"}:
         raise ValueError("invalid terminal measurement status")
     if verdict not in OUTCOME_VERDICTS:
         raise ValueError("invalid outcome verdict")
+    breakdown = {
+        str(key): float(value)
+        for key, value in (cost_breakdown or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if any(value < 0 for value in breakdown.values()):
+        raise ValueError("measurement cost components cannot be negative")
+    if breakdown:
+        cost_usd = round(sum(breakdown.values()), 8)
     if cost_usd < 0:
         raise ValueError("measurement cost cannot be negative")
+    refs = sorted({str(ref) for ref in (source_refs or []) if str(ref).strip()})
     if integration_sha is not None and not _SHA_RE.fullmatch(integration_sha):
         raise ValueError("integration_sha must be a full git SHA")
     ensure_schema(conn)
@@ -747,13 +1541,16 @@ def finalize_measurement_attempt(
             return False
         cur = conn.execute(
             "UPDATE outcome_attempts SET status = ?, observation_json = ?, verdict = ?, "
-            "cost_usd = ?, integration_sha = ?, completed_at = ? "
+            "cost_usd = ?, cost_breakdown_json = ?, source_refs_json = ?, "
+            "integration_sha = ?, completed_at = ? "
             "WHERE dedupe_key = ? AND owner_token = ? AND status = 'measuring'",
             (
                 status,
                 _canonical_json(observation),
                 verdict,
                 float(cost_usd),
+                _canonical_json(breakdown),
+                _canonical_json(refs),
                 integration_sha,
                 now,
                 dedupe_key,
@@ -776,7 +1573,11 @@ def finalize_measurement_attempt(
                 "status": status,
                 "verdict": verdict,
                 "cost_usd": float(cost_usd),
+                "cost_breakdown": breakdown,
+                "source_refs": refs,
                 "integration_sha": integration_sha,
+                "evidence_ref": observation.get("evidence_ref"),
+                "observation": dict(observation),
                 "observation_sha256": hashlib.sha256(
                     _canonical_json(observation).encode("utf-8")
                 ).hexdigest(),
@@ -792,15 +1593,42 @@ def recover_expired_attempts(conn: sqlite3.Connection, *, now: int | None = None
     now_ts = int(time.time() if now is None else now)
     with _immediate_txn(conn):
         rows = conn.execute(
-            "SELECT dedupe_key, task_id, proposal_id, contract_hash, phase, attempt_no "
-            "FROM outcome_attempts WHERE status = 'measuring' AND lease_expires_at < ?",
+            "SELECT a.dedupe_key, a.task_id, a.proposal_id, a.contract_hash, a.phase, "
+            "a.attempt_no, c.contract_json FROM outcome_attempts a "
+            "LEFT JOIN outcome_contracts c ON c.task_id = a.task_id "
+            "AND c.contract_hash = a.contract_hash "
+            "WHERE a.status = 'measuring' AND a.lease_expires_at < ?",
             (now_ts,),
         ).fetchall()
         for row in rows:
+            try:
+                contract = validate_probe_contract(json.loads(row["contract_json"] or "{}"))
+                max_attempts = min(
+                    3,
+                    max(
+                        1,
+                        int((contract.get("measurement_budget") or {}).get("max_attempts") or 1),
+                    ),
+                )
+            except (ContractError, ValueError, TypeError):
+                max_attempts = 1
+            exhausted = int(row["attempt_no"]) >= max_attempts
+            status = "exhausted" if exhausted else "retryable_failure"
+            verdict = "unmeasurable" if exhausted else None
+            observation = {
+                "ok": False,
+                "error": "lease_expired",
+                "captured_at": _utc_now(),
+                "contract_sha256": row["contract_hash"],
+            }
+            observation["evidence_ref"] = "outcome-evidence:sha256:" + hashlib.sha256(
+                _canonical_json(observation).encode("utf-8")
+            ).hexdigest()
             conn.execute(
-                "UPDATE outcome_attempts SET status = 'retryable_failure', completed_at = ?, "
-                "observation_json = ? WHERE dedupe_key = ? AND status = 'measuring'",
-                (now_ts, _canonical_json({"error": "lease_expired"}), row["dedupe_key"]),
+                "UPDATE outcome_attempts SET status = ?, verdict = ?, completed_at = ?, "
+                "observation_json = ?, cost_breakdown_json = '{}', source_refs_json = '[]' "
+                "WHERE dedupe_key = ? AND status = 'measuring'",
+                (status, verdict, now_ts, _canonical_json(observation), row["dedupe_key"]),
             )
             _append_task_event(
                 conn,
@@ -813,17 +1641,85 @@ def recover_expired_attempts(conn: sqlite3.Connection, *, now: int | None = None
                     "contract_hash": row["contract_hash"],
                     "phase": row["phase"],
                     "attempt": row["attempt_no"],
-                    "status": "retryable_failure",
-                    "verdict": None,
+                    "status": status,
+                    "verdict": verdict,
                     "cost_usd": 0.0,
+                    "cost_breakdown": {},
+                    "source_refs": [],
                     "reason": "lease_expired",
+                    "evidence_ref": observation["evidence_ref"],
+                    "observation": observation,
+                    "observation_sha256": hashlib.sha256(
+                        _canonical_json(observation).encode("utf-8")
+                    ).hexdigest(),
                 },
                 now=now_ts,
             )
     return len(rows)
 
 
-def _integration_sha_from_payload(payload: Any) -> str | None:
+_INTERVENTION_EVENT_KINDS = frozenset(
+    {
+        "freigabe_released",
+        "freigabe_vetoed",
+        "operator_override",
+        "operator_decision",
+        "manual_override",
+    }
+)
+
+
+def _measurement_accounting(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    baseline: Mapping[str, Any],
+    observation: Mapping[str, Any],
+) -> tuple[dict[str, float], list[str], int]:
+    """Collect additive, source-addressable costs and operator interventions."""
+    breakdown = {
+        "research_usd": max(0.0, float(baseline.get("research_cost_usd") or 0.0)),
+        "delivery_usd": 0.0,
+        "review_usd": 0.0,
+        "baseline_probe_usd": max(0.0, float(baseline.get("cost_usd") or 0.0)),
+        "outcome_probe_usd": max(0.0, float(observation.get("cost_usd") or 0.0)),
+    }
+    refs = [
+        str(ref)
+        for ref in (baseline.get("evidence_ref"), observation.get("evidence_ref"))
+        if ref
+    ]
+    if _table_exists(conn, "task_runs"):
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(task_runs)").fetchall()}
+        if {"id", "task_id", "profile", "cost_usd"}.issubset(columns):
+            rows = conn.execute(
+                "SELECT id, profile, cost_usd FROM task_runs "
+                "WHERE task_id = ? AND cost_usd IS NOT NULL ORDER BY id",
+                (task_id,),
+            ).fetchall()
+            for row in rows:
+                value = max(0.0, float(row["cost_usd"] or 0.0))
+                component = (
+                    "review_usd"
+                    if "review" in str(row["profile"] or "").lower()
+                    else "delivery_usd"
+                )
+                breakdown[component] += value
+                refs.append(f"task-run:{row['id']}")
+    interventions = 0
+    if _table_exists(conn, "task_events"):
+        placeholders = ",".join("?" for _ in _INTERVENTION_EVENT_KINDS)
+        rows = conn.execute(
+            f"SELECT id FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
+            "ORDER BY id",
+            (task_id, *_INTERVENTION_EVENT_KINDS),
+        ).fetchall()
+        interventions = len(rows)
+        refs.extend(f"task-event:{row['id']}" for row in rows)
+    return ({key: round(value, 8) for key, value in breakdown.items()}, sorted(set(refs)), interventions)
+
+
+def _real_integrator_sha(payload: Any) -> str | None:
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
@@ -831,32 +1727,148 @@ def _integration_sha_from_payload(payload: Any) -> str | None:
             return None
     if not isinstance(payload, Mapping):
         return None
-    for key in _SHA_KEYS:
-        value = str(payload.get(key) or "").strip()
-        if _SHA_RE.fullmatch(value):
-            return value.lower()
-    nested = payload.get("outcome")
-    if isinstance(nested, Mapping):
-        return _integration_sha_from_payload(nested)
-    return None
+    value = str(payload.get("merge_commit") or "").strip()
+    return value.lower() if _SHA_RE.fullmatch(value) else None
+
+
+def _deployment_witnesses(
+    conn: sqlite3.Connection, task_id: str
+) -> list[tuple[int, str]]:
+    placeholders = ",".join("?" for _ in _DEPLOYMENT_EVENT_KINDS)
+    rows = conn.execute(
+        f"SELECT created_at, payload FROM task_events WHERE task_id = ? "
+        f"AND kind IN ({placeholders}) ORDER BY id",
+        (task_id, *_DEPLOYMENT_EVENT_KINDS),
+    ).fetchall()
+    witnesses: list[tuple[int, str]] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        deployed = str(payload.get("deployed_sha") or "").lower()
+        running = str(payload.get("running_sha") or "").lower()
+        if _SHA_RE.fullmatch(deployed) and deployed == running:
+            witnesses.append((int(row["created_at"]), deployed))
+    return witnesses
+
+
+def _overlapping_runtime_windows(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    contract: Mapping[str, Any],
+    deployed_at: int,
+) -> list[str]:
+    """Return other same-class tasks whose reviewed effect window overlaps."""
+    if not _table_exists(conn, "outcome_contracts"):
+        return []
+    window = contract.get("observation_window") or {}
+    duration = max(
+        1,
+        int(window.get("min_age_seconds") or window.get("max_age_seconds") or 1),
+    )
+    start = int(deployed_at)
+    end = start + duration
+    overlaps: list[str] = []
+    rows = conn.execute(
+        "SELECT task_id, contract_json FROM outcome_contracts WHERE task_id != ?",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            other = validate_probe_contract(json.loads(row["contract_json"] or "{}"))
+        except (ContractError, ValueError, TypeError):
+            continue
+        if (
+            other.get("trigger") != "deployed_runtime"
+            or other.get("outcome_class") != contract.get("outcome_class")
+        ):
+            continue
+        other_window = other.get("observation_window") or {}
+        other_duration = max(
+            1,
+            int(
+                other_window.get("min_age_seconds")
+                or other_window.get("max_age_seconds")
+                or 1
+            ),
+        )
+        for other_at, _sha in _deployment_witnesses(conn, str(row["task_id"])):
+            if start <= other_at + other_duration and other_at <= end:
+                overlaps.append(str(row["task_id"]))
+                break
+    return sorted(set(overlaps))
 
 
 def measurement_readiness(
-    conn: sqlite3.Connection, *, task_id: str, contract: Mapping[str, Any]
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    contract: Mapping[str, Any],
+    now: int | None = None,
 ) -> dict[str, Any]:
-    if not bool(contract.get("requires_delivery_sha")):
-        return {"ready": True, "reason": None, "integration_sha": None}
-    placeholders = ",".join("?" for _ in _INTEGRATION_EVENT_KINDS)
-    rows = conn.execute(
-        f"SELECT payload FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
-        "ORDER BY id DESC",
-        (task_id, *_INTEGRATION_EVENT_KINDS),
-    ).fetchall()
-    for row in rows:
-        sha = _integration_sha_from_payload(row["payload"])
-        if sha:
-            return {"ready": True, "reason": None, "integration_sha": sha}
-    return {"ready": False, "reason": "integration_sha_missing", "integration_sha": None}
+    validated = validate_probe_contract(contract)
+    trigger = validated["trigger"]
+    if trigger == "integrated_commit":
+        by_kind: dict[str, set[str]] = {kind: set() for kind in _INTEGRATION_EVENT_KINDS}
+        placeholders = ",".join("?" for _ in _INTEGRATION_EVENT_KINDS)
+        rows = conn.execute(
+            f"SELECT kind, payload FROM task_events WHERE task_id = ? AND kind IN ({placeholders}) "
+            "ORDER BY id DESC",
+            (task_id, *_INTEGRATION_EVENT_KINDS),
+        ).fetchall()
+        for row in rows:
+            sha = _real_integrator_sha(row["payload"])
+            if sha:
+                by_kind[str(row["kind"])].add(sha)
+        common = by_kind["integration_merged"] & by_kind["INTEGRATOR_VERIFIED"]
+        if common:
+            return {"ready": True, "reason": None, "integration_sha": sorted(common)[-1]}
+        return {"ready": False, "reason": "integration_sha_missing", "integration_sha": None}
+
+    if trigger == "deployed_runtime":
+        witnesses = _deployment_witnesses(conn, task_id)
+        if not witnesses:
+            return {
+                "ready": False,
+                "reason": "deployment_sha_missing",
+                "integration_sha": None,
+            }
+        deployed_at, deployed = witnesses[-1]
+        window = validated.get("observation_window") or {}
+        now_ts = int(time.time() if now is None else now)
+        age = now_ts - deployed_at
+        min_age = max(0, int(window.get("min_age_seconds") or 0))
+        if age < min_age:
+            return {
+                "ready": False,
+                "reason": "observation_window_not_mature",
+                "integration_sha": deployed,
+            }
+        reasons: list[str] = []
+        max_age = int(window.get("max_age_seconds") or 0)
+        if max_age and age > max_age:
+            reasons.append("stale_observation_window")
+        overlaps = _overlapping_runtime_windows(
+            conn,
+            task_id=task_id,
+            contract=validated,
+            deployed_at=deployed_at,
+        )
+        if overlaps:
+            reasons.append("overlapping_effect_window")
+        result: dict[str, Any] = {
+            "ready": True,
+            "reason": None,
+            "integration_sha": deployed,
+        }
+        if reasons:
+            result["confounded_reasons"] = reasons
+            result["confounded_task_ids"] = overlaps
+        return result
+
+    return {"ready": False, "reason": "unknown_trigger", "integration_sha": None}
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -909,9 +1921,12 @@ def enrich_autoresearch_outcomes(
             attempt = attempts.get(proposal_id)
             if contract is not None:
                 item["contract_hash"] = contract["contract_hash"]
+                try:
+                    contract_payload = json.loads(contract["contract_json"])
+                except (ValueError, TypeError):
+                    contract_payload = {}
                 item["probe_contract"] = {
-                    "contract_id": contract["contract_id"],
-                    "contract_hash": contract["contract_hash"],
+                    **contract_payload,
                     "baseline_recorded_at": contract["baseline_recorded_at"],
                     "release_fingerprint": contract["release_fingerprint"],
                 }
@@ -925,20 +1940,34 @@ def enrich_autoresearch_outcomes(
                     {
                         "measurement_status": "pending",
                         "outcome_verdict": None,
-                        "evidence_grade": "contract_verified",
+                        # A contract and baseline make the attempt auditable,
+                        # but do not verify an outcome.  Only a terminal common
+                        # verifier attempt earns contract_verified evidence.
+                        "evidence_grade": "legacy_observational",
                         "calibration_eligible": False,
                     }
                 )
             if attempt is not None and canonical["outcome_applicability"] == "applicable":
                 canonical["measurement_status"] = attempt["status"]
                 canonical["outcome_verdict"] = attempt["verdict"]
+                if attempt["status"] in {"measured", "exhausted"}:
+                    canonical["evidence_grade"] = "contract_verified"
                 item["outcome_cost_usd"] = float(attempt["cost_usd"] or 0.0)
                 item["outcome_measured_at"] = attempt["completed_at"]
                 item["outcome_integration_sha"] = attempt["integration_sha"]
                 try:
+                    breakdown = json.loads(attempt["cost_breakdown_json"] or "{}")
+                except (ValueError, TypeError, IndexError):
+                    breakdown = {}
+                item["outcome_cost_breakdown"] = breakdown
+                try:
                     item["outcome_observation"] = json.loads(attempt["observation_json"] or "null")
                 except (ValueError, TypeError):
                     item["outcome_observation"] = None
+                if isinstance(item["outcome_observation"], Mapping):
+                    item["outcome_operator_interventions"] = int(
+                        item["outcome_observation"].get("operator_interventions") or 0
+                    )
             item.update(canonical)
             item.setdefault("outcome_schema_version", OUTCOME_SCHEMA_VERSION)
             projected.append(item)
@@ -951,12 +1980,25 @@ def enrich_autoresearch_outcomes(
 def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     applicable = [item for item in items if item.get("outcome_applicability") == "applicable"]
     measured = [item for item in applicable if item.get("measurement_status") == "measured"]
-    counts = {
-        verdict: sum(1 for item in measured if item.get("outcome_verdict") == verdict)
+    verified = [item for item in measured if item.get("evidence_grade") == "contract_verified"]
+    legacy = [item for item in measured if item.get("evidence_grade") != "contract_verified"]
+    verified_counts = {
+        verdict: sum(1 for item in verified if item.get("outcome_verdict") == verdict)
+        for verdict in ("improved", "neutral", "worsened", "unmeasurable", "confounded")
+    }
+    legacy_counts = {
+        verdict: sum(1 for item in legacy if item.get("outcome_verdict") == verdict)
         for verdict in ("improved", "neutral", "worsened", "unmeasurable", "confounded")
     }
     cost = sum(float(item.get("outcome_cost_usd") or 0.0) for item in items)
-    improved = counts["improved"]
+    interventions = sum(int(item.get("outcome_operator_interventions") or 0) for item in items)
+    integrated = [
+        item for item in applicable if str(item.get("delivery_state") or "") == "integrated"
+    ]
+    directional = (
+        verified_counts["improved"] + verified_counts["neutral"] + verified_counts["worsened"]
+    )
+    verified_improved = verified_counts["improved"]
     return {
         "applicable": len(applicable),
         "not_applicable": len(items) - len(applicable),
@@ -966,11 +2008,33 @@ def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if item.get("measurement_status") in {"pending", "measuring", "retryable_failure"}
         ),
         "measured": len(measured),
-        "measurement_coverage": len(measured) / len(applicable) if applicable else 0.0,
-        **counts,
+        "verified_measured": len(verified),
+        "measurement_coverage": len(verified) / len(integrated) if integrated else 0.0,
+        "outcome_coverage": len(verified) / len(integrated) if integrated else 0.0,
+        "directional_coverage": directional / len(integrated) if integrated else 0.0,
+        "verified_directional_denominator": directional,
+        "verified_benefit_rate": verified_improved / directional if directional else None,
+        "regression_rate": verified_counts["worsened"] / directional if directional else None,
+        "unmeasurable_rate": (
+            (verified_counts["unmeasurable"] + verified_counts["confounded"]) / len(verified)
+            if verified else None
+        ),
+        "verified_improved": verified_improved,
+        "legacy_improved": legacy_counts["improved"],
+        # Existing API keys now deliberately mean contract-verified outcomes.
+        "improved": verified_improved,
+        "neutral": verified_counts["neutral"],
+        "worsened": verified_counts["worsened"],
+        "unmeasurable": verified_counts["unmeasurable"],
+        "confounded": verified_counts["confounded"],
         "measurement_cost_usd": round(cost, 6),
         "cost_per_measured_usd": cost / len(measured) if measured and cost else None,
-        "cost_per_improved_usd": cost / improved if improved and cost else None,
+        "cost_per_improved_usd": cost / verified_improved if verified_improved and cost else None,
+        "cost_per_verified_benefit_usd": cost / verified_improved if verified_improved and cost else None,
+        "operator_interventions": interventions,
+        "operator_interventions_per_verified_benefit": (
+            interventions / verified_improved if verified_improved else None
+        ),
     }
 
 
@@ -982,6 +2046,11 @@ def shadow_marker_path() -> Path:
 
 def shadow_enabled() -> bool:
     return shadow_marker_path().is_file()
+
+
+def outcome_enforcement_enabled() -> bool:
+    """Hard policy boundary for this release: observations never steer work."""
+    return False
 
 
 def run_shadow_verifier(
@@ -1047,8 +2116,21 @@ def run_shadow_verifier(
             if existing is not None:
                 summary["skipped_existing"] += 1
                 continue
-            contract = json.loads(row["contract_json"])
-            baseline = json.loads(row["baseline_json"])
+            try:
+                contract = validate_probe_contract(json.loads(row["contract_json"]))
+                baseline = json.loads(row["baseline_json"])
+                validate_baseline(contract, baseline)
+            except (ContractError, ValueError, TypeError):
+                summary["pending"] += 1
+                continue
+            active = conn.execute(
+                "SELECT 1 FROM outcome_attempts WHERE task_id = ? AND contract_hash = ? "
+                "AND status = 'measuring' LIMIT 1",
+                (row["task_id"], row["contract_hash"]),
+            ).fetchone()
+            if active is not None:
+                summary["pending"] += 1
+                continue
             readiness = measurement_readiness(conn, task_id=row["task_id"], contract=contract)
             if not readiness["ready"]:
                 summary["pending"] += 1
@@ -1062,7 +2144,8 @@ def run_shadow_verifier(
                 (row["task_id"], row["contract_hash"], phase),
             ).fetchone()[0]
             attempt_no = int(previous or 0) + 1
-            max_attempts = min(3, max(1, int((contract.get("budget") or {}).get("max_attempts") or 1)))
+            budget = contract["measurement_budget"]
+            max_attempts = min(3, max(1, int(budget.get("max_attempts") or 1)))
             if attempt_no > max_attempts:
                 summary["exhausted"] += 1
                 continue
@@ -1078,11 +2161,44 @@ def run_shadow_verifier(
                 contract_hash=row["contract_hash"],
                 phase=phase,
                 attempt_no=attempt_no,
-                lease_seconds=int((contract.get("budget") or {}).get("timeout_seconds") or 30) + 30,
+                lease_seconds=int(budget.get("timeout_seconds") or 30) + 30,
             )
             if claim is None:
+                summary["pending"] += 1
                 continue
-            observation = capture_probe(contract, repo_root=root)
+            try:
+                observation = capture_probe(
+                    contract,
+                    repo_root=root,
+                    expected_target_sha=readiness["integration_sha"],
+                )
+                readiness_reasons = list(readiness.get("confounded_reasons") or [])
+                if readiness_reasons:
+                    observation = _seal_evidence(
+                        {
+                            **observation,
+                            "confounded_reasons": sorted(
+                                set(
+                                    list(observation.get("confounded_reasons") or [])
+                                    + readiness_reasons
+                                )
+                            ),
+                            "confounded_task_ids": list(
+                                readiness.get("confounded_task_ids") or []
+                            ),
+                        }
+                    )
+            except (ContractError, OSError, subprocess.SubprocessError) as exc:
+                observation = _seal_evidence(
+                    {
+                        "ok": False,
+                        "contract_sha256": contract["contract_sha256"],
+                        "expected_target_sha": readiness["integration_sha"],
+                        "error": type(exc).__name__,
+                        "captured_at": _utc_now(),
+                        "cost_usd": 0.0,
+                    }
+                )
             verdict = compare_observations(contract, baseline, observation)
             if observation.get("ok"):
                 terminal_status = "measured"
@@ -1092,6 +2208,20 @@ def run_shadow_verifier(
             else:
                 terminal_status = "exhausted"
                 verdict = "unmeasurable"
+            cost_breakdown, source_refs, interventions = _measurement_accounting(
+                conn,
+                task_id=row["task_id"],
+                baseline=baseline,
+                observation=observation,
+            )
+            observation = _seal_evidence(
+                {
+                    **observation,
+                    "operator_interventions": interventions,
+                    "cost_breakdown": cost_breakdown,
+                    "source_refs": source_refs,
+                }
+            )
             finalized = finalize_measurement_attempt(
                 conn,
                 dedupe_key=claim.dedupe_key,
@@ -1099,11 +2229,15 @@ def run_shadow_verifier(
                 status=terminal_status,
                 verdict=verdict,
                 observation=observation,
-                cost_usd=0.0,
+                cost_breakdown=cost_breakdown,
+                source_refs=source_refs,
                 integration_sha=readiness["integration_sha"],
             )
             if finalized:
                 summary[terminal_status] += 1
+                summary["cost_usd"] = round(
+                    float(summary["cost_usd"]) + sum(cost_breakdown.values()), 8
+                )
                 summary["outcomes"].append(
                     {
                         "proposal_id": row["proposal_id"],
@@ -1120,6 +2254,208 @@ def run_shadow_verifier(
     finally:
         if own_conn and conn is not None:
             conn.close()
+
+
+def strategist_outcome_class(record: Mapping[str, Any]) -> str | None:
+    contract = record.get("probe_contract")
+    if isinstance(contract, Mapping) and contract.get("outcome_class"):
+        return str(contract["outcome_class"])
+    key = str(record.get("metric_key") or "").strip()
+    if not key:
+        return None
+    basename = key.rsplit(".", 1)[-1]
+    direction = _VISION_METRIC_DIRECTIONS.get(key, _VISION_METRIC_DIRECTIONS.get(basename))
+    if direction is None:
+        return None
+    operator = "higher_is_better" if direction == 1 else "lower_is_better"
+    return f"vision-metric:{key}:{operator}/v1"
+
+
+def project_strategist_outcomes(
+    records: Sequence[Any], *, conn: sqlite3.Connection | None, terminalize_missing: bool = False
+) -> list[Any]:
+    """Materialize the legacy Strategist readmodel from contract/task truth."""
+    task_columns: set[str] = set()
+    has_events = False
+    if conn is not None and _table_exists(conn, "tasks"):
+        task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        has_events = _table_exists(conn, "task_events")
+    projected: list[Any] = []
+    for raw in records:
+        if not isinstance(raw, Mapping):
+            projected.append(raw)
+            continue
+        rec = normalize_strategist_record(raw)
+        root_id = rec.get("root_task_id")
+        rec.setdefault("source", "strategist")
+        rec.setdefault("subject_type", "strategist_lever")
+        rec.setdefault("subject_id", root_id or rec.get("lever_key"))
+        rec.setdefault("legacy_provenance", "lever-outcomes.json/v1")
+        outcome_class = strategist_outcome_class(rec)
+        if outcome_class is not None:
+            rec["outcome_class"] = outcome_class
+
+        contract_row = None
+        attempt_row = None
+        if (
+            conn is not None
+            and root_id is not None
+            and _table_exists(conn, "outcome_contracts")
+        ):
+            contract_row = conn.execute(
+                "SELECT * FROM outcome_contracts WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+                (root_id,),
+            ).fetchone()
+            if contract_row is not None and _table_exists(conn, "outcome_attempts"):
+                attempt_row = conn.execute(
+                    "SELECT * FROM outcome_attempts WHERE task_id = ? AND contract_hash = ? "
+                    "ORDER BY created_at DESC, attempt_no DESC LIMIT 1",
+                    (root_id, contract_row["contract_hash"]),
+                ).fetchone()
+        if contract_row is not None:
+            try:
+                rec["probe_contract"] = json.loads(contract_row["contract_json"])
+                rec["outcome_baseline"] = json.loads(contract_row["baseline_json"])
+            except (TypeError, ValueError):
+                pass
+            rec["contract_hash"] = contract_row["contract_hash"]
+            rec["contract_registered"] = True
+        if attempt_row is not None and attempt_row["status"] in {"measured", "exhausted"}:
+            try:
+                observation = json.loads(attempt_row["observation_json"] or "null")
+            except (TypeError, ValueError):
+                observation = None
+            rec.update(
+                {
+                    "status": "measured",
+                    "measured_at": attempt_row["completed_at"],
+                    "outcome_applicability": "applicable",
+                    "measurement_status": attempt_row["status"],
+                    "outcome_verdict": attempt_row["verdict"],
+                    "verdict": attempt_row["verdict"],
+                    "evidence_grade": "contract_verified",
+                    "outcome_authority": "task_events",
+                    "outcome_integration_sha": attempt_row["integration_sha"],
+                    "outcome_cost_usd": float(attempt_row["cost_usd"] or 0.0),
+                    "outcome_observation": observation,
+                }
+            )
+            projected.append(rec)
+            continue
+
+        # Existing measured rows are immutable historical observations. Their
+        # verdict and timestamp survive even when later task retention changed.
+        if rec.get("status") == "measured" or rec.get("measured_at") is not None:
+            rec.update(
+                {
+                    "outcome_applicability": "applicable",
+                    "measurement_status": "measured",
+                    "outcome_verdict": rec.get("outcome_verdict", rec.get("verdict")),
+                    "evidence_grade": "legacy_observational",
+                    "outcome_authority": "legacy_ledger",
+                }
+            )
+            projected.append(rec)
+            continue
+
+        task = None
+        events: list[sqlite3.Row] = []
+        if conn is not None and root_id is not None and "status" in task_columns:
+            task = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_id,)
+            ).fetchone()
+            if has_events:
+                events = conn.execute(
+                    "SELECT id, kind, payload, created_at FROM task_events "
+                    "WHERE task_id = ? ORDER BY id",
+                    (root_id,),
+                ).fetchall()
+        by_kind: dict[str, set[str]] = {kind: set() for kind in _INTEGRATION_EVENT_KINDS}
+        deployment_sha: str | None = None
+        terminal_event: str | None = None
+        event_refs: list[str] = []
+        shipped_at: int | None = None
+        for event in events:
+            event_refs.append(f"task-event:{event['id']}")
+            kind = str(event["kind"])
+            if kind in by_kind:
+                sha = _real_integrator_sha(event["payload"])
+                if sha:
+                    by_kind[kind].add(sha)
+                    shipped_at = int(event["created_at"])
+            if kind in _DEPLOYMENT_EVENT_KINDS:
+                try:
+                    payload = json.loads(event["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                deployed = str(payload.get("deployed_sha") or "").lower()
+                running = str(payload.get("running_sha") or "").lower()
+                if _SHA_RE.fullmatch(deployed) and deployed == running:
+                    deployment_sha = deployed
+                    shipped_at = int(event["created_at"])
+            if kind in {"freigabe_completed", "freigabe_vetoed"}:
+                terminal_event = kind
+        integrated = by_kind["integration_merged"] & by_kind["INTEGRATOR_VERIFIED"]
+        delivery_sha = sorted(integrated)[-1] if integrated else deployment_sha
+        if delivery_sha:
+            rec.update(
+                {
+                    "status": "shipped",
+                    "shipped_at": rec.get("shipped_at") or shipped_at,
+                    "delivery_state": "integrated",
+                    "outcome_applicability": "applicable",
+                    "measurement_status": "pending",
+                    "outcome_verdict": None,
+                    "evidence_grade": "legacy_observational",
+                    "outcome_authority": "task_events",
+                    "outcome_delivery_sha": delivery_sha,
+                    "outcome_source_refs": event_refs,
+                }
+            )
+            projected.append(rec)
+            continue
+
+        task_status = str(task["status"] or "") if task is not None else "missing"
+        terminal = terminal_event is not None or task_status in {
+            "done", "archived", "failed", "cancelled", "canceled"
+        } or (task is None and terminalize_missing)
+        if terminal:
+            disposition = {
+                "freigabe_completed": "done_elsewhere",
+                "freigabe_vetoed": "vetoed",
+            }.get(terminal_event or "", terminal_event or task_status or "missing_task")
+            rec.update(
+                {
+                    "status": "archived",
+                    "delivery_state": "none",
+                    "delivery_disposition": disposition,
+                    "outcome_applicability": "not_applicable",
+                    "measurement_status": "not_started",
+                    "outcome_verdict": None,
+                    "evidence_grade": "legacy_observational",
+                    "calibration_eligible": False,
+                    "outcome_authority": "task_events" if task is not None else "legacy_ledger",
+                    "outcome_source_refs": event_refs,
+                }
+            )
+        elif task is not None:
+            rec.update(
+                {
+                    "delivery_state": rec.get("delivery_state") or "queued",
+                    "outcome_applicability": "applicable",
+                    "measurement_status": "pending",
+                    "outcome_verdict": None,
+                    "evidence_grade": "legacy_observational",
+                    "outcome_authority": "task_events",
+                    "outcome_source_refs": event_refs,
+                }
+            )
+        else:
+            # Runtime compatibility for not-yet-migrated historical fixtures.
+            # The live migration calls with terminalize_missing=True.
+            rec["outcome_authority"] = "legacy_ledger"
+        projected.append(rec)
+    return projected
 
 
 def migrate_shared_state(
@@ -1163,19 +2499,25 @@ def migrate_shared_state(
         strategist_current = []
     if not isinstance(strategist_current, list):
         strategist_current = []
-    strategist_updated = [
-        normalize_strategist_record(item) if isinstance(item, Mapping) else item
-        for item in strategist_current
-    ]
-    strategist_changed = _canonical_json(strategist_updated) != _canonical_json(strategist_current)
-
     missing_schema_objects: list[str] = []
+    truth_conn: sqlite3.Connection | None = None
     if db_path is not None:
         if not db_path.is_file():
             raise FileNotFoundError(f"Kanban database does not exist: {db_path}")
         uri = f"file:{db_path.resolve()}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
-            missing_schema_objects = _missing_outcome_schema_objects(conn)
+        truth_conn = sqlite3.connect(uri, uri=True)
+        truth_conn.row_factory = sqlite3.Row
+        missing_schema_objects = _missing_outcome_schema_objects(truth_conn)
+    try:
+        strategist_updated = project_strategist_outcomes(
+            strategist_current,
+            conn=truth_conn,
+            terminalize_missing=True,
+        )
+    finally:
+        if truth_conn is not None:
+            truth_conn.close()
+    strategist_changed = _canonical_json(strategist_updated) != _canonical_json(strategist_current)
 
     backup_dir: Path | None = None
     if apply and (proposal_changes or strategist_changed or missing_schema_objects):
@@ -1211,10 +2553,17 @@ def migrate_shared_state(
             def _normalize_strategist(current: Any) -> Any:
                 if not isinstance(current, list):
                     return current
-                return [
-                    normalize_strategist_record(item) if isinstance(item, Mapping) else item
-                    for item in current
-                ]
+                truth: sqlite3.Connection | None = None
+                if db_path is not None:
+                    truth = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
+                    truth.row_factory = sqlite3.Row
+                try:
+                    return project_strategist_outcomes(
+                        current, conn=truth, terminalize_missing=True
+                    )
+                finally:
+                    if truth is not None:
+                        truth.close()
 
             locked_json_update(strategist_path, default=[], transform=_normalize_strategist)
         if db_path is not None and missing_schema_objects:
@@ -1246,6 +2595,7 @@ __all__ = [
     "build_probe_contract",
     "build_vision_metric_contract",
     "capture_probe",
+    "capture_vision_snapshot_baseline",
     "claim_measurement_attempt",
     "compare_observations",
     "enrich_autoresearch_outcomes",
@@ -1256,12 +2606,18 @@ __all__ = [
     "migrate_shared_state",
     "normalize_outcome_fields",
     "normalize_strategist_record",
+    "outcome_enforcement_enabled",
     "outcome_metrics",
+    "project_strategist_outcomes",
     "recover_expired_attempts",
     "register_contract",
     "release_fingerprint",
     "run_shadow_verifier",
+    "seal_evidence",
     "shadow_enabled",
     "shadow_marker_path",
+    "strategist_outcome_class",
     "shared_state_lock",
+    "validate_baseline",
+    "validate_probe_contract",
 ]

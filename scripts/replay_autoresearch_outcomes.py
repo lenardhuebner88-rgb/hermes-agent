@@ -40,6 +40,12 @@ def _configure(root: Path, state: Path, *, repo_root: Path | None = None) -> Non
     os.environ["HERMES_AUTORESEARCH_RECONCILE_SUMMARY_PATH"] = str(state / "last-reconcile.json")
     os.environ["HERMES_AUTORESEARCH_RECONCILE_LOCK_PATH"] = str(state / "reconcile.lock")
     os.environ["HERMES_STRATEGIST_VETOED_PATH"] = str(state / "vetoed.json")
+    os.environ["HERMES_KANBAN_DB"] = str(home / "kanban.db")
+    os.environ["HERMES_KANBAN_BOARD"] = "default"
+    os.environ["HERMES_KANBAN_WORKSPACES_ROOT"] = str(state / "workspaces")
+    os.environ["HERMES_KANBAN_WORKER_ISOLATION"] = "worktree"
+    os.environ["HERMES_SANDBOX_MODE"] = "1"
+    os.environ["HOME"] = str(home)
     if repo_root is not None:
         os.environ["AUTORESEARCH_REPLAY_REPO_ROOT"] = str(repo_root)
     home.mkdir(parents=True, exist_ok=True)
@@ -120,8 +126,19 @@ def _prepare_flood(root: Path, state: Path, count: int) -> None:
     from hermes_cli import kanban_db as kb
 
     kb.init_db()
+    targets = (
+        "hermes_cli/autoresearch_reconcile.py",
+        "hermes_cli/autoresearch_proposals.py",
+        "hermes_cli/autoresearch_runs.py",
+        "hermes_cli/strategist.py",
+        "hermes_cli/kanban_db.py",
+        "scripts/autoresearch_nightly.py",
+        "scripts/autoresearch_v2_nightly.py",
+        "tests/test_autoresearch_reconcile.py",
+    )
     for index in range(count):
         proposal_id = f"replay-flood-{index:02d}"
+        target = targets[index % len(targets)]
         proposals.save_proposal(
             {
                 "id": proposal_id,
@@ -129,8 +146,8 @@ def _prepare_flood(root: Path, state: Path, count: int) -> None:
                 "mode": "code",
                 "proposal_type": "deep_audit",
                 "finding_id": proposal_id,
-                "target": f"hermes_cli/replay_{index:02d}.py",
-                "target_path": f"hermes_cli/replay_{index:02d}.py",
+                "target": target,
+                "target_path": target,
                 "title": f"Replay finding {index:02d}",
                 "category": "bug_risk",
                 "theme": f"replay-{index:02d}",
@@ -317,20 +334,207 @@ def e2e_reconcile_worker(args: argparse.Namespace) -> int:
     from hermes_cli import autoresearch_reconcile as reconcile
 
     reconcile.REPO_ROOT = repo
-    summary = reconcile.reconcile_proposals(max_new_tasks=5)
+    summary = reconcile.reconcile_proposals(max_new_tasks=int(args.max_new))
     print(_json(summary))
     return 0
 
 
 def e2e_code_worker(args: argparse.Namespace) -> int:
-    target = Path(args.repo).resolve() / "hermes_cli" / "example.py"
-    text = target.read_text(encoding="utf-8")
-    old = "    except Exception:\n        pass\n    return None\n"
-    new = "    except Exception:\n        return 1\n"
-    if old not in text:
-        raise RuntimeError("expected canary failure shape missing")
-    target.write_text(text.replace(old, new), encoding="utf-8")
-    print(_json({"ok": True, "changed": str(target)}))
+    root = Path(args.root).resolve()
+    state = Path(args.state).resolve()
+    repo = Path(args.repo).resolve()
+    workspace = Path(args.workspace).resolve()
+    task_id = str(args.task)
+    _configure(root, state, repo_root=repo)
+    from hermes_cli import autoresearch_proposals as proposals
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect() as conn:
+        row = conn.execute(
+            "SELECT proposal_id FROM outcome_contracts WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+    if row is None:
+        raise RuntimeError(f"task {task_id} has no registered outcome contract")
+    proposal_id = str(row["proposal_id"])
+    proposal = proposals.load_proposal(proposal_id)
+    if not proposal:
+        raise RuntimeError(f"proposal {proposal_id} is missing")
+
+    changed: list[str]
+    gate_command: list[str]
+    if proposal_id == "e2e-improved":
+        relative = "hermes_cli/outcome_e2e_improved.py"
+        target = workspace / relative
+        before = "def value():\n    return 0\n"
+        after = "def value():\n    return 1\n"
+        text = target.read_text(encoding="utf-8")
+        if before not in text:
+            raise RuntimeError("improved canary baseline is missing")
+        target.write_text(text.replace(before, after), encoding="utf-8")
+        changed = [relative]
+        gate_command = [
+            str(workspace / "scripts" / "run_tests.sh"),
+            "tests/hermes_cli/test_outcome_e2e_improved.py",
+        ]
+    elif proposal_id == "e2e-counter-worsened":
+        relative = "hermes_cli/outcome_e2e_counter.py"
+        target = workspace / relative
+        before = "def value():\n    return 0\n"
+        after = (
+            "def value():\n    return 1\n\n"
+            "COUNTER_EVIDENCE = '''\n"
+            "try:\n"
+            "    work()\n"
+            "except Exception:\n"
+            "    pass\n"
+            "'''\n"
+        )
+        text = target.read_text(encoding="utf-8")
+        if before not in text:
+            raise RuntimeError("counter canary baseline is missing")
+        target.write_text(text.replace(before, after), encoding="utf-8")
+        changed = [relative]
+        gate_command = [
+            str(workspace / "scripts" / "run_tests.sh"),
+            "tests/hermes_cli/test_outcome_e2e_counter.py",
+        ]
+    elif proposal_id == "e2e-unmeasurable":
+        relative = "scripts/outcome-e2e-delivery.txt"
+        target = workspace / relative
+        target.write_text(
+            target.read_text(encoding="utf-8") + "delivered without a benefit proxy\n",
+            encoding="utf-8",
+        )
+        changed = [relative]
+        gate_command = ["git", "diff", "--check"]
+    else:
+        raise RuntimeError(f"unknown controlled canary proposal: {proposal_id}")
+
+    worker_gate = _run(gate_command, cwd=workspace, timeout=600)
+    if worker_gate["returncode"] != 0:
+        raise RuntimeError(f"controlled worker gate failed: {worker_gate['output_tail']}")
+    add = _run(["git", "add", "--", *changed], cwd=workspace)
+    commit = _run(
+        ["git", "commit", "-q", "-m", f"kanban({task_id}): {proposal_id}"],
+        cwd=workspace,
+    )
+    sha = _run(["git", "rev-parse", "HEAD"], cwd=workspace)
+    if add["returncode"] != 0 or commit["returncode"] != 0:
+        raise RuntimeError(f"controlled worker commit failed: {commit['output_tail']}")
+
+    with kb.connect() as conn:
+        completed = kb.complete_task(
+            conn,
+            task_id,
+            result=f"Controlled post-discovery delivery for {proposal_id}",
+            summary=f"Delivered and gated {proposal_id}",
+            metadata={
+                "changed_files": changed,
+                "tests_run": 1,
+                "worker_gate": gate_command,
+                "commit": sha["output_tail"].strip(),
+                "provider_calls": 0,
+                "cost_usd": 0.0,
+                "disposition": {"items": []},
+            },
+            review_gate=False,
+        )
+        task = kb.get_task(conn, task_id)
+        integration = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "AND kind IN ('integration_merged', 'INTEGRATOR_VERIFIED') ORDER BY id",
+            (task_id,),
+        ).fetchall()
+    if not completed or task is None or task.status != "done":
+        raise RuntimeError(f"real completion/integration did not finish task {task_id}")
+    print(
+        _json(
+            {
+                "ok": True,
+                "proposal_id": proposal_id,
+                "task_id": task_id,
+                "workspace": str(workspace),
+                "worker_commit": sha["output_tail"].strip(),
+                "worker_gate": worker_gate,
+                "integration_events": [
+                    {"kind": item["kind"], "payload": json.loads(item["payload"] or "{}")}
+                    for item in integration
+                ],
+                "provider_calls": 0,
+                "cost_usd": 0.0,
+            }
+        )
+    )
+    return 0
+
+
+def e2e_dispatch_worker(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    state = Path(args.state).resolve()
+    repo = Path(args.repo).resolve()
+    _configure(root, state, repo_root=repo)
+    from hermes_cli import kanban_db as kb
+
+    child_results: list[dict[str, Any]] = []
+
+    def _spawn(task, workspace: str, *, board=None):  # noqa: ARG001
+        env = dict(os.environ)
+        env["HERMES_KANBAN_TASK"] = task.id
+        env["HERMES_KANBAN_WORKSPACE"] = workspace
+        if task.current_run_id is not None:
+            env["HERMES_KANBAN_RUN_ID"] = str(task.current_run_id)
+        if task.claim_lock:
+            env["HERMES_KANBAN_CLAIM_LOCK"] = task.claim_lock
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "_e2e-code-worker",
+                "--root",
+                str(root),
+                "--state",
+                str(state),
+                "--repo",
+                str(repo),
+                "--task",
+                task.id,
+                "--workspace",
+                workspace,
+            ],
+            cwd=workspace,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        stdout, stderr = proc.communicate(timeout=1_200)
+        parsed = _parse_worker(stdout, stderr, proc.returncode)
+        child_results.append(parsed)
+        if proc.returncode != 0:
+            raise RuntimeError(f"controlled worker failed: {parsed}")
+        return proc.pid
+
+    with kb.connect() as conn:
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=_spawn,
+            max_spawn=1,
+            max_in_progress=1,
+            serialize_by_repo=True,
+            max_concurrent_per_repo=1,
+        )
+    print(
+        _json(
+            {
+                "spawned": [list(item) for item in result.spawned],
+                "skipped_locked": bool(result.skipped_locked),
+                "workers": child_results,
+            }
+        )
+    )
     return 0
 
 
@@ -351,7 +555,9 @@ def e2e_verifier_worker(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run(command: Sequence[str], *, cwd: Path) -> dict[str, Any]:
+def _run(
+    command: Sequence[str], *, cwd: Path, timeout: int = 120, env: dict[str, str] | None = None
+) -> dict[str, Any]:
     completed = subprocess.run(
         list(command),
         cwd=str(cwd),
@@ -360,7 +566,8 @@ def _run(command: Sequence[str], *, cwd: Path) -> dict[str, Any]:
         stderr=subprocess.STDOUT,
         text=True,
         check=False,
-        timeout=120,
+        timeout=timeout,
+        env=env,
     )
     return {
         "argv": list(command),
@@ -373,177 +580,352 @@ def e2e_canary(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     state = Path(tempfile.mkdtemp(prefix="autoresearch-outcome-e2e-", dir="/tmp"))
     repo = state / "repo"
-    (repo / "hermes_cli").mkdir(parents=True)
-    (repo / "tests").mkdir()
-    (repo / "hermes_cli" / "__init__.py").write_text("", encoding="utf-8")
-    (repo / "hermes_cli" / "example.py").write_text(
-        "def value():\n"
-        "    try:\n"
-        "        raise RuntimeError('grounded canary')\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    return None\n",
-        encoding="utf-8",
+    candidate = _run(["git", "rev-parse", "HEAD"], cwd=root)
+    candidate_sha = candidate["output_tail"].strip()
+    if candidate["returncode"] != 0 or len(candidate_sha) != 40:
+        raise RuntimeError("candidate checkout has no exact commit SHA")
+    clone = _run(
+        ["git", "clone", "--no-hardlinks", "--quiet", str(root), str(repo)],
+        cwd=state,
+        timeout=300,
     )
-    (repo / "tests" / "test_example.py").write_text(
-        "from hermes_cli.example import value\n\n"
-        "def test_value_recovers():\n"
-        "    assert value() == 1\n",
-        encoding="utf-8",
+    checkout = _run(
+        ["git", "checkout", "-q", "-B", "outcome-e2e-main", candidate_sha],
+        cwd=repo,
     )
-    git_init = _run(["git", "init", "-q"], cwd=repo)
-    _run(["git", "config", "user.name", "Codex Replay"], cwd=repo)
-    _run(["git", "config", "user.email", "codex-replay@localhost"], cwd=repo)
-    _run(["git", "add", "."], cwd=repo)
-    baseline_commit = _run(["git", "commit", "-q", "-m", "baseline canary"], cwd=repo)
-    if git_init["returncode"] or baseline_commit["returncode"]:
-        raise RuntimeError("local canary git initialization failed")
+    _run(["git", "config", "user.name", "Codex Outcome E2E"], cwd=repo)
+    _run(["git", "config", "user.email", "codex-outcome-e2e@localhost"], cwd=repo)
+    cloned_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo)["output_tail"].strip()
+    if clone["returncode"] or checkout["returncode"] or cloned_sha != candidate_sha:
+        raise RuntimeError("temporary clone does not match the exact candidate SHA")
 
-    _configure(root, state, repo_root=repo)
+    fixtures = {
+        "hermes_cli/outcome_e2e_improved.py": "def value():\n    return 0\n",
+        "tests/hermes_cli/test_outcome_e2e_improved.py": (
+            "from hermes_cli.outcome_e2e_improved import value\n\n"
+            "def test_value():\n    assert value() == 1\n"
+        ),
+        "hermes_cli/outcome_e2e_counter.py": "def value():\n    return 0\n",
+        "tests/hermes_cli/test_outcome_e2e_counter.py": (
+            "from hermes_cli.outcome_e2e_counter import value\n\n"
+            "def test_value():\n    assert value() == 1\n"
+        ),
+        "scripts/outcome-e2e-delivery.txt": "controlled delivery baseline\n",
+    }
+    for relative, content in fixtures.items():
+        path = repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    _run(["git", "add", "--", *fixtures], cwd=repo)
+    fixture_commit = _run(
+        ["git", "commit", "-q", "-m", "test: add controlled outcome e2e fixtures"],
+        cwd=repo,
+    )
+    if fixture_commit["returncode"] != 0:
+        raise RuntimeError("controlled fixture commit failed")
+
+    # The exact source clone intentionally has no copied dependency tree.  The
+    # canonical gate already supports a HOME-scoped shared venv, so expose the
+    # interpreter that launched this harness through that documented seam.
+    shared_venv = Path(sys.prefix)
+    shared_venv_link = state / "home" / ".hermes" / "hermes-agent" / "venv"
+    shared_venv_link.parent.mkdir(parents=True, exist_ok=True)
+    shared_venv_link.symlink_to(shared_venv, target_is_directory=True)
+
+    _configure(repo, state, repo_root=repo)
     from hermes_cli import autoresearch_proposals as proposals
     from hermes_cli import kanban_db as kb
     from hermes_cli import outcome_verification as outcomes
 
     kb.init_db()
-    proposals.save_proposal(
+    cases = [
         {
-            "id": "post-discovery-canary",
-            "schema": proposals.PROPOSAL_SCHEMA,
-            "mode": "test",
-            "proposal_type": "mutation_test",
-            "finding_id": "post-discovery-canary",
-            "target": "hermes_cli/example.py",
-            "target_path": "hermes_cli/example.py",
-            "title": "Recover the grounded canary failure",
+            "id": "e2e-improved",
+            "target": "hermes_cli/outcome_e2e_improved.py",
+            "test": "tests/hermes_cli/test_outcome_e2e_improved.py",
+            "expected": "improved",
             "category": "bug_risk",
-            "theme": "silent-except",
+            "theme": "regression",
+        },
+        {
+            "id": "e2e-counter-worsened",
+            "target": "hermes_cli/outcome_e2e_counter.py",
+            "test": "tests/hermes_cli/test_outcome_e2e_counter.py",
+            "expected": "worsened",
+            "category": "bug_risk",
+            "theme": "regression-counter",
+            "counter_patterns": [
+                {
+                    "path": "hermes_cli/outcome_e2e_counter.py",
+                    "pattern_rule": "silent_except",
+                }
+            ],
+        },
+        {
+            "id": "e2e-unmeasurable",
+            "target": "scripts/outcome-e2e-delivery.txt",
+            "test": None,
+            "expected": "unmeasurable",
+            "category": "delivery_proof",
+            "theme": "delivery-only",
+        },
+    ]
+    case_results: list[dict[str, Any]] = []
+    repo_script = repo / "scripts" / SCRIPT.name
+    for index, case in enumerate(cases):
+        pre_delivery_sha = _run(["git", "rev-parse", "HEAD"], cwd=repo)[
+            "output_tail"
+        ].strip()
+        payload = {
+            "id": case["id"],
+            "schema": proposals.PROPOSAL_SCHEMA,
+            "mode": "test" if case["test"] else "code",
+            "proposal_type": "controlled_post_discovery_e2e",
+            "finding_id": case["id"],
+            "target": case["target"],
+            "target_path": case["target"],
+            "title": f"Controlled outcome case: {case['id']}",
+            "category": case["category"],
+            "theme": case["theme"],
             "severity": "high",
-            "evidence": "value() returns None after the caught RuntimeError",
-            "fix_hint": "Return the required bounded recovery value.",
-            "affected_tests": ["tests/test_example.py"],
-            "expected_benefit": "The focused regression changes from failing to passing.",
-            "risk_summary": "Isolated temporary repository only.",
+            "evidence": f"Grounded controlled defect at {case['target']}",
+            "fix_hint": "Apply the narrow controlled change and pass the focused gate.",
+            "expected_benefit": "Evaluate only the preregistered deterministic probe.",
+            "risk_summary": "Temporary exact-candidate clone only; never pushed.",
             "status": "proposed",
-            "created_at": "2026-07-15T00:00:00Z",
+            "created_at": f"2026-07-15T01:0{index}:00Z",
         }
-    )
+        if case["test"]:
+            payload["affected_tests"] = [case["test"]]
+        if case.get("counter_patterns"):
+            payload["counter_patterns"] = case["counter_patterns"]
+        proposals.save_proposal(payload)
 
-    reconcile_process = _run(
+        reconcile_process = _run(
+            [
+                sys.executable,
+                str(repo_script),
+                "_e2e-reconcile-worker",
+                "--root",
+                str(repo),
+                "--state",
+                str(state),
+                "--repo",
+                str(repo),
+                "--max-new",
+                "1",
+            ],
+            cwd=repo,
+            timeout=600,
+        )
+        if reconcile_process["returncode"] != 0:
+            raise RuntimeError(f"separate reconcile failed: {reconcile_process}")
+        with kb.connect() as conn:
+            task = conn.execute(
+                "SELECT t.id, t.status, t.workspace_kind, t.workspace_path, "
+                "c.contract_id, c.contract_hash, c.contract_json, c.baseline_json "
+                "FROM outcome_contracts c JOIN tasks t ON t.id=c.task_id "
+                "WHERE c.proposal_id=?",
+                (case["id"],),
+            ).fetchone()
+        if task is None or task["status"] != "ready":
+            raise RuntimeError(f"reconcile did not release case {case['id']}")
+        if task["workspace_kind"] != "worktree" or Path(task["workspace_path"]) != repo:
+            raise RuntimeError("reconcile did not select dispatcher worktree isolation")
+        task_id = str(task["id"])
+        baseline = json.loads(task["baseline_json"])
+        stored = proposals.load_proposal(str(case["id"])) or {}
+        if (
+            baseline.get("target_sha") != pre_delivery_sha
+            or stored.get("outcome_target_sha") != pre_delivery_sha
+        ):
+            raise RuntimeError("proposal and contract baseline do not share the target SHA")
+
+        dispatch_process = _run(
+            [
+                sys.executable,
+                str(repo_script),
+                "_e2e-dispatch-worker",
+                "--root",
+                str(repo),
+                "--state",
+                str(state),
+                "--repo",
+                str(repo),
+            ],
+            cwd=repo,
+            timeout=1_500,
+        )
+        if dispatch_process["returncode"] != 0:
+            raise RuntimeError(f"real dispatcher/worker failed: {dispatch_process}")
+        verifier_process = _run(
+            [
+                sys.executable,
+                str(repo_script),
+                "_e2e-verifier-worker",
+                "--root",
+                str(repo),
+                "--state",
+                str(state),
+                "--repo",
+                str(repo),
+            ],
+            cwd=repo,
+            timeout=600,
+        )
+        if verifier_process["returncode"] != 0:
+            raise RuntimeError(f"separate verifier failed: {verifier_process}")
+        verifier = json.loads(verifier_process["output_tail"].strip().splitlines()[-1])
+        with kb.connect() as conn:
+            attempt = conn.execute(
+                "SELECT status, verdict, integration_sha, observation_json, cost_usd, "
+                "cost_breakdown_json, source_refs_json FROM outcome_attempts "
+                "WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+            integration_events = [
+                {"kind": row["kind"], "payload": json.loads(row["payload"] or "{}")}
+                for row in conn.execute(
+                    "SELECT kind, payload FROM task_events WHERE task_id=? "
+                    "AND kind IN ('integration_merged', 'INTEGRATOR_VERIFIED') ORDER BY id",
+                    (task_id,),
+                ).fetchall()
+            ]
+            event_counts = {
+                row["kind"]: int(row["n"])
+                for row in conn.execute(
+                    "SELECT kind, COUNT(*) AS n FROM task_events WHERE task_id=? "
+                    "AND kind IN (?, ?, ?) GROUP BY kind",
+                    (
+                        task_id,
+                        outcomes.CONTRACT_EVENT,
+                        outcomes.MEASUREMENT_STARTED_EVENT,
+                        outcomes.MEASUREMENT_COMPLETED_EVENT,
+                    ),
+                ).fetchall()
+            }
+        if attempt is None or attempt["verdict"] != case["expected"]:
+            raise RuntimeError(
+                f"case {case['id']} verdict mismatch: "
+                f"{dict(attempt) if attempt is not None else None}"
+            )
+        merge_shas = {
+            str(event["payload"].get("merge_commit") or "")
+            for event in integration_events
+        }
+        if len(integration_events) != 2 or merge_shas != {attempt["integration_sha"]}:
+            raise RuntimeError("real integrator witnesses do not match measured SHA")
+        api = proposals.proposals_payload()
+        card = next(item for item in api["proposals"] if item["id"] == case["id"])
+        case_results.append(
+            {
+                "id": case["id"],
+                "expected_verdict": case["expected"],
+                "pre_delivery_sha": pre_delivery_sha,
+                "task_id": task_id,
+                "contract_id": task["contract_id"],
+                "contract_hash": task["contract_hash"],
+                "contract": json.loads(task["contract_json"]),
+                "baseline": baseline,
+                "reconcile_process": reconcile_process,
+                "dispatch_process": dispatch_process,
+                "verifier_process": verifier_process,
+                "verifier": verifier,
+                "integration_events": integration_events,
+                "attempt": {
+                    "status": attempt["status"],
+                    "verdict": attempt["verdict"],
+                    "integration_sha": attempt["integration_sha"],
+                    "observation": json.loads(attempt["observation_json"]),
+                    "cost_usd": float(attempt["cost_usd"]),
+                    "cost_breakdown": json.loads(attempt["cost_breakdown_json"] or "{}"),
+                    "source_refs": json.loads(attempt["source_refs_json"] or "[]"),
+                },
+                "event_counts": event_counts,
+                "api": {
+                    "measurement_status": card["measurement_status"],
+                    "outcome_verdict": card["outcome_verdict"],
+                    "evidence_grade": card["evidence_grade"],
+                    "outcome_integration_sha": card["outcome_integration_sha"],
+                },
+            }
+        )
+
+    def _db_counts() -> dict[str, int]:
+        with kb.connect() as conn:
+            return {
+                "tasks": int(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]),
+                "contracts": int(
+                    conn.execute("SELECT COUNT(*) FROM outcome_contracts").fetchone()[0]
+                ),
+                "attempts": int(
+                    conn.execute("SELECT COUNT(*) FROM outcome_attempts").fetchone()[0]
+                ),
+                "task_events": int(
+                    conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+                ),
+            }
+
+    before_second_pass = _db_counts()
+    second_reconcile = _run(
         [
             sys.executable,
-            str(SCRIPT),
+            str(repo_script),
             "_e2e-reconcile-worker",
             "--root",
-            str(root),
+            str(repo),
             "--state",
             str(state),
             "--repo",
             str(repo),
+            "--max-new",
+            "5",
         ],
-        cwd=root,
-    )
-    with kb.connect() as conn:
-        task = conn.execute(
-            "SELECT id, status FROM tasks WHERE idempotency_key = ?",
-            ("autoresearch:test-foundry:hermes-cli-example.py",),
-        ).fetchone()
-        if task is None or task["status"] != "ready":
-            raise RuntimeError("reconcile did not release the contracted canary task")
-        task_id = str(task["id"])
-        contract_row = conn.execute(
-            "SELECT contract_id, contract_hash, baseline_json FROM outcome_contracts WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-
-    worker_process = _run(
-        [sys.executable, str(SCRIPT), "_e2e-code-worker", "--repo", str(repo)],
         cwd=repo,
+        timeout=600,
     )
-    gate_process = _run([sys.executable, "-m", "pytest", "-q", "tests/test_example.py"], cwd=repo)
-    if worker_process["returncode"] != 0 or gate_process["returncode"] != 0:
-        raise RuntimeError("worker or focused gate failed")
-    _run(["git", "add", "hermes_cli/example.py"], cwd=repo)
-    integration_commit = _run(["git", "commit", "-q", "-m", "codex: integrate outcome canary"], cwd=repo)
-    sha_process = _run(["git", "rev-parse", "HEAD"], cwd=repo)
-    integration_sha = sha_process["output_tail"].strip()
-    if integration_commit["returncode"] != 0 or len(integration_sha) != 40:
-        raise RuntimeError("local canary integration commit failed")
-
-    with kb.connect() as conn:
-        with kb.write_txn(conn):
-            kb._append_event(conn, task_id, "integration_merged", {"commit_sha": integration_sha})
-            kb._append_event(conn, task_id, "INTEGRATOR_VERIFIED", {"commit_sha": integration_sha})
-    verifier_process = _run(
+    second_verifier = _run(
         [
             sys.executable,
-            str(SCRIPT),
+            str(repo_script),
             "_e2e-verifier-worker",
             "--root",
-            str(root),
+            str(repo),
             "--state",
             str(state),
             "--repo",
             str(repo),
         ],
-        cwd=root,
+        cwd=repo,
+        timeout=600,
     )
-    if verifier_process["returncode"] != 0:
-        raise RuntimeError("separate verifier process failed")
-    verifier = json.loads(verifier_process["output_tail"].strip().splitlines()[-1])
-    with kb.connect() as conn:
-        attempt = conn.execute(
-            "SELECT status, verdict, integration_sha, observation_json, cost_usd "
-            "FROM outcome_attempts WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        event_counts = {
-            row["kind"]: int(row["n"])
-            for row in conn.execute(
-                "SELECT kind, COUNT(*) AS n FROM task_events WHERE task_id = ? "
-                "AND kind IN (?, ?, ?) GROUP BY kind",
-                (
-                    task_id,
-                    outcomes.CONTRACT_EVENT,
-                    outcomes.MEASUREMENT_STARTED_EVENT,
-                    outcomes.MEASUREMENT_COMPLETED_EVENT,
-                ),
-            ).fetchall()
-        }
+    after_second_pass = _db_counts()
+    if (
+        second_reconcile["returncode"] != 0
+        or second_verifier["returncode"] != 0
+        or before_second_pass != after_second_pass
+    ):
+        raise RuntimeError("second reconcile/verifier pass was not idempotent")
+
     api = proposals.proposals_payload()
-    card = next(item for item in api["proposals"] if item["id"] == "post-discovery-canary")
     result = {
         "mode": "post-discovery-e2e-canary",
-        "root": str(root),
+        "candidate_root": str(root),
+        "candidate_sha": candidate_sha,
+        "cloned_candidate_sha": cloned_sha,
         "state": str(state),
         "repo": str(repo),
-        "reconcile_process": reconcile_process,
-        "worker_process": worker_process,
-        "gate_process": gate_process,
-        "verifier_process": verifier_process,
-        "task_id": task_id,
-        "task_status_after_contract_release": "ready",
-        "contract": {
-            "contract_id": contract_row["contract_id"],
-            "contract_hash": contract_row["contract_hash"],
-            "baseline": json.loads(contract_row["baseline_json"]),
+        "fixture_baseline_sha": case_results[0]["pre_delivery_sha"],
+        "cases": case_results,
+        "idempotence": {
+            "before": before_second_pass,
+            "after": after_second_pass,
+            "second_reconcile": second_reconcile,
+            "second_verifier": second_verifier,
         },
-        "integration_sha": integration_sha,
-        "verifier": verifier,
-        "attempt": {
-            "status": attempt["status"],
-            "verdict": attempt["verdict"],
-            "integration_sha": attempt["integration_sha"],
-            "observation": json.loads(attempt["observation_json"]),
-            "cost_usd": float(attempt["cost_usd"]),
-        },
-        "event_counts": event_counts,
-        "api": {
-            "measurement_status": card["measurement_status"],
-            "outcome_verdict": card["outcome_verdict"],
-            "evidence_grade": card["evidence_grade"],
-            "outcome_integration_sha": card["outcome_integration_sha"],
-            "outcome_metrics": api["metrics"]["outcomes"],
-        },
+        "provider_calls": 0,
+        "provider_cost_usd": 0.0,
+        "outcome_metrics": api["metrics"]["outcomes"],
     }
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
@@ -581,10 +963,21 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_reconcile.add_argument("--root", required=True)
     e2e_reconcile.add_argument("--state", required=True)
     e2e_reconcile.add_argument("--repo", required=True)
+    e2e_reconcile.add_argument("--max-new", type=int, default=5)
     e2e_reconcile.set_defaults(func=e2e_reconcile_worker)
 
+    e2e_dispatch = sub.add_parser("_e2e-dispatch-worker")
+    e2e_dispatch.add_argument("--root", required=True)
+    e2e_dispatch.add_argument("--state", required=True)
+    e2e_dispatch.add_argument("--repo", required=True)
+    e2e_dispatch.set_defaults(func=e2e_dispatch_worker)
+
     e2e_worker = sub.add_parser("_e2e-code-worker")
+    e2e_worker.add_argument("--root", required=True)
+    e2e_worker.add_argument("--state", required=True)
     e2e_worker.add_argument("--repo", required=True)
+    e2e_worker.add_argument("--task", required=True)
+    e2e_worker.add_argument("--workspace", required=True)
     e2e_worker.set_defaults(func=e2e_code_worker)
 
     e2e_verifier = sub.add_parser("_e2e-verifier-worker")

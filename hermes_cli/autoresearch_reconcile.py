@@ -342,6 +342,12 @@ def _route_to_kanban(
         # contract and baseline are durably linked to task_events.
         initial_status="blocked",
         kind="code",
+        # Autoresearch code delivery must enter the same dispatcher-managed
+        # worktree/integrator path as every other repository task.  A scratch
+        # task can never produce the two independent integration witnesses the
+        # outcome verifier requires.
+        workspace_kind="worktree",
+        workspace_path=str(REPO_ROOT),
         scope_contract=contract["scope_contract"],
         max_iterations=max_iter,
         review_tier=review_tier,
@@ -356,36 +362,70 @@ def _route_to_kanban(
 
 def _prepare_outcome_baseline(proposal: dict[str, Any]) -> None:
     """Persist a bounded probe baseline before a task can be dispatched."""
-    existing = proposal.get("probe_contract")
-    baseline = proposal.get("outcome_baseline")
-    if isinstance(existing, dict) and isinstance(baseline, dict):
-        return
-    probe_contract = outcomes.build_probe_contract(proposal, repo_root=REPO_ROOT)
-    captured = outcomes.capture_probe(probe_contract, repo_root=REPO_ROOT)
-    recorded_at = _utc_now()
-    fingerprint = outcomes.release_fingerprint(
-        proposal_id=str(proposal.get("id") or ""),
-        contract=probe_contract,
-        baseline=captured,
-        target_sha256=str(proposal.get("target_sha256") or "") or None,
-    )
-    proposal.update(
-        {
-            "outcome_schema_version": outcomes.OUTCOME_SCHEMA_VERSION,
-            "outcome_applicability": "applicable",
-            "measurement_status": "pending",
-            "outcome_verdict": None,
-            "evidence_grade": "contract_verified",
-            "calibration_eligible": False,
-            "probe_contract": probe_contract,
-            "outcome_baseline": captured,
-            "outcome_baseline_recorded_at": recorded_at,
-            "outcome_release_fingerprint": fingerprint,
-        }
-    )
-    # This is intentionally before create_task().  A crash here leaves only a
-    # recoverable proposal baseline and no dispatchable work.
-    proposals.save_proposal(proposal)
+    pid = str(proposal.get("id") or "")
+    with proposals.proposal_lease(pid):
+        latest = proposals.load_proposal(pid)
+        authoritative = {**proposal, **(latest or {})}
+        existing = authoritative.get("probe_contract")
+        baseline = authoritative.get("outcome_baseline")
+        if isinstance(existing, dict) or isinstance(baseline, dict):
+            if not isinstance(existing, dict) or not isinstance(baseline, dict):
+                raise outcomes.ContractError("partial persisted outcome baseline is invalid")
+            validated = outcomes.validate_probe_contract(existing)
+            outcomes.validate_baseline(validated, baseline)
+            authoritative.update(
+                {
+                    "evidence_grade": "legacy_observational",
+                    "outcome_class": validated["outcome_class"],
+                    "outcome_target_sha": baseline["target_sha"],
+                    "outcome_authority": authoritative.get("outcome_authority")
+                    or "proposal_contract",
+                }
+            )
+            proposal.clear()
+            proposal.update(authoritative)
+            proposals.save_proposal(proposal)
+            return
+        probe_contract = outcomes.build_probe_contract(authoritative, repo_root=REPO_ROOT)
+        captured = outcomes.capture_probe(probe_contract, repo_root=REPO_ROOT)
+        outcomes.validate_baseline(probe_contract, captured)
+        captured = outcomes.seal_evidence(
+            {
+                **captured,
+                "research_cost_usd": max(
+                    0.0, float(authoritative.get("cost_usd") or 0.0)
+                ),
+            }
+        )
+        recorded_at = _utc_now()
+        fingerprint = outcomes.release_fingerprint(
+            proposal_id=pid,
+            contract=probe_contract,
+            baseline=captured,
+            target_sha256=str(authoritative.get("target_sha256") or "") or None,
+        )
+        authoritative.update(
+            {
+                "outcome_schema_version": outcomes.OUTCOME_SCHEMA_VERSION,
+                "outcome_applicability": "applicable",
+                "measurement_status": "pending",
+                "outcome_verdict": None,
+                "evidence_grade": "legacy_observational",
+                "calibration_eligible": False,
+                "probe_contract": probe_contract,
+                "outcome_class": probe_contract["outcome_class"],
+                "outcome_baseline": captured,
+                "outcome_target_sha": captured["target_sha"],
+                "outcome_baseline_recorded_at": recorded_at,
+                "outcome_release_fingerprint": fingerprint,
+                "outcome_authority": "proposal_contract",
+            }
+        )
+        proposal.clear()
+        proposal.update(authoritative)
+        # This is intentionally before create_task(). A crash here leaves only
+        # a recoverable proposal baseline and no dispatchable work.
+        proposals.save_proposal(proposal)
 
 
 def _register_outcome_before_release(conn, proposal: dict[str, Any], task_id: str) -> None:
@@ -403,6 +443,8 @@ def _register_outcome_before_release(conn, proposal: dict[str, Any], task_id: st
     )
     proposal["kanban_task_id"] = task_id
     proposal["linked_task_id"] = task_id
+    proposal["outcome_authority"] = "task_events"
+    proposal["lifecycle_source"] = "task_events"
     proposals.save_proposal(proposal)
     if not kb.unblock_task(conn, task_id):
         row = conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()

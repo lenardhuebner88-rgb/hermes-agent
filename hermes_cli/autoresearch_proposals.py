@@ -31,6 +31,7 @@ A proposal (``autoresearch-proposal-v1``) is one JSON file under
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import difflib
 import hashlib
 import importlib.util
@@ -538,6 +539,15 @@ def _proposal_path(pid: str) -> Path:
     return _proposals_dir() / f"{safe}.json"
 
 
+@contextmanager
+def proposal_lease(pid: str):
+    """Serialize contract/baseline capture with every proposal store writer."""
+    from hermes_cli.outcome_verification import shared_state_lock
+
+    with shared_state_lock(_proposal_path(pid)):
+        yield
+
+
 def save_proposal(proposal: dict[str, Any]) -> Path:
     proposal.setdefault("target_sha256", _proposal_target_sha(proposal))
     proposal.setdefault("finding_fingerprint", _finding_fingerprint(proposal))
@@ -548,12 +558,46 @@ def save_proposal(proposal: dict[str, Any]) -> Path:
             proposal.setdefault(key, value)
     path = _proposal_path(proposal["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Shared outcome verification and the dashboard/reconciler can write from
-    # different OS processes.  A unique-temp + fsync + replace projection keeps
-    # every reader on a complete JSON record and avoids fixed-temp collisions.
-    from hermes_cli.outcome_verification import atomic_write_json
+    # Serialize the complete read/merge/write. A stale lifecycle writer may add
+    # fields, but cannot erase a concurrent contract/measurement projection.
+    from hermes_cli.outcome_verification import locked_json_update
 
-    atomic_write_json(path, proposal)
+    incoming = dict(proposal)
+    measurement_rank = {
+        "not_started": 0,
+        "pending": 1,
+        "measuring": 2,
+        "retryable_failure": 3,
+        "measured": 4,
+        "exhausted": 4,
+    }
+    delivery_rank = {"none": 0, "queued": 1, "running": 2, "review": 3, "failed": 3, "integrated": 4}
+
+    def _merge(current: Any) -> dict[str, Any]:
+        prior = current if isinstance(current, dict) else {}
+        merged = {**prior, **incoming}
+        if measurement_rank.get(str(prior.get("measurement_status")), -1) > measurement_rank.get(
+            str(incoming.get("measurement_status")), -1
+        ):
+            for key in (
+                "measurement_status", "outcome_verdict", "evidence_grade",
+                "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+                "outcome_integration_sha", "outcome_operator_interventions",
+            ):
+                if key in prior:
+                    merged[key] = prior[key]
+        lifecycle_authoritative = bool(
+            incoming.get("lifecycle_source") or incoming.get("disposition_source")
+        )
+        if not lifecycle_authoritative and delivery_rank.get(
+            str(prior.get("delivery_state")), -1
+        ) > delivery_rank.get(str(incoming.get("delivery_state")), -1):
+            merged["delivery_state"] = prior["delivery_state"]
+        return merged
+
+    persisted = locked_json_update(path, default={}, transform=_merge)
+    proposal.clear()
+    proposal.update(persisted)
     return path
 
 
@@ -610,8 +654,10 @@ _LIST_FIELDS = (
     "test_plan", "recommendation",
     "outcome_schema_version", "outcome_applicability", "measurement_status",
     "outcome_verdict", "evidence_grade", "calibration_eligible",
+    "outcome_class", "outcome_authority",
     "probe_contract", "outcome_baseline", "outcome_baseline_recorded_at",
     "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+    "outcome_cost_breakdown", "outcome_operator_interventions",
     "outcome_integration_sha",
 )
 

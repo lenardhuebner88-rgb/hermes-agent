@@ -1444,6 +1444,7 @@ def propose(
             ingested=ingested,
             capped=capped,
             flat_metrics=_flatten_numeric(_metrics_payload(context.get("metrics"))),
+            metrics_snapshot=context.get("metrics"),
         )
 
     return {
@@ -1802,6 +1803,11 @@ def _write_lever_outcomes_atomic(path: Path, records: list[dict[str, Any]]) -> N
                         merged[field] = prior[field]
             by_root[key] = outcomes.normalize_strategist_record(merged)
         normalized = unkeyed + [by_root[key] for key in order]
+        try:
+            with kanban_db.connect() as conn:
+                normalized = outcomes.project_strategist_outcomes(normalized, conn=conn)
+        except Exception:
+            logger.warning("strategist outcome task-event projection failed", exc_info=True)
         outcomes.atomic_write_json(path, normalized, lock=False)
 
 
@@ -1854,12 +1860,8 @@ def _read_lever_calibration(path: Any) -> dict[str, Any]:
 
 
 def _write_lever_calibration_atomic(path: Path, data: dict[str, Any]) -> None:
-    """Persist the calibration map to *path* atomically via tmp+rename."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    """Persist calibration through the shared cross-process-safe writer."""
+    outcomes.atomic_write_json(Path(path), data)
 
 
 # STRATEGIST-CALIBRATION-S1: bounded mean-based mapping from measured verdicts
@@ -1888,14 +1890,17 @@ def compute_lever_calibration(
             continue
         if rec.get("status") != "measured":
             continue
+        if rec.get("stale_metrics") or rec.get("baseline_stale"):
+            continue
         score = _VERDICT_SCORE.get(rec.get("outcome_verdict", rec.get("verdict")))
         if score is None:
             continue
-        lever_key = rec.get("lever_key")
-        if not lever_key:
+        outcome_class = rec.get("outcome_class")
+        if not outcome_class:
+            outcome_class = outcomes.strategist_outcome_class(rec)
+        if not outcome_class:
             continue
-        cls = _lever_class_of_key(str(lever_key))
-        by_class.setdefault(cls, []).append(score)
+        by_class.setdefault(str(outcome_class), []).append(score)
 
     ts = datetime.fromtimestamp(time.time() if now is None else now).isoformat()
     out: dict[str, dict[str, Any]] = {}
@@ -1927,48 +1932,33 @@ def stamp_lever_outcome_shipped(
         if not path.exists():
             logger.info("lever-outcomes ship stamp skipped; file missing: %s", path)
             return False
-        # `complete_freigabe_hold` means "resolved elsewhere", not delivered.
-        # The kernel currently calls this stamp hook for that legacy path, so
-        # the outcome projection explicitly applies the stronger event truth.
-        done_elsewhere = False
-        try:
-            with kanban_db.connect() as conn:
-                done_elsewhere = conn.execute(
-                    "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_completed' LIMIT 1",
-                    (root_task_id,),
-                ).fetchone() is not None
-        except Exception:
-            done_elsewhere = False
         now_ts = int(time.time() if shipped_at is None else shipped_at)
         changed = False
         matched = False
         with _locked_lever_outcomes(path) as records:
             if not records:
                 return False
+            before = {
+                str(record.get("root_task_id")): dict(record)
+                for record in records
+                if record.get("root_task_id") is not None
+            }
+            try:
+                with kanban_db.connect() as conn:
+                    records[:] = outcomes.project_strategist_outcomes(records, conn=conn)
+            except Exception:
+                logger.warning("lever-outcomes ship projection failed", exc_info=True)
+                return False
             for rec in records:
                 if rec.get("root_task_id") != root_task_id:
                     continue
                 matched = True
-                if done_elsewhere:
-                    desired = {
-                        "outcome_applicability": "not_applicable",
-                        "measurement_status": "exhausted",
-                        "outcome_verdict": None,
-                        "evidence_grade": "contract_verified",
-                        "calibration_eligible": False,
-                        "delivery_state": "none",
-                        "delivery_disposition": "done_elsewhere",
-                    }
-                    if any(rec.get(key) != value for key, value in desired.items()):
-                        rec.update(desired)
-                        changed = True
-                    continue
-                if rec.get("shipped_at") is None:
+                prior = before.get(str(root_task_id), {})
+                changed = json.dumps(prior, sort_keys=True) != json.dumps(rec, sort_keys=True)
+                if rec.get("status") == "shipped" and rec.get("shipped_at") is None:
                     rec["shipped_at"] = now_ts
                     changed = True
-                if rec.get("status") == "proposed":
-                    rec["status"] = "shipped"
-                    changed = True
+                if rec.get("status") == "shipped" and prior.get("status") != "shipped":
                     # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity check — warn
                     # now, ~MATURITY_DAYS before the operator would otherwise learn
                     # the metric_key can never yield a real verdict.
@@ -2159,6 +2149,7 @@ def _outcomes_write_baselines(
     ingested: list[dict[str, Any]],
     capped: list[Any],
     flat_metrics: dict[str, float],
+    metrics_snapshot: Mapping[str, Any] | None = None,
 ) -> None:
     """Append baseline records for newly ingested levers (read-modify-write).
 
@@ -2183,14 +2174,45 @@ def _outcomes_write_baselines(
                 metric_key=mk, measurability=measurability,
             )
             probe_contract = None
+            outcome_baseline = None
+            contract_registered = False
             if mk is not None:
                 direction = _resolve_verdict_direction(mk)
                 if direction is not None:
-                    probe_contract = outcomes.build_vision_metric_contract(mk, direction=direction)
+                    candidate = outcomes.build_vision_metric_contract(mk, direction=direction)
+                    try:
+                        outcome_baseline = outcomes.capture_vision_snapshot_baseline(
+                            candidate,
+                            dict(metrics_snapshot or {}),
+                        )
+                        with kanban_db.connect() as conn:
+                            contract_registered = outcomes.register_contract(
+                                conn,
+                                proposal_id=f"strategist:{root_id}",
+                                task_id=str(root_id),
+                                contract=candidate,
+                                baseline=outcome_baseline,
+                                release_fingerprint=outcomes.release_fingerprint(
+                                    proposal_id=f"strategist:{root_id}",
+                                    contract=candidate,
+                                    baseline=outcome_baseline,
+                                    target_sha256=outcome_baseline["target_sha"],
+                                ),
+                                source="strategist",
+                            ) or True
+                        probe_contract = candidate
+                    except (outcomes.ContractError, OSError, ValueError):
+                        logger.warning(
+                            "strategist baseline remains legacy; fresh typed source evidence unavailable",
+                            extra={"root_task_id": root_id, "metric_key": mk},
+                        )
             record = {
                 "schema_version": 1,
                 "outcome_schema_version": outcomes.OUTCOME_SCHEMA_VERSION,
                 "outcome_source": "strategist",
+                "source": "strategist",
+                "subject_type": "strategist_lever",
+                "subject_id": root_id,
                 "lever_key": item["key"],
                 "root_task_id": root_id,
                 "proposed_at": now_ts,
@@ -2206,12 +2228,21 @@ def _outcomes_write_baselines(
                 "outcome_applicability": "applicable",
                 "measurement_status": "pending" if probe_contract is not None else "not_started",
                 "outcome_verdict": None,
-                "evidence_grade": "contract_verified" if probe_contract is not None else "legacy_observational",
+                "evidence_grade": "legacy_observational",
                 "calibration_eligible": True,
+                "baseline_source_generated_at": (metrics_snapshot or {}).get("generated_at"),
+                "baseline_source_schema_version": (
+                    (metrics_snapshot or {}).get("schema_version")
+                    or (metrics_snapshot or {}).get("schema")
+                ),
             }
             if probe_contract is not None:
                 record["probe_contract"] = probe_contract
                 record["contract_hash"] = probe_contract["contract_hash"]
+                record["outcome_class"] = probe_contract["outcome_class"]
+                record["outcome_baseline"] = outcome_baseline
+                record["contract_registered"] = contract_registered
+                record["outcome_authority"] = "task_events"
             records.append(record)
             existing_ids.add(root_id)
 
@@ -2495,6 +2526,30 @@ def reflect(
     if outcomes_path is not None:
         now_ts = int(time.time() if now is None else now)
         outcome_records = _read_lever_outcomes(outcomes_path)
+        before_projection_json = json.dumps(outcome_records, ensure_ascii=False, sort_keys=True)
+        before_projection = {
+            str(record.get("root_task_id")): str(record.get("status"))
+            for record in outcome_records
+            if record.get("root_task_id") is not None
+        }
+        try:
+            outcomes.run_shadow_verifier(
+                conn=conn,
+                repo_root=Path(__file__).resolve().parents[1],
+                phase="shadow",
+                require_enabled=True,
+            )
+            outcome_records = outcomes.project_strategist_outcomes(
+                outcome_records, conn=conn
+            )
+        except Exception:
+            logger.warning("strategist common outcome projection failed", exc_info=True)
+        outcomes_shipped_stamped += sum(
+            1
+            for record in outcome_records
+            if record.get("status") == "shipped"
+            and before_projection.get(str(record.get("root_task_id"))) != "shipped"
+        )
         # Confound-Guard reference: a snapshot of the on-disk state taken
         # before this pass mutates anything, so overlap detection is
         # deterministic regardless of list order / which record this loop
@@ -2502,44 +2557,37 @@ def reflect(
         _records_snapshot = [dict(r) for r in outcome_records]
         # Lazy-read current metrics only when needed for measuring.
         _current_metrics: Optional[dict[str, Any]] = metrics
-        changed = False
+        changed = (
+            json.dumps(outcome_records, ensure_ascii=False, sort_keys=True)
+            != before_projection_json
+        )
 
         for rec in outcome_records:
             status = rec.get("status")
 
-            # (a) Stamp shipped_at: proposed records whose task is now done+released.
-            if status == "proposed" and rec.get("shipped_at") is None:
-                root_id = rec.get("root_task_id")
-                if root_id is not None:
-                    task_row = conn.execute(
-                        "SELECT status, completed_at FROM tasks WHERE id = ?",
-                        (root_id,),
-                    ).fetchone()
-                    if task_row and task_row["status"] == "done":
-                        has_release = conn.execute(
-                            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = 'freigabe_released'",
-                            (root_id,),
-                        ).fetchone()
-                        if has_release:
-                            shipped_ts = task_row["completed_at"] or now_ts
-                            rec["shipped_at"] = int(shipped_ts)
-                            rec["status"] = "shipped"
-                            outcomes_shipped_stamped += 1
-                            changed = True
-                            # LEVER-OUTCOMES-VALIDITY-S1: ship-time validity
-                            # check, warn now rather than after the maturity
-                            # window silently expires into "unmeasurable".
-                            ship_mk = rec.get("metric_key")
-                            ship_measurability = _lever_measurability(ship_mk)
-                            rec["measurability"] = ship_measurability
-                            _warn_if_unmeasurable(
-                                stage="reflect-ship-stamp", lever_key=rec.get("lever_key"),
-                                root_task_id=root_id, metric_key=ship_mk,
-                                measurability=ship_measurability,
-                            )
+            # (a) Ship state is projected exclusively from integration/deploy
+            # task events above. A done/released task alone is not delivery.
+            if (
+                status == "shipped"
+                and before_projection.get(str(rec.get("root_task_id"))) != "shipped"
+            ):
+                ship_mk = rec.get("metric_key")
+                rec["measurability"] = _lever_measurability(ship_mk)
+                _warn_if_unmeasurable(
+                    stage="reflect-ship-stamp",
+                    lever_key=rec.get("lever_key"),
+                    root_task_id=rec.get("root_task_id"),
+                    metric_key=ship_mk,
+                    measurability=rec["measurability"],
+                )
+                changed = True
 
             # (b) Measure: shipped records past the maturity window.
-            if rec.get("status") == "shipped" and rec.get("measured_at") is None:
+            if (
+                rec.get("status") == "shipped"
+                and rec.get("measured_at") is None
+                and not rec.get("contract_registered")
+            ):
                 shipped_at = rec.get("shipped_at")
                 if shipped_at is not None and now_ts >= int(shipped_at) + MATURITY_DAYS * 86400:
                     if _current_metrics is None:

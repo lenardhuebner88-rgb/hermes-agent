@@ -42,6 +42,8 @@ SHA and `outcome_measurement_completed` event share the final transaction.
 The deterministic dedupe key is
 `sha256(task_id, contract_hash, phase, attempt_no)`. Cross-process JSON writers
 use advisory locks and unique temporary files followed by `fsync` and rename.
+An active-attempt partial unique index also prevents attempt N+1 from starting
+while attempt N still owns its lease.
 
 ## Baseline-before-dispatch
 
@@ -56,13 +58,26 @@ Supported probes are deliberately narrow:
 - `source_pattern.v1`: reviewed source-pattern counters below allowlisted repo
   roots;
 - `pytest_target.v1`: at most four repository-local `tests/` targets, invoked
-  without a shell and with a bounded timeout;
+  without a shell and with bounded output, memory and timeout; it may carry
+  reviewed pytest or source-pattern counter probes whose violation wins over a
+  primary improvement;
 - `delivery_evidence.v1`: records delivery without making a benefit claim;
 - `vision_metric_snapshot.v1`: Strategist metrics with a reviewed direction.
 
+Every contract hashes the claim, typed probe/args, success template and complete
+parameters/rule, stable `outcome_class`, counter probes/rules, sampling plan,
+observation window, trigger, environment requirements and complete measurement
+budget. A recomputed allowlisted template must match byte-for-byte; merely
+supplying a plausible hash is rejected.
+
 There is no arbitrary shell, SQL, network, absolute-path, or free-form command
-surface. Runtime/code probes remain pending until a real integration or
-deployment event contains a full 40-character Git SHA.
+surface. Code probes remain pending until both `integration_merged` and
+`INTEGRATOR_VERIFIED` contain the same real integrator `merge_commit` SHA.
+Runtime probes require `deployed_sha == running_sha`, retain the Strategist's
+three-day maturity window, and reject stale source snapshots. Same-class
+runtime windows that overlap, an expired observation window, target-SHA drift,
+source-schema drift or relevant environment drift are `confounded`, never
+`improved`.
 
 ## Shadow execution
 
@@ -77,6 +92,12 @@ Shadow mode reads delivery evidence and writes only the additive outcome tables
 and measurement events. It does not enforce, rank, calibrate, reopen, dispatch,
 or deploy anything. Each call is capped; each contract is also bounded by its
 immutable attempt and timeout budget.
+
+Registration alone does not grant `contract_verified`: a pending contract is
+still unconfirmed. Only a terminal common-verifier attempt with its immutable
+baseline, observation, evidence references, exact delivery SHA and additive
+cost breakdown earns that evidence grade. Consequently
+`contract_verified + improved` is the only “benefit confirmed” state.
 
 ## Migration and rollback
 
@@ -111,8 +132,12 @@ The release evidence must include:
   wave;
 - the historical lifecycle replay proving explicit `delivery_state=none`
   overrides legacy inference while legacy records remain compatible;
-- a separate-process, post-discovery E2E canary over reconciliation, worker
-  change, real gate, local Git integration SHA, verifier and API projection;
+- a clone of the exact candidate SHA plus a separate-process, post-discovery
+  E2E canary over reconciliation, real dispatcher-provisioned worktree,
+  controlled worker lifecycle, canonical worker gate, real chain integrator,
+  separate verifier and API projection. It must include `improved`, a
+  counter-won `worsened`, delivery-only `unmeasurable`, and a second no-op
+  reconcile/verifier pass. The harness never inserts integration events;
 - targeted/affected/backend/frontend/pre-release gates and an independent
   read-only `APPROVE` review of the exact commit;
 - authenticated desktop (1440 px) and mobile (390×844) candidate and live

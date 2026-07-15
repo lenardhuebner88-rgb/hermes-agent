@@ -1020,15 +1020,43 @@ export interface Proposal {
   evidence_grade?: OutcomeEvidenceGrade;
   calibration_eligible?: boolean;
   probe_contract?: {
+    schema_version?: number;
+    outcome_contract_version?: number;
     contract_id?: string;
     contract_hash?: string;
+    contract_sha256?: string;
+    claim?: string;
+    measurement_kind?: "invariant" | "metric_delta" | "runtime_observation";
+    probe_id?: string;
+    probe_args?: Record<string, unknown>;
+    success_template_id?: string;
+    success_parameters?: Record<string, unknown>;
+    success_rule?: Record<string, unknown>;
+    outcome_class?: string;
+    counter_probes?: Array<Record<string, unknown>>;
+    counter_rules?: Array<Record<string, unknown>>;
+    sampling_plan?: Record<string, unknown>;
+    observation_window?: Record<string, unknown>;
+    trigger?: "integrated_commit" | "deployed_runtime";
+    measurement_budget?: Record<string, unknown>;
+    environment_requirements?: Record<string, unknown>;
+    calibration_eligible?: boolean;
+    args?: Record<string, unknown>;
+    comparator?: Record<string, unknown>;
+    sampling?: Record<string, unknown>;
+    budget?: Record<string, unknown>;
+    requires_delivery_sha?: boolean;
     baseline_recorded_at?: number;
     release_fingerprint?: string;
   } | null;
+  outcome_class?: string | null;
+  outcome_authority?: string | null;
   outcome_baseline?: Record<string, unknown> | null;
   outcome_measured_at?: number | null;
   outcome_observation?: Record<string, unknown> | null;
   outcome_cost_usd?: number | null;
+  outcome_cost_breakdown?: Record<string, number> | null;
+  outcome_operator_interventions?: number | null;
   outcome_integration_sha?: string | null;
 }
 
@@ -1037,7 +1065,16 @@ export interface AutoresearchOutcomeMetrics {
   not_applicable: number;
   pending: number;
   measured: number;
+  verified_measured: number;
   measurement_coverage: number;
+  outcome_coverage: number;
+  directional_coverage: number;
+  verified_directional_denominator: number;
+  verified_benefit_rate: number | null;
+  regression_rate: number | null;
+  unmeasurable_rate: number | null;
+  verified_improved: number;
+  legacy_improved: number;
   improved: number;
   neutral: number;
   worsened: number;
@@ -1046,6 +1083,9 @@ export interface AutoresearchOutcomeMetrics {
   measurement_cost_usd: number;
   cost_per_measured_usd: number | null;
   cost_per_improved_usd: number | null;
+  cost_per_verified_benefit_usd: number | null;
+  operator_interventions: number;
+  operator_interventions_per_verified_benefit: number | null;
 }
 
 export interface AutoresearchQualityMetrics {

@@ -1517,9 +1517,18 @@ describe("AutoresearchView measured outcomes", () => {
       measurement_status: "measured",
       outcome_verdict: "improved",
       evidence_grade: "contract_verified",
-      probe_contract: { contract_id: "outcome:source_pattern.v1:abc", contract_hash: "abc" },
-      outcome_baseline: { metric: "occurrences", value: 1 },
-      outcome_observation: { metric: "occurrences", value: 0 },
+      probe_contract: {
+        contract_id: "outcome:source_pattern.v1:abc",
+        contract_hash: "abc",
+        claim: "Silent exceptions decrease",
+        success_rule: { metric: "occurrences", operator: "lower_is_better" },
+        counter_rules: [],
+        observation_window: { kind: "immediate" },
+        environment_requirements: { pytest_version: "9.0.2" },
+        measurement_budget: { max_attempts: 3 },
+      },
+      outcome_baseline: { metric: "occurrences", value: 1, evidence_ref: "outcome-evidence:sha256:before" },
+      outcome_observation: { metric: "occurrences", value: 0, evidence_ref: "outcome-evidence:sha256:after" },
       outcome_integration_sha: "a".repeat(40),
       outcome_cost_usd: 0.25,
     };
@@ -1541,12 +1550,33 @@ describe("AutoresearchView measured outcomes", () => {
     expect(html).toContain("aaaaaaaaaaaa");
     expect(html).toContain("occurrences: 1");
     expect(html).toContain("occurrences: 0");
-    expect(html).not.toContain("Integrated without measurement");
+    expect(html).toContain("Silent exceptions decrease");
+    expect(html).toContain("pytest_version");
+    expect(html).toContain("max_attempts");
+    expect(html).toContain("n=1");
+    expect(html).toContain("Integrated without measurement");
+    expect(html).toContain("nicht messbar");
   });
 
   it("shows an honest empty state when no contract has measured benefit", () => {
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
     expect(html).toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
     expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
+  });
+
+  it("labels legacy improved as historical and excludes it from verified benefit", () => {
+    const legacy: Proposal = {
+      ...proposal({ id: "legacy-improved", title: "Old observation", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "legacy_observational",
+    };
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[legacy]} />);
+    expect(html).toContain("Historisch verbessert");
+    expect(html).toContain("Old observation");
+    expect(html).toContain("0");
+    expect(html).not.toContain("Nutzen bestätigt</article>");
   });
 });

@@ -110,6 +110,12 @@ def _make_held_and_released_not_done(conn, key):
     return root
 
 
+def _append_integration_evidence(conn, task_id, sha="a" * 40):
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, "integration_merged", {"merge_commit": sha})
+        kb._append_event(conn, task_id, "INTEGRATOR_VERIFIED", {"merge_commit": sha})
+
+
 # --------------------------------------------------------------------------- #
 # Helper: build a shipped-state record (no task needs to exist in DB)
 # --------------------------------------------------------------------------- #
@@ -219,6 +225,7 @@ def test_complete_task_stamps_matching_lever_outcome_shipped(board_home):
     )
 
     with kb.connect() as conn:
+        _append_integration_evidence(conn, root)
         kb.complete_task(conn, root, result="integrated", summary="done")
         kb.complete_task(conn, root, result="integrated again", summary="done")
 
@@ -285,19 +292,19 @@ def test_complete_freigabe_hold_is_terminal_without_delivery(board_home):
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert rec["root_task_id"] == root
     assert rec["shipped_at"] is None
-    assert rec["status"] == "proposed"
+    assert rec["status"] == "archived"
     assert rec["measured_at"] is None
     assert rec["current"] is None
     assert rec["delta"] is None
     assert rec["verdict"] is None
     assert rec["outcome_applicability"] == "not_applicable"
-    assert rec["measurement_status"] == "exhausted"
+    assert rec["measurement_status"] == "not_started"
     assert rec["outcome_verdict"] is None
     assert rec["delivery_disposition"] == "done_elsewhere"
 
 
-def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
-    """The integrated decompose-root finalizer stamps strategist shipments."""
+def test_auto_complete_decompose_root_without_commit_evidence_is_not_shipped(board_home):
+    """An integrated label without exact commit witnesses is not delivery proof."""
     outcomes_path = _canonical_outcomes_path(board_home)
     outcomes_path.parent.mkdir(parents=True, exist_ok=True)
     with kb.connect() as conn:
@@ -323,8 +330,8 @@ def test_auto_complete_decompose_root_stamps_matching_lever_outcome_shipped(boar
 
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert rec["root_task_id"] == root
-    assert isinstance(rec["shipped_at"], int)
-    assert rec["status"] == "shipped"
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "archived"
     assert rec["measured_at"] is None
     assert rec["current"] is None
     assert rec["delta"] is None
@@ -375,8 +382,8 @@ def test_auto_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
     assert rec["status"] == "proposed"
 
 
-def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(board_home):
-    """The commitless decompose-root finalizer stamps strategist shipments."""
+def test_direct_complete_decompose_root_is_terminal_without_delivery(board_home):
+    """A commitless root finalizer is terminal but cannot claim shipment."""
     outcomes_path = _canonical_outcomes_path(board_home)
     outcomes_path.parent.mkdir(parents=True, exist_ok=True)
     with kb.connect() as conn:
@@ -401,8 +408,8 @@ def test_direct_complete_decompose_root_stamps_matching_lever_outcome_shipped(bo
 
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert rec["root_task_id"] == root
-    assert isinstance(rec["shipped_at"], int)
-    assert rec["status"] == "shipped"
+    assert rec["shipped_at"] is None
+    assert rec["status"] == "archived"
     assert rec["measured_at"] is None
     assert rec["current"] is None
     assert rec["delta"] is None
@@ -486,8 +493,8 @@ def test_ingest_noop_when_no_outcomes_path(board_home, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 2. reflect() stamps shipped_at
 # --------------------------------------------------------------------------- #
-def test_reflect_stamps_shipped_at_when_task_done_and_released(board_home, tmp_path):
-    """reflect() stamps shipped_at on proposed records whose root is done+released."""
+def test_reflect_does_not_ship_done_and_released_without_commit_evidence(board_home, tmp_path):
+    """reflect() requires integration evidence in addition to done+released."""
     now_ts = int(time.time())
     outcomes_path = tmp_path / "lever-outcomes.json"
     notes_path = tmp_path / "reflections.jsonl"
@@ -520,10 +527,10 @@ def test_reflect_stamps_shipped_at_when_task_done_and_released(board_home, tmp_p
     records = json.loads(outcomes_path.read_text(encoding="utf-8"))
     assert len(records) == 1
     rec = records[0]
-    assert rec["status"] == "shipped"
-    assert rec["shipped_at"] is not None and rec["shipped_at"] > 0
+    assert rec["status"] == "archived"
+    assert rec["shipped_at"] is None
     # reflect note must carry outcomes counts
-    assert result["note"]["outcomes"]["shipped_stamped"] == 1
+    assert result["note"]["outcomes"]["shipped_stamped"] == 0
     assert result["note"]["outcomes"]["measured"] == 0
 
 
@@ -1299,6 +1306,7 @@ def test_stamp_lever_outcome_shipped_sets_measurability(board_home):
     )
 
     with kb.connect() as conn:
+        _append_integration_evidence(conn, root)
         kb.complete_task(conn, root, result="integrated", summary="done")
 
     [rec] = json.loads(outcomes_path.read_text(encoding="utf-8"))

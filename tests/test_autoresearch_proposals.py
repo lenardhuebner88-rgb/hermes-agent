@@ -149,6 +149,44 @@ def test_generate_is_idempotent(tmp_home, scaffold_enabled):
     assert second["skipped_existing"] >= first["created_count"]
 
 
+def test_stale_proposal_writer_cannot_erase_concurrent_outcome_fields(tmp_home):
+    base = {
+        "id": "lost-update",
+        "schema": proposals.PROPOSAL_SCHEMA,
+        "mode": "code",
+        "target": "hermes_cli/example.py",
+        "status": "proposed",
+    }
+    proposals.save_proposal(base)
+    lifecycle_writer = proposals.load_proposal("lost-update")
+    outcome_writer = proposals.load_proposal("lost-update")
+    assert lifecycle_writer is not None and outcome_writer is not None
+
+    outcome_writer.update(
+        {
+            "measurement_status": "measured",
+            "outcome_verdict": "improved",
+            "evidence_grade": "contract_verified",
+        }
+    )
+    proposals.save_proposal(outcome_writer)
+    lifecycle_writer.update(
+        {
+            "decision_state": "accepted",
+            "delivery_state": "integrated",
+            "lifecycle_source": "task_events",
+        }
+    )
+    proposals.save_proposal(lifecycle_writer)
+
+    persisted = proposals.load_proposal("lost-update")
+    assert persisted is not None
+    assert persisted["measurement_status"] == "measured"
+    assert persisted["outcome_verdict"] == "improved"
+    assert persisted["decision_state"] == "accepted"
+    assert persisted["delivery_state"] == "integrated"
+
+
 def test_payload_drops_bulky_fields_and_counts_open(tmp_home, scaffold_enabled):
     _write_skill(tmp_home / "skills", "gamma", "# Gamma\n\nThin.\n")
     proposals.generate_proposals()

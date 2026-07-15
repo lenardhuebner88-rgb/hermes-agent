@@ -190,14 +190,30 @@ graded `legacy_observational`.
 
 New measurable Strategist baselines carry an immutable
 `vision_metric_snapshot.v1` contract for a reviewed metric/direction pair.
-Stale snapshots and records without an observed baseline cannot produce a new
-directional verdict. A task completed through the explicit "done elsewhere"
-event is terminal `not_applicable`, not shipped and not training evidence.
+The common verifier preserves `MATURITY_DAYS=3`: a matching deployment and
+actually running SHA only open the bounded observation window; they do not
+measure immediately. Stale snapshots, overlapping same-class effect windows,
+environment/schema drift and records without an observed baseline cannot
+produce a new directional verdict. A task completed through the explicit
+"done elsewhere" event is terminal `not_applicable`, not shipped and not
+training evidence.
+
+`task_events` are the sole shipment authority. `done` plus operator approval is
+not a ship stamp without matching integration/deployment evidence. Reflection
+projects common verifier attempts back into `lever-outcomes.json`; its legacy
+direct comparator remains compatibility-only for old records that have no
+registered common contract. Backfill preserves an existing `confounded`
+verdict and stale records are excluded from calibration.
 
 Autoresearch may be visible through the common operator outcome surface, but
 its rows are always `calibration_eligible=false`; they are excluded from
 `compute_lever_calibration`. Delivery and measurement remain separate:
 `integrated` or `shipped` alone never means `improved`.
+
+Calibration groups only the stable versioned `outcome_class`, never arbitrary
+lever labels. A class needs at least three directional, comparable, non-stale
+records. Contract-verified Autoresearch shadow rows remain ineligible even when
+that count is reached; enabling influence requires a separate operator action.
 
 The detailed contract, source hierarchy, shadow rollout and rollback procedure
 is in [`autoresearch-outcome-verification.md`](autoresearch-outcome-verification.md).

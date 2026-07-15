@@ -31,7 +31,29 @@ def reconcile_env(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AUTORESEARCH_DIGEST_PATH", str(digest))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
-    return {"home": home, "audit": audit, "digest": digest}
+    repo = tmp_path / "repo"
+    for name in ("a.py", "auth.py", "dispatcher.py", "example.py", "utils.py"):
+        path = repo / "hermes_cli" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "try:\n    work()\nexcept Exception:\n    pass\n",
+            encoding="utf-8",
+        )
+    test_path = repo / "tests" / "test_auth.py"
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text("def test_auth():\n    assert False\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Reconcile Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "reconcile@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    monkeypatch.setattr(reconcile, "REPO_ROOT", repo)
+    return {"home": home, "audit": audit, "digest": digest, "repo": repo}
 
 
 def _proposal(pid: str, **overrides):
@@ -145,7 +167,7 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
         summary = reconcile.reconcile_proposals(conn=conn)
         rows = conn.execute(
             "SELECT id, title, body, acceptance_criteria, assignee, idempotency_key, status, "
-            "review_tier, scope_contract FROM tasks"
+            "review_tier, scope_contract, workspace_kind, workspace_path FROM tasks"
         ).fetchall()
         outcome_events = conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? AND kind IN (?, ?) ORDER BY id",
@@ -160,6 +182,8 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert rows[0]["idempotency_key"] == "autoresearch:F-123"
     assert rows[0]["review_tier"] == "review"
     assert rows[0]["status"] == "ready"
+    assert rows[0]["workspace_kind"] == "worktree"
+    assert rows[0]["workspace_path"] == str(reconcile_env["repo"])
     assert json.loads(rows[0]["acceptance_criteria"])
     assert "AC-AR1" in rows[0]["body"]
     contract = json.loads(rows[0]["scope_contract"])
@@ -174,7 +198,7 @@ def test_high_severity_code_findings_create_one_deduped_kanban_task(reconcile_en
     assert routed[0]["kanban_task_id"] == rows[0]["id"]
     assert duplicate[0]["last_outcome"] == "rejected_duplicate"
     assert routed[0]["measurement_status"] == "pending"
-    assert routed[0]["evidence_grade"] == "contract_verified"
+    assert routed[0]["evidence_grade"] == "legacy_observational"
     assert routed[0]["outcome_baseline_recorded_at"]
     assert routed[0]["probe_contract"]["contract_hash"]
     assert [row["kind"] for row in outcome_events] == ["outcome_contract_registered", "unblocked"]
@@ -216,6 +240,28 @@ def test_contract_failure_leaves_task_blocked_and_next_run_recovers(reconcile_en
     assert second["new_tasks"] == 0
     assert recovered["status"] == "ready"
     assert contract_count == 1
+
+
+def test_invalid_baseline_never_creates_a_dispatchable_or_blocked_task(reconcile_env):
+    from hermes_cli import autoresearch_reconcile as reconcile
+
+    _proposal(
+        "code-missing-baseline",
+        mode="code",
+        finding_id="F-MISSING-BASELINE",
+        target="hermes_cli/auth.py",
+        target_path="hermes_cli/auth.py",
+        category="bug_risk",
+        theme="silent-except",
+    )
+    (reconcile_env["repo"] / "hermes_cli" / "auth.py").unlink()
+    with kb.connect() as conn:
+        result = reconcile.reconcile_proposals(conn=conn)
+        task_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+
+    assert result["errors"] == 1
+    assert task_count == 0
+    assert "outcome_baseline" not in _load("code-missing-baseline")
 
 
 def test_code_finding_missing_grounded_contract_is_held(reconcile_env):
