@@ -1459,22 +1459,10 @@ def decompose_task(
         logger.debug("decompose: profile outcome stats connection failed: %s", exc)
 
     try:
-        from agent.auxiliary_client import (  # type: ignore
-            get_auxiliary_extra_body,
-            get_text_auxiliary_client,
-        )
+        from agent.auxiliary_client import call_llm  # type: ignore
     except Exception as exc:
         logger.debug("decompose: auxiliary client import failed: %s", exc)
         return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    try:
-        client, model = get_text_auxiliary_client("kanban_decomposer")
-    except Exception as exc:
-        logger.debug("decompose: get_text_auxiliary_client failed: %s", exc)
-        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    if client is None or not model:
-        return DecomposeOutcome(task_id, False, "no auxiliary client configured")
 
     open_epic_ids, epics_block = _open_epics_context()
     user_msg = _USER_TEMPLATE.format(
@@ -1487,8 +1475,12 @@ def decompose_task(
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
+        # Route through call_llm so auxiliary.kanban_decomposer.* config
+        # (provider/model/base_url, extra_body, reasoning_effort, retries)
+        # all apply — the previous direct client.chat.completions.create()
+        # path dropped auxiliary.<task>.extra_body entirely (#35566).
+        resp = call_llm(
+            task="kanban_decomposer",
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
@@ -1496,12 +1488,13 @@ def decompose_task(
             temperature=0.3,
             max_tokens=4000,
             timeout=timeout or 180,
-            extra_body=get_auxiliary_extra_body() or None,
         )
     except Exception as exc:
         logger.info(
             "decompose: API call failed for %s (%s)", task_id, exc,
         )
+        if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
+            return DecomposeOutcome(task_id, False, "no auxiliary client configured")
         return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
 
     try:
@@ -1847,22 +1840,10 @@ def plan_and_document(
         logger.debug("flow-plan: profile outcome stats connection failed: %s", exc)
 
     try:
-        from agent.auxiliary_client import (  # type: ignore
-            get_auxiliary_extra_body,
-            get_text_auxiliary_client,
-        )
+        from agent.auxiliary_client import call_llm  # type: ignore
     except Exception as exc:
         logger.debug("flow-plan: auxiliary client import failed: %s", exc)
         return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    try:
-        client, model = get_text_auxiliary_client("kanban_decomposer")
-    except Exception as exc:
-        logger.debug("flow-plan: get_text_auxiliary_client failed: %s", exc)
-        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    if client is None or not model:
-        return DecomposeOutcome(task_id, False, "no auxiliary client configured")
 
     open_epic_ids, epics_block = _open_epics_context()
     user_msg = _USER_TEMPLATE.format(
@@ -1876,8 +1857,8 @@ def plan_and_document(
 
     system_prompt = _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM if document else _SYSTEM_PROMPT
     try:
-        resp = client.chat.completions.create(
-            model=model,
+        resp = call_llm(
+            task="kanban_decomposer",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
@@ -1885,10 +1866,11 @@ def plan_and_document(
             temperature=0.3,
             max_tokens=4000,
             timeout=timeout or 180,
-            extra_body=get_auxiliary_extra_body() or None,
         )
     except Exception as exc:
         logger.info("flow-plan: API call failed for %s (%s)", task_id, exc)
+        if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
+            return DecomposeOutcome(task_id, False, "no auxiliary client configured")
         return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
 
     try:

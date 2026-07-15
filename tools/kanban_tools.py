@@ -183,6 +183,9 @@ def _connect(board: Optional[str] = None):
     return kb, kb.connect(board=board)
 
 
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
+
+
 # ---------------------------------------------------------------------------
 # Runtime-activity → board-heartbeat bridge (#31752)
 # ---------------------------------------------------------------------------
@@ -717,6 +720,13 @@ def _handle_complete(args: dict, **kw) -> str:
                     # approving its own review run still goes terminal 'done'.
                     review_gate=True,
                 )
+            except kb.ArtifactPreservationError as artifact_err:
+                return tool_error(
+                    f"kanban_complete could not preserve the declared artifacts: "
+                    f"{artifact_err}. Your task is still in-flight and its "
+                    f"scratch workspace was kept. Fix the artifact path or "
+                    f"storage error, then retry kanban_complete with the same handoff."
+                )
             except kb.HallucinatedCardsError as hall_err:
                 # Structured rejection — surface the phantom ids so the
                 # worker can retry with a corrected list or drop the
@@ -785,13 +795,30 @@ def _handle_block(args: dict, **kw) -> str:
             "required_verification": [str(x) for x in (rv or []) if str(x).strip()],
         }
     reason = redact_sensitive_text(str(reason), force=True)
+    kind = args.get("kind")
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
+        if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
+            conn.close()
+            return tool_error(
+                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)"
+            )
+        task = kb.get_task(conn, tid)
+        if task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS:
+            conn.close()
+            return tool_error(
+                f"goal_mode tasks can only block with kind in "
+                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). "
+                f"If the task is actually finished or cannot proceed for "
+                f"another reason, call kanban_complete instead — the "
+                f"completion judge will evaluate it."
+            )
         try:
             ok = kb.block_task(
                 conn, tid,
                 reason=reason,
+                kind=kind,
                 expected_run_id=_worker_run_id(tid),
                 reviewer_metadata=reviewer_metadata,
             )
@@ -801,7 +828,13 @@ def _handle_block(args: dict, **kw) -> str:
                     f"running/ready)"
                 )
             run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
+            landed = kb.get_task(conn, tid)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                status=landed.status if landed else "blocked",
+                block_kind=kind,
+            )
         finally:
             conn.close()
     except ValueError as e:
@@ -1506,8 +1539,10 @@ KANBAN_COMPLETE_SCHEMA = {
                     "to ~/.hermes/reports/by-task/<task-id>/ first. Skip "
                     "intermediate scratch files and references that "
                     "are not the deliverable. The path must exist "
-                    "on disk when the notifier runs; missing files "
-                    "are silently skipped."
+                    "on disk at completion. Files inside a managed scratch "
+                    "workspace are copied to durable task attachments before "
+                    "cleanup; a missing declared scratch artifact keeps the "
+                    "task in-flight so you can fix the path and retry."
                 ),
             },
             "board": _board_schema_prop(),
@@ -1519,8 +1554,9 @@ KANBAN_COMPLETE_SCHEMA = {
 KANBAN_BLOCK_SCHEMA = {
     "name": "kanban_block",
     "description": (
-        "Transition the task to blocked because you need human input "
-        "to proceed. ``reason`` will be shown to the human on the "
+        "Stop work on this task and route it according to why you are stuck. "
+        "Use ``kind`` to distinguish a dependency, needed human input, a "
+        "capability wall, or a transient failure. ``reason`` is shown on the "
         "board and included in context when someone unblocks you. "
         "Use for genuine blockers only — don't block on things you can "
         "resolve yourself."
@@ -1541,6 +1577,15 @@ KANBAN_BLOCK_SCHEMA = {
                     "runs can put NEEDS_REVISION/REQUEST_CHANGES in the reason; "
                     "the kanban DB normalizes it into task_runs.verdict only "
                     "when the run originated from review."
+                ),
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["dependency", "needs_input", "capability", "transient"],
+                "description": (
+                    "Why you are blocked. 'dependency' waits in todo and "
+                    "resumes automatically; the others surface to a human. "
+                    "Goal-mode tasks may use only dependency or needs_input."
                 ),
             },
             "blocking_findings": {

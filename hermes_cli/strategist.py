@@ -53,7 +53,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
 from hermes_cli import outcome_verification as outcomes
@@ -2344,7 +2344,7 @@ def _recalculate_outcome_measurement(
     desired["outcome_verdict"] = desired["verdict"]
 
     relevant_fields = ("current", "delta", "status", "verdict", "stale_metrics")
-    changed = any(rec.get(field) != desired.get(field) for field in relevant_fields)
+    changed = any(rec.get(key) != desired.get(key) for key in relevant_fields)
     changed = changed or ("stale_metrics" in rec) != ("stale_metrics" in desired)
     if changed or rec.get("measured_at") is None:
         desired["measured_at"] = now_ts

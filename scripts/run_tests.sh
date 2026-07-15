@@ -88,6 +88,15 @@ trap 'rm -rf "$HERMES_TEST_HOME"' EXIT
 
 cd "$REPO_ROOT"
 
+# ── Pre-compile .pyc bytecode cache ─────────────────────────────────────────
+# Each test file runs in its own subprocess via run_tests_parallel.py.
+# Pre-building the bytecode cache once here (instead of each subprocess
+# compiling on first import) avoids redundant work across ~2000 processes.
+# Uses git to list tracked .py files (skips venv, node_modules, etc).
+echo "▶ pre-compiling bytecode cache"
+"$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
+
+echo "▶ launching test runner"
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \

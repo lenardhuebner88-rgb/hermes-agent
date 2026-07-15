@@ -40,11 +40,13 @@ from agent.prompt_builder import (
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
     TASK_COMPLETION_GUIDANCE,
+    TELEGRAM_RICH_MESSAGES_HINT,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     drain_truncation_warnings,
 )
 from agent.runtime_cwd import resolve_context_cwd
+from utils import is_truthy_value
 
 
 def _ra():
@@ -122,6 +124,22 @@ def _kanban_no_project_context_hint() -> str:
         "known project/repo context. Verify the intended workspace/repo from "
         "the task body before editing."
     )
+
+
+_TUI_EMBEDDED_PANE_CLARIFIER = (
+    " You're in its embedded terminal pane, beside the GUI chat — the user can "
+    "select your output (Option-drag on macOS, Shift-drag elsewhere) and press "
+    "Cmd/Ctrl+L to send it to the chat composer."
+)
+
+
+def _tui_embedded_pane_clarifier(hint: str) -> str:
+    """Append the desktop embedded-terminal qualifier to a TUI hint."""
+    if not hint or _TUI_EMBEDDED_PANE_CLARIFIER in hint:
+        return hint
+    if not is_truthy_value(os.getenv("HERMES_DESKTOP_TERMINAL")):
+        return hint
+    return hint + _TUI_EMBEDDED_PANE_CLARIFIER
 
 
 def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) -> Dict[str, str]:
@@ -411,7 +429,23 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         except Exception:
             pass
 
+    # For Telegram: append the rich-messages extension only when the user has
+    # opted in to ``platforms.telegram.extra.rich_messages: true``.  The base
+    # hint covers MarkdownV2-compatible constructs; the extension adds Bot API
+    # 10.1 guidance (tables, task lists, math, collapsible details, etc.).
+    if platform_key == "telegram" and _default_hint:
+        try:
+            from hermes_cli.config import load_config_readonly
+            _cfg = load_config_readonly()
+            _tg_extra = ((_cfg.get("platforms") or {}).get("telegram") or {}).get("extra") or {}
+            if _tg_extra.get("rich_messages"):
+                _default_hint = _default_hint.rstrip() + " " + TELEGRAM_RICH_MESSAGES_HINT
+        except Exception:
+            pass  # Config read failure — fall back to base hint only
+
     _effective_hint = _resolve_platform_hint(agent, platform_key, _default_hint)
+    if platform_key == "tui" and _effective_hint:
+        _effective_hint = _tui_embedded_pane_clarifier(_effective_hint)
     if _effective_hint:
         stable_parts.append(_effective_hint)
 

@@ -3425,6 +3425,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         tag = " (dry)" if args.dry_run else ""
         print(f"  - {tid}  ->  {who}  @ {ws or '-'}{tag}")
     if res.auto_assigned_default:
+        default_assignee = dispatch_kwargs.get("default_assignee")
         print(
             f"Auto-assigned to kanban.default_assignee={default_assignee!r}: "
             f"{', '.join(res.auto_assigned_default)}"

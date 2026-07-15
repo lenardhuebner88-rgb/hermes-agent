@@ -21,7 +21,8 @@
     "audit:fix:root": "npm audit fix --workspaces=false",
     "audit:fix:web": "npm audit fix --workspace web",
     "audit:fix:tui": "npm audit fix --workspace ui-tui",
-    "check:arch": "python3 scripts/gen_architecture_doc.py --check"
+    "check:arch": "python3 scripts/gen_architecture_doc.py --check",
+    "check": "npm run check --ws"
   },
   "repository": {
     "type": "git",
@@ -38,7 +39,6 @@
   },
   "overrides": {
     "lodash": "4.18.1",
-    "@assistant-ui/store": "0.2.13",
     "yauzl": "^3.3.1"
   },
   "engines": {

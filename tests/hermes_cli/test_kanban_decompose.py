@@ -97,18 +97,19 @@ def _mock_client_returning(content: str):
 
 
 def _patch_aux_client(content: str, *, model: str = "test-model"):
-    client = _mock_client_returning(content)
+    # decompose_task now routes through call_llm (see #35566) — mock it at
+    # the source module so task config, extra_body, and retries stay out of
+    # unit-test scope.
     return patch(
-        "agent.auxiliary_client.get_text_auxiliary_client",
-        return_value=(client, model),
+        "agent.auxiliary_client.call_llm",
+        return_value=_fake_aux_response(content),
     )
 
 
 def _patch_extra_body():
-    return patch(
-        "agent.auxiliary_client.get_auxiliary_extra_body",
-        return_value={},
-    )
+    # No-op shim retained for call-site compatibility: extra_body plumbing
+    # now lives inside call_llm, which _patch_aux_client already mocks.
+    return patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value={})
 
 
 def _task_stub(task_id: str = "t_parent", body: str = ""):
@@ -756,9 +757,11 @@ def test_decompose_no_aux_client_configured(kanban_home):
     for p in patches:
         p.start()
     try:
+        # call_llm raises RuntimeError when no provider is configured; the
+        # decomposer must convert that into a failed outcome, not a crash.
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(None, ""),
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("No LLM provider configured"),
         ):
             outcome = decomp.decompose_task(tid, author="me")
     finally:
@@ -1532,22 +1535,19 @@ def test_p5_prompt_lists_open_epics_only(kanban_home):
         kb.close_epic(conn, closed_eid)
         tid = kb.create_task(conn, title="anything", triage=True)
 
-    client = _mock_client_returning(jsonlib.dumps({**_EPIC_FANOUT, "epic": None}))
+    response = _fake_aux_response(jsonlib.dumps({**_EPIC_FANOUT, "epic": None}))
     patches = _patch_list_profiles(["orchestrator", "fallback"])
     for p in patches:
         p.start()
     try:
-        with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
-        ), _patch_extra_body():
+        with patch("agent.auxiliary_client.call_llm", return_value=response) as call_llm:
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
 
     assert outcome.ok, outcome.reason
-    user_msg = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    user_msg = call_llm.call_args.kwargs["messages"][1]["content"]
     assert "Open epics" in user_msg
     assert open_eid in user_msg
     assert closed_eid not in user_msg
@@ -1556,21 +1556,18 @@ def test_p5_prompt_lists_open_epics_only(kanban_home):
 def test_p5_prompt_says_none_without_open_epics(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="anything", triage=True)
-    client = _mock_client_returning(jsonlib.dumps(_EPIC_FANOUT))
+    response = _fake_aux_response(jsonlib.dumps(_EPIC_FANOUT))
     patches = _patch_list_profiles(["orchestrator", "fallback"])
     for p in patches:
         p.start()
     try:
-        with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(client, "test-model"),
-        ), _patch_extra_body():
+        with patch("agent.auxiliary_client.call_llm", return_value=response) as call_llm:
             outcome = decomp.decompose_task(tid, author="me")
     finally:
         for p in patches:
             p.stop()
     assert outcome.ok, outcome.reason
-    user_msg = client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
+    user_msg = call_llm.call_args.kwargs["messages"][1]["content"]
     assert "(none)" in user_msg
 
 

@@ -209,8 +209,8 @@ class TestJudgeGoal:
         from hermes_cli import goals
 
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(None, None),
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("No LLM provider configured"),
         ):
             verdict, _, _, _wd = goals.judge_goal("my goal", "my response")
         assert verdict == "continue"
@@ -219,11 +219,9 @@ class TestJudgeGoal:
         """Judge exception → fail-open continue (don't wedge progress on judge bugs)."""
         from hermes_cli import goals
 
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("boom")
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(fake_client, "judge-model"),
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("boom"),
         ):
             verdict, reason, _, _wd = goals.judge_goal("goal", "response")
         assert verdict == "continue"
@@ -232,17 +230,11 @@ class TestJudgeGoal:
     def test_judge_says_done(self):
         from hermes_cli import goals
 
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = MagicMock(
-            choices=[
-                MagicMock(
-                    message=MagicMock(content='{"done": true, "reason": "achieved"}')
-                )
-            ]
-        )
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(fake_client, "judge-model"),
+            "agent.auxiliary_client.call_llm",
+            return_value=MagicMock(
+                choices=[MagicMock(message=MagicMock(content='{"done": true, "reason": "achieved"}'))]
+            ),
         ):
             verdict, reason, _, _wd = goals.judge_goal("goal", "agent response")
         assert verdict == "done"
@@ -251,17 +243,11 @@ class TestJudgeGoal:
     def test_judge_says_continue(self):
         from hermes_cli import goals
 
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = MagicMock(
-            choices=[
-                MagicMock(
-                    message=MagicMock(content='{"done": false, "reason": "not yet"}')
-                )
-            ]
-        )
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(fake_client, "judge-model"),
+            "agent.auxiliary_client.call_llm",
+            return_value=MagicMock(
+                choices=[MagicMock(message=MagicMock(content='{"done": false, "reason": "not yet"}'))]
+            ),
         ):
             verdict, reason, _, _wd = goals.judge_goal("goal", "agent response")
         assert verdict == "continue"
@@ -309,6 +295,9 @@ class TestCheckGoalModeCompletion:
         with patch(
             "agent.auxiliary_client.get_text_auxiliary_client",
             return_value=(fake_client, "judge-model"),
+        ), patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=fake_client.chat.completions.create.return_value,
         ):
             rejection = goals.check_goal_mode_completion(
                 task_id="t_abc123",
@@ -335,6 +324,9 @@ class TestCheckGoalModeCompletion:
         with patch(
             "agent.auxiliary_client.get_text_auxiliary_client",
             return_value=(fake_client, "judge-model"),
+        ), patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=fake_client.chat.completions.create.return_value,
         ):
             rejection = goals.check_goal_mode_completion(
                 task_id="t_abc123",
@@ -568,11 +560,9 @@ class TestJudgeParseFailureAutoPause:
         """Transient network/API errors must not trip the auto-pause guard."""
         from hermes_cli import goals
 
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.side_effect = RuntimeError("connection reset")
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(fake_client, "judge-model"),
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("connection reset"),
         ):
             verdict, _, parse_failed, _wd = goals.judge_goal("goal", "response")
         assert verdict == "continue"
@@ -582,13 +572,9 @@ class TestJudgeParseFailureAutoPause:
         """End-to-end: judge returns empty content → parse_failed=True."""
         from hermes_cli import goals
 
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = MagicMock(
-            choices=[MagicMock(message=MagicMock(content=""))]
-        )
         with patch(
-            "agent.auxiliary_client.get_text_auxiliary_client",
-            return_value=(fake_client, "judge-model"),
+            "agent.auxiliary_client.call_llm",
+            return_value=MagicMock(choices=[MagicMock(message=MagicMock(content=""))]),
         ):
             verdict, _, parse_failed, _wd = goals.judge_goal("goal", "response")
         assert verdict == "continue"
@@ -867,22 +853,11 @@ class TestJudgeGoalWithSubgoals:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        captured.update(kwargs)
-                        return _FakeResp()
+        def _fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return _FakeResp()
 
-        with patch.object(goals, "get_text_auxiliary_client",
-                          return_value=(_FakeClient, "fake-model"), create=True), \
-             patch.object(goals, "get_auxiliary_extra_body",
-                          return_value=None, create=True), \
-             patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(_FakeClient, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body",
-                   return_value=None):
+        with patch("agent.auxiliary_client.call_llm", side_effect=_fake_call_llm):
             verdict, reason, parse_failed, _wd = goals.judge_goal(
                 "ship the feature",
                 "ok shipped",
@@ -910,18 +885,11 @@ class TestJudgeGoalWithSubgoals:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        captured.update(kwargs)
-                        return _FakeResp()
+        def _fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return _FakeResp()
 
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(_FakeClient, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body",
-                   return_value=None):
+        with patch("agent.auxiliary_client.call_llm", side_effect=_fake_call_llm):
             goals.judge_goal("ship it", "done", subgoals=None)
 
         sent_messages = captured.get("messages") or []
@@ -1483,7 +1451,8 @@ class TestGoalManagerContract:
 
 
 class TestJudgeWithContract:
-    def _fake_client(self, captured, content='{"done": false, "reason": "more"}'):
+    def _fake_call_llm(self, captured, content='{"done": false, "reason": "more"}'):
+        """judge_goal routes through call_llm (#35566) — capture its kwargs."""
         class _FakeMsg:
             pass
         _FakeMsg.content = content
@@ -1491,14 +1460,11 @@ class TestJudgeWithContract:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        captured.update(kwargs)
-                        return _FakeResp()
-        return _FakeClient
+
+        def _fake(**kwargs):
+            captured.update(kwargs)
+            return _FakeResp()
+        return _fake
 
     def test_judge_uses_contract_template(self, hermes_home):
         from unittest.mock import patch
@@ -1506,10 +1472,8 @@ class TestJudgeWithContract:
         from hermes_cli.goals import GoalContract
 
         captured = {}
-        client = self._fake_client(captured)
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(client, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   side_effect=self._fake_call_llm(captured)):
             goals.judge_goal(
                 "ship it", "I think it's done",
                 contract=GoalContract(verification="pytest -q passes"),
@@ -1527,10 +1491,8 @@ class TestJudgeWithContract:
         from hermes_cli.goals import GoalContract
 
         captured = {}
-        client = self._fake_client(captured)
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(client, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   side_effect=self._fake_call_llm(captured)):
             goals.judge_goal(
                 "ship it", "done",
                 subgoals=["write changelog"],
@@ -1558,16 +1520,8 @@ class TestDraftContract:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return _FakeResp()
-
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(_FakeClient, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   return_value=_FakeResp()):
             contract = goals.draft_contract("Migrate auth to JWT")
         assert contract is not None
         assert contract.outcome == "auth on JWT"
@@ -1584,24 +1538,16 @@ class TestDraftContract:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        return _FakeResp()
-
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(_FakeClient, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   return_value=_FakeResp()):
             assert goals.draft_contract("anything") is None
 
     def test_draft_returns_none_when_no_client(self, hermes_home):
         from unittest.mock import patch
         from hermes_cli import goals
 
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(None, None)):
+        with patch("agent.auxiliary_client.call_llm",
+                   side_effect=RuntimeError("No LLM provider configured")):
             assert goals.draft_contract("anything") is None
 
 
@@ -1615,7 +1561,8 @@ class TestContractAndBackgroundCompose:
     the contract block and the background-process list to the judge, so it
     can return either done (evidence met) or wait (parked on the poller)."""
 
-    def _capture_client(self, captured, content='{"verdict": "wait", "wait_on_pid": 4242, "reason": "CI still running"}'):
+    def _capture_call_llm(self, captured, content='{"verdict": "wait", "wait_on_pid": 4242, "reason": "CI still running"}'):
+        """judge_goal routes through call_llm (#35566) — capture its kwargs."""
         class _FakeMsg:
             pass
         _FakeMsg.content = content
@@ -1623,14 +1570,11 @@ class TestContractAndBackgroundCompose:
             message = _FakeMsg()
         class _FakeResp:
             choices = [_FakeChoice()]
-        class _FakeClient:
-            class chat:
-                class completions:
-                    @staticmethod
-                    def create(**kwargs):
-                        captured.update(kwargs)
-                        return _FakeResp()
-        return _FakeClient
+
+        def _fake(**kwargs):
+            captured.update(kwargs)
+            return _FakeResp()
+        return _fake
 
     def test_judge_prompt_carries_contract_and_background(self, hermes_home):
         from unittest.mock import patch
@@ -1638,14 +1582,12 @@ class TestContractAndBackgroundCompose:
         from hermes_cli.goals import GoalContract
 
         captured = {}
-        client = self._capture_client(captured)
         bg = [{
             "session_id": "ci-watch", "pid": 4242, "status": "running",
             "command": "wait_for_pr_green.sh 50501", "trigger": "exit",
         }]
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(client, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   side_effect=self._capture_call_llm(captured)):
             verdict, reason, parse_failed, wait_directive = goals.judge_goal(
                 "ship the PR",
                 "I pushed and started the CI watcher; waiting on it now.",
@@ -1670,14 +1612,12 @@ class TestContractAndBackgroundCompose:
         from hermes_cli.goals import GoalContract
 
         captured = {}
-        client = self._capture_client(
-            captured,
-            content='{"verdict": "done", "reason": "CI is green, evidence shown"}',
-        )
         bg = [{"session_id": "ci", "pid": 4242, "status": "running", "command": "ci", "trigger": "exit"}]
-        with patch("agent.auxiliary_client.get_text_auxiliary_client",
-                   return_value=(client, "fake-model")), \
-             patch("agent.auxiliary_client.get_auxiliary_extra_body", return_value=None):
+        with patch("agent.auxiliary_client.call_llm",
+                   side_effect=self._capture_call_llm(
+                       captured,
+                       content='{"verdict": "done", "reason": "CI is green, evidence shown"}',
+                   )):
             verdict, reason, parse_failed, wait_directive = goals.judge_goal(
                 "ship the PR",
                 "CI finished: 30 passed, 0 failed. Done.",

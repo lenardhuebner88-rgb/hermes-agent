@@ -726,6 +726,31 @@ def test_complete_rejects_non_list_artifacts(worker_env):
     assert "artifacts must be a list" in err
 
 
+def test_complete_missing_scratch_artifact_stays_in_flight(worker_env):
+    """A false deliverable claim must return retry guidance, not mark Done."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, worker_env)
+        assert task is not None
+        workspace = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, worker_env, workspace)
+
+    output = kt._handle_complete({
+        "summary": "report complete",
+        "artifacts": [str(workspace / "missing-report.md")],
+    })
+    error = json.loads(output).get("error", "")
+
+    assert "could not preserve" in error
+    assert "still in-flight" in error
+    assert "retry kanban_complete" in error
+    with kb.connect() as conn:
+        assert kb.get_task(conn, worker_env).status == "running"
+    assert workspace.exists()
+
+
 def test_complete_rejects_no_handoff(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({})
@@ -993,6 +1018,65 @@ def test_block_passes_structured_findings_to_metadata(worker_env):
         assert stored["verdict"] == "REQUEST_CHANGES"
     finally:
         conn.close()
+
+
+def _make_goal_mode_worker_env(monkeypatch, tmp_path):
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="goal-mode-block-test",
+            assignee="test-worker",
+            body="Must achieve X.",
+            goal_mode=True,
+        )
+        kb.claim_task(conn, tid)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+    return tid
+
+
+def test_block_goal_mode_rejects_missing_or_internal_kind(monkeypatch, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
+    for args in (
+        {"reason": "giving up"},
+        {"reason": "blocked", "kind": "capability"},
+        {"reason": "blocked", "kind": "transient"},
+    ):
+        assert "goal_mode" in json.loads(kt._handle_block(args))["error"]
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == "running"
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_status"),
+    [("dependency", "todo"), ("needs_input", "blocked")],
+)
+def test_block_goal_mode_allows_external_blockers(
+    monkeypatch, tmp_path, kind, expected_status
+):
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
+    result = json.loads(kt._handle_block({"reason": "external wait", "kind": kind}))
+    assert result["ok"] is True
+    assert result["status"] == expected_status
+    assert result["block_kind"] == kind
+    with kb.connect() as conn:
+        assert kb.get_task(conn, tid).status == expected_status
 
 
 def test_heartbeat_happy_path(worker_env):

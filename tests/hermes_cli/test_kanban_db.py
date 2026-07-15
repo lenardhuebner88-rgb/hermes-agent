@@ -3914,6 +3914,64 @@ def test_respawn_guard_unblock_clears_recent_success(kanban_home, monkeypatch):
         assert kb.check_respawn_guard(conn, tid) is None
 
 
+def test_respawn_guard_status_requeue_clears_recent_success(kanban_home, monkeypatch):
+    """A deliberate done-to-ready status event requests a fresh run."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 7_150_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="rs-status-requeue", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='completed', status='done', ended_at=? "
+            "WHERE id=?",
+            (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, claim_lock=NULL "
+            "WHERE id=?",
+            (tid,),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, created_at) "
+            "VALUES (?, 'status', ?)",
+            (tid, now + 20),
+        )
+        conn.commit()
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 100)
+        assert kb.check_respawn_guard(conn, tid) is None
+
+
+def test_respawn_guard_manual_promote_clears_recent_success(kanban_home, monkeypatch):
+    """The real operator promote event is a deliberate rerun request."""
+    import hermes_cli.kanban_db as _kb
+
+    now = 7_175_000
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="rs-manual-promote", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='completed', status='done', ended_at=? "
+            "WHERE id=?",
+            (now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='todo', current_run_id=NULL, claim_lock=NULL "
+            "WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 20)
+        promoted, reason = kb.promote_task(
+            conn, tid, actor="operator", reason="run it again"
+        )
+        assert promoted is True, reason
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 100)
+        assert kb.check_respawn_guard(conn, tid) is None
+
+
 def test_parked_then_unblocked_task_is_respawnable(kanban_home, monkeypatch):
     """C-1 + C-2 end-to-end: park an integration, operator unblocks → the task
     is dispatchable on the next tick (no 'recent_success' stall). The 1h-stall
@@ -7530,6 +7588,267 @@ def test_cleanup_workspace_removes_managed_scratch_dir(kanban_home):
     assert not ws.exists(), "Hermes-managed scratch dir should be cleaned up"
 
 
+def test_complete_task_persists_scratch_artifacts_before_cleanup(kanban_home):
+    """Completion artifacts from scratch workspaces survive workspace cleanup."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="render chart")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+        artifact = ws / "chart.png"
+        artifact.write_bytes(b"png-bytes")
+
+        assert kb.complete_task(
+            conn,
+            t,
+            result="ok",
+            metadata={"artifacts": [str(artifact)]},
+        )
+
+        completed = [e for e in kb.list_events(conn, t) if e.kind == "completed"][-1]
+        persisted = Path(completed.payload["artifacts"][0])
+        run = kb.latest_run(conn, t)
+
+    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert persisted.exists(), "artifact copy should survive scratch cleanup"
+    assert persisted.parent == kb.task_attachments_dir(t)
+    assert persisted.name == "chart.png"
+    assert persisted.read_bytes() == b"png-bytes"
+    assert str(persisted) != str(artifact)
+    assert run is not None
+    assert run.metadata["artifacts"] == [str(persisted)]
+    with kb.connect() as conn:
+        attachments = kb.list_attachments(conn, t)
+    assert [(a.filename, a.stored_path) for a in attachments] == [
+        ("chart.png", str(persisted.resolve()))
+    ]
+
+
+def test_complete_task_rejects_missing_declared_scratch_artifact(kanban_home):
+    """A declared scratch deliverable must not disappear behind a false Done."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="missing report")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+        missing = ws / "report.md"
+
+        with pytest.raises(kb.ArtifactPreservationError, match="unavailable"):
+            kb.complete_task(
+                conn,
+                t,
+                result="report complete",
+                metadata={"artifacts": [str(missing)]},
+            )
+
+        assert kb.get_task(conn, t).status == "ready"
+        assert kb.list_attachments(conn, t) == []
+    assert ws.exists(), "failed completion must keep scratch available for retry"
+
+
+def test_complete_task_preserves_legacy_artifact_path_from_summary(kanban_home):
+    """Summary-only workers keep the file they tell the user was delivered."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="legacy report")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+        report = ws / "report.md"
+        report.write_text("legacy deliverable", encoding="utf-8")
+
+        assert kb.complete_task(
+            conn,
+            t,
+            summary=f"Task complete — delivered {report}",
+        )
+        run = kb.latest_run(conn, t)
+
+    persisted = Path(run.metadata["artifacts"][0])
+    assert not ws.exists()
+    assert persisted.read_text(encoding="utf-8") == "legacy deliverable"
+    assert persisted.parent == kb.task_attachments_dir(t)
+
+
+def test_complete_task_leaves_non_scratch_artifact_paths_unchanged(
+    kanban_home,
+    tmp_path,
+):
+    """Only artifacts inside the managed scratch workspace are copied."""
+    external = tmp_path / "report.md"
+    external.write_text("keep me here", encoding="utf-8")
+
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="external report")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+
+        assert kb.complete_task(
+            conn,
+            t,
+            result="ok",
+            metadata={"artifacts": [str(external)]},
+        )
+
+        completed = [e for e in kb.list_events(conn, t) if e.kind == "completed"][-1]
+        run = kb.latest_run(conn, t)
+
+    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert external.exists()
+    assert completed.payload["artifacts"] == [str(external)]
+    assert run is not None
+    assert run.metadata["artifacts"] == [str(external)]
+
+
+def test_complete_task_persists_duplicate_scratch_artifact_names(kanban_home):
+    """Scratch artifact persistence does not overwrite duplicate basenames."""
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="render reports")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, t, ws)
+        first = ws / "a" / "report.txt"
+        second = ws / "b" / "report.txt"
+        first.parent.mkdir(parents=True)
+        second.parent.mkdir(parents=True)
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+
+        assert kb.complete_task(
+            conn,
+            t,
+            result="ok",
+            metadata={"artifacts": [str(first), str(second)]},
+        )
+
+        completed = [e for e in kb.list_events(conn, t) if e.kind == "completed"][-1]
+        persisted = [Path(p) for p in completed.payload["artifacts"]]
+
+    assert not ws.exists(), "scratch workspace should still be cleaned up"
+    assert [p.name for p in persisted] == ["report.txt", "report_1.txt"]
+    assert [p.read_text(encoding="utf-8") for p in persisted] == ["first", "second"]
+    assert all(p.parent == kb.task_attachments_dir(t) for p in persisted)
+    reports = kb.kanban_home() / "reports" / "by-task" / t
+    assert sorted(p.name for p in reports.iterdir()) == ["report.txt", "report_1.txt"]
+
+
+def test_complete_task_rejects_oversized_scratch_artifact_directory(
+    kanban_home, monkeypatch
+):
+    """Recursive directory preservation is bounded by a cumulative byte cap."""
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 4)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="directory artifact")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, tid, workspace)
+        artifact_dir = workspace / "large-tree"
+        artifact_dir.mkdir()
+        (artifact_dir / "report.txt").write_text("report", encoding="utf-8")
+
+        with pytest.raises(kb.ArtifactPreservationError, match="byte limit"):
+            kb.complete_task(
+                conn,
+                tid,
+                result="ok",
+                metadata={"artifacts": [str(artifact_dir)]},
+            )
+        assert kb.get_task(conn, tid).status == "ready"
+    assert workspace.exists()
+    reports = kb.kanban_home() / "reports" / "by-task" / tid
+    assert not reports.exists() or list(reports.iterdir()) == []
+
+
+def test_complete_task_rejects_over_entry_limit_artifact_directory(
+    kanban_home, monkeypatch
+):
+    monkeypatch.setattr(kb, "KANBAN_ARTIFACT_TREE_MAX_ENTRIES", 1)
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="too many artifact entries")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, tid, workspace)
+        artifact_dir = workspace / "tree"
+        artifact_dir.mkdir()
+        (artifact_dir / "one.txt").write_text("1", encoding="utf-8")
+        (artifact_dir / "two.txt").write_text("2", encoding="utf-8")
+
+        with pytest.raises(kb.ArtifactPreservationError, match="entry limit"):
+            kb.complete_task(
+                conn,
+                tid,
+                result="ok",
+                metadata={"artifacts": [str(artifact_dir)]},
+            )
+        assert kb.get_task(conn, tid).status == "ready"
+    reports = kb.kanban_home() / "reports" / "by-task" / tid
+    assert not reports.exists() or list(reports.iterdir()) == []
+
+
+def test_complete_task_rejects_root_and_nested_artifact_symlinks(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="symlink artifact")
+        task = kb.get_task(conn, tid)
+        workspace = kb.resolve_workspace(task)
+        kb.set_workspace_path(conn, tid, workspace)
+        target_dir = workspace / "target"
+        target_dir.mkdir()
+        target_file = target_dir / "report.txt"
+        target_file.write_text("report", encoding="utf-8")
+        root_link = workspace / "root-link"
+        nested_dir = workspace / "nested"
+        nested_dir.mkdir()
+        nested_link = nested_dir / "report-link"
+        try:
+            root_link.symlink_to(target_dir, target_is_directory=True)
+            nested_link.symlink_to(target_file)
+        except OSError:
+            pytest.skip("filesystem does not support symlinks")
+
+        with pytest.raises(kb.ArtifactPreservationError, match="must not be a symlink"):
+            kb.complete_task(
+                conn,
+                tid,
+                result="ok",
+                metadata={"artifacts": [str(root_link)]},
+            )
+        with pytest.raises(kb.ArtifactPreservationError, match="contains a symlink"):
+            kb.complete_task(
+                conn,
+                tid,
+                result="ok",
+                metadata={"artifacts": [str(nested_dir)]},
+            )
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_complete_task_persists_board_scratch_artifacts_to_board_attachments(kanban_home):
+    """Board scratch artifacts are copied under that board's attachment root."""
+    kb.create_board("work-proj")
+
+    with kb.connect(board="work-proj") as conn:
+        t = kb.create_task(conn, title="board chart", board="work-proj")
+        task = kb.get_task(conn, t)
+        ws = kb.resolve_workspace(task, board="work-proj")
+        kb.set_workspace_path(conn, t, ws)
+        artifact = ws / "chart.png"
+        artifact.write_bytes(b"board-png")
+
+        assert kb.complete_task(
+            conn,
+            t,
+            result="ok",
+            metadata={"artifacts": [str(artifact)]},
+        )
+
+        completed = [e for e in kb.list_events(conn, t) if e.kind == "completed"][-1]
+        persisted = Path(completed.payload["artifacts"][0])
+
+    assert not ws.exists(), "board scratch workspace should still be cleaned up"
+    assert persisted.exists()
+    assert persisted.parent == kb.task_attachments_dir(t, board="work-proj")
+
+
 def test_cleanup_workspace_refuses_path_outside_scratch_root(kanban_home, tmp_path):
     """A scratch task with a user path outside the workspaces root must NOT be deleted (#28818).
 
@@ -9826,7 +10145,7 @@ def test_stale_deliverable_event_does_not_repair_later_failure_cycle(
         assert kb.get_task(conn, tid).status == "blocked"
 
 
-def test_protocol_miss_without_deliverable_still_hard_blocks(
+def test_protocol_miss_without_deliverable_uses_bounded_retry(
     kanban_home, monkeypatch,
 ):
     monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
@@ -9844,9 +10163,9 @@ def test_protocol_miss_without_deliverable_still_hard_blocks(
         kinds = [e.kind for e in kb.list_events(conn, tid)]
 
     assert tid in crashed
-    assert task.status == "blocked"
+    assert task.status == "ready"
     assert "protocol_violation" in kinds
-    assert "gave_up" in kinds
+    assert "gave_up" not in kinds
     assert kb.DELIVERABLE_POSTED_NOT_COMPLETED not in kinds
 
 

@@ -156,20 +156,18 @@ def test_relative_artifact_path_is_skipped(kanban_home):
     assert not dest.exists()
 
 
-def test_missing_artifact_is_skipped(kanban_home):
-    """A worker that names a file but never wrote it (LLM hallucination,
-    rename race, etc.) must not crash the cleanup. The missing artifact
-    is silently dropped.
-    """
+def test_missing_artifact_rejects_false_completion(kanban_home):
+    """A declared deliverable must exist before the task can become done."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="missing")
         wp = _scratch_dir_for(kanban_home, tid)
         _bind_scratch_workspace(conn, tid, wp)
     declared = wp / "never-written.md"
     with kb.connect() as conn:
-        # Must complete cleanly even though the named file doesn't exist.
-        assert _complete_with_artifacts(conn, tid, [str(declared)]) is True
-    assert not wp.exists()
+        with pytest.raises(kb.ArtifactPreservationError, match="unavailable"):
+            _complete_with_artifacts(conn, tid, [str(declared)])
+        assert kb.get_task(conn, tid).status != "done"
+    assert wp.exists()
 
 
 def test_multiple_artifacts_preserved(kanban_home):

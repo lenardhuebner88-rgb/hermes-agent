@@ -15,6 +15,7 @@ import json
 import logging
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -164,9 +165,7 @@ def _release_config() -> dict:
     }
 
 
-def _repo_root() -> "Path":
-    from pathlib import Path
-
+def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 

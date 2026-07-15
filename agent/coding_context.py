@@ -59,6 +59,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -425,10 +426,18 @@ def _marker_root(cwd: Path) -> Optional[Path]:
     """
     current = cwd.resolve()
     home = _home()
+    # Shared world-writable temp roots are never project roots: a stray
+    # manifest in /tmp (left by any process) must not flip every session
+    # whose cwd lives under the temp dir into the coding posture. Same
+    # reasoning as the $HOME skip below.
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+    except Exception:
+        temp_root = None
     for depth, parent in enumerate([current, *current.parents]):
         if depth > 6:
             break
-        if parent == home:
+        if parent == home or (temp_root is not None and parent == temp_root):
             continue
         for marker in _PROJECT_MARKERS:
             if (parent / marker).exists():

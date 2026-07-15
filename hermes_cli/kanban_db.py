@@ -135,6 +135,8 @@ VALID_STATUSES = {
 TERMINAL_TASK_STATUSES = {"done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
+KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+KANBAN_ARTIFACT_TREE_MAX_ENTRIES = 4096
 VALID_BLOCK_KINDS = frozenset(
     {"needs_input", "capability", "dependency", "review_revision", "transient"}
 )
@@ -10143,6 +10145,10 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class ArtifactPreservationError(RuntimeError):
+    """Raised when a declared scratch deliverable cannot be preserved."""
+
+
 class WorkerGateError(Exception):
     """Raised by _submit_for_review when the enforced light worker gate
     (kanban.worker_gate) fails. The submission is aborted and the task stays
@@ -12485,6 +12491,15 @@ def complete_task(
             _reap_pid = _reap_row["worker_pid"]
             _reap_claim_lock = _reap_row["claim_lock"]
 
+    # Discover legacy absolute deliverable paths while scratch still exists.
+    metadata = _merge_completion_prose_artifacts(
+        conn,
+        task_id,
+        metadata,
+        summary=summary,
+        result=result,
+    )
+
     with write_txn(conn):
         with _review_done_terminal_authority():
             if expected_run_id is None:
@@ -12524,6 +12539,18 @@ def complete_task(
                 )
         if cur.rowcount != 1:
             return False
+        if isinstance(metadata, dict):
+            _persist_scratch_completion_artifacts(conn, task_id, metadata)
+            for stored_path in metadata.pop("_staged_artifacts", []):
+                path = Path(stored_path)
+                _insert_completion_attachment(
+                    conn,
+                    task_id,
+                    filename=path.name,
+                    stored_path=str(path),
+                    size=path.stat().st_size,
+                    created_at=now,
+                )
         run_id = _end_run(
             conn,
             task_id,
@@ -12771,6 +12798,285 @@ def complete_task(
 # ---------------------------------------------------------------------------
 
 
+def _merge_completion_prose_artifacts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+) -> Optional[dict]:
+    """Promote existing scratch files named in legacy completion prose."""
+    row = conn.execute(
+        "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+        return metadata
+    workspace = Path(row["workspace_path"]).expanduser()
+    if not _is_managed_scratch_path(workspace):
+        return metadata
+    text = "\n".join(part for part in (summary, result) if part)
+    if not text:
+        return metadata
+    discovered: list[str] = []
+    prefix = re.escape(str(workspace))
+    for match in re.finditer(prefix + r"(?:[/\\][^\s`\"'<>]+)", text):
+        candidate = Path(match.group(0).rstrip(".,;:!?)]}"))
+        if candidate.is_file():
+            discovered.append(str(candidate))
+    if not discovered:
+        return metadata
+    updated = dict(metadata) if isinstance(metadata, dict) else {}
+    artifacts = list(updated.get("artifacts") or [])
+    for path in discovered:
+        if path not in artifacts:
+            artifacts.append(path)
+    updated["artifacts"] = artifacts
+    return updated
+
+
+def _unique_attachment_path(directory: Path, filename: str, used: set[Path]) -> Path:
+    safe_name = Path(filename).name or "artifact"
+    candidate = directory / safe_name
+    if candidate not in used and not candidate.exists():
+        return candidate
+    stem, suffix = Path(safe_name).stem or "artifact", Path(safe_name).suffix
+    index = 1
+    while True:
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if candidate not in used and not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _copy_bounded_artifact_tree(source: Path, destination: Path) -> int:
+    """Copy a scratch artifact directory with bounded size and entry count."""
+    destination.mkdir(parents=False, exist_ok=False)
+    copied = 0
+    entries = 0
+    pending = [(source, destination)]
+    while pending:
+        current_source, current_destination = pending.pop()
+        with os.scandir(current_source) as scan:
+            for entry in scan:
+                entries += 1
+                if entries > KANBAN_ARTIFACT_TREE_MAX_ENTRIES:
+                    raise ArtifactPreservationError(
+                        f"declared scratch artifact directory exceeds the "
+                        f"{KANBAN_ARTIFACT_TREE_MAX_ENTRIES}-entry limit: {source}"
+                    )
+                item = Path(entry.path)
+                if entry.is_symlink():
+                    raise ArtifactPreservationError(
+                        f"declared scratch artifact directory contains a symlink: {item}"
+                    )
+                target = current_destination / entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    target.mkdir(parents=False, exist_ok=False)
+                    pending.append((item, target))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise ArtifactPreservationError(
+                        f"declared scratch artifact directory contains a non-file: {item}"
+                    )
+                with item.open("rb") as src, target.open("xb") as dst:
+                    while chunk := src.read(1024 * 1024):
+                        copied += len(chunk)
+                        if copied > KANBAN_ATTACHMENT_MAX_BYTES:
+                            raise ArtifactPreservationError(
+                                f"declared scratch artifact directory exceeds the "
+                                f"{KANBAN_ATTACHMENT_MAX_BYTES}-byte limit: {source}"
+                            )
+                        dst.write(chunk)
+                shutil.copystat(item, target, follow_symlinks=False)
+    return copied
+
+
+def _insert_completion_attachment(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    filename: str,
+    stored_path: str,
+    size: int,
+    created_at: int,
+) -> None:
+    conn.execute(
+        "INSERT INTO task_attachments "
+        "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
+        "VALUES (?, ?, ?, NULL, ?, 'kanban_complete', ?)",
+        (task_id, filename, stored_path, size, created_at),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "attached",
+        {"filename": filename, "size": size, "by": "kanban_complete"},
+    )
+
+
+def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
+    """Return whether *p* is managed scratch storage and its board slug."""
+    try:
+        candidate = p.resolve(strict=False)
+    except OSError:
+        return False, None
+    roots: list[tuple[Path, Optional[str]]] = []
+    override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
+    if override:
+        roots.append((Path(override).expanduser().resolve(strict=False), None))
+    try:
+        home = kanban_home()
+        roots.append(((home / "kanban" / "workspaces").resolve(strict=False), DEFAULT_BOARD))
+        boards_parent = (home / "kanban" / "boards").resolve(strict=False)
+        if boards_parent.is_dir():
+            for entry in boards_parent.iterdir():
+                if entry.is_dir():
+                    roots.append(((entry / "workspaces").resolve(strict=False), entry.name))
+    except OSError:
+        pass
+    for root, board in roots:
+        if candidate != root and candidate.is_relative_to(root):
+            return True, board
+    return False, None
+
+
+def _persist_scratch_completion_artifacts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: dict,
+) -> None:
+    """Copy declared scratch artifacts before workspace cleanup removes them."""
+    raw = metadata.get("artifacts")
+    if not isinstance(raw, (list, tuple)):
+        return
+    row = conn.execute(
+        "SELECT workspace_kind, workspace_path FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["workspace_kind"] != "scratch" or not row["workspace_path"]:
+        return
+    workspace = Path(row["workspace_path"]).expanduser()
+    managed, board = _managed_scratch_path_info(workspace)
+    if not managed:
+        return
+    workspace_root = workspace.resolve()
+    attachment_dir = task_attachments_dir(task_id, board=board)
+    reports_dir = kanban_home() / "reports" / "by-task" / task_id
+    persisted: list[str] = []
+    staged: list[str] = []
+    used: set[Path] = set()
+    report_copies: set[Path] = set()
+    changed = False
+
+    def rollback() -> None:
+        for path in used:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for path in report_copies:
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    for value in raw:
+        artifact = str(value).strip() if isinstance(value, str) else ""
+        if not artifact:
+            continue
+        declared_source = Path(artifact).expanduser()
+        if declared_source.is_symlink():
+            rollback()
+            raise ArtifactPreservationError(
+                f"declared scratch artifact must not be a symlink: {artifact}"
+            )
+        source = declared_source.resolve()
+        if not source.is_relative_to(workspace_root):
+            persisted.append(artifact)
+            continue
+        if not source.exists():
+            rollback()
+            raise ArtifactPreservationError(
+                f"declared scratch artifact is unavailable or not a regular file: {artifact}"
+            )
+        if source.is_dir():
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            report_destination = _unique_attachment_path(
+                reports_dir, source.name, report_copies
+            )
+            report_copies.add(report_destination)
+            try:
+                _copy_bounded_artifact_tree(source, report_destination)
+            except Exception as exc:
+                rollback()
+                if isinstance(exc, ArtifactPreservationError):
+                    raise
+                raise ArtifactPreservationError(
+                    f"could not preserve declared scratch artifact {artifact}: {exc}"
+                ) from exc
+            persisted.append(str(report_destination.resolve()))
+            changed = True
+            continue
+        if not source.is_file():
+            rollback()
+            raise ArtifactPreservationError(
+                f"declared scratch artifact is unavailable or not a regular file: {artifact}"
+            )
+        size = source.stat().st_size
+        if size > KANBAN_ATTACHMENT_MAX_BYTES:
+            rollback()
+            raise ArtifactPreservationError(
+                f"declared scratch artifact exceeds the {KANBAN_ATTACHMENT_MAX_BYTES}-byte limit: {artifact}"
+            )
+        attachment_dir.mkdir(parents=True, exist_ok=True)
+        destination = _unique_attachment_path(attachment_dir, source.name, used)
+        try:
+            with source.open("rb") as src, destination.open("xb") as dst:
+                copied = 0
+                while chunk := src.read(1024 * 1024):
+                    copied += len(chunk)
+                    if copied > KANBAN_ATTACHMENT_MAX_BYTES:
+                        raise ArtifactPreservationError(
+                            f"declared scratch artifact grew beyond the size limit: {artifact}"
+                        )
+                    dst.write(chunk)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            rollback()
+            if isinstance(exc, ArtifactPreservationError):
+                raise
+            raise ArtifactPreservationError(
+                f"could not preserve declared scratch artifact {artifact}: {exc}"
+            ) from exc
+        used.add(destination)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        report_destination = _unique_attachment_path(
+            reports_dir, destination.name, report_copies
+        )
+        report_copies.add(report_destination)
+        try:
+            shutil.copy2(source, report_destination)
+        except Exception as exc:
+            rollback()
+            raise ArtifactPreservationError(
+                f"could not preserve declared scratch artifact {artifact}: {exc}"
+            ) from exc
+        resolved_destination = str(destination.resolve())
+        persisted.append(resolved_destination)
+        staged.append(resolved_destination)
+        changed = True
+
+    if changed:
+        metadata["artifacts"] = persisted
+        if staged:
+            metadata["_staged_artifacts"] = staged
+
+
 def _is_managed_scratch_path(p: Path) -> bool:
     """Return True iff *p* is a strict descendant of a kanban-managed scratch root.
 
@@ -12796,54 +13102,8 @@ def _is_managed_scratch_path(p: Path) -> bool:
     real source tree can otherwise pair with ``workspace_kind='scratch'`` and
     cause task completion to delete user data (#28818).
     """
-    try:
-        p_abs = p.resolve(strict=False)
-    except OSError:
-        return False
-    roots: list[Path] = []
-    override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
-    if override:
-        try:
-            roots.append(Path(override).expanduser().resolve(strict=False))
-        except OSError:
-            pass
-    try:
-        home = kanban_home()
-    except OSError:
-        home = None
-    if home is not None:
-        try:
-            roots.append((home / "kanban" / "workspaces").resolve(strict=False))
-        except OSError:
-            pass
-        try:
-            boards_parent = (home / "kanban" / "boards").resolve(strict=False)
-        except OSError:
-            boards_parent = None
-        if boards_parent is not None:
-            try:
-                entries = list(boards_parent.iterdir())
-            except OSError:
-                entries = []
-            for entry in entries:
-                try:
-                    if not entry.is_dir():
-                        continue
-                except OSError:
-                    continue
-                try:
-                    roots.append((entry / "workspaces").resolve(strict=False))
-                except OSError:
-                    continue
-    for root in roots:
-        if p_abs == root:
-            continue
-        try:
-            if p_abs.is_relative_to(root):
-                return True
-        except ValueError:
-            continue
-    return False
+    is_managed, _board = _managed_scratch_path_info(p)
+    return is_managed
 
 
 def _preserve_scratch_artifacts(
@@ -16809,6 +17069,39 @@ def _run_failure_metadata(outcome: str, error: Optional[str]) -> dict[str, str]:
     }
 
 
+_PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
+_PROTOCOL_VIOLATION_SCAN_LIMIT = 50
+
+
+def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count trailing clean-exit protocol violations, skipping quota runs."""
+    streak = 0
+    rows = conn.execute(
+        "SELECT outcome, error, metadata FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?",
+        (task_id, _PROTOCOL_VIOLATION_SCAN_LIMIT),
+    ).fetchall()
+    for row in rows:
+        outcome = row["outcome"] or ""
+        if outcome == "rate_limited":
+            continue
+        if outcome == "crashed":
+            is_violation = False
+            if row["metadata"]:
+                try:
+                    is_violation = bool(json.loads(row["metadata"]).get("protocol_violation"))
+                except (ValueError, TypeError):
+                    pass
+            if not is_violation:
+                is_violation = "protocol violation" in (row["error"] or "")
+            if is_violation:
+                streak += 1
+                continue
+        break
+    return streak
+
+
 def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """Reclaim ``running`` tasks whose worker PID is no longer alive.
 
@@ -16907,6 +17200,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         "pid": pid,
                         "claimer": row["claim_lock"],
                         "exit_code": code,
+                        "protocol_violation": True,
                     }
             elif kind == "rate_limited":
                 # Worker bailed because the provider rate-limited / exhausted
@@ -17040,6 +17334,18 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                 else:
+                    if protocol_violation:
+                        # Stamp the failure error now: a below-budget
+                        # violation never reaches ``_record_task_failure``
+                        # (which stamps this column for every other failure
+                        # kind), yet the board UI and the retry worker's
+                        # context still need the violation message + the
+                        # corrective guidance it carries.
+                        conn.execute(
+                            "UPDATE tasks SET last_failure_error = ? "
+                            "WHERE id = ?",
+                            (error_text[:500], row["id"]),
+                        )
                     crashed.append(row["id"])
                     crash_details.append((
                         row["id"],
@@ -17054,11 +17360,18 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # ready → blocked with a ``gave_up`` event on top of the ``crashed``
     # event we already emitted.
     #
-    # Protocol-violation crashes force an immediate trip (failure_limit=1)
-    # because clean-exit-without-transition is deterministic: the next
-    # respawn will do exactly the same thing. Better to surface to a
-    # human with a clear reason than to loop ``DEFAULT_FAILURE_LIMIT``
-    # times first.
+    # Protocol-violation crashes (clean exit, no terminal tool call) get a
+    # BOUNDED retry, not an immediate trip: empirically ~96% of these tasks
+    # complete on a later run (a goal-mode finalize nudge, or the model simply
+    # emitting kanban_complete/kanban_block next time), so blocking on the first
+    # occurrence just churned them through the respawn cycle. The retry budget
+    # is a violation-only streak (``_protocol_violation_streak``): earlier
+    # timeouts / nonzero exits neither consume nor extend it, and a
+    # below-budget violation does not tick the unified
+    # ``consecutive_failures`` counter, so the two budgets stay independent.
+    # A per-task ``max_retries`` overrides the violation bound with the same
+    # top precedence it has for every other failure kind. Systemic same-error
+    # crashes still trip immediately.
     auto_blocked: list[str] = []
     if crash_details:
         # Fingerprint errors to detect systemic failures.
@@ -17067,14 +17380,49 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             fp = _error_fingerprint(err_text)
             _fp_counts[fp] = _fp_counts.get(fp, 0) + 1
         for tid, pid, claimer, protocol_violation, error_text, run_id in crash_details:
+            if protocol_violation:
+                streak = _protocol_violation_streak(conn, tid)
+                task_row = conn.execute(
+                    "SELECT max_retries FROM tasks WHERE id = ?", (tid,)
+                ).fetchone()
+                if task_row is None:
+                    continue
+                override = task_row["max_retries"]
+                violation_limit = (
+                    int(override)
+                    if override is not None
+                    else _PROTOCOL_VIOLATION_FAILURE_LIMIT
+                )
+                if streak < violation_limit:
+                    continue
+                tripped = _record_task_failure(
+                    conn,
+                    tid,
+                    error=error_text,
+                    outcome="crashed",
+                    failure_limit=violation_limit,
+                    force_trip=True,
+                    release_claim=False,
+                    end_run=False,
+                    event_payload_extra={
+                        "pid": pid,
+                        "claimer": claimer,
+                        "protocol_violations": streak,
+                        "protocol_violation_limit": violation_limit,
+                    },
+                    closed_run_id=run_id,
+                )
+                if tripped:
+                    auto_blocked.append(tid)
+                continue
             fp = _error_fingerprint(error_text)
-            is_systemic = not protocol_violation and _fp_counts.get(fp, 0) >= 3
+            is_systemic = _fp_counts.get(fp, 0) >= 3
             tripped = _record_task_failure(
                 conn,
                 tid,
                 error=error_text,
                 outcome="crashed",
-                failure_limit=1 if (protocol_violation or is_systemic) else None,
+                failure_limit=1 if is_systemic else None,
                 release_claim=False,
                 end_run=False,
                 event_payload_extra={"pid": pid, "claimer": claimer},
@@ -17790,6 +18138,7 @@ def _record_task_failure(
     *,
     outcome: str,
     failure_limit: int = None,
+    force_trip: bool = False,
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
@@ -17841,6 +18190,11 @@ def _record_task_failure(
       3. caller-supplied ``failure_limit`` (gateway passes the config
          value from ``kanban.failure_limit``; tests pass fixed values)
       4. ``DEFAULT_FAILURE_LIMIT``
+
+    ``force_trip=True`` skips the counter comparison after a caller has
+    already applied a separate bounded policy (currently the clean-exit
+    protocol-violation streak). The failure is still counted and the resolved
+    limit is still recorded for audit.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -17902,7 +18256,7 @@ def _record_task_failure(
         # Set only on the breaker-trip branch; pairs the end-of-txn
         # classification to the operator_escalation it explains.
         esc_event_id: Optional[int] = None
-        if count_failure and failures >= effective_limit:
+        if count_failure and (force_trip or failures >= effective_limit):
             # Trip the breaker.
             if release_claim:
                 # Spawn path: still running, also clear claim state.
@@ -20870,7 +21224,9 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     ``"recent_success"``
         A completed run exists within ``_RESPAWN_GUARD_SUCCESS_WINDOW``
         seconds.  Useful work already succeeded for this task; wait for
-        human review rather than immediately re-spawning.
+        human review rather than immediately re-spawning. Bypassed when an
+        explicit re-queue event (status change, promote, unblock, reclaim)
+        arrives AFTER that completion — that's a deliberate re-run request.
 
     ``"active_pr"``
         A GitHub PR URL appears in a recent task comment (within
@@ -21027,7 +21383,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
                 #
                 # Anchored on the LATEST completed run (``id DESC`` breaks
                 # same-second ties deterministically) and exempts iff an
-                # ``unblocked`` event is at or after it (``>=``). Second-
+                # explicit re-queue event is at or after it (``>=``). Second-
                 # granularity is sound: a full worker run cannot start AND finish
                 # within the same wall-clock second following an unblock, so the
                 # only same-second pairing in practice is "run ends, THEN
@@ -21035,13 +21391,17 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
                 # re-introduce the stall for a same-second unblock; a genuine
                 # re-run that completes later re-arms the guard (its ended_at
                 # moves past the unblock).
-                unblocked_since = conn.execute(
+                requeued_since = conn.execute(
                     "SELECT 1 FROM task_events "
-                    "WHERE task_id = ? AND kind = 'unblocked' "
+                    "WHERE task_id = ? "
+                    "  AND kind IN ("
+                    "      'status', 'promoted', 'promoted_manual', "
+                    "      'unblocked', 'reclaimed'"
+                    "  ) "
                     "  AND created_at >= ? LIMIT 1",
                     (task_id, recent["ended_at"]),
                 ).fetchone()
-                if unblocked_since is None:
+                if requeued_since is None:
                     return "recent_success"
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
@@ -24907,6 +25267,10 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    # Workers are always headless. An inherited TUI preference can otherwise
+    # make a no-TTY child exit successfully without ever executing the task.
+    env.pop("HERMES_TUI", None)
+
     # A real claimed task already owns an immutable spawn identity. Resolve it
     # BEFORE consulting the mutable lane so a lane edit between claim and
     # subprocess launch cannot alter the argv (or trip a verdict-lane strict
@@ -24980,6 +25344,7 @@ def _default_spawn(
         *_resolve_hermes_argv(),
         "-p",
         profile_arg,
+        "--cli",
         # Worker subprocesses switch to a profile-scoped HERMES_HOME above,
         # so they see that profile's shell-hook allowlist instead of the
         # dispatcher's root allowlist. Pass --accept-hooks explicitly so
@@ -25055,6 +25420,9 @@ def _default_spawn(
     if task.max_iterations is not None:
         cmd.extend(["--max-turns", str(int(task.max_iterations))])
     cmd.extend(["-q", prompt])
+    if task.goal_mode:
+        # The kanban goal loop is entered only by the fully quiet query path.
+        cmd.append("-Q")
     # Redirect output to a per-task log under <board-root>/logs/.
     # Anchored at the board root (not the shared kanban root), so
     # `hermes kanban log` on a specific board reads its own file and

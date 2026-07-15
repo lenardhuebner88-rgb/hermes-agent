@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 import os
 import re
 from typing import Any, Dict, Optional
@@ -55,6 +56,24 @@ class WhatsAppBehaviorMixin:
     supports_code_blocks = True  # WhatsApp renders fenced code blocks (monospace)
 
     DEFAULT_REPLY_PREFIX: str = "⚕ *Hermes Agent*\n────────────\n"
+
+    _OUTBOUND_INVISIBLE_CHARS_RE = re.compile(r"[\u200b\u2060\u2063\ufeff]")
+    _OUTBOUND_ODD_SPACE_RE = re.compile(r"[\u00a0\u1680\u180e\u2000-\u200a\u202f\u205f\u3000]")
+
+    @classmethod
+    def _sanitize_outbound_text(cls, content: str) -> str:
+        """Remove invisible formatting chars that leak badly in WhatsApp.
+
+        Some provider/gateway formatting paths can emit unicode like WORD
+        JOINER (U+2060) plus NARROW NO-BREAK SPACE (U+202F). WhatsApp may
+        render those as mojibake-looking prefixes (``⁠ text``) instead of
+        invisible spacing. Keep normal text and emoji joiners intact, but
+        strip known zero-width format chars and normalize odd unicode spaces.
+        """
+        if not content:
+            return content
+        content = cls._OUTBOUND_INVISIBLE_CHARS_RE.sub("", content)
+        return cls._OUTBOUND_ODD_SPACE_RE.sub(" ", content)
 
     @property
     def enforces_own_access_policy(self) -> bool:
@@ -375,6 +394,8 @@ class WhatsAppBehaviorMixin:
         if not content:
             return content
 
+        content = self._sanitize_outbound_text(content)
+
         # --- 1. Protect fenced code blocks from formatting changes ---
         _FENCE_PH = "\x00FENCE"
         fences: list[str] = []
@@ -396,12 +417,19 @@ class WhatsAppBehaviorMixin:
         result = re.sub(r"`[^`\n]+`", _save_code, result)
 
         # --- 3. Convert markdown formatting to WhatsApp syntax ---
+        # Italic: standard Markdown *text* → WhatsApp _text_.  Do this before
+        # bold conversion so **bold** does not become italic by accident.  The
+        # lookarounds avoid list bullets and bold delimiters.
+        result = re.sub(
+            r"(?<!\*)\*(?!\s|\*)([^*\n]*?\S[^*\n]*?)\*(?!\*)",
+            r"_\1_",
+            result,
+        )
         # Bold: **text** or __text__ → *text*
         result = re.sub(r"\*\*(.+?)\*\*", r"*\1*", result)
         result = re.sub(r"__(.+?)__", r"*\1*", result)
         # Strikethrough: ~~text~~ → ~text~
         result = re.sub(r"~~(.+?)~~", r"~\1~", result)
-        # Italic: *text* is already WhatsApp italic — leave as-is
         # _text_ is already WhatsApp italic — leave as-is
 
         # --- 4. Convert markdown headers to bold text ---

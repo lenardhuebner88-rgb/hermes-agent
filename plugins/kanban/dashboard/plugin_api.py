@@ -2443,6 +2443,22 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        links = _links_for(conn, task_id)
+        child_ids = links["children"]
+        child_summaries = kanban_db.latest_summaries(conn, child_ids)
+        child_results = []
+        for child_id in child_ids:
+            child = kanban_db.get_task(conn, child_id)
+            if child is not None:
+                child_results.append(
+                    {
+                        "id": child.id,
+                        "title": child.title,
+                        "status": child.status,
+                        "latest_summary": child_summaries.get(child.id),
+                        "result": child.result,
+                    }
+                )
         task_d["operator_question"] = kanban_db.blocked_task_operator_questions(
             conn, [task]
         ).get(task.id, False)
@@ -2485,7 +2501,8 @@ def get_task(
             "events": [_event_dict(e) for e in events],
             "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
             "deliverables": _list_task_deliverables(task_id),
-            "links": _links_for(conn, task_id),
+            "links": links,
+            "child_results": child_results,
             "runs": [
                 _run_dict(conn, r, legacy_resolver=legacy_resolver)
                 for r in runs
@@ -2638,7 +2655,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
 
 # Cap a single upload so a runaway request can't fill the disk. 25 MB
 # comfortably covers PDFs, images, and source docs — the kanban use case.
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = kanban_db.KANBAN_ATTACHMENT_MAX_BYTES
 
 
 def _safe_attachment_name(raw: str) -> str:
@@ -7380,6 +7397,114 @@ def get_stats(board: Optional[str] = Query(None)):
         conn.close()
 
 
+@router.get("/assignees")
+def get_assignees(board: Optional[str] = Query(None)):
+    """Return known profiles and their board task counts."""
+    board = _resolve_board(board)
+    conn = _conn(board=board)
+    try:
+        return {"assignees": kanban_db.known_assignees(conn)}
+    finally:
+        conn.close()
+
+
+class OrchestrationSettingsBody(BaseModel):
+    orchestrator_profile: Optional[str] = None
+    default_assignee: Optional[str] = None
+    auto_decompose: Optional[bool] = None
+    auto_promote_children: Optional[bool] = None
+
+
+@router.get("/orchestration")
+def get_orchestration_settings():
+    """Return explicit and effective Kanban orchestration settings."""
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    kanban_cfg = (cfg.get("kanban") or {}) if isinstance(cfg, dict) else {}
+    explicit_orch = (kanban_cfg.get("orchestrator_profile") or "").strip()
+    explicit_default = (kanban_cfg.get("default_assignee") or "").strip()
+    auto_decompose = bool(kanban_cfg.get("auto_decompose", True))
+    auto_promote_children = bool(kanban_cfg.get("auto_promote_children", True))
+
+    resolved_orch = explicit_orch
+    resolved_default = explicit_default
+    try:
+        from hermes_cli import profiles as profiles_mod
+
+        active_default = profiles_mod.get_active_profile_name() or "default"
+        if not resolved_orch or not profiles_mod.profile_exists(resolved_orch):
+            resolved_orch = active_default
+        if not resolved_default or not profiles_mod.profile_exists(resolved_default):
+            resolved_default = active_default
+    except Exception:
+        active_default = "default"
+        resolved_orch = resolved_orch or active_default
+        resolved_default = resolved_default or active_default
+
+    return {
+        "orchestrator_profile": explicit_orch,
+        "default_assignee": explicit_default,
+        "auto_decompose": auto_decompose,
+        "auto_promote_children": auto_promote_children,
+        "resolved_orchestrator_profile": resolved_orch,
+        "resolved_default_assignee": resolved_default,
+        "active_profile": active_default,
+    }
+
+
+@router.put("/orchestration")
+def set_orchestration_settings(payload: OrchestrationSettingsBody):
+    """Persist the supplied Kanban orchestration settings."""
+    try:
+        from hermes_cli.config import load_config, save_config
+
+        cfg = load_config() or {}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to load config: {exc}")
+
+    kanban_section = cfg.setdefault("kanban", {})
+    if not isinstance(kanban_section, dict):
+        kanban_section = {}
+        cfg["kanban"] = kanban_section
+
+    try:
+        from hermes_cli import profiles as profiles_mod
+    except Exception:
+        profiles_mod = None
+
+    for field in ("orchestrator_profile", "default_assignee"):
+        value = getattr(payload, field)
+        if value is None:
+            continue
+        name = (value or "").strip()
+        if name and profiles_mod is not None:
+            try:
+                if not profiles_mod.profile_exists(name):
+                    raise HTTPException(
+                        status_code=400, detail=f"profile '{name}' does not exist"
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                pass
+        kanban_section[field] = name
+
+    if payload.auto_decompose is not None:
+        kanban_section["auto_decompose"] = bool(payload.auto_decompose)
+    if payload.auto_promote_children is not None:
+        kanban_section["auto_promote_children"] = bool(payload.auto_promote_children)
+
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to save config: {exc}")
+    return get_orchestration_settings()
+
+
 @router.get("/stats/autonomy")
 def get_stats_autonomy(board: Optional[str] = Query(None)):
     """Operator-free acceptance rate from task events."""
@@ -7480,6 +7605,7 @@ class CreateBoardBody(BaseModel):
     description: Optional[FreeText] = None
     icon: Optional[ShortText] = None
     color: Optional[ShortText] = None
+    default_workdir: Optional[str] = None
     switch: bool = False
 
 
@@ -7506,6 +7632,17 @@ def _board_counts(slug: str) -> dict[str, int]:
             conn.close()
     except Exception:
         return {}
+
+
+def _default_workspace_kind(board: dict[str, Any]) -> str:
+    """Recommend a non-destructive task workspace from board metadata."""
+    workdir = str(board.get("default_workdir") or "").strip()
+    if not workdir:
+        return "scratch"
+    try:
+        return "worktree" if kanban_db._git_toplevel(Path(workdir)) else "dir"
+    except (OSError, ValueError):
+        return "dir"
 
 
 @router.get("/boards")
@@ -7537,6 +7674,7 @@ def list_boards(include_archived: bool = Query(False)):
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
+        b["default_workspace_kind"] = _default_workspace_kind(b)
         b["project_id"] = project.id if project else None
         b["project_slug"] = project.slug if project else None
         b["project_name"] = project.name if project else None
@@ -7547,6 +7685,20 @@ def list_boards(include_archived: bool = Query(False)):
 @router.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
+    default_workdir = None
+    if payload.default_workdir:
+        requested = Path(payload.default_workdir).expanduser()
+        if not requested.is_absolute():
+            raise HTTPException(
+                status_code=400,
+                detail="Project directory must be an absolute path.",
+            )
+        if not requested.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail="Project directory must be an existing directory.",
+            )
+        default_workdir = str(requested.resolve())
     try:
         meta = kanban_db.create_board(
             payload.slug,
@@ -7554,6 +7706,7 @@ def create_board_endpoint(payload: CreateBoardBody):
             description=payload.description,
             icon=payload.icon,
             color=payload.color,
+            default_workdir=default_workdir,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -7562,6 +7715,7 @@ def create_board_endpoint(payload: CreateBoardBody):
             kanban_db.set_current_board(meta["slug"])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+    meta["default_workspace_kind"] = _default_workspace_kind(meta)
     return {"board": meta, "current": kanban_db.get_current_board()}
 
 

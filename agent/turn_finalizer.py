@@ -77,6 +77,7 @@ def finalize_turn(
     original_user_message,
     _should_review_memory,
     _turn_exit_reason,
+    _pending_verification_response=None,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict.
 
@@ -86,10 +87,18 @@ def finalize_turn(
     from agent.conversation_loop import logger
 
     _kanban_completion_accepted = False
-    if final_response is None and (
+    preserved_verification_fallback = False
+    budget_exhausted = (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
-    ):
+    )
+    budget_fallback_eligible = (
+        budget_exhausted
+        and not interrupted
+        and not failed
+        and str(_turn_exit_reason) in {"unknown", "budget_exhausted"}
+    )
+    if final_response is None and budget_exhausted:
         _kanban_task = os.environ.get("HERMES_KANBAN_TASK")
         _kanban_completion_accepted, _kanban_summary = _accepted_kanban_completion(
             _kanban_task or ""
@@ -97,21 +106,29 @@ def finalize_turn(
         if _kanban_completion_accepted:
             _turn_exit_reason = "kanban_completion_at_iteration_budget_edge"
             final_response = _kanban_summary or "Kanban task completed."
-        else:
+        elif budget_fallback_eligible:
             # Budget exhausted — ask the model for a summary via one extra
             # API call with tools stripped.  _handle_max_iterations injects a
             # user message and makes a single toolless request.
             _turn_exit_reason = f"max_iterations_reached({api_call_count}/{agent.max_iterations})"
-            agent._emit_status(
-                f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                "— asking model to summarise"
-            )
-            if not agent.quiet_mode:
-                agent._safe_print(
-                    f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
-                    "— requesting summary..."
+            if _pending_verification_response:
+                # A verification/continuation gate deliberately withheld a
+                # composed answer and then consumed the remaining budget.
+                # Preserve that exact answer instead of issuing another
+                # fallible model call.
+                final_response = _pending_verification_response
+                preserved_verification_fallback = True
+            else:
+                agent._emit_status(
+                    f"⚠️ Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                    "— asking model to summarise"
                 )
-            final_response = agent._handle_max_iterations(messages, api_call_count)
+                if not agent.quiet_mode:
+                    agent._safe_print(
+                        f"\n⚠️  Iteration budget exhausted ({api_call_count}/{agent.max_iterations}) "
+                        "— requesting summary..."
+                    )
+                final_response = agent._handle_max_iterations(messages, api_call_count)
 
             # If running as a kanban worker, signal the dispatcher that the
             # worker could not complete (rather than treating it as a
@@ -254,6 +271,15 @@ def finalize_turn(
             if _tail_role != "assistant":
                 messages.append({"role": "assistant", "content": final_response})
 
+        # The model has completed its request, so replace API-local
+        # voice/model/skill guidance with the clean user input before writing the
+        # final durable snapshot and returning the continuation history. Earlier
+        # turn-start flushes use the DB-only override because their messages are
+        # still needed for the API request; this finalizer runs after that request
+        # is complete (#48677 / #63766).
+        _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
+        if callable(_apply_override):
+            _apply_override(messages)
         agent._persist_session(messages, conversation_history)
     except Exception as _persist_err:
         _cleanup_errors.append(f"persist_session: {_persist_err}")
@@ -366,6 +392,7 @@ def finalize_turn(
                 # truncated partial (the "The" case from #34452).
                 _is_partial_fragment = (
                     not _is_empty_terminal
+                    and not preserved_verification_fallback
                     and not str(_turn_exit_reason).startswith("text_response")
                     and len(_stripped) <= 24
                     and _stripped[-1:] not in {".", "!", "?", "。", "！", "？", "`", ")"}
@@ -486,6 +513,11 @@ def finalize_turn(
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,
         "cost_source": agent.session_cost_source,
+        # Requested service tier (from request_overrides.extra_body), for
+        # billing audits by callers like `hermes -z --usage-file`.
+        "service_tier": (
+            (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}
+        ).get("service_tier"),
         "session_id": agent.session_id,
     }
     if agent._tool_guardrail_halt_decision is not None:

@@ -177,7 +177,7 @@ def test_human_single_query_main_finalizes_after_query(monkeypatch):
             calls.append(("chat", query, images))
             return "done"
 
-        def _print_exit_summary(self):
+        def _print_exit_summary(self, clear_screen=True):
             calls.append("summary")
 
     monkeypatch.setattr(cli_mod, "HermesCLI", FakeCLI)
@@ -237,7 +237,7 @@ def test_human_single_query_kanban_worker_runs_terminalization_continuation(
             }
             return "deliverable posted"
 
-        def _print_exit_summary(self):
+        def _print_exit_summary(self, clear_screen=True):
             calls.append("summary")
 
     monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
