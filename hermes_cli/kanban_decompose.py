@@ -1422,6 +1422,101 @@ def _apply_epic_choice(task, parsed: dict, open_epic_ids: set[str]) -> None:
         logger.debug("decompose: epic assignment skipped for %s: %s", task.id, exc)
 
 
+@dataclass(frozen=True)
+class DecomposerRequest:
+    """Canonical routing/context inputs shared by every decomposition mode."""
+
+    config: dict
+    orchestrator: str
+    default_assignee: str
+    valid_names: set[str]
+    open_epic_ids: set[str]
+    user_message: str
+
+
+def _prepare_decomposer_request(task, *, log_prefix: str) -> DecomposerRequest:
+    """Own roster/default/orchestrator resolution for one LLM request.
+
+    Outcome statistics remain a best-effort evidence hook: they enrich the
+    roster but never become a second routing or request-building pipeline.
+    """
+    cfg = _load_config()
+    orchestrator = _resolve_orchestrator_profile(cfg)
+    default_assignee = _resolve_default_assignee(cfg)
+    roster, valid_names = _build_roster()
+    try:
+        with kb.connect_closing() as conn:
+            _enrich_roster_with_outcome_stats(conn, roster)
+    except Exception as exc:
+        logger.debug(
+            "%s: profile outcome stats connection failed: %s",
+            log_prefix,
+            exc,
+        )
+    open_epic_ids, epics_block = _open_epics_context()
+    user_message = _USER_TEMPLATE.format(
+        task_id=task.id,
+        title=_truncate(task.title or "", 400),
+        body=_truncate(task.body or "(no body)", 4000),
+        roster=_format_roster(roster),
+        default_assignee=default_assignee,
+        epics=epics_block,
+    )
+    return DecomposerRequest(
+        config=cfg,
+        orchestrator=orchestrator,
+        default_assignee=default_assignee,
+        valid_names=valid_names,
+        open_epic_ids=open_epic_ids,
+        user_message=user_message,
+    )
+
+
+def _invoke_decomposer(
+    task_id: str,
+    *,
+    user_message: str,
+    system_prompt: str,
+    timeout: Optional[int],
+    log_prefix: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Call and parse the one configured Kanban decomposer LLM edge."""
+    try:
+        from agent.auxiliary_client import call_llm  # type: ignore
+    except Exception as exc:
+        logger.debug("%s: auxiliary client import failed: %s", log_prefix, exc)
+        return None, "auxiliary client unavailable"
+
+    try:
+        # Route through call_llm so auxiliary.kanban_decomposer.* config
+        # (provider/model/base_url, extra_body, reasoning_effort, retries)
+        # applies identically to normal and documented decomposition.
+        response = call_llm(
+            task="kanban_decomposer",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.3,
+            max_tokens=4000,
+            timeout=timeout or 180,
+        )
+    except Exception as exc:
+        logger.info("%s: API call failed for %s (%s)", log_prefix, task_id, exc)
+        if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
+            return None, "no auxiliary client configured"
+        return None, f"LLM error: {type(exc).__name__}"
+
+    try:
+        raw = response.choices[0].message.content or ""
+    except Exception:
+        raw = ""
+    parsed = _extract_json_blob(raw)
+    if parsed is None:
+        return None, "LLM returned malformed JSON"
+    return parsed, None
+
+
 def decompose_task(
     task_id: str,
     *,
@@ -1444,70 +1539,28 @@ def decompose_task(
             task_id, False, f"task is not in triage (status={task.status!r})"
         )
 
-    cfg = _load_config()
-    orchestrator = _resolve_orchestrator_profile(cfg)
-    default_assignee = _resolve_default_assignee(cfg)
-    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+    request = _prepare_decomposer_request(task, log_prefix="decompose")
+    kanban_cfg = (
+        request.config.get("kanban", {})
+        if isinstance(request.config, dict)
+        else {}
+    )
     auto_promote = _coerce_config_bool(
         kanban_cfg.get("auto_promote_children", True), default=True
     )
-    roster, valid_names = _build_roster()
-    try:
-        with kb.connect_closing() as conn:
-            _enrich_roster_with_outcome_stats(conn, roster)
-    except Exception as exc:
-        logger.debug("decompose: profile outcome stats connection failed: %s", exc)
-
-    try:
-        from agent.auxiliary_client import call_llm  # type: ignore
-    except Exception as exc:
-        logger.debug("decompose: auxiliary client import failed: %s", exc)
-        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    open_epic_ids, epics_block = _open_epics_context()
-    user_msg = _USER_TEMPLATE.format(
-        task_id=task.id,
-        title=_truncate(task.title or "", 400),
-        body=_truncate(task.body or "(no body)", 4000),
-        roster=_format_roster(roster),
-        default_assignee=default_assignee,
-        epics=epics_block,
+    parsed, error = _invoke_decomposer(
+        task_id,
+        user_message=request.user_message,
+        system_prompt=_SYSTEM_PROMPT,
+        timeout=timeout,
+        log_prefix="decompose",
     )
-
-    try:
-        # Route through call_llm so auxiliary.kanban_decomposer.* config
-        # (provider/model/base_url, extra_body, reasoning_effort, retries)
-        # all apply — the previous direct client.chat.completions.create()
-        # path dropped auxiliary.<task>.extra_body entirely (#35566).
-        resp = call_llm(
-            task="kanban_decomposer",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-            timeout=timeout or 180,
-        )
-    except Exception as exc:
-        logger.info(
-            "decompose: API call failed for %s (%s)", task_id, exc,
-        )
-        if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
-            return DecomposeOutcome(task_id, False, "no auxiliary client configured")
-        return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
-
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
-
-    parsed = _extract_json_blob(raw)
-    if parsed is None:
-        return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+    if error is not None:
+        return DecomposeOutcome(task_id, False, error)
+    assert parsed is not None
 
     # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).
-    _apply_epic_choice(task, parsed, open_epic_ids)
+    _apply_epic_choice(task, parsed, request.open_epic_ids)
 
     fanout = bool(parsed.get("fanout"))
     audit_author = author or kb._profile_author()
@@ -1517,23 +1570,23 @@ def decompose_task(
         return _promote_triage_single_owner(
             task,
             parsed,
-            default_assignee=default_assignee,
-            valid_names=valid_names,
+            default_assignee=request.default_assignee,
+            valid_names=request.valid_names,
             audit_author=audit_author,
         )
 
     children, child_err = _children_from_parsed(
         parsed, task,
-        valid_names=valid_names,
-        default_assignee=default_assignee,
+        valid_names=request.valid_names,
+        default_assignee=request.default_assignee,
     )
     if child_err is not None:
         if _is_single_owner_demotion_reason(child_err):
             return _promote_triage_single_owner(
                 task,
                 parsed,
-                default_assignee=default_assignee,
-                valid_names=valid_names,
+                default_assignee=request.default_assignee,
+                valid_names=request.valid_names,
                 audit_author=audit_author,
                 demotion_reason=child_err,
             )
@@ -1544,7 +1597,7 @@ def decompose_task(
             child_ids = kb.decompose_triage_task(
                 conn,
                 task_id,
-                root_assignee=orchestrator,
+                root_assignee=request.orchestrator,
                 children=children,
                 author=audit_author,
                 auto_promote=auto_promote,
@@ -1829,61 +1882,25 @@ def plan_and_document(
             f"flow-plan root must be parked in 'scheduled' (status={task.status!r})",
         )
 
-    cfg = _load_config()
-    orchestrator = _resolve_orchestrator_profile(cfg)
-    default_assignee = _resolve_default_assignee(cfg)
-    roster, valid_names = _build_roster()
-    try:
-        with kb.connect_closing() as conn:
-            _enrich_roster_with_outcome_stats(conn, roster)
-    except Exception as exc:
-        logger.debug("flow-plan: profile outcome stats connection failed: %s", exc)
-
-    try:
-        from agent.auxiliary_client import call_llm  # type: ignore
-    except Exception as exc:
-        logger.debug("flow-plan: auxiliary client import failed: %s", exc)
-        return DecomposeOutcome(task_id, False, "auxiliary client unavailable")
-
-    open_epic_ids, epics_block = _open_epics_context()
-    user_msg = _USER_TEMPLATE.format(
-        task_id=task.id,
-        title=_truncate(task.title or "", 400),
-        body=_truncate(task.body or "(no body)", 4000),
-        roster=_format_roster(roster),
-        default_assignee=default_assignee,
-        epics=epics_block,
+    request = _prepare_decomposer_request(task, log_prefix="flow-plan")
+    system_prompt = (
+        _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM
+        if document
+        else _SYSTEM_PROMPT
     )
-
-    system_prompt = _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM if document else _SYSTEM_PROMPT
-    try:
-        resp = call_llm(
-            task="kanban_decomposer",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4000,
-            timeout=timeout or 180,
-        )
-    except Exception as exc:
-        logger.info("flow-plan: API call failed for %s (%s)", task_id, exc)
-        if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
-            return DecomposeOutcome(task_id, False, "no auxiliary client configured")
-        return DecomposeOutcome(task_id, False, f"LLM error: {type(exc).__name__}")
-
-    try:
-        raw = resp.choices[0].message.content or ""
-    except Exception:
-        raw = ""
-
-    parsed = _extract_json_blob(raw)
-    if parsed is None:
-        return DecomposeOutcome(task_id, False, "LLM returned malformed JSON")
+    parsed, error = _invoke_decomposer(
+        task_id,
+        user_message=request.user_message,
+        system_prompt=system_prompt,
+        timeout=timeout,
+        log_prefix="flow-plan",
+    )
+    if error is not None:
+        return DecomposeOutcome(task_id, False, error)
+    assert parsed is not None
 
     # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).
-    _apply_epic_choice(task, parsed, open_epic_ids)
+    _apply_epic_choice(task, parsed, request.open_epic_ids)
 
     narrative = parsed.get("narrative")
     narrative = narrative.strip() if isinstance(narrative, str) and narrative.strip() else ""
@@ -1895,7 +1912,10 @@ def plan_and_document(
 
     if fanout:
         children, child_err = _children_from_parsed(
-            parsed, task, valid_names=valid_names, default_assignee=default_assignee,
+            parsed,
+            task,
+            valid_names=request.valid_names,
+            default_assignee=request.default_assignee,
         )
         if child_err is not None:
             if _is_single_owner_demotion_reason(child_err):
@@ -1915,7 +1935,7 @@ def plan_and_document(
                     child_ids = kb.decompose_triage_task(
                         conn,
                         task_id,
-                        root_assignee=orchestrator,
+                        root_assignee=request.orchestrator,
                         children=children,
                         author=audit_author,
                         auto_promote=(not gate),
@@ -1953,7 +1973,9 @@ def plan_and_document(
     assignee_val = task.assignee
     if not assignee_val:
         assignee_val = _normalize_assignee_choice(
-            parsed.get("assignee"), default_assignee=default_assignee, valid_names=valid_names,
+            parsed.get("assignee"),
+            default_assignee=request.default_assignee,
+            valid_names=request.valid_names,
         )
     target_status = "scheduled" if gate else "todo"
     ok = _apply_single_task_from_scheduled(

@@ -7,6 +7,7 @@ and the assignee-fallback logic.
 
 from __future__ import annotations
 
+import inspect
 import json as jsonlib
 import os
 import sqlite3
@@ -1256,6 +1257,19 @@ def test_decompose_logs_warning_when_critical_not_preserved(kanban_home, caplog)
 # ---------------------------------------------------------------------------
 # plan_and_document — Flow capture Phase B (documented/lean + gate + spec)
 # ---------------------------------------------------------------------------
+
+
+def test_flow_planner_uses_canonical_decomposer_request_pipeline():
+    source = inspect.getsource(decomp.plan_and_document)
+    module_source = inspect.getsource(decomp)
+
+    assert "_prepare_decomposer_request" in source
+    assert "_invoke_decomposer" in source
+    assert "_build_roster" not in source
+    assert "_resolve_default_assignee" not in source
+    assert "_resolve_orchestrator_profile" not in source
+    assert "call_llm" not in source
+    assert module_source.count("from agent.auxiliary_client import call_llm") == 1
 
 def _park_in_scheduled(tid: str) -> None:
     """Mimic the flow-capture endpoint: triage -> todo -> scheduled."""
