@@ -4549,6 +4549,13 @@ def create_task(
             raise ValueError(
                 "acceptance_criteria has no recognizable 'AC-<id>: …' bullet"
             )
+    # B1a: corpus inventory on research/premium → coder (deterministic scanner).
+    assignee, kind, _inventory_lane_warning = apply_inventory_lane_contract(
+        assignee=assignee,
+        title=title,
+        body=body,
+        kind=kind,
+    )
     role_misuse = _role_misuse_reason(assignee=assignee, kind=kind)
     if role_misuse is not None:
         raise ValueError(role_misuse)
@@ -4877,20 +4884,24 @@ def create_task(
                         (pid,),
                     ).fetchone():
                         _inherit_notify_subs(conn, pid, task_id, now=now)
+                created_payload = {
+                    "assignee": assignee,
+                    "status": task_status,
+                    "parents": list(parents),
+                    "tenant": tenant,
+                    "branch_name": task_branch_name,
+                    "project_id": resolved_project_id,
+                    "skills": list(skills_list) if skills_list else None,
+                    "goal_mode": bool(goal_mode) or None,
+                }
+                if _inventory_lane_warning:
+                    created_payload["inventory_lane_contract"] = _inventory_lane_warning
+                    created_payload["kind"] = kind
                 _append_event(
                     conn,
                     task_id,
                     "created",
-                    {
-                        "assignee": assignee,
-                        "status": task_status,
-                        "parents": list(parents),
-                        "tenant": tenant,
-                        "branch_name": task_branch_name,
-                        "project_id": resolved_project_id,
-                        "skills": list(skills_list) if skills_list else None,
-                        "goal_mode": bool(goal_mode) or None,
-                    },
+                    created_payload,
                 )
                 if task_status == "blocked":
                     # Born-blocked tasks had no ``blocked`` event, so
@@ -13895,6 +13906,28 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
+    # B4a (2026-07-15 skill-audit fan-out): SUPERSEDED paths must leave the
+    # active board. Auto-retry already refuses them; archive so they cannot
+    # sit as blocked zombies. Skip review_revision / review-originated runs —
+    # a reviewer finding that mentions "superseded" must not auto-archive.
+    if (
+        reason_looks_superseded(reason)
+        and block_kind != "review_revision"
+        and not _run_originated_from_review(conn, task_id, run_id)
+    ):
+        if archive_task(conn, task_id):
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    task_id,
+                    "superseded_archived",
+                    {
+                        "reason": (reason or "")[:500],
+                        "source": "block_task",
+                        "prior_status": "blocked",
+                    },
+                    run_id=run_id,
+                )
     return True
 
 
@@ -22414,6 +22447,135 @@ _AUTO_RETRY_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Skill-audit fan-out 2026-07-15: workers mark dead paths "SUPERSEDED" / "nicht
+# erneut dispatchen" but leave block_kind NULL. Without a text gate,
+# auto_retry_blocked_tasks treats those as retryable and re-burns tokens
+# (incl. premium escalation). Match deliberate supersede markers first.
+_AUTO_RETRY_SUPERSEDED_RE = re.compile(
+    r"(?:"
+    r"\bSUPERSEDED\b|"
+    r"superseded\s*:|"
+    r"nicht\s+erneut\s+dispatch|"
+    r"do\s+not\s+re-?dispatch|"
+    r"kein\s+re-?dispatch|"
+    r"nicht\s+manuell\s+freigeben"
+    r")",
+    re.IGNORECASE,
+)
+
+# Capacity parks sometimes land with block_kind NULL (gave_up / heiler lag).
+# Re-dispatching the same oversized plan is pure token burn — never retryable
+# from prose alone. Keep patterns tight so review findings stay retryable.
+_AUTO_RETRY_CAPACITY_RE = re.compile(
+    r"(?:"
+    r"iteration\s+budget\s+exhausted|"
+    r"budget\s+exhausted\s*\(\s*\d+\s*/\s*\d+\s*\)|"
+    r"tool[- ]?calling\s+iteration\s+budget|"
+    r"\bcapacity\b.*\bexhaust|"
+    r"\bexhaust(?:ed|ion)\b.*\bcapacity\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def reason_looks_superseded(reason: Optional[str]) -> bool:
+    """True when block/retry prose marks a path as SUPERSEDED / do-not-redispatch."""
+    text = (reason or "").strip()
+    return bool(text and _AUTO_RETRY_SUPERSEDED_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
+# B1a — tree-wide inventory/hygiene must not land on research/premium LLM loops
+# ---------------------------------------------------------------------------
+# Soft create-time contract (task-graph B1): corpus-wide skill/file inventory
+# is a deterministic scanner job for `coder`, not a multi-iteration research
+# tool loop. Synthesis-from-parents stays on research.
+_INVENTORY_LLM_LANES = frozenset({"research", "premium", "scout"})
+_INVENTORY_TOPIC_RE = re.compile(
+    r"(?:"
+    r"\binvent(?:ar|ory)\b|"
+    r"\bhygiene\b|"
+    r"skill[-\s]?audit|"
+    r"skill[-\s]?hygiene|"
+    r"\bcatalog(?:ue)?\b|"
+    r"\bfrontmatter\b|"
+    r"broken\s+ref|"
+    r"duplikat|"
+    r"\bduplicates?\b|"
+    r"tree[-\s]?wide|"
+    r"corpus"
+    r")",
+    re.IGNORECASE,
+)
+_INVENTORY_CORPUS_RE = re.compile(
+    r"(?:"
+    r"all\s+skills|"
+    r"alle\s+skills|"
+    r"~/?\.hermes/skills|"
+    r"profiles?\s*/\s*\*/\s*skills|"
+    r"profiles/\*/skills|"
+    r"SKILL\.md|"
+    r"\bactive\s+skills\b|"
+    r"skill[-\s]?landschaft|"
+    r"skill\s+library|"
+    r"\benumerat|"
+    r"\bscan(?:ner|nen|ning)?\b|"
+    r"determinist"
+    r")",
+    re.IGNORECASE,
+)
+_INVENTORY_SYNTHESIS_EXEMPT_RE = re.compile(
+    r"(?:"
+    r"\bsynthe[sz]|"
+    r"\bkonsolid|"
+    r"\bconsolidat|"
+    r"parent[-\s]?handoff|"
+    r"parent[-\s]?handoffs|"
+    r"aus\s+den\s+parent|"
+    r"from\s+(?:the\s+)?parents?|"
+    r"\breconcili|"
+    r"\bre-?review\b|"
+    r"needs_revision|"
+    r"fix\s+needs_revision|"
+    r"\bverdict\b|"
+    r"\breport[-\s]?only\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def apply_inventory_lane_contract(
+    *,
+    assignee: Optional[str],
+    title: str,
+    body: Optional[str] = None,
+    kind: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Reroute tree-wide inventory cards off LLM research lanes onto coder.
+
+    Returns ``(assignee, kind, warning)``. ``warning`` is None when unchanged.
+    Synthesis/report-from-parents cards are exempt so research stays valid.
+    """
+    lane = (assignee or "").strip().lower()
+    if lane not in _INVENTORY_LLM_LANES:
+        return assignee, kind, None
+    blob = f"{title or ''}\n{body or ''}"
+    if _INVENTORY_SYNTHESIS_EXEMPT_RE.search(blob):
+        return assignee, kind, None
+    if not (
+        _INVENTORY_TOPIC_RE.search(blob) and _INVENTORY_CORPUS_RE.search(blob)
+    ):
+        return assignee, kind, None
+    new_kind = kind
+    if not (new_kind and str(new_kind).strip()):
+        new_kind = "analysis"
+    warning = (
+        "inventory_lane_contract: tree-wide skill/file inventory must use "
+        f"assignee=coder (was {lane!r}); rerouted. Prefer a deterministic "
+        "scanner script over an LLM research loop."
+    )
+    return "coder", new_kind, warning
+
 
 def _task_body_hash(body: Optional[str]) -> str:
     return hashlib.sha256((body or "").encode("utf-8")).hexdigest()
@@ -22557,6 +22719,9 @@ def _blocked_kind_for_auto_retry(
 
     Same-body after a prior retry still returns ``needs_operator`` (quality
     brake). Real human holds use ``block_kind=needs_input`` / hold_task.
+
+    SUPERSEDED / capacity prose (even with ``block_kind`` NULL) is never
+    retryable — see ``_AUTO_RETRY_SUPERSEDED_RE`` / ``_AUTO_RETRY_CAPACITY_RE``.
     """
     if explicit_block_kind is not None:
         if explicit_block_kind == "transient":
@@ -22582,6 +22747,12 @@ def _blocked_kind_for_auto_retry(
             return "needs_operator"
         # First pass, or body changed after a retry: stay in the self-heal lane.
         return "retryable"
+    # Dead paths and capacity parks must not re-enter the dispatch loop even
+    # when the writer left block_kind empty (live skill-audit fan-out 2026-07-15).
+    if text and _AUTO_RETRY_SUPERSEDED_RE.search(text):
+        return "superseded"
+    if text and _AUTO_RETRY_CAPACITY_RE.search(text):
+        return "capacity"
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"
     return "retryable"

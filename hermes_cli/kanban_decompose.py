@@ -136,6 +136,19 @@ Rules:
         scout's file/caller/risk brief grounds the coder before it starts. It
         edits, commits and deploys NOTHING; never assign it kind=code or
         build/implementation work, and never use it for a small/simple task.
+  - AUDIT / INVENTORY / HYGIENE graphs (token-burn guard, 2026-07-15):
+      * Tree-wide file or skill inventory (enumerate SKILL.md / frontmatter /
+        links / duplicates under ~/.hermes/skills or profiles/*/skills) is a
+        DETERMINISTIC scanner job: ONE child, assignee=coder, kind=code or
+        analysis, body must require a script + machine-readable report.
+        NEVER assign full-corpus inventory to research, premium, or scout.
+      * Max 2 leaf tasks before the first deliverable for vague "skill audit"
+        goals: (1) coder scanner, optional (2) research synthesis from parent
+        handoffs OR one bounded critic spot-check. Reviewer only after one
+        stable report exists — do not pre-create multi-lane A+B+synthesis+
+        review stacks in the first decomposition.
+      * Prefer fanout=false or 1-2 tasks for pure inventory; do not invent
+        parallel research slices (A1/A2/A3) for mechanical hygiene.
   - For any code/build implementation child, set kind="code" and pick one of
     the available code lanes above. For review/verdict work, set kind="review".
     For research-only work, set kind="research".
