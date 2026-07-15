@@ -17459,6 +17459,10 @@ _RELEASE_GATE_RAN_OUTCOMES = frozenset({"release_gate_red", "release_gate_infra"
 _HEILER_STALL_FALLBACK_CLASS = {
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
 }
+_HEILER_BLOCK_KIND_FALLBACK_CLASS = {
+    "needs_input": HEILER_CLASS_OPERATOR_GATED,
+    "operator_question": HEILER_CLASS_OPERATOR_GATED,
+}
 _DETERMINISTIC_SPAWN_FAILURE_MARKERS = (
     "spawn_refused_allowlist_unenforceable",
     "embedded null byte",
@@ -20049,6 +20053,23 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
         if excerpt:
             ev["excerpt"] = excerpt[:300]
         return HEILER_CLASS_OPERATOR_GATED, ev
+    # The silent-block sweep's structural vocabulary comes from
+    # ``_blocked_kind_for_auto_retry``. Its operator-question kinds are honest
+    # operator gates, but only weak fallbacks: real text/outcome defects above
+    # always win. ``retryable`` is deliberately absent because it is also that
+    # classifier's opaque default (and explicit ``transient`` normalizes to it).
+    if (
+        h_class == HEILER_CLASS_UNCLASSIFIED
+        and blocked_kind in _HEILER_BLOCK_KIND_FALLBACK_CLASS
+        and not has_structured_defect
+    ):
+        ev = {"matched": blocked_kind, "signal_source": "blocked_kind"}
+        if outcome:
+            ev["outcome"] = str(outcome)
+        excerpt = (last_error or why_now).strip()
+        if excerpt:
+            ev["excerpt"] = excerpt[:300]
+        return _HEILER_BLOCK_KIND_FALLBACK_CLASS[blocked_kind], ev
     return h_class, h_ev
 
 
