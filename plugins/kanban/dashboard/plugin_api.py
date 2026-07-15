@@ -53,7 +53,7 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
+from fastapi import File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -62,10 +62,20 @@ from hermes_cli import kanban_db
 from hermes_cli import projects_db
 from hermes_cli import kanban_diagnostics as kd
 from hermes_cli import strategist_surface
+from plugins.kanban.dashboard.route_contracts import DashboardRouteContract
 
 log = logging.getLogger(__name__)
 
-router = APIRouter()
+route_contract = DashboardRouteContract()
+router = route_contract.router
+core_routes = route_contract.namespace("core")
+evidence_routes = route_contract.namespace("evidence")
+control_routes = route_contract.namespace("control")
+lane_routes = route_contract.namespace("lanes")
+observability_routes = route_contract.namespace("observability")
+delivery_routes = route_contract.namespace("delivery")
+planspec_routes = route_contract.namespace("planspec")
+flow_release_routes = route_contract.namespace("flow_release")
 
 _SHORT_TEXT_MAX_LENGTH = 512
 _FREE_TEXT_MAX_LENGTH = 20_000
@@ -1243,7 +1253,7 @@ def _resolve_deliverable_file(task_id: str, relative_path: str) -> Path:
     return candidate
 
 
-@router.get("/vault-memory-links/file")
+@evidence_routes.get("/vault-memory-links/file")
 def open_vault_memory_link_file(path: str = Query(..., min_length=1)):
     """Serve a normalized Vault/Memory link through the dashboard auth boundary."""
     resolved = kanban_db.resolve_vault_memory_link_path(path)
@@ -1810,7 +1820,7 @@ def _literal_like(value: str) -> str:
 # GET /board/archive — on-demand archive truth, separate from the hot poll
 # ---------------------------------------------------------------------------
 
-@router.get("/board/archive")
+@evidence_routes.get("/board/archive")
 def get_board_archive(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
     q: Optional[str] = Query(None, max_length=200, description="Literal title/id/assignee search"),
@@ -2016,7 +2026,7 @@ def get_board_archive(
 # GET /board
 # ---------------------------------------------------------------------------
 
-@router.get("/board")
+@core_routes.get("/board")
 def get_board(
     request: Request,
     response: Response,
@@ -2361,7 +2371,7 @@ def get_board(
 # GET /tasks/review-verdicts
 # ---------------------------------------------------------------------------
 
-@router.get("/tasks/review-verdicts")
+@evidence_routes.get("/tasks/review-verdicts")
 def list_review_verdicts(
     limit: int = Query(12, ge=1, description="Maximum review tasks to return (capped at 50)"),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -2411,7 +2421,7 @@ def list_review_verdicts(
 # GET /tasks/:id
 # ---------------------------------------------------------------------------
 
-@router.get("/tasks/{task_id}")
+@core_routes.get("/tasks/{task_id}")
 def get_task(
     task_id: str,
     board: Optional[str] = Query(None),
@@ -2512,7 +2522,7 @@ def get_task(
         conn.close()
 
 
-@router.get("/tasks/{task_id}/deliverables")
+@evidence_routes.get("/tasks/{task_id}/deliverables")
 def list_task_deliverables(task_id: str):
     """List preserved worker deliverables for a task.
 
@@ -2528,7 +2538,7 @@ def list_task_deliverables(task_id: str):
     }
 
 
-@router.get("/tasks/{task_id}/deliverables/{relative_path:path}")
+@evidence_routes.get("/tasks/{task_id}/deliverables/{relative_path:path}")
 def download_task_deliverable(task_id: str, relative_path: str):
     """Serve one preserved deliverable through the dashboard auth boundary."""
     path = _resolve_deliverable_file(task_id, relative_path)
@@ -2580,7 +2590,7 @@ class CreateTaskBody(BaseModel):
     review_tier: Optional[Literal["standard", "review", "critical"]] = None
 
 
-@router.post("/tasks")
+@core_routes.post("/tasks")
 def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -2677,7 +2687,7 @@ def _safe_attachment_name(raw: str) -> str:
     return name[:200]
 
 
-@router.get("/tasks/{task_id}/attachments")
+@core_routes.get("/tasks/{task_id}/attachments")
 def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -2693,7 +2703,7 @@ def list_task_attachments(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.post("/tasks/{task_id}/attachments")
+@core_routes.post("/tasks/{task_id}/attachments")
 async def upload_task_attachment(
     task_id: str,
     file: UploadFile = File(...),
@@ -2769,7 +2779,7 @@ async def upload_task_attachment(
         conn.close()
 
 
-@router.get("/attachments/{attachment_id}")
+@core_routes.get("/attachments/{attachment_id}")
 def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -2796,7 +2806,7 @@ def download_attachment(attachment_id: int, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.delete("/attachments/{attachment_id}")
+@core_routes.delete("/attachments/{attachment_id}")
 def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -2833,7 +2843,7 @@ class UpdateTaskBody(BaseModel):
     model_override: Optional[ShortText] = None
 
 
-@router.patch("/tasks/{task_id}")
+@core_routes.patch("/tasks/{task_id}")
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -2991,7 +3001,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 # DELETE /tasks/:id
 # ---------------------------------------------------------------------------
 
-@router.delete("/tasks/{task_id}")
+@core_routes.delete("/tasks/{task_id}")
 def delete_task(task_id: str, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -3171,7 +3181,7 @@ class AnswerTaskBody(BaseModel):
     answer: FreeText
 
 
-@router.post("/tasks/{task_id}/answer")
+@evidence_routes.post("/tasks/{task_id}/answer")
 def answer_task_question(
     task_id: str,
     payload: AnswerTaskBody,
@@ -3200,7 +3210,7 @@ def answer_task_question(
         conn.close()
 
 
-@router.post("/tasks/{task_id}/comments")
+@core_routes.post("/tasks/{task_id}/comments")
 def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query(None)):
     if not payload.body.strip():
         raise HTTPException(status_code=400, detail="body is required")
@@ -3226,7 +3236,7 @@ class LinkBody(BaseModel):
     child_id: ShortText
 
 
-@router.post("/links")
+@core_routes.post("/links")
 def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
     conn = _conn(board=board)
@@ -3239,7 +3249,7 @@ def add_link(payload: LinkBody, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.delete("/links")
+@core_routes.delete("/links")
 def delete_link(
     parent_id: str = Query(...),
     child_id: str = Query(...),
@@ -3270,7 +3280,7 @@ class BulkTaskBody(BaseModel):
     reclaim_first: bool = False
 
 
-@router.post("/tasks/bulk")
+@core_routes.post("/tasks/bulk")
 def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
     """Apply the same patch to every id in ``payload.ids``.
 
@@ -3373,7 +3383,7 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
 # the rule engine.
 # ---------------------------------------------------------------------------
 
-@router.get("/diagnostics")
+@core_routes.get("/diagnostics")
 def list_diagnostics(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
     severity: Optional[str] = Query(
@@ -3459,7 +3469,7 @@ def list_diagnostics(
 # ---------------------------------------------------------------------------
 # Cross-worker live event feed (worker tab ticker)
 # ---------------------------------------------------------------------------
-@router.get("/runs/live-events")
+@observability_routes.get("/runs/live-events")
 def get_live_events(
     board: Optional[str] = Query(None),
     limit: int = Query(_LIVE_EVENTS_DEFAULT_LIMIT, ge=1),
@@ -3570,7 +3580,7 @@ def run_progress_value(run_row: sqlite3.Row, now_ts: int) -> Optional[float]:
     return None
 
 
-@router.get("/workers/active")
+@core_routes.get("/workers/active")
 def list_active_workers(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
@@ -3759,7 +3769,7 @@ def list_active_workers(
         conn.close()
 
 
-@router.get("/dispatch/holds")
+@observability_routes.get("/dispatch/holds")
 def get_dispatch_holds(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
@@ -3786,7 +3796,7 @@ _ACTIVITY_DEFAULT_LIMIT = 12
 _ACTIVITY_MAX_LIMIT = 50
 
 
-@router.get("/tasks/{task_id}/activity")
+@evidence_routes.get("/tasks/{task_id}/activity")
 def get_task_activity(
     task_id: str,
     limit: int = Query(_ACTIVITY_DEFAULT_LIMIT, ge=1, le=_ACTIVITY_MAX_LIMIT),
@@ -3901,7 +3911,7 @@ def _enrich_decision_queue_block_reasons(
     return queue
 
 
-@router.get("/decision-queue")
+@control_routes.get("/decision-queue")
 def get_decision_queue(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
@@ -3928,7 +3938,7 @@ def get_decision_queue(
         conn.close()
 
 
-@router.get("/release-status")
+@observability_routes.get("/release-status")
 def get_release_status(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
@@ -4123,7 +4133,7 @@ def _release_mode_view() -> dict:
     }
 
 
-@router.get("/release-mode")
+@control_routes.get("/release-mode")
 def get_release_mode_endpoint():
     """GET /release-mode — autonomous, max_tier_autonomous, pause_on_red_streak,
     red_streak, max_in_progress, max_in_progress_per_profile,
@@ -4135,7 +4145,7 @@ def get_release_mode_endpoint():
     return _release_mode_view()
 
 
-@router.post("/release-mode")
+@control_routes.post("/release-mode")
 def set_release_mode_endpoint(payload: ReleaseModeBody):
     """POST /release-mode — flip ``release.autonomous`` and/or
     ``release.max_tier_autonomous`` atomically.
@@ -4181,7 +4191,7 @@ def set_release_mode_endpoint(payload: ReleaseModeBody):
     }
 
 
-@router.post("/release-concurrency")
+@control_routes.post("/release-concurrency")
 def set_release_concurrency_endpoint(payload: ReleaseConcurrencyBody):
     """POST /release-concurrency — set any of ``kanban.max_in_progress``,
     ``kanban.max_in_progress_per_profile``, ``kanban.max_concurrent_per_repo``
@@ -4247,7 +4257,7 @@ def set_release_concurrency_endpoint(payload: ReleaseConcurrencyBody):
     }
 
 
-@router.get("/epics")
+@control_routes.get("/epics")
 def list_epics_endpoint(
     include_closed: bool = Query(True, description="Include closed epics"),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -4262,7 +4272,7 @@ def list_epics_endpoint(
         conn.close()
 
 
-@router.get("/epics/{epic_id}")
+@control_routes.get("/epics/{epic_id}")
 def get_epic_endpoint(
     epic_id: str,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -4284,7 +4294,7 @@ class CreateEpicBody(BaseModel):
     body: Optional[FreeText] = None
 
 
-@router.post("/epics")
+@control_routes.post("/epics")
 def create_epic_endpoint(
     payload: CreateEpicBody,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -4302,7 +4312,7 @@ def create_epic_endpoint(
         conn.close()
 
 
-@router.post("/epics/{epic_id}/close")
+@control_routes.post("/epics/{epic_id}/close")
 def close_epic_endpoint(
     epic_id: str,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -4661,7 +4671,7 @@ def _lane_profile_catalog() -> list[dict]:
     return out
 
 
-@router.get("/lanes")
+@lane_routes.get("/lanes")
 def list_lanes_endpoint(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
 ):
@@ -5188,7 +5198,7 @@ def _claude_worker_available() -> bool:
     return shutil.which(binary) is not None
 
 
-@router.post("/lanes/spawn-check")
+@lane_routes.post("/lanes/spawn-check")
 def lane_spawn_check_endpoint(payload: LaneSpawnCheckBody):
     """Read-only Lane worker/model health check for the dashboard.
 
@@ -5377,7 +5387,7 @@ def _run_single_lanes_auth_smoke(role: dict[str, object], *, timeout_seconds: in
     }
 
 
-@router.post("/lanes/auth-smoke")
+@lane_routes.post("/lanes/auth-smoke")
 def lane_auth_smoke_endpoint(
     payload: LaneAuthSmokeBody,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -5428,7 +5438,7 @@ def lane_auth_smoke_endpoint(
     }
 
 
-@router.post("/lanes/openrouter-models/import")
+@lane_routes.post("/lanes/openrouter-models/import")
 def lane_openrouter_model_import_endpoint(payload: LaneOpenRouterModelImportBody):
     """Smoke pasted OpenRouter model IDs and admit successful ones to config."""
     tokens = _parse_openrouter_import_tokens(payload)
@@ -5474,7 +5484,7 @@ def lane_openrouter_model_import_endpoint(payload: LaneOpenRouterModelImportBody
     }
 
 
-@router.post("/lanes")
+@lane_routes.post("/lanes")
 def create_lane_endpoint(
     payload: LaneBody,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -5496,7 +5506,7 @@ def create_lane_endpoint(
         conn.close()
 
 
-@router.put("/lanes/{lane_id}")
+@lane_routes.put("/lanes/{lane_id}")
 def update_lane_endpoint(
     lane_id: str,
     payload: LaneBody,
@@ -5519,7 +5529,7 @@ def update_lane_endpoint(
         conn.close()
 
 
-@router.delete("/lanes/{lane_id}")
+@lane_routes.delete("/lanes/{lane_id}")
 def delete_lane_endpoint(
     lane_id: str,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -5539,7 +5549,7 @@ def delete_lane_endpoint(
         conn.close()
 
 
-@router.post("/lanes/{lane_id}/activate")
+@lane_routes.post("/lanes/{lane_id}/activate")
 def activate_lane_endpoint(
     lane_id: str,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -5576,7 +5586,7 @@ class LanePersistBody(BaseModel):
     profiles: dict[str, LanePersistProfileEntry]
 
 
-@router.post("/lanes/persist")
+@lane_routes.post("/lanes/persist")
 def persist_lane_models_endpoint(
     payload: LanePersistBody,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -5765,7 +5775,7 @@ def persist_lane_models_endpoint(
         conn.close()
 
 
-@router.get("/runs/summary")
+@observability_routes.get("/runs/summary")
 def get_runs_summary(
     since_hours: int = Query(24, ge=1, le=720),
     board: Optional[str] = Query(None),
@@ -5784,7 +5794,7 @@ def get_runs_summary(
         conn.close()
 
 
-@router.get("/runs/reliability")
+@observability_routes.get("/runs/reliability")
 def get_runs_reliability(
     since_hours: int = Query(168, ge=1, le=24 * 90),
     baseline_hours: int = Query(720, ge=1, le=24 * 180),
@@ -5821,7 +5831,7 @@ class DismissDispositionBody(BaseModel):
     reason: str = ""
 
 
-@router.get("/funnel/drafts")
+@control_routes.get("/funnel/drafts")
 def get_funnel_drafts(
     days: int = Query(30, ge=1, le=365),
     board: Optional[str] = Query(None),
@@ -5838,7 +5848,7 @@ def get_funnel_drafts(
         conn.close()
 
 
-@router.patch("/funnel/drafts/{task_id}")
+@control_routes.patch("/funnel/drafts/{task_id}")
 def update_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional[str] = Query(None)):
     """Speichert eine Operator-bearbeitete Plan-Spec als kanonischen Draft."""
     board = _resolve_board(board)
@@ -5858,7 +5868,7 @@ def update_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional
         conn.close()
 
 
-@router.post("/funnel/drafts/{task_id}/revise")
+@control_routes.post("/funnel/drafts/{task_id}/revise")
 def revise_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional[str] = Query(None)):
     """Schickt einen Funnel-Draft mit Operator-Input zurück in den Spec-Loop."""
     board = _resolve_board(board)
@@ -5878,7 +5888,7 @@ def revise_funnel_draft(task_id: str, body: FunnelDraftEditBody, board: Optional
         conn.close()
 
 
-@router.post("/funnel/drafts/{task_id}/approve")
+@control_routes.post("/funnel/drafts/{task_id}/approve")
 def approve_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
     """Freigabe eines Funnel-Drafts: legt den Build-Task als verlinktes Kind
     an (erbt created_by → Wert-Bilanz zählt die Kette einmal als nutzer;
@@ -5895,7 +5905,7 @@ def approve_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.post("/funnel/drafts/{task_id}/dismiss")
+@control_routes.post("/funnel/drafts/{task_id}/dismiss")
 def dismiss_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
     """Verwerfen eines Funnel-Drafts: archiviert den Root (mit Kommentar) —
     der Wunsch wird NICHT gebaut und fällt aus der Freigabe-Queue."""
@@ -5920,7 +5930,7 @@ def dismiss_funnel_draft(task_id: str, board: Optional[str] = Query(None)):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/disposition-items")
+@control_routes.get("/disposition-items")
 def get_disposition_items(
     status: str = Query("open"),
     board: Optional[str] = Query(None),
@@ -5939,7 +5949,7 @@ def get_disposition_items(
         conn.close()
 
 
-@router.post("/disposition-items/{item_id}/accept")
+@control_routes.post("/disposition-items/{item_id}/accept")
 def accept_disposition_item(item_id: str, board: Optional[str] = Query(None)):
     """Mark a disposition-ledger item as accepted by the operator."""
     board = _resolve_board(board)
@@ -5955,7 +5965,7 @@ def accept_disposition_item(item_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.post("/disposition-items/{item_id}/dismiss")
+@control_routes.post("/disposition-items/{item_id}/dismiss")
 def dismiss_disposition_item(
     item_id: str,
     body: DismissDispositionBody,
@@ -5976,7 +5986,7 @@ def dismiss_disposition_item(
         conn.close()
 
 
-@router.post("/disposition-items/{item_id}/create-fix-task")
+@control_routes.post("/disposition-items/{item_id}/create-fix-task")
 def create_fix_task_from_disposition(item_id: str, board: Optional[str] = Query(None)):
     """Create a parked fix-task from an open disposition-ledger item.
 
@@ -6011,7 +6021,7 @@ def create_fix_task_from_disposition(item_id: str, board: Optional[str] = Query(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/strategist/proposals")
+@control_routes.get("/strategist/proposals")
 def get_strategist_proposals(request: Request, board: Optional[str] = Query(None)):
     """List held ``freigabe: operator`` proposals + the current metric snapshot.
 
@@ -6062,7 +6072,7 @@ def get_strategist_proposals(request: Request, board: Optional[str] = Query(None
     )
 
 
-@router.get("/strategist/disposition-digest")
+@control_routes.get("/strategist/disposition-digest")
 def get_strategist_disposition_digest(request: Request):
     """Read-only: the current disposition digest (A3) or ``null`` when none yet.
 
@@ -6093,7 +6103,7 @@ def get_strategist_disposition_digest(request: Request):
     )
 
 
-@router.post("/strategist/proposals/{task_id}/approve")
+@control_routes.post("/strategist/proposals/{task_id}/approve")
 def approve_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
     """Approve a held proposal → release the chain (held → ready/todo).
 
@@ -6115,7 +6125,7 @@ def approve_strategist_proposal(task_id: str, board: Optional[str] = Query(None)
         conn.close()
 
 
-@router.post("/strategist/proposals/{task_id}/veto")
+@control_routes.post("/strategist/proposals/{task_id}/veto")
 def veto_strategist_proposal(task_id: str, board: Optional[str] = Query(None)):
     """Veto a held proposal → archive the chain (nothing builds).
 
@@ -6139,7 +6149,7 @@ class CompleteFreigabeBody(BaseModel):
     note: FreeText
 
 
-@router.post("/strategist/proposals/{task_id}/complete")
+@control_routes.post("/strategist/proposals/{task_id}/complete")
 def complete_strategist_proposal(
     task_id: str, body: CompleteFreigabeBody, board: Optional[str] = Query(None),
 ):
@@ -6170,7 +6180,7 @@ def complete_strategist_proposal(
         conn.close()
 
 
-@router.post("/tasks/{task_id}/veto-escalation")
+@control_routes.post("/tasks/{task_id}/veto-escalation")
 def veto_operator_escalation_route(task_id: str, board: Optional[str] = Query(None)):
     """Veto an Autoresearch operator-escalation → archive it AND record the
     veto so the strategist's reflect learns to suppress the signal (Naht 3).
@@ -6274,7 +6284,7 @@ def _trigger_status(name: str) -> dict[str, Any]:
             "last_modified": last_modified, "tail": tail}
 
 
-@router.post("/strategist/run-propose")
+@control_routes.post("/strategist/run-propose")
 def run_strategist_propose():
     """Stratege-propose manuell anstoßen (derselbe Wrapper wie der 06:00-Timer)."""
     p = _spawn_trigger("strategist-propose")
@@ -6283,7 +6293,7 @@ def run_strategist_propose():
     return {"ok": True, "name": "strategist-propose", "pid": p.pid}
 
 
-@router.post("/strategist/run-harvest-watch")
+@control_routes.post("/strategist/run-harvest-watch")
 def run_strategist_harvest_watch():
     """Harvest-watch manuell über den Repo-CLI-Callable anstoßen."""
     p = _spawn_trigger("strategist-harvest-watch")
@@ -6292,7 +6302,7 @@ def run_strategist_harvest_watch():
     return {"ok": True, "name": "strategist-harvest-watch", "pid": p.pid}
 
 
-@router.post("/strategist/run-gutachter")
+@control_routes.post("/strategist/run-gutachter")
 def run_gutachter():
     """Bewerter (stratege-gutachter) manuell anstoßen — Phase-A live (Kommentar+Discord)."""
     p = _spawn_trigger("gutachter")
@@ -6301,7 +6311,7 @@ def run_gutachter():
     return {"ok": True, "name": "gutachter", "pid": p.pid}
 
 
-@router.get("/strategist/run-status")
+@control_routes.get("/strategist/run-status")
 def strategist_run_status():
     """Running / letzter-Lauf-Status der manuellen Trigger (Button-Feedback)."""
     return {
@@ -6311,7 +6321,7 @@ def strategist_run_status():
     }
 
 
-@router.get("/strategist/last-runs")
+@control_routes.get("/strategist/last-runs")
 def strategist_last_runs() -> dict:
     """Jüngster Harvest- und Propose-Lauf aus der run-history.jsonl."""
     from hermes_cli import strategist
@@ -6319,7 +6329,7 @@ def strategist_last_runs() -> dict:
     return strategist.read_last_runs(strategist.default_state_dir())
 
 
-@router.get("/strategist/outcomes")
+@control_routes.get("/strategist/outcomes")
 def get_strategist_outcomes(limit: int = Query(20, ge=1, le=200)) -> dict:
     """Wirkungs-Historie geshippter Lever (Ziel-2 ``lever-outcomes.json``).
 
@@ -6334,7 +6344,7 @@ def get_strategist_outcomes(limit: int = Query(20, ge=1, le=200)) -> dict:
     return {"outcomes": outcomes, "generated_at": int(time.time())}
 
 
-@router.get("/runs/daily")
+@observability_routes.get("/runs/daily")
 def get_runs_daily(
     days: int = Query(30, ge=1, le=365),
     board: Optional[str] = Query(None),
@@ -6354,7 +6364,7 @@ def get_runs_daily(
         conn.close()
 
 
-@router.get("/runs/failures")
+@observability_routes.get("/runs/failures")
 def get_runs_failures(
     hours: int = Query(48, ge=1, le=24 * 14),
     limit: int = Query(30, ge=1, le=100),
@@ -6375,7 +6385,7 @@ def get_runs_failures(
         conn.close()
 
 
-@router.get("/runs/issues")
+@observability_routes.get("/runs/issues")
 def get_runs_issues(
     days: int = Query(30, ge=1, le=365),
     limit: int = Query(50, ge=1, le=200),
@@ -6396,7 +6406,7 @@ def get_runs_issues(
         conn.close()
 
 
-@router.get("/runs/costs")
+@observability_routes.get("/runs/costs")
 def get_runs_costs(
     days: int = Query(7, ge=1, le=90),
     board: Optional[str] = Query(None),
@@ -6417,7 +6427,7 @@ def get_runs_costs(
         conn.close()
 
 
-@router.get("/runs/costs-series")
+@observability_routes.get("/runs/costs-series")
 def get_runs_costs_series(
     days: int = Query(7, ge=1, le=90),
     board: Optional[str] = Query(None),
@@ -6431,7 +6441,7 @@ def get_runs_costs_series(
         conn.close()
 
 
-@router.get("/runs/subscription-burn")
+@observability_routes.get("/runs/subscription-burn")
 def get_runs_subscription_burn(
     days: int = Query(7, ge=1, le=90),
     board: Optional[str] = Query(None),
@@ -6445,7 +6455,7 @@ def get_runs_subscription_burn(
         conn.close()
 
 
-@router.get("/runs/windowed-rollup")
+@observability_routes.get("/runs/windowed-rollup")
 def get_runs_windowed_rollup(
     hours: int = Query(24 * 7, ge=1, le=24 * 90),
     limit: int = Query(20, ge=1, le=100),
@@ -6466,7 +6476,7 @@ def get_runs_windowed_rollup(
         conn.close()
 
 
-@router.get("/runs/recent-results")
+@observability_routes.get("/runs/recent-results")
 def list_recent_results(
     limit: int = Query(12, ge=1, description="Maximum completed runs to return (capped at 50)"),
     since_hours: int = Query(48, ge=1, le=24 * 30, description="Lookback window in hours"),
@@ -6522,7 +6532,7 @@ def list_recent_results(
         conn.close()
 
 
-@router.get("/runs/today-digest")
+@observability_routes.get("/runs/today-digest")
 def list_today_digest(
     limit: int = Query(12, ge=1, description="Maximum digest items to return (capped at 50)"),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -6577,7 +6587,7 @@ def list_today_digest(
         conn.close()
 
 
-@router.get("/runs/blocked-completions")
+@observability_routes.get("/runs/blocked-completions")
 def list_blocked_completions(
     since_hours: int = Query(48, ge=1, le=24 * 30, description="Lookback window in hours"),
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -6662,7 +6672,7 @@ def list_blocked_completions(
         conn.close()
 
 
-@router.get("/runs/{run_id}")
+@core_routes.get("/runs/{run_id}")
 def get_run_endpoint(
     run_id: int,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -6684,7 +6694,7 @@ def get_run_endpoint(
         conn.close()
 
 
-@router.get("/runs/{run_id}/timeline")
+@observability_routes.get("/runs/{run_id}/timeline")
 def run_timeline_endpoint(
     run_id: int,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -6702,7 +6712,7 @@ def run_timeline_endpoint(
         conn.close()
 
 
-@router.get("/runs/{run_id}/inspect")
+@core_routes.get("/runs/{run_id}/inspect")
 def inspect_run_endpoint(
     run_id: int,
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -6774,7 +6784,7 @@ class TerminateRunBody(BaseModel):
     reason: Optional[FreeText] = None
 
 
-@router.post("/runs/{run_id}/terminate")
+@core_routes.post("/runs/{run_id}/terminate")
 def terminate_run_endpoint(
     run_id: int,
     payload: TerminateRunBody,
@@ -6839,7 +6849,7 @@ class WorkerActionBody(BaseModel):
 _WORKER_ACTIONS = {"unlock", "nudge", "restart", "dispatch", "hold", "resume"}
 
 
-@router.post("/workers/{run_id}/action")
+@control_routes.post("/workers/{run_id}/action")
 def worker_action_endpoint(
     run_id: int,
     payload: WorkerActionBody,
@@ -6971,7 +6981,7 @@ class ReclaimBody(BaseModel):
     reason: Optional[FreeText] = None
 
 
-@router.post("/tasks/{task_id}/reclaim")
+@core_routes.post("/tasks/{task_id}/reclaim")
 def reclaim_task_endpoint(
     task_id: str,
     payload: ReclaimBody,
@@ -7012,7 +7022,7 @@ class RepairBody(BaseModel):
     actor: Optional[ShortText] = None
 
 
-@router.post("/tasks/{task_id}/repair")
+@control_routes.post("/tasks/{task_id}/repair")
 def repair_task_endpoint(
     task_id: str,
     payload: RepairBody,
@@ -7074,7 +7084,7 @@ class SpecifyBody(BaseModel):
     author: Optional[ShortText] = None
 
 
-@router.post("/tasks/{task_id}/specify")
+@core_routes.post("/tasks/{task_id}/specify")
 def specify_task_endpoint(
     task_id: str,
     payload: SpecifyBody,
@@ -7124,7 +7134,7 @@ class ReassignBody(BaseModel):
     reason: Optional[FreeText] = None
 
 
-@router.post("/tasks/{task_id}/reassign")
+@core_routes.post("/tasks/{task_id}/reassign")
 def reassign_task_endpoint(
     task_id: str,
     payload: ReassignBody,
@@ -7163,7 +7173,7 @@ def reassign_task_endpoint(
 # Plugin config (read dashboard.kanban.* defaults from config.yaml)
 # ---------------------------------------------------------------------------
 
-@router.get("/config")
+@core_routes.get("/config")
 def get_config():
     """Return kanban dashboard preferences from ~/.hermes/config.yaml.
 
@@ -7191,7 +7201,7 @@ def get_config():
 # Browser Web Push subscriptions
 # ---------------------------------------------------------------------------
 
-@router.get("/push/vapid-public-key")
+@delivery_routes.get("/push/vapid-public-key")
 def get_push_vapid_public_key():
     vapid = _vapid_config()
     return {
@@ -7200,7 +7210,7 @@ def get_push_vapid_public_key():
     }
 
 
-@router.post("/push/subscribe")
+@delivery_routes.post("/push/subscribe")
 def subscribe_push(
     payload: PushSubscriptionBody,
     board: Optional[str] = Query(None),
@@ -7221,7 +7231,7 @@ def subscribe_push(
         conn.close()
 
 
-@router.post("/push/unsubscribe")
+@delivery_routes.post("/push/unsubscribe")
 def unsubscribe_push(
     payload: PushUnsubscribeBody,
     board: Optional[str] = Query(None),
@@ -7283,7 +7293,7 @@ def _home_sub_matches(sub: dict, home: dict) -> bool:
     )
 
 
-@router.get("/home-channels")
+@core_routes.get("/home-channels")
 def get_home_channels(
     task_id: Optional[str] = Query(None),
     board: Optional[str] = Query(None),
@@ -7317,7 +7327,7 @@ def get_home_channels(
     return {"home_channels": result}
 
 
-@router.post("/tasks/{task_id}/home-subscribe/{platform}")
+@core_routes.post("/tasks/{task_id}/home-subscribe/{platform}")
 def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(None)):
     """Subscribe *task_id* to notifications routed to *platform*'s home channel.
 
@@ -7352,7 +7362,7 @@ def subscribe_home(task_id: str, platform: str, board: Optional[str] = Query(Non
         conn.close()
 
 
-@router.delete("/tasks/{task_id}/home-subscribe/{platform}")
+@core_routes.delete("/tasks/{task_id}/home-subscribe/{platform}")
 def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(None)):
     """Remove any notify subscription on *task_id* that matches *platform*'s home."""
     homes = _configured_home_channels()
@@ -7381,7 +7391,7 @@ def unsubscribe_home(task_id: str, platform: str, board: Optional[str] = Query(N
 # Stats (per-profile / per-status counts + oldest-ready age)
 # ---------------------------------------------------------------------------
 
-@router.get("/stats")
+@core_routes.get("/stats")
 def get_stats(board: Optional[str] = Query(None)):
     """Per-status + per-assignee counts + oldest-ready age.
 
@@ -7397,7 +7407,7 @@ def get_stats(board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.get("/assignees")
+@core_routes.get("/assignees")
 def get_assignees(board: Optional[str] = Query(None)):
     """Return known profiles and their board task counts."""
     board = _resolve_board(board)
@@ -7415,7 +7425,7 @@ class OrchestrationSettingsBody(BaseModel):
     auto_promote_children: Optional[bool] = None
 
 
-@router.get("/orchestration")
+@core_routes.get("/orchestration")
 def get_orchestration_settings():
     """Return explicit and effective Kanban orchestration settings."""
     try:
@@ -7456,7 +7466,7 @@ def get_orchestration_settings():
     }
 
 
-@router.put("/orchestration")
+@core_routes.put("/orchestration")
 def set_orchestration_settings(payload: OrchestrationSettingsBody):
     """Persist the supplied Kanban orchestration settings."""
     try:
@@ -7505,7 +7515,7 @@ def set_orchestration_settings(payload: OrchestrationSettingsBody):
     return get_orchestration_settings()
 
 
-@router.get("/stats/autonomy")
+@observability_routes.get("/stats/autonomy")
 def get_stats_autonomy(board: Optional[str] = Query(None)):
     """Operator-free acceptance rate from task events."""
     board = _resolve_board(board)
@@ -7516,7 +7526,7 @@ def get_stats_autonomy(board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.get("/stats/chain-completion")
+@observability_routes.get("/stats/chain-completion")
 def get_stats_chain_completion(board: Optional[str] = Query(None)):
     """Done roots whose dependency leaves are all done."""
     board = _resolve_board(board)
@@ -7531,7 +7541,7 @@ def get_stats_chain_completion(board: Optional[str] = Query(None)):
 # Worker log (read-only; file written by _default_spawn)
 # ---------------------------------------------------------------------------
 
-@router.get("/tasks/{task_id}/log")
+@core_routes.get("/tasks/{task_id}/log")
 def get_task_log(
     task_id: str,
     tail: Optional[int] = Query(None, ge=1, le=2_000_000),
@@ -7571,7 +7581,7 @@ def get_task_log(
 # Dispatch nudge (optional quick-path so the UI doesn't wait 60 s)
 # ---------------------------------------------------------------------------
 
-@router.post("/dispatch")
+@core_routes.post("/dispatch")
 def dispatch(
     dry_run: bool = Query(False),
     max_n: int = Query(8, ge=1, le=32, alias="max"),
@@ -7645,7 +7655,7 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
         return "dir"
 
 
-@router.get("/boards")
+@core_routes.get("/boards")
 def list_boards(include_archived: bool = Query(False)):
     """Return every board on disk with task counts and the active slug."""
     boards = kanban_db.list_boards(include_archived=include_archived)
@@ -7682,7 +7692,7 @@ def list_boards(include_archived: bool = Query(False)):
     return {"boards": boards, "current": current}
 
 
-@router.post("/boards")
+@core_routes.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
     default_workdir = None
@@ -7719,7 +7729,7 @@ def create_board_endpoint(payload: CreateBoardBody):
     return {"board": meta, "current": kanban_db.get_current_board()}
 
 
-@router.patch("/boards/{slug}")
+@core_routes.patch("/boards/{slug}")
 def rename_board(slug: str, payload: RenameBoardBody):
     """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
     try:
@@ -7738,7 +7748,7 @@ def rename_board(slug: str, payload: RenameBoardBody):
     return {"board": meta}
 
 
-@router.delete("/boards/{slug}")
+@core_routes.delete("/boards/{slug}")
 def delete_board(slug: str, delete: bool = Query(False, description="Hard-delete instead of archive")):
     """Archive (default) or hard-delete a board."""
     try:
@@ -7748,7 +7758,7 @@ def delete_board(slug: str, delete: bool = Query(False, description="Hard-delete
     return {"result": res, "current": kanban_db.get_current_board()}
 
 
-@router.post("/boards/{slug}/switch")
+@core_routes.post("/boards/{slug}/switch")
 def switch_board(slug: str):
     """Persist ``slug`` as the active board for subsequent CLI / slash calls.
 
@@ -7788,7 +7798,7 @@ class DescribeAutoBody(BaseModel):
     overwrite: bool = False
 
 
-@router.get("/profiles")
+@core_routes.get("/profiles")
 def list_profile_roster():
     """Return every installed profile with its description.
 
@@ -7819,7 +7829,7 @@ def list_profile_roster():
     }
 
 
-@router.patch("/profiles/{profile_name}")
+@core_routes.patch("/profiles/{profile_name}")
 def update_profile_description(profile_name: str, payload: DescribeBody):
     """Set or clear the description of a profile.
 
@@ -7853,7 +7863,7 @@ def update_profile_description(profile_name: str, payload: DescribeBody):
     return {"ok": True, "profile": canon, "description": text}
 
 
-@router.post("/profiles/{profile_name}/describe-auto")
+@core_routes.post("/profiles/{profile_name}/describe-auto")
 def auto_describe_profile(profile_name: str, payload: DescribeAutoBody):
     """Generate a description for the named profile via the auxiliary
     LLM (``auxiliary.profile_describer``). Persists with
@@ -7890,7 +7900,7 @@ class DecomposeBody(BaseModel):
     author: Optional[ShortText] = None
 
 
-@router.post("/tasks/{task_id}/decompose")
+@core_routes.post("/tasks/{task_id}/decompose")
 def decompose_task_endpoint(
     task_id: str,
     payload: DecomposeBody,
@@ -7948,7 +7958,7 @@ class PlanSpecProseIngestBody(BaseModel):
     freigabe: Literal["operator", "sofort"] = "operator"
 
 
-@router.get("/planspecs")
+@planspec_routes.get("/planspecs")
 def list_planspecs(
     scope: Literal["open", "all"] = Query("open"),
     valid: Optional[bool] = Query(None),
@@ -7972,7 +7982,7 @@ def list_planspecs(
     return {"planspecs": records, "count": len(records)}
 
 
-@router.post("/planspecs/compile-preview")
+@planspec_routes.post("/planspecs/compile-preview")
 def compile_planspec_preview(payload: PlanSpecCompilePreviewBody):
     from hermes_cli.plan_compiler import CompileBlocked  # noqa: WPS433 (intentional)
     from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan  # noqa: WPS433
@@ -8001,7 +8011,7 @@ def _persist_dashboard_prose_plan(prose: str) -> Path:
     return path
 
 
-@router.post("/planspecs/ingest-prose")
+@planspec_routes.post("/planspecs/ingest-prose")
 def ingest_prose_planspec(payload: PlanSpecProseIngestBody, board: Optional[str] = Query(None)):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
@@ -8021,7 +8031,7 @@ def ingest_prose_planspec(payload: PlanSpecProseIngestBody, board: Optional[str]
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
-@router.post("/planspecs/ingest")
+@planspec_routes.post("/planspecs/ingest")
 def ingest_planspec(payload: PlanSpecPathBody, board: Optional[str] = Query(None)):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
@@ -8036,7 +8046,7 @@ def ingest_planspec(payload: PlanSpecPathBody, board: Optional[str] = Query(None
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
-@router.post("/planspecs/sprint-prompt")
+@planspec_routes.post("/planspecs/sprint-prompt")
 def sprint_prompt_for_planspec(payload: PlanSpecPathBody):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
@@ -8046,7 +8056,7 @@ def sprint_prompt_for_planspec(payload: PlanSpecPathBody):
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
-@router.post("/planspecs/not-needed")
+@planspec_routes.post("/planspecs/not-needed")
 def mark_planspec_not_needed(payload: PlanSpecPathBody):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
 
@@ -8059,7 +8069,7 @@ def mark_planspec_not_needed(payload: PlanSpecPathBody):
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
-@router.get("/planspecs/detail")
+@planspec_routes.get("/planspecs/detail")
 def get_planspec_detail(path: str = Query(..., max_length=1024)):
     """Return human-readable fields parsed from a PlanSpec .md file.
 
@@ -8196,7 +8206,7 @@ def _handoff_slug(body: "HandoffDraftBody") -> str:
     return terminal_handoff.slugify(first_line)
 
 
-@router.post("/planspecs/validate")
+@planspec_routes.post("/planspecs/validate")
 def validate_planspec_draft(payload: HandoffDraftBody):
     """Read-only PlanSpec validation for a handoff draft.
 
@@ -8215,7 +8225,7 @@ def validate_planspec_draft(payload: HandoffDraftBody):
     return planspecs.validate_planspec(path, plans_root=root)
 
 
-@router.post("/planspecs/ingest-draft")
+@planspec_routes.post("/planspecs/ingest-draft")
 def ingest_planspec_draft(payload: HandoffDraftBody, board: Optional[str] = Query(None)):
     """Ingest a handoff draft via the EXISTING PlanSpec ingest path.
 
@@ -9138,7 +9148,7 @@ def _release_flow_gate(
     return result
 
 
-@router.get("/flow/suggest-tier")
+@flow_release_routes.get("/flow/suggest-tier")
 def flow_suggest_tier(title: str = Query(""), description: str = Query("")):
     """Propose a review tier for the capture sheet from the deterministic risk
     heuristic over title+description. The operator sees the proposal pre-filled
@@ -9149,7 +9159,7 @@ def flow_suggest_tier(title: str = Query(""), description: str = Query("")):
     return {"tier": classify_review_tier(spec)}
 
 
-@router.post("/tasks/flow-capture")
+@flow_release_routes.post("/tasks/flow-capture")
 def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
     """Create a root, PARK it in ``scheduled`` (invisible to the gateway's
     triage-only auto-decompose tick), then plan it via the aux decomposer.
@@ -9241,7 +9251,7 @@ def flow_capture(payload: FlowCaptureBody, board: Optional[str] = Query(None)):
     }
 
 
-@router.get("/tasks/{task_id}/flow-gate")
+@flow_release_routes.get("/tasks/{task_id}/flow-gate")
 def flow_gate(task_id: str, board: Optional[str] = Query(None)):
     """Return the proposed gated chain before dispatch.
 
@@ -9256,7 +9266,7 @@ def flow_gate(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.post("/tasks/{task_id}/flow-gate/sizing")
+@flow_release_routes.post("/tasks/{task_id}/flow-gate/sizing")
 def flow_gate_sizing(
     task_id: str,
     payload: FlowSizingBody,
@@ -9290,7 +9300,7 @@ def flow_gate_sizing(
         conn.close()
 
 
-@router.post("/tasks/flow-gate/timeout-sweep")
+@flow_release_routes.post("/tasks/flow-gate/timeout-sweep")
 def flow_gate_timeout_sweep(
     payload: FlowTimeoutSweepBody | None = None,
     board: Optional[str] = Query(None),
@@ -9359,7 +9369,7 @@ def flow_gate_timeout_sweep(
         conn.close()
 
 
-@router.post("/tasks/{task_id}/flow-release")
+@flow_release_routes.post("/tasks/{task_id}/flow-release")
 def flow_release(
     task_id: str,
     payload: FlowReleaseBody | None = None,
@@ -9392,7 +9402,7 @@ def flow_release(
         conn.close()
 
 
-@router.get("/tasks/{task_id}/chain-graph")
+@flow_release_routes.get("/tasks/{task_id}/chain-graph")
 def get_chain_graph(task_id: str, board: Optional[str] = Query(None)):
     """Return a left-to-right DAG for a flow/root task.
 
@@ -9437,7 +9447,7 @@ class ReleaseGateBody(BaseModel):
     confirm: bool = False
 
 
-@router.post("/tasks/{task_id}/release-gate")
+@flow_release_routes.post("/tasks/{task_id}/release-gate")
 def release_gate_endpoint(
     task_id: str,
     payload: ReleaseGateBody,
@@ -9481,7 +9491,7 @@ def release_gate_endpoint(
         conn.close()
 
 
-@router.post("/tasks/{root_id}/cancel-chain")
+@flow_release_routes.post("/tasks/{root_id}/cancel-chain")
 def cancel_chain_endpoint(
     root_id: str,
     payload: ChainCancelBody,
@@ -9512,7 +9522,7 @@ def cancel_chain_endpoint(
         conn.close()
 
 
-@router.get("/tasks/{task_id}/chain-costs")
+@flow_release_routes.get("/tasks/{task_id}/chain-costs")
 def get_chain_costs(task_id: str, board: Optional[str] = Query(None)):
     """Return token/$ aggregates for the chain that contains ``task_id``.
 
@@ -9544,7 +9554,7 @@ def get_chain_costs(task_id: str, board: Optional[str] = Query(None)):
         conn.close()
 
 
-@router.get("/tasks/{task_id}/flow-plan")
+@flow_release_routes.get("/tasks/{task_id}/flow-plan")
 def get_flow_plan(task_id: str):
     """Serve the durable Vault plan-spec for a documented Flow capture root.
 
@@ -9574,7 +9584,7 @@ class PlanSpecApproveBody(BaseModel):
     dry_run: bool = False
 
 
-@router.post("/planspecs/approve")
+@planspec_routes.post("/planspecs/approve")
 def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(None)):
     """Composed PlanSpec-release: validate hold, apply lane overrides, optionally
     inject a scout, then release the freigabe:operator hold.
@@ -9879,7 +9889,7 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         conn.close()
 
 
-@router.websocket("/events")
+@core_routes.websocket("/events")
 async def stream_events(ws: WebSocket):
     # Authorize the upgrade via the dashboard's canonical WS gate so the
     # correct credential is accepted in every mode (loopback token / gated
