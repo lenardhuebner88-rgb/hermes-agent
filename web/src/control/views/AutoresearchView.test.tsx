@@ -1511,7 +1511,7 @@ describe("AutoresearchView keyboard safety", () => {
 });
 
 describe("AutoresearchView measured outcomes", () => {
-  it("separates integration from verified benefit and renders evidence", () => {
+  it("keeps all measured outcome content behind its collapsed disclosure by default", () => {
     const measured: Proposal = {
       ...proposal({ id: "measured-1", title: "Silent exception removed", status: "routed_to_kanban" }),
       delivery_state: "integrated",
@@ -1546,20 +1546,21 @@ describe("AutoresearchView measured outcomes", () => {
 
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured, integratedOnly]} />);
 
-    expect(html).toContain("Integriert ist nicht gleich verbessert.");
-    expect(html).toContain("Nutzen bestätigt");
-    expect(html).toContain("n=1");
-    expect(html).toContain("nicht messbar");
+    expect(html).toContain("Gemessene Wirkung");
     expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Was hat nachweislich geholfen?");
+    expect(html).not.toContain("Nutzen bestätigt");
+    expect(html).not.toContain("n=1");
+    expect(html).not.toContain("nicht messbar");
     expect(html).not.toContain("Silent exception removed");
   });
 
   it("shows an honest empty state when no contract has measured benefit", () => {
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[]} />);
-    expect(html).toContain("Noch kein bestätigter Beleg");
+    expect(html).toContain("Gemessene Wirkung");
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("Noch kein vertragsgeprüfter Nutzenbeleg");
-    expect(html).toContain("0 von 0 anwendbaren Änderungen gemessen");
+    expect(html).not.toContain("0 von 0 anwendbaren Änderungen gemessen");
   });
 
   it("labels incomplete subscription costs instead of rendering a false zero", () => {
@@ -1576,8 +1577,8 @@ describe("AutoresearchView measured outcomes", () => {
 
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
 
-    expect(html).toContain("Kostenabdeckung 0/1");
-    expect(html).toContain("Effektiv —");
+    expect(html).not.toContain("Kostenabdeckung 0/1");
+    expect(html).not.toContain("Effektiv —");
     expect(html).not.toContain("Effektiv 0,00");
   });
 
@@ -1602,10 +1603,10 @@ describe("AutoresearchView measured outcomes", () => {
 
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
 
-    expect(html).toContain("Effektive Kosten/Nutzen");
-    expect(html).toContain("Effektiv 0,25");
-    expect(html).toContain("Ist-Kosten 0,00");
-    expect(html).toContain("API-Äquivalent 0,25");
+    expect(html).not.toContain("Effektive Kosten/Nutzen");
+    expect(html).not.toContain("Effektiv 0,25");
+    expect(html).not.toContain("Ist-Kosten 0,00");
+    expect(html).not.toContain("API-Äquivalent 0,25");
     expect(html).not.toContain("Gesamt 0,25");
   });
 
@@ -1619,8 +1620,8 @@ describe("AutoresearchView measured outcomes", () => {
       evidence_grade: "legacy_observational",
     };
     const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[legacy]} />);
-    expect(html).toContain("Historisch verbessert");
-    expect(html).toContain("Noch kein bestätigter Beleg");
+    expect(html).not.toContain("Historisch verbessert");
+    expect(html).not.toContain("Noch kein bestätigter Beleg");
     expect(html).not.toContain("Old observation");
     expect(html).toContain("0");
     expect(html).not.toContain("Nutzen bestätigt</article>");
