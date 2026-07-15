@@ -1506,14 +1506,6 @@ class GatewayKanbanWatchersMixin:
                     return
                 await asyncio.sleep(1)
 
-    async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
-        """Deprecated name for the single notifications watcher.
-
-        Kept for callers outside the gateway startup surface during the P2
-        migration window. It delegates directly and owns no lifecycle state.
-        """
-        await self._kanban_notifications_watcher(interval=interval)
-
     async def _kanban_send_confirmed(
         self,
         adapter: Any,
@@ -1900,7 +1892,7 @@ class GatewayKanbanWatchersMixin:
         Each tick calls :func:`kanban_db.dispatch_once` inside
         ``asyncio.to_thread`` so the SQLite WAL lock never blocks the
         event loop. Failures in one tick don't stop subsequent ticks —
-        same pattern as `_kanban_notifier_watcher`.
+        same pattern as `_kanban_notifications_watcher`.
 
         Shutdown: the loop checks ``self._running`` between ticks; gateway
         stop() flips it to False and cancels pending tasks, and the
@@ -2256,7 +2248,7 @@ class GatewayKanbanWatchersMixin:
                 # `init_db()` call here busted the per-process cache and
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
-                # `_kanban_notifier_watcher` and issue #21378.
+                # `_kanban_notifications_watcher` and issue #21378.
                 _dispatch_result = _kb.dispatch_once(
                     conn,
                     board=slug,

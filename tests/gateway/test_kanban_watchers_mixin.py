@@ -63,6 +63,7 @@ def test_notifications_are_owned_by_one_production_watcher():
     assert startup.count("_kanban_notifications_watcher") == 1
     assert "_kanban_notifier_watcher" not in startup
     assert "_kanban_alerts_watcher" not in startup
+    assert not hasattr(GatewayKanbanWatchersMixin, "_kanban_notifier_watcher")
     assert not hasattr(GatewayKanbanWatchersMixin, "_kanban_alerts_watcher")
     assert "_kanban_alert_rules_tick" in notifications
     assert "_kanban_send_confirmed" in alert_hook

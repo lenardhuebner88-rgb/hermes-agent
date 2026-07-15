@@ -62,7 +62,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -122,7 +122,7 @@ async def test_notifier_unsubs_after_abnormal_events(kind, kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -193,7 +193,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -214,7 +214,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -230,7 +230,7 @@ async def test_notifier_second_blocked_delivers(kanban_home):
 # ---------------------------------------------------------------------------
 # Regression: gateway watchers must not double-init the kanban DB.
 #
-# Both the notifier watcher (`_kanban_notifier_watcher`) and the dispatcher
+# Both the notifier watcher (`_kanban_notifications_watcher`) and the dispatcher
 # tick (`_tick_once_for_board`) used to call `_kb.connect(board=slug)`
 # immediately followed by `_kb.init_db(board=slug)`. Since `connect()`
 # already runs the schema + idempotent migration on first open per process,
@@ -281,12 +281,12 @@ async def test_notifier_does_not_call_init_db(kanban_home):
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep), \
          patch("hermes_cli.kanban_db.init_db", side_effect=_spy_init_db):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
     assert init_db_calls == [], (
-        "_kanban_notifier_watcher must not call init_db on every tick — "
+        "_kanban_notifications_watcher must not call init_db on every tick — "
         "connect() handles first-run schema init. "
         "Reintroducing init_db revives issue #21378. "
         f"Got {len(init_db_calls)} call(s): {init_db_calls}"
@@ -323,9 +323,9 @@ def test_dispatcher_tick_does_not_call_init_db(kanban_home, monkeypatch):
         "open per process."
     )
 
-    notifier_src = inspect.getsource(GatewayRunner._kanban_notifier_watcher)
+    notifier_src = inspect.getsource(GatewayRunner._kanban_notifications_watcher)
     assert "_kb.init_db(board=slug)" not in notifier_src, (
-        "_kanban_notifier_watcher must not call _kb.init_db(board=slug) — "
+        "_kanban_notifications_watcher must not call _kb.init_db(board=slug) — "
         "see issue #21378."
     )
 
@@ -372,7 +372,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -427,7 +427,7 @@ async def test_notifier_delivers_subscription_owned_by_current_profile(kanban_ho
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -574,7 +574,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, m
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 
@@ -650,7 +650,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await asyncio.wait_for(
-            runner._kanban_notifier_watcher(interval=1),
+            runner._kanban_notifications_watcher(interval=1),
             timeout=10.0,
         )
 

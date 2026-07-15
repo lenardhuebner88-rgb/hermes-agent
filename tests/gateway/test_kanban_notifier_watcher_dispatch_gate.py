@@ -1,4 +1,4 @@
-"""Tests for the dispatch_in_gateway gate on _kanban_notifier_watcher.
+"""Tests for the dispatch_in_gateway gate on _kanban_notifications_watcher.
 
 - Non-dispatch gateways (dispatch_in_gateway=false) exit before opening any DB.
 - HERMES_KANBAN_DISPATCH_IN_GATEWAY env var disables without loading config.
@@ -31,7 +31,7 @@ def test_notifier_watcher_skips_when_dispatch_disabled():
     runner = _make_runner()
     with patch("hermes_cli.config.load_config", return_value=_fake_config(False)):
         with patch("hermes_cli.kanban_db.connect") as mock_connect:
-            asyncio.run(runner._kanban_notifier_watcher())
+            asyncio.run(runner._kanban_notifications_watcher())
     mock_connect.assert_not_called()
 
 
@@ -41,7 +41,7 @@ def test_notifier_watcher_env_override_disables(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "false")
     with patch("hermes_cli.config.load_config") as mock_load_config:
         with patch("hermes_cli.kanban_db.connect") as mock_connect:
-            asyncio.run(runner._kanban_notifier_watcher())
+            asyncio.run(runner._kanban_notifications_watcher())
     mock_load_config.assert_not_called()
     mock_connect.assert_not_called()
 
@@ -71,7 +71,7 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
         ):
             with patch("asyncio.sleep", side_effect=fake_sleep):
                 with patch("asyncio.to_thread", side_effect=fake_to_thread):
-                    asyncio.run(runner._kanban_notifier_watcher())
+                    asyncio.run(runner._kanban_notifications_watcher())
 
     assert past_gate, "list_boards should be called when dispatch_in_gateway=true"
 

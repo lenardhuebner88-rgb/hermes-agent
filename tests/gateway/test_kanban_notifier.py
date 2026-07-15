@@ -33,7 +33,7 @@ async def _run_one_notifier_tick(monkeypatch, runner):
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    await runner._kanban_notifier_watcher(interval=1)
+    await runner._kanban_notifications_watcher(interval=1)
 
 
 def _make_runner(adapter, platform=Platform.TELEGRAM):
