@@ -1066,7 +1066,7 @@ export const de = {
     outcomeExhausted: "Messbudget erschöpft",
     outcomeCoverage: "Messabdeckung",
     outcomeBenefitRate: "Bestätigungsquote",
-    outcomeCostPerBenefit: "Kosten/Nutzen",
+    outcomeCostPerBenefit: "Effektive Kosten/Nutzen",
     outcomeCost: "Messkosten",
     outcomeNeutral: "neutral",
     outcomeWorsened: "verschlechtert",

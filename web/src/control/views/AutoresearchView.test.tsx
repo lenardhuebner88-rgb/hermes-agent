@@ -1581,7 +1581,36 @@ describe("AutoresearchView measured outcomes", () => {
 
     expect(html).toContain("Kosten unvollständig");
     expect(html).toContain("Kostenabdeckung 0/1");
-    expect(html).not.toContain("Gesamt 0,00");
+    expect(html).toContain("Effektiv —");
+    expect(html).not.toContain("Effektiv 0,00");
+  });
+
+  it("separates subscription actual, API-equivalent and effective costs", () => {
+    const measured: Proposal = {
+      ...proposal({ id: "subscription-cost", title: "Subscription delivery", status: "routed_to_kanban" }),
+      delivery_state: "integrated",
+      outcome_applicability: "applicable",
+      measurement_status: "measured",
+      outcome_verdict: "improved",
+      evidence_grade: "contract_verified",
+      outcome_cost_usd: 0.25,
+      outcome_cost_actual_usd: 0,
+      outcome_cost_api_equivalent_usd: 0.25,
+      outcome_cost_effective_usd: 0.25,
+      outcome_cost_status: "complete",
+      outcome_cost_breakdown: {
+        delivery_usd: 0,
+        delivery_equivalent_usd: 0.25,
+      },
+    };
+
+    const html = renderToStaticMarkup(<OutcomePanel metrics={null} proposals={[measured]} />);
+
+    expect(html).toContain("Effektive Kosten/Nutzen");
+    expect(html).toContain("Effektiv 0,25");
+    expect(html).toContain("Ist-Kosten 0,00");
+    expect(html).toContain("API-Äquivalent 0,25");
+    expect(html).not.toContain("Gesamt 0,25");
   });
 
   it("labels legacy improved as historical and excludes it from verified benefit", () => {

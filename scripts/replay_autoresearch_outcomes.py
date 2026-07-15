@@ -1272,6 +1272,24 @@ def e2e_canary(args: argparse.Namespace) -> int:
             raise RuntimeError("real integrator witnesses do not match measured SHA")
         api = proposals.proposals_payload()
         card = next(item for item in api["proposals"] if item["id"] == case["id"])
+        api_costs = {
+            "actual_usd": card.get("outcome_cost_actual_usd"),
+            "api_equivalent_usd": card.get("outcome_cost_api_equivalent_usd"),
+            "effective_usd": card.get("outcome_cost_effective_usd"),
+            "compatibility_effective_usd": card.get("outcome_cost_usd"),
+            "status": card.get("outcome_cost_status"),
+        }
+        if api_costs["status"] != "complete" or any(
+            api_costs[key] is None
+            for key in ("actual_usd", "api_equivalent_usd", "effective_usd")
+        ):
+            raise RuntimeError("E2E API cost dimensions are incomplete")
+        if abs(
+            float(api_costs["actual_usd"])
+            + float(api_costs["api_equivalent_usd"])
+            - float(api_costs["effective_usd"])
+        ) > 1e-8 or api_costs["compatibility_effective_usd"] != api_costs["effective_usd"]:
+            raise RuntimeError("E2E API actual/equivalent/effective cost dimensions disagree")
         case_results.append(
             {
                 "id": case["id"],
@@ -1315,6 +1333,7 @@ def e2e_canary(args: argparse.Namespace) -> int:
                     "outcome_verdict": card["outcome_verdict"],
                     "evidence_grade": card["evidence_grade"],
                     "outcome_integration_sha": card["outcome_integration_sha"],
+                    "costs": api_costs,
                 },
             }
         )

@@ -693,6 +693,9 @@ def test_retry_accounting_is_additive_without_rebooking_delivery(outcome_home: P
     assert f"task-run:{unknown_run}" not in second_refs
     assert second_interventions == 0
     assert projected["outcome_cost_usd"] == pytest.approx(0.23)
+    assert projected["outcome_cost_actual_usd"] == pytest.approx(0.23)
+    assert projected["outcome_cost_api_equivalent_usd"] == 0.0
+    assert projected["outcome_cost_effective_usd"] == pytest.approx(0.23)
     assert projected["outcome_cost_status"] == "partial"
     assert projected["outcome_unknown_cost_refs"] == [f"task-run:{unknown_run}"]
     assert projected["outcome_cost_breakdown"]["delivery_usd"] == pytest.approx(0.20)
@@ -1276,10 +1279,52 @@ def test_verified_metrics_do_not_report_unknown_delivery_cost_as_zero() -> None:
 
     assert metrics["measurement_cost_usd"] is None
     assert metrics["known_measurement_cost_usd"] == pytest.approx(0.25)
+    assert metrics["measurement_actual_cost_usd"] is None
+    assert metrics["measurement_api_equivalent_cost_usd"] is None
+    assert metrics["measurement_effective_cost_usd"] is None
+    assert metrics["known_measurement_actual_cost_usd"] == pytest.approx(0.25)
+    assert metrics["known_measurement_api_equivalent_cost_usd"] == 0.0
+    assert metrics["known_measurement_effective_cost_usd"] == pytest.approx(0.25)
     assert metrics["cost_complete_outcomes"] == 0
     assert metrics["unknown_cost_outcomes"] == 1
     assert metrics["cost_coverage"] == 0.0
     assert metrics["cost_per_verified_benefit_usd"] is None
+    assert metrics["actual_cost_per_verified_benefit_usd"] is None
+    assert metrics["api_equivalent_cost_per_verified_benefit_usd"] is None
+    assert metrics["effective_cost_per_verified_benefit_usd"] is None
+
+
+def test_subscription_costs_keep_actual_api_equivalent_and_effective_distinct() -> None:
+    metrics = outcomes.outcome_metrics(
+        [
+            {
+                "id": "verified-subscription-improved",
+                "delivery_state": "integrated",
+                "outcome_applicability": "applicable",
+                "measurement_status": "measured",
+                "outcome_verdict": "improved",
+                "evidence_grade": "contract_verified",
+                # Compatibility alias remains the effective comparison total.
+                "outcome_cost_usd": 0.25,
+                "outcome_cost_actual_usd": 0.0,
+                "outcome_cost_api_equivalent_usd": 0.25,
+                "outcome_cost_effective_usd": 0.25,
+                "outcome_cost_status": "complete",
+                "outcome_cost_breakdown": {
+                    "delivery_usd": 0.0,
+                    "delivery_equivalent_usd": 0.25,
+                },
+            }
+        ]
+    )
+
+    assert metrics["measurement_cost_usd"] == pytest.approx(0.25)
+    assert metrics["measurement_actual_cost_usd"] == 0.0
+    assert metrics["measurement_api_equivalent_cost_usd"] == pytest.approx(0.25)
+    assert metrics["measurement_effective_cost_usd"] == pytest.approx(0.25)
+    assert metrics["actual_cost_per_verified_benefit_usd"] == 0.0
+    assert metrics["api_equivalent_cost_per_verified_benefit_usd"] == pytest.approx(0.25)
+    assert metrics["effective_cost_per_verified_benefit_usd"] == pytest.approx(0.25)
 
 
 def test_strategist_projection_uses_task_events_and_preserves_measured_legacy(

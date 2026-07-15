@@ -4,6 +4,17 @@ import { de } from "../../i18n/de";
 import { KpiTile, SignalChip, signalToneFromLegacy } from "../../components/leitstand";
 import { Card, Eyebrow, Text } from "../../components/primitives";
 
+function costDimensions(proposal: Proposal): { actual: number; apiEquivalent: number; effective: number } {
+  const breakdown = proposal.outcome_cost_breakdown ?? {};
+  const values = Object.entries(breakdown).filter((entry): entry is [string, number] => typeof entry[1] === "number");
+  const breakdownEquivalent = values.reduce((sum, [key, value]) => sum + (key.endsWith("_equivalent_usd") ? value : 0), 0);
+  const breakdownActual = values.reduce((sum, [key, value]) => sum + (!key.endsWith("_equivalent_usd") ? value : 0), 0);
+  const effective = proposal.outcome_cost_effective_usd ?? proposal.outcome_cost_usd ?? (breakdownActual + breakdownEquivalent);
+  const apiEquivalent = proposal.outcome_cost_api_equivalent_usd ?? breakdownEquivalent;
+  const actual = proposal.outcome_cost_actual_usd ?? (values.length ? breakdownActual : Math.max(0, effective - apiEquivalent));
+  return { actual, apiEquivalent, effective };
+}
+
 function deriveMetrics(proposals: Proposal[]): AutoresearchOutcomeMetrics {
   const applicable = proposals.filter((proposal) => proposal.outcome_applicability === "applicable");
   const integrated = applicable.filter((proposal) => proposal.delivery_state === "integrated");
@@ -20,7 +31,10 @@ function deriveMetrics(proposals: Proposal[]): AutoresearchOutcomeMetrics {
   const unmeasurable = count(verified, "unmeasurable");
   const confounded = count(verified, "confounded");
   const directional = improved + neutral + worsened;
-  const knownCost = verified.reduce((sum, proposal) => sum + (proposal.outcome_cost_usd ?? 0), 0);
+  const costs = verified.map(costDimensions);
+  const knownActualCost = costs.reduce((sum, cost) => sum + cost.actual, 0);
+  const knownApiEquivalentCost = costs.reduce((sum, cost) => sum + cost.apiEquivalent, 0);
+  const knownEffectiveCost = costs.reduce((sum, cost) => sum + cost.effective, 0);
   const costComplete = verified.filter((proposal) => proposal.outcome_cost_status === "complete");
   const costsComplete = costComplete.length === verified.length;
   const interventions = verified.reduce((sum, proposal) => sum + (proposal.outcome_operator_interventions ?? 0), 0);
@@ -44,14 +58,23 @@ function deriveMetrics(proposals: Proposal[]): AutoresearchOutcomeMetrics {
     worsened,
     unmeasurable,
     confounded,
-    measurement_cost_usd: costsComplete ? knownCost : null,
-    known_measurement_cost_usd: knownCost,
+    measurement_cost_usd: costsComplete ? knownEffectiveCost : null,
+    known_measurement_cost_usd: knownEffectiveCost,
+    measurement_actual_cost_usd: costsComplete ? knownActualCost : null,
+    measurement_api_equivalent_cost_usd: costsComplete ? knownApiEquivalentCost : null,
+    measurement_effective_cost_usd: costsComplete ? knownEffectiveCost : null,
+    known_measurement_actual_cost_usd: knownActualCost,
+    known_measurement_api_equivalent_cost_usd: knownApiEquivalentCost,
+    known_measurement_effective_cost_usd: knownEffectiveCost,
     cost_complete_outcomes: costComplete.length,
     unknown_cost_outcomes: verified.length - costComplete.length,
     cost_coverage: verified.length ? costComplete.length / verified.length : 0,
-    cost_per_measured_usd: costsComplete && verified.length ? knownCost / verified.length : null,
-    cost_per_improved_usd: costsComplete && improved ? knownCost / improved : null,
-    cost_per_verified_benefit_usd: costsComplete && improved ? knownCost / improved : null,
+    cost_per_measured_usd: costsComplete && verified.length ? knownEffectiveCost / verified.length : null,
+    cost_per_improved_usd: costsComplete && improved ? knownEffectiveCost / improved : null,
+    cost_per_verified_benefit_usd: costsComplete && improved ? knownEffectiveCost / improved : null,
+    actual_cost_per_verified_benefit_usd: costsComplete && improved ? knownActualCost / improved : null,
+    api_equivalent_cost_per_verified_benefit_usd: costsComplete && improved ? knownApiEquivalentCost / improved : null,
+    effective_cost_per_verified_benefit_usd: costsComplete && improved ? knownEffectiveCost / improved : null,
     operator_interventions: interventions,
     operator_interventions_per_verified_benefit: improved ? interventions / improved : null,
   };
@@ -67,10 +90,11 @@ function formatRate(value: number | null | undefined): string {
 }
 
 function outcomeCostLabel(proposal: Proposal): string {
+  const cost = costDimensions(proposal);
   if (proposal.outcome_cost_status !== "complete") {
-    return `Kosten unvollständig · bekannt ${formatMoney(proposal.outcome_cost_usd)}`;
+    return `Kosten unvollständig · bekannte Anteile: Ist-Kosten ${formatMoney(cost.actual)} · API-Äquivalent ${formatMoney(cost.apiEquivalent)}`;
   }
-  return formatMoney(proposal.outcome_cost_usd);
+  return `Effektiv ${formatMoney(cost.effective)} · Ist-Kosten ${formatMoney(cost.actual)} · API-Äquivalent ${formatMoney(cost.apiEquivalent)}`;
 }
 
 function outcomeLabel(proposal: Proposal): string {
@@ -131,6 +155,9 @@ export function OutcomePanel({
     ))
     .sort((a, b) => (b.outcome_measured_at ?? 0) - (a.outcome_measured_at ?? 0))
     .slice(0, 5);
+  const aggregateCostLabel = data.measurement_effective_cost_usd == null
+    ? `Effektiv — · bekannte Anteile: Ist-Kosten ${formatMoney(data.known_measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.known_measurement_api_equivalent_cost_usd)}`
+    : `Effektiv ${formatMoney(data.measurement_effective_cost_usd)} · Ist-Kosten ${formatMoney(data.measurement_actual_cost_usd)} · API-Äquivalent ${formatMoney(data.measurement_api_equivalent_cost_usd)}`;
 
   return (
     <section id="autoresearch-outcomes" aria-label={de.autoresearch.outcomeHeading}>
@@ -156,7 +183,7 @@ export function OutcomePanel({
           <KpiTile label={de.autoresearch.outcomeIntegrated} value={String(integratedCount)} />
           <KpiTile label={de.autoresearch.outcomeCoverage} value={formatRate(data.outcome_coverage)} />
           <KpiTile label={de.autoresearch.outcomeBenefitRate} value={`${formatRate(data.verified_benefit_rate)} · n=${data.verified_directional_denominator}`} />
-          <KpiTile label={de.autoresearch.outcomeCostPerBenefit} value={formatMoney(data.cost_per_verified_benefit_usd)} />
+          <KpiTile label={de.autoresearch.outcomeCostPerBenefit} value={formatMoney(data.effective_cost_per_verified_benefit_usd)} />
         </div>
 
         <div className="flex flex-wrap gap-2 text-xs">
@@ -167,7 +194,7 @@ export function OutcomePanel({
           <SignalChip tone={signalToneFromLegacy("amber")} label={`${data.confounded} ${de.autoresearch.outcomeConfounded}`} />
           <SignalChip tone={signalToneFromLegacy("zinc")} label={`${data.pending} ${de.autoresearch.outcomePending}`} />
           <span className="inline-flex min-h-7 items-center gap-1 rounded-full border border-line px-2.5 py-1 text-ink-2">
-            <CircleDollarSign aria-hidden className="h-3.5 w-3.5" /> Gesamt {formatMoney(data.measurement_cost_usd)} · Kostenabdeckung {data.cost_complete_outcomes}/{data.verified_measured} · Eingriffe/Nutzen {data.operator_interventions_per_verified_benefit ?? "—"}
+            <CircleDollarSign aria-hidden className="h-3.5 w-3.5" /> {aggregateCostLabel} · Kostenabdeckung {data.cost_complete_outcomes}/{data.verified_measured} · Eingriffe/Nutzen {data.operator_interventions_per_verified_benefit ?? "—"}
           </span>
         </div>
 

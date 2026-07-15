@@ -109,6 +109,14 @@ remains `$0` and the existing Hermes deferred cost backfill supplies
 sum of actual and API-equivalent components as effective cost, never relabeling
 the equivalent as an invoice charge.
 
+The proposal/API projection therefore exposes three explicit dimensions:
+`outcome_cost_actual_usd`, `outcome_cost_api_equivalent_usd`, and
+`outcome_cost_effective_usd`. The historical `outcome_cost_usd` field remains a
+compatibility alias for effective cost. Aggregate and per-benefit read models
+use the same `actual`, `api_equivalent`, and `effective` naming; the dashboard
+labels all three instead of presenting effective subscription burn as a bare
+dollar charge.
+
 If any run lacks both its required actual/equivalent evidence, the outcome
 retains the known subtotal but projects `outcome_cost_status=partial`.
 `measurement_cost_usd` and all per-benefit cost KPIs then remain `null`, with a

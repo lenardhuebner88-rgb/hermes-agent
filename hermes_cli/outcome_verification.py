@@ -2122,6 +2122,54 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _cost_dimensions(
+    *,
+    breakdown: Mapping[str, Any] | None,
+    fallback_effective_usd: float = 0.0,
+) -> tuple[float, float, float]:
+    """Return actual, API-equivalent and effective cost without relabelling.
+
+    New outcome attempts persist explicit ``*_equivalent_usd`` components.
+    Older rows may only have the compatibility total; those remain actual-cost
+    observations rather than being retroactively guessed as subscription burn.
+    """
+    numeric = {
+        str(key): max(0.0, float(value))
+        for key, value in (breakdown or {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not numeric:
+        actual = max(0.0, float(fallback_effective_usd or 0.0))
+        return round(actual, 8), 0.0, round(actual, 8)
+    api_equivalent = sum(
+        value for key, value in numeric.items() if key.endswith("_equivalent_usd")
+    )
+    actual = sum(
+        value for key, value in numeric.items() if not key.endswith("_equivalent_usd")
+    )
+    return round(actual, 8), round(api_equivalent, 8), round(actual + api_equivalent, 8)
+
+
+def _item_cost_dimensions(item: Mapping[str, Any]) -> tuple[float, float, float]:
+    explicit_actual = item.get("outcome_cost_actual_usd")
+    explicit_equivalent = item.get("outcome_cost_api_equivalent_usd")
+    explicit_effective = item.get("outcome_cost_effective_usd")
+    if all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (explicit_actual, explicit_equivalent, explicit_effective)
+    ):
+        return (
+            max(0.0, float(explicit_actual)),
+            max(0.0, float(explicit_equivalent)),
+            max(0.0, float(explicit_effective)),
+        )
+    breakdown = item.get("outcome_cost_breakdown")
+    return _cost_dimensions(
+        breakdown=breakdown if isinstance(breakdown, Mapping) else None,
+        fallback_effective_usd=float(item.get("outcome_cost_usd") or 0.0),
+    )
+
+
 def enrich_autoresearch_outcomes(
     items: Sequence[Mapping[str, Any]], *, conn: sqlite3.Connection | None = None
 ) -> list[dict[str, Any]]:
@@ -2239,19 +2287,28 @@ def enrich_autoresearch_outcomes(
                 )
             if attempt is not None and canonical["outcome_applicability"] == "applicable":
                 accounting = attempt_accounting.get(proposal_id) or {}
+                cost_breakdown = dict(accounting.get("breakdown") or {})
+                actual_cost, api_equivalent_cost, effective_cost = _cost_dimensions(
+                    breakdown=cost_breakdown,
+                    fallback_effective_usd=float(accounting.get("known_cost_usd") or 0.0),
+                )
                 canonical["measurement_status"] = attempt["status"]
                 canonical["outcome_verdict"] = attempt["verdict"]
                 if attempt["status"] in {"measured", "exhausted"}:
                     canonical["evidence_grade"] = "contract_verified"
-                item["outcome_cost_usd"] = round(
-                    float(accounting.get("known_cost_usd") or 0.0), 8
-                )
+                # Compatibility alias: outcome_cost_usd remains the effective
+                # operator-comparison total. Explicit fields prevent treating
+                # API-equivalent subscription burn as an invoice charge.
+                item["outcome_cost_usd"] = effective_cost
+                item["outcome_cost_actual_usd"] = actual_cost
+                item["outcome_cost_api_equivalent_usd"] = api_equivalent_cost
+                item["outcome_cost_effective_usd"] = effective_cost
                 item["outcome_cost_status"] = (
                     "complete" if accounting.get("complete") else "partial"
                 )
                 item["outcome_measured_at"] = attempt["completed_at"]
                 item["outcome_integration_sha"] = attempt["integration_sha"]
-                item["outcome_cost_breakdown"] = dict(accounting.get("breakdown") or {})
+                item["outcome_cost_breakdown"] = cost_breakdown
                 item["outcome_unknown_cost_refs"] = sorted(
                     accounting.get("unknown_task_run_refs") or []
                 )
@@ -2290,7 +2347,12 @@ def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         verdict: sum(1 for item in legacy if item.get("outcome_verdict") == verdict)
         for verdict in ("improved", "neutral", "worsened", "unmeasurable", "confounded")
     }
-    known_cost = sum(float(item.get("outcome_cost_usd") or 0.0) for item in verified)
+    dimensions = [_item_cost_dimensions(item) for item in verified]
+    known_actual_cost = sum(actual for actual, _equivalent, _effective in dimensions)
+    known_api_equivalent_cost = sum(
+        equivalent for _actual, equivalent, _effective in dimensions
+    )
+    known_effective_cost = sum(effective for _actual, _equivalent, effective in dimensions)
     cost_complete = [item for item in verified if item.get("outcome_cost_status") == "complete"]
     unknown_cost_outcomes = len(verified) - len(cost_complete)
     complete_cost = unknown_cost_outcomes == 0
@@ -2330,19 +2392,49 @@ def outcome_metrics(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "worsened": verified_counts["worsened"],
         "unmeasurable": verified_counts["unmeasurable"],
         "confounded": verified_counts["confounded"],
-        "measurement_cost_usd": round(known_cost, 6) if complete_cost else None,
-        "known_measurement_cost_usd": round(known_cost, 6),
+        # Legacy aliases retain their effective-cost meaning. New consumers
+        # must use the three explicit dimensions below.
+        "measurement_cost_usd": round(known_effective_cost, 6) if complete_cost else None,
+        "known_measurement_cost_usd": round(known_effective_cost, 6),
+        "measurement_actual_cost_usd": (
+            round(known_actual_cost, 6) if complete_cost else None
+        ),
+        "measurement_api_equivalent_cost_usd": (
+            round(known_api_equivalent_cost, 6) if complete_cost else None
+        ),
+        "measurement_effective_cost_usd": (
+            round(known_effective_cost, 6) if complete_cost else None
+        ),
+        "known_measurement_actual_cost_usd": round(known_actual_cost, 6),
+        "known_measurement_api_equivalent_cost_usd": round(
+            known_api_equivalent_cost, 6
+        ),
+        "known_measurement_effective_cost_usd": round(known_effective_cost, 6),
         "cost_complete_outcomes": len(cost_complete),
         "unknown_cost_outcomes": unknown_cost_outcomes,
         "cost_coverage": len(cost_complete) / len(verified) if verified else 0.0,
         "cost_per_measured_usd": (
-            known_cost / len(verified) if complete_cost and verified else None
+            known_effective_cost / len(verified) if complete_cost and verified else None
         ),
         "cost_per_improved_usd": (
-            known_cost / verified_improved if complete_cost and verified_improved else None
+            known_effective_cost / verified_improved
+            if complete_cost and verified_improved else None
         ),
         "cost_per_verified_benefit_usd": (
-            known_cost / verified_improved if complete_cost and verified_improved else None
+            known_effective_cost / verified_improved
+            if complete_cost and verified_improved else None
+        ),
+        "actual_cost_per_verified_benefit_usd": (
+            known_actual_cost / verified_improved
+            if complete_cost and verified_improved else None
+        ),
+        "api_equivalent_cost_per_verified_benefit_usd": (
+            known_api_equivalent_cost / verified_improved
+            if complete_cost and verified_improved else None
+        ),
+        "effective_cost_per_verified_benefit_usd": (
+            known_effective_cost / verified_improved
+            if complete_cost and verified_improved else None
         ),
         "operator_interventions": interventions,
         "operator_interventions_per_verified_benefit": (
@@ -2650,6 +2742,28 @@ def project_strategist_outcomes(
                 observation = json.loads(attempt_row["observation_json"] or "null")
             except (TypeError, ValueError):
                 observation = None
+            try:
+                attempt_breakdown = json.loads(
+                    attempt_row["cost_breakdown_json"] or "{}"
+                )
+            except (TypeError, ValueError):
+                attempt_breakdown = {}
+            if not isinstance(attempt_breakdown, Mapping):
+                attempt_breakdown = {}
+            actual_cost, api_equivalent_cost, effective_cost = _cost_dimensions(
+                breakdown=attempt_breakdown,
+                fallback_effective_usd=float(attempt_row["cost_usd"] or 0.0),
+            )
+            cost_accounting = (
+                observation.get("cost_accounting")
+                if isinstance(observation, Mapping) else None
+            )
+            cost_status = (
+                "complete"
+                if isinstance(cost_accounting, Mapping)
+                and cost_accounting.get("status") == "complete"
+                else "partial"
+            )
             rec.update(
                 {
                     "status": "measured",
@@ -2661,7 +2775,12 @@ def project_strategist_outcomes(
                     "evidence_grade": "contract_verified",
                     "outcome_authority": "task_events",
                     "outcome_integration_sha": attempt_row["integration_sha"],
-                    "outcome_cost_usd": float(attempt_row["cost_usd"] or 0.0),
+                    "outcome_cost_usd": effective_cost,
+                    "outcome_cost_actual_usd": actual_cost,
+                    "outcome_cost_api_equivalent_usd": api_equivalent_cost,
+                    "outcome_cost_effective_usd": effective_cost,
+                    "outcome_cost_status": cost_status,
+                    "outcome_cost_breakdown": dict(attempt_breakdown),
                     "outcome_observation": observation,
                 }
             )

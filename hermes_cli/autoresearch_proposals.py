@@ -582,6 +582,8 @@ def save_proposal(proposal: dict[str, Any]) -> Path:
             for key in (
                 "measurement_status", "outcome_verdict", "evidence_grade",
                 "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+                "outcome_cost_actual_usd", "outcome_cost_api_equivalent_usd",
+                "outcome_cost_effective_usd",
                 "outcome_cost_status", "outcome_cost_breakdown", "outcome_unknown_cost_refs",
                 "outcome_integration_sha", "outcome_operator_interventions",
             ):
@@ -658,6 +660,8 @@ _LIST_FIELDS = (
     "outcome_class", "outcome_authority",
     "probe_contract", "outcome_baseline", "outcome_baseline_recorded_at",
     "outcome_measured_at", "outcome_observation", "outcome_cost_usd",
+    "outcome_cost_actual_usd", "outcome_cost_api_equivalent_usd",
+    "outcome_cost_effective_usd",
     "outcome_cost_status", "outcome_cost_breakdown", "outcome_unknown_cost_refs",
     "outcome_operator_interventions",
     "outcome_integration_sha",
