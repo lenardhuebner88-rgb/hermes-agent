@@ -99,6 +99,24 @@ baseline, observation, evidence references, exact delivery SHA and additive
 cost breakdown earns that evidence grade. Consequently
 `contract_verified + improved` is the only “benefit confirmed” state.
 
+Outcome cost is additive across Research, Delivery, Review/Gates, baseline
+probe and every outcome-probe attempt. Source references prevent a retry from
+booking the same baseline, task run or operator decision twice. For metered
+runs, `*_usd` is actual spend. For subscription workers, actual marginal spend
+remains `$0` and the existing Hermes deferred cost backfill supplies
+`cost_usd_equivalent`; the outcome breakdown records that separately as
+`delivery_equivalent_usd` or `review_equivalent_usd`. The operator KPI uses the
+sum of actual and API-equivalent components as effective cost, never relabeling
+the equivalent as an invoice charge.
+
+If any run lacks both its required actual/equivalent evidence, the outcome
+retains the known subtotal but projects `outcome_cost_status=partial`.
+`measurement_cost_usd` and all per-benefit cost KPIs then remain `null`, with a
+separate cost-coverage numerator, rather than presenting the missing share as
+zero. The verifier invokes the existing bounded run-cost backfill before
+measurement; the E2E waits only for the Claude CLI's already-running final
+result write and does not create another billing path.
+
 ## Migration and rollback
 
 Use `migrate_shared_state` from `hermes_cli.outcome_verification` with the live
