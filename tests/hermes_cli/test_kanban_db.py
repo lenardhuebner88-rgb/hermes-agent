@@ -6447,13 +6447,23 @@ def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
 def test_silent_block_sweep_classifies_superseded_block_as_operator_intent(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose reason records a
-    deliberate operator supersede is not a product defect — it classifies
-    operator-intent, not the real-bug default (live: t_2491b29e, reason
-    'Superseded: operator requested direct Claude CLI review instead of
-    Kanban reviewer.')."""
+    """HEILER-CLASSIFY-SIGNAL-GAP-S2 + B4a: a SUPERSEDED block reason is
+    operator-intent (not a product defect). Since 2026-07-15 the path also
+    auto-archives so it never sits as a silent-block zombie for escalation
+    (live precedent: t_2491b29e)."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
+    reason = (
+        "Superseded: operator requested direct Claude CLI review "
+        "instead of Kanban reviewer."
+    )
+    assert kb.reason_looks_superseded(reason)
+    # Heiler text path still treats "superseded:" as operator-intent.
+    assert any(
+        cls == kb.HEILER_CLASS_OPERATOR_INTENT
+        and any("superseded:" in s for s in signals)
+        for cls, signals in kb._HEILER_TEXT_SIGNALS
+    )
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="superseded review", assignee="alice")
         conn.execute(
@@ -6461,18 +6471,10 @@ def test_silent_block_sweep_classifies_superseded_block_as_operator_intent(
             (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
         )
         kb.claim_task(conn, t)
-        kb.block_task(
-            conn, t,
-            reason="Superseded: operator requested direct Claude CLI review "
-                   "instead of Kanban reviewer.",
-        )
-        assert kb.silent_block_task_ids(conn, now=base) == [t]
-        kb.escalate_silent_blocks_sweep(conn, now=base)
-        esc = _escalation_event(conn, t)
-        heiler = _heiler_events(conn, t)[0]
-
-    assert esc.payload["evidence"]["last_error"].startswith("Superseded:")
-    assert heiler.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
+        kb.block_task(conn, t, reason=reason)
+        # B4a: terminal archive, not a sticky blocked silent-sweep candidate.
+        assert kb.get_task(conn, t).status == "archived"
+        assert kb.silent_block_task_ids(conn, now=base) == []
 
 
 def test_silent_block_sweep_completed_outcome_avoids_default_bucket(
@@ -6753,6 +6755,194 @@ def test_review_request_changes_never_false_operator_question():
         )
         == "operator_question"
     )
+
+
+def test_blocked_kind_superseded_and_capacity_never_auto_retryable():
+    """Skill-audit fan-out: SUPERSEDED / capacity prose must not re-dispatch
+    when block_kind is NULL (writers often leave it empty).
+    """
+    superseded_reasons = [
+        "SUPERSEDED: Dieser Synthesepfad ist redundant. Nicht erneut dispatchen.",
+        "superseded: old review path; do not re-dispatch",
+        "SUPERSEDED wegen reinem Kapazitaetsfehler. Nicht manuell freigeben.",
+        "Path archived — kein Re-Dispatch.",
+    ]
+    for reason in superseded_reasons:
+        assert (
+            kb._blocked_kind_for_auto_retry(reason) == "superseded"
+        ), reason
+
+    capacity_reasons = [
+        "Iteration budget exhausted (12/12) — task could not complete "
+        "within the allowed iterations",
+        "budget exhausted (6/6)",
+        "tool-calling iteration budget exhausted",
+    ]
+    for reason in capacity_reasons:
+        assert kb._blocked_kind_for_auto_retry(reason) == "capacity", reason
+
+    # Explicit kinds still win
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            "anything", explicit_block_kind="capacity"
+        )
+        == "capacity"
+    )
+    # Harmless block prose stays retryable
+    assert (
+        kb._blocked_kind_for_auto_retry("Worker noted which assertion failed")
+        == "retryable"
+    )
+    # Review feedback path still preferred over capacity/supersede bait in findings
+    assert (
+        kb._blocked_kind_for_auto_retry(
+            "NEEDS_REVISION: iteration budget note is irrelevant here",
+            verdict="REQUEST_CHANGES",
+        )
+        == "retryable"
+    )
+
+
+def test_block_task_superseded_auto_archives(kanban_home):
+    """B4a: SUPERSEDED block leaves the active board (archived, not blocked)."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="dead synthesis path", assignee="research")
+        kb.claim_task(conn, t)
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "SUPERSEDED: Dieser Synthesepfad ist redundant. "
+                "Nicht erneut dispatchen."
+            ),
+        )
+        task = kb.get_task(conn, t)
+        assert task.status == "archived"
+        kinds = [
+            r["kind"]
+            for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+                (t,),
+            )
+        ]
+        assert "blocked" in kinds
+        assert "archived" in kinds
+        assert "superseded_archived" in kinds
+
+
+def test_block_task_capacity_without_supersede_stays_blocked(kanban_home):
+    """Capacity death alone parks blocked (no auto-archive without SUPERSEDED)."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="capacity", assignee="research")
+        kb.claim_task(conn, t)
+        assert kb.block_task(
+            conn,
+            t,
+            reason=(
+                "Iteration budget exhausted (12/12) — task could not complete "
+                "within the allowed iterations"
+            ),
+            kind="capacity",
+        )
+        assert kb.get_task(conn, t).status == "blocked"
+
+
+def test_dispatch_auto_retry_skips_superseded_and_capacity_null_kind(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Capacity null-kind stays blocked and non-retryable; SUPERSEDED archives
+    at block time so it never re-enters auto_retry.
+    """
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t_sup = kb.create_task(conn, title="superseded path", assignee="coder")
+        kb.claim_task(conn, t_sup)
+        kb.block_task(
+            conn,
+            t_sup,
+            reason=(
+                "SUPERSEDED: Dieser Synthesepfad ist redundant. "
+                "Nicht erneut dispatchen."
+            ),
+        )
+        assert kb.get_task(conn, t_sup).status == "archived"
+
+        t_cap = kb.create_task(conn, title="capacity death", assignee="research")
+        kb.claim_task(conn, t_cap)
+        kb.block_task(
+            conn,
+            t_cap,
+            reason=(
+                "Iteration budget exhausted (12/12) — task could not complete "
+                "within the allowed iterations"
+            ),
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET block_kind = NULL WHERE id = ?", (t_cap,)
+            )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t_sup).status == "archived"
+        assert kb.get_task(conn, t_cap).status == "blocked"
+
+
+def test_apply_inventory_lane_contract_reroutes_research_inventory():
+    assignee, kind, warn = kb.apply_inventory_lane_contract(
+        assignee="research",
+        title="Hermes Skill-Audit A: Inventar, Struktur und technische Hygiene",
+        body=(
+            "Read-only audit der aktiven Hermes-Skill-Landschaft. "
+            "Scope: /home/piet/.hermes/skills sowie profiles/*/skills; "
+            "Inventar aller SKILL.md, Frontmatter, Duplikate."
+        ),
+        kind=None,
+    )
+    assert assignee == "coder"
+    assert kind == "analysis"
+    assert warn and "inventory_lane_contract" in warn
+
+
+def test_apply_inventory_lane_contract_spares_synthesis_research():
+    assignee, kind, warn = kb.apply_inventory_lane_contract(
+        assignee="research",
+        title="Hermes Skill-Audit: finale Synthese aus Critic + Scan",
+        body=(
+            "Synthetisiere ausschließlich die Parent-Handoffs. "
+            "Keine eigenen breiten Scans."
+        ),
+        kind="research",
+    )
+    assert assignee == "research"
+    assert kind == "research"
+    assert warn is None
+
+
+def test_create_task_inventory_reroutes_to_coder(kanban_home):
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="Skill-Audit: Inventar und Frontmatter-Validierung",
+            body=(
+                "Enumerate all active SKILL.md under ~/.hermes/skills "
+                "and validate frontmatter."
+            ),
+            assignee="research",
+            max_iterations=12,
+        )
+        task = kb.get_task(conn, tid)
+        assert task.assignee == "coder"
+        assert task.kind == "analysis"
+        payload = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created'",
+            (tid,),
+        ).fetchone()["payload"]
+        data = json.loads(payload)
+        assert "inventory_lane_contract" in data
 
 
 def test_review_prose_bait_uses_second_auto_retry_not_operator(

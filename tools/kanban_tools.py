@@ -994,6 +994,22 @@ def _handle_create(args: dict, **kw) -> str:
     except ValueError as exc:
         return tool_error(str(exc))
     body = args.get("body")
+    # B1a preview: same contract create_task applies — surface warning to caller.
+    _inv_assignee, _inv_kind, inventory_lane_contract = (
+        kanban_db.apply_inventory_lane_contract(
+            assignee=str(assignee),
+            title=str(title).strip(),
+            body=body,
+            kind=args.get("kind"),
+        )
+    )
+    if inventory_lane_contract:
+        try:
+            assignee = kanban_db.validate_spawnable_assignee(str(_inv_assignee))
+        except ValueError as exc:
+            return tool_error(str(exc))
+        if args.get("kind") is None and _inv_kind is not None:
+            args = {**args, "kind": _inv_kind}
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Stamp the originating session id when the agent loop runs under
@@ -1089,11 +1105,15 @@ def _handle_create(args: dict, **kw) -> str:
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
-            return _ok(
-                task_id=new_tid,
-                status=new_task.status if new_task else None,
-                subscribed=subscribed,
-            )
+            payload = {
+                "task_id": new_tid,
+                "status": new_task.status if new_task else None,
+                "subscribed": subscribed,
+            }
+            if inventory_lane_contract:
+                payload["inventory_lane_contract"] = inventory_lane_contract
+                payload["assignee"] = new_task.assignee if new_task else assignee
+            return _ok(**payload)
         finally:
             conn.close()
     except ValueError as e:
