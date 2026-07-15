@@ -2615,6 +2615,8 @@ export interface AuxiliaryModelsResponse {
 export interface MoaModelSlot {
   provider: string;
   model: string;
+  /** Optional per-slot reasoning effort — round-tripped, not edited here. */
+  reasoning_effort?: string;
 }
 
 export interface MoaConfigResponse {
@@ -2626,6 +2628,10 @@ export interface MoaConfigResponse {
     reference_temperature: number;
     aggregator_temperature: number;
     max_tokens: number;
+    /** Optional advisor output cap — round-tripped, not edited here. */
+    reference_max_tokens?: number | null;
+    /** Fan-out cadence (per_iteration | user_turn) — round-tripped. */
+    fanout?: string;
     enabled: boolean;
   }>;
   reference_models: MoaModelSlot[];
