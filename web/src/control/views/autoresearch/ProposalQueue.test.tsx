@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { getAutoresearchDecisionGuide, getAutoresearchQueueActionSummary } from "../../lib/autoresearchDecisionGuide";
 import { getAutoresearchQueueModeSummary } from "../../lib/autoresearchQueueMode";
@@ -111,5 +111,64 @@ describe("ProposalQueue focus", () => {
     rerender(<ProposalQueue {...queueProps(realProposal.id)} />);
 
     expect(document.getElementById(`autoresearch-proposal-${realProposal.id}`)).not.toBeNull();
+  });
+
+  it("continues with the next open proposal after deciding a deep-linked focus", () => {
+    const proposals = [
+      { ...realProposal, id: "first-proposal", title: "First proposal" },
+      { ...realProposal, id: "focused-proposal", title: "Focused proposal" },
+      { ...realProposal, id: "third-proposal", title: "Third proposal" },
+    ];
+    let currentProposals = proposals;
+    const queue = () => (
+      <ProposalQueue
+        density="airy"
+        focusId="focused-proposal"
+        openCount={currentProposals.length}
+        storeLoading={false}
+        storeBusy={null}
+        proposalGroupQueue={rankAutoresearchProposalGroups(currentProposals, 3)}
+        onApply={(proposal) => {
+          currentProposals = currentProposals.filter(({ id }) => id !== proposal.id);
+          rerender(queue());
+        }}
+        onSkip={vi.fn()}
+      />
+    );
+    const { rerender } = render(queue());
+
+    expect(document.getElementById("autoresearch-proposal-focused-proposal")).toBeTruthy();
+    expect(screen.getByText("2 von 3")).toBeTruthy();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Annehmen" }).at(-1)!);
+    expect(document.getElementById("autoresearch-proposal-third-proposal")).toBeTruthy();
+    expect(screen.getByText("2 von 2")).toBeTruthy();
+  });
+
+  it("consumes a deep-link focus when navigating between three proposals", () => {
+    const proposals = [
+      { ...realProposal, id: "first-proposal" },
+      { ...realProposal, id: "focused-proposal" },
+      { ...realProposal, id: "third-proposal" },
+    ];
+
+    const { container } = render(
+      <ProposalQueue
+        density="airy"
+        focusId="focused-proposal"
+        openCount={proposals.length}
+        storeLoading={false}
+        storeBusy={null}
+        proposalGroupQueue={rankAutoresearchProposalGroups(proposals, 3)}
+        onApply={vi.fn()}
+        onSkip={vi.fn()}
+      />,
+    );
+
+    expect(document.getElementById("autoresearch-proposal-focused-proposal")).toBeTruthy();
+    fireEvent.click(within(container).getByRole("button", { name: "Weiter" }));
+    expect(document.getElementById("autoresearch-proposal-third-proposal")).toBeTruthy();
+    fireEvent.click(within(container).getByRole("button", { name: "Zurück" }));
+    expect(document.getElementById("autoresearch-proposal-focused-proposal")).toBeTruthy();
   });
 });

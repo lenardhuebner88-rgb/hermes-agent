@@ -32,8 +32,15 @@ export function ProposalQueue({
     [proposalGroupQueue],
   );
   const [manualIndex, setManualIndex] = useState(0);
+  const [consumedFocusId, setConsumedFocusId] = useState<string | null>(null);
   const focusIndex = focusId ? proposals.findIndex((proposal) => proposal.id === focusId) : -1;
-  const index = focusIndex >= 0 ? focusIndex : Math.min(manualIndex, Math.max(0, proposals.length - 1));
+  const focusIsActive = focusIndex >= 0 && focusId !== consumedFocusId;
+  const index = focusIsActive ? focusIndex : Math.min(manualIndex, Math.max(0, proposals.length - 1));
+
+  const consumeFocusAt = (nextIndex: number) => {
+    setConsumedFocusId(focusId ?? null);
+    setManualIndex(nextIndex);
+  };
 
   const current = proposals[index] ?? null;
   const position = current ? index + 1 : 0;
@@ -54,16 +61,16 @@ export function ProposalQueue({
             <span className="font-medium text-ink">{position} von {proposals.length}</span>
             {proposals.length > 1 ? (
               <div className="flex gap-2">
-                <Button outlined className="min-h-12" onClick={() => setManualIndex(Math.max(0, index - 1))} disabled={index === 0} prefix={<ChevronLeft className="h-4 w-4" />}>Zurück</Button>
-                <Button outlined className="min-h-12" onClick={() => setManualIndex(Math.min(proposals.length - 1, index + 1))} disabled={index === proposals.length - 1} suffix={<ChevronRight className="h-4 w-4" />}>Weiter</Button>
+                <Button outlined className="min-h-12" onClick={() => consumeFocusAt(Math.max(0, index - 1))} disabled={index === 0} prefix={<ChevronLeft className="h-4 w-4" />}>Zurück</Button>
+                <Button outlined className="min-h-12" onClick={() => consumeFocusAt(Math.min(proposals.length - 1, index + 1))} disabled={index === proposals.length - 1} suffix={<ChevronRight className="h-4 w-4" />}>Weiter</Button>
               </div>
             ) : null}
           </div>
           <ProposalCard proposal={current} density={density} busy={busy} onApply={onApply} onSkip={onSkip} showActions={false} />
           <div className="sticky bottom-3 z-10 rounded-panel border border-line bg-surface-1/95 p-3 shadow-lg backdrop-blur sm:ml-auto sm:max-w-md">
             <div className="grid gap-2 sm:grid-cols-2">
-              <Button outlined className="min-h-12 justify-center" onClick={() => onSkip(current)} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>Ablehnen</Button>
-              <Button className="min-h-12 justify-center" onClick={() => onApply(current)} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>Annehmen</Button>
+              <Button outlined className="min-h-12 justify-center" onClick={() => { consumeFocusAt(index); onSkip(current); }} disabled={busy} prefix={busy ? <Spinner /> : <X className="h-4 w-4" />}>Ablehnen</Button>
+              <Button className="min-h-12 justify-center" onClick={() => { consumeFocusAt(index); onApply(current); }} disabled={busy} prefix={busy ? <Spinner /> : <Check className="h-4 w-4" />}>Annehmen</Button>
             </div>
           </div>
         </div>
