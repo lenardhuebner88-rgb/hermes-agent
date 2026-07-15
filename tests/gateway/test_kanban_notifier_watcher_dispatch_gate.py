@@ -1,7 +1,8 @@
-"""Tests for the dispatch_in_gateway gate on _kanban_notifications_watcher.
+"""Ownership tests for the unified Kanban notifications watcher.
 
-- Non-dispatch gateways (dispatch_in_gateway=false) exit before opening any DB.
-- HERMES_KANBAN_DISPATCH_IN_GATEWAY env var disables without loading config.
+- Non-dispatch gateways do not poll subscriptions.
+- Alert rules remain available when dispatch ownership is external.
+- Only one gateway process evaluates the in-memory alert rules.
 - Dispatch-owning gateways (dispatch_in_gateway=true) proceed past the gate.
 """
 
@@ -36,14 +37,141 @@ def test_notifier_watcher_skips_when_dispatch_disabled():
 
 
 def test_notifier_watcher_env_override_disables(monkeypatch):
-    """HERMES_KANBAN_DISPATCH_IN_GATEWAY=false skips config load entirely."""
+    """The env override disables subscription polling, but config still gates alerts."""
     runner = _make_runner()
     monkeypatch.setenv("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "false")
-    with patch("hermes_cli.config.load_config") as mock_load_config:
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"kanban": {"alerts": {"enabled": False}}},
+    ) as mock_load_config:
         with patch("hermes_cli.kanban_db.connect") as mock_connect:
             asyncio.run(runner._kanban_notifications_watcher())
-    mock_load_config.assert_not_called()
+    mock_load_config.assert_called_once()
     mock_connect.assert_not_called()
+
+
+def test_alert_rules_run_when_subscription_dispatch_is_external(tmp_path, monkeypatch):
+    """dispatch=false must gate DB subscription polling, not the alert rule hook."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import kanban_db as _kb
+
+    runner = _make_runner()
+    alert_ticks = []
+    sleep_calls = []
+
+    async def fake_sleep(_delay):
+        sleep_calls.append(True)
+        if len(sleep_calls) >= 2:
+            runner._running = False
+
+    async def alert_tick(config, state):
+        alert_ticks.append((config, state))
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": False,
+                "alerts": {
+                    "enabled": True,
+                    "channel_id": "operator-room",
+                    "interval_seconds": 300,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    list_boards = MagicMock(return_value=[])
+    monkeypatch.setattr(_kb, "list_boards", list_boards)
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: (object(), "held")
+    )
+    monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runner, "_kanban_alert_rules_tick", alert_tick)
+
+    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+
+    assert len(alert_ticks) == 1
+    list_boards.assert_not_called()
+    assert runner._kanban_alerts_lock_handle is None
+
+
+def test_alert_rule_failure_keeps_configured_cadence(tmp_path, monkeypatch):
+    """A failing rule tick is retried at its deadline, not every watcher tick."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import kanban_db as _kb
+
+    runner = _make_runner()
+    sleep_calls = []
+    alert_ticks = []
+
+    async def fake_sleep(_delay):
+        sleep_calls.append(True)
+        if len(sleep_calls) >= 4:
+            runner._running = False
+
+    async def failing_alert_tick(_config, _state):
+        alert_ticks.append(True)
+        raise RuntimeError("synthetic alert failure")
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": False,
+                "alerts": {
+                    "enabled": True,
+                    "channel_id": "operator-room",
+                    "interval_seconds": 300,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: (object(), "held")
+    )
+    monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(runner, "_kanban_alert_rules_tick", failing_alert_tick)
+
+    asyncio.run(runner._kanban_notifications_watcher(interval=1))
+
+    assert alert_ticks == [True]
+
+
+def test_second_gateway_cannot_evaluate_alert_rules(tmp_path, monkeypatch):
+    """A contended alert lease disables the second in-memory evaluator."""
+    from gateway import kanban_watchers as watchers
+    from hermes_cli import kanban_db as _kb
+
+    first = _make_runner()
+    second = _make_runner()
+    first._running = False
+    second_tick = MagicMock()
+    lock_states = iter([(object(), "held"), (None, "contended")])
+
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": False,
+                "alerts": {"enabled": True, "channel_id": "operator-room"},
+            }
+        },
+    )
+    monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        watchers, "_acquire_singleton_lock", lambda _path: next(lock_states)
+    )
+    monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
+    monkeypatch.setattr(second, "_kanban_alert_rules_tick", second_tick)
+
+    asyncio.run(first._kanban_notifications_watcher())
+    asyncio.run(second._kanban_notifications_watcher())
+
+    second_tick.assert_not_called()
 
 
 def test_notifier_watcher_runs_when_dispatch_enabled():

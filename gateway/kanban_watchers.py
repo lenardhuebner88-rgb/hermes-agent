@@ -902,32 +902,35 @@ class GatewayKanbanWatchersMixin:
         cross boards, so delivery semantics are unchanged — this is
         purely a fan-out of the single-DB poll.
         """
-        # Gate: only the dispatch-owning gateway opens kanban DBs for notifier polling.
-        # Non-dispatch gateways have no subscriptions to deliver — all kanban state lives
-        # in the dispatch owner's per-board DBs. This prevents N-gateway -shm contention.
-        # TODO: gate per-board when per-board dispatcher_owner tracking lands.
+        # Subscription polling follows dispatch ownership, while alert rules
+        # remain an independent opt-in.  A deployment may run dispatch in an
+        # external daemon and still choose one gateway as its alert surface.
         try:
             from hermes_cli.config import load_config as _load_config
         except Exception:
             logger.warning("kanban notifier: config loader unavailable; disabled")
             return
         env_override = os.environ.get("HERMES_KANBAN_DISPATCH_IN_GATEWAY", "").strip().lower()
-        if env_override in {"0", "false", "no", "off"}:
-            logger.info("kanban notifier: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env")
-            return
         try:
             cfg = _load_config()
         except Exception as exc:
             logger.warning("kanban notifier: cannot load config (%s); disabled", exc)
             return
         kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-        if not _coerce_config_bool(
+        subscriptions_enabled = _coerce_config_bool(
             kanban_cfg.get("dispatch_in_gateway", True), default=True
-        ):
+        )
+        if env_override in {"0", "false", "no", "off"}:
+            subscriptions_enabled = False
             logger.info(
-                "kanban notifier: disabled via config kanban.dispatch_in_gateway=false"
+                "kanban subscription polling: disabled via "
+                "HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
             )
-            return
+        elif not subscriptions_enabled:
+            logger.info(
+                "kanban subscription polling: disabled via config "
+                "kanban.dispatch_in_gateway=false"
+            )
         from gateway.config import Platform as _Platform
         try:
             from hermes_cli import kanban_db as _kb
@@ -971,6 +974,7 @@ class GatewayKanbanWatchersMixin:
         alert_cfg: Optional[dict] = None
         alert_state: Optional[dict] = None
         next_alert_tick = 0.0
+        self._kanban_alerts_lock_handle = None
         try:
             from gateway.kanban_alerts import (
                 load_alerts_config as _load_alerts_config,
@@ -999,8 +1003,44 @@ class GatewayKanbanWatchersMixin:
                 exc_info=True,
             )
 
+        # Alert cursors live in memory, so unlike SQLite subscription claims
+        # they cannot deduplicate two gateway processes.  Lease the evaluator
+        # machine-wide while leaving subscription delivery free to rely on its
+        # atomic DB claim contract.
+        if alert_cfg is not None:
+            alert_lock_path = _kb.kanban_home() / "kanban" / ".alerts.lock"
+            alert_lock_handle, alert_lock_state = _acquire_singleton_lock(
+                alert_lock_path
+            )
+            if alert_lock_state == "held":
+                self._kanban_alerts_lock_handle = alert_lock_handle
+                logger.info(
+                    "kanban notifications: holding singleton alert lock (%s)",
+                    alert_lock_path,
+                )
+            else:
+                logger.log(
+                    logging.INFO
+                    if alert_lock_state == "contended"
+                    else logging.WARNING,
+                    "kanban notifications: alert lock %s at %s; this gateway "
+                    "will not evaluate alert rules",
+                    alert_lock_state,
+                    alert_lock_path,
+                )
+                alert_cfg = None
+                alert_state = None
+
+        if not subscriptions_enabled and alert_cfg is None:
+            return
+
         # Initial delay so the gateway can finish wiring adapters.
-        await asyncio.sleep(5)
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            _release_singleton_lock(self._kanban_alerts_lock_handle)
+            self._kanban_alerts_lock_handle = None
+            raise
 
         while self._running:
             try:
@@ -1009,25 +1049,31 @@ class GatewayKanbanWatchersMixin:
                     and alert_state is not None
                     and time.monotonic() >= next_alert_tick
                 ):
-                    await self._kanban_alert_rules_tick(alert_cfg, alert_state)
+                    # Advance before invoking the hook.  A failing rule must
+                    # keep its configured cadence rather than hot-looping on
+                    # every subscription tick.
                     next_alert_tick = (
                         time.monotonic() + float(alert_cfg["interval_seconds"])
                     )
+                    await self._kanban_alert_rules_tick(alert_cfg, alert_state)
                 # F1: before collecting deliveries, flush any stalled root's
                 # suppressed child-successes as a one-time trailing report.
                 # Fully fail-soft — a sweep hiccup must never stop the tick.
-                try:
-                    await asyncio.to_thread(
-                        self._kanban_flush_stalled_trees, kanban_cfg, _kb,
-                    )
-                except Exception:
-                    logger.debug(
-                        "kanban notifier: stall-flush sweep tick failed",
-                        exc_info=True,
-                    )
+                if subscriptions_enabled:
+                    try:
+                        await asyncio.to_thread(
+                            self._kanban_flush_stalled_trees, kanban_cfg, _kb,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "kanban notifier: stall-flush sweep tick failed",
+                            exc_info=True,
+                        )
 
                 def _collect():
                     deliveries: list[dict] = []
+                    if not subscriptions_enabled:
+                        return deliveries
                     active_platforms = {
                         getattr(platform, "value", str(platform)).lower()
                         for platform in self.adapters.keys()
@@ -1498,13 +1544,27 @@ class GatewayKanbanWatchersMixin:
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
                             )
+            except asyncio.CancelledError:
+                _release_singleton_lock(self._kanban_alerts_lock_handle)
+                self._kanban_alerts_lock_handle = None
+                raise
             except Exception as exc:
                 logger.warning("kanban notifier tick failed: %s", exc)
             # Sleep with cancellation checks.
             for _ in range(int(max(1, interval))):
                 if not self._running:
+                    _release_singleton_lock(self._kanban_alerts_lock_handle)
+                    self._kanban_alerts_lock_handle = None
                     return
-                await asyncio.sleep(1)
+                try:
+                    await asyncio.sleep(1)
+                except asyncio.CancelledError:
+                    _release_singleton_lock(self._kanban_alerts_lock_handle)
+                    self._kanban_alerts_lock_handle = None
+                    raise
+
+        _release_singleton_lock(self._kanban_alerts_lock_handle)
+        self._kanban_alerts_lock_handle = None
 
     async def _kanban_send_confirmed(
         self,
