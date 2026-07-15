@@ -12071,13 +12071,15 @@ def _merge_review_submission_artifacts(
     task_id: str,
     metadata: Optional[dict],
 ) -> Optional[dict]:
-    """Merge implementer artifacts into terminal review metadata.
+    """Merge the latest implementer artifacts into terminal review metadata.
 
     ``_persist_scratch_completion_artifacts`` remains the sole filesystem-copy
     owner. This hook only reconstructs the declarative ``artifacts`` contract
-    from earlier review submissions before that owner runs. Entries are
-    de-duplicated in first-seen run order; current completion entries follow the
-    implementer handoff.
+    from the latest review submission before that owner runs. A later
+    implementer handoff supersedes earlier rejected submissions: carrying an
+    old path across ``REQUEST_CHANGES`` would make removal/replacement
+    impossible and can fail terminal approval after the old file is deleted.
+    Current completion entries follow the implementer handoff.
     """
     merged: list[str] = []
     seen: set[str] = set()
@@ -12091,9 +12093,9 @@ def _merge_review_submission_artifacts(
                 seen.add(artifact)
                 merged.append(artifact)
 
-    for _run_id, source_metadata in _review_submission_metadata_sources(
-        conn, task_id
-    ):
+    sources = _review_submission_metadata_sources(conn, task_id)
+    if sources:
+        _run_id, source_metadata = sources[-1]
         if isinstance(source_metadata, dict):
             add_entries(source_metadata.get("artifacts"))
     if isinstance(metadata, dict):

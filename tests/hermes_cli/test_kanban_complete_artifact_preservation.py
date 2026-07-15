@@ -259,8 +259,8 @@ def test_cleanup_workspace_has_no_second_artifact_copy_owner(
 def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
     """Phase 2 regression guard: with the review gate, the terminal 'done' is
     the verifier's run (no artifacts), while the coder's artifacts=[...] rode
-    the earlier submit_for_review run. Preservation must union across runs so
-    the coder's deliverable still lands in reports/by-task/."""
+    the earlier submit_for_review run. Preservation must replay the latest
+    implementer handoff so the deliverable lands in reports/by-task/."""
     import hermes_cli.profiles as profiles_mod
     monkeypatch.setattr(
         kb, "_review_gate_config",
@@ -305,7 +305,7 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
         )
         assert kb.get_task(conn, tid).status == "done"
 
-    # Workspace cleaned, but the coder's deliverable survived via union.
+    # Workspace cleaned, but the latest coder handoff survived review.
     assert not wp.exists()
     dest = kanban_home / "reports" / "by-task" / tid / "RESULT.md"
     assert dest.exists()
@@ -318,3 +318,82 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
         ]
     assert len(preserved) == 1
     assert preserved[0].payload["files"] == ["RESULT.md"]
+
+
+def test_latest_review_submission_replaces_superseded_artifacts(
+    kanban_home, monkeypatch
+):
+    """A REQUEST_CHANGES round may replace or remove an earlier deliverable.
+
+    Terminal approval must persist the latest implementer handoff only; a
+    deleted path from the rejected submission is no longer part of the
+    completion contract.
+    """
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="replace artifact", assignee="coder")
+        workspace = _scratch_dir_for(kanban_home, tid)
+        _bind_scratch_workspace(conn, tid, workspace)
+        rejected = workspace / "REJECTED.md"
+        replacement = workspace / "FINAL.md"
+        rejected.write_text("obsolete\n", encoding="utf-8")
+
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="first implementation",
+            metadata={"artifacts": [str(rejected)]},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="replace the deliverable",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["replace the deliverable"],
+            },
+            review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        rejected.unlink()
+        replacement.write_text("accepted\n", encoding="utf-8")
+        promoted, reason = kb.promote_task(
+            conn, tid, actor="test", reason="address review"
+        )
+        assert promoted, reason
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="reworked implementation",
+            metadata={"artifacts": [str(replacement)]},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="APPROVED",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+
+    report_dir = kanban_home / "reports" / "by-task" / tid
+    assert (report_dir / "FINAL.md").read_text(encoding="utf-8") == "accepted\n"
+    assert not (report_dir / "REJECTED.md").exists()
