@@ -12079,10 +12079,19 @@ def _merge_review_submission_artifacts(
                 merged.append(artifact)
 
     sources = _review_submission_metadata_sources(conn, task_id)
-    if sources:
-        _run_id, source_metadata = sources[-1]
+    for source_run_id, source_metadata in reversed(sources):
+        # Intermediate verifier/reviewer approvals also emit
+        # ``submitted_for_review`` while advancing a staged review chain.
+        # They are review-lane transitions, not new implementation handoffs,
+        # and must never shadow the latest coder artifact contract.
+        if _run_originated_from_review(conn, task_id, source_run_id):
+            continue
         if isinstance(source_metadata, dict):
             add_entries(source_metadata.get("artifacts"))
+        # The latest implementer submission is authoritative even when its
+        # artifacts list is explicitly empty (or its metadata is malformed):
+        # never resurrect a rejected earlier round by falling back further.
+        break
     if isinstance(metadata, dict):
         add_entries(metadata.get("artifacts"))
     if not merged:

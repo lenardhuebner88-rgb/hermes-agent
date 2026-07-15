@@ -397,3 +397,136 @@ def test_latest_review_submission_replaces_superseded_artifacts(
     report_dir = kanban_home / "reports" / "by-task" / tid
     assert (report_dir / "FINAL.md").read_text(encoding="utf-8") == "accepted\n"
     assert not (report_dir / "REJECTED.md").exists()
+
+
+def test_artifacts_survive_the_full_critical_review_chain(
+    kanban_home, monkeypatch
+):
+    """Intermediate verifier/reviewer submissions must not shadow the coder.
+
+    Every approved intermediate stage emits its own ``submitted_for_review``
+    event. Those review-originated runs carry verdict metadata rather than the
+    implementer's artifact contract, so terminal critic approval must replay
+    the latest non-review submission.
+    """
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical artifact",
+            assignee="coder",
+            review_tier="critical",
+        )
+        workspace = _scratch_dir_for(kanban_home, tid)
+        _bind_scratch_workspace(conn, tid, workspace)
+        artifact = workspace / "RESULT.md"
+        artifact.write_text("critical deliverable\n", encoding="utf-8")
+
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="implementation",
+            metadata={"artifacts": [str(artifact)]},
+            review_gate=True,
+        )
+        for profile in ("verifier", "reviewer", "critic"):
+            assert kb.claim_review_task(
+                conn, tid, reviewer_profile=profile
+            ) is not None
+            assert kb.complete_task(
+                conn,
+                tid,
+                summary=f"{profile} approved",
+                metadata={"review_verdict": "APPROVED"},
+                review_gate=True,
+            )
+
+        assert kb.get_task(conn, tid).status == "done"
+
+    report = kanban_home / "reports" / "by-task" / tid / "RESULT.md"
+    assert report.read_text(encoding="utf-8") == "critical deliverable\n"
+
+
+def test_empty_latest_implementer_artifacts_supersede_rejected_handoff(
+    kanban_home, monkeypatch
+):
+    """An explicit empty list removes the prior round's artifact contract."""
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="remove artifact", assignee="coder")
+        workspace = _scratch_dir_for(kanban_home, tid)
+        _bind_scratch_workspace(conn, tid, workspace)
+        rejected = workspace / "REJECTED.md"
+        rejected.write_text("obsolete\n", encoding="utf-8")
+
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="first implementation",
+            metadata={"artifacts": [str(rejected)]},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="remove the deliverable",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["remove the deliverable"],
+            },
+            review_gate=True,
+        )
+        rejected.unlink()
+
+        promoted, reason = kb.promote_task(
+            conn, tid, actor="test", reason="address review"
+        )
+        assert promoted, reason
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="artifact intentionally removed",
+            metadata={"artifacts": []},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="APPROVED",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+
+    assert not (kanban_home / "reports" / "by-task" / tid).exists()
