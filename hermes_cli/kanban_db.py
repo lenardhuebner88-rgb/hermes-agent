@@ -3936,7 +3936,11 @@ SILENT_BLOCK_ESCALATION_SOURCE = "silent_block_sweep"
 # Token discipline: at most one re-ready per block episode; hold-classes do not
 # re-dispatch workers (zero token burn) and only observe/classify.
 AUTONOMY_ROUTED_EVENT = "autonomy_routed"
+# Token bound: at most one re-ready per block *episode* AND at most one
+# re-ready over the whole task lifetime. Episode-only caps re-arm on every
+# re-block and would allow review thrash forever (Opus 4.8 review blocker).
 MAX_AUTONOMY_REREADY_PER_EPISODE = 1
+MAX_AUTONOMY_REREADY_PER_TASK = 1
 # Routes that re-dispatch a worker (token cost). Holds do not.
 # Only review rework is re-dispatched; generic exhausted/stuck blocks still
 # escalate so silent failures do not burn unbounded tokens.
@@ -20681,11 +20685,31 @@ def _autonomy_hold_active(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def _autonomy_reready_count(conn: sqlite3.Connection, task_id: str) -> int:
+    """Re-ready count in the *current* block episode only."""
     return sum(
         1
         for payload in _autonomy_routes_in_current_block_episode(conn, task_id)
         if str(payload.get("action") or "") in AUTONOMY_REREADY_ACTIONS
     )
+
+
+def _autonomy_reready_total(conn: sqlite3.Connection, task_id: str) -> int:
+    """Lifetime re-ready count for the task (token hard stop across episodes)."""
+    total = 0
+    for row in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, AUTONOMY_ROUTED_EVENT),
+    ).fetchall():
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            continue
+        if (
+            isinstance(payload, dict)
+            and str(payload.get("action") or "") in AUTONOMY_REREADY_ACTIONS
+        ):
+            total += 1
+    return total
 
 
 def _resolve_settled_block_autonomy_route(
@@ -20696,7 +20720,9 @@ def _resolve_settled_block_autonomy_route(
     reason: str,
     verdict: Optional[str],
     reready_count: int,
+    reready_total: int = 0,
     max_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
+    max_reready_task: int = MAX_AUTONOMY_REREADY_PER_TASK,
 ) -> str:
     """Pick a bounded autonomy action for a settled silent block.
 
@@ -20723,10 +20749,15 @@ def _resolve_settled_block_autonomy_route(
         return "escalate"
 
     # Capacity parks: observe only (already burned tokens; do not re-dispatch).
-    if kind == "capacity" or outcome in {
-        "iteration_budget_exhausted",
-        "gave_up",
-    } or "input-token cap" in reason_l or "iteration budget exhausted" in reason_l:
+    # Do NOT map bare ``gave_up`` here — circuit-breaker parks must still page
+    # (Opus 4.8: gave_up→hold suppressed real operator surfaces).
+    if (
+        kind == "capacity"
+        or outcome == "iteration_budget_exhausted"
+        or "input-token cap" in reason_l
+        or "iteration budget exhausted" in reason_l
+        or "per-task input-token" in reason_l
+    ):
         return "hold_capacity"
 
     # Integration parks: hold (0 tokens). Operator only if a later path escalates
@@ -20739,6 +20770,7 @@ def _resolve_settled_block_autonomy_route(
     # Review rework: one bounded re-ready with existing findings in the run trail.
     # Do NOT treat generic "retryable" as review — that would re-dispatch every
     # exhausted block and burn tokens without quality signal.
+    # Lifetime cap (max_reready_task) prevents episode-reset thrash.
     reviewish = (
         kind == "review_revision"
         or bk == "review_revision"
@@ -20749,7 +20781,7 @@ def _resolve_settled_block_autonomy_route(
         or "review verdict:" in reason_l
     )
     if reviewish:
-        if reready_count < max_reready:
+        if reready_count < max_reready and reready_total < max_reready_task:
             return "reready_review"
         return "escalate"
 
@@ -20793,8 +20825,9 @@ def _apply_autonomy_reready(
             "action": action,
             "reason": (reason or "")[:500],
             "blocked_kind": blocked_kind,
-            "max_reready": MAX_AUTONOMY_REREADY_PER_EPISODE,
-            "token_policy": "bounded_reready",
+            "max_reready_episode": MAX_AUTONOMY_REREADY_PER_EPISODE,
+            "max_reready_task": MAX_AUTONOMY_REREADY_PER_TASK,
+            "token_policy": "bounded_reready_task_lifetime",
         },
         run_id=run_id,
     )
@@ -21004,6 +21037,7 @@ def escalate_silent_blocks_sweep(
     failure_limit: int = DEFAULT_FAILURE_LIMIT,
     backoff_seconds: int = DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
     max_autonomy_reready: int = MAX_AUTONOMY_REREADY_PER_EPISODE,
+    max_autonomy_reready_task: int = MAX_AUTONOMY_REREADY_PER_TASK,
 ) -> dict:
     """Safety net: no *settled* block stays silent — with bounded autonomy first.
 
@@ -21098,6 +21132,7 @@ def escalate_silent_blocks_sweep(
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
             reready_count = _autonomy_reready_count(conn, tid)
+            reready_total = _autonomy_reready_total(conn, tid)
             route = _resolve_settled_block_autonomy_route(
                 block_kind=row["block_kind"],
                 blocked_kind=blocked_kind,
@@ -21105,7 +21140,9 @@ def escalate_silent_blocks_sweep(
                 reason=reason,
                 verdict=verdict,
                 reready_count=reready_count,
+                reready_total=reready_total,
                 max_reready=max_autonomy_reready,
+                max_reready_task=max_autonomy_reready_task,
             )
 
             if route in AUTONOMY_REREADY_ACTIONS:
@@ -21124,7 +21161,8 @@ def escalate_silent_blocks_sweep(
                             "blocked_kind": blocked_kind,
                         }
                     )
-                continue
+                    continue
+                # CAS miss: fall through to operator escalate in this tick.
 
             if route in AUTONOMY_HOLD_ACTIONS:
                 heiler_class = (
@@ -21161,12 +21199,16 @@ def escalate_silent_blocks_sweep(
                 ),
             )
             # Annotate when we already spent the autonomy re-ready budget.
-            if reready_count >= max_autonomy_reready:
+            if (
+                reready_count >= max_autonomy_reready
+                or reready_total >= max_autonomy_reready_task
+            ):
                 esc_payload = dict(esc_payload)
                 esc_payload["autonomy_reready_exhausted"] = True
+                esc_payload["autonomy_reready_total"] = reready_total
                 esc_payload["attempts_already_made"] = int(
                     esc_payload.get("attempts_already_made") or 0
-                ) + reready_count
+                ) + max(reready_count, reready_total)
             esc_event_id = _append_event(
                 conn,
                 tid,

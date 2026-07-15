@@ -6603,14 +6603,16 @@ def test_silent_block_autonomy_reready_review_once(
 def test_silent_block_autonomy_review_second_episode_escalates(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """Second settled review in a new block episode after one reready → operator."""
+    """Lifetime cap: after one autonomy reready, a new block episode escalates
+    under default maxes (no test override). Prevents review thrash token loops."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     with kb.connect_closing() as conn:
         t = _force_review_settled_block(conn, title="review loop")
         res1 = kb.escalate_silent_blocks_sweep(conn, now=base)
         assert res1["autonomy_reready"]
-        # Second worker attempt: claim + review block again, budget still exhausted.
+        assert kb._autonomy_reready_total(conn, t) == 1
+        # Second worker attempt: claim + review block again (new episode).
         kb.claim_task(conn, t)
         run_id = kb.get_task(conn, t).current_run_id
         with kb.write_txn(conn):
@@ -6627,11 +6629,15 @@ def test_silent_block_autonomy_review_second_episode_escalates(
             reason="Urteil: NEEDS_REVISION\nWarum: still broken after autonomy reready",
             expected_run_id=run_id,
         )
-        # New block episode → reready_count resets; give another reready then force
-        # second reready attempt in SAME episode by exhausting max to 0 for escalate.
-        res2 = kb.escalate_silent_blocks_sweep(conn, now=base, max_autonomy_reready=0)
+        # Episode-local count is 0, but task-lifetime total is 1 → escalate.
+        assert kb._autonomy_reready_count(conn, t) == 0
+        assert kb._autonomy_reready_total(conn, t) == 1
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)  # default bounds
         assert any(e["task_id"] == t for e in res2["escalated"])
+        assert res2["autonomy_reready"] == []
         assert len(_operator_escalations(conn, t)) == 1
+        esc = _operator_escalations(conn, t)[0]
+        assert esc.payload.get("autonomy_reready_exhausted") is True
         assert kb.get_task(conn, t).status == "blocked"
 
 
@@ -6696,9 +6702,11 @@ def test_resolve_settled_block_autonomy_route_unit():
             reason="NEEDS_REVISION: fix X",
             verdict="REQUEST_CHANGES",
             reready_count=0,
+            reready_total=0,
         )
         == "reready_review"
     )
+    # Episode spent
     assert (
         kb._resolve_settled_block_autonomy_route(
             block_kind="review_revision",
@@ -6707,6 +6715,20 @@ def test_resolve_settled_block_autonomy_route_unit():
             reason="NEEDS_REVISION: fix X",
             verdict="REQUEST_CHANGES",
             reready_count=1,
+            reready_total=1,
+        )
+        == "escalate"
+    )
+    # New episode but lifetime spent → still escalate (token hard stop)
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind="review_revision",
+            blocked_kind="retryable",
+            trigger_outcome="blocked",
+            reason="NEEDS_REVISION: fix X",
+            verdict="REQUEST_CHANGES",
+            reready_count=0,
+            reready_total=1,
         )
         == "escalate"
     )
@@ -6720,6 +6742,18 @@ def test_resolve_settled_block_autonomy_route_unit():
             reready_count=0,
         )
         == "hold_capacity"
+    )
+    # Bare gave_up is NOT capacity-hold (circuit breaker must page).
+    assert (
+        kb._resolve_settled_block_autonomy_route(
+            block_kind=None,
+            blocked_kind="retryable",
+            trigger_outcome="gave_up",
+            reason="consecutive failures",
+            verdict=None,
+            reready_count=0,
+        )
+        == "escalate"
     )
     assert (
         kb._resolve_settled_block_autonomy_route(
