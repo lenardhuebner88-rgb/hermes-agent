@@ -1027,22 +1027,17 @@ def _handle_create(args: dict, **kw) -> str:
     except ValueError as exc:
         return tool_error(str(exc))
     body = args.get("body")
-    # B1a preview: same contract create_task applies — surface warning to caller.
-    _inv_assignee, _inv_kind, inventory_lane_contract = (
-        kanban_db.apply_inventory_lane_contract(
-            assignee=str(assignee),
-            title=str(title).strip(),
-            body=body,
-            kind=args.get("kind"),
-        )
+    # B1a: do NOT pre-mutate assignee/kind here — create_task owns the write.
+    # Preview only so we can surface the contract warning after create (using
+    # the *original* assignee/kind; re-running post-create would no-op).
+    _orig_assignee_for_contract = str(assignee)
+    _orig_kind_for_contract = args.get("kind")
+    _, _, inventory_lane_contract = kanban_db.apply_inventory_lane_contract(
+        assignee=_orig_assignee_for_contract,
+        title=str(title).strip(),
+        body=body,
+        kind=_orig_kind_for_contract,
     )
-    if inventory_lane_contract:
-        try:
-            assignee = kanban_db.validate_spawnable_assignee(str(_inv_assignee))
-        except ValueError as exc:
-            return tool_error(str(exc))
-        if args.get("kind") is None and _inv_kind is not None:
-            args = {**args, "kind": _inv_kind}
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
     # Stamp the originating session id when the agent loop runs under
@@ -1090,10 +1085,23 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             f"parents must be a list of task ids, got {type(parents).__name__}"
         )
+    # B3a: dispatcher-spawned workers must not create orphan recovery roots.
+    # Empty parents → auto-parent to the current task (same recovery leaf chain).
+    auto_parented = False
+    worker_tid = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if worker_tid and not list(parents):
+        parents = [worker_tid]
+        auto_parented = True
     board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         try:
+            # B3a: only auto-parent when the worker task exists on this board
+            # (cross-HERMES_HOME tests / multi-board won't invent a dangling parent).
+            if auto_parented:
+                if kb.get_task(conn, worker_tid) is None:
+                    parents = []
+                    auto_parented = False
             # Inherit the spawning worker's own task workspace when the
             # caller didn't specify one (see resolution note above).
             if _inherit_workspace:
@@ -1146,6 +1154,12 @@ def _handle_create(args: dict, **kw) -> str:
             if inventory_lane_contract:
                 payload["inventory_lane_contract"] = inventory_lane_contract
                 payload["assignee"] = new_task.assignee if new_task else assignee
+            if auto_parented:
+                payload["auto_parent"] = worker_tid
+                payload["parent_contract"] = (
+                    "worker_create_requires_parent: empty parents auto-linked "
+                    f"to HERMES_KANBAN_TASK={worker_tid}"
+                )
             return _ok(**payload)
         finally:
             conn.close()

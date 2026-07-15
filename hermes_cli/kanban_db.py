@@ -13911,7 +13911,7 @@ def block_task(
     # sit as blocked zombies. Skip review_revision / review-originated runs —
     # a reviewer finding that mentions "superseded" must not auto-archive.
     if (
-        reason_looks_superseded(reason)
+        reason_should_archive_as_superseded(reason)
         and block_kind != "review_revision"
         and not _run_originated_from_review(conn, task_id, run_id)
     ):
@@ -15057,6 +15057,14 @@ def decompose_triage_task(
             body = child.get("body")
             assignee = child.get("assignee")
             kind = child.get("kind")
+            # B1a: same inventory→coder contract as create_task (decompose
+            # inlines INSERT and would otherwise skip the hard gate).
+            assignee, kind, _inv_warn = apply_inventory_lane_contract(
+                assignee=assignee if isinstance(assignee, str) else None,
+                title=title,
+                body=body if isinstance(body, str) else None,
+                kind=kind if isinstance(kind, str) else None,
+            )
             # Per-child override wins; otherwise inherit the root's
             # workspace. A child that sets workspace_kind without a path
             # falls back to the root path only when kinds match (so a
@@ -15128,12 +15136,15 @@ def decompose_triage_task(
                     child_max_iterations,
                 ),
             )
-            _append_event(
-                conn,
-                new_id,
-                "created",
-                {"by": author or "decomposer", "from_decompose_of": task_id},
-            )
+            created_ev = {
+                "by": author or "decomposer",
+                "from_decompose_of": task_id,
+                "assignee": assignee,
+                "kind": kind,
+            }
+            if _inv_warn:
+                created_ev["inventory_lane_contract"] = _inv_warn
+            _append_event(conn, new_id, "created", created_ev)
             # H1: inherit the root/triage task's Discord notify-subscription
             # so this child can deliver its own terminal state back to the
             # originating chat without a manual notify-subscribe. Same write_txn.
@@ -22484,6 +22495,26 @@ def reason_looks_superseded(reason: Optional[str]) -> bool:
     return bool(text and _AUTO_RETRY_SUPERSEDED_RE.search(text))
 
 
+# Stricter than skip-retry: bare "nicht manuell freigeben" must not alone
+# archive a capacity park. Archive only explicit supersede / no-redispatch.
+_SUPERSEDED_ARCHIVE_RE = re.compile(
+    r"(?:"
+    r"\bSUPERSEDED\b|"
+    r"superseded\s*:|"
+    r"do\s+not\s+re-?dispatch|"
+    r"kein\s+re-?dispatch|"
+    r"nicht\s+erneut\s+dispatch"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def reason_should_archive_as_superseded(reason: Optional[str]) -> bool:
+    """True when a blocked path should leave the active board (B4a)."""
+    text = (reason or "").strip()
+    return bool(text and _SUPERSEDED_ARCHIVE_RE.search(text))
+
+
 # ---------------------------------------------------------------------------
 # B1a — tree-wide inventory/hygiene must not land on research/premium LLM loops
 # ---------------------------------------------------------------------------
@@ -22566,9 +22597,10 @@ def apply_inventory_lane_contract(
         _INVENTORY_TOPIC_RE.search(blob) and _INVENTORY_CORPUS_RE.search(blob)
     ):
         return assignee, kind, None
-    new_kind = kind
-    if not (new_kind and str(new_kind).strip()):
-        new_kind = "analysis"
+    # Force analysis (not leftover kind=research) so coder + research-kind
+    # can't slip past role heuristics. Explicit kind=code stays code.
+    existing_kind = str(kind or "").strip().lower()
+    new_kind = "code" if existing_kind == "code" else "analysis"
     warning = (
         "inventory_lane_contract: tree-wide skill/file inventory must use "
         f"assignee=coder (was {lane!r}); rerouted. Prefer a deterministic "

@@ -6963,6 +6963,31 @@ def test_apply_inventory_lane_contract_reroutes_research_inventory():
     assert assignee == "coder"
     assert kind == "analysis"
     assert warn and "inventory_lane_contract" in warn
+    # Existing kind=research is forced to analysis (not left as research).
+    _, kind2, _ = kb.apply_inventory_lane_contract(
+        assignee="research",
+        title="Skill-Audit Inventar",
+        body="Enumerate all SKILL.md under ~/.hermes/skills",
+        kind="research",
+    )
+    assert kind2 == "analysis"
+
+
+def test_nicht_manuell_freigeben_alone_does_not_archive(kanban_home):
+    """Archive requires strong SUPERSEDED markers, not freigabe prose alone."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="freigabe note", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="Nicht manuell freigeben — wait for operator hold.",
+        )
+        assert kb.get_task(conn, t).status == "blocked"
+        # Still non-retryable via the broader SUPERSEDED skip-retry RE.
+        assert kb._blocked_kind_for_auto_retry(
+            "Nicht manuell freigeben — wait for operator hold."
+        ) == "superseded"
 
 
 def test_apply_inventory_lane_contract_spares_synthesis_research():
