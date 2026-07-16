@@ -2670,6 +2670,240 @@ def _activate_and_finalize(
     }
 
 
+def _release_gate_retry_budget(
+    output: str, *, explicit_max_retries: bool, max_retries: int,
+) -> int:
+    if not explicit_max_retries and (output or "").startswith("visual-gate:"):
+        return visual_gate_max_retries()
+    return max_retries
+
+
+def _bind_release_gate_runner(injected_gate_runner, commands: list):
+    """Build the gate callable used by validation worktrees and fixer cycles."""
+
+    def release_gate(
+        validation_root: Path, _changed_files: list[str],
+    ) -> tuple[bool, str]:
+        if injected_gate_runner is not None:
+            return _invoke_release_gate_runner(
+                injected_gate_runner, validation_root,
+            )
+        return _default_release_gate_runner(
+            commands, repo_root=validation_root,
+        )
+
+    return release_gate
+
+
+def _activate_if_still_current(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    validated_commit: Optional[str],
+    attempts: int,
+    activation_runner,
+    repo_root: Path,
+) -> dict:
+    """Never deploy a different live commit than the one just validated."""
+    if not validated_commit:
+        return _activate_and_finalize(
+            conn, task_id, root_id, attempts, activation_runner,
+        )
+
+    guard_error = None
+    lock_path = _integrator_lock_path(repo_root)
+    with _PROCESS_LOCK:
+        try:
+            lock = _acquire_file_lock(lock_path)
+        except WorktreeError as exc:
+            guard_error = f"release activation lock failed: {exc}"
+        else:
+            try:
+                try:
+                    expected = _git(
+                        repo_root,
+                        "rev-parse",
+                        f"{validated_commit}^{{commit}}",
+                    )
+                    live_head = _git(repo_root, "rev-parse", "HEAD")
+                except WorktreeError as exc:
+                    guard_error = (
+                        f"release activation HEAD guard failed: {exc}"
+                    )
+                else:
+                    guard_error = (
+                        "release activation refused: live HEAD advanced from "
+                        f"validated {expected} to {live_head}"
+                        if expected != live_head
+                        else None
+                    )
+                if not guard_error:
+                    return _activate_and_finalize(
+                        conn,
+                        task_id,
+                        root_id,
+                        attempts,
+                        activation_runner,
+                    )
+            finally:
+                _release_file_lock(lock)
+
+    _escalate_release_gate(
+        conn,
+        task_id,
+        root_id,
+        attempts=attempts,
+        last_error=guard_error or "release activation guard failed",
+    )
+    return {
+        "ok": False,
+        "status": "escalated",
+        "fixer_attempts": attempts,
+        "root_id": root_id,
+    }
+
+
+def _run_release_gate_fixer_cycle(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    repo_root: Path,
+    *,
+    release_gate,
+    fixer_runner,
+    activation_runner,
+    injected_gate_runner,
+    fixer_attempts: int,
+    output: str,
+) -> tuple[Optional[dict], str]:
+    """One fixer attempt. Returns (result_or_None, next_output).
+
+    When *result* is not None the caller must return it; otherwise continue the
+    retry loop with the updated *output*.
+    """
+    worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
+    _record_release_gate_fix_attempt(
+        conn, task_id, attempt=fixer_attempts, gate_error=output,
+        root_id=root_id, worktree=str(worktree), branch=branch,
+    )
+    fix_error = None
+    try:
+        fixer_runner(
+            worktree=worktree, branch=branch, gate_error=output,
+            attempt=fixer_attempts, task_id=task_id, root_id=root_id,
+        )
+    except Exception as exc:  # the fixer is best-effort; record + retry/escalate
+        fix_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("release-gate fixer attempt %d failed for %s: %s",
+                     fixer_attempts, task_id, fix_error, exc_info=True)
+    branch_commit = None
+    if (worktree / ".git").exists() and _branch_exists(repo_root, branch):
+        try:
+            branch_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
+        except WorktreeError:
+            branch_commit = None
+
+    if branch_commit is None and injected_gate_runner is not None:
+        # Compatibility for existing isolated executor tests whose fake
+        # fixer intentionally creates no git branch. Production fixers are
+        # required to leave a real commit and never use this path.
+        ok, output = release_gate(repo_root, [])
+        phase = "injected_legacy"
+    elif branch_commit is None:
+        ok, output = False, (
+            "release-gate fixer produced no integratable branch commit"
+        )
+        phase = "fixer_branch"
+    else:
+        ok, output = _run_release_gate_at_commit(
+            repo_root,
+            branch_commit,
+            release_gate,
+            allow_injected_legacy_fallback=False,
+        )
+        phase = "fixer_branch"
+    _record_release_gate_executed(
+        conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
+        root_id=root_id, fixer_error=fix_error, phase=phase,
+        validation_commit=branch_commit,
+    )
+    if ok and branch_commit is None:
+        # Synthetic legacy test seam only: there is no real ref to guard.
+        return (
+            _activate_and_finalize(
+                conn, task_id, root_id, fixer_attempts, activation_runner,
+            ),
+            output,
+        )
+    if not ok:
+        return None, output
+
+    merged_gate_result: list[tuple[bool, str, str]] = []
+
+    def merged_release_gate(
+        validation_root: Path, changed_files: list[str],
+    ) -> tuple[bool, str]:
+        result = release_gate(validation_root, changed_files)
+        merged_gate_result.append(
+            (result[0], result[1], _git(validation_root, "rev-parse", "HEAD"))
+        )
+        return result
+
+    try:
+        target = current_branch(repo_root)
+        integration = integrate_chain(
+            repo_root,
+            worktree,
+            branch,
+            target,
+            gate_runner=merged_release_gate,
+        )
+    except Exception as exc:
+        integration = {
+            "action": "parked",
+            "reason": f"release-gate fixer integration crashed: {exc}",
+        }
+
+    if merged_gate_result:
+        merged_ok, merged_output, merged_commit = merged_gate_result[-1]
+        _record_release_gate_executed(
+            conn,
+            task_id,
+            attempt=fixer_attempts,
+            ok=merged_ok,
+            output=merged_output,
+            root_id=root_id,
+            phase="integrated_fixer_commit",
+            validation_commit=merged_commit,
+        )
+
+    if integration.get("action") == "merged":
+        return (
+            _activate_if_still_current(
+                conn, task_id, root_id,
+                integration.get("merge_commit"), fixer_attempts,
+                activation_runner, repo_root,
+            ),
+            output,
+        )
+    if integration.get("action") == "clean":
+        live_commit = _git(repo_root, "rev-parse", "HEAD")
+        if live_commit == branch_commit:
+            return (
+                _activate_if_still_current(
+                    conn, task_id, root_id,
+                    live_commit, fixer_attempts,
+                    activation_runner, repo_root,
+                ),
+                output,
+            )
+    output = (
+        "release-gate fixer integration failed: "
+        + str(integration.get("reason") or integration.get("action"))
+    )
+    return None, output
+
+
 def execute_release_gate(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2721,80 +2955,9 @@ def execute_release_gate(
     activation_runner = activation_runner or _default_release_gate_activation
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
 
-    def release_gate(
-        validation_root: Path, _changed_files: list[str],
-    ) -> tuple[bool, str]:
-        if injected_gate_runner is not None:
-            return _invoke_release_gate_runner(
-                injected_gate_runner, validation_root,
-            )
-        return _default_release_gate_runner(
-            ctx["commands"], repo_root=validation_root,
-        )
-
-    def _retry_budget_for(output: str) -> int:
-        if not explicit_max_retries and (output or "").startswith("visual-gate:"):
-            return visual_gate_max_retries()
-        return max_retries
-
-    def activate_if_still_current(validated_commit: Optional[str], attempts: int) -> dict:
-        """Never deploy a different live commit than the one just validated."""
-        if not validated_commit:
-            return _activate_and_finalize(
-                conn, task_id, root_id, attempts, activation_runner,
-            )
-
-        guard_error = None
-        lock_path = _integrator_lock_path(repo_root)
-        with _PROCESS_LOCK:
-            try:
-                lock = _acquire_file_lock(lock_path)
-            except WorktreeError as exc:
-                guard_error = f"release activation lock failed: {exc}"
-            else:
-                try:
-                    try:
-                        expected = _git(
-                            repo_root,
-                            "rev-parse",
-                            f"{validated_commit}^{{commit}}",
-                        )
-                        live_head = _git(repo_root, "rev-parse", "HEAD")
-                    except WorktreeError as exc:
-                        guard_error = (
-                            f"release activation HEAD guard failed: {exc}"
-                        )
-                    else:
-                        guard_error = (
-                            "release activation refused: live HEAD advanced from "
-                            f"validated {expected} to {live_head}"
-                            if expected != live_head
-                            else None
-                        )
-                    if not guard_error:
-                        return _activate_and_finalize(
-                            conn,
-                            task_id,
-                            root_id,
-                            attempts,
-                            activation_runner,
-                        )
-                finally:
-                    _release_file_lock(lock)
-
-        _escalate_release_gate(
-            conn,
-            task_id,
-            root_id,
-            attempts=attempts,
-            last_error=guard_error or "release activation guard failed",
-        )
-        return {
-            "ok": False,
-            "status": "escalated",
-            "fixer_attempts": attempts,
-            "root_id": root_id,
-        }
+    release_gate = _bind_release_gate_runner(
+        injected_gate_runner, ctx["commands"],
+    )
 
     # Attempt 0: validate the integration commit recorded when this release
     # child was created. Synthetic old unit-test seams may not carry a real ref;
@@ -2818,120 +2981,29 @@ def execute_release_gate(
                 # Synthetic legacy test seam: the injected gate ran directly
                 # because its fixture carries no real repository commit.
                 guarded_commit = None
-        return activate_if_still_current(
-            guarded_commit, 0,
+        return _activate_if_still_current(
+            conn, task_id, root_id, guarded_commit, 0,
+            activation_runner, repo_root,
         )
 
     fixer_attempts = 0
-    while fixer_attempts < _retry_budget_for(output):
+    while fixer_attempts < _release_gate_retry_budget(
+        output,
+        explicit_max_retries=explicit_max_retries,
+        max_retries=max_retries,
+    ):
         fixer_attempts += 1
-        worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
-        _record_release_gate_fix_attempt(
-            conn, task_id, attempt=fixer_attempts, gate_error=output,
-            root_id=root_id, worktree=str(worktree), branch=branch,
+        done, output = _run_release_gate_fixer_cycle(
+            conn, task_id, root_id, repo_root,
+            release_gate=release_gate,
+            fixer_runner=fixer_runner,
+            activation_runner=activation_runner,
+            injected_gate_runner=injected_gate_runner,
+            fixer_attempts=fixer_attempts,
+            output=output,
         )
-        fix_error = None
-        try:
-            fixer_runner(
-                worktree=worktree, branch=branch, gate_error=output,
-                attempt=fixer_attempts, task_id=task_id, root_id=root_id,
-            )
-        except Exception as exc:  # the fixer is best-effort; record + retry/escalate
-            fix_error = f"{type(exc).__name__}: {exc}"
-            _log.warning("release-gate fixer attempt %d failed for %s: %s",
-                         fixer_attempts, task_id, fix_error, exc_info=True)
-        branch_commit = None
-        if (worktree / ".git").exists() and _branch_exists(repo_root, branch):
-            try:
-                branch_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
-            except WorktreeError:
-                branch_commit = None
-
-        if branch_commit is None and injected_gate_runner is not None:
-            # Compatibility for existing isolated executor tests whose fake
-            # fixer intentionally creates no git branch. Production fixers are
-            # required to leave a real commit and never use this path.
-            ok, output = release_gate(repo_root, [])
-            phase = "injected_legacy"
-        elif branch_commit is None:
-            ok, output = False, (
-                "release-gate fixer produced no integratable branch commit"
-            )
-            phase = "fixer_branch"
-        else:
-            ok, output = _run_release_gate_at_commit(
-                repo_root,
-                branch_commit,
-                release_gate,
-                allow_injected_legacy_fallback=False,
-            )
-            phase = "fixer_branch"
-        _record_release_gate_executed(
-            conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
-            root_id=root_id, fixer_error=fix_error, phase=phase,
-            validation_commit=branch_commit,
-        )
-        if ok and branch_commit is None:
-            # Synthetic legacy test seam only: there is no real ref to guard.
-            return _activate_and_finalize(
-                conn, task_id, root_id, fixer_attempts, activation_runner,
-            )
-        if not ok:
-            continue
-
-        merged_gate_result: list[tuple[bool, str, str]] = []
-
-        def merged_release_gate(
-            validation_root: Path, changed_files: list[str],
-        ) -> tuple[bool, str]:
-            result = release_gate(validation_root, changed_files)
-            merged_gate_result.append(
-                (result[0], result[1], _git(validation_root, "rev-parse", "HEAD"))
-            )
-            return result
-
-        try:
-            target = current_branch(repo_root)
-            integration = integrate_chain(
-                repo_root,
-                worktree,
-                branch,
-                target,
-                gate_runner=merged_release_gate,
-            )
-        except Exception as exc:
-            integration = {
-                "action": "parked",
-                "reason": f"release-gate fixer integration crashed: {exc}",
-            }
-
-        if merged_gate_result:
-            merged_ok, merged_output, merged_commit = merged_gate_result[-1]
-            _record_release_gate_executed(
-                conn,
-                task_id,
-                attempt=fixer_attempts,
-                ok=merged_ok,
-                output=merged_output,
-                root_id=root_id,
-                phase="integrated_fixer_commit",
-                validation_commit=merged_commit,
-            )
-
-        if integration.get("action") == "merged":
-            return activate_if_still_current(
-                integration.get("merge_commit"), fixer_attempts,
-            )
-        if integration.get("action") == "clean":
-            live_commit = _git(repo_root, "rev-parse", "HEAD")
-            if live_commit == branch_commit:
-                return activate_if_still_current(
-                    live_commit, fixer_attempts,
-                )
-        output = (
-            "release-gate fixer integration failed: "
-            + str(integration.get("reason") or integration.get("action"))
-        )
+        if done is not None:
+            return done
 
     _escalate_release_gate(
         conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
