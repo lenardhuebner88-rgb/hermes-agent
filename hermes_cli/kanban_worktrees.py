@@ -2926,7 +2926,6 @@ def execute_release_gate(
     activation_runner=None,
     max_retries: Optional[int] = None,
     repo_root: Optional[Path] = None,
-    board: Optional[str] = None,
 ) -> dict:
     """Process a parked release-gate child end to end.
 
