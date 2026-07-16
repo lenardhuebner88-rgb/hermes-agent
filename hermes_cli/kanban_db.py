@@ -24225,10 +24225,10 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist and refresh the claim object consumed by the immediate spawn.
-        _apply_materialized_dispatch_workspace(
-            conn, claimed, workspace, resolved_branch_name
-        )
+        # Identity-drift guard first: prepare_reused_task_worktree compares the
+        # task's still-unmaterialized workspace_path against the freshly
+        # resolved one, so it must run before that field is overwritten below
+        # (otherwise the comparison is tautological and drift is never caught).
         try:
             _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
         except _kwt.WorktreeError as exc:
@@ -24250,6 +24250,11 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
+        # Persist and refresh the claim object consumed by the immediate spawn
+        # only now that the drift guard above has passed.
+        _apply_materialized_dispatch_workspace(
+            conn, claimed, workspace, resolved_branch_name
+        )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
