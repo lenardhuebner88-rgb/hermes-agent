@@ -336,15 +336,19 @@ def test_silent_block_sweep_carries_real_run_outcome(
 def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signatures(
     kanban_home,
 ):
-    """Persisted escalation payloads retain all three non-default classes."""
+    """Persisted events retain the new classes and ledger recurrence signal."""
     with kb.connect_closing() as conn:
         task_ids = [
             kb.create_task(conn, title=title, assignee="coder")
-            for title in ("timeout", "protocol", "deliverable")
+            for title in ("timeout", "protocol", "protocol-repeat", "deliverable")
         ]
         payloads = (
             {"why_now": "settled block", "evidence": {
                 "trigger_outcome": "timed_out", "last_error": ""}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "blocked",
+                "last_error": "worker exited cleanly (rc=0) without calling "
+                "kanban_complete or kanban_block — protocol violation"}},
             {"why_now": "settled block", "evidence": {
                 "trigger_outcome": "blocked",
                 "last_error": "worker exited cleanly (rc=0) without calling "
@@ -361,17 +365,22 @@ def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signature
              if event.kind == kb.HEILER_CLASSIFICATION_EVENT][0]
             for task_id in task_ids
         ]
+        ledger = kb.read_escalation_ledger(conn)
 
     assert [item["class"] for item in summary["classified"]] == [
         kb.HEILER_CLASS_CAPACITY,
+        kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
         kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
         kb.HEILER_CLASS_OPERATOR_GATED,
     ]
     assert [event.payload["evidence"]["matched"] for event in classifications] == [
         "timed_out",
         "without calling kanban_complete",
+        "without calling kanban_complete",
         "deliverable_posted_not_completed",
     ]
+    assert kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE in kb.HEILER_CLASSES
+    assert ledger["by_class"][kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE] == 2
 
 
 def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
