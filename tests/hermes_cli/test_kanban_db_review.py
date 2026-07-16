@@ -270,6 +270,97 @@ def test_review_diff_snapshot_walks_back_and_resubmit_carries_snapshot(
     assert "No machine diff snapshot was captured" not in section
 
 
+def test_parent_context_uses_skipped_review_diff_snapshot(kanban_home):
+    """A PlanSpec reviewer child can inspect a deterministic-skip diff snapshot."""
+    snapshot = {
+        "changed_files": ["hermes_cli/kanban_db.py"],
+        "diff_stat": " hermes_cli/kanban_db.py | 12 ++++++++++++\n",
+        "diff_base_commit": "deadbeef",
+        "diff_baseline": "pre_run_commit",
+        "commit_sha": "cafebabe",
+        "branch": "kanban/code-slice",
+    }
+    with kb.connect_closing() as conn:
+        code_task = kb.create_task(
+            conn, title="code slice", assignee="coder", initial_status="running"
+        )
+        reviewer_child = kb.create_task(
+            conn, title="PlanSpec reviewer", assignee="reviewer", initial_status="running"
+        )
+        kb.link_tasks(conn, code_task, reviewer_child)
+        # Build the persisted event stream that an economy-mode completion leaves:
+        # no submitted_for_review event, only its deterministic skip + snapshot.
+        kb.add_event(conn, code_task, "review_diff_snapshot", snapshot)
+        kb.add_event(
+            conn,
+            code_task,
+            "review_skipped_deterministic",
+            {"worker_gate": {"status": "green"}, "tier": "standard"},
+        )
+        _set_task_status(conn, code_task, "done")
+
+        context = kb.build_worker_context(conn, reviewer_child)
+        submitted = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review'",
+            (code_task,),
+        ).fetchone()
+
+    assert submitted is None
+    assert "hermes_cli/kanban_db.py" in context
+    assert snapshot["diff_stat"].strip() in context
+
+
+@requires_git
+def test_deterministic_skip_persists_captured_diff_snapshot(
+    kanban_home, tmp_path, monkeypatch
+):
+    """Completion captures diff evidence even when it bypasses verifier submit."""
+    repo = tmp_path / "skip-workspace"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "standard_uses_llm_verifier": False,
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "_worker_gate_config",
+        lambda: {
+            "enabled": True,
+            "repos": {str(repo.resolve()): ["true"]},
+            "default": [],
+            "timeout": 60,
+            "code_roles": frozenset({"coder"}),
+        },
+    )
+    with kb.connect_closing() as conn:
+        code_task = kb.create_task(
+            conn,
+            title="code slice",
+            assignee="coder",
+            workspace_path=str(repo),
+            initial_status="running",
+        )
+        assert kb.claim_task(conn, code_task) is not None
+        assert kb.complete_task(conn, code_task, summary="done", review_gate=True)
+        snapshot_row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'review_diff_snapshot'",
+            (code_task,),
+        ).fetchone()
+
+    assert snapshot_row is not None
+    snapshot = json.loads(snapshot_row["payload"])
+    assert {"changed_files", "diff_stat", "diff_base_commit", "diff_baseline"} <= snapshot.keys()
+    assert {"tracked.py", "untracked.py"} <= set(snapshot["changed_files"])
+
+
 def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
     """task_runs gains a ``verdict`` column; re-running the additive migration
     is a no-op (idempotent, no duplicate-column crash)."""
