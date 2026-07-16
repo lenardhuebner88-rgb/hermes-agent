@@ -12344,7 +12344,21 @@ def complete_task(
                 None if _skip_stamp is not None else _tip_defer_review(conn, task_id)
             )
             if _skip_stamp is not None:
+                # A deterministic skip does not emit submitted_for_review, but
+                # downstream PlanSpec reviewer children still need the same
+                # machine-readable diff evidence as an ordinary review handoff.
+                # Capture before opening the event transaction: this may invoke
+                # git and must remain best-effort/fail-soft like submit.
+                _skip_diff_snapshot = _capture_review_diff_snapshot(
+                    conn, task_id, expected_run_id
+                )
                 with write_txn(conn):
+                    _append_event(
+                        conn,
+                        task_id,
+                        "review_diff_snapshot",
+                        _skip_diff_snapshot,
+                    )
                     _append_event(
                         conn,
                         task_id,
@@ -25920,8 +25934,10 @@ def _latest_review_diff_snapshot(
 ) -> tuple[list, Optional[str]]:
     """Return ``(changed_files, diff_stat)`` from the latest usable B1 snapshot.
 
-    Walks backward over recent ``submitted_for_review`` events because a fresh
-    capture can be empty when the workspace vanished after an earlier handoff.
+    Walks backward over recent ``submitted_for_review`` and
+    ``review_diff_snapshot`` events because a fresh capture can be empty when
+    the workspace vanished after an earlier handoff. The latter is emitted for
+    deterministic review skips, which have no submitted-for-review handoff.
     When no event yields a usable snapshot, best-effort recapture from the
     still-live workspace (the submit-time capture may have failed). Fail-soft:
     returns ``([], None)`` when neither source yields a snapshot.
@@ -25929,7 +25945,8 @@ def _latest_review_diff_snapshot(
     try:
         rows = conn.execute(
             "SELECT payload FROM task_events "
-            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "WHERE task_id = ? AND kind IN "
+            "('submitted_for_review', 'review_diff_snapshot') "
             "ORDER BY id DESC LIMIT ?",
             (task_id, _CTX_REVIEW_MAX_GATE_EVENTS),
         ).fetchall()
@@ -26354,6 +26371,25 @@ def _render_parent_results_and_role_history(
             age = _relative_age(done_ts, _now)
             lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
             lines.extend(_parent_result_lines(pt, run))
+            # PlanSpec reviewer children consume code-task handoffs through this
+            # parent-results block. A deterministic review skip has no
+            # submitted_for_review event, so include its persisted snapshot too.
+            changed_files, diff_stat = _latest_review_diff_snapshot(conn, pid)
+            if changed_files or diff_stat:
+                lines.append("_review diff snapshot_:")
+                if changed_files:
+                    lines.append(
+                        "changed files: "
+                        + ", ".join(
+                            f"`{path}`"
+                            for path in changed_files[:_CTX_REVIEW_MAX_CHANGED_FILES]
+                        )
+                    )
+                if diff_stat:
+                    lines.append("diff stat:")
+                    lines.append("```text")
+                    lines.append(diff_stat[:_CTX_REVIEW_MAX_DIFF_STAT].rstrip())
+                    lines.append("```")
             lines.append("")
 
         if scout_parents:
