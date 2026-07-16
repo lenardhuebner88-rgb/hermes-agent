@@ -3077,7 +3077,18 @@ export function AgentTerminalsView() {
             // Mobile toolbar: xterm has no touch selection, so "Auswählen" opens a
             // frozen native-text snapshot; copy stays reachable next to it.
             <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft bg-surface-1 px-2 py-1 text-xs text-ink-2">
-              <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                {/* Mobile is the operator's primary surface — the desktop rail/identity
+                    bar with the cwd chips is CSS-hidden here, so surface it in the strip. */}
+                {selectedWindow && copyState === "idle" && (
+                  <span
+                    data-testid="mobile-cwd-chip"
+                    className="min-w-0 truncate font-mono text-[10px] text-ink-3"
+                    title={selectedWindow.cwd?.trim() || undefined}
+                  >
+                    {formatCwdShort(selectedWindow.cwd)}
+                  </span>
+                )}
                 {copyState !== "idle" && (
                   <span role="status" className={cn("shrink-0 text-[10px]", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
                     {copyState === "copied" ? "Kopiert" : copyState === "empty" ? "Keine Auswahl" : "Kopieren fehlgeschlagen"}

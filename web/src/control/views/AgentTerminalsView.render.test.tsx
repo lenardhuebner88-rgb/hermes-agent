@@ -1216,6 +1216,23 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
   });
 
+  it("surfaces the active pane cwd in the compact toolbar strip", async () => {
+    // The desktop rail/identity bar with the cwd chips is CSS-hidden on the
+    // S24-class viewport — the strip is the only mobile home for the cwd.
+    installDom(true);
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [
+        { ...windows[0], cwd: "/home/piet/projects/family-organizer" },
+        ...windows.slice(1),
+      ],
+    });
+    await renderView();
+
+    const chip = await screen.findByTestId("mobile-cwd-chip");
+    await waitFor(() => expect(chip.textContent).toBe("~/projects/family-organizer"));
+    expect(chip.getAttribute("title")).toBe("/home/piet/projects/family-organizer");
+  });
+
   it("renames the active window from the session sheet and refreshes the window list", async () => {
     installDom(true);
     apiMock.renameAgentTerminalWindow.mockResolvedValue({
