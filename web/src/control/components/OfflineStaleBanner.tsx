@@ -2,6 +2,7 @@ import { WifiOff } from "lucide-react";
 import type { SystemHealthResponse } from "../lib/types";
 import { useClientNowSeconds } from "../lib/clock";
 import { freshness } from "../lib/derive";
+import { de } from "../i18n/de";
 
 export function OfflineStaleBanner({ health }: {
   health: {
@@ -21,7 +22,7 @@ export function OfflineStaleBanner({ health }: {
 
   if (!visible) return null;
   const age = health.lastUpdated == null ? "noch nie" : `vor ${Math.max(0, clientNow - health.lastUpdated)}s`;
-  const label = health.error ? "Health-Poll fehlgeschlagen" : ageStale ? "Health-Refresh pausiert oder veraltet" : "Health-Daten sind stale";
+  const label = health.error ? de.staleBanner.fetchError : ageStale ? de.staleBanner.pausedOrStale : de.staleBanner.stale;
 
   return (
     <div className="sticky top-0 z-50 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100 backdrop-blur">
