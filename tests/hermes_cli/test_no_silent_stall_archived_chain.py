@@ -1,4 +1,4 @@
-"""Archived chain roots must keep scheduled descendants parked."""
+"""Released archived dependencies must not keep scheduled descendants parked."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _scheduled_child(conn, *, root_status):
     return root_id, child_id
 
 
-def test_sweep_skips_scheduled_child_of_archived_root(kanban_home):
+def test_sweep_nudges_scheduled_child_of_archived_root_after_release(kanban_home):
     with kb.connect() as conn:
         _, child_id = _scheduled_child(conn, root_status="archived")
 
@@ -53,11 +53,9 @@ def test_sweep_skips_scheduled_child_of_archived_root(kanban_home):
             min_age_seconds=0,
         )
 
-        assert kb.get_task(conn, child_id).status == "scheduled"
-        assert summary["skipped_archived_chain"] == [child_id]
-        assert all(
-            item["task_id"] != child_id for item in summary["self_healed"]
-        )
+        assert kb.get_task(conn, child_id).status == "ready"
+        assert child_id not in summary["skipped_archived_chain"]
+        assert any(item["task_id"] == child_id for item in summary["self_healed"])
 
 
 def test_sweep_still_nudges_scheduled_child_of_done_root(kanban_home):

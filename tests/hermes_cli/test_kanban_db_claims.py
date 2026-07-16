@@ -209,7 +209,7 @@ def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
         assert kb.get_task(conn, c).status == "ready"
 
 
-def test_archived_parent_does_not_satisfy_dependency(kanban_home):
+def test_archived_parent_releases_dependency_for_claiming(kanban_home):
     with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="parent", assignee="a")
         child = kb.create_task(
@@ -220,14 +220,8 @@ def test_archived_parent_does_not_satisfy_dependency(kanban_home):
         assert kb.recompute_ready(conn) == 0
         task = kb.get_task(conn, child)
         assert task is not None
-        assert task.status == "todo"
-
-        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (child,))
-        conn.commit()
-        assert kb.claim_task(conn, child, claimer="host:1") is None
-        task = kb.get_task(conn, child)
-        assert task is not None
-        assert task.status == "todo"
+        assert task.status == "ready"
+        assert kb.claim_task(conn, child, claimer="worker:1") is not None
 
 
 # ---------------------------------------------------------------------------

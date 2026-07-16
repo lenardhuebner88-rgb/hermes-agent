@@ -15427,9 +15427,33 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
             summary="task archived with run still active",
         )
         _append_event(conn, task_id, "archived", None, run_id=run_id)
-    # Re-run promotion for any descendants whose other parents may have
-    # completed concurrently. Archiving this task itself does not satisfy
-    # child dependencies.
+        released_links = conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+            (task_id,),
+        ).fetchall()
+        conn.execute("DELETE FROM task_links WHERE parent_id = ?", (task_id,))
+        comment_now = int(time.time())
+        for link in released_links:
+            child_id = str(link["child_id"])
+            payload = {
+                "archived_parent_id": task_id,
+                "removed_link": {"parent_id": task_id, "child_id": child_id},
+            }
+            _append_event(conn, child_id, "dependency_released_by_archive", payload)
+            comment_body = (
+                f"Dependency {task_id} was released because its parent was archived."
+            )
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+                "VALUES (?, ?, ?, ?, 'comment')",
+                (child_id, "kanban", comment_body, comment_now),
+            )
+            _append_event(
+                conn,
+                child_id,
+                "commented",
+                {"author": "kanban", "len": len(comment_body), "kind": "comment"},
+            )
     recompute_ready(conn)
     return True
 
@@ -21378,6 +21402,7 @@ def escalate_silent_blocks_sweep(
         "escalated": [],
         "autonomy_reready": [],
         "autonomy_held": [],
+        "archived_dependency_escalated": [],
     }
     ids = silent_block_task_ids(
         conn,
@@ -21386,8 +21411,6 @@ def escalate_silent_blocks_sweep(
         failure_limit=failure_limit,
         backoff_seconds=backoff_seconds,
     )
-    if not ids:
-        return summary
     with write_txn(conn):
         for tid in ids:
             row = conn.execute(
@@ -21562,6 +21585,52 @@ def escalate_silent_blocks_sweep(
                 run_id=run_id,
             )
             summary["escalated"].append({"task_id": tid, "blocked_kind": blocked_kind})
+        # Legacy data can retain parent links to archived cards from before
+        # archive_task started removing them. These waits cannot become ready,
+        # so surface them to an operator rather than letting todo/scheduled
+        # cards stall invisibly. A freigabe hold is deliberate operator state
+        # and must remain untouched by sweeps, including descendants whose
+        # hold is carried by their scheduled root.
+        archived_waits = conn.execute(
+            "SELECT child.* FROM tasks AS child "
+            "WHERE child.status IN ('todo', 'scheduled') "
+            "AND EXISTS ("
+            "  SELECT 1 FROM task_links AS link "
+            "  JOIN tasks AS parent ON parent.id = link.parent_id "
+            "  WHERE link.child_id = child.id AND parent.status = 'archived'"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM task_links AS link "
+            "  JOIN tasks AS parent ON parent.id = link.parent_id "
+            "  WHERE link.child_id = child.id "
+            "    AND parent.status NOT IN ('done', 'archived')"
+            ") "
+            "ORDER BY child.created_at ASC, child.id ASC"
+        ).fetchall()
+        for waiting in archived_waits:
+            if _is_operator_held(conn, waiting):
+                continue
+            tid = str(waiting["id"])
+            if _operator_escalation_is_active(conn, tid):
+                continue
+            archived_parent_ids = [
+                str(row["id"])
+                for row in conn.execute(
+                    "SELECT parent.id FROM task_links AS link "
+                    "JOIN tasks AS parent ON parent.id = link.parent_id "
+                    "WHERE link.child_id = ? AND parent.status = 'archived' "
+                    "ORDER BY parent.id ASC",
+                    (tid,),
+                ).fetchall()
+            ]
+            payload = {
+                "why_now": "waiting_on_archived_parent",
+                "reason": "All remaining open dependencies are archived.",
+                "task_title": str(waiting["title"]),
+                "archived_parent_ids": archived_parent_ids,
+            }
+            _append_event(conn, tid, OPERATOR_ESCALATION_EVENT, payload)
+            summary["archived_dependency_escalated"].append({"task_id": tid})
     return summary
 
 

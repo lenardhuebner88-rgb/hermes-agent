@@ -218,8 +218,8 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
         )
 
 
-def test_archive_task_does_not_satisfy_dependent_children(kanban_home):
-    """Archiving a parent does not count as dependency completion."""
+def test_archive_task_releases_dependent_children(kanban_home):
+    """Archiving a parent removes its obsolete link and promotes its child."""
     with kb.connect_closing() as conn:
         parent = kb.create_task(conn, title="obsolete parent")
         child = kb.create_task(conn, title="child", parents=[parent])
@@ -229,7 +229,7 @@ def test_archive_task_does_not_satisfy_dependent_children(kanban_home):
 
         task = kb.get_task(conn, child)
         assert task is not None
-        assert task.status == "todo"
+        assert task.status == "ready"
 
 
 # ---------------------------------------------------------------------------
