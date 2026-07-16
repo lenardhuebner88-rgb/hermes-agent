@@ -1253,13 +1253,19 @@ class GatewayKanbanWatchersMixin:
                     except ValueError:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
-                        await self._kanban_off_loop(
-                            self._kanban_advance,
-                            sub,
-                            d["cursor"],
-                            board_slug,
-                            d.get("claim_token"),
-                        )
+                        try:
+                            await self._kanban_off_loop(
+                                self._kanban_advance,
+                                sub,
+                                d["cursor"],
+                                board_slug,
+                                d.get("claim_token"),
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban notifier: advance failed for %s on %s: %s",
+                                sub["task_id"], platform_str or "<missing>", exc,
+                            )
                         continue
                     sub_profile = sub.get("notifier_profile") or ""
                     # Route via the SAME chokepoint the authorization path uses
@@ -1532,13 +1538,20 @@ class GatewayKanbanWatchersMixin:
                             # dropping the subscription is the terminal action.
                             break
                     else:
-                        await self._kanban_off_loop(
-                            self._kanban_advance,
-                            sub,
-                            d["cursor"],
-                            board_slug,
-                            d.get("claim_token"),
-                        )
+                        try:
+                            await self._kanban_off_loop(
+                                self._kanban_advance,
+                                sub,
+                                d["cursor"],
+                                board_slug,
+                                d.get("claim_token"),
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban notifier: advance failed for %s on %s: %s",
+                                sub["task_id"], platform_str or "<missing>", exc,
+                            )
+                            continue
                         # Unsubscribe only when the task has reached a truly
                         # final status (done / archived). For blocked /
                         # gave_up / crashed / timed_out the subscription is
