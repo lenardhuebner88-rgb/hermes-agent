@@ -23,6 +23,19 @@ from tools.homeassistant_tool import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_check_fn_cache():
+    """Reset des prozessweiten check_fn-TTL-Caches (tools/registry.py) vor
+    und nach jedem Test — verhindert Cross-File-Order-Leaks; siehe
+    test_kanban_tools.py für die volle Herleitung.
+    """
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    yield
+    invalidate_check_fn_cache()
+
+
 # ---------------------------------------------------------------------------
 # Sample HA state data (matches real HA /api/states response shape)
 # ---------------------------------------------------------------------------

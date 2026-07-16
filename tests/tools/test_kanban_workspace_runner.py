@@ -8,6 +8,19 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_check_fn_cache():
+    """Reset des prozessweiten check_fn-TTL-Caches (tools/registry.py) vor
+    und nach jedem Test — verhindert Cross-File-Order-Leaks; siehe
+    test_kanban_tools.py für die volle Herleitung.
+    """
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    yield
+    invalidate_check_fn_cache()
+
+
 @pytest.fixture
 def worker_workspace(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
