@@ -8838,6 +8838,19 @@ def _operator_escalation_is_active(conn: sqlite3.Connection, task_id: str) -> bo
     return bool(row) and row["kind"] == OPERATOR_ESCALATION_EVENT
 
 
+def _has_archived_dependency_release(conn: sqlite3.Connection, task_id: str) -> bool:
+    """Return whether an archived parent was physically unlinked from a task.
+
+    The audit event preserves the unsatisfied logical dependency after
+    ``archive_task`` removes the obsolete ``task_links`` row.
+    """
+    return conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'dependency_released_by_archive' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
+
+
 def _validated_comment_id_watermark(payload: object) -> Optional[int]:
     """Return a persisted comment boundary only when it is a JSON integer."""
     if not isinstance(payload, dict):
@@ -9019,6 +9032,10 @@ def recompute_ready(
                 # unresolved escalation stays held.  Must wait for an explicit
                 # operator decision; never auto-promote behind the operator.
                 continue
+            if _has_archived_dependency_release(conn, task_id):
+                # Physical unlinking during archive cleanup does not satisfy
+                # the child dependency; the audit event is its durable guard.
+                continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
                 "JOIN task_links l ON l.parent_id = t.id "
@@ -9097,6 +9114,18 @@ def claim_task(
             source="claim_task",
         )
         if contract_reason is not None:
+            return None
+        if _has_archived_dependency_release(conn, task_id):
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (task_id,),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": "archived_dependency"},
+            )
             return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. Archived parents intentionally remain
@@ -19915,13 +19944,7 @@ def no_silent_stall_sweep(
             # Intentional propose-and-wait / ui-real hold — not a stall.
             summary["skipped_held"].append(row["id"])
             continue
-        released_by_archive = conn.execute(
-            "SELECT 1 FROM task_events "
-            "WHERE task_id = ? AND kind = 'dependency_released_by_archive' "
-            "LIMIT 1",
-            (row["id"],),
-        ).fetchone()
-        if released_by_archive:
+        if _has_archived_dependency_release(conn, row["id"]):
             # archive_task removes obsolete physical links but archive never
             # satisfies the logical dependency, so this child must not be
             # nudged to ready by the scheduled-overdue healer.
