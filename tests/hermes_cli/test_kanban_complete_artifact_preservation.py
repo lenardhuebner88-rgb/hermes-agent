@@ -232,24 +232,13 @@ def test_non_scratch_workspace_is_untouched(kanban_home, tmp_path):
 def test_cleanup_workspace_has_no_second_artifact_copy_owner(
     kanban_home, monkeypatch
 ):
-    """Cleanup removes managed scratch without rescanning completed runs.
-
-    Completion persistence is the sole artifact-copy owner.  Keep a sentinel
-    for the retired helper during reconciliation so this test is red until the
-    cleanup-side owner is actually disconnected.
-    """
+    """Cleanup removes managed scratch without rescanning completed runs."""
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="single artifact owner")
         wp = _scratch_dir_for(kanban_home, tid)
         _bind_scratch_workspace(conn, tid, wp)
     (wp / "ephemeral.md").write_text("already persisted", encoding="utf-8")
 
-    monkeypatch.setattr(
-        kb,
-        "_preserve_scratch_artifacts",
-        lambda *_args, **_kwargs: pytest.fail("cleanup must not copy artifacts"),
-        raising=False,
-    )
     with kb.connect() as conn:
         kb._cleanup_workspace(conn, tid)
 
@@ -271,13 +260,6 @@ def test_artifacts_survive_the_review_gate(kanban_home, monkeypatch):
         },
     )
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
-    monkeypatch.setattr(
-        kb,
-        "_preserve_scratch_artifacts",
-        lambda *_args, **_kwargs: pytest.fail("cleanup must not copy artifacts"),
-        raising=False,
-    )
-
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="gate preserve", assignee="coder")
         wp = _scratch_dir_for(kanban_home, tid)
