@@ -82,3 +82,39 @@ class DictationTextPipeline(
         return DictationTransform.Text(TextPersonalizer.expandSnippet(personalized, snippetRules()))
     }
 }
+
+/**
+ * Recognizer biasing vocabulary derived from the local dictionary and snippets.
+ *
+ * Only phrases the user genuinely SAYS or WANTS belong here: dictionary WRITTEN targets (the
+ * correct spellings the recognizer should prefer) and snippet SPOKEN cues (deliberately spoken
+ * trigger phrases). Dictionary spoken forms are deliberately excluded — they are typically the
+ * mishearing ("her mess"), and biasing them would reinforce exactly the error the rule fixes.
+ * Everything stays on the phone; the list only parameterizes the on-device recognizer.
+ */
+object BiasingVocabulary {
+    private const val MAX_PHRASES = 100
+    private const val MAX_PHRASE_CHARS = 50
+    private const val MAX_PHRASE_WORDS = 4
+
+    fun fromRules(dictionaryRaw: String, snippetRaw: String): List<String> {
+        val candidates = TextPersonalizer.parse(dictionaryRaw).map(PersonalizationRule::written) +
+            TextPersonalizer.parse(snippetRaw).map(PersonalizationRule::spoken)
+        val seen = HashSet<String>()
+        val phrases = mutableListOf<String>()
+        for (candidate in candidates) {
+            val phrase = candidate.trim()
+            if (phrase.isEmpty() || phrase.length > MAX_PHRASE_CHARS) continue
+            if (phrase.any { it == '\n' || it == '\r' }) continue
+            if (phrase.contains("\\n") || phrase.contains("://") || phrase.contains('@')) continue
+            if (phrase.split(WHITESPACE).size > MAX_PHRASE_WORDS) continue
+            if (!phrase.any(Char::isLetter)) continue
+            if (!seen.add(phrase.lowercase())) continue
+            phrases.add(phrase)
+            if (phrases.size >= MAX_PHRASES) break
+        }
+        return phrases
+    }
+
+    private val WHITESPACE = Regex("\\s+")
+}

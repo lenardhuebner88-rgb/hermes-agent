@@ -309,4 +309,45 @@ class OnDeviceDictationTest {
         assertEquals("de-DE", built.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE))
         assertTrue(built.getBooleanExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false))
     }
+
+    // --- Personal vocabulary biasing (Stufe 3) ---
+
+    @Test
+    fun `default intent factory passes biasing phrases on API 33+`() {
+        val built = DefaultRecognizeIntentFactory(
+            sdkInt = 34,
+            biasingPhrases = { listOf("Hermes", "PlanSpec") },
+        ).create("de-DE")
+        assertEquals(
+            arrayListOf("Hermes", "PlanSpec"),
+            built.getStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS),
+        )
+    }
+
+    @Test
+    fun `default intent factory omits the biasing extra below API 33 and when empty`() {
+        val legacy = DefaultRecognizeIntentFactory(
+            sdkInt = 30,
+            biasingPhrases = { listOf("Hermes") },
+        ).create("de-DE")
+        assertFalse(legacy.hasExtra(RecognizerIntent.EXTRA_BIASING_STRINGS))
+
+        val empty = DefaultRecognizeIntentFactory(sdkInt = 34).create("de-DE")
+        assertFalse(empty.hasExtra(RecognizerIntent.EXTRA_BIASING_STRINGS))
+    }
+
+    @Test
+    fun `biasing phrases are re-evaluated for every created intent`() {
+        var phrases = listOf("Hermes")
+        val factory = DefaultRecognizeIntentFactory(sdkInt = 34, biasingPhrases = { phrases })
+        assertEquals(
+            arrayListOf("Hermes"),
+            factory.create("de-DE").getStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS),
+        )
+        phrases = listOf("Hermes", "Leitstand")
+        assertEquals(
+            arrayListOf("Hermes", "Leitstand"),
+            factory.create("de-DE").getStringArrayListExtra(RecognizerIntent.EXTRA_BIASING_STRINGS),
+        )
+    }
 }

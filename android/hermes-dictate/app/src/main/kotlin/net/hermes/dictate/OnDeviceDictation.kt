@@ -27,6 +27,9 @@ fun interface RecognizeIntentFactory {
 class DefaultRecognizeIntentFactory(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
     private val callingPackage: String? = null,
+    // Provider (not a snapshot list) so dictionary/snippet edits reach the NEXT segment without
+    // rebinding the recognizer; evaluated once per created intent.
+    private val biasingPhrases: () -> List<String> = { emptyList() },
 ) : RecognizeIntentFactory {
     override fun create(language: String): Intent {
         return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -52,6 +55,17 @@ class DefaultRecognizeIntentFactory(
                     RecognizerIntent.EXTRA_ENABLE_FORMATTING,
                     RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY,
                 )
+                // Personal vocabulary (dictionary targets + snippet cues) biases recognition
+                // toward the terms the user actually says — "Hermes" stops arriving as
+                // "her mess" at the source instead of relying on the rewrite pipeline alone.
+                // Engines without biasing support ignore the extra; below API 33 it is omitted.
+                val phrases = biasingPhrases()
+                if (phrases.isNotEmpty()) {
+                    putStringArrayListExtra(
+                        RecognizerIntent.EXTRA_BIASING_STRINGS,
+                        ArrayList(phrases),
+                    )
+                }
             }
         }
     }

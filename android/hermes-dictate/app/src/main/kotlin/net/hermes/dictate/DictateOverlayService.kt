@@ -405,7 +405,12 @@ class DictateOverlayService :
             OnDeviceDictation(
                 OnDeviceRecognizerFactory(this),
                 this,
-                DefaultRecognizeIntentFactory(callingPackage = packageName),
+                DefaultRecognizeIntentFactory(
+                    callingPackage = packageName,
+                    biasingPhrases = {
+                        BiasingVocabulary.fromRules(prefs.dictionaryRules, prefs.snippetRules)
+                    },
+                ),
             ).also { dictation = it }
         }
         if (!d.startSegment(prefs.recognitionLanguageTag)) {
