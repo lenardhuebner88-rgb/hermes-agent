@@ -3689,7 +3689,7 @@ def _daemon_on_tick(res: Any, health_state: dict[str, int], verbose: bool) -> No
                     print(
                         f"[{_fmt_ts(now)}] WARN dispatcher: {rg_count} "
                         f"ready task(s) respawn-guarded for "
-                        f"{kb._RESPAWN_GUARD_SUCCESS_WINDOW}s and never "
+                        f">{kb._RESPAWN_GUARD_SUCCESS_WINDOW}s and never "
                         f"cleared — possible stuck guard. holds={hold_counts}.",
                         file=sys.stderr, flush=True,
                     )
