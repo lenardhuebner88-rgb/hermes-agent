@@ -60,6 +60,16 @@ describe("OpsRadarContent", () => {
     expect(html.toLowerCase()).not.toContain("update");
   });
 
+  it("renders real levers with accessible links when embedded in SystemView", () => {
+    const html = renderToStaticMarkup(<OpsRadarContent embedded data={inventory} lastUpdated={1782070000} isStale={false} />);
+
+    expect(html).toContain("Echte Hebel");
+    expect(html).toContain("Dirty Worktrees");
+    expect(html).toContain("Worktree ohne Worker");
+    expect(html).toContain('/control/system?filter=dirty');
+    expect(html).toContain('/control/system?filter=orphaned');
+  });
+
   it("does not leave a loading skeleton behind after a terminal load error", () => {
     const html = renderToStaticMarkup(<OpsRadarContent data={null} lastUpdated={null} error="offline" />);
 

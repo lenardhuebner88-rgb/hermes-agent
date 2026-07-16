@@ -126,7 +126,6 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
   return (
     <div className="space-y-4">
       {embedded ? null : (
-      <>
       <Card surface="raised" className="overflow-hidden border border-line p-0" ariaLabel="Ops Radar">
         <div className="flex flex-col gap-3 border-b border-line px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -146,6 +145,7 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
           <KpiTile icon={Wrench} label="Top-Hebel" value={next.label} delta={next.detail} dot={leverDot(next.tone)} />
         </div>
       </Card>
+      )}
 
       <Panel title="Echte Hebel" eyebrow="read-only">
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
@@ -161,8 +161,6 @@ export function OpsRadarContent({ data, lastUpdated, isStale, error, embedded }:
           ))}
         </div>
       </Panel>
-      </>
-      )}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,.85fr)]">
         <Panel title="Worktree-Ledger" eyebrow="Git Inventar">

@@ -57,6 +57,31 @@ function sourceLabel(source: PressureSource): string {
   return "Quelle";
 }
 
+function NextLeverDetail({ data }: { data: PressureStatusResponse }) {
+  const recommendation = data.recommendation;
+  return (
+    <div className="flex min-w-0 items-start gap-2">
+      <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <Eyebrow>Nächster Hebel</Eyebrow>
+        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+          <SignalChip tone={signalToneFromLegacy(recommendation.tone)} label={recommendation.label} />
+          <p className="min-w-0 flex-1 line-clamp-2 text-sec text-ink">{recommendation.detail}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CauseDetail({ data }: { data: PressureStatusResponse }) {
+  return (
+    <>
+      <p className="line-clamp-2 text-sec text-ink"><span className="text-ink-2">Grund: </span>{data.cause}</p>
+      {data.errors.length > 0 ? <SignalLabel tone="warn" label={`${data.errors.length} Teilwert unklar`} className="mt-1" /> : null}
+    </>
+  );
+}
+
 function loadTone(data: PressureStatusResponse): "cyan" | "amber" | "red" {
   const load1 = data.host.load_avg[0] ?? 0;
   const cores = Math.max(1, data.host.cpu_count || 1);
@@ -101,14 +126,20 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
   const activeCount = data.pressure_sources.reduce((sum, source) => sum + source.count, 0);
   const activeCpu = data.pressure_sources.reduce((sum, source) => sum + source.cpu_percent, 0);
   const apiLatency = data.access.api_latency_ms;
-  const recommendation = data.recommendation;
   const cpuValue = testCount > 0 ? testLabel : activeCount > 0 ? `${activeCount} aktiv` : fmtNumber(data.host.cpu_percent, "%");
   const cpuHint = testCount > 0 ? `${fmtNumber(testCpu, "%")} Test-CPU` : activeCount > 0 ? `${fmtNumber(activeCpu, "%")} Quellen-CPU` : "Host";
   const cpuTone = data.overall === "saturated" ? "red" : testCount > 0 || activeCount > 0 ? "amber" : "zinc";
 
   return (
     <div className="space-y-4">
-      {embedded ? null : (
+      {embedded ? (
+        <Panel title="Nächster Hebel" eyebrow="Empfohlene Aktion">
+          <NextLeverDetail data={data} />
+          <div className="mt-3">
+            <CauseDetail data={data} />
+          </div>
+        </Panel>
+      ) : (
       <Card surface="raised" className="overflow-hidden border border-line p-0" ariaLabel="Pressure Status">
         <div className="flex flex-col gap-3 border-b border-line px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -130,21 +161,11 @@ export function PressureContent({ data, lastUpdated, isStale, error, embedded }:
         </div>
 
         <div className="border-t border-line px-4 py-3">
-          <div className="flex min-w-0 items-start gap-2">
-            <Wrench className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" aria-hidden />
-            <div className="min-w-0 flex-1">
-              <Eyebrow>Nächster Hebel</Eyebrow>
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-                <SignalChip tone={signalToneFromLegacy(recommendation.tone)} label={recommendation.label} />
-                <p className="min-w-0 flex-1 line-clamp-2 text-sec text-ink">{recommendation.detail}</p>
-              </div>
-            </div>
-          </div>
+          <NextLeverDetail data={data} />
         </div>
 
         <div className="border-t border-line px-4 py-3">
-          <p className="line-clamp-2 text-sec text-ink"><span className="text-ink-2">Grund: </span>{data.cause}</p>
-          {data.errors.length > 0 ? <SignalLabel tone="warn" label={`${data.errors.length} Teilwert unklar`} className="mt-1" /> : null}
+          <CauseDetail data={data} />
         </div>
       </Card>
       )}

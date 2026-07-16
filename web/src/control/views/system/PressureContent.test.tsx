@@ -99,6 +99,15 @@ describe("PressureContent", () => {
     expect(html).not.toContain("mit hoher Last erkannt");
   });
 
+  it("renders next lever and cause when embedded in SystemView", () => {
+    const html = renderToStaticMarkup(<PressureContent embedded data={busyPressure} lastUpdated={1782070000} isStale={false} />);
+
+    expect(html).toContain("Nächster Hebel");
+    expect(html).toContain("Tests laufen");
+    expect(html).toContain("Grund");
+    expect(html).toContain("Ungedrosselte Testprozesse");
+  });
+
   it("does not leave a loading skeleton behind after a terminal load error", () => {
     const html = renderToStaticMarkup(<PressureContent data={null} lastUpdated={null} error="timeout" />);
 
