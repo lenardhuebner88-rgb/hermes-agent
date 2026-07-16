@@ -2,7 +2,24 @@ import importlib
 import os
 import sys
 
+import pytest
+
 from hermes_cli.env_loader import load_hermes_dotenv
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep the hermes_cli.main purge from leaking into later files.
+
+    ``test_main_import_applies_user_env_over_shell_values`` pops
+    ``hermes_cli.main`` and re-imports it so dotenv side effects run against a
+    temp HERMES_HOME. Without a restore, later files in the same worker keep
+    import-time bindings to the orphaned reimport (module-identity split) —
+    same class as the skills-subparser / empty-tool-name leaks (see
+    ``tests/_module_isolation.py``). ``restore_sys_modules`` snapshots before
+    the test body and puts the table back on teardown.
+    """
+    yield
 
 
 def test_user_env_overrides_stale_shell_values(tmp_path, monkeypatch):
