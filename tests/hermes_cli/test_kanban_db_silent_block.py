@@ -135,6 +135,8 @@ def test_silent_block_sweep_escalates_block_without_run(
         heiler = _heiler_events(conn, t)[0]
 
     assert escalation.payload["evidence"]["last_error"] == ""
+    assert heiler.payload["class"] == kb.HEILER_CLASS_UNCLASSIFIED
+    assert heiler.payload["evidence"]["signal_source"] == "default"
     assert "excerpt" not in heiler.payload["evidence"]
     assert "fingerprint" not in heiler.payload
 
@@ -1460,3 +1462,35 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
     # Event.payload is already parsed as a dict by list_events.
     assert isinstance(guarded_evt.payload, dict)
     assert guarded_evt.payload.get("reason") == "recent_success"
+
+
+def test_silent_block_sweep_classifies_born_blocked_as_operator_intent(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="Operator-created parked task",
+            assignee="worker",
+            initial_status="blocked",
+        )
+
+        summary = kb.escalate_silent_blocks_sweep(
+            conn,
+            now=base,
+        )
+        escalation = _escalation_event(conn, task_id)
+        classification = _heiler_events(conn, task_id)[0]
+
+    assert summary["escalated"] == [
+        {"task_id": task_id, "blocked_kind": "born_blocked"}
+    ]
+    assert escalation.payload["evidence"]["last_error"] == (
+        "born blocked (initial_status=blocked)"
+    )
+    assert escalation.payload["evidence"]["blocked_kind"] == "born_blocked"
+    assert classification.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
+    assert classification.payload["evidence"]["matched"] == "born_blocked"
+    assert classification.payload["evidence"]["signal_source"] == "blocked_kind"
