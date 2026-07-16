@@ -90,7 +90,7 @@ The dispatcher is a background loop in the gateway, not a separate daemon (confi
 4. **Worker exit** — the worker calls `/kanban complete <result>` (→ `status=done`,
    `task_runs.outcome=completed`) or `/kanban block <reason>` (→ `status=blocked`); a
    timeout/crash is reconciled on the next tick.
-5. **Notify** — `_kanban_notifier_watcher` tails the append-only `task_events` table and
+5. **Notify** — `_kanban_notifications_watcher` tails the append-only `task_events` table and
    pushes `completed`/`blocked`/`crashed` events to subscribed chat platforms.
 
 The `Task` dataclass and status lifecycle live in `hermes_cli/kanban_db.py` (`class Task`).

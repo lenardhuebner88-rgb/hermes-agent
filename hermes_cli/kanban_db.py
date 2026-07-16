@@ -17041,7 +17041,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     the task was still ``running`` in the DB, treat it as a protocol
     violation (worker answered conversationally without calling
     ``kanban_complete`` / ``kanban_block``) and trip the circuit breaker
-    on the first occurrence — retrying a worker whose CLI keeps
+    once the trailing violation streak reaches
+    ``_PROTOCOL_VIOLATION_FAILURE_LIMIT`` (default 3, overridable via the
+    task's ``max_retries``) — retrying a worker whose CLI keeps
     returning 0 without a terminal transition just loops forever.
 
     When the reap registry shows the worker exited with the rate-limit
@@ -17689,6 +17691,7 @@ _HEILER_OUTCOME_CLASS = {
 }
 _HEILER_STALL_CLASS = {
     "scheduled_overdue": HEILER_CLASS_TRANSIENT,
+    "scheduled_due": HEILER_CLASS_TRANSIENT,
     "rate_limited_loop": HEILER_CLASS_TRANSIENT,
     "review_without_verifier": HEILER_CLASS_BAD_SPEC,
     "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
