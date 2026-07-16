@@ -38,6 +38,22 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep ``_fresh_modules``'s sys.modules purge from leaking into later files.
+
+    The helper below deletes ``agent.auxiliary_client`` / ``agent.image_routing``
+    / ``tools.vision_tools`` / ``tools.browser_tool`` / ``hermes_cli.config`` and
+    re-imports them so resolution reads the test HERMES_HOME + credentials.
+    Without a restore, later files in the same worker keep import-time bindings
+    to the orphaned reimport (module-identity split) — same class as the
+    verification-stop-caching / empty-tool-name dampening leaks
+    (see ``tests/_module_isolation.py``). ``restore_sys_modules`` snapshots
+    before the test body and puts the table back on teardown.
+    """
+    yield
+
+
 @pytest.fixture
 def isolated_home(monkeypatch):
     """Temp HERMES_HOME with config + clean credential env vars."""
