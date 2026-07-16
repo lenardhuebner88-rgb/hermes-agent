@@ -18553,6 +18553,7 @@ def record_decompose_failure(
     conn: sqlite3.Connection,
     task_id: str,
     reason: Optional[str] = None,
+    detail: Optional[str] = None,
 ) -> int:
     """Bump the per-task ``decompose_failed`` counter and return its new value.
 
@@ -18568,6 +18569,13 @@ def record_decompose_failure(
     ``reason: null`` (the sweep then treats the stall as a genuine defect, the
     unchanged bad-spec escalation) while still marking this attempt as the latest
     decompose-failure boundary.
+
+    ``detail`` is optional free-text from ``DecomposeOutcome.detail`` (the
+    original exception message). When provided it is written as a separate
+    ``error_detail`` payload field — single-line, capped at 500 chars — so
+    operators/strategists can distinguish context-length from other 400s
+    without changing the ``reason`` classification key. Omitting ``detail``
+    keeps the event payload byte-identical to the pre-detail shape.
     """
     with write_txn(conn):
         cur = conn.execute(
@@ -18576,11 +18584,17 @@ def record_decompose_failure(
         )
         if cur.rowcount == 0:
             return 0
+        payload: dict = {
+            "reason": str(reason)[:500] if reason is not None else None,
+        }
+        if detail is not None:
+            # Single-line + hard cap — never log multi-line SDK dumps raw.
+            payload["error_detail"] = " ".join(str(detail).splitlines()).strip()[:500]
         _append_event(
             conn,
             task_id,
             DECOMPOSE_ATTEMPT_FAILED_EVENT,
-            {"reason": str(reason)[:500] if reason is not None else None},
+            payload,
         )
         row = conn.execute(
             "SELECT decompose_failed FROM tasks WHERE id = ?",

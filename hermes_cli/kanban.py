@@ -4168,7 +4168,10 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                     kb.reset_decompose_failed(_conn, outcome.task_id)
                 else:
                     kb.record_decompose_failure(
-                        _conn, outcome.task_id, reason=outcome.reason,
+                        _conn,
+                        outcome.task_id,
+                        reason=outcome.reason,
+                        detail=outcome.detail,
                     )
         except Exception:  # pragma: no cover - defensive
             pass

@@ -725,6 +725,46 @@ def _resolve_auto_decompose_settings(
     return enabled, per_tick
 
 
+def _bump_decompose_counter(
+    target_id: str,
+    *,
+    ok: bool,
+    reason: "Optional[str]" = None,
+    detail: "Optional[str]" = None,
+) -> None:
+    """Fail-soft decompose-failure bookkeeping for the auto-decompose tick.
+
+    A counter bump must never break the decomposition tick, so any DB error
+    is swallowed (logged at debug). The board is already pinned via
+    ``HERMES_KANBAN_BOARD`` / ``scoped_current_board``, so ``connect()`` with
+    no kwarg targets the right DB — same idiom as the dispatcher body.
+
+    ``reason`` (the ok=False reason from ``decompose_task``) is forwarded so
+    the no-silent-stall sweep can tell a transient/infra decompose failure
+    from a genuine spec defect (HEILER-DECOMPOSE-FALLBACK-S1).
+
+    ``detail`` (optional free-text from ``DecomposeOutcome.detail`` / crash
+    ``str(exc)``) is forwarded as a separate event payload field so
+    operators see the original LLM error message without changing the
+    classification key in ``reason``.
+    """
+    try:
+        from hermes_cli import kanban_db as _kb
+
+        with _kb.connect_closing() as _conn:
+            if ok:
+                _kb.reset_decompose_failed(_conn, target_id)
+            else:
+                _kb.record_decompose_failure(
+                    _conn, target_id, reason=reason, detail=detail,
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            "kanban auto-decompose: decompose_failed bump failed on %s (%s)",
+            target_id, exc,
+        )
+
+
 @dataclass(frozen=True)
 class _DispatchCaps:
     """Resolved dispatcher concurrency caps for one tick (see
@@ -2736,36 +2776,6 @@ class GatewayKanbanWatchersMixin:
                 except Exception:
                     boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
 
-            def _bump_decompose_counter(
-                target_id: str, *, ok: bool, reason: "Optional[str]" = None,
-            ) -> None:
-                """Fail-soft decompose-failure bookkeeping.
-
-                A counter bump must never break the decomposition tick, so
-                any DB error is swallowed (logged at debug). The board is
-                already pinned via HERMES_KANBAN_BOARD, so connect() with no
-                kwarg targets the right DB — same idiom as the rest of this
-                function.
-
-                ``reason`` (the ok=False reason from ``decompose_task``) is
-                forwarded so the no-silent-stall sweep can tell a transient/
-                infra decompose failure from a genuine spec defect (HEILER-
-                DECOMPOSE-FALLBACK-S1).
-                """
-                try:
-                    with _kb.connect_closing() as _conn:
-                        if ok:
-                            _kb.reset_decompose_failed(_conn, target_id)
-                        else:
-                            _kb.record_decompose_failure(
-                                _conn, target_id, reason=reason,
-                            )
-                except Exception as exc:  # pragma: no cover - defensive
-                    logger.debug(
-                        "kanban auto-decompose: decompose_failed bump failed on %s (%s)",
-                        target_id, exc,
-                    )
-
             attempted = 0
             successes = 0
             for b in boards:
@@ -2806,6 +2816,7 @@ class GatewayKanbanWatchersMixin:
                             _bump_decompose_counter(
                                 tid, ok=False,
                                 reason=f"decompose_task crashed: {type(exc).__name__}",
+                                detail=str(exc),
                             )
                             continue
                         if outcome.ok:
@@ -2825,6 +2836,7 @@ class GatewayKanbanWatchersMixin:
                             _bump_decompose_counter(
                                 outcome.task_id, ok=False,
                                 reason=outcome.reason,
+                                detail=outcome.detail,
                             )
                             # Common no-op reasons (no aux client configured) shouldn't
                             # spam logs every tick. Log at debug.
