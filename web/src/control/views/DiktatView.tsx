@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Download, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
 import { z } from "zod";
-import { authedFetch, fetchJSON, openAuthedApiFile } from "@/lib/api";
+import { authedFetch, downloadAuthedArtifact, fetchJSON } from "@/lib/api";
 import { DictateStatusTile } from "../components/DictateStatusTile";
 import { DictateTrend } from "../components/DictateTrend";
 import { FleetEmptyState, FleetPanel } from "../components/leitstand";
@@ -201,11 +201,14 @@ export function DiktatBody({
 
   const download = (artifact: DictateArtifact) => {
     setDownloadError(null);
-    void openAuthedApiFile(`/api/artifacts/${encodeURIComponent(artifact.name)}`, artifact.name).catch(
-      (cause: unknown) => {
-        setDownloadError(cause instanceof Error ? cause.message : "APK-Download fehlgeschlagen");
-      },
-    );
+    try {
+      // Native download (Content-Disposition + ?token=), NOT the blob-in-a-tab
+      // path: on mobile Chrome the blob download loses the filename (UUID) and
+      // leaves an about:blank tab hanging on "wird geladen…".
+      downloadAuthedArtifact(`/api/artifacts/${encodeURIComponent(artifact.name)}`, artifact.name);
+    } catch (cause: unknown) {
+      setDownloadError(cause instanceof Error ? cause.message : "APK-Download fehlgeschlagen");
+    }
   };
 
   return (

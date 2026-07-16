@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, buildWsAuthParam, fetchJSON, openAuthedApiFile } from "./api";
+import { api, buildWsAuthParam, downloadAuthedArtifact, fetchJSON, openAuthedApiFile } from "./api";
 
 // Regression coverage for the loopback stale-token auto-reload (commit
 // fe5c8ec4a). The bug: /api/auth/me answers 401 on every call in non-gated
@@ -105,6 +105,55 @@ describe("authenticated file opening", () => {
     expect(opened.location.href).toBe("blob:receipt");
     expect(opened.close).not.toHaveBeenCalled();
     expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+});
+
+describe("downloadAuthedArtifact", () => {
+  function stubDocument() {
+    const anchor = {
+      href: "",
+      download: "",
+      rel: "",
+      click: vi.fn(),
+      remove: vi.fn(),
+    };
+    const createElement = vi.fn(() => anchor);
+    const appendChild = vi.fn();
+    vi.stubGlobal("document", { createElement, body: { appendChild } });
+    return { anchor, createElement, appendChild };
+  }
+
+  it("hands the download manager a query-token URL with the real filename (no blob, no tab)", () => {
+    const open = vi.fn();
+    (window as unknown as { open: typeof open }).open = open;
+    const { anchor, createElement } = stubDocument();
+
+    downloadAuthedArtifact(
+      "/api/artifacts/hermes-dictate-1.4-6a9ec48d3.apk",
+      "hermes-dictate-1.4-6a9ec48d3.apk",
+    );
+
+    expect(createElement).toHaveBeenCalledWith("a");
+    // Real filename via the download attribute — mobile Chrome's blob path
+    // otherwise names the file after the blob UUID.
+    expect(anchor.download).toBe("hermes-dictate-1.4-6a9ec48d3.apk");
+    expect(anchor.href).toBe(
+      "/api/artifacts/hermes-dictate-1.4-6a9ec48d3.apk?token=tok-123",
+    );
+    expect(anchor.click).toHaveBeenCalledTimes(1);
+    expect(anchor.remove).toHaveBeenCalledTimes(1);
+    // Never opens an about:blank tab (the old blob path did — it hung on mobile).
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("omits the token param when no session token is present (gated mode → cookie auth on the request)", () => {
+    (window as unknown as { __HERMES_SESSION_TOKEN__: string | undefined }).__HERMES_SESSION_TOKEN__ =
+      undefined;
+    const { anchor } = stubDocument();
+
+    downloadAuthedArtifact("/api/artifacts/x.apk", "x.apk");
+
+    expect(anchor.href).toBe("/api/artifacts/x.apk");
   });
 });
 

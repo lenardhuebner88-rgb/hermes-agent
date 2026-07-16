@@ -367,6 +367,37 @@ export async function openAuthedApiFile(url: string, label = "Hermes-Deliverable
 }
 
 /**
+ * Trigger a native download of a protected artifact by its query-token URL,
+ * instead of the ``openAuthedApiFile`` blob-in-a-new-tab path.
+ *
+ * The blob path is wrong for large binaries opened on mobile: navigating a
+ * tab to a ``blob:`` URL of an ``application/vnd.android.package-archive``
+ * makes Chrome download it under the blob's UUID (losing the real filename)
+ * and leaves the ``about:blank`` tab hanging on "wird geladen…". The
+ * artifacts endpoint already streams with ``Content-Disposition: attachment;
+ * filename=…`` and accepts the loopback session token as a ``?token=`` query
+ * param (``_QUERY_TOKEN_API_PREFIXES``), exactly because a plain browser /
+ * Android-download-manager request can't set the ``X-Hermes-Session-Token``
+ * header. So hand the URL straight to the download manager: correct filename,
+ * streamed to disk, no dangling tab. Cookies still ride along for gated mode;
+ * the ``?token=`` covers loopback where no cookie is present.
+ */
+export function downloadAuthedArtifact(url: string, filename: string): void {
+  const token = window.__HERMES_SESSION_TOKEN__;
+  const sep = url.includes("?") ? "&" : "?";
+  const href = token
+    ? `${BASE}${url}${sep}token=${encodeURIComponent(token)}`
+    : `${BASE}${url}`;
+  const anchor = document.createElement("a");
+  anchor.href = href;
+  anchor.download = filename;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+/**
  * Build an absolute ``ws(s)://`` URL for a dashboard WebSocket endpoint,
  * with the correct auth query param appended for the active mode (fresh
  * single-use ``ticket`` in gated mode, ``token`` in loopback). Plugins and
