@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -12,7 +12,7 @@ import { Overlay } from "./Overlay";
 import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat";
 
 // The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
 // live in Fleet now, and System remains reachable through "Mehr" + deep-link.
@@ -58,6 +58,8 @@ const moreTabs: Array<{ id: ControlTab; label: string; path: string; icon: React
   { id: "schmiede", label: de.tabs.schmiede, path: "/control/schmiede", icon: Hammer },
   { id: "stratege", label: "Stratege", path: "/control/stratege", icon: Lightbulb },
   { id: "designBoard", label: "Design", path: "/control/design-board", icon: PenTool },
+  // Label literal (wie "Lanes"): kein Edit an i18n/de.ts paralleler Sessions.
+  { id: "diktat", label: "Diktat", path: "/control/diktat", icon: Mic2 },
 ];
 
 const secondaryNav = [
