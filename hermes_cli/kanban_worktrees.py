@@ -24,6 +24,15 @@ integration policy; task state transitions (done/blocked, run verdicts)
 stay in ``kanban_db`` hook code. DB access here is limited to workspace
 bookkeeping (``set_workspace_path``, provisioning/integration events,
 receipt comments) via lazy imports so module import never cycles.
+
+Module layout (section order)::
+
+    Config / path predicates
+    Git plumbing
+    Provisioning + chain helpers
+    Release-gate executor (context, visual gate, fixer, activation)
+    Integration (locks, affected tests, quick gates, integrate_chain)
+    Completion hook (maybe_integrate_on_complete)
 """
 
 from __future__ import annotations
@@ -1691,6 +1700,10 @@ def visual_gate_max_retries() -> int:
     return 3
 
 
+# ---------------------------------------------------------------------------
+# Visual gate (non-MCP dashboard screenshots + Playwright mobile check)
+# ---------------------------------------------------------------------------
+
 def _visual_gate_with_ime_note(detail: str) -> str:
     text = detail or "visual-gate failed"
     if _VISUAL_GATE_IME_NOTE in text:
@@ -1704,6 +1717,187 @@ def _visual_gate_error(message: str, screenshot_paths: Sequence[Path]) -> str:
     if paths:
         detail = f"{detail}\nscreenshots:\n{paths}"
     return _visual_gate_with_ime_note(detail)
+
+
+def _visual_gate_ensure_web_dist(
+    repo_root: Path, screenshot_paths: list[Path],
+) -> Optional[str]:
+    """Build ``hermes_cli/web_dist`` if missing; return error or None."""
+    web_dist = repo_root / "hermes_cli" / "web_dist"
+    web_dist_index = web_dist / "index.html"
+    if web_dist_index.is_file():
+        return None
+    try:
+        build = subprocess.run(  # noqa: S603 -- fixed argv
+            ["npm", "run", "build"],
+            cwd=str(repo_root / "web"),
+            capture_output=True,
+            text=True,
+            timeout=RELEASE_GATE_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return _visual_gate_error(
+            "frontend build for missing web_dist timed out after "
+            f"{RELEASE_GATE_COMMAND_TIMEOUT}s",
+            screenshot_paths,
+        )
+    except FileNotFoundError:
+        return _visual_gate_error(
+            "frontend build for missing web_dist failed: npm not found",
+            screenshot_paths,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _visual_gate_error(
+            f"frontend build for missing web_dist failed: {exc}",
+            screenshot_paths,
+        )
+    if build.returncode != 0:
+        tail = ((build.stdout or "") + "\n" + (build.stderr or "")).strip()[-2000:]
+        return _visual_gate_error(
+            "frontend build for missing web_dist failed with exit "
+            f"{build.returncode}\n{tail}",
+            screenshot_paths,
+        )
+    if not web_dist_index.is_file():
+        return _visual_gate_error(
+            "frontend build completed but web_dist is still missing index.html: "
+            f"{web_dist_index}",
+            screenshot_paths,
+        )
+    return None
+
+
+def _visual_gate_healthcheck(
+    repo_root: Path, visual_gate_url: str, screenshot_paths: list[Path],
+) -> Optional[str]:
+    """curl the throwaway static server; return error or None."""
+    try:
+        health = subprocess.run(  # noqa: S603 -- fixed argv
+            ["curl", "-fsS", visual_gate_url],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return _visual_gate_error(
+            f"dashboard unreachable: curl timed out for {visual_gate_url}",
+            screenshot_paths,
+        )
+    except FileNotFoundError:
+        return _visual_gate_error("dashboard unreachable: curl not found", screenshot_paths)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _visual_gate_error(f"dashboard unreachable: {exc}", screenshot_paths)
+    if health.returncode != 0:
+        tail = (health.stdout + "\n" + health.stderr).strip()[-1000:]
+        return _visual_gate_error(
+            f"dashboard unreachable: curl exit {health.returncode}\n{tail}",
+            screenshot_paths,
+        )
+    return None
+
+
+def _visual_gate_chromium_shots(
+    repo_root: Path,
+    visual_gate_url: str,
+    desktop_path: Path,
+    mobile_path: Path,
+    screenshot_paths: list[Path],
+) -> Optional[str]:
+    """Capture desktop + mobile chromium screenshots; return error or None."""
+    shots = (
+        ("desktop", "1280,800", desktop_path),
+        ("mobile", "390,844", mobile_path),
+    )
+    for label, size, path in shots:
+        try:
+            shot = subprocess.run(  # noqa: S603 -- fixed argv
+                [
+                    _resolve_chromium_shot(),
+                    f"--screenshot={path}",
+                    f"--window-size={size}",
+                    "--virtual-time-budget=12000",
+                    visual_gate_url,
+                ],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return _visual_gate_error(
+                f"{label} chromium-shot timed out after 120s",
+                screenshot_paths,
+            )
+        except FileNotFoundError:
+            return _visual_gate_error("chromium-shot not found", screenshot_paths)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return _visual_gate_error(
+                f"{label} chromium-shot failed: {exc}", screenshot_paths,
+            )
+        if shot.returncode != 0:
+            tail = (shot.stdout + "\n" + shot.stderr).strip()[-2000:]
+            return _visual_gate_error(
+                f"{label} chromium-shot exit {shot.returncode}\n{tail}",
+                screenshot_paths,
+            )
+    return None
+
+
+def _visual_gate_playwright_check(
+    repo_root: Path,
+    visual_gate_url: str,
+    scripted_mobile_path: Path,
+    screenshot_paths: list[Path],
+) -> Optional[str]:
+    """Run the mobile Playwright visual check; return error or None."""
+    env = dict(os.environ)
+    env["HERMES_VISUAL_GATE_SCREENSHOT"] = str(scripted_mobile_path)
+    env["HERMES_VISUAL_GATE_URL"] = visual_gate_url
+    try:
+        node = subprocess.run(  # noqa: S603 -- fixed argv
+            ["node", "scripts/visual_check_mobile.mjs"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return _visual_gate_error(
+            "mobile Playwright check timed out after 120s", screenshot_paths,
+        )
+    except FileNotFoundError:
+        return _visual_gate_error("node not found", screenshot_paths)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _visual_gate_error(f"mobile Playwright check failed: {exc}", screenshot_paths)
+
+    stdout = (node.stdout or "").strip()
+    try:
+        payload = json.loads(stdout) if stdout else {}
+    except json.JSONDecodeError:
+        tail = ((node.stdout or "") + "\n" + (node.stderr or "")).strip()[-2000:]
+        return _visual_gate_error(
+            f"mobile Playwright check returned non-JSON output\n{tail}",
+            screenshot_paths,
+        )
+    if payload.get("screenshotPath"):
+        try:
+            scripted_path = Path(str(payload["screenshotPath"]))
+            if scripted_path not in screenshot_paths:
+                screenshot_paths.append(scripted_path)
+        except TypeError:
+            pass
+    if node.returncode != 0 or not payload.get("ok"):
+        tail = json.dumps(payload, ensure_ascii=False, sort_keys=True)[-2000:]
+        stderr = (node.stderr or "").strip()[-1000:]
+        if stderr:
+            tail = f"{tail}\nstderr:\n{stderr}"
+        return _visual_gate_error(
+            f"mobile Playwright check failed\n{tail}",
+            screenshot_paths,
+        )
+    return None
 
 
 def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
@@ -1726,47 +1920,11 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
     scripted_mobile_path = run_dir / "mobile-playwright.png"
     screenshot_paths = [desktop_path, mobile_path, scripted_mobile_path]
 
-    web_dist = repo_root / "hermes_cli" / "web_dist"
-    web_dist_index = web_dist / "index.html"
-    if not web_dist_index.is_file():
-        try:
-            build = subprocess.run(  # noqa: S603 -- fixed argv
-                ["npm", "run", "build"],
-                cwd=str(repo_root / "web"),
-                capture_output=True,
-                text=True,
-                timeout=RELEASE_GATE_COMMAND_TIMEOUT,
-            )
-        except subprocess.TimeoutExpired:
-            return _visual_gate_error(
-                "frontend build for missing web_dist timed out after "
-                f"{RELEASE_GATE_COMMAND_TIMEOUT}s",
-                screenshot_paths,
-            )
-        except FileNotFoundError:
-            return _visual_gate_error(
-                "frontend build for missing web_dist failed: npm not found",
-                screenshot_paths,
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return _visual_gate_error(
-                f"frontend build for missing web_dist failed: {exc}",
-                screenshot_paths,
-            )
-        if build.returncode != 0:
-            tail = ((build.stdout or "") + "\n" + (build.stderr or "")).strip()[-2000:]
-            return _visual_gate_error(
-                "frontend build for missing web_dist failed with exit "
-                f"{build.returncode}\n{tail}",
-                screenshot_paths,
-            )
-        if not web_dist_index.is_file():
-            return _visual_gate_error(
-                "frontend build completed but web_dist is still missing index.html: "
-                f"{web_dist_index}",
-                screenshot_paths,
-            )
+    err = _visual_gate_ensure_web_dist(repo_root, screenshot_paths)
+    if err:
+        return err
 
+    web_dist = repo_root / "hermes_cli" / "web_dist"
     server = _VisualGateStaticServer(web_dist)
     try:
         try:
@@ -1776,114 +1934,22 @@ def _run_visual_gate(repo_root: Path, screenshots_dir: Path) -> Optional[str]:
                 f"dashboard static server failed: {exc}", screenshot_paths
             )
 
-        try:
-            health = subprocess.run(  # noqa: S603 -- fixed argv
-                ["curl", "-fsS", visual_gate_url],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired:
-            return _visual_gate_error(
-                f"dashboard unreachable: curl timed out for {visual_gate_url}",
-                screenshot_paths,
-            )
-        except FileNotFoundError:
-            return _visual_gate_error("dashboard unreachable: curl not found", screenshot_paths)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return _visual_gate_error(f"dashboard unreachable: {exc}", screenshot_paths)
-        if health.returncode != 0:
-            tail = (health.stdout + "\n" + health.stderr).strip()[-1000:]
-            return _visual_gate_error(
-                f"dashboard unreachable: curl exit {health.returncode}\n{tail}",
-                screenshot_paths,
-            )
-
-        shots = (
-            ("desktop", "1280,800", desktop_path),
-            ("mobile", "390,844", mobile_path),
+        err = _visual_gate_healthcheck(
+            repo_root, visual_gate_url, screenshot_paths,
         )
-        for label, size, path in shots:
-            try:
-                shot = subprocess.run(  # noqa: S603 -- fixed argv
-                    [
-                        _resolve_chromium_shot(),
-                        f"--screenshot={path}",
-                        f"--window-size={size}",
-                        "--virtual-time-budget=12000",
-                        visual_gate_url,
-                    ],
-                    cwd=str(repo_root),
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-            except subprocess.TimeoutExpired:
-                return _visual_gate_error(
-                    f"{label} chromium-shot timed out after 120s",
-                    screenshot_paths,
-                )
-            except FileNotFoundError:
-                return _visual_gate_error("chromium-shot not found", screenshot_paths)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return _visual_gate_error(
-                    f"{label} chromium-shot failed: {exc}", screenshot_paths,
-                )
-            if shot.returncode != 0:
-                tail = (shot.stdout + "\n" + shot.stderr).strip()[-2000:]
-                return _visual_gate_error(
-                    f"{label} chromium-shot exit {shot.returncode}\n{tail}",
-                    screenshot_paths,
-                )
+        if err:
+            return err
 
-        env = dict(os.environ)
-        env["HERMES_VISUAL_GATE_SCREENSHOT"] = str(scripted_mobile_path)
-        env["HERMES_VISUAL_GATE_URL"] = visual_gate_url
-        try:
-            node = subprocess.run(  # noqa: S603 -- fixed argv
-                ["node", "scripts/visual_check_mobile.mjs"],
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=env,
-            )
-        except subprocess.TimeoutExpired:
-            return _visual_gate_error(
-                "mobile Playwright check timed out after 120s", screenshot_paths,
-            )
-        except FileNotFoundError:
-            return _visual_gate_error("node not found", screenshot_paths)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return _visual_gate_error(f"mobile Playwright check failed: {exc}", screenshot_paths)
+        err = _visual_gate_chromium_shots(
+            repo_root, visual_gate_url, desktop_path, mobile_path,
+            screenshot_paths,
+        )
+        if err:
+            return err
 
-        stdout = (node.stdout or "").strip()
-        try:
-            payload = json.loads(stdout) if stdout else {}
-        except json.JSONDecodeError:
-            tail = ((node.stdout or "") + "\n" + (node.stderr or "")).strip()[-2000:]
-            return _visual_gate_error(
-                f"mobile Playwright check returned non-JSON output\n{tail}",
-                screenshot_paths,
-            )
-        if payload.get("screenshotPath"):
-            try:
-                scripted_path = Path(str(payload["screenshotPath"]))
-                if scripted_path not in screenshot_paths:
-                    screenshot_paths.append(scripted_path)
-            except TypeError:
-                pass
-        if node.returncode != 0 or not payload.get("ok"):
-            tail = json.dumps(payload, ensure_ascii=False, sort_keys=True)[-2000:]
-            stderr = (node.stderr or "").strip()[-1000:]
-            if stderr:
-                tail = f"{tail}\nstderr:\n{stderr}"
-            return _visual_gate_error(
-                f"mobile Playwright check failed\n{tail}",
-                screenshot_paths,
-            )
-        return None
+        return _visual_gate_playwright_check(
+            repo_root, visual_gate_url, scripted_mobile_path, screenshot_paths,
+        )
     finally:
         server.stop()
 
@@ -2617,6 +2683,240 @@ def _activate_and_finalize(
     }
 
 
+def _release_gate_retry_budget(
+    output: str, *, explicit_max_retries: bool, max_retries: int,
+) -> int:
+    if not explicit_max_retries and (output or "").startswith("visual-gate:"):
+        return visual_gate_max_retries()
+    return max_retries
+
+
+def _bind_release_gate_runner(injected_gate_runner, commands: list):
+    """Build the gate callable used by validation worktrees and fixer cycles."""
+
+    def release_gate(
+        validation_root: Path, _changed_files: list[str],
+    ) -> tuple[bool, str]:
+        if injected_gate_runner is not None:
+            return _invoke_release_gate_runner(
+                injected_gate_runner, validation_root,
+            )
+        return _default_release_gate_runner(
+            commands, repo_root=validation_root,
+        )
+
+    return release_gate
+
+
+def _activate_if_still_current(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    validated_commit: Optional[str],
+    attempts: int,
+    activation_runner,
+    repo_root: Path,
+) -> dict:
+    """Never deploy a different live commit than the one just validated."""
+    if not validated_commit:
+        return _activate_and_finalize(
+            conn, task_id, root_id, attempts, activation_runner,
+        )
+
+    guard_error = None
+    lock_path = _integrator_lock_path(repo_root)
+    with _PROCESS_LOCK:
+        try:
+            lock = _acquire_file_lock(lock_path)
+        except WorktreeError as exc:
+            guard_error = f"release activation lock failed: {exc}"
+        else:
+            try:
+                try:
+                    expected = _git(
+                        repo_root,
+                        "rev-parse",
+                        f"{validated_commit}^{{commit}}",
+                    )
+                    live_head = _git(repo_root, "rev-parse", "HEAD")
+                except WorktreeError as exc:
+                    guard_error = (
+                        f"release activation HEAD guard failed: {exc}"
+                    )
+                else:
+                    guard_error = (
+                        "release activation refused: live HEAD advanced from "
+                        f"validated {expected} to {live_head}"
+                        if expected != live_head
+                        else None
+                    )
+                if not guard_error:
+                    return _activate_and_finalize(
+                        conn,
+                        task_id,
+                        root_id,
+                        attempts,
+                        activation_runner,
+                    )
+            finally:
+                _release_file_lock(lock)
+
+    _escalate_release_gate(
+        conn,
+        task_id,
+        root_id,
+        attempts=attempts,
+        last_error=guard_error or "release activation guard failed",
+    )
+    return {
+        "ok": False,
+        "status": "escalated",
+        "fixer_attempts": attempts,
+        "root_id": root_id,
+    }
+
+
+def _run_release_gate_fixer_cycle(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    repo_root: Path,
+    *,
+    release_gate,
+    fixer_runner,
+    activation_runner,
+    injected_gate_runner,
+    fixer_attempts: int,
+    output: str,
+) -> tuple[Optional[dict], str]:
+    """One fixer attempt. Returns (result_or_None, next_output).
+
+    When *result* is not None the caller must return it; otherwise continue the
+    retry loop with the updated *output*.
+    """
+    worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
+    _record_release_gate_fix_attempt(
+        conn, task_id, attempt=fixer_attempts, gate_error=output,
+        root_id=root_id, worktree=str(worktree), branch=branch,
+    )
+    fix_error = None
+    try:
+        fixer_runner(
+            worktree=worktree, branch=branch, gate_error=output,
+            attempt=fixer_attempts, task_id=task_id, root_id=root_id,
+        )
+    except Exception as exc:  # the fixer is best-effort; record + retry/escalate
+        fix_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("release-gate fixer attempt %d failed for %s: %s",
+                     fixer_attempts, task_id, fix_error, exc_info=True)
+    branch_commit = None
+    if (worktree / ".git").exists() and _branch_exists(repo_root, branch):
+        try:
+            branch_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
+        except WorktreeError:
+            branch_commit = None
+
+    if branch_commit is None and injected_gate_runner is not None:
+        # Compatibility for existing isolated executor tests whose fake
+        # fixer intentionally creates no git branch. Production fixers are
+        # required to leave a real commit and never use this path.
+        ok, output = release_gate(repo_root, [])
+        phase = "injected_legacy"
+    elif branch_commit is None:
+        ok, output = False, (
+            "release-gate fixer produced no integratable branch commit"
+        )
+        phase = "fixer_branch"
+    else:
+        ok, output = _run_release_gate_at_commit(
+            repo_root,
+            branch_commit,
+            release_gate,
+            allow_injected_legacy_fallback=False,
+        )
+        phase = "fixer_branch"
+    _record_release_gate_executed(
+        conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
+        root_id=root_id, fixer_error=fix_error, phase=phase,
+        validation_commit=branch_commit,
+    )
+    if ok and branch_commit is None:
+        # Synthetic legacy test seam only: there is no real ref to guard.
+        return (
+            _activate_and_finalize(
+                conn, task_id, root_id, fixer_attempts, activation_runner,
+            ),
+            output,
+        )
+    if not ok:
+        return None, output
+
+    merged_gate_result: list[tuple[bool, str, str]] = []
+
+    def merged_release_gate(
+        validation_root: Path, changed_files: list[str],
+    ) -> tuple[bool, str]:
+        result = release_gate(validation_root, changed_files)
+        merged_gate_result.append(
+            (result[0], result[1], _git(validation_root, "rev-parse", "HEAD"))
+        )
+        return result
+
+    try:
+        target = current_branch(repo_root)
+        integration = integrate_chain(
+            repo_root,
+            worktree,
+            branch,
+            target,
+            gate_runner=merged_release_gate,
+        )
+    except Exception as exc:
+        integration = {
+            "action": "parked",
+            "reason": f"release-gate fixer integration crashed: {exc}",
+        }
+
+    if merged_gate_result:
+        merged_ok, merged_output, merged_commit = merged_gate_result[-1]
+        _record_release_gate_executed(
+            conn,
+            task_id,
+            attempt=fixer_attempts,
+            ok=merged_ok,
+            output=merged_output,
+            root_id=root_id,
+            phase="integrated_fixer_commit",
+            validation_commit=merged_commit,
+        )
+
+    if integration.get("action") == "merged":
+        return (
+            _activate_if_still_current(
+                conn, task_id, root_id,
+                integration.get("merge_commit"), fixer_attempts,
+                activation_runner, repo_root,
+            ),
+            output,
+        )
+    if integration.get("action") == "clean":
+        live_commit = _git(repo_root, "rev-parse", "HEAD")
+        if live_commit == branch_commit:
+            return (
+                _activate_if_still_current(
+                    conn, task_id, root_id,
+                    live_commit, fixer_attempts,
+                    activation_runner, repo_root,
+                ),
+                output,
+            )
+    output = (
+        "release-gate fixer integration failed: "
+        + str(integration.get("reason") or integration.get("action"))
+    )
+    return None, output
+
+
 def execute_release_gate(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2668,80 +2968,9 @@ def execute_release_gate(
     activation_runner = activation_runner or _default_release_gate_activation
     repo_root = Path(repo_root or LIVE_CHECKOUT_ROOT)
 
-    def release_gate(
-        validation_root: Path, _changed_files: list[str],
-    ) -> tuple[bool, str]:
-        if injected_gate_runner is not None:
-            return _invoke_release_gate_runner(
-                injected_gate_runner, validation_root,
-            )
-        return _default_release_gate_runner(
-            ctx["commands"], repo_root=validation_root,
-        )
-
-    def _retry_budget_for(output: str) -> int:
-        if not explicit_max_retries and (output or "").startswith("visual-gate:"):
-            return visual_gate_max_retries()
-        return max_retries
-
-    def activate_if_still_current(validated_commit: Optional[str], attempts: int) -> dict:
-        """Never deploy a different live commit than the one just validated."""
-        if not validated_commit:
-            return _activate_and_finalize(
-                conn, task_id, root_id, attempts, activation_runner,
-            )
-
-        guard_error = None
-        lock_path = _integrator_lock_path(repo_root)
-        with _PROCESS_LOCK:
-            try:
-                lock = _acquire_file_lock(lock_path)
-            except WorktreeError as exc:
-                guard_error = f"release activation lock failed: {exc}"
-            else:
-                try:
-                    try:
-                        expected = _git(
-                            repo_root,
-                            "rev-parse",
-                            f"{validated_commit}^{{commit}}",
-                        )
-                        live_head = _git(repo_root, "rev-parse", "HEAD")
-                    except WorktreeError as exc:
-                        guard_error = (
-                            f"release activation HEAD guard failed: {exc}"
-                        )
-                    else:
-                        guard_error = (
-                            "release activation refused: live HEAD advanced from "
-                            f"validated {expected} to {live_head}"
-                            if expected != live_head
-                            else None
-                        )
-                    if not guard_error:
-                        return _activate_and_finalize(
-                            conn,
-                            task_id,
-                            root_id,
-                            attempts,
-                            activation_runner,
-                        )
-                finally:
-                    _release_file_lock(lock)
-
-        _escalate_release_gate(
-            conn,
-            task_id,
-            root_id,
-            attempts=attempts,
-            last_error=guard_error or "release activation guard failed",
-        )
-        return {
-            "ok": False,
-            "status": "escalated",
-            "fixer_attempts": attempts,
-            "root_id": root_id,
-        }
+    release_gate = _bind_release_gate_runner(
+        injected_gate_runner, ctx["commands"],
+    )
 
     # Attempt 0: validate the integration commit recorded when this release
     # child was created. Synthetic old unit-test seams may not carry a real ref;
@@ -2765,120 +2994,29 @@ def execute_release_gate(
                 # Synthetic legacy test seam: the injected gate ran directly
                 # because its fixture carries no real repository commit.
                 guarded_commit = None
-        return activate_if_still_current(
-            guarded_commit, 0,
+        return _activate_if_still_current(
+            conn, task_id, root_id, guarded_commit, 0,
+            activation_runner, repo_root,
         )
 
     fixer_attempts = 0
-    while fixer_attempts < _retry_budget_for(output):
+    while fixer_attempts < _release_gate_retry_budget(
+        output,
+        explicit_max_retries=explicit_max_retries,
+        max_retries=max_retries,
+    ):
         fixer_attempts += 1
-        worktree, branch = _resolve_fixer_worktree(root_id, repo_root)
-        _record_release_gate_fix_attempt(
-            conn, task_id, attempt=fixer_attempts, gate_error=output,
-            root_id=root_id, worktree=str(worktree), branch=branch,
+        done, output = _run_release_gate_fixer_cycle(
+            conn, task_id, root_id, repo_root,
+            release_gate=release_gate,
+            fixer_runner=fixer_runner,
+            activation_runner=activation_runner,
+            injected_gate_runner=injected_gate_runner,
+            fixer_attempts=fixer_attempts,
+            output=output,
         )
-        fix_error = None
-        try:
-            fixer_runner(
-                worktree=worktree, branch=branch, gate_error=output,
-                attempt=fixer_attempts, task_id=task_id, root_id=root_id,
-            )
-        except Exception as exc:  # the fixer is best-effort; record + retry/escalate
-            fix_error = f"{type(exc).__name__}: {exc}"
-            _log.warning("release-gate fixer attempt %d failed for %s: %s",
-                         fixer_attempts, task_id, fix_error, exc_info=True)
-        branch_commit = None
-        if (worktree / ".git").exists() and _branch_exists(repo_root, branch):
-            try:
-                branch_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
-            except WorktreeError:
-                branch_commit = None
-
-        if branch_commit is None and injected_gate_runner is not None:
-            # Compatibility for existing isolated executor tests whose fake
-            # fixer intentionally creates no git branch. Production fixers are
-            # required to leave a real commit and never use this path.
-            ok, output = release_gate(repo_root, [])
-            phase = "injected_legacy"
-        elif branch_commit is None:
-            ok, output = False, (
-                "release-gate fixer produced no integratable branch commit"
-            )
-            phase = "fixer_branch"
-        else:
-            ok, output = _run_release_gate_at_commit(
-                repo_root,
-                branch_commit,
-                release_gate,
-                allow_injected_legacy_fallback=False,
-            )
-            phase = "fixer_branch"
-        _record_release_gate_executed(
-            conn, task_id, attempt=fixer_attempts, ok=ok, output=output,
-            root_id=root_id, fixer_error=fix_error, phase=phase,
-            validation_commit=branch_commit,
-        )
-        if ok and branch_commit is None:
-            # Synthetic legacy test seam only: there is no real ref to guard.
-            return _activate_and_finalize(
-                conn, task_id, root_id, fixer_attempts, activation_runner,
-            )
-        if not ok:
-            continue
-
-        merged_gate_result: list[tuple[bool, str, str]] = []
-
-        def merged_release_gate(
-            validation_root: Path, changed_files: list[str],
-        ) -> tuple[bool, str]:
-            result = release_gate(validation_root, changed_files)
-            merged_gate_result.append(
-                (result[0], result[1], _git(validation_root, "rev-parse", "HEAD"))
-            )
-            return result
-
-        try:
-            target = current_branch(repo_root)
-            integration = integrate_chain(
-                repo_root,
-                worktree,
-                branch,
-                target,
-                gate_runner=merged_release_gate,
-            )
-        except Exception as exc:
-            integration = {
-                "action": "parked",
-                "reason": f"release-gate fixer integration crashed: {exc}",
-            }
-
-        if merged_gate_result:
-            merged_ok, merged_output, merged_commit = merged_gate_result[-1]
-            _record_release_gate_executed(
-                conn,
-                task_id,
-                attempt=fixer_attempts,
-                ok=merged_ok,
-                output=merged_output,
-                root_id=root_id,
-                phase="integrated_fixer_commit",
-                validation_commit=merged_commit,
-            )
-
-        if integration.get("action") == "merged":
-            return activate_if_still_current(
-                integration.get("merge_commit"), fixer_attempts,
-            )
-        if integration.get("action") == "clean":
-            live_commit = _git(repo_root, "rev-parse", "HEAD")
-            if live_commit == branch_commit:
-                return activate_if_still_current(
-                    live_commit, fixer_attempts,
-                )
-        output = (
-            "release-gate fixer integration failed: "
-            + str(integration.get("reason") or integration.get("action"))
-        )
+        if done is not None:
+            return done
 
     _escalate_release_gate(
         conn, task_id, root_id, attempts=fixer_attempts, last_error=output,
@@ -3701,29 +3839,33 @@ def _run_gate_in_validation_worktree(
         _cleanup_validation_worktree(repo_root, worktree)
 
 
-def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
-    """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
-    modules; when the diff touches ``web/``, run lint:control,
-    ``tsc -b --noEmit``, and the control Vitest suite. ``npm run build`` intentionally
-    stays out of this automatic merge path because it mutates generated
-    dashboard assets and belongs to the parked post-merge release gate."""
-    notes: list[str] = []
+# ---------------------------------------------------------------------------
+# Post-merge quick gates (default_quick_gate / fo_integration_gate)
+# ---------------------------------------------------------------------------
 
-    def _run(label: str, cmd: list[str], cwd: Path, timeout: int) -> Optional[str]:
-        try:
-            proc = subprocess.run(  # noqa: S603 -- fixed argv
-                cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            return f"{label}: TIMEOUT after {timeout}s"
-        except FileNotFoundError:
-            return f"{label}: command not found ({cmd[0]})"
-        if proc.returncode != 0:
-            tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
-            return f"{label}: exit {proc.returncode}\n{tail}"
-        notes.append(f"{label} ok")
-        return None
+def _quick_gate_run_cmd(
+    label: str, cmd: list[str], cwd: Path, timeout: int, notes: list[str],
+) -> Optional[str]:
+    """Run one quick-gate subprocess; append success note or return error."""
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv
+            cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"{label}: TIMEOUT after {timeout}s"
+    except FileNotFoundError:
+        return f"{label}: command not found ({cmd[0]})"
+    if proc.returncode != 0:
+        tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
+        return f"{label}: exit {proc.returncode}\n{tail}"
+    notes.append(f"{label} ok")
+    return None
 
+
+def _default_quick_gate_ruff(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Ruff over changed .py files only; return error or None."""
     ruff_bin = shutil.which("ruff")
     # #3-C: run ruff only over the changed .py files, not the whole repo.
     # Uses the same diff source (changed_files) already computed by the caller
@@ -3736,13 +3878,16 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
     if _changed_py:
         ruff_base = [ruff_bin, "check"] if ruff_bin else [sys.executable, "-m", "ruff", "check"]
         ruff_cmd = ruff_base + _changed_py + ["--extend-exclude", WORKTREES_DIRNAME]
-        err = _run("ruff", ruff_cmd, repo_root, 300)
-        if err:
-            return False, err
-    else:
-        # No .py files in diff — skip ruff entirely (non-Python-only change).
-        notes.append("ruff skipped (no .py files in diff)")
+        return _quick_gate_run_cmd("ruff", ruff_cmd, repo_root, 300, notes)
+    # No .py files in diff — skip ruff entirely (non-Python-only change).
+    notes.append("ruff skipped (no .py files in diff)")
+    return None
 
+
+def _default_quick_gate_pytest(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Affected-pytest modules via isolated parallel runner; error or None."""
     modules = _affected_pytest_modules(repo_root, changed_files)
     if modules:
         # Run the affected modules through the canonical per-file isolation
@@ -3770,50 +3915,90 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         # other half of the t_c4ff7329 park. ``.pytest_cache`` is gitignored,
         # so dropping the flag does not dirty the post-merge tree.
         runner = str(repo_root / "scripts" / "run_tests_parallel.py")
-        err = _run(
+        return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
             [sys.executable, runner, *modules],
-            repo_root, 1200,
+            repo_root, 1200, notes,
         )
-        if err:
-            return False, err
-    else:
-        notes.append("pytest skipped (no affected test modules)")
+    notes.append("pytest skipped (no affected test modules)")
+    return None
 
-    if any(f.startswith("web/") for f in changed_files):
-        web_root = repo_root / "web"
-        # Resolve tolerant of npm-workspace hoisting (bins may live in web/ OR
-        # the hoisted ROOT node_modules/.bin). See _resolve_node_bin.
-        tsc = _resolve_node_bin(repo_root, "tsc")
-        vitest = _resolve_node_bin(repo_root, "vitest")
-        npm_bin = shutil.which("npm") or "npm"
-        npx_bin = shutil.which("npx") or "npx"
 
-        err = _run("lint:control", [npm_bin, "run", "lint:control"], web_root, 600)
-        if err:
-            return False, err
-        if tsc is None:
-            # Fail closed: a web diff we cannot type-check is not "green".
-            return False, "tsc: web/ in diff but tsc not found in web/ or root node_modules/.bin"
-        err = _run("tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600)
-        if err:
-            return False, err
-        if vitest is None:
-            return False, (
-                "vitest[control]: web/ in diff but "
-                "vitest not found in web/ or root node_modules/.bin"
-            )
-        err = _run("vitest[control]", [npx_bin, "vitest", "run", "src/control"], web_root, 900)
-        if err:
-            return False, err
+def _default_quick_gate_web(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """lint:control + tsc + vitest when web/ is in the diff; error or None."""
+    if not any(f.startswith("web/") for f in changed_files):
+        return None
+    web_root = repo_root / "web"
+    # Resolve tolerant of npm-workspace hoisting (bins may live in web/ OR
+    # the hoisted ROOT node_modules/.bin). See _resolve_node_bin.
+    tsc = _resolve_node_bin(repo_root, "tsc")
+    vitest = _resolve_node_bin(repo_root, "vitest")
+    npm_bin = shutil.which("npm") or "npm"
+    npx_bin = shutil.which("npx") or "npx"
 
+    err = _quick_gate_run_cmd(
+        "lint:control", [npm_bin, "run", "lint:control"], web_root, 600, notes,
+    )
+    if err:
+        return err
+    if tsc is None:
+        # Fail closed: a web diff we cannot type-check is not "green".
+        return "tsc: web/ in diff but tsc not found in web/ or root node_modules/.bin"
+    err = _quick_gate_run_cmd(
+        "tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600, notes,
+    )
+    if err:
+        return err
+    if vitest is None:
+        return (
+            "vitest[control]: web/ in diff but "
+            "vitest not found in web/ or root node_modules/.bin"
+        )
+    return _quick_gate_run_cmd(
+        "vitest[control]", [npx_bin, "vitest", "run", "src/control"],
+        web_root, 900, notes,
+    )
+
+
+def _default_quick_gate_visual(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Optional visual gate when control UI paths changed; error or None."""
     if visual_gate_enabled() and any(
         f.startswith("web/src/control/") for f in changed_files
     ):
         err = _run_visual_gate(repo_root, _VISUAL_GATE_SCREENSHOTS_ROOT)
         if err:
-            return False, _visual_gate_with_ime_note(err)
+            return _visual_gate_with_ime_note(err)
         notes.append(_VISUAL_GATE_IME_NOTE)
+    return None
+
+
+def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
+    """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
+    modules; when the diff touches ``web/``, run lint:control,
+    ``tsc -b --noEmit``, and the control Vitest suite. ``npm run build`` intentionally
+    stays out of this automatic merge path because it mutates generated
+    dashboard assets and belongs to the parked post-merge release gate."""
+    notes: list[str] = []
+
+    err = _default_quick_gate_ruff(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_pytest(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_web(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_visual(repo_root, changed_files, notes)
+    if err:
+        return False, err
 
     return True, "; ".join(notes)
 
@@ -3874,6 +4059,340 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
     return True, "; ".join(notes)
 
 
+# ---------------------------------------------------------------------------
+# integrate_chain (serialized merge into the frozen target)
+# ---------------------------------------------------------------------------
+
+def _integrate_parked(branch: str, reason: str, **extra) -> dict:
+    out = {"action": "parked", "reason": reason, "branch": branch}
+    out.update(extra)
+    return out
+
+
+def _integrate_precheck_live(
+    repo_root: Path, merge_target: Optional[str], branch: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """(0) live checkout clean operation state + frozen target.
+
+    Returns ``(parked_result, None)`` on failure or ``(None, cur)`` on success.
+    """
+    try:
+        git_dir = Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
+    except WorktreeError as exc:
+        return _integrate_parked(branch, f"cannot inspect live checkout: {exc}"), None
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                   "rebase-merge", "rebase-apply"):
+        if (git_dir / marker).exists():
+            return (
+                _integrate_parked(
+                    branch,
+                    f"live checkout has an operation in progress ({marker})",
+                ),
+                None,
+            )
+    try:
+        cur = current_branch(repo_root)
+    except WorktreeError as exc:
+        return _integrate_parked(branch, str(exc)), None
+    if merge_target and cur != merge_target:
+        return (
+            _integrate_parked(
+                branch,
+                f"checked-out branch {cur!r} != frozen merge target "
+                f"{merge_target!r}",
+            ),
+            None,
+        )
+    return None, cur
+
+
+def _preserve_or_park_chain_artifacts(
+    wt_path: Path, branch: str,
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Preserve preservable dirty artifacts or park. Returns (failure, receipt)."""
+    if not (wt_path.exists() and (wt_path / ".git").exists()):
+        return None, None
+    leftovers = dirty_files(wt_path)
+    if not leftovers:
+        return None, None
+    leftovers_sorted = sorted(leftovers)
+    dirty_class = _classify_dirty_paths(leftovers_sorted)
+    if dirty_class != PRESERVABLE_ARTIFACTS_CLASS:
+        return (
+            _integrate_parked(
+                branch,
+                f"{dirty_class}: "
+                + ", ".join(leftovers_sorted[:10])
+                + ". "
+                + _dirty_recovery_instruction(dirty_class),
+                dirty_files=leftovers_sorted,
+                park_class=dirty_class,
+            ),
+            None,
+        )
+    try:
+        artifact_receipt = _preserve_artifact_files(
+            wt_path, wt_path.name, leftovers_sorted
+        )
+    except Exception as exc:
+        return (
+            _integrate_parked(
+                branch,
+                f"ARTIFACT_PRESERVE_FAILED: {exc}",
+                dirty_files=sorted(leftovers),
+                park_class="ARTIFACT_PRESERVE_FAILED",
+            ),
+            None,
+        )
+    remaining = dirty_files(wt_path)
+    if remaining:
+        return (
+            _integrate_parked(
+                branch,
+                "chain worktree has uncommitted changes after artifact cleanup: "
+                + ", ".join(sorted(remaining)[:10]),
+                dirty_files=sorted(remaining),
+                artifact_receipt=artifact_receipt,
+            ),
+            None,
+        )
+    return None, artifact_receipt
+
+
+def _integrate_empty_or_already_merged(
+    repo_root: Path,
+    wt_path: Path,
+    branch: str,
+    cur: str,
+    gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
+    artifact_receipt: Optional[dict],
+) -> dict:
+    """Handle ``ahead == 0``: reintegrate-after-revert, already-integrated, or empty."""
+    already_integrated = _branch_is_ancestor(repo_root, branch, cur)
+    if already_integrated:
+        merged_commits = _first_parent_merges_reaching_branch(
+            repo_root, branch, cur
+        )
+        if merged_commits:
+            merge_commit = merged_commits[0]
+            parents = _git(
+                repo_root, "rev-list", "--parents", "-n", "1",
+                merge_commit
+            ).split()
+            diff_files = _changed_files_between(
+                repo_root, parents[1], branch
+            ) if len(parents) >= 2 else []
+            revert_commits = _revert_commits_for_merge(
+                repo_root, merge_commit, cur
+            )
+            content_differs = False
+            if diff_files:
+                try:
+                    _git(
+                        repo_root,
+                        "diff",
+                        "--quiet",
+                        cur,
+                        branch,
+                        "--",
+                        *diff_files,
+                    )
+                except WorktreeError:
+                    content_differs = True
+            if revert_commits and content_differs:
+                restore_commit = revert_commits[0]
+                try:
+                    _git(
+                        repo_root, "revert", "--no-edit",
+                        restore_commit,
+                        timeout=MERGE_TIMEOUT_SECONDS,
+                    )
+                except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                    _git(repo_root, "revert", "--abort", check=False)
+                    return _integrate_parked(
+                        branch,
+                        "reverted merge reachable by ancestry, but "
+                        f"revert-of-revert failed: {exc}",
+                        merge_commit=merge_commit,
+                        revert_commit=restore_commit,
+                        reintegrated_after_revert=False,
+                    )
+                restored_commit = _git(repo_root, "rev-parse", "HEAD")
+                gate = gate_runner or _integration_gate_for_repo(repo_root)
+                ok, detail = _run_gate_in_validation_worktree(
+                    repo_root, restored_commit, diff_files, gate,
+                )
+                if not ok:
+                    try:
+                        _git(
+                            repo_root,
+                            "revert",
+                            "--no-edit",
+                            restored_commit,
+                            timeout=MERGE_TIMEOUT_SECONDS,
+                        )
+                        reverted = True
+                    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                        _git(repo_root, "revert", "--abort", check=False)
+                        reverted = False
+                        detail += f" — AND REVERT FAILED: {exc}"
+                    return _integrate_parked(
+                        branch,
+                        f"post-reintegration gate failed: {detail}",
+                        merge_commit=merge_commit,
+                        revert_commit=restore_commit,
+                        restored_commit=restored_commit,
+                        reverted=reverted,
+                        reintegrated_after_revert=True,
+                        gate_output=detail,
+                    )
+                remove_worktree(repo_root, wt_path, branch)
+                result = {
+                    "action": "merged",
+                    "state": MERGED_GREEN,
+                    "merge_commit": restored_commit,
+                    "original_merge_commit": merge_commit,
+                    "revert_commit": restore_commit,
+                    "branch": branch,
+                    "target": cur,
+                    "gate": detail,
+                    "files": len(diff_files),
+                    "changed_files": diff_files,
+                    "reintegrated_after_revert": True,
+                }
+                if artifact_receipt:
+                    result["artifact_receipt"] = artifact_receipt
+                return result
+        remove_worktree(repo_root, wt_path, branch)
+        result = {
+            "action": "clean",
+            "branch": branch,
+            "target": cur,
+            "already_integrated": True,
+            "reason": f"chain branch already reachable from {cur}",
+        }
+        if artifact_receipt:
+            result["artifact_receipt"] = artifact_receipt
+        return result
+    remove_worktree(repo_root, wt_path, branch)
+    result = {"action": "clean", "branch": branch,
+              "reason": "no commits on chain branch"}
+    if artifact_receipt:
+        result["artifact_receipt"] = artifact_receipt
+    return result
+
+
+def _integrate_rebase_branch(
+    repo_root: Path, wt_path: Path, branch: str, cur: str,
+) -> tuple[Optional[dict], Optional[list[str]]]:
+    """(a2) Rebase chain onto live target. Returns (early_result, diff_files)."""
+    # (a2) Rebase the chain branch onto the live target HEAD inside its
+    # OWN worktree (B1), so the following merge is FF/conflict-free.
+    # Reuse `cur` (the frozen, already-validated merge target) — do NOT
+    # git fetch: repo_root is a LOCAL checkout, `cur`/HEAD is the live
+    # local tip, and this integrator never pushes. (If a chain branch
+    # could legitimately diverge from a REMOTE, escalate — do not add a
+    # network fetch here.)
+    if not (wt_path.exists() and (wt_path / ".git").exists()):
+        return _integrate_parked(branch, "chain worktree missing before rebase"), None
+    target_head = _git(repo_root, "rev-parse", cur)
+    reverted_ancestor = _reverted_merged_ancestor(
+        repo_root, branch, target_head,
+    )
+    rebase_args = ["rebase", target_head]
+    if reverted_ancestor:
+        replay_base = _git(
+            repo_root, "rev-parse", f"{reverted_ancestor}^1",
+        )
+        rebase_args = [
+            "rebase", "--onto", target_head, replay_base, branch,
+        ]
+    try:
+        _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)
+    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+        # Conflict (or timeout): abort cleanly so the worktree returns to
+        # its pre-rebase committed state, then signal rebase_conflict so
+        # complete_task routes the task back to the coder (NOT a park).
+        _git(wt_path, "rebase", "--abort", check=False)
+        return {
+            "action": "rebase_conflict",
+            "branch": branch,
+            "reason": (
+                f"rebase of {branch} onto {cur} hit a conflict "
+                f"(aborted, returned to coder): {exc}"
+            ),
+            "target": cur,
+        }, None
+    # A reverted-ancestor replay can restore acceptance paths omitted by
+    # the pre-rebase triple-dot diff as shared ancestry.  Gate and
+    # receipt the actual tree delta that is about to land.
+    diff_files = _changed_files_between(repo_root, target_head, branch)
+    # Successful rebase: fall through to the existing merge block. The
+    # --no-ff merge stays (preserves the merge-commit audit trail).
+    return None, diff_files
+
+
+def _integrate_merge_and_gate(
+    repo_root: Path,
+    wt_path: Path,
+    branch: str,
+    cur: str,
+    diff_files: list[str],
+    gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
+    artifact_receipt: Optional[dict],
+) -> dict:
+    """(b) --no-ff merge + post-merge gate; park on red/conflict."""
+    # (b) the merge itself; conflicts → abort + park.
+    msg = f"kanban: merge {branch} (worker-isolation integrator)"
+    try:
+        _git(repo_root, "merge", "--no-ff", "--no-edit", "-m", msg,
+             branch, timeout=MERGE_TIMEOUT_SECONDS)
+    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+        _git(repo_root, "merge", "--abort", check=False)
+        return _integrate_parked(
+            branch, f"merge conflict/failure (aborted): {exc}",
+        )
+    merge_commit = _git(repo_root, "rev-parse", "HEAD")
+
+    # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
+    # The gate runs at the exact merge commit in a clean detached
+    # validation worktree, never in the potentially dirty live checkout.
+    gate = gate_runner or _integration_gate_for_repo(repo_root)
+    ok, detail = _run_gate_in_validation_worktree(
+        repo_root, merge_commit, diff_files, gate,
+    )
+    if not ok:
+        try:
+            _git(repo_root, "revert", "-m", "1", "--no-edit",
+                 merge_commit, timeout=MERGE_TIMEOUT_SECONDS)
+            reverted = True
+        except (WorktreeError, subprocess.TimeoutExpired) as exc:
+            _git(repo_root, "revert", "--abort", check=False)
+            reverted = False
+            detail += f" — AND REVERT FAILED: {exc}"
+        return _integrate_parked(
+            branch,
+            f"post-merge gate failed: {detail}",
+            merge_commit=merge_commit, reverted=reverted,
+            gate_output=detail,
+        )
+
+    remove_worktree(repo_root, wt_path, branch)
+    result = {
+        "action": "merged",
+        "state": MERGED_GREEN,
+        "merge_commit": merge_commit,
+        "branch": branch,
+        "target": cur,
+        "gate": detail,
+        "files": len(diff_files),
+        "changed_files": diff_files,
+    }
+    if artifact_receipt:
+        result["artifact_receipt"] = artifact_receipt
+    return result
+
+
 def integrate_chain(
     repo_root: Path,
     wt_path: Path,
@@ -3893,11 +4412,6 @@ def integrate_chain(
     repo_root = Path(repo_root)
     wt_path = Path(wt_path)
 
-    def parked(reason: str, **extra) -> dict:
-        out = {"action": "parked", "reason": reason, "branch": branch}
-        out.update(extra)
-        return out
-
     # Lock lives in the repo's .git dir: never visible in `git status`,
     # never blocks worktree cleanup, and is shared with release activation.
     lock_path = _integrator_lock_path(repo_root)
@@ -3905,189 +4419,31 @@ def integrate_chain(
         try:
             lock = _acquire_file_lock(lock_path)
         except WorktreeError as exc:
-            return parked(str(exc))
+            return _integrate_parked(branch, str(exc))
         try:
             if not _branch_exists(repo_root, branch):
                 return {"action": "clean", "branch": branch,
                         "reason": "chain branch does not exist (nothing to merge)"}
 
             # (0) live checkout in a clean operation state + frozen target.
-            try:
-                git_dir = Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
-            except WorktreeError as exc:
-                return parked(f"cannot inspect live checkout: {exc}")
-            for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                           "rebase-merge", "rebase-apply"):
-                if (git_dir / marker).exists():
-                    return parked(
-                        f"live checkout has an operation in progress ({marker})"
-                    )
-            try:
-                cur = current_branch(repo_root)
-            except WorktreeError as exc:
-                return parked(str(exc))
-            if merge_target and cur != merge_target:
-                return parked(
-                    f"checked-out branch {cur!r} != frozen merge target "
-                    f"{merge_target!r}"
-                )
+            parked, cur = _integrate_precheck_live(
+                repo_root, merge_target, branch,
+            )
+            if parked is not None:
+                return parked
 
-            artifact_receipt = None
-
-            def preserve_or_park_artifacts() -> dict | None:
-                nonlocal artifact_receipt
-                if not (wt_path.exists() and (wt_path / ".git").exists()):
-                    return None
-                leftovers = dirty_files(wt_path)
-                if not leftovers:
-                    return None
-                leftovers_sorted = sorted(leftovers)
-                dirty_class = _classify_dirty_paths(leftovers_sorted)
-                if dirty_class != PRESERVABLE_ARTIFACTS_CLASS:
-                    return parked(
-                        f"{dirty_class}: "
-                        + ", ".join(leftovers_sorted[:10])
-                        + ". "
-                        + _dirty_recovery_instruction(dirty_class),
-                        dirty_files=leftovers_sorted,
-                        park_class=dirty_class,
-                    )
-                try:
-                    artifact_receipt = _preserve_artifact_files(
-                        wt_path, wt_path.name, leftovers_sorted
-                    )
-                except Exception as exc:
-                    return parked(
-                        f"ARTIFACT_PRESERVE_FAILED: {exc}",
-                        dirty_files=sorted(leftovers),
-                        park_class="ARTIFACT_PRESERVE_FAILED",
-                    )
-                remaining = dirty_files(wt_path)
-                if remaining:
-                    return parked(
-                        "chain worktree has uncommitted changes after artifact cleanup: "
-                        + ", ".join(sorted(remaining)[:10]),
-                        dirty_files=sorted(remaining),
-                        artifact_receipt=artifact_receipt,
-                    )
-                return None
-
-            preserve_failure = preserve_or_park_artifacts()
+            preserve_failure, artifact_receipt = _preserve_or_park_chain_artifacts(
+                wt_path, branch,
+            )
             if preserve_failure:
                 return preserve_failure
 
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
-                already_integrated = _branch_is_ancestor(repo_root, branch, cur)
-                if already_integrated:
-                    merged_commits = _first_parent_merges_reaching_branch(
-                        repo_root, branch, cur
-                    )
-                    if merged_commits:
-                        merge_commit = merged_commits[0]
-                        parents = _git(
-                            repo_root, "rev-list", "--parents", "-n", "1",
-                            merge_commit
-                        ).split()
-                        diff_files = _changed_files_between(
-                            repo_root, parents[1], branch
-                        ) if len(parents) >= 2 else []
-                        revert_commits = _revert_commits_for_merge(
-                            repo_root, merge_commit, cur
-                        )
-                        content_differs = False
-                        if diff_files:
-                            try:
-                                _git(
-                                    repo_root,
-                                    "diff",
-                                    "--quiet",
-                                    cur,
-                                    branch,
-                                    "--",
-                                    *diff_files,
-                                )
-                            except WorktreeError:
-                                content_differs = True
-                        if revert_commits and content_differs:
-                            restore_commit = revert_commits[0]
-                            try:
-                                _git(
-                                    repo_root, "revert", "--no-edit",
-                                    restore_commit,
-                                    timeout=MERGE_TIMEOUT_SECONDS,
-                                )
-                            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                                _git(repo_root, "revert", "--abort", check=False)
-                                return parked(
-                                    "reverted merge reachable by ancestry, but "
-                                    f"revert-of-revert failed: {exc}",
-                                    merge_commit=merge_commit,
-                                    revert_commit=restore_commit,
-                                    reintegrated_after_revert=False,
-                                )
-                            restored_commit = _git(repo_root, "rev-parse", "HEAD")
-                            gate = gate_runner or _integration_gate_for_repo(repo_root)
-                            ok, detail = _run_gate_in_validation_worktree(
-                                repo_root, restored_commit, diff_files, gate,
-                            )
-                            if not ok:
-                                try:
-                                    _git(
-                                        repo_root,
-                                        "revert",
-                                        "--no-edit",
-                                        restored_commit,
-                                        timeout=MERGE_TIMEOUT_SECONDS,
-                                    )
-                                    reverted = True
-                                except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                                    _git(repo_root, "revert", "--abort", check=False)
-                                    reverted = False
-                                    detail += f" — AND REVERT FAILED: {exc}"
-                                return parked(
-                                    f"post-reintegration gate failed: {detail}",
-                                    merge_commit=merge_commit,
-                                    revert_commit=restore_commit,
-                                    restored_commit=restored_commit,
-                                    reverted=reverted,
-                                    reintegrated_after_revert=True,
-                                    gate_output=detail,
-                                )
-                            remove_worktree(repo_root, wt_path, branch)
-                            result = {
-                                "action": "merged",
-                                "state": MERGED_GREEN,
-                                "merge_commit": restored_commit,
-                                "original_merge_commit": merge_commit,
-                                "revert_commit": restore_commit,
-                                "branch": branch,
-                                "target": cur,
-                                "gate": detail,
-                                "files": len(diff_files),
-                                "changed_files": diff_files,
-                                "reintegrated_after_revert": True,
-                            }
-                            if artifact_receipt:
-                                result["artifact_receipt"] = artifact_receipt
-                            return result
-                    remove_worktree(repo_root, wt_path, branch)
-                    result = {
-                        "action": "clean",
-                        "branch": branch,
-                        "target": cur,
-                        "already_integrated": True,
-                        "reason": f"chain branch already reachable from {cur}",
-                    }
-                    if artifact_receipt:
-                        result["artifact_receipt"] = artifact_receipt
-                    return result
-                remove_worktree(repo_root, wt_path, branch)
-                result = {"action": "clean", "branch": branch,
-                          "reason": "no commits on chain branch"}
-                if artifact_receipt:
-                    result["artifact_receipt"] = artifact_receipt
-                return result
+                return _integrate_empty_or_already_merged(
+                    repo_root, wt_path, branch, cur, gate_runner,
+                    artifact_receipt,
+                )
 
             diff_files = [
                 f for f in _git(
@@ -4099,139 +4455,43 @@ def integrate_chain(
             dirty = set(dirty_files(repo_root))
             overlap = sorted(dirty & set(diff_files))
             if overlap:
-                return parked(
+                return _integrate_parked(
+                    branch,
                     "dirty files in live checkout overlap the branch diff: "
-                    + ", ".join(overlap[:10])
+                    + ", ".join(overlap[:10]),
                 )
 
-            # (a2) Rebase the chain branch onto the live target HEAD inside its
-            # OWN worktree (B1), so the following merge is FF/conflict-free.
-            # Reuse `cur` (the frozen, already-validated merge target) — do NOT
-            # git fetch: repo_root is a LOCAL checkout, `cur`/HEAD is the live
-            # local tip, and this integrator never pushes. (If a chain branch
-            # could legitimately diverge from a REMOTE, escalate — do not add a
-            # network fetch here.)
-            if not (wt_path.exists() and (wt_path / ".git").exists()):
-                return parked("chain worktree missing before rebase")
-            target_head = _git(repo_root, "rev-parse", cur)
-            reverted_ancestor = _reverted_merged_ancestor(
-                repo_root, branch, target_head,
+            early, diff_files = _integrate_rebase_branch(
+                repo_root, wt_path, branch, cur,
             )
-            rebase_args = ["rebase", target_head]
-            if reverted_ancestor:
-                replay_base = _git(
-                    repo_root, "rev-parse", f"{reverted_ancestor}^1",
-                )
-                rebase_args = [
-                    "rebase", "--onto", target_head, replay_base, branch,
-                ]
-            try:
-                _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)
-            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                # Conflict (or timeout): abort cleanly so the worktree returns to
-                # its pre-rebase committed state, then signal rebase_conflict so
-                # complete_task routes the task back to the coder (NOT a park).
-                _git(wt_path, "rebase", "--abort", check=False)
-                return {
-                    "action": "rebase_conflict",
-                    "branch": branch,
-                    "reason": (
-                        f"rebase of {branch} onto {cur} hit a conflict "
-                        f"(aborted, returned to coder): {exc}"
-                    ),
-                    "target": cur,
-                }
-            # A reverted-ancestor replay can restore acceptance paths omitted by
-            # the pre-rebase triple-dot diff as shared ancestry.  Gate and
-            # receipt the actual tree delta that is about to land.
-            diff_files = _changed_files_between(repo_root, target_head, branch)
-            # Successful rebase: fall through to the existing merge block. The
-            # --no-ff merge stays (preserves the merge-commit audit trail).
+            if early is not None:
+                return early
 
-            # (b) the merge itself; conflicts → abort + park.
-            msg = f"kanban: merge {branch} (worker-isolation integrator)"
-            try:
-                _git(repo_root, "merge", "--no-ff", "--no-edit", "-m", msg,
-                     branch, timeout=MERGE_TIMEOUT_SECONDS)
-            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                _git(repo_root, "merge", "--abort", check=False)
-                return parked(f"merge conflict/failure (aborted): {exc}")
-            merge_commit = _git(repo_root, "rev-parse", "HEAD")
-
-            # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
-            # The gate runs at the exact merge commit in a clean detached
-            # validation worktree, never in the potentially dirty live checkout.
-            gate = gate_runner or _integration_gate_for_repo(repo_root)
-            ok, detail = _run_gate_in_validation_worktree(
-                repo_root, merge_commit, diff_files, gate,
+            return _integrate_merge_and_gate(
+                repo_root, wt_path, branch, cur, diff_files,
+                gate_runner, artifact_receipt,
             )
-            if not ok:
-                try:
-                    _git(repo_root, "revert", "-m", "1", "--no-edit",
-                         merge_commit, timeout=MERGE_TIMEOUT_SECONDS)
-                    reverted = True
-                except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                    _git(repo_root, "revert", "--abort", check=False)
-                    reverted = False
-                    detail += f" — AND REVERT FAILED: {exc}"
-                return parked(
-                    f"post-merge gate failed: {detail}",
-                    merge_commit=merge_commit, reverted=reverted,
-                    gate_output=detail,
-                )
-
-            remove_worktree(repo_root, wt_path, branch)
-            result = {
-                "action": "merged",
-                "state": MERGED_GREEN,
-                "merge_commit": merge_commit,
-                "branch": branch,
-                "target": cur,
-                "gate": detail,
-                "files": len(diff_files),
-                "changed_files": diff_files,
-            }
-            if artifact_receipt:
-                result["artifact_receipt"] = artifact_receipt
-            return result
         finally:
             _release_file_lock(lock)
 
 
-def maybe_integrate_on_complete(
+# ---------------------------------------------------------------------------
+# Completion hook (maybe_integrate_on_complete)
+# ---------------------------------------------------------------------------
+
+def _find_open_chain_sibling(
     conn: sqlite3.Connection,
     task_id: str,
-    *,
-    gate_runner=None,
-) -> Optional[dict]:
-    """Completion hook (called by ``complete_task`` on the direct done
-    path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
-    open task of a provisioned chain, integrate the chain.
+    members: set[str],
+    wt: Path,
+):
+    """Chain-complete check via BOTH signals, conservatively OR-ed.
 
-    Returns ``None`` when not applicable (non-provisioned workspace),
-    ``{"action": "deferred"}`` while chain siblings are still open, or the
-    ``integrate_chain`` outcome (events + receipt comment already written).
-    A ``parked`` outcome means the caller must NOT move the task to done.
+    (a) task_links membership from the chain root — covers unclaimed
+    children whose workspace_path still points at the repo root;
+    (b) same provisioned worktree path — covers tasks attached to the
+    worktree outside the link graph (e.g. cloned fix tasks).
     """
-    row = conn.execute(
-        "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
-    ).fetchone()
-    if not row or not row["workspace_path"]:
-        return None
-    provisioned = split_provisioned_path(row["workspace_path"])
-    if provisioned is None:
-        return None
-    repo_root, root_id, wt = provisioned
-
-    from hermes_cli import kanban_db as kb
-
-    # Chain-complete check via BOTH signals, conservatively OR-ed:
-    # (a) task_links membership from the chain root — covers unclaimed
-    #     children whose workspace_path still points at the repo root;
-    # (b) same provisioned worktree path — covers tasks attached to the
-    #     worktree outside the link graph (e.g. cloned fix tasks).
-    members = _chain_member_ids(conn, root_id)
-    members.discard(task_id)
     open_sibling = None
     if members:
         placeholders = ",".join("?" for _ in members)
@@ -4255,160 +4515,210 @@ def maybe_integrate_on_complete(
             "LIMIT 1",
             (like, task_id),
         ).fetchone()
-    auto_complete_root_id = None
-    if open_sibling:
-        pending_root_id = _pending_root_finalizer_id(
-            conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
-        )
-        if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
-            auto_complete_root_id = pending_root_id
-        elif pending_root_id is not None:
-            try:
-                _record_pending_root_finalizer(
-                    conn,
-                    pending_root_id=pending_root_id,
-                    completed_task_id=task_id,
-                    root_id=root_id,
-                    branch=chain_branch(root_id),
-                )
-            except Exception:
-                _log.debug("pending-root-finalizer event failed", exc_info=True)
-        else:
-            return {"action": "deferred", "reason": "chain has open siblings"}
-        if auto_complete_root_id is None:
-            return {"action": "deferred", "reason": "chain has open siblings"}
+    return open_sibling
 
-    target = frozen_merge_target(conn, root_id)
-    branch = chain_branch(root_id)
-    if not _branch_exists(repo_root, branch):
-        # A previous completion attempt may have merged, gated, and removed the
-        # branch/worktree before its later DB done/outbox transaction rolled
-        # back.  Recover only from two durable integration witnesses whose
-        # commit still reaches the frozen target; a bare missing branch remains
-        # a hard park.
-        merged_row = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? "
-            "AND kind = 'integration_merged' ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        verified_row = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? "
-            "AND kind = 'INTEGRATOR_VERIFIED' ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
+
+def _resolve_open_sibling_finalizer(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    wt: Path,
+    members: set[str],
+    open_sibling,
+) -> tuple[Optional[dict], Optional[str]]:
+    """If open siblings remain, decide deferred vs auto-complete root.
+
+    Returns ``(deferred_result, None)`` or ``(None, auto_complete_root_id)``.
+    """
+    auto_complete_root_id = None
+    if not open_sibling:
+        return None, auto_complete_root_id
+    pending_root_id = _pending_root_finalizer_id(
+        conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
+    )
+    if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
+        auto_complete_root_id = pending_root_id
+    elif pending_root_id is not None:
         try:
-            merged_payload = json.loads(merged_row["payload"]) if merged_row else {}
-            verified_payload = (
-                json.loads(verified_row["payload"]) if verified_row else {}
+            _record_pending_root_finalizer(
+                conn,
+                pending_root_id=pending_root_id,
+                completed_task_id=task_id,
+                root_id=root_id,
+                branch=chain_branch(root_id),
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            merged_payload = {}
-            verified_payload = {}
-        merge_commit = str(merged_payload.get("merge_commit") or "").strip()
-        verified_commit = str(verified_payload.get("merge_commit") or "").strip()
-        recorded_target = str(merged_payload.get("target") or target).strip()
-        if (
-            merge_commit
-            and merge_commit == verified_commit
-            and recorded_target == target
-            and _branch_is_ancestor(repo_root, merge_commit, target)
-        ):
-            changed_files = [
-                str(path)
-                for path in merged_payload.get("changed_files", [])
-                if str(path).strip()
-            ]
-            content_differs = False
-            if changed_files:
-                try:
-                    _git(
-                        repo_root,
-                        "diff",
-                        "--quiet",
-                        merge_commit,
-                        target,
-                        "--",
-                        *changed_files,
-                    )
-                except WorktreeError:
-                    content_differs = True
-            if content_differs:
-                revert_commits = _revert_commits_for_merge(
-                    repo_root, merge_commit, target,
+        except Exception:
+            _log.debug("pending-root-finalizer event failed", exc_info=True)
+    else:
+        return {"action": "deferred", "reason": "chain has open siblings"}, None
+    if auto_complete_root_id is None:
+        return {"action": "deferred", "reason": "chain has open siblings"}, None
+    return None, auto_complete_root_id
+
+
+def _recover_missing_branch_integration(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    repo_root: Path,
+    branch: str,
+    target: Optional[str],
+    kb,
+) -> dict:
+    """Recover or park when the chain branch is already gone after a prior merge."""
+    # A previous completion attempt may have merged, gated, and removed the
+    # branch/worktree before its later DB done/outbox transaction rolled
+    # back.  Recover only from two durable integration witnesses whose
+    # commit still reaches the frozen target; a bare missing branch remains
+    # a hard park.
+    merged_row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'integration_merged' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    verified_row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'INTEGRATOR_VERIFIED' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    try:
+        merged_payload = json.loads(merged_row["payload"]) if merged_row else {}
+        verified_payload = (
+            json.loads(verified_row["payload"]) if verified_row else {}
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        merged_payload = {}
+        verified_payload = {}
+    merge_commit = str(merged_payload.get("merge_commit") or "").strip()
+    verified_commit = str(verified_payload.get("merge_commit") or "").strip()
+    recorded_target = str(merged_payload.get("target") or target).strip()
+    if (
+        merge_commit
+        and merge_commit == verified_commit
+        and recorded_target == target
+        and _branch_is_ancestor(repo_root, merge_commit, target)
+    ):
+        changed_files = [
+            str(path)
+            for path in merged_payload.get("changed_files", [])
+            if str(path).strip()
+        ]
+        content_differs = False
+        if changed_files:
+            try:
+                _git(
+                    repo_root,
+                    "diff",
+                    "--quiet",
+                    merge_commit,
+                    target,
+                    "--",
+                    *changed_files,
                 )
-                return {
-                    **merged_payload,
-                    "action": "parked",
-                    "reason": (
-                        "recorded green merge content is no longer active on "
-                        f"{target}; refusing already-integrated recovery"
-                    ),
-                    "branch": branch,
-                    "target": target,
-                    "merge_commit": merge_commit,
-                    "revert_commits": revert_commits,
-                    "content_drift_after_merge": True,
-                }
-            outcome = {
+            except WorktreeError:
+                content_differs = True
+        if content_differs:
+            revert_commits = _revert_commits_for_merge(
+                repo_root, merge_commit, target,
+            )
+            return {
                 **merged_payload,
-                "action": "clean",
-                "already_integrated": True,
-                "merge_commit": merge_commit,
+                "action": "parked",
+                "reason": (
+                    "recorded green merge content is no longer active on "
+                    f"{target}; refusing already-integrated recovery"
+                ),
                 "branch": branch,
                 "target": target,
-                "reconciled_from": "integration_merged+INTEGRATOR_VERIFIED",
+                "merge_commit": merge_commit,
+                "revert_commits": revert_commits,
+                "content_drift_after_merge": True,
             }
-            release_row = conn.execute(
-                "SELECT payload FROM task_events WHERE task_id = ? "
-                "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if release_row is not None:
-                try:
-                    release_payload = json.loads(release_row["payload"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    release_payload = {}
-                child_id = str(release_payload.get("child_id") or "").strip()
-                if child_id:
-                    outcome["release_gate_child_id"] = child_id
-            if (
-                "release_gate_child_id" not in outcome
-                and outcome.get("release_gate_required")
-            ):
-                try:
-                    _create_parked_release_gate_child(
-                        conn, task_id, root_id, outcome,
-                    )
-                except Exception as exc:
-                    return {
-                        **outcome,
-                        "action": "parked",
-                        "reason": f"required release-gate creation failed: {exc}",
-                        "release_gate_creation_failed": True,
-                    }
-            return outcome
         outcome = {
-            "action": "parked",
-            "reason": f"missing branch evidence for root finalizer: {branch}",
+            **merged_payload,
+            "action": "clean",
+            "already_integrated": True,
+            "merge_commit": merge_commit,
             "branch": branch,
             "target": target,
+            "reconciled_from": "integration_merged+INTEGRATOR_VERIFIED",
         }
-        try:
-            with kb.write_txn(conn):
-                kb._append_event(conn, task_id, "integration_parked", outcome)
-        except Exception:
-            _log.warning("could not record missing-branch event for %s", task_id,
-                         exc_info=True)
+        release_row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if release_row is not None:
+            try:
+                release_payload = json.loads(release_row["payload"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                release_payload = {}
+            child_id = str(release_payload.get("child_id") or "").strip()
+            if child_id:
+                outcome["release_gate_child_id"] = child_id
+        if (
+            "release_gate_child_id" not in outcome
+            and outcome.get("release_gate_required")
+        ):
+            try:
+                _create_parked_release_gate_child(
+                    conn, task_id, root_id, outcome,
+                )
+            except Exception as exc:
+                return {
+                    **outcome,
+                    "action": "parked",
+                    "reason": f"required release-gate creation failed: {exc}",
+                    "release_gate_creation_failed": True,
+                }
         return outcome
-    outcome = integrate_chain(
-        repo_root, wt, branch, target, gate_runner=gate_runner,
-    )
-    if outcome.get("action") == "merged" and any(
-        str(path).startswith("web/")
-        for path in outcome.get("changed_files", [])
-    ):
-        outcome["release_gate_required"] = True
+    outcome = {
+        "action": "parked",
+        "reason": f"missing branch evidence for root finalizer: {branch}",
+        "branch": branch,
+        "target": target,
+    }
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "integration_parked", outcome)
+    except Exception:
+        _log.warning("could not record missing-branch event for %s", task_id,
+                     exc_info=True)
+    return outcome
 
+
+def _maybe_auto_complete_after_integration(
+    conn: sqlite3.Connection,
+    auto_complete_root_id: Optional[str],
+    task_id: str,
+    outcome: dict,
+) -> None:
+    if auto_complete_root_id is not None:
+        try:
+            _auto_complete_decompose_root(
+                conn,
+                root_id=auto_complete_root_id,
+                completed_task_id=task_id,
+                outcome=outcome,
+            )
+        except Exception:
+            _log.warning(
+                "could not auto-complete decompose root %s",
+                auto_complete_root_id,
+                exc_info=True,
+            )
+
+
+def _record_integration_events_and_receipts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    target: Optional[str],
+    outcome: dict,
+    auto_complete_root_id: Optional[str],
+    kb,
+) -> dict:
+    """Write integration events/comments/release-gate; return final outcome."""
     try:
         with kb.write_txn(conn):
             kind = {
@@ -4476,20 +4786,9 @@ def maybe_integrate_on_complete(
                     "reason": f"required release-gate creation failed: {exc}",
                     "release_gate_creation_failed": True,
                 }
-        if auto_complete_root_id is not None:
-            try:
-                _auto_complete_decompose_root(
-                    conn,
-                    root_id=auto_complete_root_id,
-                    completed_task_id=task_id,
-                    outcome=outcome,
-                )
-            except Exception:
-                _log.warning(
-                    "could not auto-complete decompose root %s",
-                    auto_complete_root_id,
-                    exc_info=True,
-                )
+        _maybe_auto_complete_after_integration(
+            conn, auto_complete_root_id, task_id, outcome,
+        )
     elif outcome["action"] == "clean" and outcome.get("already_integrated"):
         try:
             kb.add_comment(
@@ -4500,18 +4799,68 @@ def maybe_integrate_on_complete(
             )
         except Exception:
             _log.debug("already-integrated receipt comment failed", exc_info=True)
-        if auto_complete_root_id is not None:
-            try:
-                _auto_complete_decompose_root(
-                    conn,
-                    root_id=auto_complete_root_id,
-                    completed_task_id=task_id,
-                    outcome=outcome,
-                )
-            except Exception:
-                _log.warning(
-                    "could not auto-complete decompose root %s",
-                    auto_complete_root_id,
-                    exc_info=True,
-                )
+        _maybe_auto_complete_after_integration(
+            conn, auto_complete_root_id, task_id, outcome,
+        )
     return outcome
+
+
+def maybe_integrate_on_complete(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    gate_runner=None,
+) -> Optional[dict]:
+    """Completion hook (called by ``complete_task`` on the direct done
+    path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
+    open task of a provisioned chain, integrate the chain.
+
+    Returns ``None`` when not applicable (non-provisioned workspace),
+    ``{"action": "deferred"}`` while chain siblings are still open, or the
+    ``integrate_chain`` outcome (events + receipt comment already written).
+    A ``parked`` outcome means the caller must NOT move the task to done.
+    """
+    row = conn.execute(
+        "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not row or not row["workspace_path"]:
+        return None
+    provisioned = split_provisioned_path(row["workspace_path"])
+    if provisioned is None:
+        return None
+    repo_root, root_id, wt = provisioned
+
+    from hermes_cli import kanban_db as kb
+
+    # Chain-complete check via BOTH signals, conservatively OR-ed:
+    # (a) task_links membership from the chain root — covers unclaimed
+    #     children whose workspace_path still points at the repo root;
+    # (b) same provisioned worktree path — covers tasks attached to the
+    #     worktree outside the link graph (e.g. cloned fix tasks).
+    members = _chain_member_ids(conn, root_id)
+    members.discard(task_id)
+    open_sibling = _find_open_chain_sibling(conn, task_id, members, wt)
+    deferred, auto_complete_root_id = _resolve_open_sibling_finalizer(
+        conn, task_id, root_id, wt, members, open_sibling,
+    )
+    if deferred is not None:
+        return deferred
+
+    target = frozen_merge_target(conn, root_id)
+    branch = chain_branch(root_id)
+    if not _branch_exists(repo_root, branch):
+        return _recover_missing_branch_integration(
+            conn, task_id, root_id, repo_root, branch, target, kb,
+        )
+    outcome = integrate_chain(
+        repo_root, wt, branch, target, gate_runner=gate_runner,
+    )
+    if outcome.get("action") == "merged" and any(
+        str(path).startswith("web/")
+        for path in outcome.get("changed_files", [])
+    ):
+        outcome["release_gate_required"] = True
+
+    return _record_integration_events_and_receipts(
+        conn, task_id, root_id, target, outcome, auto_complete_root_id, kb,
+    )
