@@ -235,7 +235,7 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
         if len(sleep_calls) >= 2:
             runner._running = False
 
-    async def fake_to_thread(fn, *args, **kwargs):
+    async def fake_kanban_off_loop(self, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
     import hermes_cli.kanban_db as _kb
@@ -246,7 +246,9 @@ def test_notifier_watcher_runs_when_dispatch_enabled():
             side_effect=lambda *a, **kw: past_gate.append(True) or [],
         ):
             with patch("asyncio.sleep", side_effect=fake_sleep):
-                with patch("asyncio.to_thread", side_effect=fake_to_thread):
+                with patch.object(
+                    GatewayRunner, "_kanban_off_loop", fake_kanban_off_loop,
+                ):
                     asyncio.run(runner._kanban_notifications_watcher())
 
     assert past_gate, "list_boards should be called when dispatch_in_gateway=true"
@@ -270,7 +272,7 @@ def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatc
         if len(sleep_calls) >= 2:
             runner._running = False
 
-    async def fake_to_thread(fn, *args, **kwargs):
+    async def fake_kanban_off_loop(self, fn, *args, **kwargs):
         return fn(*args, **kwargs)
 
     dispatch_result = SimpleNamespace(
@@ -294,7 +296,7 @@ def test_dispatcher_watcher_spawns_closeout_units_per_board(tmp_path, monkeypatc
     )
     monkeypatch.setattr(watchers, "_release_singleton_lock", lambda _handle: None)
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(GatewayRunner, "_kanban_off_loop", fake_kanban_off_loop)
     monkeypatch.setattr(_kb, "kanban_home", lambda: tmp_path)
     monkeypatch.setattr(_kb, "kanban_db_path", lambda board=None: tmp_path / f"{board}.db")
     monkeypatch.setattr(_kb, "list_boards", lambda include_archived=False: boards)
