@@ -12640,7 +12640,7 @@ def complete_task(
             if release_row is not None:
                 try:
                     release_payload = json.loads(release_row["payload"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
+                except (TypeError, ValueError):
                     release_payload = {}
                 child_id = str(release_payload.get("child_id") or "").strip()
                 if child_id:
@@ -17773,6 +17773,9 @@ _HEILER_STALL_FALLBACK_CLASS = {
 _HEILER_BLOCK_KIND_FALLBACK_CLASS = {
     "needs_input": HEILER_CLASS_OPERATOR_GATED,
     "operator_question": HEILER_CLASS_OPERATOR_GATED,
+    # create_task(initial_status="blocked") is an explicit operator park,
+    # not evidence of a worker or product defect.
+    "born_blocked": HEILER_CLASS_OPERATOR_INTENT,
 }
 _DETERMINISTIC_SPAWN_FAILURE_MARKERS = (
     "spawn_refused_allowlist_unenforceable",
@@ -21299,6 +21302,16 @@ def escalate_silent_blocks_sweep(
                 body_hash=body_hash,
                 last_auto_retry_body_hash=_latest_auto_retry_body_hash(conn, tid),
             )
+            if blocked_event is not None:
+                try:
+                    blocked_payload = json.loads(blocked_event["payload"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    blocked_payload = {}
+                if (
+                    isinstance(blocked_payload, dict)
+                    and blocked_payload.get("source") == "create_task"
+                ):
+                    blocked_kind = "born_blocked"
             reready_count = _autonomy_reready_count(conn, tid)
             reready_total = _autonomy_reready_total(conn, tid)
             route = _resolve_settled_block_autonomy_route(

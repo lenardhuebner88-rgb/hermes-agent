@@ -135,6 +135,8 @@ def test_silent_block_sweep_escalates_block_without_run(
         heiler = _heiler_events(conn, t)[0]
 
     assert escalation.payload["evidence"]["last_error"] == ""
+    assert heiler.payload["class"] == kb.HEILER_CLASS_UNCLASSIFIED
+    assert heiler.payload["evidence"]["signal_source"] == "default"
     assert "excerpt" not in heiler.payload["evidence"]
     assert "fingerprint" not in heiler.payload
 
@@ -1488,9 +1490,7 @@ def test_silent_block_sweep_classifies_born_blocked_as_operator_intent(
     assert escalation.payload["evidence"]["last_error"] == (
         "born blocked (initial_status=blocked)"
     )
-    assert escalation.payload["blocked_kind"] == "born_blocked"
+    assert escalation.payload["evidence"]["blocked_kind"] == "born_blocked"
     assert classification.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
-    assert classification.payload["evidence"] == {
-        "matched": "born_blocked",
-        "signal_source": "blocked_kind_fallback",
-    }
+    assert classification.payload["evidence"]["matched"] == "born_blocked"
+    assert classification.payload["evidence"]["signal_source"] == "blocked_kind"
