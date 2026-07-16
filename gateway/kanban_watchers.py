@@ -11,6 +11,8 @@ behavior-neutral move that lifts ~1,000 LOC out of run.py.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
 import os
 import sqlite3
@@ -881,6 +883,17 @@ def _release_singleton_lock(handle) -> None:
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
+    async def _kanban_off_loop(self, fn, /, *args, **kwargs):
+        """Run blocking kanban work on the gateway-owned executor — NEVER the
+        loop default executor: 3.11 asyncio.run teardown joins the default
+        executor unbounded, so a stuck DB call (120s busy timeout) would park
+        gateway shutdown before cleanup. The owned pool is shut down bounded
+        (wait=False) in stop(). Context propagated like asyncio.to_thread."""
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        call = functools.partial(fn, *args, **kwargs)
+        return await loop.run_in_executor(self._get_executor(), ctx.run, call)
+
     async def _kanban_notifications_watcher(self, interval: float = 5.0) -> None:
         """Own Kanban subscription delivery and alert-rule evaluation.
 
@@ -891,8 +904,8 @@ class GatewayKanbanWatchersMixin:
         then advances the cursor. When a task reaches a terminal state
         (``completed`` / ``archived``), the subscription is removed.
 
-        Runs in the gateway event loop; all SQLite work is pushed to a
-        thread via ``asyncio.to_thread`` so the loop never blocks on the
+        Runs in the gateway event loop; all SQLite work is pushed off-loop via
+        ``self._kanban_off_loop`` so the loop never blocks on the
         WAL lock. Failures in one tick don't stop subsequent ticks.
 
         Alert rules are a stateful, rate-limited hook evaluated by this same
@@ -1096,7 +1109,7 @@ class GatewayKanbanWatchersMixin:
                             save_alert_state is not None
                             and alert_state_path is not None
                         ):
-                            await asyncio.to_thread(
+                            await self._kanban_off_loop(
                                 save_alert_state, alert_state_path, alert_state
                             )
                 # F1: before collecting deliveries, flush any stalled root's
@@ -1104,7 +1117,7 @@ class GatewayKanbanWatchersMixin:
                 # Fully fail-soft — a sweep hiccup must never stop the tick.
                 if subscriptions_enabled:
                     try:
-                        await asyncio.to_thread(
+                        await self._kanban_off_loop(
                             self._kanban_flush_stalled_trees, kanban_cfg, _kb,
                         )
                     except Exception:
@@ -1228,7 +1241,7 @@ class GatewayKanbanWatchersMixin:
                             conn.close()
                     return deliveries
 
-                deliveries = await asyncio.to_thread(_collect)
+                deliveries = await self._kanban_off_loop(_collect)
                 attempted_event_targets: set[tuple[str, str, int, str, str, str]] = set()
                 for d in deliveries:
                     sub = d["sub"]
@@ -1240,7 +1253,7 @@ class GatewayKanbanWatchersMixin:
                     except ValueError:
                         # Unknown platform string; skip and advance cursor so
                         # we don't replay forever.
-                        await asyncio.to_thread(
+                        await self._kanban_off_loop(
                             self._kanban_advance,
                             sub,
                             d["cursor"],
@@ -1264,7 +1277,7 @@ class GatewayKanbanWatchersMixin:
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
                             platform_str, sub["task_id"],
                         )
-                        await asyncio.to_thread(
+                        await self._kanban_off_loop(
                             self._kanban_rewind,
                             sub,
                             d["cursor"],
@@ -1298,7 +1311,7 @@ class GatewayKanbanWatchersMixin:
                             # superseding upstream's inline "✔ ... done — ..."
                             # construction for this kind.
                             _root_run = runs_by_event_id.get(int(ev.id))
-                            tree_decision = await asyncio.to_thread(
+                            tree_decision = await self._kanban_off_loop(
                                 self._kanban_tree_completion,
                                 task, _root_run, ev, board_slug, kanban_cfg,
                             )
@@ -1457,7 +1470,7 @@ class GatewayKanbanWatchersMixin:
                                     )
                             elif kind == "gave_up":
                                 try:
-                                    await asyncio.to_thread(
+                                    await self._kanban_off_loop(
                                         _write_auto_receipt,
                                         task,
                                         board_slug=board_slug,
@@ -1475,7 +1488,7 @@ class GatewayKanbanWatchersMixin:
                             # start of the batch (FINDING #6 duplicate-report
                             # fix).
                             delivered_cursor = int(ev.id)
-                            await asyncio.to_thread(
+                            await self._kanban_off_loop(
                                 self._kanban_checkpoint,
                                 sub,
                                 delivered_cursor,
@@ -1498,7 +1511,7 @@ class GatewayKanbanWatchersMixin:
                                     "%s on %s after %d consecutive send failures",
                                     sub["task_id"], platform_str, fails,
                                 )
-                                await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                await self._kanban_off_loop(self._kanban_unsub, sub, board_slug)
                                 sub_fail_counts.pop(sub_key, None)
                             else:
                                 # Rewind only to the last successfully delivered
@@ -1506,7 +1519,7 @@ class GatewayKanbanWatchersMixin:
                                 # to old_cursor.  This prevents already-sent
                                 # events from being re-claimed and re-delivered
                                 # on the next tick (FINDING #6).
-                                await asyncio.to_thread(
+                                await self._kanban_off_loop(
                                     self._kanban_rewind,
                                     sub,
                                     d["cursor"],
@@ -1519,7 +1532,7 @@ class GatewayKanbanWatchersMixin:
                             # dropping the subscription is the terminal action.
                             break
                     else:
-                        await asyncio.to_thread(
+                        await self._kanban_off_loop(
                             self._kanban_advance,
                             sub,
                             d["cursor"],
@@ -1607,7 +1620,7 @@ class GatewayKanbanWatchersMixin:
                                     sub["task_id"], _wk_err, exc_info=True,
                                 )
                         if task_terminal:
-                            await asyncio.to_thread(
+                            await self._kanban_off_loop(
                                 self._kanban_unsub, sub, board_slug,
                             )
             except asyncio.CancelledError:
@@ -1656,7 +1669,7 @@ class GatewayKanbanWatchersMixin:
     ) -> Optional[str]:
         """Classify a completed task's role in a decomposed tree (K2).
 
-        Runs in ``to_thread`` (opens its own board-scoped connection).
+        Runs in ``_kanban_off_loop`` (opens its own board-scoped connection).
 
         Returns:
           ``None``        — standalone task (no ``task_links``); the caller
@@ -1706,7 +1719,7 @@ class GatewayKanbanWatchersMixin:
     def _kanban_flush_stalled_trees(self, kanban_cfg: Optional[dict], _kb: Any) -> None:
         """F1 sweep: emit one-time stall-flush events across every board.
 
-        Runs in ``to_thread`` once per notifier tick (before delivery
+        Runs in ``_kanban_off_loop`` once per notifier tick (before delivery
         collection) so a freshly-emitted ``tree_stalled_flush`` is delivered
         the same tick. Mirrors the notifier's board enumeration and is fully
         fail-soft per board — never raises into the tick loop.
@@ -1754,7 +1767,7 @@ class GatewayKanbanWatchersMixin:
         board: Optional[str] = None,
         claim_token: Optional[str] = None,
     ) -> None:
-        """Sync helper: advance a subscription's cursor. Runs in to_thread.
+        """Sync helper: advance a subscription's cursor. Runs in ``_kanban_off_loop``.
 
         ``board`` scopes the DB connection to the board that owns this
         subscription. Unsub cursors in one board can't touch another's.
@@ -2019,7 +2032,7 @@ class GatewayKanbanWatchersMixin:
             finally:
                 conn.close()
 
-        alerts = await asyncio.to_thread(_evaluate)
+        alerts = await self._kanban_off_loop(_evaluate)
         for alert in alerts:
             if alert["rule"] in _SEND_GATED_RULES:
                 continue
@@ -2062,13 +2075,13 @@ class GatewayKanbanWatchersMixin:
         loop exits immediately and an external daemon is expected.
 
         Each tick calls :func:`kanban_db.dispatch_once` inside
-        ``asyncio.to_thread`` so the SQLite WAL lock never blocks the
+        ``self._kanban_off_loop`` so the SQLite WAL lock never blocks the
         event loop. Failures in one tick don't stop subsequent ticks —
         same pattern as `_kanban_notifications_watcher`.
 
         Shutdown: the loop checks ``self._running`` between ticks; gateway
         stop() flips it to False and cancels pending tasks, and the
-        in-flight ``to_thread`` returns on its own after the current
+        in-flight ``_kanban_off_loop`` returns on its own after the current
         ``dispatch_once`` call finishes (typically <1ms on an idle board).
         """
         # Read config once at boot. If the user flips the flag later, they
@@ -2383,7 +2396,7 @@ class GatewayKanbanWatchersMixin:
         def _tick_once_for_board(slug: str) -> "Optional[object]":
             """Run one dispatch_once for a specific board.
 
-            Runs in a worker thread via `asyncio.to_thread`. `board=slug`
+            Runs in a worker thread via `_kanban_off_loop`. `board=slug`
             is passed through `dispatch_once` so `resolve_workspace` and
             `_default_spawn` see the right paths. The per-board DB is
             opened explicitly so concurrent boards never share a
@@ -2779,7 +2792,7 @@ class GatewayKanbanWatchersMixin:
             try:
                 # Reap zombie children before per-board work so a board DB
                 # failure cannot block cleanup of unrelated workers.
-                pids = await asyncio.to_thread(_kb.reap_worker_zombies)
+                pids = await self._kanban_off_loop(_kb.reap_worker_zombies)
                 if pids:
                     logger.info(
                         "kanban dispatcher: reaped %d zombie worker(s), pids=%s",
@@ -2799,14 +2812,14 @@ class GatewayKanbanWatchersMixin:
                     except Exception:
                         return [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
 
-                tick_boards = await asyncio.to_thread(_fetch_boards)
+                tick_boards = await self._kanban_off_loop(_fetch_boards)
 
                 # Re-read the auto-decompose toggle live each tick so a user
                 # flipping kanban.auto_decompose=false to STOP runaway fan-out
                 # takes effect on the next tick, not on gateway restart (#49638).
                 _ad_enabled, _ad_per_tick = _read_auto_decompose_settings()
                 if _ad_enabled:
-                    await asyncio.to_thread(
+                    await self._kanban_off_loop(
                         _auto_decompose_tick, tick_boards, _ad_per_tick
                     )
 
@@ -2817,7 +2830,7 @@ class GatewayKanbanWatchersMixin:
                 # NEXT tick, not require a gateway restart. Only log when a
                 # resolved value actually changes, so an unchanged (or
                 # persistently invalid) config doesn't spam the log.
-                _new_caps, _dispatch_cap_warnings = await asyncio.to_thread(
+                _new_caps, _dispatch_cap_warnings = await self._kanban_off_loop(
                     _read_dispatch_caps, _load_config
                 )
                 if _new_caps is None:
@@ -2873,7 +2886,7 @@ class GatewayKanbanWatchersMixin:
                 serialize_by_repo = _dispatch_caps.serialize_by_repo
                 max_concurrent_per_repo = _dispatch_caps.max_concurrent_per_repo
 
-                results = await asyncio.to_thread(_tick_once, tick_boards)
+                results = await self._kanban_off_loop(_tick_once, tick_boards)
                 any_spawned = False
                 for slug, res in (results or []):
                     if res is not None and getattr(res, "spawned", None):
@@ -2897,7 +2910,7 @@ class GatewayKanbanWatchersMixin:
                 # budget / role-fit / per-profile cap). The latter is not a
                 # profile-health problem and must NOT fire the misleading
                 # "check profile health" alarm. See summarize_dispatch_holds.
-                ready_pending = await asyncio.to_thread(_ready_nonempty, tick_boards)
+                ready_pending = await self._kanban_off_loop(_ready_nonempty, tick_boards)
                 if ready_pending and not any_spawned:
                     res_objs = [r for _slug, r in (results or []) if r is not None]
                     total_held, hold_counts, dominant = (
@@ -2963,7 +2976,7 @@ class GatewayKanbanWatchersMixin:
                 # final cost flushed to the worker's per-profile state.db
                 # AFTER _end_run ran (so cost_usd was left NULL). Runs once
                 # per tick, capped tight, fully fail-soft — must NEVER affect
-                # dispatch. Off-loop via to_thread like the rest of this tick.
+                # dispatch. Off-loop via _kanban_off_loop like the rest of this tick.
                 try:
                     def _backfill_recent_costs() -> int:
                         with _kb.connect_closing() as _c:
@@ -2979,7 +2992,7 @@ class GatewayKanbanWatchersMixin:
                                 _c, limit=50, since_seconds=6 * 3600,
                             )
                             return n
-                    n_cost = await asyncio.to_thread(_backfill_recent_costs)
+                    n_cost = await self._kanban_off_loop(_backfill_recent_costs)
                     if n_cost:
                         logger.info(
                             "kanban dispatcher: backfilled cost on %d recent run(s)",
@@ -2989,7 +3002,7 @@ class GatewayKanbanWatchersMixin:
                     logger.debug("kanban dispatcher: cost backfill skipped (%s)", exc)
 
                 try:
-                    await asyncio.to_thread(
+                    await self._kanban_off_loop(
                         _kb.write_kanban_dispatcher_heartbeat,
                         tick_health="ok",
                         boards=tick_boards,

@@ -970,12 +970,16 @@ def _drive_dispatcher_tick(monkeypatch, runner, kanban_cfg) -> dict:
     async def _sleep(_delay):
         return None
 
-    async def _to_thread(fn, *args, **kwargs):
+    async def _kanban_off_loop(self, fn, *args, **kwargs):
+        # Inline-execute on the event-loop thread so hermetic config-tick
+        # tests never touch any executor (default or gateway-owned).
         return fn(*args, **kwargs)
 
     monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
     monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
-    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr(
+        type(runner), "_kanban_off_loop", _kanban_off_loop,
+    )
 
     asyncio.run(
         asyncio.wait_for(
@@ -1065,7 +1069,12 @@ def test_dispatcher_tick_tests_survive_lost_selfpipe_wake(kanban_home, monkeypat
     """Regression for the 2026-07-16 load flake: the dispatcher config
     unit tests must not depend on default-executor teardown. On 3.11 a
     lost self-pipe wake makes asyncio.run() teardown hang forever; under
-    parallel suite load that lost wake actually happens."""
+    parallel suite load that lost wake actually happens.
+
+    With the seam patched inline (``_kanban_off_loop`` → sync call), this
+    also proves independence from ANY executor teardown — not just the
+    loop default.
+    """
     import asyncio
     import concurrent.futures.thread as _thread
 
@@ -1107,6 +1116,84 @@ def test_dispatcher_tick_tests_survive_lost_selfpipe_wake(kanban_home, monkeypat
         if t.is_alive():
             _thread._threads_queues.clear()
     assert captured["max_concurrent_per_repo"] == 1
+
+
+def test_dispatcher_tick_uses_gateway_owned_executor_not_default(
+    kanban_home, monkeypatch,
+):
+    """Watcher off-loop work must land on hermes-gateway*, never the loop default.
+
+    Drives one real dispatcher tick through the real ``_kanban_off_loop``
+    (no inline patch) so we assert (a) the sync helper ran on a thread
+    named ``hermes-gateway*`` and (b) the loop's default executor stayed
+    ``None`` — i.e. watcher work touches ONLY the gateway-owned pool.
+    Then ``_shutdown_executor()`` must return (bounded shutdown).
+    """
+    import asyncio
+    import hermes_cli.config as _cfg_mod
+
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    thread_names: list[str] = []
+    default_executor_after: list[object] = []
+
+    monkeypatch.setattr(
+        _cfg_mod,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        kb,
+        "list_boards",
+        lambda include_archived=False: [{"slug": kb.DEFAULT_BOARD}],
+    )
+
+    def _dispatch_once(conn, **kwargs):
+        thread_names.append(threading.current_thread().name)
+        runner._running = False
+        return SimpleNamespace(
+            spawned=[],
+            reclaimed=0,
+            crashed=[],
+            timed_out=[],
+            promoted=0,
+            auto_blocked=[],
+        )
+
+    async def _sleep(_delay):
+        return None
+
+    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
+    monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
+
+    async def _drive():
+        try:
+            await asyncio.wait_for(
+                runner._kanban_dispatcher_watcher(),
+                timeout=5.0,
+            )
+            loop = asyncio.get_running_loop()
+            default_executor_after.append(loop._default_executor)
+        finally:
+            runner._shutdown_executor()
+
+    asyncio.run(_drive())
+
+    assert thread_names, "dispatch_once must have run at least once"
+    assert all(
+        name.startswith("hermes-gateway") for name in thread_names
+    ), f"expected hermes-gateway* thread names, got {thread_names!r}"
+    assert default_executor_after == [None], (
+        f"loop default executor must stay None; got {default_executor_after!r}"
+    )
 
 
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
@@ -1161,12 +1248,12 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
             )
         raise sqlite3.DatabaseError("file is not a database")
 
-    async def _to_thread(fn, *args, **kwargs):
+    async def _kanban_off_loop(self, fn, *args, **kwargs):
         # PR salvage (#32857 commit 7): the dispatcher now reaps zombies at
-        # the top of each tick via ``asyncio.to_thread(_kb.reap_worker_zombies)``
+        # the top of each tick via ``_kanban_off_loop(_kb.reap_worker_zombies)``
         # BEFORE the per-board tick work. K16 added cost backfill and Sprint2
         # adds the dispatcher heartbeat, so each full tick now issues 5
-        # ``to_thread`` calls (reaper + ``_tick_once`` + ``_ready_nonempty`` +
+        # off-loop calls (reaper + ``_tick_once`` + ``_ready_nonempty`` +
         # cost backfill + heartbeat). This counter must reach 10 to allow the
         # same 2 dispatch ticks the pre-reaper test expected at 4.
         calls["to_thread"] += 1
@@ -1179,7 +1266,7 @@ def test_gateway_dispatcher_disables_corrupt_board_without_traceback(
         return None
 
     monkeypatch.setattr(_kb, "connect", _connect)
-    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr(type(runner), "_kanban_off_loop", _kanban_off_loop)
     monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
 
     with caplog.at_level(logging.ERROR, logger="gateway.run"):
@@ -1270,7 +1357,7 @@ def test_gateway_dispatcher_retries_corrupt_board_after_quarantine(
     def _connect(*args, **kwargs):
         raise sqlite3.DatabaseError("file is not a database")
 
-    async def _to_thread(fn, *args, **kwargs):
+    async def _kanban_off_loop(self, fn, *args, **kwargs):
         result = fn(*args, **kwargs)
         if getattr(fn, "__name__", "") == "_tick_once":
             calls["tick"] += 1
@@ -1282,7 +1369,7 @@ def test_gateway_dispatcher_retries_corrupt_board_after_quarantine(
         return None
 
     monkeypatch.setattr(_kb, "connect", _connect)
-    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+    monkeypatch.setattr(type(runner), "_kanban_off_loop", _kanban_off_loop)
     monkeypatch.setattr("gateway.run.asyncio.sleep", _sleep)
 
     with caplog.at_level(logging.INFO, logger="gateway.run"):
