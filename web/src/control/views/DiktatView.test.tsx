@@ -1,8 +1,12 @@
+// @vitest-environment jsdom
+
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DictateStatusResponse } from "../lib/schemas";
 import {
   DICTATE_ERROR_HELP,
+  DictionaryEditorPanel,
   DiktatBody,
   apkVersion,
   dictateApks,
@@ -158,5 +162,193 @@ describe("DiktatBody", () => {
     );
     expect(empty).toContain("Kein APK im Artefakt-Store");
     expect(empty).toContain("ohne Kontakt");
+  });
+});
+
+// Harvested from tests/hermes_cli/test_web_server.py
+// test_dictate_personalization_round_trips_real_german_dictionary — real
+// server-verified line shapes (umlauts, a `#`-comment line, a snippet whose
+// replacement carries a literal "\n" the app expands at insert time), not a
+// hand-picked synthetic string.
+const REAL_DICTIONARY_RULES =
+  "# Eigennamen (Müller, Schäfer)\n" +
+  "her mess => Hermes\n" +
+  "plan speak => PlanSpec\n" +
+  "kanban bord => Kanban Board";
+const REAL_SNIPPET_RULES = "meine adresse => Musterweg 12\\n12345 Beispielstadt";
+
+const PERSONALIZATION_DOC = {
+  schema: "hermes-dictate-personalization-v1",
+  exists: true,
+  dictionary_rules: REAL_DICTIONARY_RULES,
+  snippet_rules: REAL_SNIPPET_RULES,
+  revision: 3,
+  updated_at: "2026-07-15T10:22:00+00:00",
+  updated_by: "app",
+};
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+describe("DictionaryEditorPanel", () => {
+  const fetchMock = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
+      configurable: true,
+      value: "test-token",
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("lädt den geladenen Stand (echtes Datenformat) und zählt Regel-Zeilen korrekt", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(PERSONALIZATION_DOC));
+    render(<DictionaryEditorPanel />);
+
+    const dictionary = (await screen.findByLabelText("Wörterbuch")) as HTMLTextAreaElement;
+    expect(dictionary.value).toBe(REAL_DICTIONARY_RULES);
+    // 4 lines: 1 comment + 3 rule lines — the comment must NOT count.
+    expect(screen.getByText("3/250 Regeln")).toBeTruthy();
+
+    const snippets = screen.getByLabelText("Snippets") as HTMLTextAreaElement;
+    expect(snippets.value).toBe(REAL_SNIPPET_RULES);
+    expect(screen.getByText("1/250 Regeln")).toBeTruthy();
+
+    expect(screen.getByText(/Zuletzt geändert/)).toBeTruthy();
+  });
+
+  it("Save bleibt disabled bis dirty; erfolgreicher PUT sendet den exakten Payload", async () => {
+    const edited = REAL_DICTIONARY_RULES + "\nneu => Neu";
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(PERSONALIZATION_DOC))
+      .mockResolvedValueOnce(jsonResponse({ ...PERSONALIZATION_DOC, revision: 4, dictionary_rules: edited }));
+
+    render(<DictionaryEditorPanel />);
+    const dictionary = (await screen.findByLabelText("Wörterbuch")) as HTMLTextAreaElement;
+    const saveButton = screen.getByRole("button", { name: "Speichern" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(true);
+
+    fireEvent.change(dictionary, { target: { value: edited } });
+    expect(saveButton.disabled).toBe(false);
+
+    fireEvent.click(saveButton);
+    await screen.findByText("Gespeichert · Stand r4");
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/dictate/personalization",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    const [, putOptions] = fetchMock.mock.calls[1];
+    expect(JSON.parse(String(putOptions?.body))).toEqual({
+      dictionary_rules: edited,
+      snippet_rules: REAL_SNIPPET_RULES,
+      base_revision: 3,
+      source: "dashboard",
+    });
+    expect((screen.getByRole("button", { name: "Speichern" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("409: zeigt den Konflikt-Hinweis, „Serverstand laden“ übernimmt Inhalt + base_revision", async () => {
+    const conflictDoc = {
+      ...PERSONALIZATION_DOC,
+      revision: 5,
+      dictionary_rules: "server => gewonnen",
+      snippet_rules: "",
+    };
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(PERSONALIZATION_DOC))
+      .mockResolvedValueOnce(jsonResponse(conflictDoc, 409))
+      .mockResolvedValueOnce(jsonResponse({ ...conflictDoc, revision: 6 }));
+
+    render(<DictionaryEditorPanel />);
+    const dictionary = (await screen.findByLabelText("Wörterbuch")) as HTMLTextAreaElement;
+    fireEvent.change(dictionary, { target: { value: "lokal => geändert" } });
+    fireEvent.click(screen.getByRole("button", { name: "Speichern" }));
+
+    await screen.findByText(/Inzwischen geändert/);
+    expect(screen.getByText(/verwirft deine ungespeicherten Änderungen/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Serverstand laden" }));
+    await waitFor(() =>
+      expect((screen.getByLabelText("Wörterbuch") as HTMLTextAreaElement).value).toBe("server => gewonnen"),
+    );
+
+    // base_revision advanced to the conflict document's revision (5), proven
+    // by the next successful save's payload.
+    fireEvent.change(screen.getByLabelText("Wörterbuch"), { target: { value: "server => gewonnen\nzweite => Regel" } });
+    fireEvent.click(screen.getByRole("button", { name: "Speichern" }));
+    await screen.findByText("Gespeichert · Stand r6");
+    const [, putOptions] = fetchMock.mock.calls[2];
+    expect(JSON.parse(String(putOptions?.body))).toMatchObject({ base_revision: 5 });
+  });
+
+  it("400 invalid_rules: zeigt Feldname und Zeilennummern aus detail.lines", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(PERSONALIZATION_DOC)).mockResolvedValueOnce(
+      jsonResponse(
+        {
+          detail: {
+            error: "invalid_rules",
+            field: "dictionary_rules",
+            lines: [3],
+            reason: "trigger must be 1-120 chars and replacement 1-2000 chars (trimmed)",
+          },
+        },
+        400,
+      ),
+    );
+
+    render(<DictionaryEditorPanel />);
+    const dictionary = (await screen.findByLabelText("Wörterbuch")) as HTMLTextAreaElement;
+    fireEvent.change(dictionary, { target: { value: REAL_DICTIONARY_RULES + "\n" + "x".repeat(121) + " => y" } });
+    fireEvent.click(screen.getByRole("button", { name: "Speichern" }));
+
+    const message = await screen.findByText(/ungültige Zeile/);
+    expect(message.textContent).toContain("Wörterbuch");
+    expect(message.textContent).toContain("3");
+    expect(message.textContent).toContain("trigger must be 1-120 chars");
+  });
+
+  it("exists:false rendert einen Leerzustand ohne Fehler-Look", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        schema: "hermes-dictate-personalization-v1",
+        exists: false,
+        dictionary_rules: "",
+        snippet_rules: "",
+        revision: 0,
+        updated_at: null,
+        updated_by: null,
+      }),
+    );
+
+    render(<DictionaryEditorPanel />);
+    await screen.findByText(/Noch kein gespeichertes Wörterbuch/);
+    expect((screen.getByLabelText("Wörterbuch") as HTMLTextAreaElement).value).toBe("");
+    expect(screen.queryByText(/nicht erreichbar/)).toBeNull();
+  });
+
+  it("GET-Fehler zeigt Fehlerhinweis + Retry, der neu lädt", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("network down")).mockResolvedValueOnce(jsonResponse(PERSONALIZATION_DOC));
+
+    render(<DictionaryEditorPanel />);
+    // "network down" only appears in the outer <span> (the sibling <strong>
+    // wraps just the "nicht erreichbar" label) — an unambiguous single match,
+    // unlike a substring both nodes would share.
+    await screen.findByText(/network down/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Erneut versuchen" }));
+    await screen.findByLabelText("Wörterbuch");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

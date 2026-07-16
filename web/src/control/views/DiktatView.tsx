@@ -7,7 +7,12 @@ import { FleetEmptyState, FleetPanel } from "../components/leitstand";
 import { Eyebrow } from "../components/primitives";
 import { useDictateStatus } from "../hooks/useControlData";
 import { fmtRelativeTime, nowSec } from "../lib/derive";
-import type { DictateStatusResponse } from "../lib/schemas";
+import {
+  DictatePersonalizationSchema,
+  parseOrThrow,
+  type DictatePersonalizationResponse,
+  type DictateStatusResponse,
+} from "../lib/schemas";
 
 // Artefakt-Listing (/api/artifacts) — bewusst lokal statt in lib/schemas.ts:
 // die Seite ist der einzige Konsument der Versionshistorie.
@@ -319,6 +324,292 @@ export function DiktatBody({
           </div>
         </FleetPanel>
       </div>
+
+      <DictionaryEditorPanel />
+    </div>
+  );
+}
+
+// ── Wörterbuch & Snippets (Diktat Stufe 9 — Wörterbuch-Sync) ────────────────
+
+/** `a => b` rule lines, mirroring the server's line semantics
+ * (`_validate_dictate_personalization_rules`): blank lines, `#`-comments, and
+ * lines without `=>` don't count. Client-side hint only — the server is the
+ * enforcing source of truth for the 250-rule cap. */
+function ruleLineCount(text: string): number {
+  return text.split("\n").filter((line) => {
+    const trimmed = line.trim();
+    return trimmed !== "" && !trimmed.startsWith("#") && trimmed.includes("=>");
+  }).length;
+}
+
+const RULE_FIELD_LABEL: Record<string, string> = {
+  dictionary_rules: "Wörterbuch",
+  snippet_rules: "Snippets",
+};
+
+const RULE_TEXTAREA_CLS =
+  "min-h-[180px] w-full rounded-card border border-line bg-surface-2 px-3 py-2 font-data text-xs text-ink";
+
+type PersonalizationDoc = DictatePersonalizationResponse;
+
+type PersonalizationSaveState =
+  | { kind: "idle" }
+  | { kind: "saving" }
+  | { kind: "saved"; revision: number }
+  | { kind: "conflict"; doc: PersonalizationDoc }
+  | { kind: "field_too_long"; field: string }
+  | { kind: "invalid_rules"; field: string; lines: number[]; reason: string }
+  | { kind: "error"; message: string };
+
+/**
+ * Wörterbuch/Snippet-Editor. Lädt den geteilten Stand einmalig beim Mount
+ * (kein Auto-Polling — würde sonst Tipparbeit überschreiben) und schreibt
+ * revisionsgesichert zurück (`base_revision`). Ein 409 liefert den aktuellen
+ * Serverstand bereits im Response-Body mit — kein zweiter GET nötig.
+ */
+export function DictionaryEditorPanel() {
+  const [phase, setPhase] = useState<"loading" | "loaded" | "error">("loading");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [doc, setDoc] = useState<PersonalizationDoc | null>(null);
+  const [dictionaryText, setDictionaryText] = useState("");
+  const [snippetText, setSnippetText] = useState("");
+  const [savedDictionaryText, setSavedDictionaryText] = useState("");
+  const [savedSnippetText, setSavedSnippetText] = useState("");
+  const [baseRevision, setBaseRevision] = useState(0);
+  const [saveState, setSaveState] = useState<PersonalizationSaveState>({ kind: "idle" });
+  const [reloadKey, setReloadKey] = useState(0);
+
+  const applyDocument = (parsed: PersonalizationDoc) => {
+    setDoc(parsed);
+    setDictionaryText(parsed.dictionary_rules);
+    setSnippetText(parsed.snippet_rules);
+    setSavedDictionaryText(parsed.dictionary_rules);
+    setSavedSnippetText(parsed.snippet_rules);
+    setBaseRevision(parsed.revision);
+  };
+
+  useEffect(() => {
+    let alive = true;
+    setPhase("loading");
+    setLoadError(null);
+    fetchJSON<unknown>("/api/dictate/personalization")
+      .then((raw) => {
+        if (!alive) return;
+        applyDocument(parseOrThrow(DictatePersonalizationSchema, raw, "dictate-personalization"));
+        setSaveState({ kind: "idle" });
+        setPhase("loaded");
+      })
+      .catch((cause: unknown) => {
+        if (!alive) return;
+        setLoadError(cause instanceof Error ? cause.message : "Wörterbuch nicht erreichbar");
+        setPhase("error");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [reloadKey]);
+
+  const dirty = dictionaryText !== savedDictionaryText || snippetText !== savedSnippetText;
+  const busy = saveState.kind === "saving";
+
+  const handleSave = async () => {
+    if (!dirty || busy) return;
+    setSaveState({ kind: "saving" });
+    try {
+      const response = await authedFetch("/api/dictate/personalization", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dictionary_rules: dictionaryText,
+          snippet_rules: snippetText,
+          base_revision: baseRevision,
+          source: "dashboard",
+        }),
+      });
+      const body: unknown = await response.json().catch(() => null);
+      if (response.status === 200 && body) {
+        const parsed = parseOrThrow(DictatePersonalizationSchema, body, "dictate-personalization");
+        applyDocument(parsed);
+        setSaveState({ kind: "saved", revision: parsed.revision });
+        return;
+      }
+      if (response.status === 409 && body) {
+        setSaveState({
+          kind: "conflict",
+          doc: parseOrThrow(DictatePersonalizationSchema, body, "dictate-personalization"),
+        });
+        return;
+      }
+      if (response.status === 400 && body && typeof body === "object" && "detail" in body) {
+        const detail = (body as { detail?: unknown }).detail;
+        if (detail && typeof detail === "object") {
+          const d = detail as { error?: string; field?: string; lines?: number[]; reason?: string };
+          if (d.error === "field_too_long" && d.field) {
+            setSaveState({ kind: "field_too_long", field: d.field });
+            return;
+          }
+          if (d.error === "invalid_rules" && d.field) {
+            setSaveState({ kind: "invalid_rules", field: d.field, lines: d.lines ?? [], reason: d.reason ?? "" });
+            return;
+          }
+        }
+      }
+      setSaveState({ kind: "error", message: `Speichern fehlgeschlagen (HTTP ${response.status})` });
+    } catch (cause: unknown) {
+      setSaveState({
+        kind: "error",
+        message: cause instanceof Error ? cause.message : "Speichern fehlgeschlagen",
+      });
+    }
+  };
+
+  const handleLoadServerState = () => {
+    if (saveState.kind !== "conflict") return;
+    applyDocument(saveState.doc);
+    setSaveState({ kind: "idle" });
+  };
+
+  const updatedMeta = (() => {
+    if (!doc?.updated_at) return null;
+    const ms = Date.parse(doc.updated_at);
+    const rel = Number.isNaN(ms) ? null : fmtRelativeTime(ms / 1000, nowSec());
+    const who = doc.updated_by === "app" ? "App" : doc.updated_by === "dashboard" ? "Dashboard" : doc.updated_by;
+    if (rel) return `Zuletzt geändert ${rel}${who ? ` · ${who}` : ""}`;
+    return who ? `Zuletzt geändert von ${who}` : null;
+  })();
+
+  return (
+    <FleetPanel
+      eyebrow="Wörterbuch & Snippets"
+      meta={
+        saveState.kind === "saved" && !dirty
+          ? `Gespeichert · Stand r${saveState.revision}`
+          : updatedMeta
+      }
+    >
+      <p className="mb-3 text-xs text-ink-2">
+        Die App übernimmt Änderungen beim nächsten Tastatur-Start (max. 5 Min Verzögerung).
+      </p>
+
+      {phase === "loading" ? (
+        <p className="text-sm text-ink-2">Wörterbuch wird geladen …</p>
+      ) : phase === "error" ? (
+        <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
+          <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-2">
+            <span><strong>Wörterbuch nicht erreichbar:</strong> {loadError}</span>
+            <button
+              type="button"
+              className="ch-btn min-h-12 shrink-0 px-3 text-xs font-medium"
+              onClick={() => setReloadKey((k) => k + 1)}
+            >
+              Erneut versuchen
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3">
+          {doc && !doc.exists ? (
+            <p className="text-xs text-ink-3">
+              Noch kein gespeichertes Wörterbuch — Felder sind leer, das ist kein Fehler.
+            </p>
+          ) : null}
+
+          <RuleField
+            id="diktat-dictionary"
+            label="Wörterbuch"
+            hint="Eine Regel pro Zeile: gesprochen => geschrieben. Zeilen mit # sind Kommentare."
+            value={dictionaryText}
+            onChange={setDictionaryText}
+          />
+          <RuleField
+            id="diktat-snippets"
+            label="Snippets"
+            hint="Gleiches Format. \n im Text wird beim Einfügen zu einem Zeilenumbruch."
+            value={snippetText}
+            onChange={setSnippetText}
+          />
+
+          {saveState.kind === "conflict" ? (
+            <div className="flex items-start gap-2 rounded-card border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-status-warn">
+              <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+              <div className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-2">
+                <span>
+                  Inzwischen geändert (App?) — dein Speichern wurde abgelehnt.
+                  {dirty ? ' „Serverstand laden“ verwirft deine ungespeicherten Änderungen.' : ""}
+                </span>
+                <button
+                  type="button"
+                  className="ch-btn min-h-12 shrink-0 px-3 text-xs font-medium"
+                  onClick={handleLoadServerState}
+                >
+                  Serverstand laden
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {saveState.kind === "field_too_long" ? (
+            <p className="text-xs text-status-alert">
+              {RULE_FIELD_LABEL[saveState.field] ?? saveState.field}: Text zu lang (maximal 64.000 Zeichen).
+            </p>
+          ) : null}
+
+          {saveState.kind === "invalid_rules" ? (
+            <p className="text-xs text-status-alert">
+              {RULE_FIELD_LABEL[saveState.field] ?? saveState.field}: ungültige Zeile
+              {saveState.lines.length === 1 ? "" : "n"} {saveState.lines.join(", ")} — {saveState.reason}
+            </p>
+          ) : null}
+
+          {saveState.kind === "error" ? <p className="text-xs text-status-alert">{saveState.message}</p> : null}
+
+          <button
+            type="button"
+            className="ch-btn ch-btn-primary min-h-12 w-fit px-4 text-xs font-medium"
+            disabled={!dirty || busy}
+            onClick={() => void handleSave()}
+          >
+            {busy ? "Speichert …" : "Speichern"}
+          </button>
+        </div>
+      )}
+    </FleetPanel>
+  );
+}
+
+function RuleField({
+  id,
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const count = ruleLineCount(value);
+  return (
+    <div className="grid grid-cols-1 gap-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <label htmlFor={id} className="font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">
+          {label}
+        </label>
+        <span className="font-data text-micro text-ink-3">{count}/250 Regeln</span>
+      </div>
+      <textarea
+        id={id}
+        aria-label={label}
+        className={RULE_TEXTAREA_CLS}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+      />
+      <p className="text-xs text-ink-3">{hint}</p>
     </div>
   );
 }

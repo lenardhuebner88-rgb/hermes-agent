@@ -512,6 +512,295 @@ class TestWebServerEndpoints:
         }
         assert self.client.post("/api/dictate/status", json=report).status_code == 200
 
+    def test_dictate_personalization_get_missing_returns_empty_document(self):
+        response = self.client.get("/api/dictate/personalization")
+        assert response.status_code == 200
+        assert response.json() == {
+            "schema": "hermes-dictate-personalization-v1",
+            "exists": False,
+            "dictionary_rules": "",
+            "snippet_rules": "",
+            "revision": 0,
+            "updated_at": None,
+            "updated_by": None,
+        }
+
+    def test_dictate_personalization_put_creates_document_and_survives_restart(self):
+        from starlette.testclient import TestClient
+
+        from hermes_cli.web_server import app, _SESSION_HEADER_NAME, _SESSION_TOKEN
+
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "her mess => Hermes",
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 200
+        created = response.json()
+        assert created["exists"] is True
+        assert created["revision"] == 1
+        assert created["dictionary_rules"] == "her mess => Hermes"
+        assert created["updated_by"] == "dashboard"
+        assert created["updated_at"] is not None
+
+        get_response = self.client.get("/api/dictate/personalization")
+        assert get_response.status_code == 200
+        assert get_response.json() == created
+
+        # This endpoint keeps no in-memory cache (unlike /api/dictate/status) —
+        # every request re-reads the persisted file, so a brand new client
+        # instance on the same HERMES_HOME sees the document with no
+        # rehydration step, proving restart-durability.
+        restarted_client = TestClient(app)
+        restarted_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
+        restarted_response = restarted_client.get("/api/dictate/personalization")
+        assert restarted_response.status_code == 200
+        assert restarted_response.json() == created
+
+    def test_dictate_personalization_put_wrong_base_revision_returns_409_with_current_document(self):
+        first = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "her mess => Hermes",
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert first.status_code == 200
+        current = first.json()
+
+        conflict = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "someone else => wins",
+                "snippet_rules": "",
+                "base_revision": 0,  # stale — current is now revision 1
+                "source": "app",
+            },
+        )
+        assert conflict.status_code == 409
+        assert conflict.json() == current
+
+    def test_dictate_personalization_put_rejects_unknown_field(self):
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "",
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+                "transcript": "must never be accepted",
+            },
+        )
+        assert response.status_code == 422
+
+    def test_dictate_personalization_put_rejects_field_too_long(self):
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "x" * 64_001,
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "error": "field_too_long",
+            "field": "dictionary_rules",
+        }
+
+    def test_dictate_personalization_put_rejects_invalid_rule_lines(self):
+        too_long_trigger = "# comment\n\n" + ("x" * 121) + " => valid replacement"
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": too_long_trigger,
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "error": "invalid_rules",
+            "field": "dictionary_rules",
+            "lines": [3],
+            "reason": "trigger must be 1-120 chars and replacement 1-2000 chars (trimmed)",
+        }
+
+        too_long_replacement = "trigger => " + ("y" * 2001)
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": too_long_replacement,
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "invalid_rules"
+        assert detail["lines"] == [1]
+
+        too_many_rules = "\n".join(f"trigger{i} => value{i}" for i in range(251))
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": too_many_rules,
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "invalid_rules"
+        assert detail["lines"] == [251]
+
+    def test_dictate_personalization_normalizes_lone_cr_line_endings(self):
+        """Android's TextPersonalizer.parse uses Kotlin's lineSequence(),
+        which also splits on a bare \\r — a lone-CR payload must be split
+        into individual lines server-side too, else the 250-rule cap and
+        per-rule bounds are trivially bypassable and the app sees more
+        rules than the server validated."""
+        three_rules = "\r".join(["a => 1", "b => 2", "c => 3"])
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": three_rules,
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["dictionary_rules"] == "a => 1\nb => 2\nc => 3"
+
+        get_response = self.client.get("/api/dictate/personalization")
+        assert get_response.json()["dictionary_rules"] == "a => 1\nb => 2\nc => 3"
+
+        too_many_cr_rules = "\r".join(f"trigger{i} => value{i}" for i in range(251))
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": too_many_cr_rules,
+                "snippet_rules": "",
+                "base_revision": body["revision"],
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "invalid_rules"
+        assert detail["lines"] == [251]
+
+    def test_dictate_personalization_get_put_via_cookie_session(self, monkeypatch):
+        """The app authenticates with the WebView-login cookie, never the
+        SPA session header — the real client path for the Diktat app."""
+        import time as _time
+
+        import hermes_cli.dashboard_auth.middleware as auth_mw
+        from hermes_cli.dashboard_auth.base import Session
+
+        session = Session(
+            user_id="piet", email="", display_name="piet", org_id="",
+            provider="basic", expires_at=int(_time.time()) + 3600,
+            access_token="valid-at", refresh_token="rt",
+        )
+
+        class _StubProvider:
+            name = "basic"
+
+            def verify_session(self, *, access_token):
+                return session if access_token == "valid-at" else None
+
+        monkeypatch.setattr(
+            auth_mw, "list_session_providers", lambda: [_StubProvider()]
+        )
+
+        del self.client.headers["X-Hermes-Session-Token"]
+        self.client.cookies.set("hermes_session_at", "valid-at")
+        self.client.cookies.set("hermes_session_provider", "basic")
+
+        get_response = self.client.get("/api/dictate/personalization")
+        assert get_response.status_code == 200
+        assert get_response.json()["exists"] is False
+
+        put_response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": "her mess => Hermes",
+                "snippet_rules": "",
+                "base_revision": 0,
+                "source": "app",
+            },
+        )
+        assert put_response.status_code == 200
+        assert put_response.json()["revision"] == 1
+
+        self.client.cookies.set("hermes_session_at", "forged-at")
+        assert self.client.get("/api/dictate/personalization").status_code == 401
+
+    def test_dictate_personalization_round_trips_real_german_dictionary(self):
+        dictionary_rules = (
+            "# Eigennamen (Müller, Schäfer)\n"
+            "her mess => Hermes\n"
+            "plan speak => PlanSpec\n"
+            "kanban bord => Kanban Board"
+        )
+        # Literal two-char "\n" (not a real newline) — the app only expands
+        # it to a real line break at insert time (TextPersonalizer.expandSnippet).
+        snippet_rules = "meine adresse => Musterweg 12\\n12345 Beispielstadt"
+
+        response = self.client.put(
+            "/api/dictate/personalization",
+            json={
+                "dictionary_rules": dictionary_rules,
+                "snippet_rules": snippet_rules,
+                "base_revision": 0,
+                "source": "dashboard",
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["dictionary_rules"] == dictionary_rules
+        assert body["snippet_rules"] == snippet_rules
+
+        get_response = self.client.get("/api/dictate/personalization")
+        assert get_response.status_code == 200
+        assert get_response.json()["dictionary_rules"] == dictionary_rules
+        assert get_response.json()["snippet_rules"] == snippet_rules
+
+    def test_dictate_personalization_get_survives_corrupted_state_file(self):
+        from hermes_constants import get_hermes_home
+
+        state_path = get_hermes_home() / "state" / "dictate-personalization.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+
+        state_path.write_text("not json at all {{{", encoding="utf-8")
+        response = self.client.get("/api/dictate/personalization")
+        assert response.status_code == 200
+        assert response.json()["exists"] is False
+
+        state_path.write_text(json.dumps({
+            "dictionary_rules": 123,
+            "snippet_rules": None,
+            "revision": "one",
+            "updated_at": 456,
+            "updated_by": True,
+        }), encoding="utf-8")
+        response = self.client.get("/api/dictate/personalization")
+        assert response.status_code == 200
+        assert response.json()["exists"] is False
+
     def test_api_accepts_valid_session_cookie_without_header_token(self, monkeypatch):
         """Native apps (Diktat/Voice) hold only the WebView-login cookie —
         never the SPA-injected session token. A valid cookie session must

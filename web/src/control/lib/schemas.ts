@@ -249,6 +249,22 @@ export const DictateStatusResponseSchema = z.object({
 });
 export type DictateStatusResponse = z.infer<typeof DictateStatusResponseSchema>;
 
+// Diktat Stufe 9 — shared dictionary/snippet rules, synced between the
+// /control/diktat editor and the app. `schema` pins the envelope shape (same
+// versioning idiom as DictateStatusResponseSchema above); `revision`/
+// `updated_at`/`updated_by` are null/0 when no document has been saved yet
+// (`exists:false`, mirroring GET's "missing file" response).
+export const DictatePersonalizationSchema = z.object({
+  schema: z.literal("hermes-dictate-personalization-v1"),
+  exists: z.boolean().catch(false),
+  dictionary_rules: z.string().catch(""),
+  snippet_rules: z.string().catch(""),
+  revision: z.coerce.number().catch(0),
+  updated_at: z.string().nullable().catch(null),
+  updated_by: z.string().nullable().catch(null),
+});
+export type DictatePersonalizationResponse = z.infer<typeof DictatePersonalizationSchema>;
+
 export const PlanSpecRecordSchema = z.object({
   path: z.string().catch(""),
   agent: z.string().catch(""),

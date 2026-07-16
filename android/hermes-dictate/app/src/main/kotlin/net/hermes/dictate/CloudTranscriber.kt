@@ -15,6 +15,25 @@ interface HttpTransport {
         connectTimeoutMs: Int,
         readTimeoutMs: Int,
     ): HttpResponse
+
+    /** @throws IOException on connect/read failures. */
+    @Throws(IOException::class)
+    fun get(
+        url: String,
+        headers: Map<String, String>,
+        connectTimeoutMs: Int,
+        readTimeoutMs: Int,
+    ): HttpResponse
+
+    /** @throws IOException on connect/read failures. */
+    @Throws(IOException::class)
+    fun put(
+        url: String,
+        headers: Map<String, String>,
+        body: ByteArray,
+        connectTimeoutMs: Int,
+        readTimeoutMs: Int,
+    ): HttpResponse
 }
 
 data class HttpResponse(val status: Int, val body: String, val setCookies: List<String>)

@@ -52,6 +52,9 @@ class DictateInputMethodService :
     private val statusReporter by lazy {
         DictateStatusReporter(DictateConfig.STATUS_URL, WebViewCookieStore(), UrlConnectionTransport())
     }
+    private val personalizationSync by lazy {
+        PersonalizationSync(DictateConfig.PERSONALIZATION_URL, WebViewCookieStore(), UrlConnectionTransport())
+    }
 
     /** Audio captured for the cloud path, alive only between StopRecording and Upload. */
     private var pendingAudio: ByteArray? = null
@@ -91,6 +94,7 @@ class DictateInputMethodService :
         // A process killed mid-recording must not leave audio in the cache indefinitely.
         CloudRecorder.cleanupStale(this)
         reportStatus(DictateStatusEvent.CONTACT)
+        attemptPersonalizationPull()
     }
 
     override fun onDestroy() {
@@ -149,6 +153,7 @@ class DictateInputMethodService :
         cloudChip?.visibility = if (prefs.cloudEnabled) View.VISIBLE else View.GONE
         refreshModeChip()
         applyStatus(UiStatus.Idle)
+        attemptPersonalizationPull()
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {
@@ -486,6 +491,27 @@ class DictateInputMethodService :
             lastError = error?.name?.lowercase(),
         )
         statusExecutor.execute { statusReporter.report(snapshot) }
+    }
+
+    /**
+     * Throttled to at most one attempt per 5 min (atomic claim shared with the overlay via
+     * [DictatePrefs]). The outcome is applied via the CAS-guarded prefs method (contract
+     * Nachschaerfung F1) — no editor here to guard, but a dictation-in-flight edit of the prefs
+     * (unlikely, but possible via the settings screen in the same process) is never clobbered.
+     */
+    private fun attemptPersonalizationPull() {
+        if (!::statusExecutor.isInitialized || statusExecutor.isShutdown) return
+        statusExecutor.execute {
+            if (!prefs.tryClaimPersonalizationPullAttempt(System.currentTimeMillis())) return@execute
+            val local = LocalPersonalizationState(
+                dictionaryRules = prefs.dictionaryRules,
+                snippetRules = prefs.snippetRules,
+                syncLastRevision = prefs.syncLastRevision,
+                syncLastFingerprint = prefs.syncLastFingerprint,
+            )
+            val outcome = personalizationSync.pull(local) ?: return@execute
+            prefs.applyPersonalizationPullOutcome(local.dictionaryRules, local.snippetRules, outcome)
+        }
     }
 
     private fun errorText(kind: ErrorKind): Int = when (kind) {

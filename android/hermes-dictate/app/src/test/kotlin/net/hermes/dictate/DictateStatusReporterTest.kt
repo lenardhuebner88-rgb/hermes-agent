@@ -19,6 +19,21 @@ class DictateStatusReporterTest {
             this.body = body.toString(Charsets.UTF_8)
             return HttpResponse(200, "{}", emptyList())
         }
+
+        override fun get(
+            url: String,
+            headers: Map<String, String>,
+            connectTimeoutMs: Int,
+            readTimeoutMs: Int,
+        ): HttpResponse = throw UnsupportedOperationException("DictateStatusReporter never GETs")
+
+        override fun put(
+            url: String,
+            headers: Map<String, String>,
+            body: ByteArray,
+            connectTimeoutMs: Int,
+            readTimeoutMs: Int,
+        ): HttpResponse = throw UnsupportedOperationException("DictateStatusReporter never PUTs")
     }
 
     private object NoCookies : SessionCookieStore {

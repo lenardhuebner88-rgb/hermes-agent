@@ -12,6 +12,9 @@ object DictateConfig {
     const val STATUS_URL = "$ALLOWED_ORIGIN/api/dictate/status"
     const val LOGIN_URL = "$ALLOWED_ORIGIN/login"
 
+    /** Diktat Stufe 9: shared dictionary/snippet rules, synced with the /control/diktat editor. */
+    const val PERSONALIZATION_URL = "$ALLOWED_ORIGIN/api/dictate/personalization"
+
     /** Cheap gated GET used to answer "is the cookie session still valid?" (200 vs 401). */
     const val AUTH_PROBE_URL = "$ALLOWED_ORIGIN/api/health-status"
 
@@ -113,6 +116,24 @@ class DictatePrefs(context: Context) {
         get() = prefs.getString("snippet_rules", "") ?: ""
         set(value) = prefs.edit().putString("snippet_rules", value).apply()
 
+    /** Server revision as of the last successful personalization sync; 0 = never synced. */
+    var syncLastRevision: Int
+        get() = prefs.getInt("sync_last_revision", 0)
+        set(value) = prefs.edit().putInt("sync_last_revision", value).apply()
+
+    /** [PersonalizationFingerprint] of dictionaryRules+snippetRules as of the last successful sync. */
+    var syncLastFingerprint: String
+        get() = prefs.getString("sync_last_fingerprint", "") ?: ""
+        set(value) = prefs.edit().putString("sync_last_fingerprint", value).apply()
+
+    /**
+     * Shared between the IME and overlay service (same process, no `android:process` split) so
+     * the personalization pull throttle (max. 1 attempt / 5 min) applies across both surfaces.
+     */
+    var syncLastPullAttemptAtMs: Long
+        get() = prefs.getLong("sync_last_pull_attempt_at_ms", 0L)
+        set(value) = prefs.edit().putLong("sync_last_pull_attempt_at_ms", value).apply()
+
     /** Deterministic on-device removal of fillers, repetitions and simple spoken backtracks. */
     var localRefine: Boolean
         get() = prefs.getBoolean("local_refine", true)
@@ -163,4 +184,68 @@ class DictatePrefs(context: Context) {
      */
     val languageHint: String?
         get() = cloudLanguageHint
+
+    // --- Diktat Stufe 9 sync: contract Nachschaerfung F1/F7 — every read-check-write across the
+    // pull throttle timestamp or a sync-outcome CAS runs under one shared lock, so the IME,
+    // overlay and settings screen (all one process, no android:process split) can never race
+    // each other into a double pull or a silently clobbered edit. ---
+
+    /**
+     * Atomic throttle claim: `true` (and marks [syncLastPullAttemptAtMs] = [nowMs]) only if the
+     * throttle allows an attempt right now — the check and the write never interleave with a
+     * concurrent claim from the IME/overlay/settings.
+     */
+    fun tryClaimPersonalizationPullAttempt(nowMs: Long): Boolean = synchronized(syncLock) {
+        if (!PersonalizationPullThrottle.shouldAttempt(syncLastPullAttemptAtMs, nowMs)) return@synchronized false
+        syncLastPullAttemptAtMs = nowMs
+        true
+    }
+
+    /**
+     * Pull-outcome CAS (contract F1): applies content AND markers together, atomically, but only
+     * if the live prefs still exactly match [expectedDictionaryRules]/[expectedSnippetRules] — the
+     * snapshot the pull decision was computed against. On mismatch the whole outcome is discarded
+     * (no partial marker update either) — a concurrent edit is never silently overwritten.
+     * Returns whether the outcome was applied.
+     */
+    fun applyPersonalizationPullOutcome(
+        expectedDictionaryRules: String,
+        expectedSnippetRules: String,
+        outcome: PersonalizationSyncOutcome,
+    ): Boolean = synchronized(syncLock) {
+        if (!PersonalizationCas.unchanged(expectedDictionaryRules, expectedSnippetRules, dictionaryRules, snippetRules)) {
+            return@synchronized false
+        }
+        dictionaryRules = outcome.dictionaryRules
+        snippetRules = outcome.snippetRules
+        syncLastRevision = outcome.revision
+        syncLastFingerprint = outcome.fingerprint
+        true
+    }
+
+    /**
+     * Push-outcome CAS (contract F1 exception): markers always describe the server state for the
+     * content that was actually pushed — set unconditionally. Content is only reflected back
+     * (e.g. after a 409 union-merge) if the live prefs still match
+     * [pushedDictionaryRules]/[pushedSnippetRules]; an interleaved edit is never clobbered, the
+     * next debounced push reconciles it. Returns whether the content was applied.
+     */
+    fun applyPersonalizationPushOutcome(
+        pushedDictionaryRules: String,
+        pushedSnippetRules: String,
+        outcome: PersonalizationSyncOutcome,
+    ): Boolean = synchronized(syncLock) {
+        syncLastRevision = outcome.revision
+        syncLastFingerprint = outcome.fingerprint
+        if (!PersonalizationCas.unchanged(pushedDictionaryRules, pushedSnippetRules, dictionaryRules, snippetRules)) {
+            return@synchronized false
+        }
+        dictionaryRules = outcome.dictionaryRules
+        snippetRules = outcome.snippetRules
+        true
+    }
+
+    companion object {
+        private val syncLock = Any()
+    }
 }

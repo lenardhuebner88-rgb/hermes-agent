@@ -39,6 +39,21 @@ class CloudTranscriberTest {
             error?.let { throw it }
             return response!!
         }
+
+        override fun get(
+            url: String,
+            headers: Map<String, String>,
+            connectTimeoutMs: Int,
+            readTimeoutMs: Int,
+        ): HttpResponse = throw UnsupportedOperationException("CloudTranscriber never GETs")
+
+        override fun put(
+            url: String,
+            headers: Map<String, String>,
+            body: ByteArray,
+            connectTimeoutMs: Int,
+            readTimeoutMs: Int,
+        ): HttpResponse = throw UnsupportedOperationException("CloudTranscriber never PUTs")
     }
 
     private class FakeCookies(var header: String? = null) : SessionCookieStore {

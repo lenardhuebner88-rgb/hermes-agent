@@ -54,6 +54,9 @@ class DictateOverlayService :
     private val statusReporter by lazy {
         DictateStatusReporter(DictateConfig.STATUS_URL, WebViewCookieStore(), UrlConnectionTransport())
     }
+    private val personalizationSync by lazy {
+        PersonalizationSync(DictateConfig.PERSONALIZATION_URL, WebViewCookieStore(), UrlConnectionTransport())
+    }
 
     private var dictation: OnDeviceDictation? = null
     private var recorder: CloudRecorder? = null
@@ -90,6 +93,7 @@ class DictateOverlayService :
         addBubbleWindow()
         refreshLoginState()
         reportStatus(DictateStatusEvent.CONTACT)
+        attemptPersonalizationPull()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -614,6 +618,26 @@ class DictateOverlayService :
             lastError = error?.name?.lowercase(),
         )
         statusExecutor.execute { statusReporter.report(snapshot) }
+    }
+
+    /**
+     * Throttled to at most one attempt per 5 min (atomic claim shared with the IME via
+     * [DictatePrefs]). The outcome is applied via the CAS-guarded prefs method (contract
+     * Nachschaerfung F1).
+     */
+    private fun attemptPersonalizationPull() {
+        if (statusExecutor.isShutdown) return
+        statusExecutor.execute {
+            if (!prefs.tryClaimPersonalizationPullAttempt(System.currentTimeMillis())) return@execute
+            val local = LocalPersonalizationState(
+                dictionaryRules = prefs.dictionaryRules,
+                snippetRules = prefs.snippetRules,
+                syncLastRevision = prefs.syncLastRevision,
+                syncLastFingerprint = prefs.syncLastFingerprint,
+            )
+            val outcome = personalizationSync.pull(local) ?: return@execute
+            prefs.applyPersonalizationPullOutcome(local.dictionaryRules, local.snippetRules, outcome)
+        }
     }
 
     private fun showCopyAction() {

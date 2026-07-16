@@ -44,7 +44,7 @@ import zipfile
 from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 import yaml
 
@@ -1220,6 +1220,22 @@ class DictateStatusReport(BaseModel):
     event: str = "contact"
     latency_ms: Optional[int] = None
     last_error: Optional[str] = None
+
+    class Config:
+        extra = "forbid"
+
+
+class DictatePersonalizationUpdate(BaseModel):
+    """Shared dictionary/snippet rule text, revision-gated (dashboard/app sync).
+
+    ``extra = forbid`` fails closed on unknown fields, same privacy-boundary
+    posture as ``DictateStatusReport``.
+    """
+
+    dictionary_rules: str
+    snippet_rules: str
+    base_revision: int
+    source: Literal["dashboard", "app"]
 
     class Config:
         extra = "forbid"
@@ -2544,6 +2560,184 @@ async def report_dictate_status(payload: DictateStatusReport):
         samples = list(_DICTATE_LATENCY_SAMPLES)
     _persist_dictate_status(snapshot, samples)
     return {"ok": True, **snapshot}
+
+
+# Shared dictionary/snippet rules, synced between the /control/diktat editor
+# and the app's local personalization (Diktat Stufe 9). Revision-gated so a
+# concurrent dashboard/app write loses cleanly (409 + current document)
+# instead of one silently clobbering the other. Persisted like Dictate
+# status: atomic tmp+replace, typed load so a corrupted/hand-edited file
+# degrades to "no document" rather than 500ing.
+_DICTATE_PERSONALIZATION_LOCK = threading.Lock()
+_DICTATE_PERSONALIZATION_SCHEMA = "hermes-dictate-personalization-v1"
+_DICTATE_PERSONALIZATION_MAX_FIELD_CHARS = 64_000
+_DICTATE_PERSONALIZATION_MAX_TRIGGER_CHARS = 120
+_DICTATE_PERSONALIZATION_MAX_REPLACEMENT_CHARS = 2_000
+_DICTATE_PERSONALIZATION_MAX_RULES = 250
+
+
+def _dictate_personalization_path() -> Path:
+    return get_hermes_home() / "state" / "dictate-personalization.json"
+
+
+def _load_dictate_personalization() -> Optional[Dict[str, Any]]:
+    """Load+type-check the persisted document; corrupt/mistyped → None (as if missing)."""
+    path = _dictate_personalization_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    dictionary_rules = raw.get("dictionary_rules")
+    snippet_rules = raw.get("snippet_rules")
+    revision = raw.get("revision")
+    updated_at = raw.get("updated_at")
+    updated_by = raw.get("updated_by")
+    if (
+        not isinstance(dictionary_rules, str)
+        or not isinstance(snippet_rules, str)
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+        or not isinstance(updated_at, str)
+        or not isinstance(updated_by, str)
+    ):
+        _log.warning("dictate-personalization: corrupt/mistyped state at %s, treating as missing", path)
+        return None
+    return {
+        "dictionary_rules": dictionary_rules,
+        "snippet_rules": snippet_rules,
+        "revision": revision,
+        "updated_at": updated_at,
+        "updated_by": updated_by,
+    }
+
+
+def _persist_dictate_personalization(document: Dict[str, Any]) -> None:
+    payload = json.dumps({"schema": _DICTATE_PERSONALIZATION_SCHEMA, **document})
+    target = _dictate_personalization_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    tmp.replace(target)
+
+
+def _dictate_personalization_response(document: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if document is None:
+        return {
+            "schema": _DICTATE_PERSONALIZATION_SCHEMA,
+            "exists": False,
+            "dictionary_rules": "",
+            "snippet_rules": "",
+            "revision": 0,
+            "updated_at": None,
+            "updated_by": None,
+        }
+    return {
+        "schema": _DICTATE_PERSONALIZATION_SCHEMA,
+        "exists": True,
+        **document,
+    }
+
+
+def _validate_dictate_personalization_length(value: str, field: str) -> None:
+    if len(value) > _DICTATE_PERSONALIZATION_MAX_FIELD_CHARS:
+        raise HTTPException(status_code=400, detail={
+            "error": "field_too_long",
+            "field": field,
+        })
+
+
+def _normalize_dictate_personalization_field(value: str) -> str:
+    """``\\r\\n``→``\\n`` first, then lone ``\\r``→``\\n``.
+
+    Android's ``TextPersonalizer.parse`` uses Kotlin's ``lineSequence()``,
+    which also splits on a bare ``\\r`` (old Mac-style line endings) — a
+    payload with only ``\\r``-separated rule lines would otherwise collapse
+    into a single server-side line, letting it dodge the 250-rule cap and
+    the per-rule length checks the app enforces per line.
+    """
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _validate_dictate_personalization_rules(normalized: str, field: str) -> None:
+    """Mirror TextPersonalizer.kt's line semantics: '#'-comments and lines
+    without '=>' are allowed (the app ignores them); a line containing '=>'
+    is a rule line and needs a 1..120-char trimmed trigger and a 1..2000-char
+    trimmed replacement, capped at 250 rule lines per field."""
+    bad_lines: List[int] = []
+    rule_lines: List[int] = []
+    for lineno, line in enumerate(normalized.split("\n"), start=1):
+        trimmed = line.strip()
+        if not trimmed or trimmed.startswith("#") or "=>" not in trimmed:
+            continue
+        trigger, _, replacement = trimmed.partition("=>")
+        trigger = trigger.strip()
+        replacement = replacement.strip()
+        rule_lines.append(lineno)
+        if (
+            not 1 <= len(trigger) <= _DICTATE_PERSONALIZATION_MAX_TRIGGER_CHARS
+            or not 1 <= len(replacement) <= _DICTATE_PERSONALIZATION_MAX_REPLACEMENT_CHARS
+        ):
+            bad_lines.append(lineno)
+    if bad_lines:
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_rules",
+            "field": field,
+            "lines": bad_lines,
+            "reason": "trigger must be 1-120 chars and replacement 1-2000 chars (trimmed)",
+        })
+    if len(rule_lines) > _DICTATE_PERSONALIZATION_MAX_RULES:
+        raise HTTPException(status_code=400, detail={
+            "error": "invalid_rules",
+            "field": field,
+            "lines": rule_lines[_DICTATE_PERSONALIZATION_MAX_RULES:],
+            "reason": f"at most {_DICTATE_PERSONALIZATION_MAX_RULES} rule lines allowed",
+        })
+
+
+@app.get("/api/dictate/personalization")
+async def get_dictate_personalization():
+    """Return the shared dictionary/snippet document; never audio or transcript."""
+    return _dictate_personalization_response(_load_dictate_personalization())
+
+
+@app.put("/api/dictate/personalization")
+async def put_dictate_personalization(payload: DictatePersonalizationUpdate):
+    """Revision-gated write of the shared dictionary/snippet rules.
+
+    Validation order is fixed: field length, then per-field rule semantics
+    (after line-ending normalization), then the revision check — a stale
+    ``base_revision`` never even reaches rule validation of the other
+    field's content past the first offending field.
+    """
+    _validate_dictate_personalization_length(payload.dictionary_rules, "dictionary_rules")
+    _validate_dictate_personalization_length(payload.snippet_rules, "snippet_rules")
+
+    normalized_dictionary = _normalize_dictate_personalization_field(payload.dictionary_rules)
+    normalized_snippet = _normalize_dictate_personalization_field(payload.snippet_rules)
+    _validate_dictate_personalization_rules(normalized_dictionary, "dictionary_rules")
+    _validate_dictate_personalization_rules(normalized_snippet, "snippet_rules")
+
+    with _DICTATE_PERSONALIZATION_LOCK:
+        current = _load_dictate_personalization()
+        current_revision = current["revision"] if current else 0
+        if payload.base_revision != current_revision:
+            return JSONResponse(
+                status_code=409,
+                content=_dictate_personalization_response(current),
+            )
+        document = {
+            "dictionary_rules": normalized_dictionary,
+            "snippet_rules": normalized_snippet,
+            "revision": current_revision + 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": payload.source,
+        }
+        _persist_dictate_personalization(document)
+
+    return _dictate_personalization_response(document)
 
 
 # Historic install links (Discord, 2026-07-10/13) pointed at APKs inside

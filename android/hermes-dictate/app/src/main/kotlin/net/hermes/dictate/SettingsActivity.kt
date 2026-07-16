@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.View
 import android.view.inputmethod.InputMethodManager
@@ -23,6 +25,14 @@ class SettingsActivity : ComponentActivity() {
 
     private lateinit var prefs: DictatePrefs
     private val probeExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val personalizationSync by lazy {
+        PersonalizationSync(DictateConfig.PERSONALIZATION_URL, WebViewCookieStore(), UrlConnectionTransport())
+    }
+    private val personalizationPushRunnable = Runnable { pushPersonalization() }
+
+    /** True while a pulled/merged value is being applied via setText — suppresses the push debounce. */
+    private var suppressPersonalizationPush = false
 
     private val micPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { refreshStates() }
@@ -34,6 +44,9 @@ class SettingsActivity : ComponentActivity() {
         // Third cleanup hook besides recorder start + IME service start: after a crash during
         // a recording, even a settings-only launch must not leave audio in the cache.
         CloudRecorder.cleanupStale(this)
+        // Kicked off before the editors below are filled; the response (if any) lands async and
+        // only overwrites an editor that the user has not started typing into meanwhile.
+        startPersonalizationPull()
 
         findViewById<Button>(R.id.mic_button).setOnClickListener {
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -90,11 +103,17 @@ class SettingsActivity : ComponentActivity() {
 
         findViewById<EditText>(R.id.dictionary_editor).apply {
             setText(prefs.dictionaryRules)
-            doAfterTextChanged { prefs.dictionaryRules = it?.toString().orEmpty() }
+            doAfterTextChanged {
+                prefs.dictionaryRules = it?.toString().orEmpty()
+                if (!suppressPersonalizationPush) schedulePersonalizationPush()
+            }
         }
         findViewById<EditText>(R.id.snippet_editor).apply {
             setText(prefs.snippetRules)
-            doAfterTextChanged { prefs.snippetRules = it?.toString().orEmpty() }
+            doAfterTextChanged {
+                prefs.snippetRules = it?.toString().orEmpty()
+                if (!suppressPersonalizationPush) schedulePersonalizationPush()
+            }
         }
 
         val radioGroup = findViewById<RadioGroup>(R.id.language_group)
@@ -160,6 +179,7 @@ class SettingsActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(personalizationPushRunnable)
         probeExecutor.shutdownNow()
         super.onDestroy()
     }
@@ -241,7 +261,65 @@ class SettingsActivity : ComponentActivity() {
         }
     }
 
+    // --- Diktat Stufe 9: dictionary/snippet sync ---
+    // Contract Nachschaerfung F1: every async application of a sync outcome goes through the
+    // CAS-guarded DictatePrefs methods — an edit that raced the network call is never clobbered,
+    // it is discarded (pull) or left for the next debounced push to reconcile (push conflict).
+
+    private fun startPersonalizationPull() {
+        if (probeExecutor.isShutdown) return
+        probeExecutor.execute {
+            val local = LocalPersonalizationState(
+                dictionaryRules = prefs.dictionaryRules,
+                snippetRules = prefs.snippetRules,
+                syncLastRevision = prefs.syncLastRevision,
+                syncLastFingerprint = prefs.syncLastFingerprint,
+            )
+            val outcome = personalizationSync.pull(local) ?: return@execute
+            val applied = prefs.applyPersonalizationPullOutcome(local.dictionaryRules, local.snippetRules, outcome)
+            if (!applied) return@execute
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                reflectPersonalizationInEditors(outcome.dictionaryRules, outcome.snippetRules)
+            }
+        }
+    }
+
+    private fun reflectPersonalizationInEditors(dictionaryRules: String, snippetRules: String) {
+        suppressPersonalizationPush = true
+        findViewById<EditText>(R.id.dictionary_editor).setText(dictionaryRules)
+        findViewById<EditText>(R.id.snippet_editor).setText(snippetRules)
+        suppressPersonalizationPush = false
+    }
+
+    private fun schedulePersonalizationPush() {
+        mainHandler.removeCallbacks(personalizationPushRunnable)
+        mainHandler.postDelayed(personalizationPushRunnable, PERSONALIZATION_PUSH_DEBOUNCE_MS)
+    }
+
+    private fun pushPersonalization() {
+        if (probeExecutor.isShutdown) return
+        val local = LocalPersonalizationState(
+            dictionaryRules = prefs.dictionaryRules,
+            snippetRules = prefs.snippetRules,
+            syncLastRevision = prefs.syncLastRevision,
+            syncLastFingerprint = prefs.syncLastFingerprint,
+        )
+        probeExecutor.execute {
+            val outcome = personalizationSync.push(local) ?: return@execute
+            // Markers always land (they describe the server state for what was actually pushed);
+            // content (e.g. after a 409 union-merge) only if nothing raced the push.
+            val applied = prefs.applyPersonalizationPushOutcome(local.dictionaryRules, local.snippetRules, outcome)
+            if (!applied) return@execute
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                reflectPersonalizationInEditors(outcome.dictionaryRules, outcome.snippetRules)
+            }
+        }
+    }
+
     companion object {
         const val EXTRA_REQUEST_MIC = "request_mic"
+        private const val PERSONALIZATION_PUSH_DEBOUNCE_MS = 2_000L
     }
 }
