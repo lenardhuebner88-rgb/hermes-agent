@@ -2857,6 +2857,82 @@ def _cmd_review_commit(args: argparse.Namespace) -> int:
         print("Push: not executed")
     return 0
 
+def _complete_parse_metadata(raw_meta: Any) -> tuple[Any, int | None]:
+    """Parse ``--metadata`` JSON. Returns ``(metadata, error_exit_or_None)``."""
+    if not raw_meta:
+        return None, None
+    try:
+        metadata = json.loads(raw_meta)
+        if not isinstance(metadata, dict):
+            raise ValueError("must be a JSON object")
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"kanban: --metadata: {exc}", file=sys.stderr)
+        return None, 2
+    return metadata, None
+
+
+def _complete_one_task(
+    conn: Any,
+    tid: str,
+    *,
+    result: Any,
+    summary: Any,
+    metadata: Any,
+) -> bool:
+    """Complete a single task. Prints status lines. Returns True on success."""
+    # Goal-mode pre-completion judge gate (Issue #38367), the CLI
+    # side of the SAME gate the kanban_complete model tool enforces
+    # (tools/kanban_tools.py:_handle_complete) — the documented
+    # worker completion path invokes `hermes kanban complete` (or
+    # the equivalent claude-CLI lifecycle bridge) directly against
+    # kb.complete_task, bypassing the tool entirely, so a goal_mode
+    # worker could self-certify without ever hitting the tool gate.
+    # SHARED with the tool via hermes_cli.goals.check_goal_mode_completion
+    # so the two enforcement points can't diverge.
+    #
+    # Scoped NARROWLY to a worker closing its OWN task
+    # (HERMES_KANBAN_TASK == tid): an operator running `hermes kanban
+    # complete` by hand (e.g. dispositioning a task as done-elsewhere)
+    # has no worker-env marker and must stay ungated — the judge is a
+    # guard against a worker self-certifying, not an operator override.
+    if os.environ.get("HERMES_KANBAN_TASK") == tid:
+        task_for_gate = kb.get_task(conn, tid)
+        if task_for_gate and task_for_gate.goal_mode:
+            rejection = check_goal_mode_completion(
+                task_id=tid,
+                task_title=task_for_gate.title,
+                task_body=task_for_gate.body,
+                handoff_text=(summary or result or ""),
+            )
+            if rejection:
+                print(f"kanban: {rejection}", file=sys.stderr)
+                return False
+    # Worker-context completions (the claude-CLI lifecycle bridge
+    # reports back via this verb) must hit the same review gate as the
+    # in-process kanban_complete tool — otherwise a claude-cli worker
+    # in a code-bearing role (e.g. premium) bypasses the verifier.
+    # Operator CLI completions (no HERMES_KANBAN_TASK/RUN_ID env)
+    # keep the direct 'done' path by design.
+    worker_run_id = _worker_run_id_for(tid)
+    try:
+        completed = kb.complete_task(
+            conn, tid,
+            result=result,
+            summary=summary,
+            metadata=metadata,
+            expected_run_id=worker_run_id,
+            review_gate=worker_run_id is not None,
+        )
+    except kb.ReviewVerdictRequiredError as exc:
+        print(f"kanban: {exc}", file=sys.stderr)
+        return False
+    if not completed:
+        print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
+        return False
+    print(f"Completed {tid}")
+    return True
+
+
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
     ids = list(args.task_ids or [])
@@ -2876,15 +2952,9 @@ def _cmd_complete(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    metadata = None
-    if raw_meta:
-        try:
-            metadata = json.loads(raw_meta)
-            if not isinstance(metadata, dict):
-                raise ValueError("must be a JSON object")
-        except (ValueError, json.JSONDecodeError) as exc:
-            print(f"kanban: --metadata: {exc}", file=sys.stderr)
-            return 2
+    metadata, meta_err = _complete_parse_metadata(raw_meta)
+    if meta_err is not None:
+        return meta_err
     # Versioned-bundle gate (PlanSpec C landing): mirror the in-process
     # kanban_complete tool so the claude-CLI worker lane (premium/coder-claude)
     # gets the same in-flight rejection. When the worker opts into the structured
@@ -2910,60 +2980,16 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
-            # Goal-mode pre-completion judge gate (Issue #38367), the CLI
-            # side of the SAME gate the kanban_complete model tool enforces
-            # (tools/kanban_tools.py:_handle_complete) — the documented
-            # worker completion path invokes `hermes kanban complete` (or
-            # the equivalent claude-CLI lifecycle bridge) directly against
-            # kb.complete_task, bypassing the tool entirely, so a goal_mode
-            # worker could self-certify without ever hitting the tool gate.
-            # SHARED with the tool via hermes_cli.goals.check_goal_mode_completion
-            # so the two enforcement points can't diverge.
-            #
-            # Scoped NARROWLY to a worker closing its OWN task
-            # (HERMES_KANBAN_TASK == tid): an operator running `hermes kanban
-            # complete` by hand (e.g. dispositioning a task as done-elsewhere)
-            # has no worker-env marker and must stay ungated — the judge is a
-            # guard against a worker self-certifying, not an operator override.
-            if os.environ.get("HERMES_KANBAN_TASK") == tid:
-                task_for_gate = kb.get_task(conn, tid)
-                if task_for_gate and task_for_gate.goal_mode:
-                    rejection = check_goal_mode_completion(
-                        task_id=tid,
-                        task_title=task_for_gate.title,
-                        task_body=task_for_gate.body,
-                        handoff_text=(summary or args.result or ""),
-                    )
-                    if rejection:
-                        failed.append(tid)
-                        print(f"kanban: {rejection}", file=sys.stderr)
-                        continue
-            # Worker-context completions (the claude-CLI lifecycle bridge
-            # reports back via this verb) must hit the same review gate as the
-            # in-process kanban_complete tool — otherwise a claude-cli worker
-            # in a code-bearing role (e.g. premium) bypasses the verifier.
-            # Operator CLI completions (no HERMES_KANBAN_TASK/RUN_ID env)
-            # keep the direct 'done' path by design.
-            worker_run_id = _worker_run_id_for(tid)
-            try:
-                completed = kb.complete_task(
-                    conn, tid,
-                    result=args.result,
-                    summary=summary,
-                    metadata=metadata,
-                    expected_run_id=worker_run_id,
-                    review_gate=worker_run_id is not None,
-                )
-            except kb.ReviewVerdictRequiredError as exc:
+            ok = _complete_one_task(
+                conn, tid,
+                result=args.result,
+                summary=summary,
+                metadata=metadata,
+            )
+            if not ok:
                 failed.append(tid)
-                print(f"kanban: {exc}", file=sys.stderr)
-                continue
-            if not completed:
-                failed.append(tid)
-                print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
-            else:
-                print(f"Completed {tid}")
     return 0 if not failed else 1
+
 
 def _cmd_edit(args: argparse.Namespace) -> int:
     raw_meta = getattr(args, "metadata", None)
