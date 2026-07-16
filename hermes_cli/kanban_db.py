@@ -15957,13 +15957,23 @@ def _apply_materialized_dispatch_workspace(
         task.branch_name = effective_branch
 
 
+# ``schedule_task`` predates timed holds.  Existing non-CLI callers must leave
+# an already persisted due time alone, while the CLI needs to be able to pass
+# ``None`` explicitly to clear one.
+class _ScheduleDueUnspecified:
+    pass
+
+
+_SCHEDULE_DUE_UNSPECIFIED = _ScheduleDueUnspecified()
+
+
 # ---------------------------------------------------------------------------
 def schedule_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     reason: Optional[str] = None,
-    due_at: Optional[int] = None,
+    due_at: int | None | _ScheduleDueUnspecified = _SCHEDULE_DUE_UNSPECIFIED,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Park a task in ``scheduled`` so it is waiting on time, not human input.
@@ -15973,14 +15983,21 @@ def schedule_task(
     to ``ready`` (or ``todo`` if parents are still incomplete).
     """
     with write_txn(conn):
-        params: list[Any] = [due_at, task_id]
-        sql = """
+        assignments = [
+            "status       = 'scheduled'",
+            "claim_lock   = NULL",
+            "claim_expires= NULL",
+            "worker_pid   = NULL",
+        ]
+        params: list[Any] = []
+        if due_at is not _SCHEDULE_DUE_UNSPECIFIED:
+            assignments.insert(1, "due_at       = ?")
+            params.append(due_at)
+        params.append(task_id)
+        assignments_sql = ",\n                   ".join(assignments)
+        sql = f"""
             UPDATE tasks
-               SET status       = 'scheduled',
-                   due_at       = ?,
-                   claim_lock   = NULL,
-                   claim_expires= NULL,
-                   worker_pid   = NULL
+               SET {assignments_sql}
              WHERE id = ?
                AND status IN ('todo', 'ready', 'running', 'blocked')
         """
