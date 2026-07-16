@@ -3754,29 +3754,29 @@ def _run_gate_in_validation_worktree(
         _cleanup_validation_worktree(repo_root, worktree)
 
 
-def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
-    """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
-    modules; when the diff touches ``web/``, run lint:control,
-    ``tsc -b --noEmit``, and the control Vitest suite. ``npm run build`` intentionally
-    stays out of this automatic merge path because it mutates generated
-    dashboard assets and belongs to the parked post-merge release gate."""
-    notes: list[str] = []
+def _quick_gate_run_cmd(
+    label: str, cmd: list[str], cwd: Path, timeout: int, notes: list[str],
+) -> Optional[str]:
+    """Run one quick-gate subprocess; append success note or return error."""
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv
+            cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return f"{label}: TIMEOUT after {timeout}s"
+    except FileNotFoundError:
+        return f"{label}: command not found ({cmd[0]})"
+    if proc.returncode != 0:
+        tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
+        return f"{label}: exit {proc.returncode}\n{tail}"
+    notes.append(f"{label} ok")
+    return None
 
-    def _run(label: str, cmd: list[str], cwd: Path, timeout: int) -> Optional[str]:
-        try:
-            proc = subprocess.run(  # noqa: S603 -- fixed argv
-                cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
-            )
-        except subprocess.TimeoutExpired:
-            return f"{label}: TIMEOUT after {timeout}s"
-        except FileNotFoundError:
-            return f"{label}: command not found ({cmd[0]})"
-        if proc.returncode != 0:
-            tail = (proc.stdout + "\n" + proc.stderr).strip()[-2000:]
-            return f"{label}: exit {proc.returncode}\n{tail}"
-        notes.append(f"{label} ok")
-        return None
 
+def _default_quick_gate_ruff(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Ruff over changed .py files only; return error or None."""
     ruff_bin = shutil.which("ruff")
     # #3-C: run ruff only over the changed .py files, not the whole repo.
     # Uses the same diff source (changed_files) already computed by the caller
@@ -3789,13 +3789,16 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
     if _changed_py:
         ruff_base = [ruff_bin, "check"] if ruff_bin else [sys.executable, "-m", "ruff", "check"]
         ruff_cmd = ruff_base + _changed_py + ["--extend-exclude", WORKTREES_DIRNAME]
-        err = _run("ruff", ruff_cmd, repo_root, 300)
-        if err:
-            return False, err
-    else:
-        # No .py files in diff — skip ruff entirely (non-Python-only change).
-        notes.append("ruff skipped (no .py files in diff)")
+        return _quick_gate_run_cmd("ruff", ruff_cmd, repo_root, 300, notes)
+    # No .py files in diff — skip ruff entirely (non-Python-only change).
+    notes.append("ruff skipped (no .py files in diff)")
+    return None
 
+
+def _default_quick_gate_pytest(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Affected-pytest modules via isolated parallel runner; error or None."""
     modules = _affected_pytest_modules(repo_root, changed_files)
     if modules:
         # Run the affected modules through the canonical per-file isolation
@@ -3823,50 +3826,90 @@ def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool,
         # other half of the t_c4ff7329 park. ``.pytest_cache`` is gitignored,
         # so dropping the flag does not dirty the post-merge tree.
         runner = str(repo_root / "scripts" / "run_tests_parallel.py")
-        err = _run(
+        return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
             [sys.executable, runner, *modules],
-            repo_root, 1200,
+            repo_root, 1200, notes,
         )
-        if err:
-            return False, err
-    else:
-        notes.append("pytest skipped (no affected test modules)")
+    notes.append("pytest skipped (no affected test modules)")
+    return None
 
-    if any(f.startswith("web/") for f in changed_files):
-        web_root = repo_root / "web"
-        # Resolve tolerant of npm-workspace hoisting (bins may live in web/ OR
-        # the hoisted ROOT node_modules/.bin). See _resolve_node_bin.
-        tsc = _resolve_node_bin(repo_root, "tsc")
-        vitest = _resolve_node_bin(repo_root, "vitest")
-        npm_bin = shutil.which("npm") or "npm"
-        npx_bin = shutil.which("npx") or "npx"
 
-        err = _run("lint:control", [npm_bin, "run", "lint:control"], web_root, 600)
-        if err:
-            return False, err
-        if tsc is None:
-            # Fail closed: a web diff we cannot type-check is not "green".
-            return False, "tsc: web/ in diff but tsc not found in web/ or root node_modules/.bin"
-        err = _run("tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600)
-        if err:
-            return False, err
-        if vitest is None:
-            return False, (
-                "vitest[control]: web/ in diff but "
-                "vitest not found in web/ or root node_modules/.bin"
-            )
-        err = _run("vitest[control]", [npx_bin, "vitest", "run", "src/control"], web_root, 900)
-        if err:
-            return False, err
+def _default_quick_gate_web(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """lint:control + tsc + vitest when web/ is in the diff; error or None."""
+    if not any(f.startswith("web/") for f in changed_files):
+        return None
+    web_root = repo_root / "web"
+    # Resolve tolerant of npm-workspace hoisting (bins may live in web/ OR
+    # the hoisted ROOT node_modules/.bin). See _resolve_node_bin.
+    tsc = _resolve_node_bin(repo_root, "tsc")
+    vitest = _resolve_node_bin(repo_root, "vitest")
+    npm_bin = shutil.which("npm") or "npm"
+    npx_bin = shutil.which("npx") or "npx"
 
+    err = _quick_gate_run_cmd(
+        "lint:control", [npm_bin, "run", "lint:control"], web_root, 600, notes,
+    )
+    if err:
+        return err
+    if tsc is None:
+        # Fail closed: a web diff we cannot type-check is not "green".
+        return "tsc: web/ in diff but tsc not found in web/ or root node_modules/.bin"
+    err = _quick_gate_run_cmd(
+        "tsc -b", [str(tsc), "-b", "--noEmit"], web_root, 600, notes,
+    )
+    if err:
+        return err
+    if vitest is None:
+        return (
+            "vitest[control]: web/ in diff but "
+            "vitest not found in web/ or root node_modules/.bin"
+        )
+    return _quick_gate_run_cmd(
+        "vitest[control]", [npx_bin, "vitest", "run", "src/control"],
+        web_root, 900, notes,
+    )
+
+
+def _default_quick_gate_visual(
+    repo_root: Path, changed_files: list[str], notes: list[str],
+) -> Optional[str]:
+    """Optional visual gate when control UI paths changed; error or None."""
     if visual_gate_enabled() and any(
         f.startswith("web/src/control/") for f in changed_files
     ):
         err = _run_visual_gate(repo_root, _VISUAL_GATE_SCREENSHOTS_ROOT)
         if err:
-            return False, _visual_gate_with_ime_note(err)
+            return _visual_gate_with_ime_note(err)
         notes.append(_VISUAL_GATE_IME_NOTE)
+    return None
+
+
+def default_quick_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool, str]:
+    """Post-merge quick gate (Entscheidung 5): ruff + affected pytest
+    modules; when the diff touches ``web/``, run lint:control,
+    ``tsc -b --noEmit``, and the control Vitest suite. ``npm run build`` intentionally
+    stays out of this automatic merge path because it mutates generated
+    dashboard assets and belongs to the parked post-merge release gate."""
+    notes: list[str] = []
+
+    err = _default_quick_gate_ruff(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_pytest(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_web(repo_root, changed_files, notes)
+    if err:
+        return False, err
+
+    err = _default_quick_gate_visual(repo_root, changed_files, notes)
+    if err:
+        return False, err
 
     return True, "; ".join(notes)
 
