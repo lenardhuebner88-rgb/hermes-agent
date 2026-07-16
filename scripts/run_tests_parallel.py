@@ -7,8 +7,8 @@ unless explicitly requested), then runs one ``python -m pytest <file>``
 subprocess per file, with bounded parallelism (default: ``os.cpu_count()``).
 
 Why per-file rather than per-test?
-    Per-test spawn overhead (~250ms × 17k tests = 70min CPU minimum)
-    swamped the actual work. Per-file spawn (~250ms × ~850 files = ~3.5min)
+    Per-test spawn overhead (~250ms × ~44k tests = ~3h CPU minimum)
+    swamped the actual work. Per-file spawn (~250ms × ~2300 files = ~10min)
     fits in the budget while still giving every file a fresh Python
     interpreter — the only isolation boundary that actually matters
     (cross-file module-level state leakage was the original flake source;

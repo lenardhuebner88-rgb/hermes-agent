@@ -38,6 +38,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE_SCRIPT = REPO_ROOT / "scripts" / "gate-frontend.sh"
+TOKENS_SCRIPT = REPO_ROOT / "scripts" / "check-design-tokens.sh"
 
 _EXEC = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
 
@@ -83,9 +84,13 @@ def _make_repo(tmp_path: Path, *, tsc: str) -> tuple[Path, Path, Path]:
     """
     repo = tmp_path / "repo"
     (repo / "scripts").mkdir(parents=True)
-    # Copy the real script under test verbatim.
+    # Copy the real script under test verbatim — plus its design-token
+    # companion, which the gate delegates the ratchet step to (shared with
+    # web's `npm run check`, so CI enforces the same contract).
     (repo / "scripts" / "gate-frontend.sh").write_text(GATE_SCRIPT.read_text())
     (repo / "scripts" / "gate-frontend.sh").chmod(_EXEC)
+    (repo / "scripts" / "check-design-tokens.sh").write_text(TOKENS_SCRIPT.read_text())
+    (repo / "scripts" / "check-design-tokens.sh").chmod(_EXEC)
     (repo / "package-lock.json").write_text("{}\n")
 
     bindir = repo / "node_modules" / ".bin"
@@ -261,3 +266,50 @@ def test_full_gate_uses_local_bins_and_bounded_vitest_workers(tmp_path: Path) ->
     calls = tool_sentinel.read_text().splitlines()
     assert "tsc:-b --noEmit" in calls
     assert "vitest:run --maxWorkers=3" in calls
+
+
+def _run_token_check(repo: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(repo / "scripts" / "check-design-tokens.sh")],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _make_token_repo(tmp_path: Path, baseline: str) -> Path:
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "check-design-tokens.sh").write_text(TOKENS_SCRIPT.read_text())
+    (repo / "scripts" / "check-design-tokens.sh").chmod(_EXEC)
+    (repo / "scripts" / "design-token-baseline.txt").write_text(baseline)
+    (repo / "web" / "src" / "control").mkdir(parents=True)
+    return repo
+
+
+def test_design_token_ratchet_fails_when_count_goes_up(tmp_path: Path) -> None:
+    """The shared ratchet (gate-frontend.sh AND web's npm check) must fail
+    when new raw color literals appear instead of tokens (DESIGN.md rule 8)."""
+    repo = _make_token_repo(tmp_path, "0\n")
+    (repo / "web" / "src" / "control" / "Widget.tsx").write_text(
+        'export const c = "#a1b2c3";\n',
+    )
+    r = _run_token_check(repo)
+    assert r.returncode == 1
+    assert "raw color literals" in r.stderr
+    assert "Widget.tsx" in r.stderr
+
+
+def test_design_token_ratchet_passes_at_baseline_and_ignores_theme_css(tmp_path: Path) -> None:
+    """At/under baseline passes; theme.css is the one file allowed to hold
+    raw hex values and is excluded from the count."""
+    repo = _make_token_repo(tmp_path, "1\n")
+    (repo / "web" / "src" / "control" / "Widget.tsx").write_text(
+        'export const c = "#a1b2c3";\n',
+    )
+    (repo / "web" / "src" / "control" / "theme.css").write_text(
+        ":root { --hc-accent: #ff00aa; }\n",
+    )
+    r = _run_token_check(repo)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "design-tokens OK: 1 raw color literals (baseline 1)" in r.stdout

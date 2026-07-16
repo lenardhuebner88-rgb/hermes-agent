@@ -59,10 +59,10 @@ from typing import Callable, Optional, Sequence
 # fallback downgrades to no selection (nightly full suite remains the
 # backstop). Must stay in sync with scripts/affected_tests.py.
 #
-# Calibrated (2026-06-23): tests/hermes_cli/=437, tests/gateway/=356 files.
-# 500 covers all current directories; anything larger would exceed the
-# targeted-gate walltime budget.
-_FALLBACK_MAX_TEST_FILES = 500
+# Calibrated (2026-07-16): tests/hermes_cli/=592, tests/gateway/=460,
+# tests/tools/=318 files. 800 covers all current directories; anything
+# larger would exceed the targeted-gate walltime budget.
+_FALLBACK_MAX_TEST_FILES = 800
 
 
 def _imports_changed_module(test_path: Path, module_import: str) -> bool:
@@ -86,14 +86,19 @@ def _imports_changed_module(test_path: Path, module_import: str) -> bool:
 
 
 def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) -> list[str]:
+    module_import = str(source.with_suffix("")).replace("/", ".")
+    # Feature tests also live directly at tests/ root (e.g.
+    # tests/test_design_board_store.py for hermes_cli/design_board_store.py);
+    # glob is non-recursive, so the root scan only matches those.
+    test_dirs = [repo_root / "tests"]
     pkg_test_dir = Path("tests") / rel_dir
     absolute_pkg_test_dir = repo_root / pkg_test_dir
-    if pkg_test_dir == Path("tests") or not absolute_pkg_test_dir.is_dir():
-        return []
-    module_import = str(source.with_suffix("")).replace("/", ".")
+    if pkg_test_dir != Path("tests") and absolute_pkg_test_dir.is_dir():
+        test_dirs.append(absolute_pkg_test_dir)
     return [
         str(path.relative_to(repo_root))
-        for path in sorted(absolute_pkg_test_dir.glob("test_*.py"))
+        for test_dir in test_dirs
+        for path in sorted(test_dir.glob("test_*.py"))
         if _imports_changed_module(path, module_import)
     ]
 

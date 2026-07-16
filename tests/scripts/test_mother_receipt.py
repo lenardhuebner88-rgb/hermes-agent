@@ -3,8 +3,15 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
 
 SCRIPT = Path.home() / ".hermes" / "scripts" / "kanban-mother-receipt.py"
+
+# The script under test lives in the operator's ~/.hermes/scripts/ and is not
+# tracked in git; skip everywhere it is not installed instead of failing.
+pytestmark = pytest.mark.skipif(
+    not SCRIPT.is_file(), reason=f"operator script {SCRIPT} is not installed"
+)
 
 
 def _load_mother_receipt():
