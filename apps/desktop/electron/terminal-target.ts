@@ -86,6 +86,7 @@ export function resolveTerminalSpawnSpec({
   if (!target) {
     return { ...shellSpec, target: null }
   }
+
   const tmux = lookup('tmux')
 
   if (!tmux) {
