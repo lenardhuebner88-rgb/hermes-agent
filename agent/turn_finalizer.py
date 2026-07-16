@@ -148,6 +148,27 @@ def finalize_turn(
                     from hermes_cli import kanban_db as _kb
                     _conn = _kb.connect()
                     try:
+                        _event_payload_extra = {
+                            "budget_used": api_call_count,
+                            "budget_max": agent.max_iterations,
+                        }
+                        try:
+                            _event_payload_extra["workspace_progress_size"] = (
+                                _kb._workspace_progress_size(_conn, _kanban_task)
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            _task = _kb.get_task(_conn, _kanban_task)
+                            _progress_marker = getattr(
+                                _task, "budget_progress_marker", None
+                            )
+                            if _progress_marker is not None:
+                                _event_payload_extra["budget_progress_marker"] = int(
+                                    _progress_marker
+                                )
+                        except Exception:
+                            pass
                         _kb._record_task_failure(
                             _conn,
                             _kanban_task,
@@ -160,10 +181,7 @@ def finalize_turn(
                             outcome="timed_out",
                             release_claim=True,
                             end_run=True,
-                            event_payload_extra={
-                                "budget_used": api_call_count,
-                                "budget_max": agent.max_iterations,
-                            },
+                            event_payload_extra=_event_payload_extra,
                             summary=final_response,
                             expected_run_id=(
                                 int(os.environ["HERMES_KANBAN_RUN_ID"])

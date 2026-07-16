@@ -273,6 +273,13 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
     record = MagicMock(name="record_task_failure")
     conn = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr("hermes_cli.kanban_db.connect", lambda: conn)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db._workspace_progress_size", lambda _conn, _task_id: 17
+    )
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db.get_task",
+        lambda _conn, _task_id: SimpleNamespace(budget_progress_marker=11),
+    )
     monkeypatch.setattr("hermes_cli.kanban_db._record_task_failure", record)
     agent = _LimitAgent()
 
@@ -294,7 +301,12 @@ def test_pending_response_records_kanban_timeout(monkeypatch):
         outcome="timed_out",
         release_claim=True,
         end_run=True,
-        event_payload_extra={"budget_used": 60, "budget_max": 60},
+        event_payload_extra={
+            "budget_used": 60,
+            "budget_max": 60,
+            "workspace_progress_size": 17,
+            "budget_progress_marker": 11,
+        },
         summary="composed report",
         expected_run_id=None,
     )

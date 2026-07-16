@@ -283,3 +283,68 @@ def test_workspace_progress_size_reads_real_git_diff(kanban_home, tmp_path):
         (ws / "b.py").write_text("print('more work')\n")
         bigger = kb._workspace_progress_size(conn, tid)
         assert bigger > small
+
+
+def test_budget_progress_evidence_reaches_operator_escalation(kanban_home, tmp_path):
+    import subprocess
+
+    ws = tmp_path / "budget-evidence-ws"
+    ws.mkdir()
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(ws), *args],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "t@t.t")
+    git("config", "user.name", "t")
+    (ws / "agent.py").write_text("step = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "base")
+    (ws / "agent.py").write_text("step = 1\nstep = 2\n", encoding="utf-8")
+
+    with kb.connect() as conn:
+        tid = _ready_task(conn)
+        prior_marker = 3
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ?, budget_progress_marker = ? "
+            "WHERE id = ?",
+            (str(ws), prior_marker, tid),
+        )
+        conn.commit()
+        progress = kb._workspace_progress_size(conn, tid)
+        assert progress > 0
+
+        error = (
+            "Iteration budget exhausted (4/4) — task could not complete "
+            "within the allowed iterations"
+        )
+        assert kb._record_task_failure(
+            conn,
+            tid,
+            error,
+            outcome="timed_out",
+            failure_limit=1,
+            event_payload_extra={
+                "budget_used": 4,
+                "budget_max": 4,
+                "workspace_progress_size": progress,
+                "budget_progress_marker": prior_marker,
+            },
+        )
+
+        escalation = next(
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == kb.OPERATOR_ESCALATION_EVENT
+        )
+        assert escalation.payload["evidence"]["context"] == {
+            "budget_used": 4,
+            "budget_max": 4,
+            "workspace_progress_size": progress,
+            "budget_progress_marker": prior_marker,
+        }
