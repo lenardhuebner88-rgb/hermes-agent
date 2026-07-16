@@ -167,6 +167,39 @@ def test_parse_long_select_full_options_and_marker_insensitive_fp() -> None:
     assert fp_label != fp_cursor1
 
 
+def test_parse_stale_select_above_fresh_yn_is_not_picked() -> None:
+    """A scrolled-up, already-answered select block above a fresh bottom y/n
+    question must not be parsed/fingerprinted as the standing question."""
+    stale_then_yn = (
+        "  Do you want to proceed?\n"
+        "  ❯ 1. Yes\n"
+        "    2. No, and tell Claude what to do differently\n"
+        "  chosen: 1\n"
+        "  running build step 1 …\n"
+        "  running build step 2 …\n"
+        "  running build step 3 …\n"
+        "  running build step 4 …\n"
+        "  running build step 5 …\n"
+        "  build done.\n"
+        "Allow network access for this tool? (y/n)\n"
+    )
+    parsed = aq.parse_question(stale_then_yn)
+    assert parsed is not None
+    assert parsed["options"] == [
+        {"nr": "y", "label": "yes"},
+        {"nr": "n", "label": "no"},
+    ]
+    assert "Allow network access" in parsed["question_text"]
+    assert "Do you want to proceed?" not in parsed["region"]
+
+    # And the fingerprint differs from the stale select prompt's fingerprint.
+    stale_parsed = aq.parse_question(_FIXTURE_CLAUDE_SELECT)
+    assert stale_parsed is not None
+    fp_yn = aq.compute_fingerprint("%s", parsed["region"])
+    fp_stale = aq.compute_fingerprint("%s", stale_parsed["region"])
+    assert fp_yn != fp_stale
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -213,6 +246,45 @@ def test_store_schema_init_idempotent_and_list_filter(qdb: Path) -> None:
     assert len(expired) == 1
     assert expired[0]["fingerprint"] == "fp-open"
     assert isinstance(opens[0]["options"], list)
+
+
+def test_supersede_and_insert_single_transaction(qdb: Path) -> None:
+    """Supersede+insert happen atomically; repeat with same fp is idempotent."""
+    aq.insert_question_event(
+        session="work",
+        window="claude",
+        pane_id="%a",
+        fingerprint="fp-old",
+        question_text="Old?",
+        db_path=qdb,
+    )
+    n_super, new_id = aq.supersede_and_insert(
+        session="work",
+        window="claude",
+        pane_id="%a",
+        fingerprint="fp-new",
+        question_text="New?",
+        db_path=qdb,
+    )
+    assert n_super == 1
+    assert isinstance(new_id, int)
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["fingerprint"] == "fp-new"
+    assert len(aq.list_question_events(status="superseded", db_path=qdb)) == 1
+
+    # Same fingerprint again: nothing superseded, insert ignored.
+    n_super2, new_id2 = aq.supersede_and_insert(
+        session="work",
+        window="claude",
+        pane_id="%a",
+        fingerprint="fp-new",
+        question_text="New?",
+        db_path=qdb,
+    )
+    assert n_super2 == 0
+    assert new_id2 is None
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
 
 
 def test_store_options_json_roundtrip(qdb: Path) -> None:
@@ -453,6 +525,37 @@ def test_ingestor_empty_snapshot_skips_expiry(qdb: Path) -> None:
     assert s["skipped_expiry_empty_snapshot"] == 1
     assert s["expired"] == 0
     assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+
+def test_ingestor_persistently_empty_snapshots_eventually_expire(qdb: Path) -> None:
+    """Truly gone windows (>= 3 consecutive empty overviews) must not leave
+    events open forever; expiry stays two-poll confirmed on top."""
+    now = 1_700_000_360.0
+    win = _frage_window(now=now, activity=now - 10)
+    service = _StubService([win], now=now)
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=lambda: now,
+    )
+    ing.poll_once()
+    ing.poll_once()
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+    service._windows = []
+    s1 = ing.poll_once()  # empty #1: skipped
+    s2 = ing.poll_once()  # empty #2: skipped
+    assert s1["skipped_expiry_empty_snapshot"] == 1
+    assert s2["skipped_expiry_empty_snapshot"] == 1
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+    s3 = ing.poll_once()  # empty #3: expiry pass runs → candidate pending
+    assert s3["skipped_expiry_empty_snapshot"] == 0
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+    s4 = ing.poll_once()  # empty #4: two-poll confirmed → expired
+    assert s4["expired"] == 1
+    assert aq.list_question_events(status="open", db_path=qdb) == []
 
 
 def test_ingestor_ignores_non_work_session(qdb: Path) -> None:

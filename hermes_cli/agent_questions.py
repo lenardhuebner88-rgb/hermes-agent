@@ -163,7 +163,12 @@ def _parse_numbered_options(lines: list[str]) -> list[dict[str, Any]]:
 def _bottom_option_block(lines: list[str]) -> tuple[int, int]:
     """Return ``(start, end)`` of the bottom-most contiguous option-line block.
 
-    Empty lines break a block. Returns ``(-1, -1)`` when none is found.
+    Empty lines break a block. The block's END must lie inside the last 8
+    lines (the same window question detection uses) — otherwise a stale,
+    scrolled-up select prompt above a fresh bottom question (e.g. y/n) would
+    be parsed and fingerprinted instead of the question actually standing.
+    The block's START may reach further up so long option lists survive.
+    Returns ``(-1, -1)`` when none is found.
     """
     i = len(lines) - 1
     while i >= 0:
@@ -176,6 +181,8 @@ def _bottom_option_block(lines: list[str]) -> tuple[int, int]:
             i -= 1
         start = i + 1
         # First hit walking bottom-up is the bottom-most contiguous block.
+        if end - 1 < max(0, len(lines) - 8):
+            return -1, -1
         return start, end
     return -1, -1
 
@@ -395,31 +402,56 @@ def insert_question_event(
             return int(cur.lastrowid)
 
 
-def supersede_open_for_pane(
-    pane_id: str,
+def supersede_and_insert(
     *,
-    except_fingerprint: str | None = None,
+    session: str,
+    window: str,
+    pane_id: str,
+    fingerprint: str,
+    question_text: str,
+    options: list[dict[str, Any]] | None = None,
+    kind: str | None = None,
+    cwd: str | None = None,
+    source: str = "scrape",
+    class_: str = "unknown",
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
-) -> int:
-    """Mark open events for ``pane_id`` as superseded; returns rows touched."""
+) -> tuple[int, int | None]:
+    """Supersede other open events on the pane and insert the new one in ONE
+    transaction, so no interleaving writer can observe/leave two open rows
+    for the same pane. Returns ``(superseded_count, new_id_or_None)``."""
     ts = _iso_now(now)
+    options_json = json.dumps(options if options is not None else [], ensure_ascii=False)
     with connect_closing(db_path=db_path) as conn:
         with write_txn(conn):
-            if except_fingerprint is None:
-                cur = conn.execute(
-                    "UPDATE question_events SET status = 'superseded', "
-                    "updated_ts = ? WHERE pane_id = ? AND status = 'open'",
-                    (ts, pane_id),
-                )
-            else:
-                cur = conn.execute(
-                    "UPDATE question_events SET status = 'superseded', "
-                    "updated_ts = ? WHERE pane_id = ? AND status = 'open' "
-                    "AND fingerprint != ?",
-                    (ts, pane_id, except_fingerprint),
-                )
-            return int(cur.rowcount or 0)
+            sup = conn.execute(
+                "UPDATE question_events SET status = 'superseded', "
+                "updated_ts = ? WHERE pane_id = ? AND status = 'open' "
+                "AND fingerprint != ?",
+                (ts, pane_id, fingerprint),
+            )
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO question_events ("
+                "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+                "kind, cwd, question_text, options_json, class, status, override"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0)",
+                (
+                    ts,
+                    ts,
+                    source,
+                    session,
+                    window,
+                    pane_id,
+                    fingerprint,
+                    kind,
+                    cwd,
+                    question_text,
+                    options_json,
+                    class_,
+                ),
+            )
+            new_id = int(cur.lastrowid) if cur.rowcount != 0 else None
+            return int(sup.rowcount or 0), new_id
 
 
 def expire_open_events(
@@ -485,6 +517,7 @@ class QuestionScrapeIngestor:
         self.session_filter = session_filter
         self._pending: dict[str, str] = {}
         self._expire_pending: set[str] = set()
+        self._empty_snapshots: int = 0
 
     def _service(self) -> Any:
         if self._service_factory is not None:
@@ -554,15 +587,10 @@ class QuestionScrapeIngestor:
 
             if stable and age_ok:
                 # Supersede only after the new fingerprint is stable (not on
-                # first observation) so a 1-poll flicker cannot kill a valid open.
-                n_super = supersede_open_for_pane(
-                    pane_id,
-                    except_fingerprint=fp,
-                    db_path=self.db_path,
-                    now=now,
-                )
-                summary["superseded"] += n_super
-                new_id = insert_question_event(
+                # first observation) so a 1-poll flicker cannot kill a valid
+                # open; both writes share one transaction so no interleaving
+                # writer can leave two open rows for the pane.
+                n_super, new_id = supersede_and_insert(
                     session=str(win.get("session") or ""),
                     window=str(win.get("window") or ""),
                     pane_id=pane_id,
@@ -576,6 +604,7 @@ class QuestionScrapeIngestor:
                     db_path=self.db_path,
                     now=now,
                 )
+                summary["superseded"] += n_super
                 if new_id is None:
                     summary["idempotent"] += 1
                 else:
@@ -597,10 +626,17 @@ class QuestionScrapeIngestor:
         self._pending = next_pending
 
         # Empty overview (e.g. transient tmux list_windows failure) must not
-        # expire everything — skip the whole expiry passage.
+        # expire everything — skip the expiry passage. But a PERSISTENTLY
+        # empty overview (>= 3 consecutive polls) means the windows are truly
+        # gone; from then on the expiry passage runs again (still two-poll
+        # confirmed via _expire_pending) so events cannot stay open forever.
         if len(windows) == 0:
-            summary["skipped_expiry_empty_snapshot"] = 1
-            return summary
+            self._empty_snapshots += 1
+            if self._empty_snapshots < 3:
+                summary["skipped_expiry_empty_snapshot"] = 1
+                return summary
+        else:
+            self._empty_snapshots = 0
 
         open_panes = list_open_pane_ids(db_path=self.db_path)
         candidates = open_panes - frage_panes
