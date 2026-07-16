@@ -1121,9 +1121,10 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
 
     // Chips hängen an geladenen Fenstern — als Erstes darauf warten, sonst sind
     // die folgenden Sync-Assertions ein Race gegen den async getAgentTerminalWindows-Resolve.
-    expect(await screen.findByRole("button", { name: "hermes-agents:hermes" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "hermes-agents:codex" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "hermes-agents:claude" })).toBeTruthy();
+    // Accessible name may include overview state (" — läuft" / " — frage") once polled.
+    expect(await screen.findByRole("button", { name: /^hermes-agents:hermes/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^hermes-agents:codex/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^hermes-agents:claude/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Zurück zum Dashboard" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Neue Session starten" })).toBeTruthy();
     expect(screen.getByLabelText("Text an Terminal senden")).toBeTruthy();
@@ -1151,7 +1152,7 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     installDom(true);
     await renderView();
 
-    const codexChip = await screen.findByRole("button", { name: "hermes-agents:codex" });
+    const codexChip = await screen.findByRole("button", { name: /^hermes-agents:codex/ });
     fireEvent.click(codexChip);
     fireEvent.click(codexChip);
 
@@ -1164,7 +1165,7 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     installDom(true);
     await renderView();
 
-    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    const activeChip = await screen.findByRole("button", { name: /^hermes-agents:hermes/ });
     fireEvent.click(activeChip);
     fireEvent.click(screen.getByRole("button", { name: "Tools / Tageslage" }));
     expect((await screen.findAllByText("Terminal-Kontext")).length).toBeGreaterThan(0);
@@ -1175,7 +1176,7 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     installDom(true);
     await renderView();
 
-    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    const activeChip = await screen.findByRole("button", { name: /^hermes-agents:hermes/ });
     fireEvent.click(activeChip);
     await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Liste aktualisieren" }));
@@ -1240,7 +1241,7 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     });
     await renderView();
 
-    const activeChip = await screen.findByRole("button", { name: "hermes-agents:hermes" });
+    const activeChip = await screen.findByRole("button", { name: /^hermes-agents:hermes/ });
     fireEvent.click(activeChip);
 
     const input = (await screen.findByLabelText("Neuer Fenstername")) as HTMLInputElement;
@@ -1250,6 +1251,40 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
 
     await waitFor(() => expect(apiMock.renameAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", "hermes-2"));
     await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(2));
+  });
+
+  it("exposes overview state on chips and a Wer-wartet pill that jumps to the frage window (S10)", async () => {
+    // overviewFixture marks codex as "frage" — chip accessible name + summary pill.
+    installDom(true);
+    await renderView();
+
+    const codexChip = await screen.findByRole("button", { name: /hermes-agents:codex — frage/i });
+    expect(codexChip.getAttribute("title")).toMatch(/frage/i);
+    expect(await screen.findByRole("button", { name: "1 Frage" })).toBeTruthy();
+    expect(screen.getByTestId("frage-summary-pill").textContent).toMatch(/1 Frage/);
+
+    // Pill jumps to the first non-active frage window (codex); cwd chip proves target switch.
+    fireEvent.click(screen.getByTestId("frage-summary-pill"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mobile-cwd-chip").getAttribute("title")).toBe(
+        "/home/piet/.hermes/hermes-agent",
+      ),
+    );
+    // Second tap on the now-active codex chip opens the session sheet (same contract as chip switch).
+    fireEvent.click(codexChip);
+    expect(await screen.findByRole("button", { name: "Sitzung schließen" })).toBeTruthy();
+  });
+
+  it("polls agent-terminal overview while on mobile terminal view without opening Flotte (S10)", async () => {
+    installDom(true);
+    await renderView();
+
+    // Stay on terminal (default) — do not open Flotten-Übersicht.
+    expect(screen.getByRole("button", { name: "Flotten-Übersicht" })).toBeTruthy();
+    expect(screen.queryByText("Zustände: Heuristik aus Terminal-Ausgabe")).toBeNull();
+
+    await waitFor(() => expect(apiMock.getAgentTerminalOverview).toHaveBeenCalled());
+    expect(apiMock.getAgentTerminalOverview.mock.calls.length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows the fleet overview toggle in the chip strip and renders cards from the fetched overview", async () => {

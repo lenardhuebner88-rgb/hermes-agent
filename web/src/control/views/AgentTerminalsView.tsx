@@ -1949,12 +1949,12 @@ export function AgentTerminalsView() {
     }
   }, []);
 
-  // Fleet-Polling: auf Desktop IMMER an (speist den persistenten Fleet-Strip
-  // über der Terminal-Fläche), auf compactLayout nur solange die Flotte-
-  // Übersicht offen ist — gleiches visibility-aware-Timer-Muster wie
-  // refreshReadOnlyContext oben.
+  // Fleet-Polling: desktop always (persistent fleet strip). On compactLayout
+  // also while view === "terminal" so the mobile chip strip can show per-window
+  // overview state (frage/läuft/…) without opening Flotte first. Same
+  // visibility-aware timer pattern as refreshReadOnlyContext above.
   useEffect(() => {
-    if (compactLayout && view !== "flotte") return;
+    if (compactLayout && view !== "flotte" && view !== "terminal") return;
     let disposed = false;
     let timer: number | null = null;
 
@@ -2092,6 +2092,24 @@ export function AgentTerminalsView() {
     return map;
   }, [overview]);
   const selectedOverview = activeTarget ? overviewByKey.get(`${activeTarget.session}:${activeTarget.window}`) ?? null : null;
+
+  /** Windows currently in overview state "frage" — drives the strip summary pill. */
+  const frageWindows = useMemo(() => {
+    return orderedWindows.filter((win) => {
+      const entry = overviewByKey.get(`${win.session}:${win.window}`);
+      const state: AgentTerminalOverviewState = entry?.state ?? (isDeadWindow(win) ? "dead" : "idle");
+      return state === "frage";
+    });
+  }, [orderedWindows, overviewByKey]);
+
+  const jumpToNextFrage = useCallback(() => {
+    if (frageWindows.length === 0) return;
+    const activeKey = activeTarget ? `${activeTarget.session}:${activeTarget.window}` : null;
+    const currentIdx = frageWindows.findIndex((win) => `${win.session}:${win.window}` === activeKey);
+    // Not on a frage window → first; already on one → cycle to the next.
+    const next = frageWindows[(currentIdx + 1) % frageWindows.length];
+    if (next) selectPaneTarget(activePane, targetFromWindow(next));
+  }, [activePane, activeTarget, frageWindows, selectPaneTarget]);
 
   const sessionList = (
     <div className="flex h-full flex-col gap-3">
@@ -2542,11 +2560,39 @@ export function AgentTerminalsView() {
         <ChevronLeft className="h-4 w-4" />
       </button>
       <div className="flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto px-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {frageWindows.length > 0 && (
+          <button
+            type="button"
+            data-testid="frage-summary-pill"
+            aria-label={frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
+            title={frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
+            onClick={jumpToNextFrage}
+            className="inline-flex shrink-0 items-center gap-1 self-center rounded-full border border-status-warn/40 bg-status-warn/10 px-2.5 py-1 text-[11px] font-medium text-status-warn"
+          >
+            <span className="relative grid h-1.5 w-1.5 shrink-0 place-items-center" aria-hidden>
+              <span className="absolute h-1.5 w-1.5 animate-ping rounded-full bg-status-warn/50" />
+              <span className="h-1.5 w-1.5 rounded-full bg-status-warn" />
+            </span>
+            {frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
+          </button>
+        )}
         {orderedWindows.map((win) => {
           const active = activeTarget?.session === win.session && activeTarget.window === win.window;
           const dead = isDeadWindow(win);
           const key = `${win.session}:${win.window}`;
           const unseen = !active && hasUnseenActivity(win, lastSeen);
+          const chipOverview = overviewByKey.get(key);
+          const chipState: AgentTerminalOverviewState = chipOverview?.state ?? (dead ? "dead" : "idle");
+          const chipMeta = STRIP_STATE_META[chipState] ?? STRIP_STATE_META.idle;
+          const chipName = `${chipLabel(win)} — ${chipMeta.label}`;
+          // Operator directive 2026-07-16: chips look like before (green alive,
+          // red dead) — ONLY the attention case (frage) gets a distinct color.
+          const dotToneClass =
+            chipState === "frage"
+              ? "bg-status-warn"
+              : dead
+                ? "bg-status-alert"
+                : "bg-status-ok";
           return (
             <button
               key={key}
@@ -2554,14 +2600,19 @@ export function AgentTerminalsView() {
                 chipRefs.current[key] = el;
               }}
               type="button"
+              aria-label={chipName}
+              title={chipName}
               onClick={() => (active ? setSessionSheetOpen(true) : selectPaneTarget(activePane, targetFromWindow(win)))}
               className={cn(
                 "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition",
                 active ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2",
               )}
             >
-              <span className="relative grid h-2 w-2 shrink-0 place-items-center">
-                <span className={cn("h-2 w-2 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} />
+              <span className="relative grid h-2 w-2 shrink-0 place-items-center" aria-hidden>
+                {chipState === "frage" && (
+                  <span className="absolute h-2 w-2 animate-ping rounded-full bg-status-warn/50" />
+                )}
+                <span className={cn("h-2 w-2 rounded-full", dotToneClass)} />
                 {unseen && <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-live" />}
               </span>
               <span className="max-w-[8rem] truncate">{chipLabel(win)}</span>
