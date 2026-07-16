@@ -517,7 +517,31 @@ def _fetch_codex_account_usage(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> Optional[AccountUsageSnapshot]:
-    token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
+    """Fetch Codex/ChatGPT quota. Fail-soft with specific reasons (Kimi pattern).
+
+    Credential resolution: AuthError / empty token → unavailable snapshot.
+    Transient non-AuthError failures (e.g. refresh 503) still propagate so the
+    outer ``fetch_account_usage`` guard returns None rather than a wrong-account
+    pool snapshot — see ``_resolve_codex_usage_credentials``.
+    """
+    try:
+        token, resolved_base_url, account_id = _resolve_codex_usage_credentials(
+            base_url, api_key
+        )
+    except AuthError:
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Codex credentials not available.",
+        )
+    if not str(token or "").strip():
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Codex credentials not available.",
+        )
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
@@ -525,10 +549,44 @@ def _fetch_codex_account_usage(
     }
     if account_id:
         headers["ChatGPT-Account-Id"] = account_id
-    with httpx.Client(timeout=15.0) as client:
-        response = client.get(_resolve_codex_usage_url(resolved_base_url), headers=headers)
-        response.raise_for_status()
-    payload = response.json() or {}
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.get(
+                _resolve_codex_usage_url(resolved_base_url), headers=headers
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is not None and status_code >= 400:
+                if status_code in (401, 403):
+                    return AccountUsageSnapshot(
+                        provider="openai-codex",
+                        source="usage_api",
+                        fetched_at=_utc_now(),
+                        unavailable_reason="ChatGPT/Codex token rejected.",
+                    )
+                return AccountUsageSnapshot(
+                    provider="openai-codex",
+                    source="usage_api",
+                    fetched_at=_utc_now(),
+                    unavailable_reason=f"Codex usage API error ({status_code}).",
+                )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.debug("Codex usage API request failed", exc_info=True)
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Codex usage API unreachable ({type(exc).__name__}).",
+        )
+    try:
+        payload = response.json() or {}
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Invalid Codex usage response ({type(exc).__name__}).",
+        )
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
     for key, label, wkey in (
@@ -747,9 +805,15 @@ def redeem_codex_reset_credit(
 
 
 def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
+    """Fetch Anthropic OAuth usage. Fail-soft with specific reasons (Kimi pattern)."""
     token = (resolve_anthropic_token() or "").strip()
     if not token:
-        return None
+        return AccountUsageSnapshot(
+            provider="anthropic",
+            source="oauth_usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason="Anthropic OAuth token not configured.",
+        )
     if not _is_oauth_token(token):
         return AccountUsageSnapshot(
             provider="anthropic",
@@ -764,10 +828,44 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": "claude-code/2.1.0",
     }
-    with httpx.Client(timeout=15.0) as client:
-        response = client.get("https://api.anthropic.com/api/oauth/usage", headers=headers)
-        response.raise_for_status()
-    payload = response.json() or {}
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            response = client.get(
+                "https://api.anthropic.com/api/oauth/usage", headers=headers
+            )
+            status_code = getattr(response, "status_code", None)
+            if status_code is not None and status_code >= 400:
+                if status_code in (401, 403):
+                    return AccountUsageSnapshot(
+                        provider="anthropic",
+                        source="oauth_usage_api",
+                        fetched_at=_utc_now(),
+                        unavailable_reason="Anthropic OAuth token rejected (expired?).",
+                    )
+                return AccountUsageSnapshot(
+                    provider="anthropic",
+                    source="oauth_usage_api",
+                    fetched_at=_utc_now(),
+                    unavailable_reason=f"Anthropic usage API error ({status_code}).",
+                )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.debug("Anthropic usage API request failed", exc_info=True)
+        return AccountUsageSnapshot(
+            provider="anthropic",
+            source="oauth_usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Anthropic usage API unreachable ({type(exc).__name__}).",
+        )
+    try:
+        payload = response.json() or {}
+    except Exception as exc:
+        return AccountUsageSnapshot(
+            provider="anthropic",
+            source="oauth_usage_api",
+            fetched_at=_utc_now(),
+            unavailable_reason=f"Invalid Anthropic usage response ({type(exc).__name__}).",
+        )
     windows: list[AccountUsageWindow] = []
     mapping = (
         ("five_hour", "Current session", "session"),

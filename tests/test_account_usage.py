@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import httpx
+
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
@@ -7,6 +9,7 @@ from agent.account_usage import (
     fetch_account_usage,
     render_account_usage_lines,
 )
+from hermes_cli.auth import AuthError
 
 # Real Grok CLI billing line captured 2026-07-16 (verbatim).
 _XAI_BILLING_FIXTURE_LINE = (
@@ -115,6 +118,198 @@ def test_fetch_account_usage_codex(monkeypatch):
     assert snapshot.windows[0].used_percent == 15.0
     assert snapshot.windows[0].reset_at == datetime.fromtimestamp(1_900_000_000, tz=timezone.utc)
     assert "Credits balance: $12.50" in snapshot.details
+
+
+def test_fetch_account_usage_anthropic_maps_windows(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: "sk-ant-oat01-test-oauth-token",
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "five_hour": {
+                    "utilization": 0.15,
+                    "resets_at": "2026-07-16T18:00:00Z",
+                },
+                "seven_day": {
+                    "utilization": 40,
+                    "resets_at": "2026-07-20T00:00:00Z",
+                },
+                "seven_day_opus": {
+                    "utilization": 55,
+                    "resets_at": "2026-07-20T00:00:00Z",
+                },
+                "extra_usage": {
+                    "is_enabled": True,
+                    "used_credits": 1.5,
+                    "monthly_limit": 10.0,
+                    "currency": "USD",
+                },
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.provider == "anthropic"
+    assert snapshot.source == "oauth_usage_api"
+    assert snapshot.unavailable_reason is None
+    assert len(snapshot.windows) == 3
+    assert snapshot.windows[0].label == "Current session"
+    assert snapshot.windows[0].used_percent == 15.0
+    assert snapshot.windows[0].window_key == "session"
+    assert snapshot.windows[1].label == "Current week"
+    assert snapshot.windows[1].used_percent == 40.0
+    assert snapshot.windows[1].window_key == "weekly"
+    assert snapshot.windows[2].label == "Opus week"
+    assert snapshot.windows[2].used_percent == 55.0
+    assert snapshot.windows[2].window_key == "opus_week"
+    assert "Extra usage: 1.50 / 10.00 USD" in snapshot.details
+
+
+def test_fetch_account_usage_anthropic_missing_token(monkeypatch):
+    monkeypatch.setattr("agent.account_usage.resolve_anthropic_token", lambda: "")
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.provider == "anthropic"
+    assert snapshot.source == "oauth_usage_api"
+    assert snapshot.unavailable_reason is not None
+    assert "not configured" in snapshot.unavailable_reason
+    assert snapshot.windows == ()
+
+
+def test_fetch_account_usage_anthropic_rejected_token_returns_unavailable(monkeypatch):
+    fake_token = "sk-ant-oat01-secret-should-not-leak"
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: fake_token,
+    )
+
+    class _UnauthorizedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            class _UnauthorizedResponse:
+                status_code = 401
+
+                def raise_for_status(self):
+                    raise Exception(f"Unauthorized token {fake_token}")
+
+                def json(self):
+                    return {"error": fake_token}
+
+            return _UnauthorizedResponse()
+
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _UnauthorizedClient(),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason is not None
+    assert "rejected" in snapshot.unavailable_reason
+    assert fake_token not in snapshot.unavailable_reason
+    assert "secret-should-not-leak" not in snapshot.unavailable_reason
+
+
+def test_fetch_account_usage_anthropic_unreachable_connect_error(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: "sk-ant-oat01-test-oauth-token",
+    )
+
+    class _ConnectFailClient:
+        def __enter__(self):
+            raise httpx.ConnectError("connection refused")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _ConnectFailClient(),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason == (
+        "Anthropic usage API unreachable (ConnectError)."
+    )
+    assert "connection refused" not in snapshot.unavailable_reason
+
+
+def test_fetch_account_usage_codex_credentials_not_available(monkeypatch):
+    def _boom(base_url=None, api_key=None):
+        raise AuthError("no ChatGPT credentials for sk-secret-codex-token")
+
+    monkeypatch.setattr(
+        "agent.account_usage._resolve_codex_usage_credentials",
+        _boom,
+    )
+
+    snapshot = fetch_account_usage("openai-codex")
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.provider == "openai-codex"
+    assert snapshot.source == "usage_api"
+    assert snapshot.unavailable_reason == "Codex credentials not available."
+    assert "sk-secret-codex-token" not in snapshot.unavailable_reason
+    assert "ChatGPT credentials" not in snapshot.unavailable_reason
+
+
+def test_fetch_account_usage_codex_rejected_token_returns_unavailable(monkeypatch):
+    fake_token = "sk-codex-secret-should-not-leak"
+    monkeypatch.setattr(
+        "agent.account_usage._resolve_codex_usage_credentials",
+        lambda base_url=None, api_key=None: (fake_token, "https://chatgpt.com/backend-api/codex", "acct"),
+    )
+
+    class _UnauthorizedClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, url, headers=None):
+            class _UnauthorizedResponse:
+                status_code = 401
+
+                def raise_for_status(self):
+                    raise Exception(f"Unauthorized {fake_token}")
+
+                def json(self):
+                    return {"error": fake_token}
+
+            return _UnauthorizedResponse()
+
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _UnauthorizedClient(),
+    )
+
+    snapshot = fetch_account_usage("openai-codex")
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason == "ChatGPT/Codex token rejected."
+    assert fake_token not in snapshot.unavailable_reason
 
 
 def test_render_account_usage_lines_includes_reset_and_provider():
