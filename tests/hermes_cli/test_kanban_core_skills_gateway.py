@@ -936,31 +936,18 @@ def test_gateway_dispatcher_watcher_env_truthy_uses_config(monkeypatch):
     )
 
 
-def test_gateway_dispatcher_invalid_repo_cap_uses_default(
-    kanban_home, monkeypatch, caplog
-):
-    """Bad kanban.max_concurrent_per_repo config must not kill the dispatcher."""
+def _drive_dispatcher_tick(monkeypatch, runner, kanban_cfg) -> dict:
+    """Run one dispatcher tick via asyncio.run and return captured
+    dispatch_once kwargs. (Shared by the config-fallback tests.)"""
     import asyncio
-    import logging
-
-    from gateway.run import GatewayRunner
     import hermes_cli.config as _cfg_mod
 
-    runner = object.__new__(GatewayRunner)
-    runner._running = True
     captured = {}
 
     monkeypatch.setattr(
         _cfg_mod,
         "load_config",
-        lambda: {
-            "kanban": {
-                "dispatch_in_gateway": True,
-                "dispatch_interval_seconds": 1,
-                "auto_decompose": False,
-                "max_concurrent_per_repo": "many",
-            }
-        },
+        lambda: {"kanban": dict(kanban_cfg)},
     )
     monkeypatch.setattr(
         kb,
@@ -983,15 +970,43 @@ def test_gateway_dispatcher_invalid_repo_cap_uses_default(
     async def _sleep(_delay):
         return None
 
+    async def _to_thread(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
     monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
     monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
+    monkeypatch.setattr("gateway.run.asyncio.to_thread", _to_thread)
+
+    asyncio.run(
+        asyncio.wait_for(
+            runner._kanban_dispatcher_watcher(),
+            timeout=3.0,
+        )
+    )
+    return captured
+
+
+def test_gateway_dispatcher_invalid_repo_cap_uses_default(
+    kanban_home, monkeypatch, caplog
+):
+    """Bad kanban.max_concurrent_per_repo config must not kill the dispatcher."""
+    import logging
+
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
 
     with caplog.at_level(logging.WARNING, logger="gateway.run"):
-        asyncio.run(
-            asyncio.wait_for(
-                runner._kanban_dispatcher_watcher(),
-                timeout=3.0,
-            )
+        captured = _drive_dispatcher_tick(
+            monkeypatch,
+            runner,
+            {
+                "dispatch_in_gateway": True,
+                "dispatch_interval_seconds": 1,
+                "auto_decompose": False,
+                "max_concurrent_per_repo": "many",
+            },
         )
 
     assert captured["max_concurrent_per_repo"] == 1
@@ -1004,56 +1019,19 @@ def test_gateway_dispatcher_invalid_repo_cap_uses_default(
 
 def test_gateway_dispatcher_invalid_max_spawn_uses_default(kanban_home, monkeypatch):
     """Bad kanban.max_spawn config must not flow into dispatch comparisons."""
-    import asyncio
-
     from gateway.run import GatewayRunner
-    import hermes_cli.config as _cfg_mod
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
-    captured = {}
-
-    monkeypatch.setattr(
-        _cfg_mod,
-        "load_config",
-        lambda: {
-            "kanban": {
-                "dispatch_in_gateway": True,
-                "dispatch_interval_seconds": 1,
-                "auto_decompose": False,
-                "max_spawn": "many",
-            }
+    captured = _drive_dispatcher_tick(
+        monkeypatch,
+        runner,
+        {
+            "dispatch_in_gateway": True,
+            "dispatch_interval_seconds": 1,
+            "auto_decompose": False,
+            "max_spawn": "many",
         },
-    )
-    monkeypatch.setattr(
-        kb,
-        "list_boards",
-        lambda include_archived=False: [{"slug": kb.DEFAULT_BOARD}],
-    )
-
-    def _dispatch_once(conn, **kwargs):
-        captured.update(kwargs)
-        runner._running = False
-        return SimpleNamespace(
-            spawned=[],
-            reclaimed=0,
-            crashed=[],
-            timed_out=[],
-            promoted=0,
-            auto_blocked=[],
-        )
-
-    async def _sleep(_delay):
-        return None
-
-    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
-    monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
-
-    asyncio.run(
-        asyncio.wait_for(
-            runner._kanban_dispatcher_watcher(),
-            timeout=3.0,
-        )
     )
 
     assert captured["max_spawn"] is None
@@ -1063,61 +1041,72 @@ def test_gateway_dispatcher_string_false_booleans_disable_flags(
     kanban_home, monkeypatch
 ):
     """Quoted false values must not enable retry/serialization flags."""
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    captured = _drive_dispatcher_tick(
+        monkeypatch,
+        runner,
+        {
+            "dispatch_in_gateway": True,
+            "dispatch_interval_seconds": 1,
+            "auto_decompose": False,
+            "auto_retry_blocked": "false",
+            "serialize_by_repo": "false",
+        },
+    )
+
+    assert captured["auto_retry_blocked"] is False
+    assert captured["serialize_by_repo"] is False
+
+
+def test_dispatcher_tick_tests_survive_lost_selfpipe_wake(kanban_home, monkeypatch):
+    """Regression for the 2026-07-16 load flake: the dispatcher config
+    unit tests must not depend on default-executor teardown. On 3.11 a
+    lost self-pipe wake makes asyncio.run() teardown hang forever; under
+    parallel suite load that lost wake actually happens."""
     import asyncio
+    import concurrent.futures.thread as _thread
 
     from gateway.run import GatewayRunner
-    import hermes_cli.config as _cfg_mod
 
     runner = object.__new__(GatewayRunner)
     runner._running = True
     captured = {}
 
     monkeypatch.setattr(
-        _cfg_mod,
-        "load_config",
-        lambda: {
-            "kanban": {
-                "dispatch_in_gateway": True,
-                "dispatch_interval_seconds": 1,
-                "auto_decompose": False,
-                "auto_retry_blocked": "false",
-                "serialize_by_repo": "false",
-            }
-        },
-    )
-    monkeypatch.setattr(
-        kb,
-        "list_boards",
-        lambda include_archived=False: [{"slug": kb.DEFAULT_BOARD}],
+        asyncio.selector_events.BaseSelectorEventLoop,
+        "_write_to_self",
+        lambda self: None,
     )
 
-    def _dispatch_once(conn, **kwargs):
-        captured.update(kwargs)
-        runner._running = False
-        return SimpleNamespace(
-            spawned=[],
-            reclaimed=0,
-            crashed=[],
-            timed_out=[],
-            promoted=0,
-            auto_blocked=[],
+    def _run_tick():
+        captured.update(
+            _drive_dispatcher_tick(
+                monkeypatch,
+                runner,
+                {
+                    "dispatch_in_gateway": True,
+                    "dispatch_interval_seconds": 1,
+                    "auto_decompose": False,
+                    "max_concurrent_per_repo": "many",
+                },
+            )
         )
 
-    async def _sleep(_delay):
-        return None
+    t = threading.Thread(target=_run_tick, daemon=True)
+    t.start()
+    t.join(timeout=15)
 
-    monkeypatch.setattr(kb, "dispatch_once", _dispatch_once)
-    monkeypatch.setattr("gateway.kanban_watchers.asyncio.sleep", _sleep)
-
-    asyncio.run(
-        asyncio.wait_for(
-            runner._kanban_dispatcher_watcher(),
-            timeout=3.0,
-        )
-    )
-
-    assert captured["auto_retry_blocked"] is False
-    assert captured["serialize_by_repo"] is False
+    try:
+        assert not t.is_alive(), "teardown hung on lost self-pipe wake"
+    finally:
+        # Let a RED run report its bounded assertion instead of leaving the
+        # per-file pytest subprocess parked in concurrent.futures atexit.
+        if t.is_alive():
+            _thread._threads_queues.clear()
+    assert captured["max_concurrent_per_repo"] == 1
 
 
 @pytest.mark.parametrize("corrupt_exc", ["sqlite", "guard"])
@@ -1308,4 +1297,3 @@ def test_gateway_dispatcher_retries_corrupt_board_after_quarantine(
     assert sum("not a valid SQLite database" in msg for msg in messages) == 2
     assert any("database fingerprint unchanged" in msg for msg in messages)
     assert calls["tick"] == 3
-
