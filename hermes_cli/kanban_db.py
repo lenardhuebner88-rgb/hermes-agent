@@ -22898,12 +22898,12 @@ def _latest_blocked_run_for_auto_retry(
         SELECT id, profile, summary, error, ended_at, verdict, metadata
           FROM task_runs
          WHERE task_id = ?
-           AND outcome = 'blocked'
+           AND outcome IN ('blocked', ?)
            AND ended_at IS NOT NULL
          ORDER BY ended_at DESC, id DESC
          LIMIT 1
         """,
-        (task_id,),
+        (task_id, DELIVERABLE_POSTED_NOT_COMPLETED),
     ).fetchone()
     if row is not None:
         return row
@@ -22933,6 +22933,23 @@ def _latest_blocked_run_for_auto_retry(
         """,
         (task_id, task_id),
     ).fetchone()
+
+
+def _is_deliverable_protocol_miss_reason(reason: Optional[str]) -> bool:
+    """True when the block reason is the detect_crashed_workers protocol-miss text.
+
+    Matches the recoverable clean-exit path that stamps
+    ``without calling kanban_complete — repair required`` (exact production
+    phrasing). Used by :func:`auto_retry_blocked_tasks` to try
+    :func:`repair_deliverable_posted_not_completed` before re-dispatch.
+    """
+    text = (reason or "").strip()
+    if not text:
+        return False
+    return (
+        "without calling kanban_complete" in text
+        and "repair required" in text
+    )
 
 
 def _latest_ended_run(
@@ -23200,6 +23217,41 @@ def auto_retry_blocked_tasks(
                     {"attempts": current_count, "limit": retry_limit},
                 )
             continue
+        # Protocol-miss blocks: try the evidence-preserving repair primitive
+        # before burning a fresh worker re-dispatch. The attempt consumes the
+        # same auto_retry_count budget either way (success stamps the count;
+        # failure falls through to the re-dispatch path below).
+        if _is_deliverable_protocol_miss_reason(reason):
+            repaired = repair_deliverable_posted_not_completed(
+                conn,
+                task_id,
+                actor="auto_retry",
+            )
+            if repaired:
+                attempt = current_count + 1
+                with write_txn(conn):
+                    conn.execute(
+                        """
+                        UPDATE tasks
+                           SET auto_retry_count = ?
+                         WHERE id = ?
+                        """,
+                        (attempt, task_id),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "auto_retry_repaired",
+                        {
+                            "attempt": attempt,
+                            "limit": retry_limit,
+                            "blocked_run_id": int(blocked_run["id"]),
+                            "reason": (reason or "")[:500] or None,
+                            "source": "deliverable_protocol_miss",
+                        },
+                    )
+                # Not a re-dispatch — leave ``retried`` empty for this task.
+                continue
         attempt = current_count + 1
         escalated = attempt >= 2
         with write_txn(conn):
