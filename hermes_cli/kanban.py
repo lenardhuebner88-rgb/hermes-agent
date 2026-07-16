@@ -4092,6 +4092,7 @@ def _cmd_specify(args: argparse.Namespace) -> int:
                 "task_id": outcome.task_id,
                 "ok": outcome.ok,
                 "reason": outcome.reason,
+                "detail": outcome.detail,
                 "new_title": outcome.new_title,
             }))
         elif outcome.ok:
@@ -4102,8 +4103,9 @@ def _cmd_specify(args: argparse.Namespace) -> int:
             )
             print(f"Specified {outcome.task_id} → todo{title_suffix}")
         else:
+            detail_suffix = f" — {outcome.detail}" if outcome.detail else ""
             print(
-                f"kanban: specify {outcome.task_id}: {outcome.reason}",
+                f"kanban: specify {outcome.task_id}: {outcome.reason}{detail_suffix}",
                 file=sys.stderr,
             )
     if not all_flag:
@@ -4174,6 +4176,7 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                 "task_id": outcome.task_id,
                 "ok": outcome.ok,
                 "reason": outcome.reason,
+                "detail": outcome.detail,
                 "fanout": outcome.fanout,
                 "child_ids": outcome.child_ids,
                 "new_title": outcome.new_title,
@@ -4196,8 +4199,9 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
                     f"(no fanout){title_suffix}"
                 )
         else:
+            detail_suffix = f" — {outcome.detail}" if outcome.detail else ""
             print(
-                f"kanban: decompose {outcome.task_id}: {outcome.reason}",
+                f"kanban: decompose {outcome.task_id}: {outcome.reason}{detail_suffix}",
                 file=sys.stderr,
             )
     if not all_flag:

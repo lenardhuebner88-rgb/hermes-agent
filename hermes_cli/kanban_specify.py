@@ -108,12 +108,17 @@ class SpecifyOutcome:
     ok: bool
     reason: str = ""
     new_title: Optional[str] = None
+    detail: Optional[str] = None
 
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+def _format_exc_detail(exc: Exception) -> str:
+    return " ".join(str(exc).splitlines()).strip()[:300]
 
 
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
@@ -193,12 +198,15 @@ def specify_task(
             timeout=timeout or 120,
         )
     except Exception as exc:
-        logger.info(
+        logger.warning(
             "specify: API call failed for %s (%s) — skipping",
             task_id, exc,
         )
         return SpecifyOutcome(
-            task_id, False, f"LLM error: {type(exc).__name__}"
+            task_id,
+            False,
+            f"LLM error: {type(exc).__name__}",
+            detail=_format_exc_detail(exc),
         )
 
     try:

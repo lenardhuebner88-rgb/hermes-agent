@@ -285,12 +285,17 @@ class DecomposeOutcome:
     # the children were held in ``scheduled`` (gate) vs auto-promoted.
     spec_relpath: Optional[str] = None
     gated: bool = False
+    detail: Optional[str] = None
 
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+def _format_exc_detail(exc: Exception) -> str:
+    return " ".join(str(exc).splitlines()).strip()[:300]
 
 
 def _extract_json_blob(raw: str) -> Optional[dict]:
@@ -1492,13 +1497,13 @@ def _invoke_decomposer(
     system_prompt: str,
     timeout: Optional[int],
     log_prefix: str,
-) -> tuple[Optional[dict], Optional[str]]:
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
     """Call and parse the one configured Kanban decomposer LLM edge."""
     try:
         from agent.auxiliary_client import call_llm  # type: ignore
     except Exception as exc:
         logger.debug("%s: auxiliary client import failed: %s", log_prefix, exc)
-        return None, "auxiliary client unavailable"
+        return None, "auxiliary client unavailable", None
 
     try:
         # Route through call_llm so auxiliary.kanban_decomposer.* config
@@ -1515,10 +1520,11 @@ def _invoke_decomposer(
             timeout=timeout or 180,
         )
     except Exception as exc:
-        logger.info("%s: API call failed for %s (%s)", log_prefix, task_id, exc)
+        logger.warning("%s: API call failed for %s (%s)", log_prefix, task_id, exc)
+        detail = _format_exc_detail(exc)
         if isinstance(exc, RuntimeError) and "No LLM provider configured" in str(exc):
-            return None, "no auxiliary client configured"
-        return None, f"LLM error: {type(exc).__name__}"
+            return None, "no auxiliary client configured", detail
+        return None, f"LLM error: {type(exc).__name__}", detail
 
     try:
         raw = response.choices[0].message.content or ""
@@ -1526,8 +1532,8 @@ def _invoke_decomposer(
         raw = ""
     parsed = _extract_json_blob(raw)
     if parsed is None:
-        return None, "LLM returned malformed JSON"
-    return parsed, None
+        return None, "LLM returned malformed JSON", None
+    return parsed, None, None
 
 
 def decompose_task(
@@ -1561,7 +1567,7 @@ def decompose_task(
     auto_promote = _coerce_config_bool(
         kanban_cfg.get("auto_promote_children", True), default=True
     )
-    parsed, error = _invoke_decomposer(
+    parsed, error, detail = _invoke_decomposer(
         task_id,
         user_message=request.user_message,
         system_prompt=_SYSTEM_PROMPT,
@@ -1569,7 +1575,7 @@ def decompose_task(
         log_prefix="decompose",
     )
     if error is not None:
-        return DecomposeOutcome(task_id, False, error)
+        return DecomposeOutcome(task_id, False, error, detail=detail)
     assert parsed is not None
 
     # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).
@@ -1901,7 +1907,7 @@ def plan_and_document(
         if document
         else _SYSTEM_PROMPT
     )
-    parsed, error = _invoke_decomposer(
+    parsed, error, detail = _invoke_decomposer(
         task_id,
         user_message=request.user_message,
         system_prompt=system_prompt,
@@ -1909,7 +1915,7 @@ def plan_and_document(
         log_prefix="flow-plan",
     )
     if error is not None:
-        return DecomposeOutcome(task_id, False, error)
+        return DecomposeOutcome(task_id, False, error, detail=detail)
     assert parsed is not None
 
     # Vor dem Decompose-Write, damit Kinder das Root-Epic erben (N-E3).

@@ -773,6 +773,52 @@ def test_decompose_no_aux_client_configured(kanban_home):
     assert "no auxiliary client" in outcome.reason
 
 
+def test_decompose_llm_error_surfaces_detail_without_changing_reason(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", triage=True)
+
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            side_effect=RuntimeError("credit exhausted for model xyz"),
+        ):
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert outcome.reason == "LLM error: RuntimeError"
+    assert "credit exhausted" in outcome.detail
+
+
+def test_decompose_llm_error_reason_remains_classification_key(kanban_home):
+    class BadRequestError(Exception):
+        pass
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="x", triage=True)
+
+    patches = _patch_list_profiles(["orchestrator"])
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "agent.auxiliary_client.call_llm",
+            side_effect=BadRequestError("invalid request detail"),
+        ):
+            outcome = decomp.decompose_task(tid, author="me")
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert outcome.ok is False
+    assert outcome.reason == "LLM error: BadRequestError"
+
+
 def _assert_worker_scope_contract(body: str):
     assert "scope_contract:" in body
     assert "version: 2" in body
