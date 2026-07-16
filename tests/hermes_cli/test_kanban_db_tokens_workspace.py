@@ -1036,6 +1036,102 @@ def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch
 
 
 # ---------------------------------------------------------------------------
+# Identity-drift guard ordering (worker base preparation must see the
+# still-unmaterialized recorded workspace_path, not the freshly resolved one)
+# ---------------------------------------------------------------------------
+
+def test_dispatch_rejects_when_materialized_workspace_drifts_from_recorded(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """A task whose freshly resolved workspace no longer matches its recorded
+    provisioned workspace_path must be rejected (worker_base_rejected) BEFORE
+    the drifted path is persisted — the drift check would be tautological if
+    workspace_path were overwritten first (#identity-drift)."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    workspace_a = repo / ".worktrees" / "kanban" / "root-a"
+    workspace_b = repo / ".worktrees" / "kanban" / "root-b"
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="drifted worktree",
+            assignee="coder-claude",
+            workspace_kind="worktree",
+            workspace_path=str(workspace_a),
+        )
+
+        monkeypatch.setattr(
+            kb,
+            "_resolve_dispatch_workspace",
+            lambda conn, task, board=None: (workspace_b, task.branch_name),
+        )
+        result = kb.dispatch_once(conn, board="default")
+        stored = kb.get_task(conn, tid)
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert not result.spawned
+    assert stored is not None
+    # The recorded path must NOT have been overwritten with the drifted one.
+    assert stored.workspace_path == str(workspace_a)
+    reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
+    assert len(reject_events) == 1
+    payload = json.loads(reject_events[0]["payload"])
+    assert "identity drifted" in payload["reason"]
+
+
+def test_dispatch_reused_worktree_no_reject_when_recorded_path_matches(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Gegenprobe: an identical resolved path is not treated as drift."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="reused worktree",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        first_task = kb.get_task(conn, tid)
+        assert first_task is not None
+        expected = repo / ".worktrees" / "kanban" / tid
+
+        conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        second_task = kb.get_task(conn, tid)
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert first.spawned == [(tid, "sentinel", str(expected))]
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert second_task is not None
+    assert second_task.workspace_path == str(expected)
+    assert not any(e["kind"] == "worker_base_rejected" for e in events)
+
+
+# ---------------------------------------------------------------------------
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------
 

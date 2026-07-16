@@ -612,6 +612,47 @@ def test_blocked_kind_superseded_and_capacity_never_auto_retryable():
     )
 
 
+def test_blocked_kind_deterministic_fail_fast_markers_need_operator():
+    """Deterministic spawn-refusal / decompose-LLM-client-error markers never
+    self-heal on retry — auto-retry must escalate, not respawn (live incident
+    2026-07-15, t_df10f6b1)."""
+    for marker in kb._DETERMINISTIC_SPAWN_FAILURE_MARKERS:
+        reason = f"worktree provisioning: {marker} for assignee coder"
+        assert kb._blocked_kind_for_auto_retry(reason) == "needs_operator", marker
+
+    for reason in kb._DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS:
+        assert kb._blocked_kind_for_auto_retry(reason) == "needs_operator", reason
+        # Case-insensitive, matching how reasons are recorded/read elsewhere.
+        assert kb._blocked_kind_for_auto_retry(reason.upper()) == "needs_operator"
+
+
+def test_dispatch_auto_retry_needs_operator_deterministic_spawn_failure_marker(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Auto-retry must not respawn a task blocked on a deterministic fail-fast
+    marker, even after the normal backoff window (t_df10f6b1)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="worktree provisioning: spawn_refused_allowlist_unenforceable",
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        event = [
+            e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"
+        ][-1]
+        assert event.payload["blocked_kind"] == "needs_operator"
+
+
 def test_block_task_superseded_auto_archives(kanban_home):
     """B4a: SUPERSEDED block leaves the active board (archived, not blocked)."""
     with kb.connect_closing() as conn:

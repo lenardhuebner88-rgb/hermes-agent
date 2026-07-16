@@ -20,8 +20,21 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 def _redispatch(conn, task_id):
-    """Simulate an operator unblock + re-dispatch: counter reset, re-claimed."""
-    assert kb.unblock_task(conn, task_id)
+    """Simulate a bounded auto-retry re-dispatch (NOT an operator resolving
+    the escalation): counter reset, re-claimed. Mirrors the raw status flip
+    ``auto_retry_blocked_tasks`` performs — no ``unblocked``/``promoted_manual``
+    event. Genuine operator resolution (``unblock_task`` / ``promote_task`` /
+    ``answer_operator_question``) starts a NEW escalation episode instead and
+    is exercised separately below (episode-boundary tests).
+    """
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, "
+            "claim_expires=NULL, worker_pid=NULL, block_kind=NULL, "
+            "block_recurrences=0 WHERE id=? AND status='blocked'",
+            (task_id,),
+        )
+        assert cur.rowcount == 1
     assert kb.claim_task(conn, task_id) is not None
 
 
@@ -188,13 +201,14 @@ def test_escalation_coalesce_decision_queue_counter(kanban_home):
             ("tests failed: assertion", "crashed"),  # new real-bug class
         ]
         for i, (err, oc) in enumerate(cycles):
-            kb.claim_task(conn, tid)
+            if i == 0:
+                kb.claim_task(conn, tid)
             assert kb._record_task_failure(
                 conn, tid, err, outcome=oc, failure_limit=1,
                 release_claim=True, end_run=True,
             )
             if i < len(cycles) - 1:
-                assert kb.unblock_task(conn, tid)
+                _redispatch(conn, tid)
         result = kb.decision_queue(conn)
 
     row = next(d for d in result["decisions"] if d["task_id"] == tid)
@@ -245,6 +259,37 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     assert row["escalation_classes"] == ["capacity"]
     # exactly one suppressed repeat, made explicit (was invisibly dropped before)
     assert row["coalesced_repeats"] == 1
+
+
+def test_escalation_coalesce_resets_after_operator_unblock(kanban_home):
+    """Episode-scoped write-side gate (mirrors ``_operator_escalation_is_active``
+    / commit 28c296871): a genuine operator resolution (``unblock_task``)
+    starts a NEW escalation episode, so the SAME class recurring afterwards
+    must escalate again — not be coalesced away forever."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        # Operator resolves the hold (NOT the bounded auto-retry lane) —
+        # ends the current escalation episode.
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        # Same (transient) class recurs in the new episode.
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom 2", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        events = kb.list_events(conn, tid)
+
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    gave_ups = [e for e in events if e.kind == "gave_up"]
+    assert len(gave_ups) == 2
+    # NOT coalesced: the operator unblock reset the episode boundary.
+    assert len(escalations) == 2
+    assert gave_ups[1].payload.get("escalation_coalesced") is False
 
 
 def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):

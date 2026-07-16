@@ -204,10 +204,10 @@ def save_alert_state(path: str | Path, state: dict) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     try:
-        temp.write_text(
-            json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        with open(temp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         temp.replace(target)
     finally:
         try:
