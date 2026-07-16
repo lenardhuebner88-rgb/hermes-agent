@@ -8330,6 +8330,57 @@ def _resolve_max_continuations(task: Task) -> int:
     return DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT
 
 
+def _is_iteration_budget_exhausted_timeout(outcome: str, error: str) -> bool:
+    """Match the turn_finalizer budget-exhaust timed_out error shape."""
+    return (
+        outcome == "timed_out"
+        and "iteration budget exhausted" in (error or "").lower()
+    )
+
+
+def _has_timeout_budget_progress_evidence(
+    event_payload_extra: Optional[dict],
+) -> bool:
+    """True when 648c7b0b7 progress fields show real work (not empty/zero/flat).
+
+    ``workspace_progress_size`` must be a positive int. When a prior
+    ``budget_progress_marker`` is also present, require growth past it so a
+    looping task (flat diff) does not get a freepass.
+    """
+    if not isinstance(event_payload_extra, dict):
+        return False
+    raw = event_payload_extra.get("workspace_progress_size")
+    if raw is None:
+        return False
+    try:
+        progress = int(raw)
+    except (TypeError, ValueError):
+        return False
+    if progress <= 0:
+        return False
+    marker = event_payload_extra.get("budget_progress_marker")
+    if marker is None:
+        return True
+    try:
+        return progress > int(marker)
+    except (TypeError, ValueError):
+        return True
+
+
+def _auto_timeout_continuation_has_room(task: Task) -> bool:
+    """True when ``_schedule_continuation_after_closed_run`` would requeue.
+
+    Caps exhausted (continuation_count >= limit, or max_continuations<=0)
+    fall through to the normal failure / breaker path — no endless extend.
+    Progress-gated one-shot extension at the cap stays on the voluntary path
+    only; auto-timeout does not invent a second freepass past the cap.
+    """
+    limit = _resolve_max_continuations(task)
+    if limit <= 0:
+        return False
+    return int(task.continuation_count or 0) < limit
+
+
 def _budget_extension_config() -> dict:
     """Resolve ``kanban.budget_progress_extension`` policy from the ROOT config.
 
@@ -18609,6 +18660,61 @@ def _record_task_failure(
                 reason=outcome,
             ):
                 return False
+
+            # Automatic entry into the existing continuation ladder when the
+            # turn_finalizer budget-exhaust path fires with progress evidence.
+            # Without this, respawn re-burns the same max_iterations and trips
+            # the breaker; voluntary kanban_continue already reaches the ladder.
+            if (
+                count_failure
+                and _is_iteration_budget_exhausted_timeout(outcome, error)
+                and _has_timeout_budget_progress_evidence(event_payload_extra)
+            ):
+                cont_task = get_task(conn, task_id)
+                if cont_task is not None and _auto_timeout_continuation_has_room(
+                    cont_task
+                ):
+                    cont_meta: dict = {
+                        "trigger_outcome": outcome,
+                        "auto_timeout_continuation": True,
+                    }
+                    if event_payload_extra:
+                        cont_meta.update(event_payload_extra)
+                    cont_run_id = _end_run(
+                        conn,
+                        task_id,
+                        outcome="iteration_budget_exhausted",
+                        status="iteration_budget_exhausted",
+                        error=error[:500] if error else None,
+                        summary=summary,
+                        metadata=cont_meta,
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "iteration_budget_exhausted",
+                        {
+                            "reason": "iteration_budget_exhausted",
+                            "auto_timeout_continuation": True,
+                            "error": (error or "")[:500],
+                            "summary": (
+                                (summary or "").strip().splitlines()[0][:400]
+                                if summary
+                                else None
+                            ),
+                        },
+                        run_id=cont_run_id,
+                    )
+                    if _schedule_continuation_after_closed_run(
+                        conn,
+                        task_id,
+                        reason="iteration_budget_exhausted",
+                        run_id=cont_run_id,
+                    ):
+                        return False
+                    # Schedule lost a race / unexpected state: fall through to
+                    # normal failure accounting. The run is already closed;
+                    # end_run below is a no-op.
 
         # Transient path (count_failure=False) leaves the counter untouched;
         # everything else increments it toward the breaker threshold.
