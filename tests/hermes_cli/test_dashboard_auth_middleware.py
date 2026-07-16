@@ -14,14 +14,20 @@ without any external IDP.  Exercises:
 """
 from __future__ import annotations
 
+import time as _time
+
 import pytest
 
 from fastapi.testclient import TestClient
 
 from hermes_cli import web_server
 from hermes_cli.dashboard_auth import clear_providers, register_provider
-from hermes_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
-from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+from hermes_cli.dashboard_auth.cookies import (
+    SESSION_AT_COOKIE,
+    SESSION_PROVIDER_COOKIE,
+    SESSION_RT_COOKIE,
+)
+from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider, _sign
 
 
 @pytest.fixture
@@ -654,3 +660,445 @@ def test_unverifiable_token_with_reachable_providers_redirects(_gated_state):
     r = client.get("/api/auth/me")
     assert r.status_code == 401
     assert "unreachable" not in r.text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Stage 10 — loopback cookie-refresh fallback (``web_server.auth_middleware``,
+# ``auth_required`` falsy). This is a SEPARATE code path from the OAuth
+# gate above (``gated_auth_middleware``, which no-ops when ``auth_required``
+# is falsy) — it's what the loopback dashboard bind the Diktat/Voice Android
+# apps talk to actually runs. It reuses the gate's ``_attempt_refresh``
+# rotation via the new ``refresh_cookie_session`` helper, but the gated-flow
+# tests above (and test_dashboard_auth_401_reauth.py) must stay green
+# untouched — anti-scope for this slice.
+# ---------------------------------------------------------------------------
+
+
+class _CountingRefreshProvider(StubAuthProvider):
+    """StubAuthProvider that counts ``refresh_session`` calls, so the
+    failed-refresh cooldown throttle can be asserted precisely (exactly one
+    provider hit per cooldown window, not one per HTTP request)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.refresh_calls = 0
+
+    def refresh_session(self, *, refresh_token: str):
+        self.refresh_calls += 1
+        return super().refresh_session(refresh_token=refresh_token)
+
+
+def _mint_stub_session(stub: StubAuthProvider):
+    """Full (access_token, refresh_token) pair from a StubAuthProvider via
+    its own login round trip — same mechanics as ``_mint_stub_at`` above,
+    but keeps the refresh token too."""
+    ls = stub.start_login(redirect_uri="https://fly-app.fly.dev/auth/callback")
+    parts = dict(
+        seg.split("=", 1)
+        for seg in ls.cookie_payload["hermes_session_pkce"].split(";")
+        if "=" in seg
+    )
+    return stub.complete_login(
+        code="stub_code",
+        state=parts["state"],
+        code_verifier=parts["verifier"],
+        redirect_uri="https://fly-app.fly.dev/auth/callback",
+    )
+
+
+def _expired_stub_at() -> str:
+    """A syntactically-valid but already-expired stub access token.
+
+    ``StubAuthProvider.verify_session`` returns ``None`` as soon as
+    ``exp <= now`` without touching any other payload field, so a bare
+    ``exp`` in the past is sufficient here.
+    """
+    return _sign({"exp": int(_time.time()) - 1})
+
+
+def _reset_cookie_refresh_throttle_state() -> None:
+    web_server._COOKIE_REFRESH_FAILURES.clear()
+    web_server._COOKIE_REFRESH_BUDGET_STATE["window_start"] = 0.0
+    web_server._COOKIE_REFRESH_BUDGET_STATE["count"] = 0
+
+
+@pytest.fixture
+def _loopback_state():
+    """Loopback app-state (``auth_required`` left falsy) so
+    ``web_server.auth_middleware`` — not the OAuth gate — handles the
+    request. Also resets the module-global failed-refresh cooldown dict AND
+    the global failed-refresh budget so one test's throttled/garbage RT
+    can't bleed into the next."""
+    clear_providers()
+    prev_required = getattr(web_server.app.state, "auth_required", None)
+    web_server.app.state.auth_required = False
+    _reset_cookie_refresh_throttle_state()
+
+    def _client() -> TestClient:
+        return TestClient(web_server.app)
+
+    yield _client
+    clear_providers()
+    web_server.app.state.auth_required = prev_required
+    _reset_cookie_refresh_throttle_state()
+
+
+def test_loopback_refresh_rotates_expired_access_token(_loopback_state):
+    """Scenario a: expired AT + valid RT → 200 with a rotated Set-Cookie
+    (``Cache-Control: no-store``); a follow-up request with the NEW cookies
+    must succeed WITHOUT a second refresh (the fresh AT verifies directly)."""
+    stub = _CountingRefreshProvider(default_ttl=3600)  # refreshed AT gets a real TTL
+    register_provider(stub)
+    session = _mint_stub_session(stub)  # mints a 30-day-valid RT
+    expired_at = _expired_stub_at()
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, expired_at)
+    client.cookies.set(SESSION_RT_COOKIE, session.refresh_token)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    new_at = r.cookies.get(SESSION_AT_COOKIE)
+    new_rt = r.cookies.get(SESSION_RT_COOKIE)
+    assert new_at and new_at != expired_at
+    assert new_rt
+    assert stub.refresh_calls == 1
+
+    # httpx persists Set-Cookie into the client's jar automatically — the
+    # follow-up request already carries the rotated cookies.
+    r2 = client.get("/api/dictate/status")
+    assert r2.status_code == 200
+    assert stub.refresh_calls == 1  # no second refresh — new AT verifies
+
+
+def test_loopback_refresh_expired_refresh_token_returns_401_no_cookie(_loopback_state):
+    """Scenario b: expired AT + EXPIRED RT (``RefreshExpiredError`` inside
+    the provider) → 401, no Set-Cookie — refresh must not silently succeed."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    expired_rt = _sign({"sub": "stub-user-1", "kind": "refresh", "exp": int(_time.time()) - 1})
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, expired_rt)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert SESSION_AT_COOKIE not in r.cookies
+    assert SESSION_RT_COOKIE not in r.cookies
+    assert stub.refresh_calls == 1
+
+
+def test_loopback_refresh_garbage_refresh_token_returns_401_no_cookie(_loopback_state):
+    """Scenario c: expired AT + a garbage (non-HMAC) RT → 401, no Set-Cookie."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, "not-a-real-token-at-all")
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert SESSION_AT_COOKIE not in r.cookies
+    assert stub.refresh_calls == 1
+
+
+def test_loopback_refresh_skipped_without_refresh_token_cookie(_loopback_state):
+    """Scenario d: no RT cookie at all → behaves exactly like before this
+    slice (401, no refresh attempt) — the provider stub proves
+    ``refresh_session`` is never even called."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    # deliberately no SESSION_RT_COOKIE
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert stub.refresh_calls == 0
+
+
+def test_loopback_refresh_reuses_old_refresh_token_current_behavior(_loopback_state):
+    """Scenario e (pinning, NOT a spec): the ``basic`` provider is stateless
+    HMAC with no server-side store, so a successful refresh does not
+    invalidate the OLD refresh token — replaying it still refreshes
+    successfully today. This test PINS that current behavior; if
+    reuse-detection/RT-invalidation is ever added, THIS TEST MUST GO RED —
+    that is the intended signal of a semantics change, not a false alarm to
+    silence by updating the assertion without a design discussion."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    session = _mint_stub_session(stub)
+    old_rt = session.refresh_token
+    expired_at = _expired_stub_at()
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, expired_at)
+    client.cookies.set(SESSION_RT_COOKIE, old_rt)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r1 = client.get("/api/dictate/status")
+    assert r1.status_code == 200
+    assert stub.refresh_calls == 1
+
+    # Replay: wipe the jar (it now holds the rotated pair, domain/path-bound
+    # from the Set-Cookie response) and reinstate the already-spent old RT +
+    # the same expired AT explicitly.
+    client.cookies.clear()
+    client.cookies.set(SESSION_AT_COOKIE, expired_at)
+    client.cookies.set(SESSION_RT_COOKIE, old_rt)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+    r2 = client.get("/api/dictate/status")
+    assert r2.status_code == 200  # <- pins "no reuse detection" today
+    assert stub.refresh_calls == 2
+
+
+def test_loopback_refresh_throttles_repeated_bad_refresh_token(_loopback_state):
+    """Scenario f: two requests with the SAME broken RT within the 60s
+    cooldown hit the provider exactly ONCE; after the cooldown, a third
+    request hits it again."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    broken_rt = "garbage-rt-throttle-test"
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, broken_rt)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r1 = client.get("/api/dictate/status")
+    assert r1.status_code == 401
+    assert stub.refresh_calls == 1
+
+    r2 = client.get("/api/dictate/status")
+    assert r2.status_code == 401
+    assert stub.refresh_calls == 1  # throttled — no second provider hit
+
+    # Rewind the recorded failure timestamp past the cooldown window
+    # instead of monkeypatching the global ``time`` module (which would
+    # also skew TestClient/asyncio internals mid-test).
+    token_hash = web_server._cookie_refresh_token_hash(broken_rt)
+    with web_server._COOKIE_REFRESH_FAILURES_LOCK:
+        web_server._COOKIE_REFRESH_FAILURES[token_hash] = (
+            _time.time() - web_server._COOKIE_REFRESH_FAILURE_COOLDOWN_SECONDS - 1
+        )
+    r3 = client.get("/api/dictate/status")
+    assert r3.status_code == 401
+    assert stub.refresh_calls == 2
+
+
+def test_loopback_refresh_never_attempted_on_public_path(_loopback_state):
+    """Scenario g: a ``PUBLIC_API_PATHS`` entry (``/api/status``) never
+    attempts a refresh or sets a cookie, even with an expired AT + valid RT
+    on the request — the whole session-check block is skipped for it."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    session = _mint_stub_session(stub)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, session.refresh_token)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/status")
+    assert r.status_code == 200
+    assert SESSION_AT_COOKIE not in r.cookies
+    assert stub.refresh_calls == 0
+
+
+def test_loopback_refresh_rotates_cookies_for_dictate_personalization(_loopback_state):
+    """Scenario h (Stufe-9 coupling): GET /api/dictate/personalization with
+    an expired AT + valid RT → 200 with rotated cookies, same as any other
+    gated /api/* route."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    session = _mint_stub_session(stub)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, session.refresh_token)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/dictate/personalization")
+    assert r.status_code == 200
+    assert r.json()["exists"] is False
+    new_at = r.cookies.get(SESSION_AT_COOKIE)
+    assert new_at and new_at != _expired_stub_at()
+
+
+def test_loopback_refresh_provider_error_returns_401_not_503(_loopback_state):
+    """Scenario i: the refresh provider itself is unreachable
+    (``ProviderError``) → 401 fail-closed, never 500/503 — the loopback
+    fallback has no clean "come back later" signal to hand a native client,
+    unlike the gated flow's inline refresh."""
+    register_provider(_UnreachableProvider())
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, "whatever-at")
+    client.cookies.set(SESSION_RT_COOKIE, "whatever-rt")
+    client.cookies.set(SESSION_PROVIDER_COOKIE, "unreachable")
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert SESSION_AT_COOKIE not in r.cookies
+
+
+# ---------------------------------------------------------------------------
+# Codex cross-family review fixes on the stage-10 diff above (F2/bare-cookie
+# accept is a documented pre-existing behavior, not fixed here).
+# ---------------------------------------------------------------------------
+
+
+class _CountingUnreachableProvider(StubAuthProvider):
+    """Always raises ``ProviderError`` from ``refresh_session`` (simulated
+    IDP outage), but — unlike ``_UnreachableProvider`` above — counts calls,
+    so F4's "an outage never feeds the cooldown/budget" guarantee can be
+    asserted across multiple consecutive requests."""
+
+    name = "unreachable-counting"
+    display_name = "Unreachable (counting, test only)"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.refresh_calls = 0
+
+    def refresh_session(self, *, refresh_token: str):
+        self.refresh_calls += 1
+        from hermes_cli.dashboard_auth.base import ProviderError
+
+        raise ProviderError("simulated: IDP unreachable")
+
+
+def test_loopback_refresh_scopes_strictly_to_hinted_provider(_loopback_state):
+    """F1 MAJOR: a provider-hint cookie scopes refresh EXCLUSIVELY to that
+    provider — no fallback scan across every registered provider. Without
+    this, a ``basic`` refresh token would get POSTed to a foreign OAuth
+    provider's (e.g. ``nous``) external token endpoint on a hint mismatch —
+    a credential-disclosure risk. providerB must NEVER be called when the
+    hint names providerA, even though providerA rejects the token."""
+
+    class _RejectingProviderA(_CountingRefreshProvider):
+        name = "provider-a"
+
+        def refresh_session(self, *, refresh_token: str):
+            self.refresh_calls += 1
+            from hermes_cli.dashboard_auth.base import RefreshExpiredError
+
+            raise RefreshExpiredError("provider-a stub: not this provider's token")
+
+    class _ProviderB(_CountingRefreshProvider):
+        name = "provider-b"
+
+    provider_a = _RejectingProviderA(default_ttl=3600)
+    provider_b = _ProviderB(default_ttl=3600)
+    register_provider(provider_a)
+    register_provider(provider_b)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, "some-refresh-token-value")
+    client.cookies.set(SESSION_PROVIDER_COOKIE, provider_a.name)
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert provider_a.refresh_calls == 1
+    assert provider_b.refresh_calls == 0
+
+
+def test_loopback_refresh_global_budget_blocks_after_threshold(_loopback_state, monkeypatch):
+    """F3 MAJOR: the global failed-refresh budget caps REJECTED refresh
+    attempts server-wide, independent of the per-token cooldown — a fresh
+    garbage RT on every request would otherwise get its own cooldown entry
+    and never be throttled (high-cardinality bypass)."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    monkeypatch.setattr(web_server, "_COOKIE_REFRESH_BUDGET_MAX_FAILURES", 2)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    for i in range(2):
+        client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+        client.cookies.set(SESSION_RT_COOKIE, f"garbage-budget-{i}")
+        r = client.get("/api/dictate/status")
+        assert r.status_code == 401
+    assert stub.refresh_calls == 2
+
+    # Budget now exhausted: a THIRD, never-before-seen (not per-token-
+    # cooldown-throttled) garbage RT must still be blocked before it ever
+    # reaches the provider.
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, "garbage-budget-3")
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert stub.refresh_calls == 2  # unchanged — budget blocked it pre-provider
+
+    # Roll the budget window into the past → resets; the next distinct bad
+    # RT reaches the provider again.
+    web_server._COOKIE_REFRESH_BUDGET_STATE["window_start"] = (
+        _time.time() - web_server._COOKIE_REFRESH_BUDGET_WINDOW_SECONDS - 1
+    )
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, "garbage-budget-4")
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 401
+    assert stub.refresh_calls == 3
+
+
+def test_loopback_refresh_provider_error_never_throttled(_loopback_state):
+    """F4 MINOR: a transient provider outage (``ProviderError``) must NOT
+    feed the per-token cooldown or the global failure budget — two
+    consecutive requests presenting the SAME RT both reach the provider
+    (both still 401, fail-closed), never a false "throttled" 401 masking
+    the outage as a rejected token."""
+    provider = _CountingUnreachableProvider(default_ttl=3600)
+    register_provider(provider)
+
+    client = _loopback_state()
+    client.cookies.set(SESSION_AT_COOKIE, _expired_stub_at())
+    client.cookies.set(SESSION_RT_COOKIE, "same-rt-both-requests")
+    client.cookies.set(SESSION_PROVIDER_COOKIE, provider.name)
+
+    r1 = client.get("/api/dictate/status")
+    assert r1.status_code == 401
+    assert provider.refresh_calls == 1
+
+    r2 = client.get("/api/dictate/status")
+    assert r2.status_code == 401
+    assert provider.refresh_calls == 2  # NOT throttled — outage, not a rejection
+
+
+def test_loopback_refresh_works_with_rt_only_no_at_cookie(_loopback_state):
+    """F5 MINOR (most important test finding): the real 30-day production
+    case — the browser/WebView already evicted the AT cookie after its own
+    (short) Max-Age, leaving ONLY the RT + provider-hint cookies. No AT
+    cookie at all must still refresh transparently, exactly like an
+    expired-but-present AT; a follow-up request with the new cookies must
+    succeed WITHOUT a second refresh."""
+    stub = _CountingRefreshProvider(default_ttl=3600)
+    register_provider(stub)
+    session = _mint_stub_session(stub)
+
+    client = _loopback_state()
+    # deliberately no SESSION_AT_COOKIE at all
+    client.cookies.set(SESSION_RT_COOKIE, session.refresh_token)
+    client.cookies.set(SESSION_PROVIDER_COOKIE, stub.name)
+
+    r = client.get("/api/dictate/status")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+    new_at = r.cookies.get(SESSION_AT_COOKIE)
+    new_rt = r.cookies.get(SESSION_RT_COOKIE)
+    assert new_at
+    assert new_rt
+    assert stub.refresh_calls == 1
+
+    r2 = client.get("/api/dictate/status")
+    assert r2.status_code == 200
+    assert stub.refresh_calls == 1  # no second refresh — new AT verifies

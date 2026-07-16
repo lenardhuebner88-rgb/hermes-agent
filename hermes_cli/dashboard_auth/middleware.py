@@ -160,6 +160,77 @@ def verify_cookie_session(request: Request):
     return None
 
 
+def refresh_cookie_session(request: Request):
+    """Rotate an expired access token via the request's refresh-token cookie.
+
+    Loopback counterpart to the gated middleware's inline refresh, for the
+    same native-client caller as ``verify_cookie_session`` (Diktat/Voice hold
+    only the WebView-login cookie, never the SPA session token/header): the
+    Android apps' long-lived background probers (IME/overlay onCreate,
+    SettingsActivity) hit the 30-day access-token cliff constantly, and
+    without a refresh path here each one bounces the user to a full re-login
+    even though the refresh token is still good for the remainder of its own
+    30-day window.
+
+    Provider-hint scoping is MANDATORY here, unlike the gate's inline
+    refresh (``_attempt_refresh``, unchanged): when the request carries a
+    provider-hint cookie, the refresh token is presented ONLY to that
+    provider — never scanned across every registered provider. Scanning
+    would risk POSTing a ``basic`` refresh token to an unrelated OAuth
+    provider's (e.g. ``nous``) external token endpoint on a hint mismatch —
+    a credential-disclosure risk the gate's own interactive,
+    user-supervised flow accepts but this unattended background fallback
+    must not repeat. A request with NO hint cookie (pre-hint-cookie
+    sessions) falls back to ``_attempt_refresh``'s normal multi-provider
+    scan, same as the gate.
+
+    Returns ``(Session, provider_name)`` on success, ``None`` when the RT
+    is missing, the hinted provider is unknown, or every eligible provider
+    rejects the token (including ``RefreshExpiredError``). Raises
+    ``ProviderError`` when a candidate provider could not be reached —
+    callers MUST treat that distinctly from an outright-rejected token (a
+    transient outage should never be punished the same way as a genuinely
+    bad refresh token, e.g. by a failure-cooldown/budget).
+    """
+    _at, rt = read_session_cookies(request)
+    if not rt:
+        return None
+
+    provider_hint = read_session_provider(request)
+    if not provider_hint:
+        return _attempt_refresh(request, refresh_token=rt, provider_hint=None)
+
+    hinted = next(
+        (p for p in list_session_providers() if p.name == provider_hint), None,
+    )
+    if hinted is None:
+        return None
+    try:
+        new_session = hinted.refresh_session(refresh_token=rt)
+    except RefreshExpiredError:
+        audit_log(
+            AuditEvent.REFRESH_FAILURE,
+            provider=hinted.name,
+            reason="refresh_expired",
+            ip=_client_ip(request),
+        )
+        return None
+    except ProviderError as e:
+        _log.warning(
+            "dashboard-auth: provider %r unreachable during loopback "
+            "cookie refresh: %s",
+            hinted.name, e,
+        )
+        audit_log(
+            AuditEvent.REFRESH_FAILURE,
+            provider=hinted.name,
+            reason="provider_unreachable",
+            ip=_client_ip(request),
+        )
+        raise
+    return new_session, hinted.name
+
+
 def _unauth_response(request: Request, *, reason: str) -> Response:
     """API routes → 401 JSON with ``login_url``; HTML routes → 302 → /login.
 

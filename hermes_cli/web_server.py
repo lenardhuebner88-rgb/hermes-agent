@@ -17,6 +17,7 @@ import base64
 import binascii
 import concurrent.futures
 import functools
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -802,6 +803,163 @@ async def _dashboard_auth_gate(request: Request, call_next):
     return await gated_auth_middleware(request, call_next)
 
 
+# Bounded cooldown for the loopback cookie-refresh fallback below: once a
+# refresh token fails to rotate (an outright REJECTION — dead RT, garbage
+# RT, or the hinted provider rejects it; NOT a transient provider outage,
+# see the ProviderError handling below), skip re-hitting the provider for
+# the SAME RT for 60s. The Diktat/Voice apps' background probers
+# (IME/overlay onCreate, throttled pull-sync) retry aggressively on 401 and
+# would otherwise hammer the (uncached) auth provider on every request
+# carrying a known-bad token. A successful refresh always clears its entry
+# — a working refresh token is never throttled.
+_COOKIE_REFRESH_FAILURE_COOLDOWN_SECONDS = 60
+_COOKIE_REFRESH_FAILURE_MAX_ENTRIES = 256
+_COOKIE_REFRESH_FAILURES: "OrderedDict[str, float]" = OrderedDict()
+_COOKIE_REFRESH_FAILURES_LOCK = threading.Lock()
+
+# Global failed-refresh budget, on top of the per-token cooldown above: a
+# fresh garbage RT on every request (e.g. a misbehaving/hostile client that
+# never reuses a token) trivially bypasses the per-token cooldown — each
+# one gets its own cooldown entry instead of being throttled. Capping
+# REJECTED refreshes server-wide at 30/60s bounds the worst case regardless
+# of RT cardinality. Successful refreshes never spend budget; neither do
+# ProviderError outages (see the fallback below) — only genuine rejections
+# do, so the budget can't be exhausted by a real IDP hiccup.
+_COOKIE_REFRESH_BUDGET_WINDOW_SECONDS = 60
+_COOKIE_REFRESH_BUDGET_MAX_FAILURES = 30
+_COOKIE_REFRESH_BUDGET_STATE: Dict[str, float] = {"window_start": 0.0, "count": 0}
+
+
+def _cookie_refresh_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _cookie_refresh_on_cooldown(token_hash: str) -> bool:
+    with _COOKIE_REFRESH_FAILURES_LOCK:
+        failed_at = _COOKIE_REFRESH_FAILURES.get(token_hash)
+        if failed_at is None:
+            return False
+        if time.time() - failed_at >= _COOKIE_REFRESH_FAILURE_COOLDOWN_SECONDS:
+            del _COOKIE_REFRESH_FAILURES[token_hash]
+            return False
+        return True
+
+
+def _record_cookie_refresh_failure(token_hash: str) -> None:
+    with _COOKIE_REFRESH_FAILURES_LOCK:
+        _COOKIE_REFRESH_FAILURES[token_hash] = time.time()
+        _COOKIE_REFRESH_FAILURES.move_to_end(token_hash)
+        while len(_COOKIE_REFRESH_FAILURES) > _COOKIE_REFRESH_FAILURE_MAX_ENTRIES:
+            _COOKIE_REFRESH_FAILURES.popitem(last=False)
+
+
+def _clear_cookie_refresh_failure(token_hash: str) -> None:
+    with _COOKIE_REFRESH_FAILURES_LOCK:
+        _COOKIE_REFRESH_FAILURES.pop(token_hash, None)
+
+
+def _cookie_refresh_budget_roll_window(now: float) -> None:
+    """Reset the rolling failure-budget window once it has elapsed.
+
+    Caller must hold ``_COOKIE_REFRESH_FAILURES_LOCK`` (reused rather than
+    a second lock — this state is updated in lockstep with the per-token
+    cooldown above and a single lock keeps the ordering trivially safe).
+    """
+    if now - _COOKIE_REFRESH_BUDGET_STATE["window_start"] >= _COOKIE_REFRESH_BUDGET_WINDOW_SECONDS:
+        _COOKIE_REFRESH_BUDGET_STATE["window_start"] = now
+        _COOKIE_REFRESH_BUDGET_STATE["count"] = 0
+
+
+def _cookie_refresh_budget_exhausted() -> bool:
+    with _COOKIE_REFRESH_FAILURES_LOCK:
+        _cookie_refresh_budget_roll_window(time.time())
+        return _COOKIE_REFRESH_BUDGET_STATE["count"] >= _COOKIE_REFRESH_BUDGET_MAX_FAILURES
+
+
+def _record_cookie_refresh_budget_failure() -> None:
+    with _COOKIE_REFRESH_FAILURES_LOCK:
+        _cookie_refresh_budget_roll_window(time.time())
+        _COOKIE_REFRESH_BUDGET_STATE["count"] += 1
+
+
+async def _cookie_session_refresh_fallback(request: Request, call_next):
+    """Loopback counterpart to the OAuth gate's inline refresh (see
+    ``gated_auth_middleware`` in ``dashboard_auth.middleware``): on an
+    expired/invalid session cookie with a refresh-token cookie still
+    present, rotate transparently and retry the request instead of forcing
+    the native app through a full re-login every 30 days.
+
+    Returns the (rotated-cookie) response on success, or ``None`` to fall
+    through to the caller's existing 401 — a missing RT, a throttled/
+    known-bad RT, an exhausted global failure budget, a transient provider
+    outage, or every provider rejecting the RT all take this path.
+    """
+    from hermes_cli.dashboard_auth.cookies import read_session_cookies
+
+    _at, refresh_token = read_session_cookies(request)
+    if not refresh_token:
+        return None
+    token_hash = _cookie_refresh_token_hash(refresh_token)
+    if _cookie_refresh_on_cooldown(token_hash):
+        return None
+    if _cookie_refresh_budget_exhausted():
+        return None
+
+    from hermes_cli.dashboard_auth.base import ProviderError
+    from hermes_cli.dashboard_auth.middleware import refresh_cookie_session
+
+    try:
+        refreshed = refresh_cookie_session(request)
+    except ProviderError as e:
+        # Transient provider outage, NOT a rejected token — never punish a
+        # possibly-genuinely-valid RT for a backend hiccup: no cooldown
+        # entry, no budget spend. The next request gets a fresh,
+        # unthrottled attempt (matches the gate's own 503-not-clear
+        # posture for the same distinction).
+        _log.warning("dashboard-auth: loopback cookie-refresh provider unreachable: %s", e)
+        return None
+    if refreshed is None:
+        _record_cookie_refresh_failure(token_hash)
+        _record_cookie_refresh_budget_failure()
+        return None
+    _clear_cookie_refresh_failure(token_hash)
+
+    new_session, refreshing_provider = refreshed
+    request.state.session = new_session
+    response = await call_next(request)
+
+    # Persist the rotated tokens — same set_session_cookies call as the
+    # gated path's inline refresh (prefix/https bound to this request
+    # shape, Max-Age tracks the new access token's actual expiry).
+    from hermes_cli.dashboard_auth.cookies import detect_https, set_session_cookies
+    from hermes_cli.dashboard_auth.middleware import _client_ip, _expires_in_seconds
+    from hermes_cli.dashboard_auth.prefix import prefix_from_request
+
+    set_session_cookies(
+        response,
+        access_token=new_session.access_token,
+        refresh_token=new_session.refresh_token,
+        access_token_expires_in=_expires_in_seconds(new_session),
+        use_https=detect_https(request),
+        prefix=prefix_from_request(request),
+        provider=refreshing_provider,
+    )
+    # A rotated Set-Cookie response must never be cached (proxies/CDNs sitting
+    # in front of a non-loopback Tailscale Serve bind, browser bfcache) — a
+    # cached copy would hand a later caller stale, already-rotated cookies.
+    response.headers["Cache-Control"] = "no-store"
+
+    from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
+
+    audit_log(
+        AuditEvent.REFRESH_SUCCESS,
+        provider=refreshing_provider,
+        user_id=new_session.user_id,
+        ip=_client_ip(request),
+    )
+    return response
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """Require the session token on all /api/ routes except the public list."""
@@ -829,6 +987,12 @@ async def auth_middleware(request: Request, call_next):
             )
             session = verify_cookie_session(request)
             if session is None:
+                # Access token expired/invalid: try rotating it via the
+                # refresh-token cookie before forcing the native app back
+                # through a full re-login (stage 10 — 30-day cliff fix).
+                refreshed_response = await _cookie_session_refresh_fallback(request, call_next)
+                if refreshed_response is not None:
+                    return refreshed_response
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Unauthorized"},
