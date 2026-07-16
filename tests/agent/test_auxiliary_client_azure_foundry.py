@@ -67,13 +67,59 @@ def fake_azure_identity(monkeypatch):
 
 @pytest.fixture
 def patch_load_config(monkeypatch):
-    """Helper to set model_cfg seen by _try_azure_foundry."""
+    """Helper to set model_cfg seen by _try_azure_foundry.
+
+    Order-leak guard: ``hermes_cli.runtime_provider`` does a module-level
+    ``from hermes_cli.config import load_config`` — a name bound once, at
+    first import, into *that module's own namespace* (not re-resolved on
+    every call). ``_try_azure_foundry`` only imports
+    ``hermes_cli.runtime_provider`` lazily, inside the function body. If
+    that first-ever import happens while this fixture has
+    ``hermes_cli.config.load_config`` monkeypatched to the fake lambda
+    below, ``hermes_cli.runtime_provider.load_config`` permanently binds to
+    THIS test's closure for the rest of the process — monkeypatch teardown
+    only restores the ``hermes_cli.config`` attribute, it cannot un-poison a
+    name already copied into another module's namespace. Every later test
+    that resolves named custom providers via
+    ``hermes_cli.runtime_provider._get_named_custom_provider`` (e.g.
+    tests/agent/test_auxiliary_named_custom_providers.py) then silently
+    sees this test's ``{"model": model_cfg}`` stub — missing
+    ``custom_providers``/``providers`` — and every lookup returns None.
+    Force the real import (real load_config still bound) before patching.
+    """
+    import hermes_cli.runtime_provider  # noqa: F401 — see docstring
+
     def _apply(model_cfg):
         monkeypatch.setattr(
             "hermes_cli.config.load_config",
             lambda: {"model": model_cfg},
         )
     return _apply
+
+
+@pytest.fixture(autouse=True)
+def _guard_runtime_provider_load_config_binding():
+    """Regression guard for the order-leak ``patch_load_config`` fixes above.
+
+    Once ``hermes_cli.runtime_provider`` is imported, its module-level
+    ``load_config`` name must always be identical to the live
+    ``hermes_cli.config.load_config`` function object. Checked at SETUP
+    (not teardown): this test's own ``patch_load_config`` usage legitimately
+    diverges the two while its monkeypatch is active, so the only clean
+    place to assert "no leak happened" is before the current test's
+    patching starts — i.e. verifying whatever the *previous* test left
+    behind, after its monkeypatch has already been undone.
+    """
+    import sys
+    rp = sys.modules.get("hermes_cli.runtime_provider")
+    cfg = sys.modules.get("hermes_cli.config")
+    if rp is not None and cfg is not None:
+        assert rp.load_config is cfg.load_config, (
+            "hermes_cli.runtime_provider.load_config diverged from "
+            "hermes_cli.config.load_config — a monkeypatch window poisoned "
+            "the module-level binding (order-leak regression)"
+        )
+    yield
 
 
 # ---------------------------------------------------------------------------
