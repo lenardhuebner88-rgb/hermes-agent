@@ -108,6 +108,12 @@ const TMUX_PAGE_UP = `${TMUX_PREFIX}\x1b[5~`;
 const TMUX_LINE_STEP = 5;
 
 const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
+/** Per-kind key; legacy global WORKDIR_STORAGE_KEY is still read once for migration. */
+function workdirStorageKeyForKind(kind: AgentTerminalKind): string {
+  return `${WORKDIR_STORAGE_KEY}:${kind}`;
+}
+const WORKDIR_RESET_NOTE =
+  "Gespeichertes Arbeitsverzeichnis nicht verfügbar — auf Zuhause zurückgesetzt.";
 const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
 const KEYS_STORAGE_KEY = "hermes-terminals-keysopen";
 const TARGET_STORAGE_KEY = "hermes-terminals-last-target";
@@ -246,6 +252,47 @@ export function orderWindowsForStrip(windows: AgentTerminalWindow[]): AgentTermi
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
 export function chipLabel(window: AgentTerminalWindow): string {
   return window.session === PRIMARY_SESSION ? window.window : `${window.session}:${window.window}`;
+}
+
+/**
+ * Short display form for a pane cwd: $HOME → ~, then at most the last two path segments.
+ * Backend may omit cwd (optional on AgentTerminalWindow); callers pass null/undefined safely.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function formatCwdShort(cwd: string | null | undefined): string {
+  const raw = cwd?.trim();
+  if (!raw) return "unbekannt";
+  let display = raw;
+  // Linux operator host: tmux pane_current_path is absolute under /home/<user>.
+  const homeMatch = display.match(/^\/home\/[^/]+/);
+  if (homeMatch) {
+    const rest = display.slice(homeMatch[0].length);
+    display = rest ? `~${rest}` : "~";
+  }
+  if (display === "~") return "~";
+  if (display.startsWith("~/")) {
+    const rest = display.slice(2).split("/").filter(Boolean);
+    if (rest.length <= 2) return `~/${rest.join("/")}`;
+    return `~/${rest.slice(-2).join("/")}`;
+  }
+  const segs = display.split("/").filter(Boolean);
+  if (segs.length <= 2) return display.startsWith("/") ? `/${segs.join("/")}` : segs.join("/");
+  return segs.slice(-2).join("/");
+}
+
+/** Read last workdir for a kind: per-kind key → legacy global (migration) → home. */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
+export function readStoredWorkdir(kind: AgentTerminalKind): string {
+  try {
+    const perKind = window.localStorage.getItem(workdirStorageKeyForKind(kind));
+    if (perKind) return perKind;
+    // One-shot migration read of the pre-S4 global key (do not delete it).
+    const legacy = window.localStorage.getItem(WORKDIR_STORAGE_KEY);
+    if (legacy) return legacy;
+  } catch {
+    /* storage optional */
+  }
+  return "home";
 }
 
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
@@ -432,7 +479,9 @@ function TerminalIdentityBar({
   const kind = kindFromWindow(window, selectedKind);
   const label = AGENT_LABELS[kind] ?? kind;
   const target = window ? `${window.session}:${window.window}` : "missing window";
-  const cwd = window?.cwd?.trim() || "cwd unbekannt";
+  // cwd is optional on the windows payload (AgentTerminalWindow.cwd); shorten for chrome.
+  const cwdRaw = window?.cwd?.trim() || "";
+  const cwdShort = formatCwdShort(window?.cwd);
   const process = terminalProcessLabel(window, kind);
   return (
     <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">
@@ -441,7 +490,13 @@ function TerminalIdentityBar({
         <span className="text-ink-3">·</span>
         <span className="min-w-0 max-w-[9rem] truncate font-mono text-live sm:max-w-[14rem]" title={target}>{target}</span>
         <span className="text-ink-3">·</span>
-        <span className="min-w-0 max-w-[13rem] truncate font-mono text-ink-2 sm:max-w-[28rem]" title={cwd}>{cwd}</span>
+        <span
+          data-testid="terminal-cwd-chip"
+          className="min-w-0 max-w-[13rem] truncate font-mono text-ink-2 sm:max-w-[28rem]"
+          title={cwdRaw || cwdShort}
+        >
+          {cwdShort}
+        </span>
         <span className="text-ink-3">·</span>
         <span className="min-w-0 max-w-[8rem] truncate font-mono text-ink-2" title={process}>{process}</span>
         <span className="text-ink-3">·</span>
@@ -801,13 +856,9 @@ export function AgentTerminalsView() {
       return false;
     }
   });
-  const [workdir, setWorkdir] = useState<string>(() => {
-    try {
-      return window.localStorage.getItem(WORKDIR_STORAGE_KEY) ?? "home";
-    } catch {
-      return "home";
-    }
-  });
+  const [workdir, setWorkdir] = useState<string>(() => readStoredWorkdir("hermes"));
+  /** Visible note when a stored workdir key was invalid and we fell back to home. */
+  const [workdirResetNote, setWorkdirResetNote] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState<number | null>(() => {
     try {
       const stored = Number(window.localStorage.getItem(FONT_STORAGE_KEY));
@@ -1654,21 +1705,31 @@ export function AgentTerminalsView() {
   const selectWorkdir = useCallback((key: string) => {
     setWorkdir(key);
     try {
-      window.localStorage.setItem(WORKDIR_STORAGE_KEY, key);
+      // Persist for the current create-sheet kind only (legacy global key left intact).
+      window.localStorage.setItem(workdirStorageKeyForKind(createKind), key);
     } catch {
       /* storage optional */
     }
-  }, []);
+  }, [createKind]);
+
+  // When the create-sheet kind changes, restore that kind's remembered workdir.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- kind switch must rehydrate per-kind memory
+    setWorkdir(readStoredWorkdir(createKind));
+    setWorkdirResetNote(null);
+  }, [createKind]);
 
   useEffect(() => {
     // Stale localStorage-Key (z. B. entferntes Verzeichnis) gegen die aktuell gültigen
     // Optionen validieren — sonst spawnt "Neue Fenster starten in" mit totem Key.
     // Erst nach Capability-Load: der FALLBACK-Liste könnten legitime Backend-Keys fehlen.
+    // Unlike pre-S4, surface a visible note instead of a silent home reset.
     if (!capability) return;
     const options = capability.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
     if (!options.some((option) => option.key === workdir)) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- korrigiert Stale-Key nach Capability-Load, "home" ist immer gültig
       selectWorkdir("home");
+      setWorkdirResetNote(WORKDIR_RESET_NOTE);
     }
   }, [capability, workdir, selectWorkdir]);
 
@@ -1958,6 +2019,9 @@ export function AgentTerminalsView() {
                     <button type="button" onClick={() => selectPaneTarget(activePane, targetFromWindow(win))} className={cn("min-w-0 flex-1 px-2.5 py-2 text-left text-xs transition", active ? "text-live" : "text-ink-2 hover:bg-surface-3")}>
                       <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
                       <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
+                      <span className="mt-0.5 block truncate font-mono text-[10px] text-ink-3" title={win.cwd?.trim() || undefined}>
+                        {formatCwdShort(win.cwd)}
+                      </span>
                       <Sparkline state={laneState} className="mt-1" />
                     </button>
                     {dead && (
@@ -2403,7 +2467,16 @@ export function AgentTerminalsView() {
       </div>
       {renameError && <div className="mt-1.5 rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-[11px] text-status-alert">{renameError}</div>}
       <div className="mt-3 grid gap-1.5 rounded-card border border-line bg-surface-2 p-3 text-xs text-ink-2">
-        <div className="flex items-center justify-between gap-2"><span>cwd</span><span className="min-w-0 truncate font-mono text-ink-2">{selectedWindow.cwd?.trim() || "unbekannt"}</span></div>
+        <div className="flex items-center justify-between gap-2">
+          <span>cwd</span>
+          <span
+            data-testid="session-sheet-cwd"
+            className="min-w-0 truncate font-mono text-ink-2"
+            title={selectedWindow.cwd?.trim() || undefined}
+          >
+            {formatCwdShort(selectedWindow.cwd)}
+          </span>
+        </div>
         <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-ink-2">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Status</span><TerminalStatusChip state={state} /></div>
       </div>
@@ -2479,7 +2552,10 @@ export function AgentTerminalsView() {
         <select
           aria-label="Arbeitsverzeichnis für neue Terminals"
           value={workdir}
-          onChange={(event) => selectWorkdir(event.target.value)}
+          onChange={(event) => {
+            setWorkdirResetNote(null);
+            selectWorkdir(event.target.value);
+          }}
           className="rounded-card border border-line bg-surface-2 px-2 py-2 text-xs text-ink-2 focus:border-live/50 focus:outline-none"
         >
           {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
@@ -2487,6 +2563,11 @@ export function AgentTerminalsView() {
           ))}
         </select>
       </label>
+      {workdirResetNote && (
+        <div className="rounded-card border border-line bg-surface-2 p-2 text-[11px] text-ink-3" role="status">
+          {workdirResetNote}
+        </div>
+      )}
       {createError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-xs text-status-alert">{createError}</div>}
       <button
         type="button"

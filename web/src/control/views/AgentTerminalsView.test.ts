@@ -5,12 +5,14 @@ import {
   chipLabel,
   classifyTerminalState,
   formatActivityAge,
+  formatCwdShort,
   formatPtyResize,
   hasUnseenActivity,
   isTerminalCopyShortcut,
   orderOverviewForFleet,
   orderWindowsForStrip,
   pickInitialTarget,
+  readStoredWorkdir,
   reconnectDelayMs,
   terminalSurfaceOrder,
 } from "./AgentTerminalsView";
@@ -381,5 +383,52 @@ describe("terminalSurfaceOrder", () => {
     expect(terminalSurfaceOrder(target(""))).toBeNull();
     expect(terminalSurfaceOrder(target("pane"))).toBeNull();
     expect(terminalSurfaceOrder(target("-1"))).toBeNull();
+  });
+});
+
+describe("formatCwdShort", () => {
+  // Real pane_current_path values from AgentTerminalWindow.to_dict() / tmux list-windows.
+  it("shortens a realistic family-organizer cwd under $HOME", () => {
+    expect(formatCwdShort("/home/piet/projects/family-organizer")).toBe("~/projects/family-organizer");
+  });
+
+  it("shortens hermes-agent home-relative paths and keeps at most two segments after ~", () => {
+    expect(formatCwdShort("/home/piet/.hermes/hermes-agent")).toBe("~/.hermes/hermes-agent");
+    expect(formatCwdShort("/home/piet/.hermes/hermes-agent/web/src")).toBe("~/web/src");
+  });
+
+  it("maps bare $HOME to ~ and missing/empty cwd to unbekannt", () => {
+    expect(formatCwdShort("/home/piet")).toBe("~");
+    expect(formatCwdShort(null)).toBe("unbekannt");
+    expect(formatCwdShort(undefined)).toBe("unbekannt");
+    expect(formatCwdShort("   ")).toBe("unbekannt");
+  });
+});
+
+describe("readStoredWorkdir", () => {
+  it("prefers the per-kind key, then migrates from the legacy global key, then home", () => {
+    const store = new Map<string, string>();
+    const original = globalThis.window;
+    // Minimal localStorage stand-in for the pure helper (no jsdom in this file).
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (globalThis as any).window = {
+      localStorage: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => {
+          store.set(k, v);
+        },
+      },
+    };
+    try {
+      expect(readStoredWorkdir("claude")).toBe("home");
+      store.set("hermes-terminals-workdir", "family-organizer");
+      expect(readStoredWorkdir("claude")).toBe("family-organizer");
+      store.set("hermes-terminals-workdir:claude", "hermes-agent");
+      expect(readStoredWorkdir("claude")).toBe("hermes-agent");
+      expect(readStoredWorkdir("codex")).toBe("family-organizer");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).window = original;
+    }
   });
 });

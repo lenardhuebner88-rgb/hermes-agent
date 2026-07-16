@@ -365,7 +365,11 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByText("Terminal-Kontext")).not.toBeNull();
     fireEvent.click((await screen.findAllByText("codex"))[0]);
     expect(screen.getAllByText("hermes-agents:codex").length).toBeGreaterThan(0);
-    expect(await screen.findByText("/home/piet/.hermes/hermes-agent")).toBeTruthy();
+    // Identity bar chip: shortened cwd (~ + ≤2 segments); full path is title only.
+    // Session list also shows the short form → multiple nodes, assert via test id.
+    const cwdChip = await screen.findByTestId("terminal-cwd-chip");
+    await waitFor(() => expect(cwdChip.textContent).toBe("~/.hermes/hermes-agent"));
+    expect(cwdChip.getAttribute("title")).toBe("/home/piet/.hermes/hermes-agent");
     expect(screen.getByText("node/codex")).toBeTruthy();
   });
 
@@ -824,12 +828,57 @@ describe("AgentTerminalsView desktop rendering", () => {
   });
 
   it("opens the create-session modal and resets a stale workdir localStorage key to home after capability load", async () => {
+    // Legacy global key still migrates for the default create kind (hermes); invalid → home + note.
     window.localStorage.setItem("hermes-terminals-workdir", "gibt-es-nicht");
     await renderView();
 
-    await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("home"));
+    await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("home"));
+    // Legacy key is left intact (migration read only; anti-scope: no removal).
+    expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("gibt-es-nicht");
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
     expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
+    expect(screen.getByText(/Gespeichertes Arbeitsverzeichnis nicht verfügbar/)).toBeTruthy();
+  });
+
+  it("remembers workdir per agent kind in the create sheet", async () => {
+    await renderView();
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+
+    const workdirSelect = () => screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement;
+
+    // Kind A (default hermes): pick family-organizer and persist under hermes only.
+    fireEvent.change(workdirSelect(), { target: { value: "family-organizer" } });
+    expect(workdirSelect().value).toBe("family-organizer");
+    expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("family-organizer");
+
+    // Kind B (claude): shows its own remembered/default value, not hermes' choice.
+    fireEvent.click(screen.getByRole("button", { name: /Claude/ }));
+    await waitFor(() => expect(workdirSelect().value).toBe("home"));
+    fireEvent.change(workdirSelect(), { target: { value: "hermes-agent" } });
+    expect(window.localStorage.getItem("hermes-terminals-workdir:claude")).toBe("hermes-agent");
+    // hermes key untouched while editing claude
+    expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("family-organizer");
+
+    // Switch back to hermes → restored X.
+    fireEvent.click(screen.getByRole("button", { name: /^Hermes/ }));
+    await waitFor(() => expect(workdirSelect().value).toBe("family-organizer"));
+  });
+
+  it("renders a shortened cwd chip from a realistic windows payload", async () => {
+    // Preferred default target is window name === selectedKind ("hermes") — put the
+    // realistic FO cwd on that pane so TerminalIdentityBar mounts with it active.
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [
+        { ...windows[0], cwd: "/home/piet/projects/family-organizer" },
+        ...windows.slice(1),
+      ],
+    });
+    await renderView();
+
+    // Active pane header chip (TerminalIdentityBar) — short form ~/projects/family-organizer.
+    const chip = await screen.findByTestId("terminal-cwd-chip");
+    await waitFor(() => expect(chip.textContent).toBe("~/projects/family-organizer"));
+    expect(chip.getAttribute("title")).toBe("/home/piet/projects/family-organizer");
   });
 
   it("creates a Grok Build session via the desktop create modal", async () => {
