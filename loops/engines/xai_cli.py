@@ -1,9 +1,10 @@
 """Engine: official Grok Build CLI bound to the SuperGrok subscription.
 
-The subscription CLI exposes the product slot ``grok-build`` rather than the
-API model id ``grok-4.5``.  xAI documents Grok Build as powered by Grok 4.5, so
-the adapter keeps the operator-facing model id and makes that alias explicit at
-the transport boundary.  This path does not use an API key or OpenRouter.
+The subscription CLI accepts the API model id ``grok-4.5`` directly (it is the
+CLI default; verified via ``grok models`` 2026-07-16 after the CLI dropped the
+older ``grok-build`` product slot, which now fails with "unknown model id").
+Model ids therefore pass through unaliased; the alias table remains as the
+seam for future slot renames.  This path does not use an API key or OpenRouter.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from . import EngineResult, detect_usage_limit, register
 GROK_BIN = os.environ.get("GROK_BIN", "/home/piet/.npm-global/bin/grok")
 GROK_HOME = Path(os.environ.get("GROK_HOME", Path.home() / ".grok"))
 
-_CLI_MODEL_ALIASES = {"grok-4.5": "grok-build"}
+_CLI_MODEL_ALIASES: dict[str, str] = {}
 
 
 @register("xai")

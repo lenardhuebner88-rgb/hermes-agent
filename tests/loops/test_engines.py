@@ -145,7 +145,7 @@ def test_xai_cli_maps_grok_45_to_official_grok_build_subscription_slot(
         "--disable-web-search",
         "--always-approve",
         "--model",
-        "grok-build",
+        "grok-4.5",
         "--single",
         "build it",
         "--output-format",
