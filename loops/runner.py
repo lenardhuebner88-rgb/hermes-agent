@@ -88,7 +88,7 @@ AUTOLAND_MANIFEST_SHA256 = {
 }
 AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
-        "PLANNER-PROMPT.md": "8a65ad96a5398d1eb3f01c00f1051ef5a6c580a46d978447307707f13303758b",
+        "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
         "VERIFIER-PROMPT.md": "f6f4db9b95c55f6ebbfc0514a656c1b362e997d3a9f64344621c786de9ca94db",
     },
@@ -1095,6 +1095,14 @@ class LoopRunner:
         status = "TIMEOUT" if result.timed_out else self.last_status()
         self.say(f"Planner fertig: status=[{status}], {n} Pläne in der Queue")
         self.ledger(f"PLAN: {n} Pläne (status={status})")
+        # Statuskontrakt: Planner muss last-status auf PLANNED… oder DRY… setzen.
+        # Leerer/sonstiger Status (False-DRY, Timeout, Turn vor Sweep-Ende) ist
+        # eine Anomalie — sichtbar im Ledger; cmd_night retryt einmal.
+        if not (status.startswith("PLANNED") or status.startswith("DRY")):
+            self.ledger(
+                f"PLAN-ANOMALIE: status=[{status}] — "
+                "Planner-Turn ohne Statuskontrakt beendet"
+            )
         self.notify(f"🌀 {self.pack.name} PLAN: {n} Pläne in der Queue (status={status})")
         return True
 
@@ -1593,9 +1601,37 @@ class LoopRunner:
                 return False
             fresh = False  # Worktree steht jetzt
             if self.qcount("00-planned") == 0:
-                self.say("Keine Pläne — nichts zu bauen.")
-                self.report()
-                return True
+                status = self.last_status()
+                if status.startswith("DRY"):
+                    # Echter DRY-Kontrakt: nichts zu bauen, still-ok Ende.
+                    self.say("Keine Pläne — nichts zu bauen.")
+                    self.report()
+                    return True
+                # Anomalie (leer, TIMEOUT, sonst ohne Statuskontrakt): genau 1 Retry.
+                self.ledger("PLAN-RETRY nach Anomalie")
+                self.say("Plan-Anomalie (0 Pläne, kein DRY) — genau 1 Plan-Retry.")
+                if not self.cmd_plan(fresh=False):
+                    return False
+                if self.qcount("00-planned") == 0:
+                    status2 = self.last_status()
+                    if status2.startswith("DRY"):
+                        self.say("Keine Pläne — nichts zu bauen.")
+                        self.report()
+                        return True
+                    msg = (
+                        f"{self.pack.name}: Plan-Phase 2× ohne Statuskontrakt "
+                        f"beendet (status=[{status2}]) — Run gestoppt, "
+                        "bitte Planner-Log prüfen"
+                    )
+                    self.say(msg)
+                    self.ledger(
+                        f"PLAN-STOP: Plan-Phase 2× ohne Statuskontrakt "
+                        f"(status=[{status2}])"
+                    )
+                    self.notify(msg)
+                    self.report()
+                    return True
+                # Retry hat Pläne geliefert → normal weiter in cmd_run.
         self.cmd_run(fresh=fresh)
         if self.pack.autoland and self._autoland_pending():
             if self._manual_land_required("night"):

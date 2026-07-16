@@ -110,6 +110,12 @@ escapten `\"`.
 - Ledger: `PLANNER <route> <objective-fix|directional-design> <kurzgrund>`.
 - Bei Plan: `last-status` exakt `PLANNED 1`.
 - Ohne objektiven Fund: `last-status` exakt `DRY <route>`.
+- HART: Beende deinen Turn NIEMALS, bevor `last-status` geschrieben ist
+  (`PLANNED 1` oder `DRY <route>`). Starte keine Hintergrund-Jobs, deren Ergebnis
+  du nicht mehr im selben Turn auswertest — warte im Vordergrund auf laufende
+  Sweeps/Builds. Ein beendeter Turn ohne `last-status` zählt als gescheiterte
+  Planung (der Runner retryt einmal und stoppt dann laut)
+  (Vorfall 2026-07-16 False-DRY).
 
 NIE push, merge, deploy, Service-Restart oder Live-Dashboard-Interaktion. Die
 spätere Landung gehört allein dem deterministischen Runner nach Verifier-PASS.

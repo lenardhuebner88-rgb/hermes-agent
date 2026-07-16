@@ -90,3 +90,9 @@ unbaubar, Build-Slot verloren).
    `PLANNED <n>` — oder `DRY`, wenn du nach ehrlicher Analyse keinen Plan über der
    Wert-Schwelle gefunden hast (dann lieber DRY als Beschäftigungstherapie).
 3. Gib eine knappe Liste der Pläne (id + title + prio) als Text aus. Dann Turn beenden.
+4. HART: Beende deinen Turn NIEMALS, bevor `last-status` geschrieben ist
+   (`PLANNED <n>` oder `DRY`). Starte keine Hintergrund-Jobs, deren Ergebnis du
+   nicht mehr im selben Turn auswertest — warte im Vordergrund auf laufende
+   Sweeps/Builds. Ein beendeter Turn ohne `last-status` zählt als gescheiterte
+   Planung (der Runner retryt einmal und stoppt dann laut)
+   (Vorfall 2026-07-16 False-DRY).

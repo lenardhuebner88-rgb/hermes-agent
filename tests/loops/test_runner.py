@@ -2789,3 +2789,112 @@ def test_night_base_refresh_skips_dirty_worktree_but_runs(tmp_path, fake_engine)
     ledger = runner.ledger_path.read_text(encoding="utf-8")
     assert "BASE-REFRESH übersprungen" in ledger
     assert "dirty" in ledger
+
+
+# ── Plan-Phase-Anomalie-Härtung (False-DRY, Incident 2026-07-16) ─────────────
+
+def test_cmd_night_empty_status_zero_plans_retries_once_then_loud_stop(
+    tmp_path, fake_engine, monkeypatch
+):
+    """False-DRY: Planner-Turn endet mit leerem last-status und 0 Plänen.
+
+    Backstop: genau 1 Retry, dann lauter Stop (notify+ledger), kein Build.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "anom-empty", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "anom-empty")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+
+    def plan_phase(kv, cwd):
+        # Kein Plan, last-status bleibt leer (Incident-Form).
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("Build darf nach Plan-Anomalie nicht starten")
+    )
+
+    assert runner.cmd_night() is True
+
+    assert calls.count("plan") == 2, f"erwartet 2× plan (1 Retry), got {calls}"
+    assert "build" not in calls
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "PLAN-ANOMALIE" in ledger
+    assert "PLAN-RETRY nach Anomalie" in ledger
+    stop_msgs = [m for m in notifies if "gestoppt" in m]
+    assert stop_msgs, f"notify mit 'gestoppt' erwartet, got {notifies!r}"
+    assert "2×" in stop_msgs[0] or "2x" in stop_msgs[0].lower()
+    assert "Statuskontrakt" in stop_msgs[0]
+
+
+def test_cmd_night_dry_zero_plans_no_retry(tmp_path, fake_engine, monkeypatch):
+    """Echter DRY: 0 Pläne + last-status DRY → einmal planen, keine Anomalie."""
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "anom-dry", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "anom-dry")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+
+    def plan_phase(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "DRY /control/x\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("Build darf bei DRY nicht starten")
+    )
+
+    assert runner.cmd_night() is True
+
+    assert calls.count("plan") == 1, f"DRY darf nicht retryen, got {calls}"
+    assert "build" not in calls
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "PLAN-ANOMALIE" not in ledger
+    assert "PLAN-RETRY" not in ledger
+    assert not any("gestoppt" in m and "Statuskontrakt" in m for m in notifies)
+
+
+def test_cmd_night_planned_one_reaches_build(tmp_path, fake_engine):
+    """Normalfall PLANNED 1: keine Anomalie, Build-Phase wird erreicht.
+
+    Ergänzt den Happy-Path in test_pipeline_happy_path_plan_build_verify um
+    die explizite Anomalie-Negativ-Assertion.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "anom-planned", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "anom-planned")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "t1")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    assert runner.cmd_night() is True
+
+    assert calls == ["plan", "build", "verify"]
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "PLAN-ANOMALIE" not in ledger
+    assert "PLAN-RETRY" not in ledger
