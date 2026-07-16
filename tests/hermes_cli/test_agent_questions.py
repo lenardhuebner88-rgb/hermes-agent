@@ -780,3 +780,365 @@ def test_start_poller_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert aq.start_poller(interval_s=60.0, db_path=tmp_path / "q.db") is True
     assert aq.start_poller(interval_s=60.0, db_path=tmp_path / "q.db") is False
     aq.stop_poller()
+
+
+# ---------------------------------------------------------------------------
+# Answer path (P0b)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingService:
+    """Stub tmux service: scripted captures + records send_keys_to_pane calls."""
+
+    def __init__(
+        self,
+        captures: list[str] | Exception | list[Any],
+        *,
+        recheck_raises: Exception | None = None,
+        verify_raises: Exception | None = None,
+    ) -> None:
+        # captures: sequence of pane texts returned by successive capture_pane calls
+        if isinstance(captures, Exception):
+            self._captures: list[Any] = [captures]
+        else:
+            self._captures = list(captures)
+        self.recheck_raises = recheck_raises
+        self.verify_raises = verify_raises
+        self.sent: list[dict[str, Any]] = []
+        self._capture_i = 0
+
+    def capture_pane(self, pane_id: str, *, start: int = -50) -> str:
+        if self._capture_i == 0 and self.recheck_raises is not None:
+            raise self.recheck_raises
+        if self._capture_i >= 1 and self.verify_raises is not None:
+            raise self.verify_raises
+        if self._capture_i >= len(self._captures):
+            # default: empty pane (question gone)
+            return ""
+        item = self._captures[self._capture_i]
+        self._capture_i += 1
+        if isinstance(item, Exception):
+            raise item
+        return str(item)
+
+    def send_keys_to_pane(self, pane_id: str, text: str, *, enter: bool = False) -> None:
+        self.sent.append({"pane_id": pane_id, "text": text, "enter": enter})
+
+
+def _insert_open_select(
+    qdb: Path,
+    *,
+    pane_id: str = "%42",
+    kind: str = "claude",
+    options: list[dict[str, Any]] | None = None,
+    fingerprint: str | None = None,
+    question_text: str = "Do you want to proceed?",
+    fixture: str = _FIXTURE_CLAUDE_SELECT,
+) -> tuple[int, str, str]:
+    """Insert open select event; return (id, pane_id, fingerprint matching fixture)."""
+    parsed = aq.parse_question(fixture)
+    assert parsed is not None
+    fp = fingerprint or aq.compute_fingerprint(pane_id, parsed["region"])
+    opts = options if options is not None else parsed["options"]
+    eid = aq.insert_question_event(
+        session="work",
+        window="claude",
+        pane_id=pane_id,
+        fingerprint=fp,
+        question_text=question_text,
+        options=opts,
+        kind=kind,
+        db_path=qdb,
+    )
+    assert eid is not None
+    return int(eid), pane_id, fp
+
+
+def test_answer_claim_double_click_safe(qdb: Path) -> None:
+    eid, pane_id, fp = _insert_open_select(qdb)
+    parsed = aq.parse_question(_FIXTURE_CLAUDE_SELECT)
+    assert parsed is not None
+    # recheck matches, then verify: question gone
+    svc = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
+    r1 = aq.answer_question(eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None)
+    assert r1["ok"] is True
+    assert r1["verified"] is True
+    r2 = aq.answer_question(eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None)
+    assert r2 == {"ok": False, "reason": "not-open"}
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answer"] == "1"
+    assert len(svc.sent) == 1
+
+
+def test_answer_recheck_mismatch_supersedes_no_send(qdb: Path) -> None:
+    eid, _pane, _fp = _insert_open_select(qdb, fingerprint="fp-stale-mismatch")
+    # Recheck sees a *different* standing prompt → supersede, no send
+    svc = _RecordingService([_FIXTURE_CLAUDE_SELECT_V2])
+    result = aq.answer_question(
+        eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert result == {"ok": False, "reason": "superseded"}
+    assert svc.sent == []
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+    supers = aq.list_question_events(status="superseded", db_path=qdb)
+    assert len(supers) == 1
+    assert supers[0]["id"] == eid
+
+
+def test_answer_recheck_capture_error_rolls_back_to_open(qdb: Path) -> None:
+    eid, _pane, _fp = _insert_open_select(qdb)
+    svc = _RecordingService([], recheck_raises=RuntimeError("tmux capture failed"))
+    result = aq.answer_question(
+        eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert result == {"ok": False, "reason": "recheck-failed"}
+    assert svc.sent == []
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["id"] == eid
+    assert opens[0].get("answer") is None
+
+
+def test_answer_dialect_claude_select_and_default_yn(qdb: Path) -> None:
+    # claude select → digit, enter=False
+    eid_c, pane_c, _fp = _insert_open_select(qdb, pane_id="%c1", kind="claude")
+    svc_c = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
+    r_c = aq.answer_question(
+        eid_c, "1", db_path=qdb, service=svc_c, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r_c["ok"] is True
+    assert svc_c.sent == [{"pane_id": pane_c, "text": "1", "enter": False}]
+
+    # default yn → "y" + Enter
+    parsed_yn = aq.parse_question(_FIXTURE_YN)
+    assert parsed_yn is not None
+    pane_y = "%y1"
+    fp_y = aq.compute_fingerprint(pane_y, parsed_yn["region"])
+    eid_y = aq.insert_question_event(
+        session="work",
+        window="claude",
+        pane_id=pane_y,
+        fingerprint=fp_y,
+        question_text=parsed_yn["question_text"],
+        options=parsed_yn["options"],
+        kind="unknown",  # falls through to default dialect
+        db_path=qdb,
+    )
+    assert eid_y is not None
+    svc_y = _RecordingService([_FIXTURE_YN, ""])
+    r_y = aq.answer_question(
+        int(eid_y), "y", db_path=qdb, service=svc_y, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r_y["ok"] is True
+    assert svc_y.sent == [{"pane_id": pane_y, "text": "y", "enter": True}]
+
+
+def test_answer_invalid_option_stays_open(qdb: Path) -> None:
+    eid, _pane, _fp = _insert_open_select(qdb)
+    svc = _RecordingService([_FIXTURE_CLAUDE_SELECT])
+    result = aq.answer_question(
+        eid, "7", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert result["ok"] is False
+    assert result["reason"] == "invalid-option"
+    assert svc.sent == []
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["id"] == eid
+
+
+def test_answer_verify_true_and_false(qdb: Path) -> None:
+    # verified True: question gone after send
+    eid1, _p1, _f1 = _insert_open_select(qdb, pane_id="%v1")
+    svc_ok = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
+    r_ok = aq.answer_question(
+        eid1, "1", db_path=qdb, service=svc_ok, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r_ok["ok"] is True
+    assert r_ok["verified"] is True
+    assert r_ok["latency_s"] >= 0
+    row1 = aq.list_question_events(status="answered", db_path=qdb)[0]
+    assert row1["answer_verified"] == 1
+    assert row1["latency_s"] is not None and row1["latency_s"] >= 0
+
+    # verified False: same prompt still standing
+    eid2, _p2, _f2 = _insert_open_select(qdb, pane_id="%v2")
+    svc_still = _RecordingService([_FIXTURE_CLAUDE_SELECT, _FIXTURE_CLAUDE_SELECT])
+    r_still = aq.answer_question(
+        eid2, "1", db_path=qdb, service=svc_still, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r_still["ok"] is True
+    assert r_still["verified"] is False
+    rows = [e for e in aq.list_question_events(status="answered", db_path=qdb) if e["id"] == eid2]
+    assert len(rows) == 1
+    assert rows[0]["answer_verified"] == 0
+
+
+def test_answer_free_text_not_supported(qdb: Path) -> None:
+    eid = aq.insert_question_event(
+        session="work",
+        window="claude",
+        pane_id="%ft",
+        fingerprint="fp-ft",
+        question_text="What is the deployment target?",
+        options=[],
+        kind="claude",
+        db_path=qdb,
+    )
+    assert eid is not None
+    svc = _RecordingService([])
+    result = aq.answer_question(
+        int(eid), "prod", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert result == {"ok": False, "reason": "free-text-not-supported"}
+    assert svc.sent == []
+
+
+def test_endpoint_answer_success_and_conflict(
+    qdb: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import hermes_cli.web_server as web_server
+
+    monkeypatch.setattr(aq, "question_events_db_path", lambda: qdb)
+
+    eid, _pane_id, _fp = _insert_open_select(qdb, pane_id="%api-ans")
+    svc = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
+    real_answer = aq.answer_question
+
+    def _answer(event_id, answer, **kwargs):
+        # Route does not pass db_path/service; inject isolated store + stub.
+        return real_answer(
+            event_id,
+            answer,
+            answered_by=kwargs.get("answered_by", "operator"),
+            db_path=qdb,
+            service=svc,
+            verify_delay_s=0,
+            sleep=lambda _s: None,
+        )
+
+    monkeypatch.setattr(aq, "answer_question", _answer)
+
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    ok = client.post(
+        f"/api/agent-questions/{eid}/answer",
+        json={"answer": "1"},
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["ok"] is True
+    assert body["verified"] is True
+    assert svc.sent and svc.sent[0]["text"] == "1"
+
+    conflict = client.post(
+        f"/api/agent-questions/{eid}/answer",
+        json={"answer": "1"},
+        headers=headers,
+    )
+    assert conflict.status_code == 409, conflict.text
+    detail = conflict.json()["detail"]
+    assert detail["reason"] == "not-open"
+
+
+@pytestmark_tmux
+def test_real_tmux_e2e_answer_chosen(
+    tmp_path: Path,
+    tmux_service: TmuxAgentSessionService,
+) -> None:
+    """Full claim→recheck→send→verify path against a real pane.
+
+    Pane runs: cat fixture; read answer; clear; echo CHOSEN:$x
+    Ingestor creates the event; answer_question sends "1"+Enter (codex dialect).
+    """
+    db_path = tmp_path / "home" / "question_events.db"
+    prompt_file = tmp_path / "select_prompt.txt"
+    prompt_file.write_text(_FIXTURE_CLAUDE_SELECT, encoding="utf-8")
+
+    tmux_service._run(
+        "new-session",
+        "-d",
+        "-s",
+        "work",
+        "-n",
+        "claude",
+        "sh",
+        "-c",
+        f"cat {prompt_file}; read -r x; clear; echo \"CHOSEN:$x\"; sleep 120",
+    )
+    # Companion window so overview is never empty after kill paths (not used here).
+    tmux_service._run(
+        "new-window",
+        "-t",
+        "work",
+        "-n",
+        "idle",
+        "sh",
+        "-c",
+        "sleep 120",
+    )
+    time.sleep(4.0)
+
+    overview = tmux_service.overview(tail_lines=25)
+    frage = [
+        w
+        for w in overview["windows"]
+        if w.get("session") == "work" and w.get("state") == "frage"
+    ]
+    assert frage, f"expected frage state; windows={overview.get('windows')}"
+    pane_id = str(frage[0]["pane_id"])
+
+    ing = aq.QuestionScrapeIngestor(
+        db_path=db_path,
+        service_factory=lambda: tmux_service,
+    )
+    s1 = ing.poll_once()
+    assert s1["created"] == 0
+    s2 = ing.poll_once()
+    assert s2["created"] == 1, f"expected create on second stable poll: {s1=} {s2=}"
+
+    opens = aq.list_question_events(status="open", db_path=db_path)
+    assert len(opens) == 1
+    event_id = int(opens[0]["id"])
+
+    # sh needs Enter; force codex dialect (select enter=True).
+    with aq.connect_closing(db_path=db_path) as conn:
+        from hermes_cli.sqlite_util import write_txn
+
+        with write_txn(conn):
+            conn.execute(
+                "UPDATE question_events SET kind = ? WHERE id = ?",
+                ("codex", event_id),
+            )
+
+    result = aq.answer_question(
+        event_id,
+        "1",
+        db_path=db_path,
+        service=tmux_service,
+        verify_delay_s=0.8,
+    )
+    assert result["ok"] is True, result
+    assert result["verified"] is True, result
+
+    # Pane should show the chosen value after clear+echo.
+    deadline = time.time() + 5.0
+    chosen_seen = False
+    while time.time() < deadline:
+        cap = tmux_service.capture_pane(pane_id, start=-30)
+        if "CHOSEN:1" in cap:
+            chosen_seen = True
+            break
+        time.sleep(0.2)
+    assert chosen_seen, f"expected CHOSEN:1 in pane; last={cap!r}"
+
+    answered = aq.list_question_events(status="answered", db_path=db_path)
+    assert len(answered) == 1
+    assert answered[0]["answer"] == "1"
+    assert answered[0]["answer_verified"] == 1
+    assert answered[0]["latency_s"] is not None

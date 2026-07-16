@@ -1,8 +1,10 @@
-"""Question-events store, scrape parser, and poll-ingest for the Frage-Assistent.
+"""Question-events store, scrape parser, poll-ingest, and answer path.
 
 P0a: detect standing agent questions (select prompts / y-n) from tmux pane
 tails, persist open events in a per-profile SQLite store, and expose them via
-the dashboard API. Answering (send-keys) is P0b and out of scope here.
+the dashboard API.
+
+P0b: claim → fingerprint-recheck → pane-addressed send-keys → verify.
 """
 
 from __future__ import annotations
@@ -40,6 +42,14 @@ _RECOMMENDED_MARKER_RE = re.compile(r"^\s*[❯›]\s*\d+\.")
 
 _KIND_HINTS = ("claude", "codex", "kimi", "grok")
 
+# kind -> how an option answer is delivered (select digit vs y/n).
+# Central table so live CLI dialect differences have one audit point.
+ANSWER_DIALECTS: dict[str, dict[str, dict[str, bool]]] = {
+    "claude": {"select": {"enter": False}, "yn": {"enter": False}},
+    "codex": {"select": {"enter": True}, "yn": {"enter": True}},
+    "default": {"select": {"enter": False}, "yn": {"enter": True}},
+}
+
 # ---------------------------------------------------------------------------
 # Paths / schema
 # ---------------------------------------------------------------------------
@@ -69,6 +79,7 @@ CREATE TABLE IF NOT EXISTS question_events (
     answered_by   TEXT,
     answer        TEXT,
     latency_s     REAL,
+    answer_verified INTEGER,
     override      INTEGER NOT NULL DEFAULT 0
 );
 
@@ -483,6 +494,248 @@ def expire_open_events(
                 [ts, *to_expire],
             )
             return int(cur.rowcount or 0)
+
+
+# ---------------------------------------------------------------------------
+# Answer path (P0b): claim → recheck → send → verify
+# ---------------------------------------------------------------------------
+
+
+def _load_event(event_id: int, *, db_path: Optional[Path] = None) -> dict[str, Any] | None:
+    with connect_closing(db_path=db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM question_events WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+    return _row_to_event(row) if row is not None else None
+
+
+def _parse_iso_ts(ts: str) -> float:
+    """Parse store ISO-UTC (…Z) into epoch seconds."""
+    text = (ts or "").strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return datetime.fromisoformat(text).timestamp()
+
+
+def _option_nrs(options: list[Any]) -> list[str]:
+    nrs: list[str] = []
+    for opt in options or []:
+        if isinstance(opt, dict) and "nr" in opt:
+            nrs.append(str(opt["nr"]))
+    return nrs
+
+
+def _answer_enter_flag(kind: str | None, answer: str) -> bool:
+    dialect = ANSWER_DIALECTS.get(kind or "") or ANSWER_DIALECTS["default"]
+    opt_type = "yn" if answer in ("y", "n") else "select"
+    return bool(dialect.get(opt_type, {}).get("enter", False))
+
+
+def _normalize_capture_tail(raw: str) -> str:
+    """ANSI-strip + drop trailing blank rows (tmux pads short panes to height).
+
+    Mirrors overview's tail cleanup so recheck fingerprints match ingest.
+    """
+    cleaned = _agent_terminals.strip_ansi(raw or "")
+    lines = cleaned.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+def _recheck_fingerprint(service: Any, pane_id: str) -> str | None:
+    """Capture pane and return current question fingerprint, or None if gone."""
+    raw = service.capture_pane(pane_id, start=-50)
+    tail = _normalize_capture_tail(raw)
+    parsed = parse_question(tail)
+    if parsed is None:
+        return None
+    return compute_fingerprint(pane_id, parsed["region"])
+
+
+def _claim_event(
+    event_id: int,
+    *,
+    answer: str,
+    answered_by: str,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> bool:
+    """Atomic open→answered claim. True when this caller owns the send."""
+    ts = _iso_now(now)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE question_events SET status = 'answered', answered_by = ?, "
+                "answer = ?, updated_ts = ? WHERE id = ? AND status = 'open'",
+                (answered_by, answer, ts, int(event_id)),
+            )
+            return int(cur.rowcount or 0) == 1
+
+
+def _set_event_status(
+    event_id: int,
+    status: str,
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+    clear_answer: bool = False,
+) -> None:
+    ts = _iso_now(now)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            if clear_answer:
+                conn.execute(
+                    "UPDATE question_events SET status = ?, answered_by = NULL, "
+                    "answer = NULL, updated_ts = ? WHERE id = ?",
+                    (status, ts, int(event_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE question_events SET status = ?, updated_ts = ? WHERE id = ?",
+                    (status, ts, int(event_id)),
+                )
+
+
+def _set_verify_fields(
+    event_id: int,
+    *,
+    answer_verified: bool,
+    latency_s: float,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> None:
+    ts = _iso_now(now)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            conn.execute(
+                "UPDATE question_events SET answer_verified = ?, latency_s = ?, "
+                "updated_ts = ? WHERE id = ?",
+                (1 if answer_verified else 0, float(latency_s), ts, int(event_id)),
+            )
+
+
+def answer_question(
+    event_id: int,
+    answer: str,
+    *,
+    answered_by: str = "operator",
+    db_path: Optional[Path] = None,
+    service: Any = None,
+    verify_delay_s: float = 1.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Claim an open event, recheck fingerprint, send answer, verify.
+
+    Order is load-bearing (plan Ein-Schuss-Idempotenz + Anti-TOCTOU):
+    validate → claim → recheck → send → verify. Double-click safe.
+    """
+    answer_str = str(answer)
+    event = _load_event(event_id, db_path=db_path)
+    if event is None:
+        return {"ok": False, "reason": "not-found"}
+
+    options = event.get("options") or []
+    if not options:
+        return {"ok": False, "reason": "free-text-not-supported"}
+
+    valid_nrs = _option_nrs(options)
+    if answer_str not in valid_nrs:
+        return {"ok": False, "reason": "invalid-option"}
+
+    if not _claim_event(
+        event_id,
+        answer=answer_str,
+        answered_by=answered_by,
+        db_path=db_path,
+    ):
+        return {"ok": False, "reason": "not-open"}
+
+    pane_id = str(event.get("pane_id") or "")
+    expected_fp = str(event.get("fingerprint") or "")
+    svc = service if service is not None else _agent_terminals.TmuxAgentSessionService()
+
+    # Step 4: fingerprint recheck (nothing sent yet → claim can roll back)
+    try:
+        current_fp = _recheck_fingerprint(svc, pane_id)
+    except Exception as exc:
+        logger.warning(
+            "answer_question recheck failed event_id=%s pane_id=%s: %s",
+            event_id,
+            pane_id,
+            exc,
+        )
+        _set_event_status(
+            event_id, "open", db_path=db_path, clear_answer=True
+        )
+        return {"ok": False, "reason": "recheck-failed"}
+
+    if current_fp is None or current_fp != expected_fp:
+        _set_event_status(event_id, "superseded", db_path=db_path)
+        return {"ok": False, "reason": "superseded"}
+
+    # Step 5: send via dialect table
+    enter = _answer_enter_flag(
+        str(event.get("kind") or "") if event.get("kind") is not None else None,
+        answer_str,
+    )
+    try:
+        svc.send_keys_to_pane(pane_id, answer_str, enter=enter)
+    except Exception as exc:
+        logger.warning(
+            "answer_question send failed event_id=%s pane_id=%s: %s",
+            event_id,
+            pane_id,
+            exc,
+        )
+        # Claim already answered; do not re-open (send may have partially landed).
+        return {"ok": False, "reason": "send-failed"}
+
+    # Step 6: verify question region gone / changed
+    answer_mono = time.time()
+    try:
+        event_ts = _parse_iso_ts(str(event.get("ts") or ""))
+        latency_s = max(0.0, answer_mono - event_ts)
+    except (TypeError, ValueError):
+        latency_s = 0.0
+
+    sleep(float(verify_delay_s))
+    verified = False
+    try:
+        fp2 = _recheck_fingerprint(svc, pane_id)
+        verified = fp2 is None or fp2 != expected_fp
+        _set_verify_fields(
+            event_id,
+            answer_verified=verified,
+            latency_s=latency_s,
+            db_path=db_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "answer_question verify failed event_id=%s pane_id=%s: %s",
+            event_id,
+            pane_id,
+            exc,
+        )
+        # Send already happened — stay answered; report recheck failure.
+        try:
+            _set_verify_fields(
+                event_id,
+                answer_verified=False,
+                latency_s=latency_s,
+                db_path=db_path,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "reason": "recheck-failed",
+            "verified": False,
+            "latency_s": latency_s,
+        }
+
+    return {"ok": True, "verified": verified, "latency_s": latency_s}
 
 
 # ---------------------------------------------------------------------------

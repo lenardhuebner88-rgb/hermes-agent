@@ -1024,6 +1024,18 @@ class TmuxAgentSessionService:
             self._log_event("capture", session=session, window=window, lines=abs(start))
         return proc.stdout
 
+    def capture_pane(self, pane_id: str, *, start: int = -50) -> str:
+        """Capture a pane by absolute tmux pane id (``%N``), not session:window.
+
+        Pane ids survive window renames/respawns better for answer delivery.
+        """
+        if not re.fullmatch(r"%\d+", pane_id or ""):
+            raise InvalidTarget(f"invalid pane_id: {pane_id!r}")
+        start = max(-5000, min(0, int(start)))
+        proc = self._run("capture-pane", "-p", "-t", pane_id, "-S", str(start))
+        self._log_event("capture_pane", pane_id=pane_id, lines=abs(start))
+        return proc.stdout
+
     def overview(self, *, tail_lines: int = 10) -> dict[str, object]:
         """Fleet snapshot: every tmux window plus a best-effort live tail and
         an honest heuristic state — one call for the dashboard control room.
@@ -1060,6 +1072,24 @@ class TmuxAgentSessionService:
         target = self._cmd_target(session, window)
         self._run("send-keys", "-t", target, "-l", "--", text)
         self._log_event("send_keys", session=session, window=window, bytes=len(text.encode("utf-8")))
+
+    def send_keys_to_pane(self, pane_id: str, text: str, *, enter: bool = False) -> None:
+        """Send literal keys to an absolute pane id; optional separate Enter.
+
+        Enter is never mixed into the literal payload — a second ``send-keys``
+        fires only when ``enter=True``.
+        """
+        if not re.fullmatch(r"%\d+", pane_id or ""):
+            raise InvalidTarget(f"invalid pane_id: {pane_id!r}")
+        self._run("send-keys", "-t", pane_id, "-l", "--", text)
+        if enter:
+            self._run("send-keys", "-t", pane_id, "Enter")
+        self._log_event(
+            "send_keys_to_pane",
+            pane_id=pane_id,
+            bytes=len(text.encode("utf-8")),
+            enter=bool(enter),
+        )
 
     def interrupt(self, session: str, window: str) -> None:
         target = self._cmd_target(session, window)

@@ -17550,7 +17550,12 @@ async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
         raise _agent_terminal_error(exc) from exc
 
 
-# --- agent questions (Frage-Assistent P0a) ---
+# --- agent questions (Frage-Assistent P0a/P0b) ---
+class AgentQuestionAnswerRequest(BaseModel):
+    answer: str
+    answered_by: str = "operator"
+
+
 @app.get("/api/agent-questions")
 async def agent_questions_list(
     status: str = "open",
@@ -17565,6 +17570,40 @@ async def agent_questions_list(
         detail = scrub_detail(str(exc)) or exc.__class__.__name__
         raise HTTPException(status_code=503, detail=detail) from exc
     return {"questions": questions}
+
+
+@app.post("/api/agent-questions/{event_id}/answer")
+async def agent_questions_answer(
+    event_id: int,
+    req: AgentQuestionAnswerRequest,
+) -> Dict[str, object]:
+    """Claim + recheck + send answer to a standing agent question (P0b)."""
+    from hermes_cli import agent_questions as _agent_questions
+
+    try:
+        result = _agent_questions.answer_question(
+            event_id,
+            req.answer,
+            answered_by=req.answered_by or "operator",
+        )
+    except Exception as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+    if result.get("ok"):
+        return result
+
+    reason = str(result.get("reason") or "error")
+    if reason == "not-found":
+        raise HTTPException(status_code=404, detail={"ok": False, "reason": reason})
+    if reason in ("not-open", "superseded"):
+        raise HTTPException(status_code=409, detail={"ok": False, "reason": reason})
+    if reason in ("free-text-not-supported", "invalid-option"):
+        raise HTTPException(status_code=400, detail={"ok": False, "reason": reason})
+    if reason in ("recheck-failed", "send-failed"):
+        raise HTTPException(status_code=503, detail={"ok": False, "reason": reason})
+    detail = scrub_detail(reason) or reason
+    raise HTTPException(status_code=503, detail=detail)
 
 
 @app.post("/api/agent-terminals/show")

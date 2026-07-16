@@ -116,6 +116,53 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     assert "handoff_draft" in log
 
 
+def test_capture_pane_and_send_keys_to_pane(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
+    """Pane-id addressed capture/send (P0b) with invalid-id rejection."""
+    service = TmuxAgentSessionService(
+        socket_path=tmux_service.socket_path, hermes_home=tmp_path
+    )
+    service._run(
+        "new-session",
+        "-d",
+        "-s",
+        "work",
+        "-n",
+        "pane-test",
+        "sh",
+        "-c",
+        "printf 'ready\\n'; read -r x; printf 'GOT:%s\\n' \"$x\"; sleep 60",
+    )
+    time.sleep(0.3)
+    info = service.show("work", "pane-test")
+    pane_id = info.pane_id
+    assert pane_id and pane_id.startswith("%")
+
+    cap = service.capture_pane(pane_id, start=-20)
+    assert "ready" in cap
+
+    service.send_keys_to_pane(pane_id, "secret-token-xyz", enter=True)
+    deadline = time.time() + 3.0
+    saw = False
+    while time.time() < deadline:
+        if "GOT:secret-token-xyz" in service.capture_pane(pane_id, start=-20):
+            saw = True
+            break
+        time.sleep(0.1)
+    assert saw
+
+    with pytest.raises(InvalidTarget):
+        service.capture_pane("not-a-pane")
+    with pytest.raises(InvalidTarget):
+        service.send_keys_to_pane("%-1", "x")
+    with pytest.raises(InvalidTarget):
+        service.send_keys_to_pane("work:pane-test", "x")
+
+    log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
+    assert "secret-token-xyz" not in log
+    assert "capture_pane" in log
+    assert "send_keys_to_pane" in log
+
+
 def test_ensure_existing_window_does_not_overwrite_process(tmp_path: Path, tmux_service: TmuxAgentSessionService) -> None:
     fake = _fake_hermes(tmp_path)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_binary=fake, hermes_home=tmp_path)
