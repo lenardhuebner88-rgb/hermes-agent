@@ -18,6 +18,7 @@ const apiMock = {
   killDeadAgentTerminalWindow: vi.fn(),
   terminateAgentTerminalWindow: vi.fn(),
   renameAgentTerminalWindow: vi.fn(),
+  captureAgentTerminalWindow: vi.fn(),
   getAgentTerminalOverview: vi.fn(),
   sendAgentTerminalKeys: vi.fn(),
   getSkills: vi.fn(),
@@ -54,6 +55,9 @@ let terminalBufferLines: string[] = [
   "▌ Analysiere PlanSpec …",
   "",
 ];
+// xterm buffer type: "normal" keeps client-side snapshot; "alternate" triggers
+// server capture (SF2 — TUI panes under tmux attach).
+let terminalBufferType: "normal" | "alternate" = "normal";
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -94,6 +98,9 @@ vi.mock("@/lib/xtermSurface", async () => {
         rows: 24,
         buffer: {
           active: {
+            get type() {
+              return terminalBufferType;
+            },
             get length() {
               return terminalBufferLines.length;
             },
@@ -276,6 +283,7 @@ beforeEach(() => {
     "▌ Analysiere PlanSpec …",
     "",
   ];
+  terminalBufferType = "normal";
   window.localStorage.clear();
   installDom(false);
   clipboardWriteMock.mockResolvedValue(undefined);
@@ -292,6 +300,7 @@ beforeEach(() => {
   apiMock.sendAgentTerminalKeys.mockResolvedValue({ ok: true });
   apiMock.renameAgentTerminalWindow.mockResolvedValue({ window: windows[0] });
   apiMock.terminateAgentTerminalWindow.mockResolvedValue({ ok: true });
+  apiMock.captureAgentTerminalWindow.mockResolvedValue({ content: "" });
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -752,6 +761,31 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByTestId("extern-badge-work:scratch-thing").textContent).toMatch(/extern/i);
   });
 
+  // B3: dead foreign windows keep Entfernen (kill-dead) but must not offer respawn
+  // (backend would kill+recreate under work).
+  it("hides respawn for dead managed:false windows but keeps remove", async () => {
+    const deadForeign = {
+      session: "work",
+      window: "scratch-thing",
+      active: false,
+      pane_id: "%9",
+      pid: null,
+      command: "",
+      cwd: null,
+      dead: true,
+      managed: false,
+    } as AgentTerminalWindow;
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [deadForeign] });
+
+    await renderView();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Fenster schließen work:scratch-thing" })).toBeTruthy();
+    });
+    expect(screen.queryByRole("button", { name: "Neu starten work:scratch-thing" })).toBeNull();
+    expect(apiMock.respawnAgentTerminalWindow).not.toHaveBeenCalled();
+  });
+
   it("copies the xterm selection via Ctrl+Shift+C without sending ETX to tmux", async () => {
     await renderView();
     const host = await screen.findByTestId("terminal-pane-host-0");
@@ -835,6 +869,31 @@ describe("AgentTerminalsView desktop rendering", () => {
     const snapshot = dialog.querySelector("pre");
     expect(snapshot?.textContent).toContain("piet@homeserver:~$ hermes --tui");
     expect(snapshot?.textContent).toContain("Analysiere PlanSpec");
+    // Normal buffer never hits the server capture path.
+    expect(apiMock.captureAgentTerminalWindow).not.toHaveBeenCalled();
+  });
+
+  // SF2: alternate buffer (tmux attach / TUI) has no client scrollback — overlay
+  // content comes from the existing capture API (~2000 lines).
+  it("fills the select overlay from capture API when the active buffer is alternate", async () => {
+    terminalBufferType = "alternate";
+    apiMock.captureAgentTerminalWindow.mockResolvedValue({
+      content: "SERVER-CAPTURE-SCROLLBACK\nline two from tmux history",
+    });
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
+
+    // Overlay opens immediately (loading state) then fills from capture.
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+    await waitFor(() => {
+      expect(apiMock.captureAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "hermes", -2000);
+    });
+    await waitFor(() => {
+      expect(dialog.querySelector("pre")?.textContent).toContain("SERVER-CAPTURE-SCROLLBACK");
+    });
+    expect(dialog.querySelector("pre")?.textContent).toContain("line two from tmux history");
   });
 
   it("copies the full buffer snapshot via Alles kopieren through the clipboard helper", async () => {

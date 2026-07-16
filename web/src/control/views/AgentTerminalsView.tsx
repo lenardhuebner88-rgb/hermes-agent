@@ -709,16 +709,20 @@ function FleetCard({
       </pre>
       {dead && (
         <div className="flex gap-1.5">
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRespawn();
-            }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-live/40 hover:text-live"
-          >
-            <RotateCcw className="h-3 w-3" />Respawn
-          </button>
+          {/* Respawn only for dashboard-managed dead windows — foreign dead panes
+              keep Entfernen (kill-dead) but must not recreate under work. */}
+          {managed && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onRespawn();
+              }}
+              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-live/40 hover:text-live"
+            >
+              <RotateCcw className="h-3 w-3" />Respawn
+            </button>
+          )}
           <button
             type="button"
             onClick={(event) => {
@@ -909,6 +913,8 @@ export function AgentTerminalsView() {
   const [copyState, setCopyState] = useState<TerminalCopyState>("idle");
   /** Frozen buffer snapshot for the "Text auswählen" overlay; null = closed. */
   const [selectSnapshot, setSelectSnapshot] = useState<string | null>(null);
+  /** Invalidates in-flight capture fetches when the overlay closes/reopens. */
+  const selectSnapshotSeqRef = useRef(0);
   const [view, setView] = useState<"terminal" | "flotte">("terminal");
   const [overview, setOverview] = useState<AgentTerminalOverviewWindow[]>([]);
   const [overviewNow, setOverviewNow] = useState<number>(() => Date.now() / 1000);
@@ -989,9 +995,11 @@ export function AgentTerminalsView() {
     const seq = ++windowsSeqRef.current;
     try {
       const [cap, win] = await Promise.all([api.getAgentTerminalCapabilities(), api.getAgentTerminalWindows()]);
-      setCapability(cap);
+      // Sequence guard covers capability too — a stale full refresh must not
+      // overwrite a newer capability payload (same race as setWindows).
       if (seq > windowsAppliedSeqRef.current) {
         windowsAppliedSeqRef.current = seq;
+        setCapability(cap);
         setWindows(win.windows);
         setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
       }
@@ -1582,6 +1590,18 @@ export function AgentTerminalsView() {
     }
   }, []);
 
+  /** Restore focus after terminal-originated copy (clipboard fallback can steal it). */
+  const focusPane = useCallback(
+    (paneOrder: number) => {
+      if (paneOrder > 0) {
+        extraPaneRefs[paneOrder - 1]?.current?.focus();
+        return;
+      }
+      termRef.current?.focus();
+    },
+    [extraPaneRefs],
+  );
+
   /** Selection of the focused pane — for callers without a pane of their own
    *  (toolbar button, handoff panel), unlike the keyboard chord which knows its pane. */
   const readActiveSelection = useCallback(
@@ -1589,10 +1609,13 @@ export function AgentTerminalsView() {
     [activePane, readPaneSelection],
   );
 
-  const copySelection = useCallback(
-    (): Promise<void> => copyText(readActiveSelection()),
-    [copyText, readActiveSelection],
-  );
+  const copySelection = useCallback(async (): Promise<void> => {
+    await copyText(readActiveSelection());
+    // Terminal-originated only — overlay "Alles kopieren" must not steal focus back.
+    // Compact/touch layout: focusing xterm's hidden textarea would summon the
+    // soft keyboard; the fallback-steals-focus problem is a desktop-chord case.
+    if (!compactLayout) focusPane(activePane);
+  }, [activePane, compactLayout, copyText, focusPane, readActiveSelection]);
 
   /** Active pane buffer as plain text — used for the mobile select-snapshot overlay. */
   const readActiveBufferText = useCallback((): string => {
@@ -1602,12 +1625,43 @@ export function AgentTerminalsView() {
     return extractTerminalBufferText(termRef.current);
   }, [activePane, extraPaneRefs]);
 
+  const readActiveBufferType = useCallback((): string | undefined => {
+    if (activePane > 0) {
+      return extraPaneRefs[activePane - 1]?.current?.getActiveBufferType();
+    }
+    return termRef.current?.buffer?.active?.type;
+  }, [activePane, extraPaneRefs]);
+
   const openSelectOverlay = useCallback(() => {
     // Capture once at open so polling / WS traffic cannot destroy a native selection.
-    setSelectSnapshot(readActiveBufferText());
-  }, [readActiveBufferText]);
+    // Alternate buffer (tmux attach / TUI) has no client scrollback — fetch ~2000
+    // lines from the server capture API (same path as TerminalHandoffPanel).
+    const clientText = readActiveBufferText();
+    const bufferType = readActiveBufferType();
+    const captureTarget = activeTarget;
+    const requestSeq = ++selectSnapshotSeqRef.current;
+    if (bufferType === "alternate" && captureTarget) {
+      setSelectSnapshot("Lade Verlauf …");
+      void api
+        .captureAgentTerminalWindow(captureTarget.session, captureTarget.window, -2000)
+        .then((resp) => {
+          // A close (or newer open) during the fetch wins — a late resolve must
+          // not reopen the overlay.
+          if (requestSeq !== selectSnapshotSeqRef.current) return;
+          const content = typeof resp?.content === "string" ? resp.content : "";
+          setSelectSnapshot(content || clientText);
+        })
+        .catch(() => {
+          if (requestSeq !== selectSnapshotSeqRef.current) return;
+          setSelectSnapshot(clientText);
+        });
+      return;
+    }
+    setSelectSnapshot(clientText);
+  }, [activeTarget, readActiveBufferText, readActiveBufferType]);
 
   const closeSelectOverlay = useCallback(() => {
+    selectSnapshotSeqRef.current += 1;
     setSelectSnapshot(null);
   }, []);
 
@@ -1630,13 +1684,15 @@ export function AgentTerminalsView() {
       if (!selection) return;
       event.preventDefault();
       event.stopPropagation();
-      void copyText(selection);
+      void copyText(selection).then(() => {
+        focusPane(paneOrder);
+      });
     };
     // Capture phase: xterm binds its own keydown on the helper textarea, so the chord
     // has to be intercepted before it can be turned into terminal input.
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [copyText, readPaneSelection]);
+  }, [copyText, focusPane, readPaneSelection]);
 
   const renameWindow = useCallback(async () => {
     if (!selectedWindow) return;
@@ -2067,10 +2123,13 @@ export function AgentTerminalsView() {
                       <>
                         {/* WCAG 2.5.8 Desktop-Pointer-Ausnahme: 32×45 px bleibt hier nötig,
                             damit zwei redundante Row-Aktionen im 260-px-Rail nicht die
-                            Zielzeile verdrängen; 24×24 px Mindestfläche bleibt erfüllt. */}
-                        <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live">
-                          <RotateCcw className="h-3.5 w-3.5" />
-                        </button>
+                            Zielzeile verdrängen; 24×24 px Mindestfläche bleibt erfüllt.
+                            Respawn only for managed dead windows; kill-dead stays for foreign. */}
+                        {managed && (
+                          <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live">
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-status-alert">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -2539,7 +2598,7 @@ export function AgentTerminalsView() {
         <button type="button" disabled={!activeSocketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
           <span className="font-mono text-sm">^C</span><span>^C senden</span>
         </button>
-        {sessionSheetDead && (
+        {sessionSheetDead && sessionSheetManaged && (
           <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
             <RotateCcw className="h-4 w-4" /><span>Neu starten</span>
           </button>
@@ -3075,7 +3134,7 @@ export function AgentTerminalsView() {
                   <span>letztes Event <b className="font-semibold text-ink-2">{formatActivityAge(overviewNow, selectedOverview.activity ?? null)}</b></span>
                 </div>
               )}
-              {state === "dead pane" && selectedWindow && (
+              {state === "dead pane" && selectedWindow && isManagedWindow(selectedWindow) && (
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-[11px] text-status-warn">
                   <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
                   <button type="button" onClick={() => void respawnWindow(selectedWindow)} className="inline-flex shrink-0 items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15">

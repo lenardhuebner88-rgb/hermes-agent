@@ -32,6 +32,20 @@ _EPHEMERAL_ATTACH_WINDOW = "@hermes_attach_window"
 _EPHEMERAL_ATTACH_CREATED_AT = "@hermes_attach_created_at"
 _EPHEMERAL_ATTACH_GRACE_SECONDS = 60
 
+# Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
+# Used by window_exists / show / idempotent kill to distinguish not-found from
+# transient socket failures that must surface as AgentTerminalError (503).
+# Keep markers specific: bare "no such" would false-match unrelated messages;
+# "no such file" is only treated as gone when paired with "error connecting"
+# (socket path not yet created — first ensure() before any server).
+_TMUX_GONE_MARKERS: tuple[str, ...] = (
+    "can't find",
+    "no such window",
+    "no such pane",
+    "no such session",
+    "no server running",
+)
+
 _AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi", "grok")
 
 # ----- ANSI stripping --------------------------------------------------------
@@ -276,6 +290,24 @@ class TmuxAgentSessionService:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+
+    @staticmethod
+    def _is_tmux_gone_message(stderr: str | None) -> bool:
+        """True when tmux stderr indicates the target/server is already gone.
+
+        Distinct from transient connect failures (permission, busy socket): those
+        must raise so idempotent close paths cannot report success without a kill.
+        A missing socket file ("error connecting" + "no such file") is the cold
+        start case — no server yet — and counts as gone so ensure/kill-dead work
+        before the first new-session.
+        """
+        text = (stderr or "").lower()
+        if any(marker in text for marker in _TMUX_GONE_MARKERS):
+            return True
+        # Socket path not created yet (first use of a dedicated -S path).
+        if "error connecting" in text and "no such file" in text:
+            return True
+        return False
 
     @staticmethod
     def _safe_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -657,8 +689,17 @@ class TmuxAgentSessionService:
     def window_exists(self, session: str, window: str) -> bool:
         # list-panes errors on a missing window; display-message would silently
         # fall back to the current window and report every window as existing.
+        # Transient tmux/socket failures must NOT map to "gone" — idempotent close
+        # paths would otherwise report success without killing anything.
         target = self._cmd_target(session, window)
-        return self._run("list-panes", "-t", target, "-F", "#{window_name}", check=False).returncode == 0
+        proc = self._run("list-panes", "-t", target, "-F", "#{window_name}", check=False)
+        if proc.returncode == 0:
+            return True
+        stderr = (proc.stderr or "").strip()
+        if self._is_tmux_gone_message(stderr):
+            return False
+        detail = stderr or f"exit {proc.returncode}"
+        raise AgentTerminalError(f"tmux list-panes failed for {session}:{window}: {detail}")
 
     # ----- lifecycle / IO -------------------------------------------------
     def ensure_session_options(self, session: str) -> None:
@@ -789,6 +830,10 @@ class TmuxAgentSessionService:
         info = self.show(session, window)
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing respawn")
+        # Same session guard as terminate_live: never kill a dead pane in a
+        # foreign session and recreate it under work.
+        if info.session != "work":
+            raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
         kind, workdir_key = self.identity_for(session, info.window)
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
@@ -799,20 +844,35 @@ class TmuxAgentSessionService:
         if definition.window != info.window:
             definition = replace(definition, window=info.window)
         self.cleanup_related_isolated_attaches(info.session, info.window)
-        self._run("kill-window", "-t", self._cmd_target(session, window))
+        # Prefer pane id so a delayed close cannot race a respawn of the same name.
+        kill_target = info.pane_id if info.pane_id else self._cmd_target(session, window)
+        self._run("kill-window", "-t", kill_target)
         self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
         return self._spawn_window(definition)
 
-    def _kill_window_idempotent(self, session: str, window: str) -> bool:
+    def _kill_window_idempotent(
+        self, session: str, window: str, *, pane_id: str | None = None
+    ) -> bool:
         """Kill a window; treat already-gone as success (TOCTOU-safe).
 
-        Returns True if the window is gone after this call (killed now or
+        Prefer *pane_id* when present — window names are reusable after
+        respawn, so a stale close must not kill the new generation. tmux
+        accepts pane targets on kill-window and kills the containing window.
+
+        Returns True if the target is gone after this call (killed now or
         already absent), False only when kill failed and the window still
-        exists — in which case the caller should raise.
+        exists under the name — in which case the caller should raise.
+        Transient tmux failures raise AgentTerminalError via window_exists.
         """
+        kill_target = pane_id if pane_id else self._cmd_target(session, window)
         try:
-            self._run("kill-window", "-t", self._cmd_target(session, window))
-        except subprocess.CalledProcessError:
+            self._run("kill-window", "-t", kill_target)
+        except subprocess.CalledProcessError as exc:
+            stderr = getattr(exc, "stderr", None) or ""
+            # Pane-id kill against a dead generation: gone markers mean the
+            # old target is already absent (name may belong to a new window).
+            if self._is_tmux_gone_message(stderr):
+                return True
             if not self.window_exists(session, window):
                 return True
             return False
@@ -842,7 +902,7 @@ class TmuxAgentSessionService:
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
         self.cleanup_related_isolated_attaches(info.session, info.window)
-        if not self._kill_window_idempotent(session, window):
+        if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
         self._log_event("kill_dead", session=session, window=window)
 
@@ -862,7 +922,7 @@ class TmuxAgentSessionService:
             raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
         kind, _workdir = self.identity_for(info.session, info.window)
         self.cleanup_related_isolated_attaches(info.session, info.window)
-        if not self._kill_window_idempotent(session, window):
+        if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
         self._log_event("terminate", kind=kind, session=session, window=window)
 
@@ -898,8 +958,15 @@ class TmuxAgentSessionService:
             )
         except subprocess.CalledProcessError as exc:
             # Window can vanish between list-panes and display-message (TOCTOU);
-            # surface as the same not-found CapabilityError callers already handle.
-            raise CapabilityError(f"window {session}:{window} not found") from exc
+            # only map genuine not-found/no-server messages to CapabilityError —
+            # transient socket failures must stay honest AgentTerminalError.
+            stderr = getattr(exc, "stderr", None) or ""
+            if self._is_tmux_gone_message(stderr):
+                raise CapabilityError(f"window {session}:{window} not found") from exc
+            detail = (stderr or "").strip() or "nonzero exit"
+            raise AgentTerminalError(
+                f"tmux display-message failed for {session}:{window}: {detail}"
+            ) from exc
         parts = proc.stdout.rstrip("\n").split("\t")
         pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
         dead = len(parts) > 5 and parts[5] == "1"

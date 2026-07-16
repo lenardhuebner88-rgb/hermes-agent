@@ -479,6 +479,160 @@ def test_show_display_message_called_process_error_is_not_found(
         service.show("work", "claude")
 
 
+def test_show_display_message_transient_error_raises_agent_terminal_error(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nit: non-gone display-message failures must not masquerade as not-found."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    real_run = TmuxAgentSessionService._run
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "display-message":
+            raise subprocess.CalledProcessError(
+                1, args, output="", stderr="error connecting to /tmp/tmux.sock"
+            )
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+
+    with pytest.raises(AgentTerminalError, match="display-message failed"):
+        service.show("work", "claude")
+
+
+def test_window_exists_gone_stderr_is_false(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: list-panes not-found messages → False (gone), not a raised error."""
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "list-panes":
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="can't find window: ghost"
+            )
+        raise AssertionError(f"unexpected tmux args: {args}")
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    assert service.window_exists("work", "ghost") is False
+
+
+def test_window_exists_transient_socket_error_raises(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1: non-gone list-panes failures raise AgentTerminalError (honest 503).
+
+    Bare "error connecting to socket" (no missing-file cold-start) must raise —
+    not silently map to gone. Cold-start "error connecting … (No such file …)"
+    remains gone so ensure() can spawn the first session.
+    """
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "list-panes":
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="error connecting to socket"
+            )
+        raise AssertionError(f"unexpected tmux args: {args}")
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    with pytest.raises(AgentTerminalError, match="list-panes failed"):
+        service.window_exists("work", "claude")
+
+
+def test_terminate_live_idempotent_when_list_panes_reports_gone(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1(a): close path sees gone via window_exists → success, no silent hang."""
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "list-panes":
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="can't find window: claude"
+            )
+        raise AssertionError(f"unexpected tmux args for gone close: {args}")
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    # Already gone — must not raise.
+    service.terminate_live("work", "claude")
+
+
+def test_terminate_live_raises_on_transient_list_panes_failure(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B1(b): socket/transient list-panes error must NOT become silent success."""
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "list-panes":
+            return subprocess.CompletedProcess(
+                args, 1, stdout="", stderr="error connecting to socket"
+            )
+        raise AssertionError(f"unexpected tmux args: {args}")
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    with pytest.raises(AgentTerminalError, match="list-panes failed"):
+        service.terminate_live("work", "claude")
+
+
+def test_kill_window_idempotent_stale_pane_id_is_noop_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B2: close carrying an old pane id must not kill a respawned same-name window."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    first = service.ensure("claude")
+    old_pane_id = first.pane_id
+    assert old_pane_id
+
+    # Kill and recreate under the SAME name (respawn semantics) — new generation.
+    service._run("kill-window", "-t", service._cmd_target("work", "claude"))
+    second = service.ensure("claude")
+    assert second.window == "claude"
+    assert second.pane_id
+    assert second.pane_id != old_pane_id
+
+    # Stale close for the OLD pane: no-op success; new window must survive.
+    ok = service._kill_window_idempotent("work", "claude", pane_id=old_pane_id)
+    assert ok is True
+    assert service.window_exists("work", "claude")
+    still = service.show("work", "claude")
+    assert still.pane_id == second.pane_id
+
+
+def test_respawn_dead_refuses_foreign_session(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3: dead window in a non-work session must not be killed+recreated under work."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    # Seed a server (set-option -g needs a running server), then build a dead
+    # pane in a foreign session under remain-on-exit.
+    service.ensure("claude")
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-session", "-d", "-s", "other-agent", "-n", "claude", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    dead = service.show("other-agent", "claude")
+    assert dead.dead or not dead.pid
+    assert dead.session == "other-agent"
+
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service.respawn_dead("other-agent", "claude")
+    # Foreign dead window must still exist (respawn must not have killed it).
+    assert service.window_exists("other-agent", "claude")
+
+
 def _patch_display_message(
     monkeypatch: pytest.MonkeyPatch, stdout: str
 ) -> list[tuple[str, ...]]:

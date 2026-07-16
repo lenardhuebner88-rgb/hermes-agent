@@ -24,9 +24,18 @@ export type TerminalBufferLike = {
   buffer: {
     active: {
       length: number;
+      /** xterm buffer type: "normal" | "alternate" (optional on fakes). */
+      type?: string;
       getLine: (
         index: number,
-      ) => { translateToString: (trimRight?: boolean) => string } | undefined | null;
+      ) =>
+        | {
+            translateToString: (trimRight?: boolean) => string;
+            /** True when this physical row continues the previous logical line. */
+            isWrapped?: boolean;
+          }
+        | undefined
+        | null;
     };
   };
 };
@@ -34,7 +43,8 @@ export type TerminalBufferLike = {
 /**
  * Extract printable buffer text from an xterm Terminal (or a test double).
  * Uses buffer.active line API, trims trailing empty lines, caps at the last
- * `maxLines` lines.
+ * `maxLines` lines. Continuation rows marked `isWrapped` are concatenated onto
+ * the previous logical line (no artificial newline).
  */
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for TerminalPane + tests
 export function extractTerminalBufferText(
@@ -49,7 +59,14 @@ export function extractTerminalBufferText(
   const lines: string[] = [];
   for (let i = start; i < length; i += 1) {
     const line = active.getLine(i);
-    lines.push(line ? line.translateToString(true) : "");
+    const text = line ? line.translateToString(true) : "";
+    // isWrapped on the current row means it continues the previous logical line.
+    // Fakes without the field keep the old per-row newline behaviour.
+    if (line?.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+    } else {
+      lines.push(text);
+    }
   }
   while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
     lines.pop();

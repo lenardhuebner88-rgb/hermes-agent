@@ -37,6 +37,8 @@ export interface TerminalPaneHandle {
   getSelection(): string;
   /** Full buffer snapshot for the mobile "Text auswählen" overlay. */
   getBufferText(): string;
+  /** xterm active buffer type ("normal" | "alternate"); used for alt-buffer history capture. */
+  getActiveBufferType(): string | undefined;
 }
 
 export interface TerminalPaneProps {
@@ -287,6 +289,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       },
       getBufferText() {
         return extractTerminalBufferText(termRef.current);
+      },
+      getActiveBufferType() {
+        return termRef.current?.buffer?.active?.type;
       },
     }),
     [fitAndResize],

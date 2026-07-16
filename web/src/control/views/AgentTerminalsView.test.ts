@@ -17,6 +17,7 @@ import {
   reconnectDelayMs,
   terminalSurfaceOrder,
 } from "./AgentTerminalsView";
+import { extractTerminalBufferText } from "./agent-terminals/TerminalSelectOverlay";
 
 // Echtes Datenformat: 9-Fenster-Inventar aus dem Live-System (tmux list-windows -a
 // -F 'session:window active pane_id pane_pid pane_current_command pane_current_path
@@ -81,6 +82,49 @@ describe("isManagedWindow", () => {
 
   it("treats legacy payloads without managed as closable (backward compatible)", () => {
     expect(isManagedWindow(base)).toBe(true);
+  });
+});
+
+describe("extractTerminalBufferText wrap-aware (SF3)", () => {
+  it("concatenates isWrapped continuation rows without artificial newline", () => {
+    const rows: Array<{ text: string; isWrapped?: boolean }> = [
+      { text: "hello " },
+      { text: "world", isWrapped: true },
+      { text: "next line" },
+    ];
+    const term = {
+      buffer: {
+        active: {
+          length: rows.length,
+          getLine(index: number) {
+            const row = rows[index];
+            if (!row) return undefined;
+            return {
+              translateToString: () => row.text,
+              isWrapped: row.isWrapped,
+            };
+          },
+        },
+      },
+    };
+    expect(extractTerminalBufferText(term)).toBe("hello world\nnext line");
+  });
+
+  it("keeps per-row newlines when isWrapped is absent (fakes / defensive)", () => {
+    const rows = ["first", "second"];
+    const term = {
+      buffer: {
+        active: {
+          length: rows.length,
+          getLine(index: number) {
+            const text = rows[index];
+            if (text === undefined) return undefined;
+            return { translateToString: () => text };
+          },
+        },
+      },
+    };
+    expect(extractTerminalBufferText(term)).toBe("first\nsecond");
   });
 });
 
