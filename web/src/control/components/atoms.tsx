@@ -4,7 +4,7 @@ import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { diffStats, withLineNumbers } from "../lib/diff";
-import { fmtRelativeTime, nowSec } from "../lib/derive";
+import { fmtRelativeTime, freshness, nowSec } from "../lib/derive";
 import type { DiffLine } from "../lib/types";
 import type { DotKind } from "../lib/tones";
 import type { StructuredError } from "../hooks/pollingStore";
@@ -14,18 +14,22 @@ export function Led({ kind, size = 8 }: { kind: DotKind; size?: number }) {
   return <span aria-hidden className={cn("hc-led inline-block shrink-0 rounded-full", `hc-led-${kind}`)} style={{ width: size, height: size }} />;
 }
 
-export function StaleBadge({ isStale, lastUpdated, errorObj, error, now = nowSec(), className }: {
+export function StaleBadge({ isStale, lastUpdated, errorObj, error, now, pollIntervalMs = 10000, className }: {
   isStale?: boolean;
   lastUpdated?: number | null;
   errorObj?: StructuredError | null;
   error?: string | null;
   now?: number;
+  pollIntervalMs?: number;
   className?: string;
 }) {
+  const effectiveNow = now ?? nowSec();
   const hasError = Boolean(errorObj || error);
-  if (!isStale && !hasError) return null;
-  const ageLabel = lastUpdated != null ? fmtRelativeTime(lastUpdated, now) : null;
-  const label = isStale ? (ageLabel ? de.staleBadge.staleRelative(ageLabel) : de.staleBadge.staleUnknown) : de.staleBadge.error;
+  const ageStale = lastUpdated != null && freshness(lastUpdated, pollIntervalMs, effectiveNow).stale;
+  const stale = Boolean(isStale || ageStale);
+  if (!stale && !hasError) return null;
+  const ageLabel = lastUpdated != null ? fmtRelativeTime(lastUpdated, effectiveNow) : null;
+  const label = stale ? (ageLabel ? de.staleBadge.staleRelative(ageLabel) : de.staleBadge.staleUnknown) : de.staleBadge.error;
   const title = errorObj?.message ?? error ?? label;
   const Icon = hasError ? AlertTriangle : Clock3;
   return (

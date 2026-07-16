@@ -677,6 +677,7 @@ export const de = {
     gateway: "Hermes-Gateway",
     autoresearch: "Autoresearch-Loop",
     kanban: "Kanban-DB",
+    dispatcher: "Kanban-Dispatcher",
     healthy: "Gesund",
     degraded: "Beeinträchtigt",
     offline: "Offline",

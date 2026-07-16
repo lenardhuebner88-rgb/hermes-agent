@@ -41,6 +41,7 @@ const subsystems: Array<{ key: SubsystemKey; label: string }> = [
   { key: "gateway", label: de.systemHealth.gateway },
   { key: "autoresearch", label: de.systemHealth.autoresearch },
   { key: "kanban_db", label: de.systemHealth.kanban },
+  { key: "kanban_dispatcher", label: de.systemHealth.dispatcher },
 ];
 
 const unknownHealth: SubsystemHealth = { status: "offline", detail: de.systemHealth.unknown, error: null };
@@ -60,7 +61,7 @@ export function SystemHealthStrip({ data, error, now, metrics }: Props) {
           <Led kind={isUnknown ? "idle" : statusDot[data.overall]} size={9} />
           <span>{de.systemHealth.title}</span>
         </div>
-        <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-3">
+        <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-4">
           {subsystems.map((item) => (
             <SubsystemLight
               key={item.key}

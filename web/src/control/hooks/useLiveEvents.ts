@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { buildWsUrl } from "@/lib/api";
 import { getSnapshot, refresh, setIntervalScale } from "./pollingStore";
 import { boardLoader } from "./useControlData";
@@ -61,18 +61,26 @@ const STATUS_POLL_KEYS = [
 ] as const;
 
 const LIVE_SCALED_KEYS = [...TASK_EVENT_KEYS, ...RUN_EVENT_KEYS, ...STATUS_POLL_KEYS];
+export type LiveConnectionState = "connected" | "reconnecting" | "off";
+let liveState: LiveConnectionState = "off";
+const liveListeners = new Set<() => void>();
+function setLiveState(next: LiveConnectionState) { liveState = next; liveListeners.forEach((listener) => listener()); }
+export function useLiveStatus(): LiveConnectionState {
+  return useSyncExternalStore((listener) => { liveListeners.add(listener); return () => liveListeners.delete(listener); }, () => liveState, () => "off");
+}
 
 export function setLivePollingMode(live: boolean): void {
   for (const key of LIVE_SCALED_KEYS) setIntervalScale(key, live ? LIVE_SCALE : 1);
 }
 
-export function useLiveEvents(): void {
+export function useLiveEvents(): LiveConnectionState {
   const cursorRef = useRef(currentCursor());
   const backoffRef = useRef(1000);
   const reconnectTimerRef = useRef<number | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
+    setLiveState("reconnecting");
     let stopped = false;
 
     const clearReconnect = () => {
@@ -147,15 +155,18 @@ export function useLiveEvents(): void {
         ws.onopen = () => {
           backoffRef.current = 1000;
           setLivePollingMode(true);
+          setLiveState("connected");
         };
         ws.onmessage = (event) => handleMessage(String(event.data));
         ws.onerror = () => {
           setLivePollingMode(false);
+          setLiveState("reconnecting");
           closeSocket();
           scheduleReconnect();
         };
         ws.onclose = () => {
           setLivePollingMode(false);
+          setLiveState("reconnecting");
           socketRef.current = null;
           scheduleReconnect();
         };
@@ -183,6 +194,8 @@ export function useLiveEvents(): void {
       clearReconnect();
       closeSocket();
       setLivePollingMode(false);
+      setLiveState("off");
     };
   }, []);
+  return useLiveStatus();
 }
