@@ -22,6 +22,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "observability" / "nemo_relay"
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep nemo_relay / dependency purges from leaking into later files.
+
+    ``_fresh_plugin`` and several tests force a clean plugin re-read via
+    ``sys.modules.pop("plugins.observability.nemo_relay")`` (and inject a
+    fake ``nemo_relay`` dependency) then re-import. Without a restore, later
+    files in the same worker keep import-time bindings to the orphaned
+    pre-purge objects while lazy imports resolve to the reimport
+    (module-identity split) — same class as the langfuse /
+    security-guidance leaks (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the
+    table (plus parent-package attributes) back on teardown.
+    """
+    yield
+
+
 class _FakeNemoRelay:
     def __init__(self):
         self.events = []
