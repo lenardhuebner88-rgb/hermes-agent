@@ -2595,10 +2595,21 @@ def _valid_dictate_history_entry(value: Any) -> bool:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             return False
     rate = value.get("success_rate_percent")
-    if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))):
+    if rate is not None and (
+        isinstance(rate, bool)
+        or not isinstance(rate, (int, float))
+        # json.loads turns e.g. `1e309` into `inf`, which passes the bare
+        # (int, float) isinstance check above and would otherwise reach
+        # Starlette's JSON encoder on GET → 500 (Codex F1). NaN/inf are
+        # never a valid percentage either way, so isfinite + range both gate.
+        or not math.isfinite(rate)
+        or not 0 <= rate <= 100
+    ):
         return False
     for key in ("latency_p50_ms", "latency_p95_ms"):
         latency = value.get(key)
+        # Strict `int` (not float) already excludes inf/nan here — json.loads
+        # never produces a non-finite *int*, only a non-finite float.
         if latency is not None and (
             not isinstance(latency, int) or isinstance(latency, bool) or latency < 0
         ):
@@ -2619,8 +2630,17 @@ def _sanitized_dictate_history_entry(value: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _valid_dictate_day(value: Any) -> bool:
-    """Type-guard for the persisted running-day state — see _load_dictate_status."""
+def _valid_dictate_day(value: Any, current_counters: Dict[str, Any]) -> bool:
+    """Type-guard for the persisted running-day state — see _load_dictate_status.
+
+    ``current_counters`` must be the ALREADY-loaded cumulative
+    ``_DICTATE_STATUS`` counters (Stufe 1). A baseline value greater than
+    its corresponding cumulative counter is impossible — the baseline is a
+    past snapshot of that same monotonically-increasing counter — and would
+    otherwise produce a negative delta (e.g. ``today.dictations: -5``,
+    Codex F2). Reject the whole day rather than serve nonsense; the next
+    POST bootstraps a fresh one.
+    """
     if not isinstance(value, dict):
         return False
     if not isinstance(value.get("date"), str) or not value["date"]:
@@ -2631,6 +2651,8 @@ def _valid_dictate_day(value: Any) -> bool:
     for key in _DICTATE_DAY_COUNTER_KEYS:
         count = baseline.get(key)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return False
+        if count > current_counters.get(key, 0):
             return False
     return isinstance(value.get("latency_samples"), list)
 
@@ -2691,7 +2713,7 @@ def _load_dictate_status() -> None:
             _DICTATE_HISTORY[:] = valid_entries[-_DICTATE_HISTORY_MAX_DAYS:]
         elif history is not None:
             _log.warning("dictate-status: corrupt 'history' field (expected list), ignoring")
-        if _valid_dictate_day(day):
+        if _valid_dictate_day(day, _DICTATE_STATUS):
             _DICTATE_DAY.clear()
             _DICTATE_DAY.update({
                 "date": day["date"],

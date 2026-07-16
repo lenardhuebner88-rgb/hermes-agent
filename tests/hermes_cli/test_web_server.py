@@ -712,6 +712,85 @@ class TestWebServerEndpoints:
         assert body["dictations"] == 5
         assert body["today"]["date"] == "2026-07-01"
 
+    def test_dictate_history_load_drops_non_finite_success_rate_entry(self):
+        """Codex review F1: json.loads turns e.g. `1e309` into `inf`; a bare
+        isinstance(value, (int, float)) guard lets it through, and
+        Starlette's JSON encoder then 500s on GET. A history entry with a
+        non-finite (or out-of-range) success_rate_percent must be dropped
+        like any other corrupt entry — the rest of history and the
+        Stufe-1 counters stay intact."""
+        web_server = self._reset_dictate_metrics_state()
+        from hermes_constants import get_hermes_home
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        # Written as raw JSON text (not json.dumps) — `1e309` is valid JSON
+        # number syntax that Python's decoder silently overflows to `inf`,
+        # exactly the bytes-on-disk shape a corrupted/hand-edited file has.
+        state_path.write_text(
+            '{"status": {"app_version": "1.4", "dictations": 5, "failures": 1}, '
+            '"latency_samples": [], '
+            '"history": ['
+            '{"date": "2026-07-01", "dictations": 1, "failures": 0, "retries": 0, '
+            '"busy": 0, "success_rate_percent": 1e309, "latency_p50_ms": 100, '
+            '"latency_p95_ms": 100}, '
+            '{"date": "2026-07-02", "dictations": 2, "failures": 0, "retries": 0, '
+            '"busy": 0, "success_rate_percent": 100.0, "latency_p50_ms": 150, '
+            '"latency_p95_ms": 150}'
+            '], "day": null}',
+            encoding="utf-8",
+        )
+
+        web_server._load_dictate_status()
+
+        response = self.client.get("/api/dictate/status")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["history"]) == 1
+        assert body["history"][0]["date"] == "2026-07-02"
+        assert body["app_version"] == "1.4"
+        assert body["dictations"] == 5
+
+    def test_dictate_history_load_drops_day_with_impossible_baseline(self):
+        """Codex review F2: a persisted day.baseline greater than the loaded
+        cumulative counter is impossible (the baseline is a PAST snapshot of
+        that same monotonically-increasing counter) and would otherwise
+        produce a negative delta on GET (e.g. today.dictations: -5). The
+        whole day must be dropped (today: null) rather than serve nonsense;
+        the next POST bootstraps a fresh day from the current counters."""
+        web_server = self._reset_dictate_metrics_state()
+        from hermes_constants import get_hermes_home
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "status": {"app_version": "1.4", "dictations": 5, "failures": 1},
+            "latency_samples": [],
+            "history": [],
+            "day": {
+                "date": "2026-07-01",
+                "baseline": {"dictations": 10, "failures": 0, "retries": 0, "busy": 0},
+                "latency_samples": [],
+            },
+        }), encoding="utf-8")
+
+        web_server._load_dictate_status()
+
+        response = self.client.get("/api/dictate/status")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["today"] is None
+        assert body["app_version"] == "1.4"
+        assert body["dictations"] == 5
+
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=222),
+        ).status_code == 200
+        followup = self.client.get("/api/dictate/status").json()
+        assert followup["today"] is not None
+        assert followup["today"]["dictations"] == 1
+
     def test_dictate_history_survives_restart_via_persisted_state(self, monkeypatch):
         """Done-when 7: restart proof (pattern of
         test_dictate_status_survives_restart_via_persisted_state) — a
