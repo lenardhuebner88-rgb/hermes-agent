@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import httpx
@@ -1097,6 +1099,135 @@ def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
     )
 
 
+_XAI_BILLING_MARKER = "billing: fetched credits config"
+_XAI_LOG_TAIL_BYTES = 4 * 1024 * 1024  # last 4 MiB only
+
+
+def _fetch_xai_account_usage(log_path: Optional[Path] = None) -> Optional[AccountUsageSnapshot]:
+    """Fetch Grok/xAI plan usage from the local Grok CLI billing log.
+
+    Pure local file read (no network). Scans ~/.grok/logs/unified.jsonl for the
+    latest ``billing: fetched credits config`` line and maps
+    ``ctx.config.creditUsagePercent`` into an AccountUsageSnapshot.
+    Fail-soft: missing/unreadable log or no valid billing line returns a
+    snapshot with unavailable_reason set; never raises.
+    """
+    path = log_path if log_path is not None else Path.home() / ".grok" / "logs" / "unified.jsonl"
+
+    def _unavailable(reason: str) -> AccountUsageSnapshot:
+        return AccountUsageSnapshot(
+            provider="xai",
+            source="grok_cli_log",
+            fetched_at=_utc_now(),
+            unavailable_reason=reason,
+        )
+
+    try:
+        if not path.is_file():
+            return _unavailable(
+                "Grok-CLI-Log nicht gefunden (~/.grok/logs/unified.jsonl)."
+            )
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > _XAI_LOG_TAIL_BYTES:
+                fh.seek(size - _XAI_LOG_TAIL_BYTES)
+                raw = fh.read()
+                # Mid-line seek: drop the partial first line.
+                nl = raw.find(b"\n")
+                if nl != -1:
+                    raw = raw[nl + 1 :]
+            else:
+                raw = fh.read()
+    except OSError:
+        return _unavailable(
+            "Grok-CLI-Log nicht gefunden (~/.grok/logs/unified.jsonl)."
+        )
+
+    text = raw.decode("utf-8", errors="replace")
+    for line in reversed(text.splitlines()):
+        if _XAI_BILLING_MARKER not in line:
+            continue
+        try:
+            payload = json.loads(line)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        ctx = payload.get("ctx")
+        if not isinstance(ctx, dict):
+            continue
+        config = ctx.get("config")
+        if not isinstance(config, dict):
+            continue
+        credit_pct = config.get("creditUsagePercent")
+        # bool is a subclass of int — reject it.
+        if isinstance(credit_pct, bool) or not isinstance(credit_pct, (int, float)):
+            continue
+
+        plan_raw = ctx.get("subscriptionTier")
+        plan: Optional[str] = None
+        if plan_raw not in {None, ""}:
+            cleaned = str(plan_raw).strip()
+            if cleaned:
+                plan = cleaned
+
+        period_end: Any = None
+        current_period = config.get("currentPeriod")
+        if isinstance(current_period, dict):
+            period_end = current_period.get("end")
+
+        windows = (
+            AccountUsageWindow(
+                label="Diese Woche",
+                used_percent=float(credit_pct),
+                reset_at=_parse_dt(period_end),
+                window_key="weekly",
+            ),
+        )
+
+        details: list[str] = []
+        ts = _parse_dt(payload.get("ts"))
+        if ts is not None:
+            details.append(
+                f"Stand: {ts.astimezone().strftime('%Y-%m-%d %H:%M %Z')}"
+            )
+
+        def _nested_val(obj: Any) -> Optional[float]:
+            if not isinstance(obj, dict):
+                return None
+            raw_val = obj.get("val")
+            if raw_val in {None, ""}:
+                return None
+            try:
+                return float(raw_val)
+            except (TypeError, ValueError):
+                return None
+
+        on_demand_cap = _nested_val(config.get("onDemandCap"))
+        on_demand_used = _nested_val(config.get("onDemandUsed"))
+        if on_demand_cap is not None and on_demand_cap > 0:
+            used_disp = int(on_demand_used) if on_demand_used is not None and on_demand_used == int(on_demand_used) else (on_demand_used if on_demand_used is not None else 0)
+            cap_disp = int(on_demand_cap) if on_demand_cap == int(on_demand_cap) else on_demand_cap
+            details.append(f"On-Demand: {used_disp}/{cap_disp}")
+
+        prepaid = _nested_val(config.get("prepaidBalance"))
+        if prepaid is not None and prepaid > 0:
+            prepaid_disp = int(prepaid) if prepaid == int(prepaid) else prepaid
+            details.append(f"Prepaid-Guthaben: {prepaid_disp}")
+
+        return AccountUsageSnapshot(
+            provider="xai",
+            source="grok_cli_log",
+            fetched_at=_utc_now(),
+            title="Grok",
+            plan=plan,
+            windows=windows,
+            details=tuple(details),
+        )
+
+    return _unavailable("Keine Billing-Daten im Grok-CLI-Log.")
+
+
 def fetch_account_usage(
     provider: Optional[str],
     *,
@@ -1115,6 +1246,8 @@ def fetch_account_usage(
             return _fetch_openrouter_account_usage(base_url, api_key)
         if normalized in {"kimi", "moonshot"}:
             return _fetch_kimi_account_usage()
+        if normalized in {"xai", "grok"}:
+            return _fetch_xai_account_usage()
     except Exception:
         return None
     return None
