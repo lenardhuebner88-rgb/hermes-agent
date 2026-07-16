@@ -9,6 +9,7 @@
  */
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import type { Freshness } from "../../lib/derive";
 import type { PressureStatusResponse, SystemHealthResponse } from "../../lib/types";
 import type { ReliabilityRiskModel } from "../../lib/fleetRisk";
 
@@ -38,9 +39,10 @@ export interface RisikoPulseProps {
   pressureStatus: PressureStatusResponse | null;
   systemHealth: SystemHealthResponse | null;
   reliabilityModel: ReliabilityRiskModel;
+  fresh: Freshness;
 }
 
-export function RisikoPulse({ pressureStatus, systemHealth, reliabilityModel }: RisikoPulseProps) {
+export function RisikoPulse({ pressureStatus, systemHealth, reliabilityModel, fresh }: RisikoPulseProps) {
   const [open, setOpen] = useState<MeterKey | null>(null);
   const [spark, setSpark] = useState<{ cpu: number[]; ram: number[] }>({ cpu: [], ram: [] });
 
@@ -97,6 +99,7 @@ export function RisikoPulse({ pressureStatus, systemHealth, reliabilityModel }: 
       ) : null}
 
       <div className="rk-footer-line">
+        <span className={`rk-sdot rk-sdot-${fresh.stale ? "warn" : "ok"}`}>Puls {fresh.stale ? `veraltet (${fresh.label})` : fresh.label}</span>
         <span className={`rk-sdot rk-sdot-${healthDot(systemHealth?.subsystems.gateway.status)}`}>Gateway</span>
         <span className={`rk-sdot rk-sdot-${healthDot(systemHealth?.subsystems.kanban_dispatcher.status)}`}>Dispatcher</span>
         <span className={`rk-sdot rk-sdot-${tailnetDot(pressureStatus?.access.tailnet)}`}>Tailnet</span>

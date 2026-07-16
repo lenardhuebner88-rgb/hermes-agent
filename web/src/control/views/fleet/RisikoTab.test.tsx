@@ -10,12 +10,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
+const { fetchJSONMock, pulseDataMock } = vi.hoisted(() => ({
+  fetchJSONMock: vi.fn(),
+  pulseDataMock: vi.fn(),
+}));
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
   return { ...actual, fetchJSON: fetchJSONMock };
 });
+
+vi.mock("../../hooks/usePulseData", () => ({ usePulseData: pulseDataMock }));
 
 import { RisikoTab } from "./RisikoTab";
 import { de } from "../../i18n/de";
@@ -92,6 +97,7 @@ function defaultFetchImpl(url: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   fetchJSONMock.mockImplementation(defaultFetchImpl);
+  pulseDataMock.mockReturnValue({ fresh: { stale: false, label: "vor 4s" } });
 });
 
 afterEach(() => {
@@ -130,6 +136,19 @@ function renderRisikoTab(overrides: {
 }
 
 describe("RisikoTab — Release-Gate needcard", () => {
+  it("zeigt die Pulse-Datenfrische im sichtbaren System-Puls", () => {
+    renderRisikoTab();
+
+    expect(screen.getByText("Puls vor 4s")).toBeTruthy();
+  });
+
+  it("markiert einen veralteten Pulse-Refresh sichtbar", () => {
+    pulseDataMock.mockReturnValue({ fresh: { stale: true, label: "vor 3m" } });
+    renderRisikoTab();
+
+    expect(screen.getByText("Puls veraltet (vor 3m)").className).toContain("rk-sdot-warn");
+  });
+
   it("keeps clipped risk-card titles recoverable", () => {
     const title = "Risiko ".repeat(80);
     renderRisikoTab({
