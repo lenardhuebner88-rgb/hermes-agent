@@ -22792,6 +22792,14 @@ def _blocked_kind_for_auto_retry(
         return "capacity"
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"
+    # Deterministic fail-fast markers (spawn refusal / decompose LLM client
+    # errors) never self-heal on retry — respawning burns the retry budget
+    # (incl. premium/opus escalation) on a task that needs an operator, not
+    # another attempt (live incident 2026-07-15, t_df10f6b1).
+    if text and _deterministic_spawn_failure_marker(text) is not None:
+        return "needs_operator"
+    if text and text.lower() in _DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS:
+        return "needs_operator"
     return "retryable"
 
 
