@@ -388,6 +388,30 @@ function TypeBadge({ type }: { type: "pipeline" | "sweep" }) {
   );
 }
 
+// ── Landing-Zeile (Karte) ────────────────────────────────────────────────────
+
+/** Wohin/ob eine Landung pusht — sicherheitsrelevant für den Operator (z.B.
+ *  land_push=false = gewollter Dreifach-Lock, kein Alarmzustand). Pro Pack,
+ *  nicht pro Repo-Gruppe: land_remote/land_gates können sich zwischen Packs
+ *  im selben Repo unterscheiden. */
+function LoopLandingLine({ pack }: { pack: LoopPackSummary }) {
+  return (
+    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs" style={{ color: "var(--ln-ink-soft)" }}>
+      {pack.land_push ? (
+        <span>
+          {t.landRemoteArrow}{" "}
+          <span className="font-data" style={{ color: "var(--ln-ink)" }}>{pack.land_remote}</span>
+        </span>
+      ) : (
+        <span style={{ color: "var(--ln-ink-mute)" }}>{t.landNoAutoPush}</span>
+      )}
+      {pack.land_gates ? (
+        <span title={pack.land_gates.join(", ")}>{t.landGatesCount(pack.land_gates.length)}</span>
+      ) : null}
+    </p>
+  );
+}
+
 // ── Telemetrie-Zeile (Karte) ────────────────────────────────────────────────
 
 function CardTelemetryLine({ pack, nowMs }: { pack: LoopPackSummary; nowMs: number }) {
@@ -1298,6 +1322,7 @@ function LoopCard({
 
       <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-soft)" }}>{statusLabel}</p>
       <p className="mt-1.5 line-clamp-2 text-[13px]" style={{ color: "var(--ln-ink-soft)" }}>{pack.description}</p>
+      <LoopLandingLine pack={pack} />
 
       <CardTelemetryLine pack={pack} nowMs={nowMs} />
       {pack.heartbeat?.last.length ? <PhaseHistoryBars last={pack.heartbeat.last} /> : null}

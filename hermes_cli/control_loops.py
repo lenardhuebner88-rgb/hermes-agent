@@ -472,6 +472,9 @@ def _pack_summary(
         "source": source,
         "repo": str(pack.repo),
         "base_branch": pack.base_branch,
+        "land_remote": pack.land_remote,
+        "land_push": pack.land_push,
+        "land_gates": pack.land_gates,
         "description": pack.description,
         "stability": pack.stability,
         "phases": {

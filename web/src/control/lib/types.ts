@@ -1211,6 +1211,12 @@ export interface LoopPackSummary {
   /** Gebundener Projektpfad aus dem Pack-Manifest; kein frei editierbares Ziel. */
   repo: string;
   base_branch: string;
+  /** Ziel-Remote der Landung (z.B. "piet-fork"); nur relevant, wenn land_push true ist. */
+  land_remote: string;
+  /** false = Landung committet lokal, pusht aber nicht (gewollter Dreifach-Lock, kein Fehlerzustand). */
+  land_push: boolean;
+  /** null = Default-Gates; sonst die Land-Gate-Kommandos aus dem Pack-Manifest. */
+  land_gates: string[] | null;
   /** true = genau ein verifizierter PASS-Commit darf nach den Gates automatisch landen. */
   autoland?: boolean;
   description: string;
