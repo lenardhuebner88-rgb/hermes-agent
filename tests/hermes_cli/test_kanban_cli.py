@@ -337,6 +337,24 @@ def test_unblock_allows_budget_park_after_current_cap_is_raised(kanban_home, mon
         assert [event.kind for event in kb.list_events(conn, task_id)].count("unblocked") == 1
 
 
+def test_unblock_refuses_budget_park_at_current_cap(kanban_home, monkeypatch, capsys):
+    """An exhausted budget park at the live cap still has no room for a run."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"per_task_input_token_cap": 4_148_125}},
+    )
+    with kb.connect() as conn:
+        task_id = _seed_exhausted_budget_runaway(conn)
+
+    assert kc._cmd_unblock(
+        argparse.Namespace(task_ids=[task_id], force=False, reason=None)
+    ) == 1
+    assert "Refusing to unblock" in capsys.readouterr().err
+    with kb.connect() as conn:
+        assert kb.get_task(conn, task_id).status == "blocked"
+        assert [event.kind for event in kb.list_events(conn, task_id)].count("unblocked") == 0
+
+
 @pytest.mark.parametrize("state", ["blocked", "scheduled"])
 def test_unblock_non_budget_parks_preserves_existing_behavior(kanban_home, state):
     with kb.connect() as conn:

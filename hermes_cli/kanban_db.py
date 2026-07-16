@@ -14619,7 +14619,7 @@ def budget_runaway_unblock_refusal(
     input_token_sum, _run_count = _dispatch_policy.per_task_input_usage(conn, [task_id]).get(
         task_id, (0, 0)
     )
-    if input_token_sum <= cap:
+    if input_token_sum < cap:
         return None
     return {
         "input_token_sum": input_token_sum,
