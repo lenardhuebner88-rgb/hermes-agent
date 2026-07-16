@@ -200,3 +200,8 @@ def _heiler_events(conn, task_id):
         if e.kind == kb.HEILER_CLASSIFICATION_EVENT
     ]
 
+
+def _write_test_profile(home: Path, name: str) -> None:
+    d = home / "profiles" / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "config.yaml").write_text("model: {}\n")
