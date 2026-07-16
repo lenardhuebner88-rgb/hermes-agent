@@ -41,6 +41,9 @@ class AccountUsageSnapshot:
     provider: str
     source: str
     fetched_at: datetime
+    # When the underlying data point was produced (e.g. Grok log line ts).
+    # None ⇒ consumers treat fetched_at as the signal time.
+    signal_at: Optional[datetime] = None
     title: str = "Account limits"
     plan: Optional[str] = None
     windows: tuple[AccountUsageWindow, ...] = ()
@@ -1317,6 +1320,7 @@ def _fetch_xai_account_usage(log_path: Optional[Path] = None) -> Optional[Accoun
             provider="xai",
             source="grok_cli_log",
             fetched_at=_utc_now(),
+            signal_at=ts,
             title="Grok",
             plan=plan,
             windows=windows,

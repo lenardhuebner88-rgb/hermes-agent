@@ -130,6 +130,8 @@ export interface AccountUsageProvider {
   available: boolean;
   source: string | null;
   fetched_at: string | null;
+  /** Underlying data-point time; omit/null ⇒ treat fetched_at as signal (≤8-file: optional so pre-existing fixtures typecheck). */
+  signal_at?: string | null;
   title: string;
   plan: string | null;
   windows: AccountUsageWindow[];

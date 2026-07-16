@@ -635,7 +635,32 @@ class TestAccountUsageEndpoint:
         assert codex["details"] == ["openai-codex detail"]
         assert all(row["cached"] is False for row in first.json()["providers"])
         assert all(row["cached"] is True for row in second.json()["providers"])
+        assert all("signal_at" in row for row in first.json()["providers"])
+        assert all(row["signal_at"] is None for row in first.json()["providers"])
         assert len(calls) == 5
+
+    def test_account_usage_payload_signal_at_iso_and_unavailable_none(self):
+        from datetime import datetime, timezone
+
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+        import hermes_cli.web_server as ws
+
+        signal = datetime(2026, 7, 16, 9, 47, 14, 767000, tzinfo=timezone.utc)
+        snapshot = AccountUsageSnapshot(
+            provider="xai",
+            source="grok_cli_log",
+            fetched_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+            signal_at=signal,
+            title="Grok",
+            windows=(AccountUsageWindow(label="Diese Woche", used_percent=21.0),),
+        )
+        payload = ws._account_usage_payload(snapshot, "xai")
+        assert "signal_at" in payload
+        assert payload["signal_at"] == signal.isoformat()
+
+        unavail = ws._account_usage_unavailable("xai")
+        assert "signal_at" in unavail
+        assert unavail["signal_at"] is None
 
     def test_unavailable_reason_replaces_500_and_scrubs_exception_secrets(self, monkeypatch):
         import agent.account_usage as account_usage

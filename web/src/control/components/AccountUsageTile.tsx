@@ -106,6 +106,20 @@ function AccountProviderCard({
       : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
         ? "warn"
         : "ok";
+  // Non-xai providers leave signal_at null; their fetched_at is always fresh
+  // (≤ HTTP cache TTL), so the 60min guard keeps them on Cache/Live —
+  // byte-identical chip behavior for non-xai.
+  let chipLabel = unavailable ? "offline" : provider.cached ? "Cache" : "Live";
+  let chipTone: SignalTone = tone;
+  if (!unavailable) {
+    const signalMs = Date.parse(provider.signal_at ?? provider.fetched_at ?? "");
+    if (Number.isFinite(signalMs) && nowMs - signalMs > 60 * 60 * 1000) {
+      const ageH = Math.floor((nowMs - signalMs) / (60 * 60 * 1000));
+      const rel = ageH < 24 ? `${ageH}h` : `${Math.floor(ageH / 24)}d`;
+      chipLabel = `Stand ${rel}`;
+      chipTone = ageH >= 24 ? "warn" : "neutral";
+    }
+  }
   const hasExtras = others.length > 0 || provider.details.length > 0;
   return (
     <article className="rounded-card border border-line bg-surface-2 p-3">
@@ -116,8 +130,8 @@ function AccountProviderCard({
         </div>
         <div className="justify-self-end">
           <SignalChip
-            tone={tone}
-            label={unavailable ? "offline" : provider.cached ? "Cache" : "Live"}
+            tone={chipTone}
+            label={chipLabel}
           />
         </div>
       </div>
