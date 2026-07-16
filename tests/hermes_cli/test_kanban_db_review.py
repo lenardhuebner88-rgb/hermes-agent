@@ -639,6 +639,12 @@ def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_p
             conn, t, result="lgtm", summary="lgtm",
             metadata={"review_verdict": "APPROVED"}, review_gate=True,
         ) is True
+        stage_one_payload = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()["payload"]
 
         # Reviewer (stage 1) claims — its context must read the CARRIED
         # snapshot from the newest submitted_for_review event.
@@ -646,6 +652,10 @@ def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_p
         ctx = kb.build_worker_context(conn, t)
     assert "Changed files at submit" in ctx
     assert "tracked.py" in ctx
+    assert "diff_text" in stage_one_payload
+    assert "```diff" in ctx
+    assert "+original = 2" in ctx
+    assert "MANDATORY: for any CHANGED existing symbol" in ctx
     assert "No machine diff snapshot" not in ctx
 
 
@@ -704,6 +714,7 @@ def test_review_context_missing_snapshot_and_workspace_stays_fail_soft(
         ctx = kb.build_worker_context(conn, t)
 
     assert "Kein Diff-Zugriff in diesem Run" in ctx
+    assert "MANDATORY: for any CHANGED existing symbol" not in ctx
 
 
 @requires_git

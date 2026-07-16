@@ -12089,6 +12089,7 @@ def _maybe_advance_review_chain(
         for _snap_key in (
             "changed_files",
             "diff_stat",
+            "diff_text",
             "diff_base_commit",
             "diff_baseline",
         ):
