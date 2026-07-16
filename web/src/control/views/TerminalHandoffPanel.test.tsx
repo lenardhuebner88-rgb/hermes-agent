@@ -103,7 +103,8 @@ describe("TerminalHandoffPanel", () => {
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
-    await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
+    const draft = screen.getByLabelText("PlanSpec-Draft") as HTMLTextAreaElement;
+    await waitFor(() => expect(draft.value).not.toBe(""));
 
     fireEvent.click(screen.getByRole("button", { name: /^Validieren/ }));
 
@@ -127,7 +128,8 @@ describe("TerminalHandoffPanel", () => {
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
-    await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
+    const draft = screen.getByLabelText("PlanSpec-Draft") as HTMLTextAreaElement;
+    await waitFor(() => expect(draft.value).not.toBe(""));
 
     fireEvent.click(screen.getByRole("button", { name: /^Ingest/ }));
 
@@ -152,7 +154,8 @@ describe("TerminalHandoffPanel", () => {
     });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: "Auswahl übernehmen" }));
-    await waitFor(() => screen.getByLabelText("PlanSpec-Draft"));
+    const draft = screen.getByLabelText("PlanSpec-Draft") as HTMLTextAreaElement;
+    await waitFor(() => expect(draft.value).not.toBe(""));
 
     fireEvent.click(screen.getByRole("button", { name: /^Ingest/ }));
 
