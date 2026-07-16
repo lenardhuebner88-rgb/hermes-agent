@@ -77,18 +77,18 @@ const t = {
   workerCheck: "Worker-Check",
   workerCheckRunning: "Prüfe …",
   smokeOk: "Worker-Check ok",
-  authDirtyHint: "Ungespeicherte Aenderungen: erst uebernehmen, dann Auth pruefen.",
+  authDirtyHint: "Ungespeicherte Änderungen: erst übernehmen, dann Auth prüfen.",
   authCheckSummary: (ok: number, total: number) => `${ok}/${total} Live OK`,
-  authScopeSummary: (checked: number, total: number) => `${checked}/${total} Rollen geprueft`,
+  authScopeSummary: (checked: number, total: number) => `${checked}/${total} Rollen geprüft`,
   authExact: "Antwort exakt",
-  authExactViaFallback: "Exakte Antwort ueber Fallback",
+  authExactViaFallback: "Exakte Antwort über Fallback",
   authNotExact: "Antwort nicht exakt",
   authDecisionReady: "Lane einsatzbereit",
-  authDecisionRestricted: "Lane eingeschraenkt",
+  authDecisionRestricted: "Lane eingeschränkt",
   authDecisionBlocked: "Lane blockiert",
   authFallbackActive: "Fallback aktiv",
-  authUnchecked: (n: number) => `${n} nicht geprueft`,
-  authSkipped: (n: number) => `${n} uebersprungen`,
+  authUnchecked: (n: number) => `${n} nicht geprüft`,
+  authSkipped: (n: number) => `${n} übersprungen`,
   authBlocked: (n: number) => `${n} blockiert`,
   authFallbackCount: (n: number) => `${n} Fallback`,
   authStatusOk: "Live OK",
@@ -166,7 +166,7 @@ const ROLE_HINTS: Record<string, string> = {
 };
 
 const CONTROL_CLASS =
-  "min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink focus:border-live";
+  "min-h-12 w-full rounded-card border border-line bg-surface-2 px-2 py-1.5 text-body text-ink focus:border-live sm:max-w-[28rem]";
 
 function groupedModelOptions(models: LaneModelOption[]) {
   const groups = new Map<string, LaneModelOption[]>();
@@ -904,7 +904,10 @@ export function LanesEditor({
             </ul>
           ) : null}
         </div>
-        <ul className="space-y-3">
+        {/* pb-24: die sticky Speicherleiste darunter deckt sonst die letzte
+            Zeile beim Scrollen ab — genug Sicherheitsabstand für 1-2 Buttons
+            (Mobile stapelt "Dauerhaft speichern" + "N Hinweise ▸"). */}
+        <ul className="space-y-3 pb-24 sm:pb-16">
           {rows.map((row) => {
             const ready = readiness[row.profile];
             const override = hasLaneOverride(row);
@@ -1077,7 +1080,10 @@ export function LanesEditor({
             </ul>
           ) : null}
         </div>
-        <ul className="space-y-3">
+        {/* pb-24: die sticky Speicherleiste darunter deckt sonst die letzte
+            Zeile beim Scrollen ab — genug Sicherheitsabstand für 1-2 Buttons
+            (Mobile stapelt "Dauerhaft speichern" + "N Hinweise ▸"). */}
+        <ul className="space-y-3 pb-24 sm:pb-16">
           {rows.map((row) => {
             const ready = readiness[row.profile];
             const override = hasLaneOverride(row);

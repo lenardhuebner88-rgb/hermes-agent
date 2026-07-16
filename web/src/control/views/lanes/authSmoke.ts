@@ -5,9 +5,9 @@ import type { LaneAuthSmokeResult } from "./api";
 // button labels live here too — they are part of these helpers' contract and
 // are unit-tested directly. No other LanesView code references them.
 const authSmokeLabels = {
-  authCheck: "Auth pruefen",
-  authCheckRunning: "Auth prueft...",
-  authCheckSavedLane: "Gespeicherte Lane pruefen",
+  authCheck: "Auth prüfen",
+  authCheckRunning: "Auth prüft...",
+  authCheckSavedLane: "Gespeicherte Lane prüfen",
 };
 
 export function laneAuthSmokeTone(status: LaneAuthSmokeResult["status"]): "emerald" | "amber" | "red" | "zinc" {

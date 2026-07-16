@@ -143,17 +143,17 @@ describe("LanesEditor (routing cards)", () => {
       <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} initialAuthSmokeResults={authSmokeResults} />,
     );
 
-    expect(html).toContain("Auth pruefen");
+    expect(html).toContain("Auth prüfen");
     expect(html).toContain("Live OK");
     expect(html).toContain("Antwort exakt");
     expect(html).toContain("requested openrouter/qwen/qwen3.7-max");
     expect(html).toContain("observed openrouter/qwen/qwen3.7-max");
   });
 
-  it("macht Auth-Smoke bei ungespeicherten Aenderungen ehrlich", () => {
-    expect(authSmokeButtonLabel(false, false)).toBe("Auth pruefen");
-    expect(authSmokeButtonLabel(false, true)).toBe("Auth prueft...");
-    expect(authSmokeButtonLabel(true, false)).toBe("Gespeicherte Lane pruefen");
+  it("macht Auth-Smoke bei ungespeicherten Änderungen ehrlich", () => {
+    expect(authSmokeButtonLabel(false, false)).toBe("Auth prüfen");
+    expect(authSmokeButtonLabel(false, true)).toBe("Auth prüft...");
+    expect(authSmokeButtonLabel(true, false)).toBe("Gespeicherte Lane prüfen");
     expect(authSmokeDisabled({ busy: false, running: false, hasLaneId: true, dirty: true })).toBe(true);
   });
 
@@ -266,11 +266,11 @@ describe("LanesEditor (routing cards)", () => {
     expect(html).toContain("1 OK");
     expect(html).toContain("1 blockiert");
     expect(html).toContain("1 Fallback");
-    expect(html).toContain("1 uebersprungen");
-    expect(html).toContain("2 nicht geprueft");
-    expect(html).toContain("3/5 Rollen geprueft");
+    expect(html).toContain("1 übersprungen");
+    expect(html).toContain("2 nicht geprüft");
+    expect(html).toContain("3/5 Rollen geprüft");
     expect(html).toContain("Fallback aktiv");
-    expect(html).toContain("Exakte Antwort ueber Fallback");
+    expect(html).toContain("Exakte Antwort über Fallback");
     expect(html).not.toContain("premium</span><span class=\"block\">Antwort nicht exakt");
   });
 
@@ -329,6 +329,15 @@ describe("LanesEditor (routing cards)", () => {
     expect(html).toContain("Neuralwatt");
     expect(html).toContain("GLM 5.2 Fast · Neuralwatt");
     expect(html).toContain('value="hermes|glm-5.2-fast"');
+  });
+
+  it("begrenzt Rollen-Selects auf Desktop-Breite statt volle Panelbreite (sparse-empty-chrome)", () => {
+    const html = renderToStaticMarkup(
+      <LanesEditor data={fixture} lane={fixture.lanes[0]} busy={false} actions={noopActions} />,
+    );
+    // sm:max-w-[28rem] auf CONTROL_CLASS — greift ab Desktop, Mobile bleibt w-full.
+    expect(html).toContain("sm:max-w-[28rem]");
+    expect(html).toContain("w-full rounded-card border border-line bg-surface-2");
   });
 
   it("erklärt im Standard-Modus aktiven Lane-Override getrennt von dauerhaftem Profil-Default", () => {
