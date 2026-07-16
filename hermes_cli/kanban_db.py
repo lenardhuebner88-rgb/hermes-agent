@@ -14567,12 +14567,16 @@ def veto_operator_escalation(
 
 
 def budget_runaway_unblock_refusal(
-    conn: sqlite3.Connection, task_id: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    per_task_input_token_cap: Optional[int],
 ) -> Optional[dict[str, int]]:
     """Return exhausted budget-park details that make a normal unblock futile.
 
     The check intentionally derives its facts from the persisted production
-    event pair.  It does not infer a budget park from merely being blocked or
+    event pair. It then checks the task's live token usage against the currently
+    effective cap. It does not infer a budget park from merely being blocked or
     from a task's token total, so ordinary operator blocks and scheduled tasks
     retain their existing unblock behavior.
     """
@@ -14609,15 +14613,13 @@ def budget_runaway_unblock_refusal(
     parked_payload = parked_event.payload if parked_event else None
     if not isinstance(parked_payload, dict) or parked_payload.get("stall_class") != BUDGET_RUNAWAY_STALL_CLASS:
         return None
-    input_token_sum = parked_payload.get("input_token_sum")
-    cap = parked_payload.get("cap")
-    if (
-        not isinstance(input_token_sum, int)
-        or isinstance(input_token_sum, bool)
-        or not isinstance(cap, int)
-        or isinstance(cap, bool)
-        or input_token_sum < cap
-    ):
+    cap = _dispatch_policy.positive_int(per_task_input_token_cap)
+    if cap is None:
+        return None
+    input_token_sum, _run_count = _dispatch_policy.per_task_input_usage(conn, [task_id]).get(
+        task_id, (0, 0)
+    )
+    if input_token_sum <= cap:
         return None
     return {
         "input_token_sum": input_token_sum,

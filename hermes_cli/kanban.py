@@ -3218,9 +3218,21 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         reason = reason.strip() or None
     author = _profile_author() if reason else None
     failed: list[str] = []
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+        kanban_config = config.get("kanban", {}) if isinstance(config, dict) else {}
+    except Exception:
+        kanban_config = {}
+    per_task_input_token_cap = kanban_config.get("per_task_input_token_cap")
     with kb.connect_closing() as conn:
         for tid in ids:
-            refusal = None if args.force else kb.budget_runaway_unblock_refusal(conn, tid)
+            refusal = None if args.force else kb.budget_runaway_unblock_refusal(
+                conn,
+                tid,
+                per_task_input_token_cap=per_task_input_token_cap,
+            )
             if refusal:
                 failed.append(tid)
                 print(

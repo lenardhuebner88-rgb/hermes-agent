@@ -250,45 +250,61 @@ def test_run_slash_block_unblock_cycle(kanban_home):
     assert "Unblocked" in kc.run_slash(f"unblock {tid}")
 
 
-def test_unblock_refuses_exhausted_budget_runaway_unless_forced(kanban_home):
+def _seed_exhausted_budget_runaway(conn):
+    task_id = kb.create_task(conn, title="runaway", assignee="alice")
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'blocked', block_kind = 'capacity', budget_extension_count = ?
+        WHERE id = ?
+        """,
+        (kb.BUDGET_PROGRESS_EXTENSION_LIMIT, task_id),
+    )
+    conn.execute(
+        """
+        INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, input_tokens)
+        VALUES (?, 'alice', 'blocked', 'blocked', 1, 2, ?)
+        """,
+        (task_id, 4_148_125),
+    )
+    # Match the production stream emitted by _park_budget_runaway(), rather
+    # than a shortened test-only marker.
+    kb._append_event(
+        conn,
+        task_id,
+        "blocked",
+        {
+            "reason": "per-task input-token cap exceeded: 4148125 > 4000000 "
+            "(cumulative input across 3 run(s))",
+            "kind": "capacity",
+            "source": "system_park",
+            "input_token_sum": 4_148_125,
+            "cap": 4_000_000,
+            "runs": 3,
+        },
+    )
+    kb._append_event(
+        conn,
+        task_id,
+        "budget_runaway_parked",
+        {
+            "input_token_sum": 4_148_125,
+            "cap": 4_000_000,
+            "runs": 3,
+            "stall_class": "budget_runaway",
+        },
+    )
+    return task_id
+
+
+def test_unblock_refuses_exhausted_budget_runaway_unless_forced(kanban_home, monkeypatch):
     """A real budget-park event stream must not be silently revived forever."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"per_task_input_token_cap": 4_000_000}},
+    )
     with kb.connect() as conn:
-        task_id = kb.create_task(conn, title="runaway", assignee="alice")
-        conn.execute(
-            """
-            UPDATE tasks
-            SET status = 'blocked', block_kind = 'capacity', budget_extension_count = ?
-            WHERE id = ?
-            """,
-            (kb.BUDGET_PROGRESS_EXTENSION_LIMIT, task_id),
-        )
-        # Match the production stream emitted by _park_budget_runaway(), rather
-        # than a shortened test-only marker.
-        kb._append_event(
-            conn,
-            task_id,
-            "blocked",
-            {
-                "reason": "per-task input-token cap exceeded: 4148125 > 4000000 "
-                "(cumulative input across 3 run(s))",
-                "kind": "capacity",
-                "source": "system_park",
-                "input_token_sum": 4_148_125,
-                "cap": 4_000_000,
-                "runs": 3,
-            },
-        )
-        kb._append_event(
-            conn,
-            task_id,
-            "budget_runaway_parked",
-            {
-                "input_token_sum": 4_148_125,
-                "cap": 4_000_000,
-                "runs": 3,
-                "stall_class": "budget_runaway",
-            },
-        )
+        task_id = _seed_exhausted_budget_runaway(conn)
 
     refused = kc.run_slash(f"unblock {task_id}")
     assert "Refusing to unblock" in refused
@@ -301,6 +317,21 @@ def test_unblock_refuses_exhausted_budget_runaway_unless_forced(kanban_home):
         assert [event.kind for event in kb.list_events(conn, task_id)].count("unblocked") == 0
 
     assert "Unblocked" in kc.run_slash(f"unblock --force {task_id}")
+    with kb.connect() as conn:
+        assert kb.get_task(conn, task_id).status == "ready"
+        assert [event.kind for event in kb.list_events(conn, task_id)].count("unblocked") == 1
+
+
+def test_unblock_allows_budget_park_after_current_cap_is_raised(kanban_home, monkeypatch):
+    """A raised live cap makes a previously parked task actionable again."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"kanban": {"per_task_input_token_cap": 5_000_000}},
+    )
+    with kb.connect() as conn:
+        task_id = _seed_exhausted_budget_runaway(conn)
+
+    assert "Unblocked" in kc.run_slash(f"unblock {task_id}")
     with kb.connect() as conn:
         assert kb.get_task(conn, task_id).status == "ready"
         assert [event.kind for event in kb.list_events(conn, task_id)].count("unblocked") == 1
