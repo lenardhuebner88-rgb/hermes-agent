@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { AgentTerminalCapabilityState, AgentTerminalOverviewResponse, AgentTerminalWindow } from "@/lib/api";
+import { TERMINAL_MAIN_BACKGROUND, TERMINAL_PANE_BACKGROUND } from "@/lib/xtermSurface";
 
 // Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
 // waitFor-Default-Timeout (1s) zurück — Timeout hochsetzen, um das Gate-Flake zu härten.
@@ -55,30 +56,34 @@ vi.mock("@/lib/api", async () => {
 });
 
 vi.mock("@xterm/xterm", () => ({ Terminal: class Terminal {} }));
-vi.mock("@/lib/xtermSurface", () => ({
-  TERMINAL_THEME_STATIC: {},
-  TERMINAL_MAIN_BACKGROUND: "terminal-background",
-  TERMINAL_PANE_BACKGROUND: "terminal-pane-background",
-  createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => ({
-    term: {
-      clear: vi.fn(),
-      reset: terminalResetMock,
-      writeln: vi.fn(),
-      write: vi.fn(),
-      onData: vi.fn(() => ({ dispose: vi.fn() })),
-      scrollLines: terminalScrollLinesMock,
-      scrollPages: terminalScrollPagesMock,
-      scrollToBottom: terminalScrollToBottomMock,
-      focus: terminalFocusMock,
-      getSelection: () => paneSelections[host?.dataset?.terminalSurface ?? ""] ?? terminalSelection,
-      dispose: vi.fn(),
-      options: {},
-      cols: 80,
-      rows: 24,
-    },
-    fit: { fit: fitFitMock },
-  })),
-}));
+vi.mock("@/lib/xtermSurface", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/xtermSurface")>("@/lib/xtermSurface");
+  return {
+    TERMINAL_THEME_STATIC: {},
+    // Keep real palette exports so host-ridge assertions match production constants.
+    TERMINAL_MAIN_BACKGROUND: actual.TERMINAL_MAIN_BACKGROUND,
+    TERMINAL_PANE_BACKGROUND: actual.TERMINAL_PANE_BACKGROUND,
+    createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => ({
+      term: {
+        clear: vi.fn(),
+        reset: terminalResetMock,
+        writeln: vi.fn(),
+        write: vi.fn(),
+        onData: vi.fn(() => ({ dispose: vi.fn() })),
+        scrollLines: terminalScrollLinesMock,
+        scrollPages: terminalScrollPagesMock,
+        scrollToBottom: terminalScrollToBottomMock,
+        focus: terminalFocusMock,
+        getSelection: () => paneSelections[host?.dataset?.terminalSurface ?? ""] ?? terminalSelection,
+        dispose: vi.fn(),
+        options: {},
+        cols: 80,
+        rows: 24,
+      },
+      fit: { fit: fitFitMock },
+    })),
+  };
+});
 
 class FakeWebSocket {
   static OPEN = 1;
@@ -321,7 +326,16 @@ describe("AgentTerminalsView desktop rendering", () => {
 
   it("switches between stable 1x, 2x, and 4x terminal grids with unique targets", async () => {
     await renderView();
-    expect(await screen.findByTestId("terminal-pane-host-0")).toBeTruthy();
+    const primaryHost = await screen.findByTestId("terminal-pane-host-0");
+    expect(primaryHost).toBeTruthy();
+    // Floored xterm cols/rows leave a strip of host bg — must match canvas theme constants.
+    // jsdom serializes hex as rgb(); normalize the export the same way.
+    const asCssColor = (hex: string) => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = hex;
+      return probe.style.backgroundColor;
+    };
+    expect(primaryHost.style.backgroundColor).toBe(asCssColor(TERMINAL_MAIN_BACKGROUND));
     const primaryCard = screen.getByTestId("terminal-pane-card-0");
     expect(primaryCard.className).toContain("w-full");
     expect(primaryCard.className).toContain("shrink-0");
@@ -329,7 +343,9 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(screen.getByTestId("terminal-layout-button-2"));
     expect(await screen.findByTestId("terminal-layout-2")).toBeTruthy();
     expect(screen.getByTestId("terminal-pane-host-0")).toBeTruthy();
-    expect(screen.getByTestId("terminal-pane-host-1")).toBeTruthy();
+    const splitHost = screen.getByTestId("terminal-pane-host-1");
+    expect(splitHost).toBeTruthy();
+    expect(splitHost.style.backgroundColor).toBe(asCssColor(TERMINAL_PANE_BACKGROUND));
     expect((screen.getByLabelText("Terminal 1") as HTMLSelectElement).value).not.toBe((screen.getByLabelText("Terminal 2") as HTMLSelectElement).value);
     const { buildWsUrl } = await import("@/lib/api");
     await waitFor(() => {

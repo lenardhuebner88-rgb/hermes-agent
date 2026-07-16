@@ -294,7 +294,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       // events originating inside one, and copies exactly this pane's selection.
       data-terminal-surface={String(paneOrder)}
       data-ready={connection.ready ? "true" : "false"}
-      className={`h-full min-h-0 min-w-0 overflow-hidden bg-surface-0 ${className}`}
+      // Match xterm canvas theme so floored cols/rows leave no ridge of surface-0.
+      className={`h-full min-h-0 min-w-0 overflow-hidden ${className}`}
+      style={{ backgroundColor: TERMINAL_PANE_BACKGROUND }}
       onMouseDown={onActivate}
       onFocus={onActivate}
       tabIndex={0}

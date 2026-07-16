@@ -2622,7 +2622,9 @@ export function AgentTerminalsView() {
       ref={hostRef}
       data-testid="terminal-pane-host-0"
       data-terminal-surface="0"
-      className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden bg-surface-0"
+      // Match xterm canvas theme so floored cols/rows leave no ridge of surface-0.
+      className="xterm-surface min-h-0 min-w-0 flex-1 overflow-hidden"
+      style={{ backgroundColor: TERMINAL_MAIN_BACKGROUND }}
       onMouseDown={() => setActivePane(0)}
       onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }}
       onDrop={(event) => {
