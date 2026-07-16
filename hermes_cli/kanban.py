@@ -3354,7 +3354,11 @@ def _cmd_tail(args: argparse.Namespace) -> int:
         print("\n(stopped)")
         return 0
 
-def _cmd_dispatch(args: argparse.Namespace) -> int:
+def _dispatch_load_kwargs(args: argparse.Namespace) -> tuple[dict[str, Any], bool, int]:
+    """Resolve dispatch_kwargs + auto-retry settings from config / CLI flags.
+
+    Returns ``(dispatch_kwargs, auto_retry_blocked, auto_retry_blocked_backoff_seconds)``.
+    """
     # Honour kanban.default_assignee as the fallback for unassigned ready
     # tasks (#27145), kanban.max_in_progress as the global concurrency cap
     # (#33488), kanban.max_in_progress_per_profile as the per-profile
@@ -3393,26 +3397,15 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             dispatch_kwargs["max_spawn"] = cli_max
         auto_retry_blocked = False
         auto_retry_blocked_backoff_seconds = kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
-    with kb.connect_closing() as conn:
-        res = kb.dispatch_once(
-            conn,
-            dry_run=args.dry_run,
-            failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
-            auto_retry_blocked=auto_retry_blocked,
-            auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
-            **dispatch_kwargs,
-        )
-        if not args.dry_run:
-            try:
-                from hermes_cli import kanban_closeout as _closeout
+    return dispatch_kwargs, auto_retry_blocked, auto_retry_blocked_backoff_seconds
 
-                _closeout.spawn_pending_closeouts(
-                    conn,
-                    board=kb.board_slug_for_conn(conn),
-                    limit=10,
-                )
-            except Exception:
-                _log.debug("kanban dispatch: closeout spawn sweep failed", exc_info=True)
+
+def _dispatch_print_result(
+    res: Any,
+    args: argparse.Namespace,
+    dispatch_kwargs: dict[str, Any],
+) -> int:
+    """Print dispatch_once result as JSON or human text. Returns exit code."""
     if getattr(args, "json", False):
         print(json.dumps({
             "reclaimed": res.reclaimed,
@@ -3478,6 +3471,34 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"{', '.join(res.skipped_nonspawnable)}"
         )
     return 0
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    dispatch_kwargs, auto_retry_blocked, auto_retry_blocked_backoff_seconds = (
+        _dispatch_load_kwargs(args)
+    )
+    with kb.connect_closing() as conn:
+        res = kb.dispatch_once(
+            conn,
+            dry_run=args.dry_run,
+            failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
+            auto_retry_blocked=auto_retry_blocked,
+            auto_retry_blocked_backoff_seconds=auto_retry_blocked_backoff_seconds,
+            **dispatch_kwargs,
+        )
+        if not args.dry_run:
+            try:
+                from hermes_cli import kanban_closeout as _closeout
+
+                _closeout.spawn_pending_closeouts(
+                    conn,
+                    board=kb.board_slug_for_conn(conn),
+                    limit=10,
+                )
+            except Exception:
+                _log.debug("kanban dispatch: closeout spawn sweep failed", exc_info=True)
+    return _dispatch_print_result(res, args, dispatch_kwargs)
+
 
 def _cmd_holds(args: argparse.Namespace) -> int:
     """Handle ``hermes kanban holds [--json]``."""
