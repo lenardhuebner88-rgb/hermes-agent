@@ -472,7 +472,9 @@ class TmuxAgentSessionService:
             argv: tuple[str, ...] = (str(binary), "--tui")
             env = self._safe_env({"HERMES_TUI_INLINE": "1"})
         elif kind == "grok":
-            argv = (str(binary), "--model", "grok-build")
+            # CLI dropped the grok-build product slot (2026-07-16: "unknown
+            # model id"); grok-4.5 is the CLI-native default id.
+            argv = (str(binary), "--model", "grok-4.5")
             env = self._safe_env()
         else:
             argv = (str(binary),)

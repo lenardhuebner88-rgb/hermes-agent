@@ -181,10 +181,10 @@ def test_grok_uses_subscription_cli_and_grok_build_model(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     definition = service.definition_for("grok")
 
-    assert definition.argv == (str(grok.resolve()), "--model", "grok-build")
+    assert definition.argv == (str(grok.resolve()), "--model", "grok-4.5")
     created = service.ensure("grok")
     assert created.window == "grok"
-    assert "fake grok args: --model grok-build" in service.capture("work", "grok")
+    assert "fake grok args: --model grok-4.5" in service.capture("work", "grok")
     assert service.identity_for("work", "grok") == ("grok", "home")
     assert service.capabilities().to_dict()["agents"]["grok"]["available"] is True
 
