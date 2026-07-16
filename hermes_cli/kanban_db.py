@@ -14566,6 +14566,69 @@ def veto_operator_escalation(
     return True
 
 
+def budget_runaway_unblock_refusal(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    per_task_input_token_cap: Optional[int],
+) -> Optional[dict[str, int]]:
+    """Return exhausted budget-park details that make a normal unblock futile.
+
+    The check intentionally derives its facts from the persisted production
+    event pair. It then checks the task's live token usage against the currently
+    effective cap. It does not infer a budget park from merely being blocked or
+    from a task's token total, so ordinary operator blocks and scheduled tasks
+    retain their existing unblock behavior.
+    """
+    task = get_task(conn, task_id)
+    if (
+        task is None
+        or task.status != "blocked"
+        or task.budget_extension_count < BUDGET_PROGRESS_EXTENSION_LIMIT
+    ):
+        return None
+
+    events = list_events(conn, task_id)
+    last_blocked = next((event for event in reversed(events) if event.kind == "blocked"), None)
+    blocked_payload = last_blocked.payload if last_blocked else None
+    if not isinstance(blocked_payload, dict):
+        return None
+    reason = blocked_payload.get("reason")
+    if (
+        blocked_payload.get("source") != "system_park"
+        or blocked_payload.get("kind") != "capacity"
+        or not isinstance(reason, str)
+        or not reason.startswith("per-task input-token cap exceeded:")
+    ):
+        return None
+
+    parked_event = next(
+        (
+            event
+            for event in reversed(events)
+            if event.id > last_blocked.id and event.kind == BUDGET_RUNAWAY_PARKED_EVENT
+        ),
+        None,
+    )
+    parked_payload = parked_event.payload if parked_event else None
+    if not isinstance(parked_payload, dict) or parked_payload.get("stall_class") != BUDGET_RUNAWAY_STALL_CLASS:
+        return None
+    cap = _dispatch_policy.positive_int(per_task_input_token_cap)
+    if cap is None:
+        return None
+    input_token_sum, _run_count = _dispatch_policy.per_task_input_usage(conn, [task_id]).get(
+        task_id, (0, 0)
+    )
+    if input_token_sum < cap:
+        return None
+    return {
+        "input_token_sum": input_token_sum,
+        "cap": cap,
+        "budget_extension_count": task.budget_extension_count,
+        "budget_extension_limit": BUDGET_PROGRESS_EXTENSION_LIMIT,
+    }
+
+
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
