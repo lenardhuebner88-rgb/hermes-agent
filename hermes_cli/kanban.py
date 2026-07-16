@@ -1971,7 +1971,12 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
         print(f"{entry['name']:20s}  {on_disk:8s}  {count_str}")
     return 0
 
-def _cmd_create(args: argparse.Namespace) -> int:
+def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
+    """Validate create flags.
+
+    Returns ``(ws_kind, ws_path, branch_name, max_runtime, max_retries,
+    max_iterations, max_continuations)`` or an int exit code on error.
+    """
     try:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
@@ -2014,6 +2019,32 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    return (ws_kind, ws_path, branch_name, max_runtime, max_retries, max_iterations, max_continuations)
+
+
+def _create_subscribe_home_channels(conn: Any, task_id: str) -> None:
+    """Subscribe a newly created task to configured home channels (idempotent)."""
+    try:
+        from gateway.config import configured_home_channels
+        homes = configured_home_channels()
+    except Exception:
+        homes = []
+    for home in homes:
+        kb.add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform=home["platform"],
+            chat_id=home["chat_id"],
+            thread_id=home["thread_id"] or None,
+            notifier_profile=_profile_author(),
+        )
+
+
+def _cmd_create(args: argparse.Namespace) -> int:
+    validated = _create_validate_args(args)
+    if isinstance(validated, int):
+        return validated
+    ws_kind, ws_path, branch_name, max_runtime, max_retries, max_iterations, max_continuations = validated
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -2054,20 +2085,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
         # notify-subscribe. Idempotent; no home channels -> no-op; opt out with
         # --no-notify-home.
         if not getattr(args, "no_notify_home", False):
-            try:
-                from gateway.config import configured_home_channels
-                homes = configured_home_channels()
-            except Exception:
-                homes = []
-            for home in homes:
-                kb.add_notify_sub(
-                    conn,
-                    task_id=task_id,
-                    platform=home["platform"],
-                    chat_id=home["chat_id"],
-                    thread_id=home["thread_id"] or None,
-                    notifier_profile=_profile_author(),
-                )
+            _create_subscribe_home_channels(conn, task_id)
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
         print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
@@ -2086,6 +2104,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             if not running and message:
                 print(f"\n⚠  {message}", file=sys.stderr)
     return 0
+
 
 def _dispatch_epic(args: argparse.Namespace) -> int:
     """Handle ``hermes kanban epic <create|list|show|close>`` (N-E3)."""
