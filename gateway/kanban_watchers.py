@@ -555,14 +555,35 @@ def _resolve_report_delivery_target(
     return chat_id, thread_id
 
 
+def _payload_has_iteration_budget_exhaustion(payload: Optional[dict]) -> bool:
+    """True when payload is budget-exhaustion, not a wall-clock timeout.
+
+    Producer records budget exhaustion as outcome ``timed_out`` (so the
+    circuit-breaker plumbing fires) and puts the signal in the error text
+    — same substring the Heiler classifier sniffs. ``trigger_outcome`` is
+    therefore almost always the literal ``timed_out``; the dedicated
+    ``iteration_budget_exhausted`` trigger values remain accepted for
+    future producers.
+    """
+    if not payload:
+        return False
+    trigger = str(payload.get("trigger_outcome") or "").strip().lower()
+    if trigger in {"iteration_budget_exhausted", "budget_exhausted"}:
+        return True
+    error = str(payload.get("error") or "").lower()
+    return "iteration budget exhausted" in error
+
+
 def _gave_up_message(
     task_id: str, tag: str, payload: Optional[dict], *, board_tag: str = "",
 ) -> str:
     trigger = str((payload or {}).get("trigger_outcome") or "").strip().lower()
-    if trigger == "timed_out":
-        reason = "after repeated worker timed out outcomes"
-    elif trigger in {"iteration_budget_exhausted", "budget_exhausted"}:
+    # Budget-exhaustion must beat trigger==timed_out: live payloads carry
+    # trigger_outcome="timed_out" plus the budget error text (see Run 6997).
+    if _payload_has_iteration_budget_exhaustion(payload):
         reason = "after repeated iteration-budget exhaustion"
+    elif trigger == "timed_out":
+        reason = "after repeated worker timed out outcomes"
     elif trigger in {"spawn_failed", "spawn_failure"}:
         reason = "after repeated spawn failures"
     elif trigger:
@@ -573,6 +594,35 @@ def _gave_up_message(
     if payload and payload.get("error"):
         err = f"\n{str(payload['error'])[:200]}"
     return f"✖ {board_tag}{tag}Kanban {task_id} gave up {reason}{err}"
+
+
+def _timed_out_message(
+    task_id: str, tag: str, payload: Optional[dict], *, board_tag: str = "",
+) -> str:
+    """Render a kind=timed_out notification.
+
+    ``limit_seconds`` is only set by enforce_max_runtime (wall-clock kill).
+    Intermediate budget-exhaustion failures arrive as kind=timed_out with
+    the budget error text and no limit_seconds — those must not read as a
+    bare wall-clock timeout.
+    """
+    limit = None
+    if payload and payload.get("limit_seconds"):
+        try:
+            limit = int(payload["limit_seconds"])
+        except (TypeError, ValueError):
+            limit = None
+    if limit and limit > 0:
+        return (
+            f"⏱ {board_tag}{tag}Kanban {task_id} timed out "
+            f"(max_runtime={limit}s); will retry"
+        )
+    if _payload_has_iteration_budget_exhaustion(payload):
+        return (
+            f"⏱ {board_tag}{tag}Kanban {task_id} hit iteration-budget "
+            f"exhaustion; will retry"
+        )
+    return f"⏱ {board_tag}{tag}Kanban {task_id} timed out; will retry"
 
 
 # K12: where auto vault-receipts land when a task reaches terminal ``done``.
@@ -1372,19 +1422,9 @@ class GatewayKanbanWatchersMixin:
                                 f"(pid gone); dispatcher will retry"
                             )
                         elif kind == "timed_out":
-                            limit = None
-                            if ev.payload and ev.payload.get("limit_seconds"):
-                                try:
-                                    limit = int(ev.payload["limit_seconds"])
-                                except (TypeError, ValueError):
-                                    limit = None
-                            if limit and limit > 0:
-                                msg = (
-                                    f"⏱ {board_tag}{tag}Kanban {sub['task_id']} timed out "
-                                    f"(max_runtime={limit}s); will retry"
-                                )
-                            else:
-                                msg = f"⏱ {board_tag}{tag}Kanban {sub['task_id']} timed out; will retry"
+                            msg = _timed_out_message(
+                                sub["task_id"], tag, ev.payload, board_tag=board_tag,
+                            )
                         elif kind == "status":
                             new_status = ""
                             if ev.payload and ev.payload.get("status"):

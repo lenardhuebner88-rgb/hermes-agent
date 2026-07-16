@@ -397,6 +397,123 @@ def test_kanban_notifier_failure_text_uses_event_specific_fallbacks(tmp_path, mo
     assert "timed out" in gave_up_text.lower()
 
 
+# Live gave_up payload shape (Run 6997): trigger_outcome is the outcome
+# literal ``timed_out`` (never ``iteration_budget_exhausted``), plus the
+# turn_finalizer error text and budget counters. The dedicated trigger
+# branch in _gave_up_message is dead code for this path — sniff the error.
+_LIVE_BUDGET_GAVE_UP_PAYLOAD = {
+    "trigger_outcome": "timed_out",
+    "error": (
+        "Iteration budget exhausted (6/6) — task could not complete "
+        "within the allowed iterations"
+    ),
+    "budget_used": 6,
+    "budget_max": 6,
+    "failures": 3,
+    "effective_limit": 3,
+}
+
+
+# Intermediate budget-exhaustion failure: _record_task_failure(end_run=True)
+# emits kind=outcome ("timed_out") with error only — no limit_seconds
+# (limit_seconds is set only by enforce_max_runtime wall-clock kills).
+_LIVE_BUDGET_TIMED_OUT_PAYLOAD = {
+    "error": (
+        "Iteration budget exhausted (6/6) — task could not complete "
+        "within the allowed iterations"
+    ),
+    "failures": 1,
+}
+
+
+def test_gave_up_message_budget_exhaustion_via_error_text_not_timeout_headline():
+    """Budget exhaustion is recorded as outcome timed_out; notifier must not
+    report it as a worker wall-clock timeout."""
+    from gateway.kanban_watchers import _gave_up_message
+
+    msg = _gave_up_message("t_6997", "", _LIVE_BUDGET_GAVE_UP_PAYLOAD)
+    assert "iteration-budget exhaustion" in msg.lower()
+    assert "worker timed out" not in msg.lower()
+    assert "Iteration budget exhausted (6/6)" in msg
+
+
+def test_gave_up_message_spawn_failed_unchanged():
+    from gateway.kanban_watchers import _gave_up_message
+
+    msg = _gave_up_message(
+        "t_spawn",
+        "",
+        {"trigger_outcome": "spawn_failed", "error": "assignee not spawnable"},
+    )
+    assert "spawn failures" in msg.lower()
+    assert "iteration-budget" not in msg.lower()
+
+
+def test_timed_out_message_budget_exhaustion_without_limit_seconds():
+    """Intermediate budget failures emit kind=timed_out with error text and
+    no limit_seconds — must not look like a bare wall-clock timeout."""
+    from gateway.kanban_watchers import _timed_out_message
+
+    msg = _timed_out_message("t_budget", "", _LIVE_BUDGET_TIMED_OUT_PAYLOAD)
+    lower = msg.lower()
+    assert "iteration" in lower and "budget" in lower
+    assert "max_runtime" not in lower
+    # Must not be the generic bare fallback.
+    assert msg.rstrip().endswith("timed out; will retry") is False
+
+
+def test_timed_out_message_wall_clock_limit_seconds_unchanged():
+    """enforce_max_runtime payload always carries limit_seconds."""
+    from gateway.kanban_watchers import _timed_out_message
+
+    msg = _timed_out_message(
+        "t_wall",
+        "",
+        {
+            "pid": 1234,
+            "elapsed_seconds": 610,
+            "limit_seconds": 600,
+            "sigkill": True,
+            "reclaim_target": "ready",
+        },
+    )
+    assert "max_runtime=600s" in msg
+    assert "will retry" in msg
+    assert "iteration" not in msg.lower()
+
+
+def test_kanban_notifier_budget_exhaustion_messages_end_to_end(tmp_path, monkeypatch):
+    """Full notifier path: live-shaped timed_out + gave_up payloads."""
+    db_path = tmp_path / "budget-exhaustion-messages.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="budget exhaust", assignee="worker")
+        kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
+        kb._append_event(
+            conn, tid, kind="timed_out", payload=dict(_LIVE_BUDGET_TIMED_OUT_PAYLOAD)
+        )
+        kb._append_event(
+            conn, tid, kind="gave_up", payload=dict(_LIVE_BUDGET_GAVE_UP_PAYLOAD)
+        )
+    finally:
+        conn.close()
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 2
+    timed_out_text = adapter.sent[0]["text"]
+    gave_up_text = adapter.sent[1]["text"]
+    assert "iteration" in timed_out_text.lower() and "budget" in timed_out_text.lower()
+    assert "max_runtime" not in timed_out_text.lower()
+    assert "iteration-budget exhaustion" in gave_up_text.lower()
+    assert "worker timed out" not in gave_up_text.lower()
+
+
 def test_kanban_notifier_rewinds_claim_if_adapter_disconnects(tmp_path, monkeypatch):
     db_path = tmp_path / "adapter-disconnect.db"
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
