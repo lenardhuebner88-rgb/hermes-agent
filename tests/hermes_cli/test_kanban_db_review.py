@@ -360,6 +360,107 @@ def test_deterministic_skip_persists_captured_diff_snapshot(
     assert {"changed_files", "diff_stat", "diff_base_commit", "diff_baseline"} <= snapshot.keys()
     assert {"tracked.py", "untracked.py"} <= set(snapshot["changed_files"])
 
+@requires_git
+def test_review_context_includes_bounded_unified_submit_diff(kanban_home, tmp_path):
+    """A real submit event exposes its unified diff, not only the stat."""
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="inline diff",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            initial_status="running",
+        )
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="done",
+            summary="done",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        event = next(
+            e
+            for e in kb.list_events(conn, task_id)
+            if e.kind == "submitted_for_review"
+        )
+        assert "diff_text" in event.payload
+        assert "-original = 1" in event.payload["diff_text"]
+        assert "+original = 2" in event.payload["diff_text"]
+        assert kb.claim_review_task(conn, task_id) is not None
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "## Unified diff at submit (bounded)" in context
+    assert "-original = 1" in context
+    assert "MANDATORY: for any CHANGED existing symbol" in context
+
+
+def test_review_context_without_diff_uses_capability_aware_clause(kanban_home):
+    """No event and no workspace tells reviewers to request evidence, not block."""
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="no source", assignee="coder")
+        _set_task_status(conn, task_id, "review")
+        assert kb.claim_review_task(conn, task_id) is not None
+        context = kb.build_worker_context(conn, task_id)
+
+    assert "Kein Diff-Zugriff in diesem Run" in context
+    assert "NEEDS_MORE_CONTEXT statt als Blocker" in context
+    assert "MANDATORY: for any CHANGED existing symbol" not in context
+
+
+@requires_git
+def test_reviewer_child_receives_parent_unified_diff(kanban_home, tmp_path):
+    """A reviewer child gets the coder parent's event-backed unified diff."""
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect_closing() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="code slice",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            initial_status="running",
+        )
+        child_id = kb.create_task(
+            conn, title="review child", assignee="reviewer", initial_status="running"
+        )
+        kb.link_tasks(conn, parent_id, child_id)
+        assert kb._submit_for_review(
+            conn,
+            parent_id,
+            result="done",
+            summary="done",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        _set_task_status(conn, parent_id, "done")
+        context = kb.build_worker_context(conn, child_id)
+
+    assert "_review unified diff (bounded)_:" in context
+    assert "-original = 1" in context
+    assert "+original = 2" in context
+
+
+def test_bounded_unified_diff_marks_per_file_and_global_truncation():
+    """Both hard caps leave explicit evidence rather than silently slicing."""
+    text = "".join(
+        f"diff --git a/file{idx}.py b/file{idx}.py\n" + ("+x\n" * 120)
+        for idx in range(8)
+    )
+    bounded = kb._bounded_review_diff_text(text)
+    assert len(bounded.encode("utf-8")) <= kb._DIFF_SNAPSHOT_TEXT_BYTE_CAP
+    assert len(bounded.splitlines()) <= kb._DIFF_SNAPSHOT_TEXT_LINE_CAP
+    assert "per-file cap" in bounded
+    assert "global cap" in bounded
+
 
 def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
     """task_runs gains a ``verdict`` column; re-running the additive migration
@@ -602,7 +703,7 @@ def test_review_context_missing_snapshot_and_workspace_stays_fail_soft(
         assert kb.claim_review_task(conn, t) is not None
         ctx = kb.build_worker_context(conn, t)
 
-    assert "No machine diff snapshot" in ctx
+    assert "Kein Diff-Zugriff in diesem Run" in ctx
 
 
 @requires_git
@@ -896,7 +997,7 @@ def test_a2_review_context_fallbacks_when_no_acs_no_snapshot(kanban_home):
         assert claimed is not None
         ctx = kb.build_worker_context(conn, t)
     assert "No structured acceptance criteria" in ctx
-    assert "No machine diff snapshot" in ctx
+    assert "Kein Diff-Zugriff in diesem Run" in ctx
 
 
 def test_a2_non_review_context_has_no_review_section(kanban_home):

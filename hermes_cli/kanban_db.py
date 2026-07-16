@@ -11194,6 +11194,56 @@ def _git_head_sha_for_workspace(workspace_path: Optional[str]) -> Optional[str]:
 # yields an empty snapshot — never an exception that could block the handoff.
 _DIFF_SNAPSHOT_FILE_CAP = 200  # max changed_files entries
 _DIFF_SNAPSHOT_STAT_CAP = 4000  # max diff_stat characters
+_DIFF_SNAPSHOT_TEXT_LINE_CAP = 400
+_DIFF_SNAPSHOT_TEXT_BYTE_CAP = 24000
+_DIFF_SNAPSHOT_PER_FILE_LINE_CAP = 96
+_DIFF_SNAPSHOT_PER_FILE_BYTE_CAP = 6000
+
+
+def _truncate_review_diff_lines(
+    lines: list[str], *, line_cap: int, byte_cap: int, marker: str
+) -> str:
+    """Return a newline-preserving, explicitly marked line/byte-bounded diff."""
+    if not lines:
+        return ""
+    marker_bytes = len(marker.encode("utf-8"))
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        encoded = len(line.encode("utf-8"))
+        has_more = index < len(lines) - 1
+        reserve = marker_bytes if has_more else 0
+        if len(kept) + 1 + (1 if has_more else 0) > line_cap or used + encoded + reserve > byte_cap:
+            return "".join(kept) + marker
+        kept.append(line)
+        used += encoded
+    return "".join(kept)
+
+
+def _bounded_review_diff_text(diff_text: Optional[str]) -> Optional[str]:
+    """Cap a unified diff per file and globally without silent truncation."""
+    if not isinstance(diff_text, str) or not diff_text.strip():
+        return None
+    sections: list[list[str]] = []
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith("diff --git ") or not sections:
+            sections.append([])
+        sections[-1].append(line)
+    bounded_sections = [
+        _truncate_review_diff_lines(
+            section,
+            line_cap=_DIFF_SNAPSHOT_PER_FILE_LINE_CAP,
+            byte_cap=_DIFF_SNAPSHOT_PER_FILE_BYTE_CAP,
+            marker="... [diff truncated: per-file cap]\n",
+        )
+        for section in sections
+    ]
+    return _truncate_review_diff_lines(
+        "".join(bounded_sections).splitlines(keepends=True),
+        line_cap=_DIFF_SNAPSHOT_TEXT_LINE_CAP,
+        byte_cap=_DIFF_SNAPSHOT_TEXT_BYTE_CAP,
+        marker="... [diff truncated: global cap]\n",
+    )
 
 
 def _capture_review_diff_snapshot(
@@ -11230,7 +11280,7 @@ def _capture_review_diff_snapshot(
         except (sqlite3.Error, TypeError, ValueError):
             pre_run_sha = None
 
-    def _git(*args: str) -> Optional[str]:
+    def _git(*args: str, allow_nonzero: bool = False) -> Optional[str]:
         try:
             proc = subprocess.run(
                 ["git", "-C", ws, *args],
@@ -11242,7 +11292,7 @@ def _capture_review_diff_snapshot(
             )
         except (OSError, subprocess.SubprocessError, ValueError):
             return None
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not allow_nonzero:
             return None
         return proc.stdout or ""
 
@@ -11267,6 +11317,9 @@ def _capture_review_diff_snapshot(
             snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
         snapshot["diff_base_commit"] = pre_run_sha
         snapshot["diff_baseline"] = "pre_run_commit_sha"
+    raw_diff = _git(
+        "diff", "--no-ext-diff", "--unified=3", *((pre_run_sha,) if pre_run_sha else ())
+    )
     porcelain = _git("status", "--porcelain")
     if porcelain:
         for line in porcelain.splitlines():
@@ -11277,6 +11330,13 @@ def _capture_review_diff_snapshot(
             entry = entry.strip().strip('"')
             if entry and entry not in changed:
                 changed.append(entry)
+            if line.startswith("?? "):
+                untracked_diff = _git(
+                    "diff", "--no-index", "--unified=3", "--", "/dev/null", entry,
+                    allow_nonzero=True,
+                )
+                if untracked_diff:
+                    raw_diff = (raw_diff or "") + untracked_diff
             if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
                 break
     if changed:
@@ -11285,6 +11345,9 @@ def _capture_review_diff_snapshot(
         stat = _git("diff", "--stat")
         if stat and stat.strip():
             snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
+    diff_text = _bounded_review_diff_text(raw_diff)
+    if diff_text:
+        snapshot["diff_text"] = diff_text
     return snapshot
 
 
@@ -25931,8 +25994,8 @@ _VERIFIER_ANALYSIS_CLASS_HEADER = (
 
 def _latest_review_diff_snapshot(
     conn: sqlite3.Connection, task_id: str
-) -> tuple[list, Optional[str]]:
-    """Return ``(changed_files, diff_stat)`` from the latest usable B1 snapshot.
+) -> tuple[list, Optional[str], Optional[str]]:
+    """Return ``(changed_files, diff_stat, diff_text)`` from review evidence.
 
     Walks backward over recent ``submitted_for_review`` and
     ``review_diff_snapshot`` events because a fresh capture can be empty when
@@ -25940,7 +26003,7 @@ def _latest_review_diff_snapshot(
     deterministic review skips, which have no submitted-for-review handoff.
     When no event yields a usable snapshot, best-effort recapture from the
     still-live workspace (the submit-time capture may have failed). Fail-soft:
-    returns ``([], None)`` when neither source yields a snapshot.
+    returns ``([], None, None)`` when neither source yields a snapshot.
     """
     try:
         rows = conn.execute(
@@ -25951,7 +26014,8 @@ def _latest_review_diff_snapshot(
             (task_id, _CTX_REVIEW_MAX_GATE_EVENTS),
         ).fetchall()
     except sqlite3.Error:
-        return [], None
+        return [], None, None
+    fallback: Optional[tuple[list, Optional[str], Optional[str]]] = None
     for row in rows:
         if not row["payload"]:
             continue
@@ -25965,11 +26029,11 @@ def _latest_review_diff_snapshot(
         changed = [str(x) for x in cf] if isinstance(cf, list) else []
         ds = payload.get("diff_stat")
         diff_stat = ds if isinstance(ds, str) and ds.strip() else None
-        if changed or diff_stat:
-            return changed, diff_stat
-    # No handoff event carried a usable snapshot — the submit-time capture may
-    # have failed while the workspace is still alive. Best-effort recapture;
-    # the event payloads above stay authoritative whenever they have content.
+        diff_text = _bounded_review_diff_text(payload.get("diff_text"))
+        if diff_text:
+            return changed, diff_stat, diff_text
+        if (changed or diff_stat) and fallback is None:
+            fallback = (changed, diff_stat, None)
     try:
         recaptured = _capture_review_diff_snapshot(conn, task_id)
     except Exception:
@@ -25979,9 +26043,12 @@ def _latest_review_diff_snapshot(
         changed = [str(x) for x in cf] if isinstance(cf, list) else []
         ds = recaptured.get("diff_stat")
         diff_stat = ds if isinstance(ds, str) and ds.strip() else None
-        if changed or diff_stat:
-            return changed, diff_stat
-    return [], None
+        diff_text = _bounded_review_diff_text(recaptured.get("diff_text"))
+        if changed or diff_stat or diff_text:
+            return changed, diff_stat, diff_text
+    if fallback is not None:
+        return fallback
+    return [], None, None
 
 
 def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> list:
@@ -26055,7 +26122,7 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
         )
 
     # (b) changed-files snapshot from the submit event (B1)
-    changed_files, diff_stat = _latest_review_diff_snapshot(conn, task_id)
+    changed_files, diff_stat, diff_text = _latest_review_diff_snapshot(conn, task_id)
     lines.append("")
     lines.append("## Changed files at submit (caller check required)")
     if changed_files:
@@ -26069,6 +26136,12 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
             lines.append("```")
             lines.append(diff_stat[:_CTX_REVIEW_MAX_DIFF_STAT])
             lines.append("```")
+    if diff_text:
+        lines.append("")
+        lines.append("## Unified diff at submit (bounded)")
+        lines.append("```diff")
+        lines.append(diff_text)
+        lines.append("```")
         lines.append("")
         lines.append(
             "MANDATORY: for any CHANGED existing symbol (function/class/const), "
@@ -26077,8 +26150,8 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
         )
     else:
         lines.append(
-            "_No machine diff snapshot was captured. Inspect the workspace "
-            "directly (git status / git diff) before judging._"
+            "Kein Diff-Zugriff in diesem Run — prüfe gegen die vorliegende Evidenz "
+            "und benenne fehlende Evidenz als NEEDS_MORE_CONTEXT statt als Blocker."
         )
 
     # (c) #3-A: worker_gate stamp — one machine-readable line for the verifier
@@ -26374,7 +26447,9 @@ def _render_parent_results_and_role_history(
             # PlanSpec reviewer children consume code-task handoffs through this
             # parent-results block. A deterministic review skip has no
             # submitted_for_review event, so include its persisted snapshot too.
-            changed_files, diff_stat = _latest_review_diff_snapshot(conn, pid)
+            changed_files, diff_stat, parent_diff = _latest_review_diff_snapshot(
+                conn, pid
+            )
             if changed_files or diff_stat:
                 lines.append("_review diff snapshot_:")
                 if changed_files:
@@ -26390,6 +26465,11 @@ def _render_parent_results_and_role_history(
                     lines.append("```text")
                     lines.append(diff_stat[:_CTX_REVIEW_MAX_DIFF_STAT].rstrip())
                     lines.append("```")
+            if parent_diff:
+                lines.append("_review unified diff (bounded)_:")
+                lines.append("```diff")
+                lines.append(parent_diff)
+                lines.append("```")
             lines.append("")
 
         if scout_parents:
