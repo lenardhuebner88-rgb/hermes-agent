@@ -2859,6 +2859,24 @@ def test_patch_schedule_then_unblock(client):
     assert r.json()["task"]["status"] == "ready"
 
 
+def test_patch_schedule_preserves_existing_due_at(client):
+    """The dashboard schedules without managing an inherited timer."""
+    task = client.post("/api/plugins/kanban/tasks", json={"title": "x"}).json()["task"]
+    due_at = int(time.time()) + 3600
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET due_at = ? WHERE id = ?", (due_at, task["id"]))
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{task['id']}",
+        json={"status": "scheduled", "block_reason": "run tomorrow"},
+    )
+
+    assert response.status_code == 200
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, task["id"]).due_at == due_at
+
+
 def test_patch_drag_drop_move_todo_to_ready(client):
     """Direct status write: the drag-drop path for statuses without a
     dedicated verb (e.g. manually promoting todo -> ready).
