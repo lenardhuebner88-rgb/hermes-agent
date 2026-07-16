@@ -17376,6 +17376,39 @@ def _run_failure_metadata(outcome: str, error: Optional[str]) -> dict[str, str]:
 
 _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
 _PROTOCOL_VIOLATION_SCAN_LIMIT = 50
+# Bounded tail size for protocol-violation observability. Hard-capped so
+# task_events / operator_escalation evidence never grow unbounded blobs.
+_PROTOCOL_VIOLATION_LOG_TAIL_CHARS = 1500
+
+
+def _protocol_violation_worker_log_fields(
+    task_id: str,
+    *,
+    board: Optional[str] = None,
+) -> dict:
+    """Bounded worker-log evidence for protocol_violation payloads.
+
+    Reads only the on-disk per-task worker log (``worker_logs_dir/{id}.log``)
+    via the existing accessors — never Claude session transcripts. Fail-soft:
+    missing/empty/unreadable logs yield ``{}`` (no raise). Tail is hard-capped
+    so event payloads stay small.
+    """
+    try:
+        path = worker_log_path(task_id, board=board)
+        raw = read_worker_log(
+            task_id,
+            tail_bytes=_PROTOCOL_VIOLATION_LOG_TAIL_CHARS,
+            board=board,
+        )
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+    tail = raw[-_PROTOCOL_VIOLATION_LOG_TAIL_CHARS:]
+    return {
+        "worker_log_tail": tail,
+        "worker_log_path": str(path),
+    }
 
 
 def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
@@ -17509,6 +17542,12 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         "exit_code": code,
                         "protocol_violation": True,
                     }
+                    # Lift a bounded tail of the on-disk worker log into the
+                    # event so operators (and the streak-trip escalation) see
+                    # what the worker last did — not only the fixed template.
+                    event_payload.update(
+                        _protocol_violation_worker_log_fields(row["id"])
+                    )
             elif kind == "rate_limited":
                 # Worker bailed because the provider rate-limited / exhausted
                 # quota (EX_TEMPFAIL sentinel). This is NOT a task failure —
@@ -17714,6 +17753,18 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 )
                 if streak < violation_limit:
                     continue
+                # end_run=False is the production crash/timeout path
+                # (run already closed above). event_payload_extra lands in
+                # operator_escalation evidence.context via
+                # _operator_escalation_payload — include the same bounded
+                # worker-log tail as the protocol_violation event.
+                _esc_extra = {
+                    "pid": pid,
+                    "claimer": claimer,
+                    "protocol_violations": streak,
+                    "protocol_violation_limit": violation_limit,
+                }
+                _esc_extra.update(_protocol_violation_worker_log_fields(tid))
                 tripped = _record_task_failure(
                     conn,
                     tid,
@@ -17723,12 +17774,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     force_trip=True,
                     release_claim=False,
                     end_run=False,
-                    event_payload_extra={
-                        "pid": pid,
-                        "claimer": claimer,
-                        "protocol_violations": streak,
-                        "protocol_violation_limit": violation_limit,
-                    },
+                    event_payload_extra=_esc_extra,
                     closed_run_id=run_id,
                 )
                 if tripped:
