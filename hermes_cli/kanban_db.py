@@ -11780,6 +11780,7 @@ def _submit_for_review(
                 for key in (
                     "changed_files",
                     "diff_stat",
+                    "diff_text",
                     "diff_base_commit",
                     "diff_baseline",
                 )
