@@ -4042,6 +4042,336 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
     return True, "; ".join(notes)
 
 
+def _integrate_parked(branch: str, reason: str, **extra) -> dict:
+    out = {"action": "parked", "reason": reason, "branch": branch}
+    out.update(extra)
+    return out
+
+
+def _integrate_precheck_live(
+    repo_root: Path, merge_target: Optional[str], branch: str,
+) -> tuple[Optional[dict], Optional[str]]:
+    """(0) live checkout clean operation state + frozen target.
+
+    Returns ``(parked_result, None)`` on failure or ``(None, cur)`` on success.
+    """
+    try:
+        git_dir = Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
+    except WorktreeError as exc:
+        return _integrate_parked(branch, f"cannot inspect live checkout: {exc}"), None
+    for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                   "rebase-merge", "rebase-apply"):
+        if (git_dir / marker).exists():
+            return (
+                _integrate_parked(
+                    branch,
+                    f"live checkout has an operation in progress ({marker})",
+                ),
+                None,
+            )
+    try:
+        cur = current_branch(repo_root)
+    except WorktreeError as exc:
+        return _integrate_parked(branch, str(exc)), None
+    if merge_target and cur != merge_target:
+        return (
+            _integrate_parked(
+                branch,
+                f"checked-out branch {cur!r} != frozen merge target "
+                f"{merge_target!r}",
+            ),
+            None,
+        )
+    return None, cur
+
+
+def _preserve_or_park_chain_artifacts(
+    wt_path: Path, branch: str,
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Preserve preservable dirty artifacts or park. Returns (failure, receipt)."""
+    if not (wt_path.exists() and (wt_path / ".git").exists()):
+        return None, None
+    leftovers = dirty_files(wt_path)
+    if not leftovers:
+        return None, None
+    leftovers_sorted = sorted(leftovers)
+    dirty_class = _classify_dirty_paths(leftovers_sorted)
+    if dirty_class != PRESERVABLE_ARTIFACTS_CLASS:
+        return (
+            _integrate_parked(
+                branch,
+                f"{dirty_class}: "
+                + ", ".join(leftovers_sorted[:10])
+                + ". "
+                + _dirty_recovery_instruction(dirty_class),
+                dirty_files=leftovers_sorted,
+                park_class=dirty_class,
+            ),
+            None,
+        )
+    try:
+        artifact_receipt = _preserve_artifact_files(
+            wt_path, wt_path.name, leftovers_sorted
+        )
+    except Exception as exc:
+        return (
+            _integrate_parked(
+                branch,
+                f"ARTIFACT_PRESERVE_FAILED: {exc}",
+                dirty_files=sorted(leftovers),
+                park_class="ARTIFACT_PRESERVE_FAILED",
+            ),
+            None,
+        )
+    remaining = dirty_files(wt_path)
+    if remaining:
+        return (
+            _integrate_parked(
+                branch,
+                "chain worktree has uncommitted changes after artifact cleanup: "
+                + ", ".join(sorted(remaining)[:10]),
+                dirty_files=sorted(remaining),
+                artifact_receipt=artifact_receipt,
+            ),
+            None,
+        )
+    return None, artifact_receipt
+
+
+def _integrate_empty_or_already_merged(
+    repo_root: Path,
+    wt_path: Path,
+    branch: str,
+    cur: str,
+    gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
+    artifact_receipt: Optional[dict],
+) -> dict:
+    """Handle ``ahead == 0``: reintegrate-after-revert, already-integrated, or empty."""
+    already_integrated = _branch_is_ancestor(repo_root, branch, cur)
+    if already_integrated:
+        merged_commits = _first_parent_merges_reaching_branch(
+            repo_root, branch, cur
+        )
+        if merged_commits:
+            merge_commit = merged_commits[0]
+            parents = _git(
+                repo_root, "rev-list", "--parents", "-n", "1",
+                merge_commit
+            ).split()
+            diff_files = _changed_files_between(
+                repo_root, parents[1], branch
+            ) if len(parents) >= 2 else []
+            revert_commits = _revert_commits_for_merge(
+                repo_root, merge_commit, cur
+            )
+            content_differs = False
+            if diff_files:
+                try:
+                    _git(
+                        repo_root,
+                        "diff",
+                        "--quiet",
+                        cur,
+                        branch,
+                        "--",
+                        *diff_files,
+                    )
+                except WorktreeError:
+                    content_differs = True
+            if revert_commits and content_differs:
+                restore_commit = revert_commits[0]
+                try:
+                    _git(
+                        repo_root, "revert", "--no-edit",
+                        restore_commit,
+                        timeout=MERGE_TIMEOUT_SECONDS,
+                    )
+                except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                    _git(repo_root, "revert", "--abort", check=False)
+                    return _integrate_parked(
+                        branch,
+                        "reverted merge reachable by ancestry, but "
+                        f"revert-of-revert failed: {exc}",
+                        merge_commit=merge_commit,
+                        revert_commit=restore_commit,
+                        reintegrated_after_revert=False,
+                    )
+                restored_commit = _git(repo_root, "rev-parse", "HEAD")
+                gate = gate_runner or _integration_gate_for_repo(repo_root)
+                ok, detail = _run_gate_in_validation_worktree(
+                    repo_root, restored_commit, diff_files, gate,
+                )
+                if not ok:
+                    try:
+                        _git(
+                            repo_root,
+                            "revert",
+                            "--no-edit",
+                            restored_commit,
+                            timeout=MERGE_TIMEOUT_SECONDS,
+                        )
+                        reverted = True
+                    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+                        _git(repo_root, "revert", "--abort", check=False)
+                        reverted = False
+                        detail += f" — AND REVERT FAILED: {exc}"
+                    return _integrate_parked(
+                        branch,
+                        f"post-reintegration gate failed: {detail}",
+                        merge_commit=merge_commit,
+                        revert_commit=restore_commit,
+                        restored_commit=restored_commit,
+                        reverted=reverted,
+                        reintegrated_after_revert=True,
+                        gate_output=detail,
+                    )
+                remove_worktree(repo_root, wt_path, branch)
+                result = {
+                    "action": "merged",
+                    "state": MERGED_GREEN,
+                    "merge_commit": restored_commit,
+                    "original_merge_commit": merge_commit,
+                    "revert_commit": restore_commit,
+                    "branch": branch,
+                    "target": cur,
+                    "gate": detail,
+                    "files": len(diff_files),
+                    "changed_files": diff_files,
+                    "reintegrated_after_revert": True,
+                }
+                if artifact_receipt:
+                    result["artifact_receipt"] = artifact_receipt
+                return result
+        remove_worktree(repo_root, wt_path, branch)
+        result = {
+            "action": "clean",
+            "branch": branch,
+            "target": cur,
+            "already_integrated": True,
+            "reason": f"chain branch already reachable from {cur}",
+        }
+        if artifact_receipt:
+            result["artifact_receipt"] = artifact_receipt
+        return result
+    remove_worktree(repo_root, wt_path, branch)
+    result = {"action": "clean", "branch": branch,
+              "reason": "no commits on chain branch"}
+    if artifact_receipt:
+        result["artifact_receipt"] = artifact_receipt
+    return result
+
+
+def _integrate_rebase_branch(
+    repo_root: Path, wt_path: Path, branch: str, cur: str,
+) -> tuple[Optional[dict], Optional[list[str]]]:
+    """(a2) Rebase chain onto live target. Returns (early_result, diff_files)."""
+    # (a2) Rebase the chain branch onto the live target HEAD inside its
+    # OWN worktree (B1), so the following merge is FF/conflict-free.
+    # Reuse `cur` (the frozen, already-validated merge target) — do NOT
+    # git fetch: repo_root is a LOCAL checkout, `cur`/HEAD is the live
+    # local tip, and this integrator never pushes. (If a chain branch
+    # could legitimately diverge from a REMOTE, escalate — do not add a
+    # network fetch here.)
+    if not (wt_path.exists() and (wt_path / ".git").exists()):
+        return _integrate_parked(branch, "chain worktree missing before rebase"), None
+    target_head = _git(repo_root, "rev-parse", cur)
+    reverted_ancestor = _reverted_merged_ancestor(
+        repo_root, branch, target_head,
+    )
+    rebase_args = ["rebase", target_head]
+    if reverted_ancestor:
+        replay_base = _git(
+            repo_root, "rev-parse", f"{reverted_ancestor}^1",
+        )
+        rebase_args = [
+            "rebase", "--onto", target_head, replay_base, branch,
+        ]
+    try:
+        _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)
+    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+        # Conflict (or timeout): abort cleanly so the worktree returns to
+        # its pre-rebase committed state, then signal rebase_conflict so
+        # complete_task routes the task back to the coder (NOT a park).
+        _git(wt_path, "rebase", "--abort", check=False)
+        return {
+            "action": "rebase_conflict",
+            "branch": branch,
+            "reason": (
+                f"rebase of {branch} onto {cur} hit a conflict "
+                f"(aborted, returned to coder): {exc}"
+            ),
+            "target": cur,
+        }, None
+    # A reverted-ancestor replay can restore acceptance paths omitted by
+    # the pre-rebase triple-dot diff as shared ancestry.  Gate and
+    # receipt the actual tree delta that is about to land.
+    diff_files = _changed_files_between(repo_root, target_head, branch)
+    # Successful rebase: fall through to the existing merge block. The
+    # --no-ff merge stays (preserves the merge-commit audit trail).
+    return None, diff_files
+
+
+def _integrate_merge_and_gate(
+    repo_root: Path,
+    wt_path: Path,
+    branch: str,
+    cur: str,
+    diff_files: list[str],
+    gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
+    artifact_receipt: Optional[dict],
+) -> dict:
+    """(b) --no-ff merge + post-merge gate; park on red/conflict."""
+    # (b) the merge itself; conflicts → abort + park.
+    msg = f"kanban: merge {branch} (worker-isolation integrator)"
+    try:
+        _git(repo_root, "merge", "--no-ff", "--no-edit", "-m", msg,
+             branch, timeout=MERGE_TIMEOUT_SECONDS)
+    except (WorktreeError, subprocess.TimeoutExpired) as exc:
+        _git(repo_root, "merge", "--abort", check=False)
+        return _integrate_parked(
+            branch, f"merge conflict/failure (aborted): {exc}",
+        )
+    merge_commit = _git(repo_root, "rev-parse", "HEAD")
+
+    # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
+    # The gate runs at the exact merge commit in a clean detached
+    # validation worktree, never in the potentially dirty live checkout.
+    gate = gate_runner or _integration_gate_for_repo(repo_root)
+    ok, detail = _run_gate_in_validation_worktree(
+        repo_root, merge_commit, diff_files, gate,
+    )
+    if not ok:
+        try:
+            _git(repo_root, "revert", "-m", "1", "--no-edit",
+                 merge_commit, timeout=MERGE_TIMEOUT_SECONDS)
+            reverted = True
+        except (WorktreeError, subprocess.TimeoutExpired) as exc:
+            _git(repo_root, "revert", "--abort", check=False)
+            reverted = False
+            detail += f" — AND REVERT FAILED: {exc}"
+        return _integrate_parked(
+            branch,
+            f"post-merge gate failed: {detail}",
+            merge_commit=merge_commit, reverted=reverted,
+            gate_output=detail,
+        )
+
+    remove_worktree(repo_root, wt_path, branch)
+    result = {
+        "action": "merged",
+        "state": MERGED_GREEN,
+        "merge_commit": merge_commit,
+        "branch": branch,
+        "target": cur,
+        "gate": detail,
+        "files": len(diff_files),
+        "changed_files": diff_files,
+    }
+    if artifact_receipt:
+        result["artifact_receipt"] = artifact_receipt
+    return result
+
+
 def integrate_chain(
     repo_root: Path,
     wt_path: Path,
@@ -4061,11 +4391,6 @@ def integrate_chain(
     repo_root = Path(repo_root)
     wt_path = Path(wt_path)
 
-    def parked(reason: str, **extra) -> dict:
-        out = {"action": "parked", "reason": reason, "branch": branch}
-        out.update(extra)
-        return out
-
     # Lock lives in the repo's .git dir: never visible in `git status`,
     # never blocks worktree cleanup, and is shared with release activation.
     lock_path = _integrator_lock_path(repo_root)
@@ -4073,189 +4398,31 @@ def integrate_chain(
         try:
             lock = _acquire_file_lock(lock_path)
         except WorktreeError as exc:
-            return parked(str(exc))
+            return _integrate_parked(branch, str(exc))
         try:
             if not _branch_exists(repo_root, branch):
                 return {"action": "clean", "branch": branch,
                         "reason": "chain branch does not exist (nothing to merge)"}
 
             # (0) live checkout in a clean operation state + frozen target.
-            try:
-                git_dir = Path(_git(repo_root, "rev-parse", "--absolute-git-dir"))
-            except WorktreeError as exc:
-                return parked(f"cannot inspect live checkout: {exc}")
-            for marker in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                           "rebase-merge", "rebase-apply"):
-                if (git_dir / marker).exists():
-                    return parked(
-                        f"live checkout has an operation in progress ({marker})"
-                    )
-            try:
-                cur = current_branch(repo_root)
-            except WorktreeError as exc:
-                return parked(str(exc))
-            if merge_target and cur != merge_target:
-                return parked(
-                    f"checked-out branch {cur!r} != frozen merge target "
-                    f"{merge_target!r}"
-                )
+            parked, cur = _integrate_precheck_live(
+                repo_root, merge_target, branch,
+            )
+            if parked is not None:
+                return parked
 
-            artifact_receipt = None
-
-            def preserve_or_park_artifacts() -> dict | None:
-                nonlocal artifact_receipt
-                if not (wt_path.exists() and (wt_path / ".git").exists()):
-                    return None
-                leftovers = dirty_files(wt_path)
-                if not leftovers:
-                    return None
-                leftovers_sorted = sorted(leftovers)
-                dirty_class = _classify_dirty_paths(leftovers_sorted)
-                if dirty_class != PRESERVABLE_ARTIFACTS_CLASS:
-                    return parked(
-                        f"{dirty_class}: "
-                        + ", ".join(leftovers_sorted[:10])
-                        + ". "
-                        + _dirty_recovery_instruction(dirty_class),
-                        dirty_files=leftovers_sorted,
-                        park_class=dirty_class,
-                    )
-                try:
-                    artifact_receipt = _preserve_artifact_files(
-                        wt_path, wt_path.name, leftovers_sorted
-                    )
-                except Exception as exc:
-                    return parked(
-                        f"ARTIFACT_PRESERVE_FAILED: {exc}",
-                        dirty_files=sorted(leftovers),
-                        park_class="ARTIFACT_PRESERVE_FAILED",
-                    )
-                remaining = dirty_files(wt_path)
-                if remaining:
-                    return parked(
-                        "chain worktree has uncommitted changes after artifact cleanup: "
-                        + ", ".join(sorted(remaining)[:10]),
-                        dirty_files=sorted(remaining),
-                        artifact_receipt=artifact_receipt,
-                    )
-                return None
-
-            preserve_failure = preserve_or_park_artifacts()
+            preserve_failure, artifact_receipt = _preserve_or_park_chain_artifacts(
+                wt_path, branch,
+            )
             if preserve_failure:
                 return preserve_failure
 
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
-                already_integrated = _branch_is_ancestor(repo_root, branch, cur)
-                if already_integrated:
-                    merged_commits = _first_parent_merges_reaching_branch(
-                        repo_root, branch, cur
-                    )
-                    if merged_commits:
-                        merge_commit = merged_commits[0]
-                        parents = _git(
-                            repo_root, "rev-list", "--parents", "-n", "1",
-                            merge_commit
-                        ).split()
-                        diff_files = _changed_files_between(
-                            repo_root, parents[1], branch
-                        ) if len(parents) >= 2 else []
-                        revert_commits = _revert_commits_for_merge(
-                            repo_root, merge_commit, cur
-                        )
-                        content_differs = False
-                        if diff_files:
-                            try:
-                                _git(
-                                    repo_root,
-                                    "diff",
-                                    "--quiet",
-                                    cur,
-                                    branch,
-                                    "--",
-                                    *diff_files,
-                                )
-                            except WorktreeError:
-                                content_differs = True
-                        if revert_commits and content_differs:
-                            restore_commit = revert_commits[0]
-                            try:
-                                _git(
-                                    repo_root, "revert", "--no-edit",
-                                    restore_commit,
-                                    timeout=MERGE_TIMEOUT_SECONDS,
-                                )
-                            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                                _git(repo_root, "revert", "--abort", check=False)
-                                return parked(
-                                    "reverted merge reachable by ancestry, but "
-                                    f"revert-of-revert failed: {exc}",
-                                    merge_commit=merge_commit,
-                                    revert_commit=restore_commit,
-                                    reintegrated_after_revert=False,
-                                )
-                            restored_commit = _git(repo_root, "rev-parse", "HEAD")
-                            gate = gate_runner or _integration_gate_for_repo(repo_root)
-                            ok, detail = _run_gate_in_validation_worktree(
-                                repo_root, restored_commit, diff_files, gate,
-                            )
-                            if not ok:
-                                try:
-                                    _git(
-                                        repo_root,
-                                        "revert",
-                                        "--no-edit",
-                                        restored_commit,
-                                        timeout=MERGE_TIMEOUT_SECONDS,
-                                    )
-                                    reverted = True
-                                except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                                    _git(repo_root, "revert", "--abort", check=False)
-                                    reverted = False
-                                    detail += f" — AND REVERT FAILED: {exc}"
-                                return parked(
-                                    f"post-reintegration gate failed: {detail}",
-                                    merge_commit=merge_commit,
-                                    revert_commit=restore_commit,
-                                    restored_commit=restored_commit,
-                                    reverted=reverted,
-                                    reintegrated_after_revert=True,
-                                    gate_output=detail,
-                                )
-                            remove_worktree(repo_root, wt_path, branch)
-                            result = {
-                                "action": "merged",
-                                "state": MERGED_GREEN,
-                                "merge_commit": restored_commit,
-                                "original_merge_commit": merge_commit,
-                                "revert_commit": restore_commit,
-                                "branch": branch,
-                                "target": cur,
-                                "gate": detail,
-                                "files": len(diff_files),
-                                "changed_files": diff_files,
-                                "reintegrated_after_revert": True,
-                            }
-                            if artifact_receipt:
-                                result["artifact_receipt"] = artifact_receipt
-                            return result
-                    remove_worktree(repo_root, wt_path, branch)
-                    result = {
-                        "action": "clean",
-                        "branch": branch,
-                        "target": cur,
-                        "already_integrated": True,
-                        "reason": f"chain branch already reachable from {cur}",
-                    }
-                    if artifact_receipt:
-                        result["artifact_receipt"] = artifact_receipt
-                    return result
-                remove_worktree(repo_root, wt_path, branch)
-                result = {"action": "clean", "branch": branch,
-                          "reason": "no commits on chain branch"}
-                if artifact_receipt:
-                    result["artifact_receipt"] = artifact_receipt
-                return result
+                return _integrate_empty_or_already_merged(
+                    repo_root, wt_path, branch, cur, gate_runner,
+                    artifact_receipt,
+                )
 
             diff_files = [
                 f for f in _git(
@@ -4267,101 +4434,22 @@ def integrate_chain(
             dirty = set(dirty_files(repo_root))
             overlap = sorted(dirty & set(diff_files))
             if overlap:
-                return parked(
+                return _integrate_parked(
+                    branch,
                     "dirty files in live checkout overlap the branch diff: "
-                    + ", ".join(overlap[:10])
+                    + ", ".join(overlap[:10]),
                 )
 
-            # (a2) Rebase the chain branch onto the live target HEAD inside its
-            # OWN worktree (B1), so the following merge is FF/conflict-free.
-            # Reuse `cur` (the frozen, already-validated merge target) — do NOT
-            # git fetch: repo_root is a LOCAL checkout, `cur`/HEAD is the live
-            # local tip, and this integrator never pushes. (If a chain branch
-            # could legitimately diverge from a REMOTE, escalate — do not add a
-            # network fetch here.)
-            if not (wt_path.exists() and (wt_path / ".git").exists()):
-                return parked("chain worktree missing before rebase")
-            target_head = _git(repo_root, "rev-parse", cur)
-            reverted_ancestor = _reverted_merged_ancestor(
-                repo_root, branch, target_head,
+            early, diff_files = _integrate_rebase_branch(
+                repo_root, wt_path, branch, cur,
             )
-            rebase_args = ["rebase", target_head]
-            if reverted_ancestor:
-                replay_base = _git(
-                    repo_root, "rev-parse", f"{reverted_ancestor}^1",
-                )
-                rebase_args = [
-                    "rebase", "--onto", target_head, replay_base, branch,
-                ]
-            try:
-                _git(wt_path, *rebase_args, timeout=MERGE_TIMEOUT_SECONDS)
-            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                # Conflict (or timeout): abort cleanly so the worktree returns to
-                # its pre-rebase committed state, then signal rebase_conflict so
-                # complete_task routes the task back to the coder (NOT a park).
-                _git(wt_path, "rebase", "--abort", check=False)
-                return {
-                    "action": "rebase_conflict",
-                    "branch": branch,
-                    "reason": (
-                        f"rebase of {branch} onto {cur} hit a conflict "
-                        f"(aborted, returned to coder): {exc}"
-                    ),
-                    "target": cur,
-                }
-            # A reverted-ancestor replay can restore acceptance paths omitted by
-            # the pre-rebase triple-dot diff as shared ancestry.  Gate and
-            # receipt the actual tree delta that is about to land.
-            diff_files = _changed_files_between(repo_root, target_head, branch)
-            # Successful rebase: fall through to the existing merge block. The
-            # --no-ff merge stays (preserves the merge-commit audit trail).
+            if early is not None:
+                return early
 
-            # (b) the merge itself; conflicts → abort + park.
-            msg = f"kanban: merge {branch} (worker-isolation integrator)"
-            try:
-                _git(repo_root, "merge", "--no-ff", "--no-edit", "-m", msg,
-                     branch, timeout=MERGE_TIMEOUT_SECONDS)
-            except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                _git(repo_root, "merge", "--abort", check=False)
-                return parked(f"merge conflict/failure (aborted): {exc}")
-            merge_commit = _git(repo_root, "rev-parse", "HEAD")
-
-            # Post-merge quick gate (Entscheidung 5); red → revert -m 1 + park.
-            # The gate runs at the exact merge commit in a clean detached
-            # validation worktree, never in the potentially dirty live checkout.
-            gate = gate_runner or _integration_gate_for_repo(repo_root)
-            ok, detail = _run_gate_in_validation_worktree(
-                repo_root, merge_commit, diff_files, gate,
+            return _integrate_merge_and_gate(
+                repo_root, wt_path, branch, cur, diff_files,
+                gate_runner, artifact_receipt,
             )
-            if not ok:
-                try:
-                    _git(repo_root, "revert", "-m", "1", "--no-edit",
-                         merge_commit, timeout=MERGE_TIMEOUT_SECONDS)
-                    reverted = True
-                except (WorktreeError, subprocess.TimeoutExpired) as exc:
-                    _git(repo_root, "revert", "--abort", check=False)
-                    reverted = False
-                    detail += f" — AND REVERT FAILED: {exc}"
-                return parked(
-                    f"post-merge gate failed: {detail}",
-                    merge_commit=merge_commit, reverted=reverted,
-                    gate_output=detail,
-                )
-
-            remove_worktree(repo_root, wt_path, branch)
-            result = {
-                "action": "merged",
-                "state": MERGED_GREEN,
-                "merge_commit": merge_commit,
-                "branch": branch,
-                "target": cur,
-                "gate": detail,
-                "files": len(diff_files),
-                "changed_files": diff_files,
-            }
-            if artifact_receipt:
-                result["artifact_receipt"] = artifact_receipt
-            return result
         finally:
             _release_file_lock(lock)
 
