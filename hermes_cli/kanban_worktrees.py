@@ -2000,6 +2000,42 @@ def _resolve_fixer_worktree(
     return wt, chain_branch(root_id)
 
 
+def _self_heal_release_toolchain(root: Path) -> Optional[str]:
+    """Install a private, lockfile-bound toolchain in a validation worktree."""
+    for rel in ("node_modules", "web/node_modules"):
+        private_modules = root / rel
+        try:
+            if private_modules.is_symlink():
+                private_modules.unlink()
+            private_modules.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return (
+                "release-toolchain: could not create private "
+                f"{rel}: {exc}"
+            )
+
+    npm_bin = shutil.which("npm") or "npm"
+    try:
+        proc = subprocess.run(  # noqa: S603 -- fixed argv
+            [npm_bin, "ci"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=RELEASE_GATE_COMMAND_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            "release-toolchain: npm ci timed out after "
+            f"{RELEASE_GATE_COMMAND_TIMEOUT}s"
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"release-toolchain: npm ci command error: {exc}"
+    if proc.returncode != 0:
+        tail = ((proc.stdout or "") + (proc.stderr or "")).strip()[-2000:]
+        return f"release-toolchain: npm ci exit {proc.returncode}\n{tail}"
+    return None
+
+
 def _default_release_gate_runner(
     commands: Optional[Sequence[str]] = None,
     *,
@@ -2017,6 +2053,16 @@ def _default_release_gate_runner(
     the detached commit.
     """
     root = Path(repo_root or LIVE_CHECKOUT_ROOT)
+    if (root / "web" / "package.json").is_file() and _resolve_node_bin(
+        root, "tsc"
+    ) is None:
+        if root.resolve() == LIVE_CHECKOUT_ROOT.resolve():
+            return False, (
+                "release-toolchain: refusing npm ci in the live checkout"
+            )
+        heal_error = _self_heal_release_toolchain(root)
+        if heal_error:
+            return False, heal_error
     cmds = list(commands or _RELEASE_GATE_COMMANDS)
     quoted_root = shlex.quote(str(root))
     cmds = [cmd.replace(str(LIVE_CHECKOUT_ROOT), quoted_root) for cmd in cmds]
