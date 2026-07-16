@@ -423,6 +423,39 @@ class TestWebServerEndpoints:
             assert resp.status_code == 302
             assert resp.headers["location"] == "/control/diktat"
 
+    def test_dictate_download_streams_newest_apk_with_attachment_name(self, monkeypatch, tmp_path):
+        """The SPA-independent /dictate/download serves the newest
+        hermes-dictate APK as a native attachment (S24 mobile PWA-cache fix):
+        no auth (non-/api/ path, tailnet-bounded like the legacy redirects),
+        correct Content-Disposition filename, apk MIME."""
+        import hermes_cli.web_server as web_server
+
+        old = tmp_path / "hermes-dictate-1.3-0322eed96.apk"
+        old.write_bytes(b"old-apk")
+        new = tmp_path / "hermes-dictate-1.4-6a9ec48d3.apk"
+        new.write_bytes(b"new-apk-bytes")
+        os.utime(new, (old.stat().st_mtime + 10, old.stat().st_mtime + 10))
+        # A Voice build that merely mentions "dictate" must not be picked.
+        voice = tmp_path / "hermes-voice-dictate-handoff.apk"
+        voice.write_bytes(b"voice")
+        os.utime(voice, (old.stat().st_mtime + 20, old.stat().st_mtime + 20))
+        monkeypatch.setattr(web_server, "_ARTIFACTS_DIR", tmp_path)
+
+        resp = self.client.get("/dictate/download")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "application/vnd.android.package-archive"
+        assert (
+            resp.headers["content-disposition"]
+            == 'attachment; filename="hermes-dictate-1.4-6a9ec48d3.apk"'
+        )
+        assert resp.content == b"new-apk-bytes"
+
+    def test_dictate_download_404_when_no_apk_present(self, monkeypatch, tmp_path):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_ARTIFACTS_DIR", tmp_path)
+        assert self.client.get("/dictate/download").status_code == 404
+
     def test_dictate_status_survives_restart_via_persisted_state(self):
         import hermes_cli.web_server as web_server
         from hermes_constants import get_hermes_home

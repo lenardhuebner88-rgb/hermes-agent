@@ -3156,6 +3156,34 @@ async def legacy_dictate_apk_redirect():
     return RedirectResponse(url="/control/diktat", status_code=302)
 
 
+# Stable, SPA-independent APK download for the phone. The /control/diktat
+# button downloads through the SPA JS bundle, which a mobile PWA serves from
+# the service-worker precache — so a freshly-deployed download fix doesn't
+# reach the device until the SW updates, and the old blob-in-a-tab path keeps
+# hanging (S24 report 2026-07-16). This route is a plain server navigation:
+# not an /api/ path (so the auth middleware doesn't gate it — same
+# tailnet-bounded posture as the legacy redirects and the dashboard shell on
+# this loopback bind) and never matched by the SW (navigateFallback is null,
+# no runtime caching), so it always hits the server fresh. It takes NO user
+# input — it resolves and streams the single newest hermes-dictate-*.apk —
+# so there is no path-traversal surface. Correct filename via
+# Content-Disposition, streamed to the Android download manager.
+@app.get("/dictate/download")
+async def dictate_apk_download():
+    latest = _latest_dictate_artifact()
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No hermes-dictate APK available")
+    target = (_ARTIFACTS_DIR / latest["name"]).resolve(strict=False)
+    if not _path_is_under(_ARTIFACTS_DIR, target) or not target.is_file():
+        raise HTTPException(status_code=404, detail="No hermes-dictate APK available")
+    return FileResponse(
+        path=str(target),
+        media_type="application/vnd.android.package-archive",
+        filename=target.name,
+        content_disposition_type="attachment",
+    )
+
+
 @app.get("/api/artifacts")
 async def list_artifacts():
     """List downloadable artifacts (name, size, mtime) — no directory traversal surface."""
