@@ -25788,7 +25788,9 @@ def _latest_review_diff_snapshot(
 
     Walks backward over recent ``submitted_for_review`` events because a fresh
     capture can be empty when the workspace vanished after an earlier handoff.
-    Fail-soft: returns ``([], None)`` when no usable snapshot is found.
+    When no event yields a usable snapshot, best-effort recapture from the
+    still-live workspace (the submit-time capture may have failed). Fail-soft:
+    returns ``([], None)`` when neither source yields a snapshot.
     """
     try:
         rows = conn.execute(
@@ -25811,6 +25813,20 @@ def _latest_review_diff_snapshot(
         cf = payload.get("changed_files")
         changed = [str(x) for x in cf] if isinstance(cf, list) else []
         ds = payload.get("diff_stat")
+        diff_stat = ds if isinstance(ds, str) and ds.strip() else None
+        if changed or diff_stat:
+            return changed, diff_stat
+    # No handoff event carried a usable snapshot — the submit-time capture may
+    # have failed while the workspace is still alive. Best-effort recapture;
+    # the event payloads above stay authoritative whenever they have content.
+    try:
+        recaptured = _capture_review_diff_snapshot(conn, task_id)
+    except Exception:
+        recaptured = {}
+    if isinstance(recaptured, dict):
+        cf = recaptured.get("changed_files")
+        changed = [str(x) for x in cf] if isinstance(cf, list) else []
+        ds = recaptured.get("diff_stat")
         diff_stat = ds if isinstance(ds, str) and ds.strip() else None
         if changed or diff_stat:
             return changed, diff_stat

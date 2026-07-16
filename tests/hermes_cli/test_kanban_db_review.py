@@ -457,6 +457,110 @@ def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_p
     assert "No machine diff snapshot" not in ctx
 
 
+@requires_git
+def test_review_context_recaptures_missing_submit_snapshot(
+    kanban_home, tmp_path, monkeypatch
+):
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    real_capture = kb._capture_review_diff_snapshot
+    with kb.connect_closing() as conn:
+        t = kb.create_task(
+            conn, title="widget", assignee="coder", review_tier="review",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        monkeypatch.setattr(kb, "_capture_review_diff_snapshot", lambda *_a, **_kw: {})
+        assert kb._submit_for_review(
+            conn, t, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+        monkeypatch.setattr(kb, "_capture_review_diff_snapshot", real_capture)
+
+        assert kb.claim_review_task(conn, t) is not None
+        ctx = kb.build_worker_context(conn, t)
+
+    assert "Changed files at submit" in ctx
+    assert "tracked.py" in ctx
+    assert "No machine diff snapshot" not in ctx
+
+
+@requires_git
+def test_review_context_missing_snapshot_and_workspace_stays_fail_soft(
+    kanban_home, tmp_path, monkeypatch
+):
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    real_capture = kb._capture_review_diff_snapshot
+    with kb.connect_closing() as conn:
+        t = kb.create_task(
+            conn, title="widget", assignee="coder", review_tier="review",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        monkeypatch.setattr(kb, "_capture_review_diff_snapshot", lambda *_a, **_kw: {})
+        assert kb._submit_for_review(
+            conn, t, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+        monkeypatch.setattr(kb, "_capture_review_diff_snapshot", real_capture)
+        repo.rename(tmp_path / "gone")
+
+        assert kb.claim_review_task(conn, t) is not None
+        ctx = kb.build_worker_context(conn, t)
+
+    assert "No machine diff snapshot" in ctx
+
+
+@requires_git
+def test_review_context_does_not_recapture_existing_submit_snapshot(
+    kanban_home, tmp_path, monkeypatch
+):
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(
+            conn, title="widget", assignee="coder", review_tier="review",
+            workspace_kind="dir", workspace_path=str(repo),
+            initial_status="running",
+        )
+        assert kb._submit_for_review(
+            conn, t, result="done", summary="done", metadata=None,
+            verified_cards=[], expected_run_id=None,
+        )
+        event_payload_before = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()["payload"]
+        (repo / "late.py").write_text("late = True\n", encoding="utf-8")
+        capture_calls = 0
+
+        def counted_capture(*_args, **_kwargs):
+            nonlocal capture_calls
+            capture_calls += 1
+            return {"changed_files": ["late.py"]}
+
+        monkeypatch.setattr(kb, "_capture_review_diff_snapshot", counted_capture)
+        assert kb.claim_review_task(conn, t) is not None
+        ctx = kb.build_worker_context(conn, t)
+        event_payload_after = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'submitted_for_review' "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()["payload"]
+
+    assert capture_calls == 0
+    assert event_payload_after == event_payload_before
+    assert "tracked.py" in ctx
+    assert "late.py" not in ctx
+
+
 def test_b2_non_review_complete_leaves_verdict_null(kanban_home):
     """An ordinary coder completion leaves task_runs.verdict NULL."""
     with kb.connect_closing() as conn:
@@ -816,4 +920,3 @@ def test_a2_acceptance_roles_union_into_code_roles(kanban_home):
     assert {"docs", "qa"} <= cfg["code_roles"]
     # Defaults preserved alongside the additions.
     assert frozenset(kb._DEFAULT_REVIEW_CODE_ROLES) <= cfg["code_roles"]
-
