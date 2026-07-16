@@ -399,12 +399,14 @@ export function normalizeUsageWindowLabel(label: string, windowKey: string | nul
 // ─── Ketten-Subtab Hilfsfunktionen ───────────────────────────────────────────
 
 /**
- * ChainChipState: Drei-Zustands-Modell eines Ketten-Chips.
- * - 'active'    = mind. 1 Kind running/scheduled/blocked
- * - 'pending'   = unfertig, nichts aktiv (mind. 1 Kind todo/ready/offen)
- * - 'completed' = ALLE Kinder (und Root) sind done/archived
+ * ChainChipState: Wahrheitsgetreues Zustandsmodell eines Ketten-Chips.
+ * - active    = mind. 1 Kind ist tatsächlich running
+ * - blocked   = kein Kind running, mind. 1 Mitglied blocked
+ * - held      = kein Kind running/blocked, mind. 1 Mitglied scheduled
+ * - pending   = unfertig, nichts aktiv/gehalten (mind. 1 Kind todo/ready/offen)
+ * - completed = ALLE Kinder (und Root) sind done/archived
  */
-export type ChainChipState = "active" | "pending" | "completed";
+export type ChainChipState = "active" | "blocked" | "held" | "pending" | "completed";
 
 /**
  * ChainChipDef: Repräsentation eines Ketten-Chips im Subtab.
@@ -416,7 +418,7 @@ export interface ChainChipDef {
   progress: number;
   done: number;
   total: number;
-  /** Drei-Zustands-Modell: 'active' | 'pending' | 'completed'. */
+  /** Abgeleiteter Kettenzustand; nur running wird als active gezählt. */
   state: ChainChipState;
   /** Zeitstempel des jüngsten completed_at (für Sortierung der fertigen Ketten). */
   completedAt: number | null;
@@ -424,8 +426,7 @@ export interface ChainChipDef {
 
 /**
  * buildChainChips: Gruppiert Board-Tasks nach root_id und leitet Chips ab.
- * Reihenfolge: active zuerst (Fortschritts-Ring), dann pending (Uhr-Glyph),
- * dann completed (✓ grün).
+ * Reihenfolge: active, blocked, held, pending, dann completed (✓ grün).
  *
  * `boardTasks` = ALLE Tasks aus useBoard() (flat, alle Spalten).
  *
@@ -463,12 +464,20 @@ export function buildChainChips(
 
     const total = members.length;
     const done = members.filter((t) => t.status === "done" || t.status === "archived").length;
-    // Drei-Zustands-Ableitung — ausschließlich hier, nie in JSX
-    const isActive = children.some((t) =>
-      t.status === "running" || t.status === "scheduled" || t.status === "blocked",
-    );
+    // Status-Ableitung — ausschließlich hier, nie in JSX. Ein Hold ist nicht aktiv.
+    const hasRunning = children.some((t) => t.status === "running");
+    const hasBlocked = members.some((t) => t.status === "blocked");
+    const hasScheduled = members.some((t) => t.status === "scheduled");
     const isCompleted = done === total;
-    const state: ChainChipState = isActive ? "active" : isCompleted ? "completed" : "pending";
+    const state: ChainChipState = hasRunning
+      ? "active"
+      : hasBlocked
+        ? "blocked"
+        : hasScheduled
+          ? "held"
+          : isCompleted
+            ? "completed"
+            : "pending";
 
     // Root-Titel: der Task, dessen id === rootId (oder erster in der Gruppe).
     const root = members.find((t) => t.id === rootId) ?? members[0];
@@ -481,8 +490,14 @@ export function buildChainChips(
     chips.push({ rootId, label, progress: total > 0 ? done / total : 0, done, total, state, completedAt });
   }
 
-  // Sortierung: active zuerst, dann pending, dann completed (nach completedAt desc)
-  const stateOrder: Record<ChainChipState, number> = { active: 0, pending: 1, completed: 2 };
+  // Sortierung: echte Aktivität zuerst, dann Aufmerksamkeit/Hold, dann offen/fertig.
+  const stateOrder: Record<ChainChipState, number> = {
+    active: 0,
+    blocked: 1,
+    held: 2,
+    pending: 3,
+    completed: 4,
+  };
   chips.sort((a, b) => {
     const oa = stateOrder[a.state];
     const ob = stateOrder[b.state];

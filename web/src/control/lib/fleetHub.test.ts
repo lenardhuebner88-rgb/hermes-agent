@@ -447,7 +447,7 @@ describe("buildChainChips", () => {
     expect(chip!.state).toBe<ChainChipState>("completed");
   });
 
-  it("active vor pending vor completed (Reihenfolge)", () => {
+  it("active vor blockiert, gehalten, pending und completed (Reihenfolge)", () => {
     const tasks = [
       // Fertige Kette (completed)
       makeBoardTask({ id: "rA", title: "Fertig", status: "done", root_id: null, completed_at: NOW - 100 }),
@@ -455,14 +455,18 @@ describe("buildChainChips", () => {
       // Aktive Kette (active)
       makeBoardTask({ id: "rB", title: "Aktiv", status: "done", root_id: null }),
       makeBoardTask({ id: "tB1", title: "Subtask", status: "running", root_id: "rB" }),
+      // Blockierte Kette
+      makeBoardTask({ id: "rC", title: "Blockiert", status: "scheduled", root_id: null }),
+      makeBoardTask({ id: "tC1", title: "Subtask", status: "blocked", root_id: "rC" }),
+      // Gehaltene Kette
+      makeBoardTask({ id: "rD", title: "Gehalten", status: "scheduled", root_id: null }),
+      makeBoardTask({ id: "tD1", title: "Subtask", status: "scheduled", root_id: "rD" }),
       // Wartende Kette (pending: todo-Kind, nichts aktiv)
-      makeBoardTask({ id: "rC", title: "Wartet", status: "done", root_id: null }),
-      makeBoardTask({ id: "tC1", title: "Subtask", status: "todo", root_id: "rC" }),
+      makeBoardTask({ id: "rE", title: "Wartet", status: "done", root_id: null }),
+      makeBoardTask({ id: "tE1", title: "Subtask", status: "todo", root_id: "rE" }),
     ];
     const chips = buildChainChips(tasks);
-    expect(chips[0].rootId).toBe("rB"); // active zuerst
-    expect(chips[1].rootId).toBe("rC"); // pending danach
-    expect(chips[2].rootId).toBe("rA"); // completed zuletzt
+    expect(chips.map((chip) => chip.rootId)).toEqual(["rB", "rC", "rD", "rE", "rA"]);
   });
 
   it("Fortschritt korrekt berechnet (2 von 4 done)", () => {
@@ -515,23 +519,37 @@ describe("buildChainChips", () => {
 
   // ─── Drei-Zustands-Fixtures ────────────────────────────────────────────────
 
-  it("[state=active] mind. 1 Kind running/scheduled/blocked", () => {
+  it("[state=held] scheduled-Kind ohne running bleibt gehalten", () => {
     const tasks = [
       makeBoardTask({ id: "ra", title: "Root", status: "done", root_id: null }),
       makeBoardTask({ id: "ca1", status: "done", root_id: "ra" }),
       makeBoardTask({ id: "ca2", status: "scheduled", root_id: "ra" }),
     ];
     const chip = buildChainChips(tasks).find((c) => c.rootId === "ra");
-    expect(chip!.state).toBe<ChainChipState>("active");
+    expect(chip!.state).toBe<ChainChipState>("held");
   });
 
-  it("[state=active] blocked-Kind gilt als aktiv", () => {
+  it("[state=blocked] blocked-Kind bleibt sichtbar blockiert", () => {
     const tasks = [
       makeBoardTask({ id: "rb", title: "Root", status: "done", root_id: null }),
       makeBoardTask({ id: "cb1", status: "blocked", root_id: "rb" }),
     ];
     const chip = buildChainChips(tasks).find((c) => c.rootId === "rb");
-    expect(chip!.state).toBe<ChainChipState>("active");
+    expect(chip!.state).toBe<ChainChipState>("blocked");
+  });
+
+  it("Live-Hold: Root + Kind scheduled ergeben held; ein running-Kind ergibt active", () => {
+    const heldTasks = [
+      makeBoardTask({ id: "hold-root", title: "Freigabe-Hold", status: "scheduled", root_id: null }),
+      makeBoardTask({ id: "hold-child", status: "scheduled", root_id: "hold-root" }),
+    ];
+    expect(buildChainChips(heldTasks)[0]?.state).toBe<ChainChipState>("held");
+
+    const runningTasks = [
+      ...heldTasks,
+      makeBoardTask({ id: "running-child", status: "running", root_id: "hold-root" }),
+    ];
+    expect(buildChainChips(runningTasks)[0]?.state).toBe<ChainChipState>("active");
   });
 
   it("[state=pending] todo/ready-Kinder ohne aktives Kind → pending NICHT completed (Regressionsfall)", () => {

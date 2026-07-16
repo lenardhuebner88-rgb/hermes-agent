@@ -253,6 +253,34 @@ describe("HeuteTab action block + idle state", () => {
     expect(onNavigate).toHaveBeenCalledWith("plan");
   });
 
+  it("routes the approval hero CTA to Plan with qualified copy", () => {
+    const onNavigate = vi.fn();
+    renderHeute({ blockedCount: 0, pendingItems: [{ kind: "approval", topic: "Freigabe", targetSubtab: "plan" }], onNavigate });
+
+    fireEvent.click(screen.getByRole("button", { name: "Kette im Plan-Tab freigeben und starten" }));
+    expect(onNavigate).toHaveBeenCalledWith("plan");
+  });
+
+  it("routes the blocker hero CTA to Risiko", () => {
+    const onNavigate = vi.fn();
+    renderHeute({ blockedCount: 1, pendingItems: [], onNavigate });
+
+    fireEvent.click(screen.getByRole("button", { name: "Im Risiko-Tab lösen" }));
+    expect(onNavigate).toHaveBeenCalledWith("risiko");
+  });
+
+  it("routes an operator blocker to Risiko instead of Plan", () => {
+    const onNavigate = vi.fn();
+    renderHeute({
+      blockedCount: 1,
+      pendingItems: [{ kind: "blocked", topic: "Deploy halten", targetSubtab: "risiko" }],
+      onNavigate,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Operator-Halt: Deploy halten" }));
+    expect(onNavigate).toHaveBeenCalledWith("risiko");
+  });
+
   it("summarizes remaining blockers without double-counting operator holds", () => {
     renderHeute({
       blockedCount: 3,

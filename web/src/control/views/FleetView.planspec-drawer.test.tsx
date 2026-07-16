@@ -396,6 +396,32 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(pendingCallout?.getAttribute("aria-label")).toBeTruthy();
   });
 
+  it("counts only genuinely running chains in the Ketten subtab badge", () => {
+    hooks.useBoard.mockReturnValue({ data: DEFAULT_BOARD, loading: false, error: null, reload });
+    hooks.usePlanSpecs.mockReturnValue({
+      data: {
+        planspecs: [planSpec, { ...planSpec, path: "/plans/beta.md", filename: "beta.md", topic: "Beta" }],
+        count: 2,
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+
+    renderFleetView();
+
+    const kettenTab = screen.getByRole("button", { name: "Subtab Ketten" });
+    expect(within(kettenTab).getByText("1")).toBeTruthy();
+  });
+
+  it("qualifies the operator approval CTA as a chain release and start action", () => {
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+
+    expect(de.fleet.planFreigeben).toBe("Kette mit dieser Konfiguration freigeben und starten");
+    expect(screen.getByRole("button", { name: de.fleet.planFreigeben })).toBeTruthy();
+  });
+
   it("opens the PlanSpec full-text drawer from Plan tab approval cards", () => {
     renderFleetView();
 
