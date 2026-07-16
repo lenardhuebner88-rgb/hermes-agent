@@ -340,7 +340,9 @@ def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signature
     with kb.connect_closing() as conn:
         task_ids = [
             kb.create_task(conn, title=title, assignee="coder")
-            for title in ("timeout", "protocol", "protocol-repeat", "deliverable")
+            for title in (
+                "timeout", "protocol", "protocol-repeat", "deliverable", "unrelated",
+            )
         ]
         payloads = (
             {"why_now": "settled block", "evidence": {
@@ -356,6 +358,10 @@ def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signature
             {"why_now": "settled block", "evidence": {
                 "trigger_outcome": "deliverable_posted_not_completed",
                 "last_error": ""}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "blocked",
+                "last_error": "unrelated report: user continued without calling "
+                "kanban_complete"}},
         )
         for task_id, payload in zip(task_ids, payloads):
             kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
@@ -372,12 +378,14 @@ def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signature
         kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
         kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
         kb.HEILER_CLASS_OPERATOR_GATED,
+        kb.HEILER_CLASS_UNCLASSIFIED,
     ]
     assert [event.payload["evidence"]["matched"] for event in classifications] == [
         "timed_out",
-        "without calling kanban_complete",
-        "without calling kanban_complete",
+        kb._PROTOCOL_VIOLATION_ERROR,
+        kb._PROTOCOL_VIOLATION_ERROR,
         "deliverable_posted_not_completed",
+        "default",
     ]
     assert kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE in kb.HEILER_CLASSES
     assert ledger["by_class"][kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE] == 2

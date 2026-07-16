@@ -17816,10 +17816,12 @@ _HEILER_TEXT_SIGNALS = (
         # is the same capacity signal, reusing this class (no new class).
         "input-token runaway",
     )),
-    # Keep this precise terminal-call omission ahead of the broad transient
-    # protocol wording below so repeated misses remain visible in by_class.
+    # Match only the canonical worker clean-exit error.  A bare mention of a
+    # missing terminal call in unrelated prose is not protocol noncompliance.
+    # Keep this ahead of the broad transient protocol wording below so repeated
+    # misses remain visible in by_class.
     (HEILER_CLASS_PROTOCOL_NONCOMPLIANCE, (
-        "without calling kanban_complete",
+        _PROTOCOL_VIOLATION_ERROR,
     )),
     (HEILER_CLASS_TRANSIENT, (
         "dirty",
