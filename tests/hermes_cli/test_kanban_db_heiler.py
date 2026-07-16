@@ -1419,6 +1419,73 @@ def test_record_task_failure_escalation_carries_escalation_event_id(kanban_home)
     assert heilers[0].payload["class"] == kb.HEILER_CLASS_REAL_BUG
 
 
+def test_record_task_failure_groups_iteration_budget_digit_variants(kanban_home):
+    """Budget changes keep one production failure cause without collisions."""
+    budget_errors = (
+        (
+            30,
+            "Iteration budget exhausted (30/30) — task could not complete "
+            "within the allowed iterations",
+        ),
+        (
+            60,
+            "Iteration budget exhausted (60/60) — task could not complete "
+            "within the allowed iterations",
+        ),
+    )
+    distinct_errors = (
+        "worker lost heartbeat while compiling",
+        "repository merge conflict blocked checkout",
+    )
+
+    with kb.connect_closing() as conn:
+        def record_two_failures(task_id, errors):
+            for budget, error in errors:
+                assert kb.claim_task(conn, task_id) is not None
+                run_id = conn.execute(
+                    "SELECT current_run_id FROM tasks WHERE id = ?", (task_id,),
+                ).fetchone()["current_run_id"]
+                kb._record_task_failure(
+                    conn,
+                    task_id,
+                    error=error,
+                    outcome="timed_out",
+                    release_claim=True,
+                    end_run=True,
+                    event_payload_extra={
+                        "budget_used": budget,
+                        "budget_max": budget,
+                    },
+                    summary="Iteration budget exhausted",
+                    expected_run_id=run_id,
+                )
+            return [
+                json.loads(row["metadata"])["worker_failure_fingerprint"]
+                for row in conn.execute(
+                    "SELECT metadata FROM task_runs WHERE task_id = ? ORDER BY id",
+                    (task_id,),
+                ).fetchall()
+            ]
+
+        budget_task = kb.create_task(
+            conn, title="changing iteration budget", assignee="coder",
+        )
+        budget_fingerprints = record_two_failures(budget_task, budget_errors)
+        escalation = _escalation_event(conn, budget_task)
+
+        distinct_task = kb.create_task(
+            conn, title="distinct worker failures", assignee="coder",
+        )
+        distinct_fingerprints = record_two_failures(
+            distinct_task,
+            ((30, distinct_errors[0]), (60, distinct_errors[1])),
+        )
+
+    assert budget_fingerprints[0] == budget_fingerprints[1]
+    assert escalation.payload["evidence"]["same_cause_count"] == 2
+    assert distinct_fingerprints[0] != distinct_fingerprints[1]
+
+
 def test_park_budget_runaway_writes_inline_heiler_classification(kanban_home):
     """ESCALATION-INLINE-CLASSIFY-S1 (defense-in-depth): the budget-runaway park
     classifies atomically AT the escalation site — exactly one

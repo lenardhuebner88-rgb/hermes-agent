@@ -16962,6 +16962,7 @@ def _error_fingerprint(error_text: str) -> str:
     with the same root cause produce the same fingerprint.
     """
     fp = re.sub(r"\bpid \d+\b", "pid N", error_text[:80])
+    fp = re.sub(r"\(\d+/\d+\)", "(N/N)", fp)
     fp = re.sub(r"\b\d{10,}\b", "<TS>", fp)
     return fp.lower().strip()
 
