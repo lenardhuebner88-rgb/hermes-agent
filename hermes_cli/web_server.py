@@ -229,6 +229,16 @@ async def _lifespan(app: "FastAPI"):
     # Reap idle/dead keep-alive PTY sessions in the background (30-min TTL).
     pty_reaper_task = asyncio.create_task(run_reaper(PTY_REGISTRY))
 
+    # Frage-Assistent P0a: background scrape poller for standing agent questions.
+    # Kill-switch: HERMES_AGENT_QUESTIONS_POLL=0. Local import keeps the core
+    # import graph free of agent_questions until dashboard startup.
+    from hermes_cli.agent_questions import (
+        start_poller as _start_agent_questions_poller,
+        stop_poller as _stop_agent_questions_poller,
+    )
+
+    _start_agent_questions_poller()
+
     try:
         yield
     finally:
@@ -236,6 +246,7 @@ async def _lifespan(app: "FastAPI"):
         await PTY_REGISTRY.close_all()
         if cron_stop is not None:
             cron_stop.set()
+        _stop_agent_questions_poller()
 
 
 def _get_event_state(app: "FastAPI"):
@@ -17537,6 +17548,23 @@ async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
         return _agent_terminal_service().overview(tail_lines=tail_lines)
     except AgentTerminalError as exc:
         raise _agent_terminal_error(exc) from exc
+
+
+# --- agent questions (Frage-Assistent P0a) ---
+@app.get("/api/agent-questions")
+async def agent_questions_list(
+    status: str = "open",
+    limit: int = 50,
+) -> Dict[str, object]:
+    """List standing/answered agent questions from the scrape store."""
+    from hermes_cli import agent_questions as _agent_questions
+
+    try:
+        questions = _agent_questions.list_question_events(status=status, limit=limit)
+    except Exception as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+    return {"questions": questions}
 
 
 @app.post("/api/agent-terminals/show")
