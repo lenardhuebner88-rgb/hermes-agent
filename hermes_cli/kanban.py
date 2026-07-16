@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime as dt
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -55,6 +57,32 @@ _STATUS_ICONS = {
     "done":     "✓",
     "archived": "—",
 }
+
+_SCHEDULE_DUE_DURATION_RE = re.compile(r"\+(\d+)([smh])$")
+
+
+def _parse_schedule_due(value: str) -> int:
+    """Parse schedule deadlines into Unix epoch seconds."""
+    if value.isdigit():
+        return int(value)
+
+    duration = _SCHEDULE_DUE_DURATION_RE.fullmatch(value)
+    if duration:
+        amount = int(duration.group(1))
+        multiplier = {"s": 1, "m": 60, "h": 3600}[duration.group(2)]
+        return int(time.time()) + amount * multiplier
+
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+        return int(parsed.timestamp())
+
+    raise argparse.ArgumentTypeError(
+        "--due must be Unix epoch seconds, an ISO-8601 timestamp with offset, "
+        "or a relative duration such as +2h, +45m, or +90s"
+    )
 
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -97,6 +125,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "project_id": t.project_id,
         "created_by": t.created_by,
         "created_at": t.created_at,
+        "due_at": t.due_at,
         "started_at": t.started_at,
         "completed_at": t.completed_at,
         "result": t.result,
@@ -725,6 +754,12 @@ def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
     p_schedule.add_argument("reason", nargs="*", help="Reason/timing note (also appended as a comment)")
     p_schedule.add_argument("--ids", nargs="+", default=None,
                             help="Additional task ids to schedule with the same reason (bulk mode)")
+    p_schedule.add_argument(
+        "--due",
+        type=_parse_schedule_due,
+        metavar="WHEN",
+        help="Wake at ISO-8601 offset time, Unix epoch seconds, or +2h/+45m/+90s",
+    )
 
     p_unblock = sub.add_parser("unblock", help="Return one or more blocked/scheduled tasks to ready")
     p_unblock.add_argument(
@@ -2361,6 +2396,8 @@ def _show_print_header(task: Any) -> None:
         else:
             print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
     print(f"  created:   {_fmt_ts(task.created_at)} by {task.created_by or '-'}")
+    if task.due_at is not None:
+        print(f"  due:       {_fmt_ts(task.due_at)}")
 
 
 def _show_print_diagnostics(task: Any, events: Any, runs: Any) -> None:
@@ -3157,6 +3194,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 conn,
                 tid,
                 reason=reason,
+                due_at=getattr(args, "due", None),
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)

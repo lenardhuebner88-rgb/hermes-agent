@@ -15963,6 +15963,7 @@ def schedule_task(
     task_id: str,
     *,
     reason: Optional[str] = None,
+    due_at: Optional[int] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Park a task in ``scheduled`` so it is waiting on time, not human input.
@@ -15972,10 +15973,11 @@ def schedule_task(
     to ``ready`` (or ``todo`` if parents are still incomplete).
     """
     with write_txn(conn):
-        params: list[Any] = [task_id]
+        params: list[Any] = [due_at, task_id]
         sql = """
             UPDATE tasks
                SET status       = 'scheduled',
+                   due_at       = ?,
                    claim_lock   = NULL,
                    claim_expires= NULL,
                    worker_pid   = NULL
