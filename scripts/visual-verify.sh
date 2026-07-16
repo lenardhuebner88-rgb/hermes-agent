@@ -173,7 +173,7 @@ import re
 import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace") if Path(sys.argv[1]).exists() else ""
-match = re.search(r"HERMES_DASHBOARD_READY port=(\d+)", text)
+match = re.search(r"HERMES_(?:DASHBOARD|BACKEND)_READY port=(\d+)", text)
 print(match.group(1) if match else "")
 PY
 )"
