@@ -24107,7 +24107,7 @@ def _dispatch_once_locked(
                 conn,
                 claimed.id,
                 reason,
-                failure_limit=1,
+                failure_limit=failure_limit,
             )
             if auto:
                 result.auto_blocked.append(claimed.id)

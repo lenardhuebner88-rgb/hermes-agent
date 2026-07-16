@@ -726,13 +726,23 @@ def test_dispatch_once_blocks_dirty_worktree_before_worker_spawn(
         task = kb.get_task(conn, tid)
         (Path(task.workspace_path) / "a.txt").write_text("dirty retry\n")
 
+        first_result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        first_task = kb.get_task(conn, tid)
+        first_rejected = _events(conn, tid, "worker_base_rejected")
+
         result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
         task = kb.get_task(conn, tid)
         rejected = _events(conn, tid, "worker_base_rejected")
 
     assert len(spawned) == 1, "dirty retry must not reach the worker spawn"
+    assert first_task.status == "ready"
+    assert first_task.consecutive_failures == 1
+    assert first_result.auto_blocked == []
+    assert len(first_rejected) == 1
     assert task.status == "blocked"
+    assert task.consecutive_failures == kb.DEFAULT_FAILURE_LIMIT
     assert result.auto_blocked == [tid]
+    assert len(rejected) == kb.DEFAULT_FAILURE_LIMIT
     assert "dirty before worker edits" in rejected[-1]["reason"]
 
 
