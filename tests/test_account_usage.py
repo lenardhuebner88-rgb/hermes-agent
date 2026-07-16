@@ -553,6 +553,7 @@ def test_fetch_xai_account_usage_latest_billing_line_wins(tmp_path):
     assert snapshot.details
     assert snapshot.details[0].startswith("Stand: 2026-07-16")
     assert len(snapshot.details) == 1
+    assert snapshot.signal_at == datetime(2026, 7, 16, 9, 47, 14, 767000, tzinfo=timezone.utc)
 
 
 def test_fetch_xai_account_usage_missing_file(tmp_path):

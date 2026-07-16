@@ -198,6 +198,7 @@ const AccountUsageProviderSchema = z.object({
   available: z.boolean().catch(false),
   source: z.string().nullable().catch(null),
   fetched_at: z.string().nullable().catch(null),
+  signal_at: z.string().nullable().catch(null),
   title: z.string().catch("Account limits"),
   plan: z.string().nullable().catch(null),
   windows: z.array(AccountUsageWindowSchema).catch([]),
@@ -211,7 +212,11 @@ export const AccountUsageResponseSchema = z.object({
   cache_ttl_seconds: z.coerce.number().catch(60),
 });
 export type AccountUsageWindow = z.infer<typeof AccountUsageWindowSchema>;
-export type AccountUsageProvider = z.infer<typeof AccountUsageProviderSchema>;
+// signal_at optional on the TS surface so pre-existing Partial fixtures keep
+// typechecking (8-file slice); runtime parse always materializes string|null via .catch.
+export type AccountUsageProvider = Omit<z.infer<typeof AccountUsageProviderSchema>, "signal_at"> & {
+  signal_at?: string | null;
+};
 
 const DictateApkSchema = z.object({
   name: z.string(),

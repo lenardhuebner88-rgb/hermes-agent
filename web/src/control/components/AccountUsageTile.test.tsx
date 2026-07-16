@@ -354,4 +354,76 @@ describe("AccountUsageTile", () => {
     expect(html).toContain("grok log missing");
     expect(html).not.toContain("<article");
   });
+
+  // REAL xai payload shape (SuperGrok weekly) + signal_at age chip semantics.
+  function xaiPayload(signalAtIso: string, fetchedAtIso?: string): AccountUsageResponse {
+    return {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "xai",
+          available: true,
+          source: "grok_log",
+          fetched_at: fetchedAtIso ?? new Date().toISOString(),
+          signal_at: signalAtIso,
+          title: "Grok usage",
+          plan: "SuperGrok",
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            {
+              label: "Diese Woche",
+              window_key: "weekly",
+              used_percent: 21,
+              reset_at: "2026-07-21T00:00:00+00:00",
+              detail: null,
+            },
+          ],
+          details: ["Stand: 2026-07-16 11:47 CEST"],
+        },
+      ],
+    };
+  }
+
+  const xaiCfg: StatsFieldConfig = {
+    ...DEFAULT_STATS_CONFIG,
+    providers: [
+      ...DEFAULT_STATS_CONFIG.providers.filter((p) => p.id !== "xai"),
+      { id: "xai", label: "Grok", lane: null, visible: true },
+    ],
+  };
+
+  it("chip shows Stand 3d (warn) when signal_at is 3 days old", () => {
+    // Pad past the exact 72h boundary: nowSec floors to whole seconds, so
+    // Date.now()-3d can floor to 71h and render "Stand 2d".
+    const signalAt = new Date(Date.now() - (3 * 24 + 1) * 60 * 60 * 1000).toISOString();
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={xaiPayload(signalAt)} loading={false} error={null} config={xaiCfg} />,
+    );
+    expect(html).toContain("Stand 3d");
+    // warn tone on the age chip (SignalChip CHIP.warn)
+    expect(html).toMatch(/border-status-warn\/30[^"]*"[^>]*>[\s\S]*?Stand 3d/);
+    expect(html).not.toContain(">Live</");
+  });
+
+  it("chip shows Live when signal_at is 2 minutes old", () => {
+    const signalAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={xaiPayload(signalAt)} loading={false} error={null} config={xaiCfg} />,
+    );
+    expect(html).toContain(">Live</");
+    expect(html).not.toContain("Stand ");
+  });
+
+  it("chip shows Stand 5h (neutral) when signal_at is 5 hours old", () => {
+    // Pad past exact 5h: nowSec floors Date.now(), so Date.now()-5h floors to 4h.
+    const signalAt = new Date(Date.now() - (5 * 60 + 10) * 60 * 1000).toISOString();
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={xaiPayload(signalAt)} loading={false} error={null} config={xaiCfg} />,
+    );
+    expect(html).toContain("Stand 5h");
+    // neutral tone on the age chip (SignalChip CHIP.neutral)
+    expect(html).toMatch(/border-line bg-surface-2 text-ink-2[^"]*"[^>]*>[\s\S]*?Stand 5h/);
+    expect(html).not.toContain(">Live</");
+  });
 });
