@@ -19,6 +19,21 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep the cli/hermes_constants purge from leaking into later files.
+
+    Both tests below ``sys.modules.pop`` every ``cli*`` / ``hermes_constants``
+    entry and re-import them so ``/save`` resolves against the fixture
+    ``HERMES_HOME``. Without a restore, later files in the same worker keep
+    import-time bindings to the orphaned reimport (module-identity split) —
+    same class as the vision-routing / verification-stop-caching leaks
+    (see ``tests/_module_isolation.py``). ``restore_sys_modules`` snapshots
+    before the test body and puts the table back on teardown.
+    """
+    yield
+
+
 @pytest.fixture
 def hermes_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
