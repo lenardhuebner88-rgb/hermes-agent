@@ -38,6 +38,41 @@ export function fmtMegabytes(size: number): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Versionsnummer aus einem versionierten APK-Namen (`hermes-dictate-1.3-<sha>.apk`). */
+export function apkVersion(name: string): string | null {
+  return /^hermes-dictate-(\d+(?:\.\d+)+)-/.exec(name)?.[1] ?? null;
+}
+
+/**
+ * Ältere Builds ohne Alias-Duplikate des neuesten APKs — `hermes-dictate-latest.apk`
+ * wird als Kopie des versionierten Builds mit ausgeliefert (gleiche Größe, gleicher
+ * Zeitstempel ±5 s) und wäre in der Historie nur Rauschen.
+ */
+export function olderBuilds(artifacts: DictateArtifact[]): DictateArtifact[] {
+  const latest = artifacts[0];
+  if (!latest) return [];
+  return artifacts
+    .slice(1)
+    .filter((a) => !(a.size === latest.size && Math.abs(a.mtime - latest.mtime) <= 5))
+    .slice(0, 5);
+}
+
+/**
+ * „Update verfügbar“-Hinweis, wenn die verbundene App älter meldet als das neueste
+ * versionierte APK. Die Versionsnummer kommt aus dem NEUESTEN Namen mit parsebarer
+ * Version — das mtime-neueste Artefakt ist meist der versionslose `-latest`-Alias.
+ */
+export function updateHint(
+  status: DictateStatusResponse | null,
+  artifacts: DictateArtifact[] | null,
+): string | null {
+  const latest = artifacts?.map((a) => apkVersion(a.name)).find((v) => v !== null) ?? null;
+  const reported = status?.connected ? status.app_version : null;
+  if (!latest || !reported) return null;
+  if (reported === latest || reported.startsWith(`${latest}-`)) return null;
+  return `Update verfügbar: App meldet ${reported}, aktuell ist ${latest}`;
+}
+
 /** Fehlerklassen des Status-Reports → verständliche Ursache + nächster Schritt. */
 export const DICTATE_ERROR_HELP: Record<string, { title: string; help: string }> = {
   no_speech: { title: "Keine Sprache erkannt", help: "Näher ans Mikrofon, kurz warten, erneut tippen." },
@@ -141,8 +176,9 @@ export function DiktatBody({
 }) {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const latest = artifacts?.[0] ?? null;
-  const older = artifacts?.slice(1, 6) ?? [];
+  const older = artifacts ? olderBuilds(artifacts) : [];
   const lastError = status?.last_error ?? null;
+  const update = updateHint(status, artifacts);
 
   const download = (artifact: DictateArtifact) => {
     setDownloadError(null);
@@ -193,6 +229,11 @@ export function DiktatBody({
                   <Download className="h-4 w-4" /> APK laden
                 </button>
               </div>
+              {update ? (
+                <p className="rounded-card border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-status-warn">
+                  {update}
+                </p>
+              ) : null}
               {sha256 ? (
                 <p className="break-all text-xs text-ink-3">
                   sha256 <code className="text-ink-2">{sha256}</code>

@@ -2524,6 +2524,18 @@ async def report_dictate_status(payload: DictateStatusReport):
     return {"ok": True, **snapshot}
 
 
+# Historic install links (Discord, 2026-07-10/13) pointed at APKs inside
+# web_dist, which every dashboard deploy wipes — those URLs now fall through
+# to the SPA and return HTML. Redirect the known legacy names to the Diktat
+# page, which always offers the current artifact with an authed download.
+@app.get("/hermes-dictate.apk")
+@app.get("/hermes-dictate-1.0.apk")
+async def legacy_dictate_apk_redirect():
+    from fastapi.responses import RedirectResponse
+
+    return RedirectResponse(url="/control/diktat", status_code=302)
+
+
 @app.get("/api/artifacts")
 async def list_artifacts():
     """List downloadable artifacts (name, size, mtime) — no directory traversal surface."""

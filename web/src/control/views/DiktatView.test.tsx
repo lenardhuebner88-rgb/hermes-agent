@@ -1,7 +1,15 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { DictateStatusResponse } from "../lib/schemas";
-import { DICTATE_ERROR_HELP, DiktatBody, dictateApks, fmtMegabytes } from "./DiktatView";
+import {
+  DICTATE_ERROR_HELP,
+  DiktatBody,
+  apkVersion,
+  dictateApks,
+  fmtMegabytes,
+  olderBuilds,
+  updateHint,
+} from "./DiktatView";
 
 const status: DictateStatusResponse = {
   schema: "hermes-dictate-status-v1",
@@ -33,7 +41,8 @@ const status: DictateStatusResponse = {
 
 const artifacts = [
   { name: "hermes-dictate-latest.apk", size: 7_556_281, mtime: 1_784_206_400 },
-  { name: "hermes-dictate-1.1-2b75c1931.apk", size: 7_556_281, mtime: 1_784_206_399 },
+  // Byte-identical versioned twin of the latest alias — deduped from the history list.
+  { name: "hermes-dictate-1.3-0322eed96.apk", size: 7_556_281, mtime: 1_784_206_399 },
   { name: "hermes-dictate-wispr-flow-87ed6d36b.apk", size: 7_464_121, mtime: 1_783_899_807 },
 ];
 
@@ -58,6 +67,32 @@ describe("fmtMegabytes", () => {
   });
 });
 
+describe("apkVersion / updateHint / olderBuilds", () => {
+  it("parses versions from versioned names only", () => {
+    expect(apkVersion("hermes-dictate-1.3-0322eed96.apk")).toBe("1.3");
+    expect(apkVersion("hermes-dictate-latest.apk")).toBeNull();
+    expect(apkVersion("hermes-dictate-wispr-flow-87ed6d36b.apk")).toBeNull();
+  });
+
+  it("hints only when a connected app reports an older version", () => {
+    // The newest artifact is the unversioned -latest alias; the version must
+    // come from the newest versioned twin behind it.
+    expect(updateHint(status, artifacts)).toContain("aktuell ist 1.3");
+    expect(updateHint({ ...status, app_version: "1.3" }, artifacts)).toBeNull();
+    expect(updateHint({ ...status, connected: false }, artifacts)).toBeNull();
+    expect(updateHint(null, artifacts)).toBeNull();
+    expect(updateHint(status, [artifacts[0]])).toBeNull();
+    expect(updateHint(status, null)).toBeNull();
+  });
+
+  it("drops byte-identical alias twins from the history", () => {
+    expect(olderBuilds(artifacts).map((a) => a.name)).toEqual([
+      "hermes-dictate-wispr-flow-87ed6d36b.apk",
+    ]);
+    expect(olderBuilds([])).toEqual([]);
+  });
+});
+
 describe("DiktatBody", () => {
   const html = renderToStaticMarkup(
     <DiktatBody
@@ -79,6 +114,12 @@ describe("DiktatBody", () => {
     expect(html).toContain("Tastatur aktivieren");
     expect(html).toContain("Ältere Builds");
     expect(html).toContain("hermes-dictate-wispr-flow-87ed6d36b.apk");
+    // The versioned twin of the latest alias is deduped from the history list.
+    expect(html).not.toContain("hermes-dictate-1.3-0322eed96.apk");
+  });
+
+  it("flags an update when the connected app is older than the latest APK", () => {
+    expect(html).toContain("Update verfügbar: App meldet 1.1, aktuell ist 1.3");
   });
 
   it("highlights the currently reported error class", () => {

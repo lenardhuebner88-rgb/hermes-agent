@@ -417,6 +417,12 @@ class TestWebServerEndpoints:
         )
         assert rejected.status_code == 422
 
+    def test_legacy_dictate_apk_links_redirect_to_diktat_page(self):
+        for path in ("/hermes-dictate.apk", "/hermes-dictate-1.0.apk"):
+            resp = self.client.get(path, follow_redirects=False)
+            assert resp.status_code == 302
+            assert resp.headers["location"] == "/control/diktat"
+
     def test_dictate_status_survives_restart_via_persisted_state(self):
         import hermes_cli.web_server as web_server
         from hermes_constants import get_hermes_home
