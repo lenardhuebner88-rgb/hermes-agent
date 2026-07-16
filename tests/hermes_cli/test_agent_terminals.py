@@ -256,6 +256,52 @@ def test_terminate_live_kills_only_dashboard_managed_live_windows(
         service.terminate_live("work", "scratch-thing")
 
 
+def test_terminate_live_allow_external_kills_foreign_session(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """allow_external=True closes any window on the socket (foreign session)."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    # Seed managed session so the socket is live, then add a foreign session.
+    service.ensure("claude")
+    service._run("new-session", "-d", "-s", "foreign-agent", "-n", "python3", "sleep 60")
+    assert service.window_exists("foreign-agent", "python3")
+
+    # Default path still refuses non-work sessions.
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service.terminate_live("foreign-agent", "python3")
+
+    service.terminate_live("foreign-agent", "python3", allow_external=True)
+    assert not service.window_exists("foreign-agent", "python3")
+
+    # Idempotent second call.
+    service.terminate_live("foreign-agent", "python3", allow_external=True)
+
+
+def test_terminate_live_allow_external_kills_non_parseable_work_window(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """allow_external=True closes non-identity windows in the work session."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    service.ensure("claude")
+    service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sleep 60")
+    assert service.window_exists("work", "scratch-thing")
+
+    with pytest.raises(CapabilityError, match="not a dashboard-managed"):
+        service.terminate_live("work", "scratch-thing")
+
+    service.terminate_live("work", "scratch-thing", allow_external=True)
+    assert not service.window_exists("work", "scratch-thing")
+    service.terminate_live("work", "scratch-thing", allow_external=True)
+
+
 def test_terminate_live_already_killed_window_is_success(
     tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
 ) -> None:

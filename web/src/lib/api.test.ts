@@ -328,4 +328,26 @@ describe("agent terminal worker contract", () => {
     const headers = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers;
     expect(headers.get("Content-Type")).toBe("application/json");
   });
+
+  it("terminateAgentTerminalWindow posts external boolean (default false)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => mockResponse(200, { jsonBody: { ok: true } })));
+
+    await api.terminateAgentTerminalWindow("work", "hermes");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/agent-terminals/terminate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ session: "work", window: "hermes", external: false }),
+      }),
+    );
+
+    await api.terminateAgentTerminalWindow("foreign", "python3", true);
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-terminals/terminate",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ session: "foreign", window: "python3", external: true }),
+      }),
+    );
+  });
 });

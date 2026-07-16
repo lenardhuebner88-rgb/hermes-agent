@@ -697,7 +697,7 @@ function FleetCard({
           <span
             data-testid={`extern-badge-${win.session}:${win.window}`}
             className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
-            title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+            title="Externes Fenster — gehört einem anderen Agenten/Prozess"
           >
             extern
           </span>
@@ -737,8 +737,8 @@ function FleetCard({
       )}
       {/* Two-step close, same guard as the session rail — a single click on a Fleet
           card must never be able to kill a live agent session.
-          Foreign (managed===false) windows stay visible but read-only for close. */}
-      {!dead && managed && (
+          Extern (managed===false) keeps the affordance with sharper confirm chrome. */}
+      {!dead && (
         <div className="flex gap-1.5">
           {terminateArmed ? (
             <>
@@ -749,10 +749,16 @@ function FleetCard({
                   event.stopPropagation();
                   onConfirmTerminate();
                 }}
-                className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/60 bg-status-alert/15 px-2 py-1.5 text-[11px] text-status-alert hover:bg-status-alert/25 disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label={`Beenden bestätigen ${win.session}:${win.window}`}
+                className={cn(
+                  "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
+                  managed
+                    ? "border border-status-alert/60 bg-status-alert/15 hover:bg-status-alert/25"
+                    : "border-2 border-status-alert/70 bg-status-alert/25 hover:bg-status-alert/35",
+                )}
+                aria-label={managed ? `Beenden bestätigen ${win.session}:${win.window}` : `Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. ${win.session}:${win.window}`}
+                title={managed ? undefined : "Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess."}
               >
-                <Check className="h-3 w-3" />Wirklich beenden
+                <Check className="h-3 w-3" />{managed ? "Wirklich beenden" : "Extern wirklich?"}
               </button>
               <button
                 type="button"
@@ -774,10 +780,16 @@ function FleetCard({
                 event.stopPropagation();
                 onTerminate();
               }}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-status-alert/30 px-2 py-1.5 text-[11px] text-status-alert hover:border-status-alert/60 hover:bg-status-alert/10"
-              aria-label={`Session beenden ${win.session}:${win.window}`}
+              className={cn(
+                "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert",
+                managed
+                  ? "border border-status-alert/30 hover:border-status-alert/60 hover:bg-status-alert/10"
+                  : "border-2 border-status-alert/50 bg-status-alert/10 hover:border-status-alert/70 hover:bg-status-alert/20",
+              )}
+              aria-label={managed ? `Session beenden ${win.session}:${win.window}` : `Externes Fenster beenden ${win.session}:${win.window}`}
+              title={managed ? undefined : "Externes Fenster beenden — gehört einem anderen Agenten/Prozess"}
             >
-              <Trash2 className="h-3 w-3" />Session beenden
+              <Trash2 className="h-3 w-3" />{managed ? "Session beenden" : "Extern beenden"}
             </button>
           )}
         </div>
@@ -1530,13 +1542,20 @@ export function AgentTerminalsView() {
   const cancelTerminate = useCallback(() => setPendingTerminate(null), []);
 
   // Close guard, step 2 of 2 — the only path that actually kills a tmux window.
+  // Managed windows keep the two-arg call (external defaults false). Foreign
+  // (managed===false) sends external:true so the backend skips identity guards.
   const confirmTerminate = useCallback(
-    async (win: { session: string; window: string }) => {
+    async (win: AgentTerminalWindow) => {
       actionErrorRef.current = null;
       setError(null);
       setTerminateBusy(true);
       try {
-        await api.terminateAgentTerminalWindow(win.session, win.window);
+        const external = !isManagedWindow(win);
+        if (external) {
+          await api.terminateAgentTerminalWindow(win.session, win.window, true);
+        } else {
+          await api.terminateAgentTerminalWindow(win.session, win.window);
+        }
         // Success: full refresh (capabilities + windows).
         await refresh();
       } catch (err) {
@@ -2105,7 +2124,7 @@ export function AgentTerminalsView() {
                             <span
                               data-testid={`extern-badge-${win.session}:${win.window}`}
                               className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
-                              title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+                              title="Externes Fenster — gehört einem anderen Agenten/Prozess"
                             >
                               extern
                             </span>
@@ -2135,10 +2154,23 @@ export function AgentTerminalsView() {
                         </button>
                       </>
                     )}
-                    {/* Foreign live windows: visible + attachable, no terminate (backend would 503). */}
-                    {!dead && managed && (pendingTerminate === `${win.session}:${win.window}` ? (
+                    {/* Live close: managed keeps the original two-step labels; extern gets a
+                        sharper confirm (external:true) and stronger status-alert chrome. */}
+                    {!dead && (pendingTerminate === `${win.session}:${win.window}` ? (
                       <>
-                        <button type="button" aria-label={`Beenden bestätigen ${win.session}:${win.window}`} title="Wirklich beenden — die laufende Agent-Arbeit geht verloren" disabled={terminateBusy} onClick={() => void confirmTerminate(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft bg-status-alert/20 text-status-alert hover:bg-status-alert/30 disabled:cursor-not-allowed disabled:opacity-40">
+                        <button
+                          type="button"
+                          aria-label={managed ? `Beenden bestätigen ${win.session}:${win.window}` : `Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. ${win.session}:${win.window}`}
+                          title={managed ? "Wirklich beenden — die laufende Agent-Arbeit geht verloren" : "Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess."}
+                          disabled={terminateBusy}
+                          onClick={() => void confirmTerminate(win)}
+                          className={cn(
+                            "grid w-8 shrink-0 place-items-center border-l border-line-soft disabled:cursor-not-allowed disabled:opacity-40",
+                            managed
+                              ? "bg-status-alert/20 text-status-alert hover:bg-status-alert/30"
+                              : "bg-status-alert/30 text-status-alert ring-1 ring-inset ring-status-alert/50 hover:bg-status-alert/40",
+                          )}
+                        >
                           <Check className="h-3.5 w-3.5" />
                         </button>
                         <button type="button" aria-label={`Beenden abbrechen ${win.session}:${win.window}`} title="Abbrechen" disabled={terminateBusy} onClick={cancelTerminate} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40">
@@ -2146,7 +2178,18 @@ export function AgentTerminalsView() {
                         </button>
                       </>
                     ) : (
-                      <button type="button" aria-label={`Session beenden ${win.session}:${win.window}`} title="Laufende Session beenden" onClick={() => requestTerminate(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-status-alert/70 hover:bg-status-alert/10 hover:text-status-alert">
+                      <button
+                        type="button"
+                        aria-label={managed ? `Session beenden ${win.session}:${win.window}` : `Externes Fenster beenden ${win.session}:${win.window}`}
+                        title={managed ? "Laufende Session beenden" : "Externes Fenster beenden — gehört einem anderen Agenten/Prozess"}
+                        onClick={() => requestTerminate(win)}
+                        className={cn(
+                          "grid w-8 shrink-0 place-items-center border-l border-line-soft",
+                          managed
+                            ? "text-status-alert/70 hover:bg-status-alert/10 hover:text-status-alert"
+                            : "bg-status-alert/10 text-status-alert hover:bg-status-alert/20",
+                        )}
+                      >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
                     ))}
@@ -2549,7 +2592,7 @@ export function AgentTerminalsView() {
               <span
                 data-testid={`extern-badge-${selectedWindow.session}:${selectedWindow.window}`}
                 className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
-                title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+                title="Externes Fenster — gehört einem anderen Agenten/Prozess"
               >
                 extern
               </span>
@@ -2610,14 +2653,37 @@ export function AgentTerminalsView() {
         )}
         {/* Same two-step guard as the desktop rail: the first tap arms, the second kills.
             The sheet stays open in between so the armed state is visible where it was armed.
-            Foreign (managed===false) windows stay attachable but offer no terminate. */}
-        {!sessionSheetDead && sessionSheetManaged && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
-          <button type="button" aria-label={`Beenden bestätigen ${selectedWindow.session}:${selectedWindow.window}`} disabled={terminateBusy} onClick={() => { void confirmTerminate(selectedWindow).then(() => setSessionSheetOpen(false)); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/50 bg-status-alert/15 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/25 disabled:cursor-not-allowed disabled:opacity-40">
-            <Check className="h-4 w-4" /><span>Wirklich beenden</span>
+            Extern (managed===false) uses sharper German confirm labels + external:true. */}
+        {!sessionSheetDead && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
+          <button
+            type="button"
+            aria-label={sessionSheetManaged ? `Beenden bestätigen ${selectedWindow.session}:${selectedWindow.window}` : `Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. ${selectedWindow.session}:${selectedWindow.window}`}
+            title={sessionSheetManaged ? undefined : "Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess."}
+            disabled={terminateBusy}
+            onClick={() => { void confirmTerminate(selectedWindow).then(() => setSessionSheetOpen(false)); }}
+            className={cn(
+              "flex flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
+              sessionSheetManaged
+                ? "border border-status-alert/50 bg-status-alert/15 hover:bg-status-alert/25"
+                : "border-2 border-status-alert/70 bg-status-alert/25 hover:bg-status-alert/35",
+            )}
+          >
+            <Check className="h-4 w-4" /><span>{sessionSheetManaged ? "Wirklich beenden" : "Extern wirklich?"}</span>
           </button>
         ) : (
-          <button type="button" aria-label={`Session beenden ${selectedWindow.session}:${selectedWindow.window}`} onClick={() => requestTerminate(selectedWindow)} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
-            <Trash2 className="h-4 w-4" /><span>Session beenden</span>
+          <button
+            type="button"
+            aria-label={sessionSheetManaged ? `Session beenden ${selectedWindow.session}:${selectedWindow.window}` : `Externes Fenster beenden ${selectedWindow.session}:${selectedWindow.window}`}
+            title={sessionSheetManaged ? undefined : "Externes Fenster beenden — gehört einem anderen Agenten/Prozess"}
+            onClick={() => requestTerminate(selectedWindow)}
+            className={cn(
+              "flex flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert",
+              sessionSheetManaged
+                ? "border border-status-alert/25 hover:bg-status-alert/10"
+                : "border-2 border-status-alert/50 bg-status-alert/10 hover:bg-status-alert/20",
+            )}
+          >
+            <Trash2 className="h-4 w-4" /><span>{sessionSheetManaged ? "Session beenden" : "Extern beenden"}</span>
           </button>
         ))}
         <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">

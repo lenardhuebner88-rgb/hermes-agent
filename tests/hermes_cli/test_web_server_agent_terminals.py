@@ -54,8 +54,9 @@ class FakeAgentTerminalService:
     def kill_dead(self, session, window):
         assert (session, window) == ("work", "hermes")
 
-    def terminate_live(self, session, window):
+    def terminate_live(self, session, window, *, allow_external=False):
         assert (session, window) == ("work", "hermes")
+        assert allow_external is False
 
     def capture(self, session, window, *, start=-200):
         assert (session, window, start) == ("work", "hermes", -10)
@@ -127,6 +128,11 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/rename", json={"session": "work", "window": "hermes", "name": "hermes-renamed"}, headers=headers).json()["window"]["window"] == "hermes-renamed"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/terminate", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
+    assert client.post(
+        "/api/agent-terminals/terminate",
+        json={"session": "work", "window": "hermes", "external": False},
+        headers=headers,
+    ).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
     assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
     assert client.post("/api/agent-terminals/handoff-draft", json={"session": "work", "window": "hermes", "start": -12}, headers=headers).json()["draft"]["content"] == "# handoff"
@@ -138,6 +144,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     names = {
         "AgentTerminalEnsureRequest",
         "AgentTerminalTargetRequest",
+        "AgentTerminalTerminateRequest",
         "AgentTerminalRenameRequest",
         "AgentTerminalCaptureRequest",
         "AgentTerminalHandoffDraftRequest",
@@ -149,6 +156,34 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     for name in names:
         fields = set(schemas[name].get("properties", {}))
         assert fields.isdisjoint(forbidden), (name, fields)
+    assert "external" in schemas["AgentTerminalTerminateRequest"].get("properties", {})
+
+
+def test_agent_terminal_terminate_external_flag_reaches_service(monkeypatch):
+    """POST /terminate with external=true passes allow_external to the service."""
+    calls: list[tuple[str, str, bool]] = []
+
+    class ExternalTrackingService(FakeAgentTerminalService):
+        def terminate_live(self, session, window, *, allow_external=False):
+            calls.append((session, window, allow_external))
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: ExternalTrackingService())
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    assert client.post(
+        "/api/agent-terminals/terminate",
+        json={"session": "foreign", "window": "python3", "external": True},
+        headers=headers,
+    ).json() == {"ok": True}
+    assert calls == [("foreign", "python3", True)]
+
+    assert client.post(
+        "/api/agent-terminals/terminate",
+        json={"session": "work", "window": "hermes"},
+        headers=headers,
+    ).json() == {"ok": True}
+    assert calls[-1] == ("work", "hermes", False)
 
 
 def test_four_real_isolated_websockets_keep_distinct_same_session_windows(monkeypatch, tmp_path: Path):

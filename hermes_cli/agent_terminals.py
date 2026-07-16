@@ -906,25 +906,51 @@ class TmuxAgentSessionService:
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
         self._log_event("kill_dead", session=session, window=window)
 
-    def terminate_live(self, session: str, window: str) -> None:
-        """Terminate a dashboard-managed agent window (live or dead).
+    def terminate_live(
+        self, session: str, window: str, *, allow_external: bool = False
+    ) -> None:
+        """Terminate a live (or dead) agent window.
+
+        Default path: dashboard-managed only (session ``work`` + resolvable
+        identity). With ``allow_external=True`` both guards are skipped so any
+        window on the socket may be closed (operator-confirmed foreign kill).
 
         Idempotent close: missing windows succeed (no raise). Dead panes are
-        killed here too — the frontend may hold a stale `dead` flag and call
+        killed here too — the frontend may hold a stale ``dead`` flag and call
         terminate instead of kill-dead; that race must not 503.
-        Guards for non-`work` sessions and non-managed windows are preserved.
         """
         info = self._show_if_present(session, window)
         if info is None:
-            self._log_event("terminate", session=session, window=window, already_gone=True)
+            log_fields: dict[str, object] = {
+                "session": session,
+                "window": window,
+                "already_gone": True,
+            }
+            if allow_external:
+                log_fields["external"] = True
+            self._log_event("terminate", **log_fields)
             return
-        if info.session != "work":
-            raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
-        kind, _workdir = self.identity_for(info.session, info.window)
-        self.cleanup_related_isolated_attaches(info.session, info.window)
+        if not allow_external:
+            if info.session != "work":
+                raise CapabilityError(
+                    f"window {session}:{window} is not a dashboard-managed agent window"
+                )
+            kind, _workdir = self.identity_for(info.session, info.window)
+        else:
+            try:
+                kind, _workdir = self.identity_for(info.session, info.window)
+            except (CapabilityError, InvalidTarget):
+                kind = "external"
+        # Isolated-attach cleanup is only meaningful for managed windows
+        # (source markers are set by dashboard attach of work-session targets).
+        if not allow_external or self.is_managed_window(info.session, info.window):
+            self.cleanup_related_isolated_attaches(info.session, info.window)
         if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
-        self._log_event("terminate", kind=kind, session=session, window=window)
+        log_fields = {"kind": kind, "session": session, "window": window}
+        if allow_external:
+            log_fields["external"] = True
+        self._log_event("terminate", **log_fields)
 
     def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
         """Rename a dashboard-managed window, preserving its respawn identity."""

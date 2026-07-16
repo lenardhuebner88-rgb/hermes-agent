@@ -1436,6 +1436,12 @@ class AgentTerminalTargetRequest(BaseModel):
     window: str
 
 
+class AgentTerminalTerminateRequest(AgentTerminalTargetRequest):
+    """Terminate a window; external=True skips managed-window guards."""
+
+    external: bool = False
+
+
 class AgentTerminalRenameRequest(AgentTerminalTargetRequest):
     name: str
 
@@ -17583,9 +17589,11 @@ async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str,
 
 
 @app.post("/api/agent-terminals/terminate")
-async def agent_terminal_terminate(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+async def agent_terminal_terminate(req: AgentTerminalTerminateRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().terminate_live(req.session, req.window)
+        _agent_terminal_service().terminate_live(
+            req.session, req.window, allow_external=req.external
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"ok": True}
