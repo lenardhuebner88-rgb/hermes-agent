@@ -24,6 +24,15 @@ integration policy; task state transitions (done/blocked, run verdicts)
 stay in ``kanban_db`` hook code. DB access here is limited to workspace
 bookkeeping (``set_workspace_path``, provisioning/integration events,
 receipt comments) via lazy imports so module import never cycles.
+
+Module layout (section order)::
+
+    Config / path predicates
+    Git plumbing
+    Provisioning + chain helpers
+    Release-gate executor (context, visual gate, fixer, activation)
+    Integration (locks, affected tests, quick gates, integrate_chain)
+    Completion hook (maybe_integrate_on_complete)
 """
 
 from __future__ import annotations
@@ -1690,6 +1699,10 @@ def visual_gate_max_retries() -> int:
         pass
     return 3
 
+
+# ---------------------------------------------------------------------------
+# Visual gate (non-MCP dashboard screenshots + Playwright mobile check)
+# ---------------------------------------------------------------------------
 
 def _visual_gate_with_ime_note(detail: str) -> str:
     text = detail or "visual-gate failed"
@@ -3826,6 +3839,10 @@ def _run_gate_in_validation_worktree(
         _cleanup_validation_worktree(repo_root, worktree)
 
 
+# ---------------------------------------------------------------------------
+# Post-merge quick gates (default_quick_gate / fo_integration_gate)
+# ---------------------------------------------------------------------------
+
 def _quick_gate_run_cmd(
     label: str, cmd: list[str], cwd: Path, timeout: int, notes: list[str],
 ) -> Optional[str]:
@@ -4041,6 +4058,10 @@ def fo_integration_gate(repo_root: Path, changed_files: list[str]) -> tuple[bool
         notes.append(_VISUAL_GATE_IME_NOTE)
     return True, "; ".join(notes)
 
+
+# ---------------------------------------------------------------------------
+# integrate_chain (serialized merge into the frozen target)
+# ---------------------------------------------------------------------------
 
 def _integrate_parked(branch: str, reason: str, **extra) -> dict:
     out = {"action": "parked", "reason": reason, "branch": branch}
@@ -4453,6 +4474,10 @@ def integrate_chain(
         finally:
             _release_file_lock(lock)
 
+
+# ---------------------------------------------------------------------------
+# Completion hook (maybe_integrate_on_complete)
+# ---------------------------------------------------------------------------
 
 def _find_open_chain_sibling(
     conn: sqlite3.Connection,
