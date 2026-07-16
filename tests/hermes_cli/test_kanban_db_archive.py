@@ -5,26 +5,29 @@ from __future__ import annotations
 from hermes_cli import kanban_db as kb
 
 
-def test_archive_task_releases_outgoing_dependencies_with_audit_trail(
+def test_archive_task_releases_outgoing_dependencies_and_promotes_remaining_chain(
     kanban_home, all_assignees_spawnable
 ):
     with kb.connect_closing() as conn:
         upstream = kb.create_task(conn, title="upstream", assignee="alice")
+        assert kb.complete_task(conn, upstream)
         archived_parent = kb.create_task(
             conn, title="archive me", assignee="alice", parents=[upstream]
         )
         dependent = kb.create_task(
             conn, title="dependent", assignee="alice", parents=[archived_parent]
         )
+        root = kb.create_task(conn, title="root", assignee="alice", parents=[dependent])
 
         assert kb.archive_task(conn, archived_parent) is True
 
-        links = conn.execute(
-            "SELECT parent_id, child_id FROM task_links ORDER BY parent_id, child_id"
-        ).fetchall()
-        assert [(row["parent_id"], row["child_id"]) for row in links] == [
-            (upstream, archived_parent)
-        ]
+        links = {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        }
+        assert (archived_parent, dependent) not in links
+        assert (upstream, archived_parent) in links
+        assert (dependent, root) in links
         released = [
             event
             for event in kb.list_events(conn, dependent)
@@ -41,12 +44,14 @@ def test_archive_task_releases_outgoing_dependencies_with_audit_trail(
             archived_parent in comment.body and "dependency" in comment.body.lower()
             for comment in comments
         )
-        conn.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (dependent,))
-        heal_summary = kb.no_silent_stall_sweep(conn, min_age_seconds=0)
-        healed_task = kb.get_task(conn, dependent)
-        assert healed_task is not None
-        assert healed_task.status == "scheduled"
-        assert dependent in heal_summary["skipped_archived_chain"]
+        dependent_task = kb.get_task(conn, dependent)
+        assert dependent_task is not None
+        assert dependent_task.status == "ready"
+
+        assert kb.complete_task(conn, dependent)
+        root_task = kb.get_task(conn, root)
+        assert root_task is not None
+        assert root_task.status == "ready"
 
 
 def test_silent_block_sweep_escalates_legacy_archived_dependency_waits(
