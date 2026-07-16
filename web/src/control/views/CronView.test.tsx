@@ -80,9 +80,11 @@ describe("CronView", () => {
     });
   });
 
-  it("renders the title and a gateway-down banner when no data is loaded yet", () => {
+  it("renders the eyebrow and a gateway-down banner when no data is loaded yet", () => {
     const html = renderToStaticMarkup(<CronView density="airy" />);
-    expect(html).toContain("Crons");
+    // Route name lives once in the shared Puls-Leiste (not re-rendered here) —
+    // this view only carries the eyebrow + subtitle band.
+    expect(html).toContain("Geplante Jobs");
     // No data yet → gateway.running defaults false → operator-critical banner shows.
     expect(html).toContain("Gateway läuft nicht");
   });

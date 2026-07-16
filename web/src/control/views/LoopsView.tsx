@@ -2009,7 +2009,6 @@ export function LoopsView() {
       <header>
         <p className="text-[11px] uppercase tracking-[0.2em]" style={{ color: "var(--ln-ink-soft)" }}>{t.eyebrow}</p>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 className="text-[28px] font-semibold md:text-[36px]" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.title}</h2>
           <span className="text-sm" style={{ color: "var(--ln-ink-soft)" }}>{t.subtitle}</span>
         </div>
       </header>

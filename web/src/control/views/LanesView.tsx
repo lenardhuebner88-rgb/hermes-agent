@@ -1536,7 +1536,6 @@ export function LanesView(_props: { density?: Density }) {
 
   return (
     <section aria-label={t.title} className="space-y-4">
-      <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
       {error ? (
         <div className="flex items-center justify-between gap-3 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">
           <span className="flex min-w-0 items-start gap-2"><TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" /><span>{error}</span></span>

@@ -172,7 +172,6 @@ export function CronView(_props: { density: Density }) {
       <header>
         <Eyebrow>{t.eyebrow}</Eyebrow>
         <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-          <h2 className="font-display text-h2 font-semibold text-ink">{t.title}</h2>
           <span className="text-sec text-ink-2">{t.subtitle}</span>
           <StaleBadge isStale={controls.isStale} lastUpdated={controls.lastUpdated} errorObj={controls.errorObj} error={controls.error} now={now} />
         </div>
