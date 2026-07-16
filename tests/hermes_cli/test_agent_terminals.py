@@ -11,6 +11,7 @@ from collections.abc import Generator
 import pytest
 
 from hermes_cli.agent_terminals import (
+    AgentTerminalError,
     CapabilityError,
     InvalidTarget,
     TmuxAgentSessionService,
@@ -240,15 +241,198 @@ def test_terminate_live_kills_only_dashboard_managed_live_windows(
     service.terminate_live(live.session, live.window)
     assert not service.window_exists("work", "claude")
 
+    # Dead pane: terminate_live is now idempotent and kills dead panes too
+    # (stale frontend dead-flag used to route here and 503).
     service._run("set-option", "-g", "remain-on-exit", "on")
     service._run("new-window", "-d", "-t", "work:", "-n", "codex", "sh -c 'exit 0'")
     time.sleep(0.3)
-    with pytest.raises(CapabilityError, match="marked dead"):
-        service.terminate_live("work", "codex")
+    dead = service.show("work", "codex")
+    assert dead.dead or not dead.pid
+    service.terminate_live("work", "codex")
+    assert not service.window_exists("work", "codex")
 
     service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sleep 60")
     with pytest.raises(CapabilityError, match="not a dashboard-managed"):
         service.terminate_live("work", "scratch-thing")
+
+
+def test_terminate_live_already_killed_window_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    live = service.ensure("claude")
+    service.terminate_live(live.session, live.window)
+    assert not service.window_exists("work", "claude")
+
+    # Already gone — must not raise (double-click / race).
+    service.terminate_live("work", "claude")
+
+
+def test_terminate_live_twice_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    live = service.ensure("claude")
+    service.terminate_live(live.session, live.window)
+    service.terminate_live(live.session, live.window)
+    assert not service.window_exists("work", "claude")
+
+
+def test_terminate_live_on_dead_pane_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    service.ensure("claude")  # seed the "work" session
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-window", "-d", "-t", "work:", "-n", "codex", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    dead = service.show("work", "codex")
+    assert dead.dead or not dead.pid
+
+    service.terminate_live("work", "codex")
+    assert not service.window_exists("work", "codex")
+
+
+def test_kill_dead_nonexistent_window_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    # No session / window at all — must not raise CapabilityError via show().
+    service.kill_dead("work", "ghost-window")
+
+
+def test_terminate_live_kill_window_toctou_already_gone_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kill-window CalledProcessError + window already gone → success, not 500."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    real_run = TmuxAgentSessionService._run
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args and args[0] == "kill-window":
+            raise subprocess.CalledProcessError(1, args, output="", stderr="can't find window")
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+
+    # Pre-kill checks see the window; post-kill re-check reports gone (concurrent closer).
+    def fake_exists(self: TmuxAgentSessionService, session: str, window: str) -> bool:
+        if any(c and c[0] == "kill-window" for c in calls):
+            return False
+        return True
+
+    monkeypatch.setattr(TmuxAgentSessionService, "window_exists", fake_exists)
+
+    service.terminate_live("work", "claude")
+    assert any(call and call[0] == "kill-window" for call in calls)
+
+
+def test_kill_dead_kill_window_toctou_already_gone_is_success(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    # Force dead classification via display-message fixture, then fail kill-window.
+    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t\t{home}\n"
+    real_run = TmuxAgentSessionService._run
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args and args[0] == "display-message":
+            return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+        if args and args[0] == "kill-window":
+            raise subprocess.CalledProcessError(1, args, output="", stderr="can't find window")
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    # window_exists: True until kill path re-checks after CalledProcessError.
+    exists_calls = {"n": 0}
+    real_exists = TmuxAgentSessionService.window_exists
+
+    def fake_exists(self: TmuxAgentSessionService, session: str, window: str) -> bool:
+        exists_calls["n"] += 1
+        # First checks (pre-show / pre-kill) must see the window; post-kill re-check gone.
+        if any(c and c[0] == "kill-window" for c in calls):
+            return False
+        return True
+
+    monkeypatch.setattr(TmuxAgentSessionService, "window_exists", fake_exists)
+
+    service.kill_dead("work", "claude")
+    assert any(call and call[0] == "kill-window" for call in calls)
+    # silence unused
+    assert real_exists is not None
+    assert exists_calls["n"] >= 1
+
+
+def test_terminate_live_kill_window_still_present_raises_agent_terminal_error(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    real_run = TmuxAgentSessionService._run
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "kill-window":
+            raise subprocess.CalledProcessError(1, args, output="", stderr="permission denied")
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    # Window still present after failed kill → AgentTerminalError (maps to 503, not 500).
+    monkeypatch.setattr(TmuxAgentSessionService, "window_exists", lambda self, s, w: True)
+
+    with pytest.raises(AgentTerminalError, match="failed to kill"):
+        service.terminate_live("work", "claude")
+
+
+def test_show_display_message_called_process_error_is_not_found(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    service.ensure("claude")
+
+    real_run = TmuxAgentSessionService._run
+
+    def fake_run(self: TmuxAgentSessionService, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "display-message":
+            raise subprocess.CalledProcessError(1, args, output="", stderr="can't find pane")
+        return real_run(self, *args, check=check)
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+
+    with pytest.raises(CapabilityError, match="not found"):
+        service.show("work", "claude")
 
 
 def _patch_display_message(

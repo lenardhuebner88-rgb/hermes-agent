@@ -764,25 +764,67 @@ class TmuxAgentSessionService:
         self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
         return self._spawn_window(definition)
 
+    def _kill_window_idempotent(self, session: str, window: str) -> bool:
+        """Kill a window; treat already-gone as success (TOCTOU-safe).
+
+        Returns True if the window is gone after this call (killed now or
+        already absent), False only when kill failed and the window still
+        exists — in which case the caller should raise.
+        """
+        try:
+            self._run("kill-window", "-t", self._cmd_target(session, window))
+        except subprocess.CalledProcessError:
+            if not self.window_exists(session, window):
+                return True
+            return False
+        return True
+
+    def _show_if_present(self, session: str, window: str) -> TmuxWindow | None:
+        """Like show(), but return None when the window vanished (idempotent close)."""
+        if not self.window_exists(session, window):
+            return None
+        try:
+            return self.show(session, window)
+        except CapabilityError as exc:
+            if "not found" in str(exc) and not self.window_exists(session, window):
+                return None
+            raise
+
     def kill_dead(self, session: str, window: str) -> None:
-        """Remove a dead pane's window — guarded so live sessions cannot be killed."""
-        info = self.show(session, window)
+        """Remove a dead pane's window — guarded so live sessions cannot be killed.
+
+        Idempotent: a window that is already gone is a success (no raise), so
+        double-click / stale UI state does not surface as a permanent 503.
+        """
+        info = self._show_if_present(session, window)
+        if info is None:
+            self._log_event("kill_dead", session=session, window=window, already_gone=True)
+            return
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
         self.cleanup_related_isolated_attaches(info.session, info.window)
-        self._run("kill-window", "-t", self._cmd_target(session, window))
+        if not self._kill_window_idempotent(session, window):
+            raise AgentTerminalError(f"failed to kill window {session}:{window}")
         self._log_event("kill_dead", session=session, window=window)
 
     def terminate_live(self, session: str, window: str) -> None:
-        """Terminate a live dashboard-managed agent window."""
-        info = self.show(session, window)
-        if info.dead:
-            raise CapabilityError(f"window {session}:{window} is marked dead; use kill_dead instead")
+        """Terminate a dashboard-managed agent window (live or dead).
+
+        Idempotent close: missing windows succeed (no raise). Dead panes are
+        killed here too — the frontend may hold a stale `dead` flag and call
+        terminate instead of kill-dead; that race must not 503.
+        Guards for non-`work` sessions and non-managed windows are preserved.
+        """
+        info = self._show_if_present(session, window)
+        if info is None:
+            self._log_event("terminate", session=session, window=window, already_gone=True)
+            return
         if info.session != "work":
             raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
         kind, _workdir = self.identity_for(info.session, info.window)
         self.cleanup_related_isolated_attaches(info.session, info.window)
-        self._run("kill-window", "-t", self._cmd_target(session, window))
+        if not self._kill_window_idempotent(session, window):
+            raise AgentTerminalError(f"failed to kill window {session}:{window}")
         self._log_event("terminate", kind=kind, session=session, window=window)
 
     def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
@@ -807,13 +849,18 @@ class TmuxAgentSessionService:
         target = self._cmd_target(session, window)
         if not self.window_exists(session, window):
             raise CapabilityError(f"window {session}:{window} not found")
-        proc = self._run(
-            "display-message",
-            "-p",
-            "-t",
-            target,
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
-        )
+        try:
+            proc = self._run(
+                "display-message",
+                "-p",
+                "-t",
+                target,
+                "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
+            )
+        except subprocess.CalledProcessError as exc:
+            # Window can vanish between list-panes and display-message (TOCTOU);
+            # surface as the same not-found CapabilityError callers already handle.
+            raise CapabilityError(f"window {session}:{window} not found") from exc
         parts = proc.stdout.rstrip("\n").split("\t")
         pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
         dead = len(parts) > 5 and parts[5] == "1"
