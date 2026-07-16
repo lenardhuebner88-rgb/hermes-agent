@@ -158,7 +158,7 @@ unset HERMES_KANBAN_DB HERMES_KANBAN_BOARD HERMES_PROFILE HERMES_CONFIG
 
 (
   cd "${repo_root}"
-  python3 -m hermes_cli.main serve --host 127.0.0.1 --port 0 --skip-build
+  python3 -m hermes_cli.main dashboard --no-open --host 127.0.0.1 --port 0 --skip-build
 ) >"${server_log}" 2>&1 &
 server_pid=$!
 
