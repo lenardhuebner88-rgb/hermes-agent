@@ -333,6 +333,64 @@ def test_silent_block_sweep_carries_real_run_outcome(
         assert kb.silent_block_task_ids(conn, now=base) == []
 
 
+def test_escalation_sweep_classifies_capacity_protocol_and_deliverable_signatures(
+    kanban_home,
+):
+    """Persisted events retain the new classes and ledger recurrence signal."""
+    with kb.connect_closing() as conn:
+        task_ids = [
+            kb.create_task(conn, title=title, assignee="coder")
+            for title in (
+                "timeout", "protocol", "protocol-repeat", "deliverable", "unrelated",
+            )
+        ]
+        payloads = (
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "timed_out", "last_error": ""}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "blocked",
+                "last_error": "worker exited cleanly (rc=0) without calling "
+                "kanban_complete or kanban_block — protocol violation"}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "blocked",
+                "last_error": "worker exited cleanly (rc=0) without calling "
+                "kanban_complete or kanban_block — protocol violation"}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "deliverable_posted_not_completed",
+                "last_error": ""}},
+            {"why_now": "settled block", "evidence": {
+                "trigger_outcome": "blocked",
+                "last_error": "unrelated report: user continued without calling "
+                "kanban_complete"}},
+        )
+        for task_id, payload in zip(task_ids, payloads):
+            kb._append_event(conn, task_id, kb.OPERATOR_ESCALATION_EVENT, payload)
+        summary = kb.classify_escalations_sweep(conn)
+        classifications = [
+            [event for event in kb.list_events(conn, task_id)
+             if event.kind == kb.HEILER_CLASSIFICATION_EVENT][0]
+            for task_id in task_ids
+        ]
+        ledger = kb.read_escalation_ledger(conn)
+
+    assert [item["class"] for item in summary["classified"]] == [
+        kb.HEILER_CLASS_CAPACITY,
+        kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
+        kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE,
+        kb.HEILER_CLASS_OPERATOR_GATED,
+        kb.HEILER_CLASS_UNCLASSIFIED,
+    ]
+    assert [event.payload["evidence"]["matched"] for event in classifications] == [
+        "timed_out",
+        kb._PROTOCOL_VIOLATION_ERROR,
+        kb._PROTOCOL_VIOLATION_ERROR,
+        "deliverable_posted_not_completed",
+        "default",
+    ]
+    assert kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE in kb.HEILER_CLASSES
+    assert ledger["by_class"][kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE] == 2
+
+
 def test_silent_block_sweep_classifies_missing_spec_block_as_bad_spec(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):

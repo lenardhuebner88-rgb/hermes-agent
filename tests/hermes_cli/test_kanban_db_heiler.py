@@ -885,23 +885,25 @@ def test_s4_classify_failure_structural_resource_outcomes_do_not_default_real_bu
     assert cls == kb.HEILER_CLASS_CAPACITY
     assert ev["signal_source"] == "outcome_fallback"
 
-    for outcome in ("timed_out", "reclaimed"):
-        cls, ev = kb._classify_failure(outcome=outcome)
-        assert cls == kb.HEILER_CLASS_TRANSIENT, outcome
-        assert ev["signal_source"] == "outcome"
+    cls, ev = kb._classify_failure(outcome="timed_out")
+    assert cls == kb.HEILER_CLASS_CAPACITY
+    assert ev["signal_source"] == "outcome"
+
+    cls, ev = kb._classify_failure(outcome="reclaimed")
+    assert cls == kb.HEILER_CLASS_TRANSIENT
+    assert ev["signal_source"] == "outcome"
 
 
-def test_s4_classify_failure_budget_text_capacity_and_protocol_text_transient():
-    """Free-text budget exhaustion -> capacity, while worker-protocol signals
-    remain transient harness faults. This covers gave_up budget paths that keep
-    their 'gave_up' outcome but carry the budget message."""
+def test_s4_classify_failure_budget_text_capacity_and_protocol_text_noncompliance():
+    """Free-text budget exhaustion -> capacity, while a missing terminal
+    Kanban call receives its own protocol-noncompliance class."""
     cls, _ = kb._classify_failure(
         error="iteration budget exhausted; continuation limit exhausted (60/60)")
     assert cls == kb.HEILER_CLASS_CAPACITY
     cls, _ = kb._classify_failure(
         error="worker exited cleanly (rc=0) without calling kanban_complete "
               "or kanban_block — protocol violation")
-    assert cls == kb.HEILER_CLASS_TRANSIENT
+    assert cls == kb.HEILER_CLASS_PROTOCOL_NONCOMPLIANCE
 
 
 def test_s4_classify_failure_missing_spec_bad_spec():
