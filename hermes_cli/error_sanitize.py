@@ -16,7 +16,12 @@ _POSIX_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9:])"
     r"/(?!api(?:/|$))"
     r"(?:"
-    r"(?:home|tmp|var|Users)(?:/[^\s'\"\)\]\}>:,;]*)*"
+    # Named absolute-path roots. Depth-1 forms like /root or /etc are matched
+    # here (via the allowlist) rather than by the generic branch below, so a
+    # bare /segment that is NOT a known system root (e.g. a URL host after
+    # http://) is never scrubbed — which keeps this list, not the slash count,
+    # the thing that decides a single-segment redaction.
+    r"(?:home|tmp|var|Users|root|etc|opt|srv|boot|mnt|usr|proc|sys|dev)(?:/[^\s'\"\)\]\}>:,;]*)*"
     r"|"
     r"(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-][^\s'\"\)\]\}>:,;]*"
     r")"

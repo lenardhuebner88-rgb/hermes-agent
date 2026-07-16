@@ -46,6 +46,43 @@ def test_safe_detail_logs_and_returns_scrubbed_message(caplog):
     assert "/home/piet/.hermes/config.yaml" in caplog.text
 
 
+def test_scrub_detail_strips_single_segment_system_dirs():
+    # Depth-1 absolute paths to known system roots leak sensitive location info
+    # (e.g. PermissionError: "[Errno 13] Permission denied: '/root'").
+    for d in ("root", "etc", "opt", "srv", "boot", "mnt", "usr", "proc", "sys", "dev"):
+        out = scrub_detail(f"Permission denied: /{d}")
+        assert out == "Permission denied: <path>", (d, out)
+
+
+def test_scrub_detail_strips_double_slash_system_path():
+    # Valid double-slash POSIX forms must still be redacted, not leaked.
+    assert "root" not in scrub_detail("Permission denied: //root")
+    assert "<path>" in scrub_detail("Permission denied: //root")
+    assert "passwd" not in scrub_detail("leak //etc/passwd here")
+
+
+def test_scrub_detail_does_not_scrub_nonsystem_single_segment():
+    # The allowlist — not the slash count — decides a depth-1 redaction, so a
+    # bare /segment that is not a known system root is left untouched.
+    assert scrub_detail("see /nonsystem leaf") == "see /nonsystem leaf"
+    assert scrub_detail("token /abc123") == "token /abc123"
+
+
+def test_scrub_detail_preserves_urls():
+    # Extending the allowlist must not regress URL handling: scheme URLs with a
+    # bare host or a double-slash path segment stay byte-identical.
+    assert scrub_detail("Error fetching http://example.com") == "Error fetching http://example.com"
+    assert (
+        scrub_detail("GET https://example.com//health failed")
+        == "GET https://example.com//health failed"
+    )
+
+
+def test_scrub_detail_no_overscrub_word_internal_slashes():
+    for s in ("use and/or here", "ratio 24/7 uptime", "read/write access denied"):
+        assert scrub_detail(s) == s, s
+
+
 def test_safe_detail_uses_generic_for_traceback_like_message(caplog):
     log = logging.getLogger("tests.error_sanitize.generic")
     caplog.set_level(logging.ERROR, logger=log.name)
