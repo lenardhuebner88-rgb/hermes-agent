@@ -225,6 +225,21 @@ const DictateApkSchema = z.object({
   mtime: z.coerce.number().catch(0),
 });
 
+// Diktat Stufe 11 — one finalized day's metric snapshot (history entry or the
+// live `today` delta). `.catch()` per field so a single corrupt day degrades
+// field-by-field instead of dropping the whole document.
+const DictateHistoryDaySchema = z.object({
+  date: z.string().catch(""),
+  dictations: z.coerce.number().catch(0),
+  failures: z.coerce.number().catch(0),
+  retries: z.coerce.number().catch(0),
+  busy: z.coerce.number().catch(0),
+  success_rate_percent: z.coerce.number().nullable().catch(null),
+  latency_p50_ms: z.coerce.number().nullable().catch(null),
+  latency_p95_ms: z.coerce.number().nullable().catch(null),
+});
+export type DictateHistoryDay = z.infer<typeof DictateHistoryDaySchema>;
+
 export const DictateStatusResponseSchema = z.object({
   schema: z.literal("hermes-dictate-status-v1"),
   connected: z.boolean().catch(false),
@@ -246,6 +261,13 @@ export const DictateStatusResponseSchema = z.object({
   latency_p50_ms: z.coerce.number().nullable().catch(null),
   latency_p95_ms: z.coerce.number().nullable().catch(null),
   apk: DictateApkSchema.nullable().catch(null),
+  // Stufe 11, additive: `.optional()` keeps these backward-compatible with
+  // object literals written against the pre-Stufe-11 shape (e.g. other
+  // components' test fixtures) — undefined and "present but malformed" both
+  // normalize to []/null at the point of use (DictateTrend), same effective
+  // fallback a plain `.catch()` would give a genuinely-missing key.
+  history: z.array(DictateHistoryDaySchema).optional().catch([]),
+  today: DictateHistoryDaySchema.nullable().optional().catch(null),
 });
 export type DictateStatusResponse = z.infer<typeof DictateStatusResponseSchema>;
 

@@ -26,6 +26,7 @@ import inspect
 import importlib.util
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -2544,6 +2545,19 @@ _DICTATE_STATUS: Dict[str, Any] = {
     "latency_ms": None,
 }
 _DICTATE_LATENCY_SAMPLES: List[int] = []
+# Diktat Stufe 11 — daily metric history. `_DICTATE_DAY` tracks the running
+# day (baseline = cumulative counters at day start, so today's delta is
+# always `_DICTATE_STATUS[key] - baseline[key]`); empty dict means "no day
+# yet" (fresh install, never reported). `_DICTATE_HISTORY` holds only
+# FINALIZED days (chronological, oldest first), hard-capped at 30 — a day
+# with zero activity delta never gets a history entry (gaps are fine, the
+# frontend shows the date). Both mutated in place (never reassigned) so
+# `_load_dictate_status` can update them without a `global` declaration,
+# matching `_DICTATE_STATUS`'s existing style.
+_DICTATE_DAY: Dict[str, Any] = {}
+_DICTATE_HISTORY: List[Dict[str, Any]] = []
+_DICTATE_HISTORY_MAX_DAYS = 30
+_DICTATE_DAY_LATENCY_MAX_SAMPLES = 200
 _DICTATE_ENGINES = {"on_device", "cloud"}
 _DICTATE_LANGUAGES = {"system", "german", "english", "auto"}
 _DICTATE_STATUS_STYLES = {"auto", "formal", "casual", "concise", "neutral"}
@@ -2564,6 +2578,63 @@ def _dictate_state_path() -> Path:
     return get_hermes_home() / "state" / "dictate-status.json"
 
 
+# Stufe 11 counter/latency shape reused by both the history-entry and the
+# day-state validators below (kept as bare module-level sets, same idiom as
+# _counter_keys inside _load_dictate_status).
+_DICTATE_DAY_COUNTER_KEYS = ("dictations", "failures", "retries", "busy")
+
+
+def _valid_dictate_history_entry(value: Any) -> bool:
+    """Type-guard for one persisted history entry — see _load_dictate_status."""
+    if not isinstance(value, dict):
+        return False
+    if not isinstance(value.get("date"), str) or not value["date"]:
+        return False
+    for key in _DICTATE_DAY_COUNTER_KEYS:
+        count = value.get(key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return False
+    rate = value.get("success_rate_percent")
+    if rate is not None and (isinstance(rate, bool) or not isinstance(rate, (int, float))):
+        return False
+    for key in ("latency_p50_ms", "latency_p95_ms"):
+        latency = value.get(key)
+        if latency is not None and (
+            not isinstance(latency, int) or isinstance(latency, bool) or latency < 0
+        ):
+            return False
+    return True
+
+
+def _sanitized_dictate_history_entry(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "date": value["date"],
+        "dictations": value["dictations"],
+        "failures": value["failures"],
+        "retries": value["retries"],
+        "busy": value["busy"],
+        "success_rate_percent": value.get("success_rate_percent"),
+        "latency_p50_ms": value.get("latency_p50_ms"),
+        "latency_p95_ms": value.get("latency_p95_ms"),
+    }
+
+
+def _valid_dictate_day(value: Any) -> bool:
+    """Type-guard for the persisted running-day state — see _load_dictate_status."""
+    if not isinstance(value, dict):
+        return False
+    if not isinstance(value.get("date"), str) or not value["date"]:
+        return False
+    baseline = value.get("baseline")
+    if not isinstance(baseline, dict):
+        return False
+    for key in _DICTATE_DAY_COUNTER_KEYS:
+        count = baseline.get(key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return False
+    return isinstance(value.get("latency_samples"), list)
+
+
 def _load_dictate_status() -> None:
     try:
         raw = json.loads(_dictate_state_path().read_text(encoding="utf-8"))
@@ -2573,6 +2644,8 @@ def _load_dictate_status() -> None:
         return
     status = raw.get("status")
     samples = raw.get("latency_samples")
+    history = raw.get("history")
+    day = raw.get("day")
     # Per-field type guards: a hand-edited or corrupted state file must not
     # poison the counters (a str "dictations" would TypeError every report).
     _counter_keys = {"dictations", "failures", "retries", "busy"}
@@ -2600,13 +2673,52 @@ def _load_dictate_status() -> None:
                 int(value) for value in samples[-100:]
                 if isinstance(value, (int, float)) and 0 <= value <= 120_000
             ]
+        # Stufe 11: history/day are ADDITIVE — a corrupt/mistyped file for
+        # either must never poison (or 500 on) the Stufe-1 counters above,
+        # and never poisons each other either. Same per-item filtering idiom
+        # as the samples list: outer-type gate, then keep only valid items.
+        if isinstance(history, list):
+            valid_entries = [
+                _sanitized_dictate_history_entry(entry)
+                for entry in history
+                if _valid_dictate_history_entry(entry)
+            ]
+            if len(valid_entries) != len(history):
+                _log.warning(
+                    "dictate-status: dropped %d corrupt history entries",
+                    len(history) - len(valid_entries),
+                )
+            _DICTATE_HISTORY[:] = valid_entries[-_DICTATE_HISTORY_MAX_DAYS:]
+        elif history is not None:
+            _log.warning("dictate-status: corrupt 'history' field (expected list), ignoring")
+        if _valid_dictate_day(day):
+            _DICTATE_DAY.clear()
+            _DICTATE_DAY.update({
+                "date": day["date"],
+                "baseline": {key: day["baseline"][key] for key in _DICTATE_DAY_COUNTER_KEYS},
+                "latency_samples": [
+                    int(value) for value in day["latency_samples"][-_DICTATE_DAY_LATENCY_MAX_SAMPLES:]
+                    if isinstance(value, (int, float)) and not isinstance(value, bool)
+                    and 0 <= value <= 120_000
+                ],
+            })
+        elif day is not None:
+            _log.warning("dictate-status: corrupt 'day' field, ignoring")
 
 
 def _persist_dictate_status(
-    status: Dict[str, Any], samples: List[int],
+    status: Dict[str, Any],
+    samples: List[int],
+    history: List[Dict[str, Any]],
+    day: Dict[str, Any],
 ) -> None:
     """Write the current snapshot to disk; never fails the report request."""
-    payload = json.dumps({"status": status, "latency_samples": samples[-100:]})
+    payload = json.dumps({
+        "status": status,
+        "latency_samples": samples[-100:],
+        "history": history[-_DICTATE_HISTORY_MAX_DAYS:],
+        "day": day,
+    })
     target = _dictate_state_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2649,12 +2761,104 @@ def _dictate_percentile(values: List[int], percentile: float) -> Optional[int]:
     return ordered[index]
 
 
+def _dictate_today() -> str:
+    """Local-server-time date boundary (contract: Europe/Berlin, i.e. this
+    process's local time, not UTC). A dedicated seam so tests can pin the
+    "current day" without touching the real clock."""
+    return datetime.now().date().isoformat()
+
+
+def _dictate_day_nearest_rank_percentile(values: List[int], percentile: float) -> Optional[int]:
+    """Nearest-rank percentile (ceil(p*n)-th smallest of the sorted sample),
+    int ms. Deliberately a DIFFERENT formula than ``_dictate_percentile``
+    above (which stays unchanged for the existing top-level
+    ``latency_p50_ms``/``latency_p95_ms`` fields) — Stufe 11's contract
+    fixes nearest-rank for history/today entries specifically."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    n = len(ordered)
+    rank = max(1, math.ceil(percentile * n))
+    return ordered[min(rank, n) - 1]
+
+
+def _dictate_day_deltas_locked(day: Dict[str, Any]) -> Dict[str, int]:
+    """Delta of the current cumulative counters vs. a day's baseline. Caller
+    must hold ``_DICTATE_STATUS_LOCK``."""
+    baseline = day["baseline"]
+    return {
+        key: _DICTATE_STATUS[key] - baseline[key]
+        for key in _DICTATE_DAY_COUNTER_KEYS
+    }
+
+
+def _dictate_day_snapshot_locked(day: Dict[str, Any], *, date: str) -> Dict[str, Any]:
+    """Shared shape for both a finalized history entry and the live
+    ``today`` snapshot — deltas + percentiles computed identically in both
+    places. ``success_rate_percent`` mirrors the existing top-level
+    computation exactly (dictations / (dictations+failures) * 100), just
+    applied to this day's DELTA counts instead of the all-time cumulative
+    ones. Caller must hold ``_DICTATE_STATUS_LOCK``.
+    """
+    deltas = _dictate_day_deltas_locked(day)
+    attempts = deltas["dictations"] + deltas["failures"]
+    return {
+        "date": date,
+        **deltas,
+        "success_rate_percent": (
+            round(deltas["dictations"] * 100 / attempts, 1) if attempts else None
+        ),
+        "latency_p50_ms": _dictate_day_nearest_rank_percentile(day["latency_samples"], 0.50),
+        "latency_p95_ms": _dictate_day_nearest_rank_percentile(day["latency_samples"], 0.95),
+    }
+
+
+def _dictate_new_day_state_locked(date: str) -> Dict[str, Any]:
+    """A fresh running-day state, baselined at the CURRENT cumulative
+    counters (so the day's own delta starts at zero). Caller must hold
+    ``_DICTATE_STATUS_LOCK``."""
+    return {
+        "date": date,
+        "baseline": {key: _DICTATE_STATUS[key] for key in _DICTATE_DAY_COUNTER_KEYS},
+        "latency_samples": [],
+    }
+
+
+def _dictate_rollover_day_if_needed_locked() -> None:
+    """Finalize the stored running day into history once its date is stale,
+    then (re)start a fresh day for today. Must run BEFORE the incoming
+    event is applied to ``_DICTATE_STATUS`` — the finalized day's delta is
+    computed against counters that do NOT yet include this event, and the
+    new day's baseline is exactly that same pre-event snapshot. A
+    multi-day gap (server down, no reports) finalizes the stored day ONCE
+    on its own date — no backfilling of the skipped days in between. Caller
+    must hold ``_DICTATE_STATUS_LOCK``.
+    """
+    today = _dictate_today()
+    if _DICTATE_DAY and _DICTATE_DAY["date"] == today:
+        return
+    if _DICTATE_DAY:
+        deltas = _dictate_day_deltas_locked(_DICTATE_DAY)
+        if deltas["dictations"] + deltas["failures"] > 0:
+            _DICTATE_HISTORY.append(
+                _dictate_day_snapshot_locked(_DICTATE_DAY, date=_DICTATE_DAY["date"])
+            )
+            del _DICTATE_HISTORY[:-_DICTATE_HISTORY_MAX_DAYS]
+    _DICTATE_DAY.clear()
+    _DICTATE_DAY.update(_dictate_new_day_state_locked(today))
+
+
 @app.get("/api/dictate/status")
 async def get_dictate_status():
     """Return metadata-only Dictate health; never audio or dictated text."""
     with _DICTATE_STATUS_LOCK:
         status = dict(_DICTATE_STATUS)
         latencies = list(_DICTATE_LATENCY_SAMPLES)
+        history = list(_DICTATE_HISTORY)
+        today = (
+            _dictate_day_snapshot_locked(_DICTATE_DAY, date=_DICTATE_DAY["date"])
+            if _DICTATE_DAY else None
+        )
     attempts = status["dictations"] + status["failures"]
     return {
         "schema": "hermes-dictate-status-v1",
@@ -2664,6 +2868,8 @@ async def get_dictate_status():
         "latency_p50_ms": _dictate_percentile(latencies, 0.50),
         "latency_p95_ms": _dictate_percentile(latencies, 0.95),
         "apk": _latest_dictate_artifact(),
+        "history": history,
+        "today": today,
     }
 
 
@@ -2695,6 +2901,10 @@ async def report_dictate_status(payload: DictateStatusReport):
         raise HTTPException(status_code=400, detail="Invalid dictation error")
 
     with _DICTATE_STATUS_LOCK:
+        # Stufe 11: roll the day over BEFORE this event is accounted for, so
+        # a finalized history entry's delta never includes it and the fresh
+        # day's baseline is the exact pre-event snapshot.
+        _dictate_rollover_day_if_needed_locked()
         _DICTATE_STATUS.update({
             "last_contact_at": int(time.time()),
             "app_version": app_version,
@@ -2713,6 +2923,8 @@ async def report_dictate_status(payload: DictateStatusReport):
             if payload.latency_ms is not None:
                 _DICTATE_LATENCY_SAMPLES.append(payload.latency_ms)
                 del _DICTATE_LATENCY_SAMPLES[:-100]
+                _DICTATE_DAY["latency_samples"].append(payload.latency_ms)
+                del _DICTATE_DAY["latency_samples"][:-_DICTATE_DAY_LATENCY_MAX_SAMPLES]
         elif event == "failure":
             _DICTATE_STATUS["failures"] += 1
             _DICTATE_STATUS["last_error"] = last_error
@@ -2722,7 +2934,13 @@ async def report_dictate_status(payload: DictateStatusReport):
             _DICTATE_STATUS["retries"] += 1
         snapshot = dict(_DICTATE_STATUS)
         samples = list(_DICTATE_LATENCY_SAMPLES)
-    _persist_dictate_status(snapshot, samples)
+        history_snapshot = list(_DICTATE_HISTORY)
+        day_snapshot = {
+            "date": _DICTATE_DAY["date"],
+            "baseline": dict(_DICTATE_DAY["baseline"]),
+            "latency_samples": list(_DICTATE_DAY["latency_samples"]),
+        }
+    _persist_dictate_status(snapshot, samples, history_snapshot, day_snapshot)
     return {"ok": True, **snapshot}
 
 

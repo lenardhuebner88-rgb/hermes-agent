@@ -512,6 +512,286 @@ class TestWebServerEndpoints:
         }
         assert self.client.post("/api/dictate/status", json=report).status_code == 200
 
+    def _reset_dictate_metrics_state(self):
+        """Cold-start the Stufe-1 counters/samples AND the Stufe-11
+        history/running-day state before a metric-history test — other
+        tests in this class (same subprocess) leave residue behind."""
+        import hermes_cli.web_server as web_server
+
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({
+                "last_contact_at": None, "app_version": None, "engine": None,
+                "language": None, "style": None, "surface": None,
+                "microphone_permission": None, "service_enabled": None,
+                "last_error": None, "dictations": 0, "failures": 0,
+                "retries": 0, "busy": 0, "latency_ms": None,
+            })
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+            web_server._DICTATE_HISTORY.clear()
+            web_server._DICTATE_DAY.clear()
+        return web_server
+
+    def _dictate_report(self, **overrides):
+        report = {
+            "app_version": "1.4", "engine": "on_device", "language": "german",
+            "style": "formal", "surface": "overlay",
+            "microphone_permission": True, "service_enabled": True,
+            "event": "success", "latency_ms": 500,
+        }
+        report.update(overrides)
+        return report
+
+    def test_dictate_history_today_reflects_same_day_events(self, monkeypatch):
+        """Done-when 1: events on a single day → GET's `today` carries the
+        correct deltas + nearest-rank percentiles; `history` stays empty
+        (nothing finalized yet)."""
+        web_server = self._reset_dictate_metrics_state()
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-01")
+
+        for latency in (100, 200, 300):
+            assert self.client.post(
+                "/api/dictate/status",
+                json=self._dictate_report(event="success", latency_ms=latency),
+            ).status_code == 200
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="failure", latency_ms=None, last_error="no_speech"),
+        ).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        assert body["history"] == []
+        today = body["today"]
+        assert today["date"] == "2026-07-01"
+        assert today["dictations"] == 3
+        assert today["failures"] == 1
+        assert today["retries"] == 0
+        assert today["busy"] == 0
+        assert today["success_rate_percent"] == round(100 * 3 / 4, 1)
+        assert today["latency_p50_ms"] == 200  # nearest-rank median of [100,200,300]
+        assert today["latency_p95_ms"] == 300
+
+    def test_dictate_history_finalizes_previous_day_on_rollover(self, monkeypatch):
+        """Done-when 2: the date changes → the NEXT event finalizes the
+        previous day into `history` (deltas + p50/p95 from that day's
+        samples, success_rate mirroring the existing instant-status
+        formula); `today` restarts fresh with a new baseline."""
+        web_server = self._reset_dictate_metrics_state()
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-01")
+
+        for latency in (100, 300):
+            assert self.client.post(
+                "/api/dictate/status",
+                json=self._dictate_report(event="success", latency_ms=latency),
+            ).status_code == 200
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="failure", latency_ms=None, last_error="no_speech"),
+        ).status_code == 200
+
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-02")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=500),
+        ).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        assert len(body["history"]) == 1
+        finalized = body["history"][0]
+        assert finalized["date"] == "2026-07-01"
+        assert finalized["dictations"] == 2
+        assert finalized["failures"] == 1
+        assert finalized["success_rate_percent"] == round(100 * 2 / 3, 1)
+        assert finalized["latency_p50_ms"] == 100  # nearest-rank of [100,300]: rank=ceil(1)=1
+        assert finalized["latency_p95_ms"] == 300  # rank=ceil(1.9)=2
+
+        today = body["today"]
+        assert today["date"] == "2026-07-02"
+        assert today["dictations"] == 1
+        assert today["failures"] == 0
+        assert today["success_rate_percent"] == 100.0
+        assert today["latency_p50_ms"] == 500
+
+    def test_dictate_history_multi_day_gap_finalizes_only_stored_day(self, monkeypatch):
+        """Done-when 3: a multi-day gap (server down / no reports) finalizes
+        the ONE stored day on its own date — no backfilling of the skipped
+        days in between."""
+        web_server = self._reset_dictate_metrics_state()
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-01")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=150),
+        ).status_code == 200
+
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-06")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=250),
+        ).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        assert len(body["history"]) == 1
+        assert body["history"][0]["date"] == "2026-07-01"
+        assert body["history"][0]["dictations"] == 1
+        dates_in_history = {entry["date"] for entry in body["history"]}
+        assert "2026-07-02" not in dates_in_history
+        assert "2026-07-06" not in dates_in_history  # today — not finalized
+        assert body["today"]["date"] == "2026-07-06"
+
+    def test_dictate_history_skips_day_with_zero_dictation_failure_delta(self, monkeypatch):
+        """Done-when 4: a day whose delta dictations+failures is 0 (only
+        retry/contact events) produces NO history entry on rollover."""
+        web_server = self._reset_dictate_metrics_state()
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-01")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="retry", latency_ms=None),
+        ).status_code == 200
+
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-07-02")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=400),
+        ).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        assert body["history"] == []
+        assert body["today"]["date"] == "2026-07-02"
+        assert body["today"]["dictations"] == 1
+
+    def test_dictate_history_bounded_to_30_days_oldest_dropped(self, monkeypatch):
+        """Done-when 5: 31+ active days simulated → history caps at exactly
+        30 entries, the oldest evicted, chronological order preserved."""
+        import datetime as _dt
+
+        web_server = self._reset_dictate_metrics_state()
+        start = _dt.date(2026, 1, 1)
+        dates = [(start + _dt.timedelta(days=i)).isoformat() for i in range(32)]
+
+        for i, date in enumerate(dates):
+            monkeypatch.setattr(web_server, "_dictate_today", lambda d=date: d)
+            assert self.client.post(
+                "/api/dictate/status",
+                json=self._dictate_report(event="success", latency_ms=100 + i),
+            ).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        assert len(body["history"]) == 30
+        history_dates = [entry["date"] for entry in body["history"]]
+        # dates[0] (oldest, day 1) evicted; dates[31] (day 32) is still "today".
+        assert history_dates == dates[1:31]
+        assert history_dates == sorted(history_dates)
+        assert body["today"]["date"] == dates[31]
+
+    def test_dictate_history_corrupt_field_falls_back_to_empty(self):
+        """Done-when 6: a wrong-typed `history` field in the state file →
+        GET stays 200 with an EMPTY history, while the rest of the state
+        (counters, `today`) stays intact — never a 500."""
+        web_server = self._reset_dictate_metrics_state()
+        from hermes_constants import get_hermes_home
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "status": {"app_version": "1.4", "dictations": 5, "failures": 1},
+            "latency_samples": [200, 300],
+            "history": "not-a-list-at-all",
+            "day": {
+                "date": "2026-07-01",
+                "baseline": {"dictations": 5, "failures": 1, "retries": 0, "busy": 0},
+                "latency_samples": [200],
+            },
+        }), encoding="utf-8")
+
+        web_server._load_dictate_status()
+
+        response = self.client.get("/api/dictate/status")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["history"] == []
+        assert body["app_version"] == "1.4"
+        assert body["dictations"] == 5
+        assert body["today"]["date"] == "2026-07-01"
+
+    def test_dictate_history_survives_restart_via_persisted_state(self, monkeypatch):
+        """Done-when 7: restart proof (pattern of
+        test_dictate_status_survives_restart_via_persisted_state) — a
+        finalized history entry + the running day both survive a wipe of
+        in-memory state followed by `_load_dictate_status()`."""
+        web_server = self._reset_dictate_metrics_state()
+        from hermes_constants import get_hermes_home
+
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-08-01")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=120),
+        ).status_code == 200
+
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-08-02")
+        assert self.client.post(
+            "/api/dictate/status",
+            json=self._dictate_report(event="success", latency_ms=340),
+        ).status_code == 200
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert len(persisted["history"]) == 1
+        assert persisted["history"][0]["date"] == "2026-08-01"
+        assert persisted["day"]["date"] == "2026-08-02"
+
+        # Simulate the deploy restart: wipe in-memory state, then rehydrate.
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({"dictations": 0, "failures": 0})
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+            web_server._DICTATE_HISTORY.clear()
+            web_server._DICTATE_DAY.clear()
+        web_server._load_dictate_status()
+
+        body = self.client.get("/api/dictate/status").json()
+        assert len(body["history"]) == 1
+        assert body["history"][0]["date"] == "2026-08-01"
+        assert body["today"]["date"] == "2026-08-02"
+        assert body["today"]["dictations"] == 1
+
+    def test_dictate_history_real_app_report_payload_shape(self, monkeypatch):
+        """Done-when 8 (REAL-Datenformat): the full app report shape (engine/
+        language/style/surface/mic/service booleans + latency) — the same
+        fields the actual Hermes Dictate app posts, not a synthetic minimal
+        object — across a mix of engines/surfaces and a failure event."""
+        web_server = self._reset_dictate_metrics_state()
+        monkeypatch.setattr(web_server, "_dictate_today", lambda: "2026-09-10")
+
+        real_reports = [
+            {
+                "app_version": "1.4", "engine": "cloud", "language": "german",
+                "style": "concise", "surface": "ime",
+                "microphone_permission": True, "service_enabled": True,
+                "event": "success", "latency_ms": 980,
+            },
+            {
+                "app_version": "1.4", "engine": "on_device", "language": "auto",
+                "style": "neutral", "surface": "overlay",
+                "microphone_permission": True, "service_enabled": True,
+                "event": "success", "latency_ms": 610,
+            },
+            {
+                "app_version": "1.4", "engine": "cloud", "language": "english",
+                "style": "formal", "surface": "ime",
+                "microphone_permission": True, "service_enabled": True,
+                "event": "failure", "last_error": "cloud_network",
+            },
+        ]
+        for report in real_reports:
+            assert self.client.post("/api/dictate/status", json=report).status_code == 200
+
+        body = self.client.get("/api/dictate/status").json()
+        today = body["today"]
+        assert today["date"] == "2026-09-10"
+        assert today["dictations"] == 2
+        assert today["failures"] == 1
+        assert today["success_rate_percent"] == round(100 * 2 / 3, 1)
+        assert today["latency_p50_ms"] == 610  # nearest-rank median of [980,610]
+        assert today["latency_p95_ms"] == 980
+
     def test_dictate_personalization_get_missing_returns_empty_document(self):
         response = self.client.get("/api/dictate/personalization")
         assert response.status_code == 200

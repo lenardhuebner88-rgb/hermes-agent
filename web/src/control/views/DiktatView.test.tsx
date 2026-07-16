@@ -149,6 +149,38 @@ describe("DiktatBody", () => {
     expect(html).not.toContain("Audioinhalt");
   });
 
+  // Diktat Stufe 11: the top-level `status` fixture above deliberately omits
+  // `history`/`today` (the pre-Stufe-11 shape) — proving the whole page still
+  // renders fine (trend degrades to its own empty state, nothing else breaks).
+  it("renders the trend's empty state when the status has no history/today (backward compat)", () => {
+    expect(html).toContain("Noch keine Tagesdaten");
+    expect(html).toContain("kommt mit dem ersten aktiven Diktat-Tag");
+    expect(html).toContain("Systemweites Diktat"); // rest of the page unaffected
+  });
+
+  it("wires history/today through to the trend block when present", () => {
+    const withTrend = renderToStaticMarkup(
+      <DiktatBody
+        status={{
+          ...status,
+          history: [
+            { date: "2026-07-14", dictations: 25, failures: 2, retries: 1, busy: 0, success_rate_percent: 92.6, latency_p50_ms: 750, latency_p95_ms: 1380 },
+          ],
+          today: { date: "2026-07-15", dictations: 6, failures: 0, retries: 0, busy: 0, success_rate_percent: 100, latency_p50_ms: 690, latency_p95_ms: 950 },
+        }}
+        statusLoading={false}
+        statusError={null}
+        artifacts={artifacts}
+        artifactsError={null}
+        sha256={null}
+      />,
+    );
+    expect(withTrend).not.toContain("Noch keine Tagesdaten");
+    expect(withTrend).toContain("2026-07-14");
+    expect(withTrend).toContain("92.6%");
+    expect(withTrend).toContain("heute");
+  });
+
   it("renders the empty state when no APK exists", () => {
     const empty = renderToStaticMarkup(
       <DiktatBody

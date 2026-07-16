@@ -3,6 +3,7 @@ import { Download, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
 import { z } from "zod";
 import { authedFetch, fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { DictateStatusTile } from "../components/DictateStatusTile";
+import { DictateTrend } from "../components/DictateTrend";
 import { FleetEmptyState, FleetPanel } from "../components/leitstand";
 import { Eyebrow } from "../components/primitives";
 import { useDictateStatus } from "../hooks/useControlData";
@@ -219,6 +220,7 @@ export function DiktatBody({
       </header>
 
       <DictateStatusTile status={status} loading={statusLoading} error={statusError} />
+      <DictateTrend history={status?.history} today={status?.today} />
 
       <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-2">
         <FleetPanel
