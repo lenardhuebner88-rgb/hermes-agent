@@ -27,6 +27,12 @@ function designStatusTone(status: string): "ok" | "warn" | "neutral" {
   return "neutral";
 }
 
+function targetPreview(view: string): string {
+  const normalized = view.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 72) return normalized;
+  return `${normalized.slice(0, 72)}…`;
+}
+
 export function DesignBoardView(_props: { density?: string } = {}) {
   const [cards, setCards] = useState<CardSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -139,13 +145,15 @@ export function DesignBoardView(_props: { density?: string } = {}) {
           />
         </div>
       )}
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {cards.map((c) => (
-          <Link key={c.id} to={`/control/design-board/${c.id}`} className="block">
+          <Link key={c.id} to={`/control/design-board/${c.id}`} className="block min-w-0">
             <FleetPanel eyebrow={c.kind} meta={<SignalLabel tone={designStatusTone(c.derived_status ?? c.status)} label={statusLabel(c.derived_status ?? c.status)} />}>
               <div className="text-sec font-semibold text-ink">{c.title}</div>
               {c.target?.view && (
-                <div className="mt-1 font-data text-micro text-ink-3">→ {c.target.view}</div>
+                <div className="mt-1 line-clamp-1 font-data text-micro text-ink-3" title={c.target.view}>
+                  → {targetPreview(c.target.view)}
+                </div>
               )}
               {c.linked_tasks.length > 0 && (
                 <div className="mt-1 text-micro text-ink-2"><span className="font-data tabular-nums">{c.linked_tasks.length}</span> verknüpfte Aufgabe(n)</div>

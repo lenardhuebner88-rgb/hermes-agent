@@ -56,4 +56,34 @@ describe("DesignBoardView (jsdom)", () => {
       expect(screen.getByText(/Kanban-Status nicht verfügbar/)).toBeTruthy(),
     );
   });
+
+  it("clamps long target.view prose to a one-line preview", async () => {
+    const longTarget =
+      "Ich möchte den Kettentappen neu designen. Ich möchte tatsächlich sehen, von Anfang bis Ende, welche Steps noch sind. Zurzeit sehe ich nicht: - wann der Verifier kommt - wie der Verifier steht - ob diese Kette einen Reviewer hat oder nicht - ob da Kritik mit drin ist - was mit dem Integrator ist Ich möchte saubere States sehen, die auch tatsächlich wirklich erkennbar sind, ob diese Kette ein Problem hat, ob sie jetzt läuft oder nicht. , ein Mockup für mich zu erzeugen.";
+    fetchJSONMock.mockResolvedValueOnce([
+      { id: "c_a1b2c3d4", kind: "bug", title: "Redesign Ketten Tab",
+        target: { view: longTarget }, status: "open", derived_status: null,
+        linked_tasks: [], updated_at: 1 },
+    ]);
+    render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText("Redesign Ketten Tab")).toBeTruthy());
+
+    const preview = screen.getByText(/^→ .*…$/);
+    const previewText = preview.textContent ?? "";
+    expect(previewText.length).toBeLessThanOrEqual(80);
+    expect(previewText).toMatch(/^→ .*…$/);
+    expect(screen.queryByText(longTarget)).toBeNull();
+    expect(preview.getAttribute("title")).toBe(longTarget);
+  });
+
+  it("leaves short target.view pointers unchanged", async () => {
+    fetchJSONMock.mockResolvedValueOnce([
+      { id: "c_1", kind: "bug", title: "Header overlaps",
+        target: { view: "FleetView" }, status: "open", derived_status: null,
+        linked_tasks: [], updated_at: 1 },
+    ]);
+    render(<MemoryRouter><DesignBoardView /></MemoryRouter>);
+    await waitFor(() => expect(screen.getByText("→ FleetView")).toBeTruthy());
+    expect(screen.queryByText("→ FleetView…")).toBeNull();
+  });
 });
