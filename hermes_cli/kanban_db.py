@@ -6221,8 +6221,10 @@ def _subscription_for_spawn_identity(
         return "chatgpt"
     if provider_l in {"claude", "anthropic"}:
         return "claude"
-    if provider_l in {"kimi", "moonshot"}:
+    if provider_l in {"kimi", "moonshot", "kimi-coding"}:
         return "kimi"
+    if provider_l in {"xai-oauth", "xai", "grok"}:
+        return "grok"
     try:
         return _profile_subscription(profile)
     except Exception:
