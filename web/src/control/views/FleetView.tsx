@@ -137,8 +137,6 @@ export function FleetView() {
   // Offene PlanSpecs die auf Operator-Freigabe oder Kettenstart warten
   const allPlanspecs = planspecs.data?.planspecs ?? [];
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps)).length;
-  const activePlanspecs = allPlanspecs.filter((ps) => ps.kanban_state === "running" || ps.kanban_state === "queued");
-
   // Geparkte Release-Gates (post-merge, wartet auf Operator-Ausführung) — einziges
   // Zuhause ist Fleet → Risiko, aus dem /control-Postfach verschoben.
   const releaseGateDecisions = (decisionQueue.data?.decisions ?? []).filter((d) => d.kind === "release_gate_parked");
@@ -152,17 +150,7 @@ export function FleetView() {
     [allPlanspecs, blockedTasks],
   );
 
-  const subtabDefs: SubtabDef[] = [
-    { id: "heute", label: de.fleet.subtabHeute },
-    { id: "worker", label: de.fleet.subtabWorker, count: activeWorkers.length > 0 ? activeWorkers.length : undefined },
-    { id: "ketten", label: de.fleet.subtabKetten, count: activePlanspecs.length > 0 ? activePlanspecs.length : undefined },
-    { id: "board", label: de.fleet.subtabBoard },
-    { id: "plan", label: de.fleet.subtabPlan, count: pendingApprovals > 0 ? pendingApprovals : undefined },
-    { id: "risiko", label: de.fleet.subtabRisiko, warn: blockedCount > 0 },
-  ];
-
-  // Ketten-Chips für die persistente rechte Spalte auf Tablet/Desktop.
-  // Root-Auswahl und Fetch-Board müssen immer aus derselben Board-Payload stammen.
+  // Ketten-Chips für Badge und persistente rechte Spalte aus derselben Board-Payload.
   const activeBoardData = selectedBoard ? selectedBoardData.data : board.data;
   const activeBoardTasksForKetten = (activeBoardData?.columns ?? []).flatMap((column) => column.tasks).map((t) => ({
     id: t.id,
@@ -172,6 +160,16 @@ export function FleetView() {
     completed_at: t.completed_at,
   }));
   const kettenChipsForAside = buildChainChips(activeBoardTasksForKetten);
+  const runningChainCount = kettenChipsForAside.filter((chip) => chip.state === "active").length;
+
+  const subtabDefs: SubtabDef[] = [
+    { id: "heute", label: de.fleet.subtabHeute },
+    { id: "worker", label: de.fleet.subtabWorker, count: activeWorkers.length > 0 ? activeWorkers.length : undefined },
+    { id: "ketten", label: de.fleet.subtabKetten, count: runningChainCount > 0 ? runningChainCount : undefined },
+    { id: "board", label: de.fleet.subtabBoard },
+    { id: "plan", label: de.fleet.subtabPlan, count: pendingApprovals > 0 ? pendingApprovals : undefined },
+    { id: "risiko", label: de.fleet.subtabRisiko, warn: blockedCount > 0 },
+  ];
 
   function closeNodeDetail() {
     setNodeDetailId(null);

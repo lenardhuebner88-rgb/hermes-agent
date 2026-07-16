@@ -9,6 +9,8 @@ interface ModelRouteBadgeProps {
   modelState?: ModelRouteState | null;
   modelSource?: string | null;
   observedAt?: number | null;
+  /** Ob zu diesem Step bereits ein Run existiert. Ohne Run bleibt fehlende Telemetrie neutral. */
+  hasRun?: boolean;
   className?: string;
 }
 
@@ -39,6 +41,7 @@ export function ModelRouteBadge({
   modelState,
   modelSource,
   observedAt,
+  hasRun = true,
   className = "",
 }: ModelRouteBadgeProps) {
   const provider = activeProvider || requestedProvider || null;
@@ -51,6 +54,18 @@ export function ModelRouteBadge({
     de.worker.modelRouteSource(modelSource || de.worker.modelRouteMissing),
     de.worker.modelRouteObserved(observed || de.worker.modelRouteMissing),
   ].join(" · ");
+
+  if (!hasRun) {
+    return (
+      <span
+        className={`inline-flex max-w-full flex-wrap items-center rounded-card border border-line bg-surface-2 px-2 py-0.5 text-xs text-ink-3 ${className}`}
+        aria-label={de.worker.modelRouteNoRun}
+        title={de.worker.modelRouteNoRun}
+      >
+        {de.worker.modelRouteNoRun}
+      </span>
+    );
+  }
 
   if (!provider || !model) {
     return (

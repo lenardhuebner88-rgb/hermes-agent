@@ -152,6 +152,13 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
         {visibleChips.map((chip) => {
           const isActive = chip.state === "active";
           const isDone = chip.state === "completed";
+          const stateLabel = {
+            active: de.fleet.kettenStateActive,
+            blocked: de.fleet.kettenStateBlocked,
+            held: de.fleet.kettenStateHeld,
+            pending: de.fleet.kettenStatePending,
+            completed: de.fleet.kettenStateCompleted,
+          }[chip.state];
           const pct = chip.total > 0 ? Math.round((chip.done / chip.total) * 100) : 0;
 
           return (
@@ -168,7 +175,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
                 <div className="chain-title-row">
                   <span className="chain-title" title={chip.label}>{chip.label}</span>
                   <span className={`chain-badge ${isActive ? "badge-running" : isDone ? "badge-done" : "badge-waiting"}`}>
-                    {isActive ? "läuft" : isDone ? "fertig" : "wartet"}
+                    {stateLabel}
                   </span>
                 </div>
                 <div className="chain-meta-row">
@@ -352,7 +359,13 @@ function KettenGraphV4({
             <span className="ach-pct-sub">% · {done} / {total} Steps</span>
           </div>
           <span className="ach-state-badge">
-            {focusNode?.status === "running" ? "läuft" : focusNode?.status === "blocked" ? "blockiert" : done >= total ? "fertig" : "wartet"}
+            {focusNode?.status === "running"
+              ? de.fleet.kettenStateActive
+              : focusNode?.status === "blocked"
+                ? de.fleet.kettenStateBlocked
+                : done >= total
+                  ? de.fleet.kettenStateCompleted
+                  : de.fleet.kettenStatePending}
           </span>
         </div>
 

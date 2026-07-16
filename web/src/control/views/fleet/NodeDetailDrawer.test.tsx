@@ -220,6 +220,29 @@ describe("NodeDetailDrawer Reassign", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it("renders a scheduled task without runs with a neutral model-route badge", () => {
+    const original = hookState.taskBody.data;
+    (hookState.taskBody as { data: unknown }).data = {
+      task: {
+        id: "t_no_run",
+        title: "Noch nicht gestarteter Task",
+        status: "scheduled",
+        assignee: "coder",
+        body: null,
+      },
+      runs: [],
+    };
+    try {
+      renderDrawer();
+
+      const badge = screen.getByText("Noch kein Run");
+      expect(badge.className).not.toContain("text-status-warn");
+      expect(screen.queryByText("Modell unbekannt – Telemetrie fehlt")).toBeNull();
+    } finally {
+      (hookState.taskBody as { data: unknown }).data = original;
+    }
+  });
+
   it("bietet für einen laufenden Task keine deterministisch abgelehnte Profiländerung an", () => {
     const original = hookState.taskBody.data.task.status;
     hookState.taskBody.data.task.status = "running";

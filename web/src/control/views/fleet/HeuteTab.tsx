@@ -240,7 +240,7 @@ function deriveHeroState(blockedCount: number, actionRows: ActionRow[], activeCo
       tone: "alert",
       led: "error",
       eyebrow: "Blockade",
-      cta: { label: "Im Risiko-Tab lösen", target: "risiko", ghost: false },
+      cta: { label: de.fleet.heuteRisikoLoesen, target: "risiko", ghost: false },
     };
   }
   const approval = actionRows.find((row) => row.target === "plan");
@@ -249,7 +249,7 @@ function deriveHeroState(blockedCount: number, actionRows: ActionRow[], activeCo
       tone: "warn",
       led: "warn",
       eyebrow: "Wartet auf dich",
-      cta: { label: "Im Plan-Tab freigeben", target: "plan", ghost: false },
+      cta: { label: de.fleet.heuteKetteFreigeben, target: "plan", ghost: false },
     };
   }
   if (activeCount > 0) {

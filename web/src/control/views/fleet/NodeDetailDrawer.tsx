@@ -482,6 +482,7 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
               modelState={latestRun?.model_state}
               modelSource={latestRun?.model_source}
               observedAt={latestRun?.model_observed_at}
+              hasRun={latestRun != null}
             />
           </div>
         </div>

@@ -243,6 +243,22 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(screen.getAllByText("noch nicht gestartet").length).toBeGreaterThan(0);
   });
 
+  it("renders a scheduled approval hold as gehalten and not läuft", async () => {
+    const holdChild: BoardTask = { ...ACTIVE_TASK, status: "scheduled", started_at: null };
+    const holdBoard: BoardResponse = {
+      ...BOARD,
+      columns: [{ name: "scheduled", tasks: [ROOT_TASK, holdChild] }],
+    };
+    const { container } = render(
+      <KettenTab board={holdBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    await waitFor(() => expect(container.querySelector(".chain-badge")?.textContent).toBe("gehalten"));
+    expect(container.querySelector(".chain-badge")?.textContent).not.toContain("läuft");
+    expect(container.querySelector(".glyph-waiting")).toBeTruthy();
+    expect(container.querySelector(".glyph-active")).toBeNull();
+  });
+
   it("keeps clipped chain and node titles recoverable", async () => {
     render(
       <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,

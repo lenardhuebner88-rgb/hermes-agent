@@ -47,9 +47,17 @@ describe("ModelRouteBadge", () => {
   });
 
   it("shows an explicit warning when model telemetry is absent", () => {
-    render(<ModelRouteBadge modelState="unknown" modelSource={null} />);
+    render(<ModelRouteBadge modelState="unknown" modelSource={null} hasRun />);
 
     expect(screen.getByText("Modell unbekannt – Telemetrie fehlt").className).toContain("text-status-warn");
+  });
+
+  it("renders an unstarted step neutrally when no run exists", () => {
+    render(<ModelRouteBadge modelState="unknown" modelSource={null} hasRun={false} />);
+
+    const label = screen.getByText("Noch kein Run");
+    expect(label.className).not.toContain("text-status-warn");
+    expect(screen.queryByText("Modell unbekannt – Telemetrie fehlt")).toBeNull();
   });
 
   it("updates the visible route when a fallback prop arrives", () => {
