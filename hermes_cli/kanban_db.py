@@ -156,7 +156,6 @@ OPERATOR_ONLY_BLOCK_KINDS = frozenset(
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
-_PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = False
 _PROTOCOL_VIOLATION_ERROR = (
     "worker exited cleanly (rc=0) without calling "
     "kanban_complete or kanban_block — protocol violation"
@@ -187,14 +186,12 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
 
 def _ensure_push_hook_consumers_registered() -> None:
     """Register bundled lifecycle observers, fully best-effort."""
-    global _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED
     try:
         from plugins.kanban.lifecycle import register_bundled_consumers
 
         # Register on every transition. The public registry deduplicates normal
         # calls and also restores observers after a plugin-manager force reset.
         register_bundled_consumers()
-        _PUSH_HOOK_CONSUMERS_BOOTSTRAPPED = True
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("bundled kanban hook consumer bootstrap failed: %s", exc)
 
@@ -22119,8 +22116,7 @@ OPENCLAW_ASSIGNEE_PREFIX = "openclaw:"
 
 # Map the OpenClaw agent name (the part after ``openclaw:``) to the MC
 # operation the signer knows how to build/validate. Mirrors the MC
-# operation->agent routing map. All four builders (atlas/lens/forge/pixel) are
-# live; see ``_OPENCLAW_ENVELOPE_BUILDERS`` below.
+# operation->agent routing map.
 OPENCLAW_AGENT_TO_OPERATION = {
     "atlas": "trigger_atlas_sprint",
     "lens": "request_lens_audit",
@@ -22135,21 +22131,6 @@ OPENCLAW_DEFAULT_DELIVER_TO = "1500203113867378789"
 # Where the signer module lives. Importing it is lazy + guarded so a missing
 # module never crashes the dispatcher — it degrades to a normal spawn failure.
 _MC_SIGNER_DIR = str(Path.home() / ".hermes" / "mcp")
-
-def _parse_openclaw_assignee(assignee: Optional[str]) -> Optional[str]:
-    """Return the MC operation for an ``openclaw:<agent>`` assignee, else None.
-
-    ``openclaw:lens`` -> ``request_lens_audit``. A plain Hermes profile
-    (``coder``) or an unknown agent (``openclaw:bogus``) returns ``None`` so
-    the caller falls through to the normal dispatch path unchanged.
-    """
-    if not assignee or not isinstance(assignee, str):
-        return None
-    if not assignee.startswith(OPENCLAW_ASSIGNEE_PREFIX):
-        return None
-    agent = assignee[len(OPENCLAW_ASSIGNEE_PREFIX) :].strip().lower()
-    return OPENCLAW_AGENT_TO_OPERATION.get(agent)
-
 
 def _import_mc_signer():
     """Lazy + guarded import of the MC signer module.
@@ -22185,43 +22166,6 @@ def _openclaw_deliver_to(claimed_task: "Task") -> str:
     return OPENCLAW_DEFAULT_DELIVER_TO
 
 
-def _build_lens_envelope(claimed_task: "Task", signer) -> dict:
-    """Build a fully-signed ``request_lens_audit`` envelope for ``claimed_task``."""
-    import uuid
-    from datetime import datetime, timezone
-
-    deliver_to = _openclaw_deliver_to(claimed_task)
-    # scope_query must be 4-512 chars. Build it from the task title (+ id for
-    # traceability), clamped into range.
-    title = (getattr(claimed_task, "title", None) or "").strip()
-    scope_query = f"[{claimed_task.id}] {title}".strip()
-    if len(scope_query) < 4:
-        scope_query = f"kanban-task-{claimed_task.id}"
-    scope_query = scope_query[:512]
-
-    payload = {
-        "audit_kind": "memory-pipeline",
-        "scope_query": scope_query,
-        "deliver_to": deliver_to,
-    }
-    workflow_id = f"wf-openclaw-lens-{uuid.uuid4().hex[:8]}"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    signature = signer.compute_signature(payload, workflow_id, timestamp)
-    envelope = {
-        "workflow_id": workflow_id,
-        "source": "hermes-coordinator",
-        "source_profile": "coordinator",
-        "routing_alias": "@lens",
-        "capability_id": "openclaw.lens.request_audit",
-        "operation": "request_lens_audit",
-        "risk_class": "safe-read-only",
-        "timestamp": timestamp,
-        "signature": signature,
-        "payload": payload,
-    }
-    return envelope
-
-
 def _openclaw_objective(claimed_task: "Task") -> str:
     """Derive a scope-contract objective (8-280 chars) from the task title.
 
@@ -22252,102 +22196,6 @@ def _openclaw_body_lines(claimed_task: "Task") -> list[str]:
     return out
 
 
-def _build_atlas_envelope(claimed_task: "Task", signer) -> dict:
-    """Build a fully-signed ``trigger_atlas_sprint`` envelope.
-
-    NOTE: atlas is the HIGHEST-RISK path — ``risk_class=gated-mutation``. Unlike
-    lens/forge/pixel (read-only / planned), an Atlas sprint can mutate. We
-    hand-build the envelope (mirroring the lens pattern) rather than calling the
-    ``simple_atlas_sprint`` convenience wrapper, so this returns the same
-    envelope shape every other agent persists and the success path is uniform.
-
-    kanban title -> ``scope_contract_v2.objective``; in_scope/out_of_scope/
-    termination_conditions/evidence_requirements are derived from the task body
-    with conservative defaults that keep the sprint tightly bounded.
-    """
-    import uuid
-    from datetime import datetime, timezone
-
-    deliver_to = _openclaw_deliver_to(claimed_task)
-    objective = _openclaw_objective(claimed_task)
-    body_lines = _openclaw_body_lines(claimed_task)
-    in_scope = body_lines[:12] if body_lines else [objective]
-    payload = {
-        "sprint_kind": "audit",
-        "scope_contract_v2": {
-            "objective": objective,
-            "in_scope": in_scope,
-            "out_of_scope": [
-                "No file writes outside the stated scope",
-                # Phrased to avoid the signer's dangerous-keyword scanner, which
-                # bans the literal VCS-publish verb even inside anti-scope text.
-                "No remote publishing, deploys, or infra mutation",
-            ],
-            "termination_conditions": [
-                "Objective addressed and evidence posted",
-            ],
-            "evidence_requirements": [
-                "Summary of findings posted to the deliver_to channel",
-            ],
-        },
-        "deliver_to": deliver_to,
-        "max_parallel_tasks": 3,
-    }
-    workflow_id = f"wf-openclaw-atlas-{uuid.uuid4().hex[:8]}"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    signature = signer.compute_signature(payload, workflow_id, timestamp)
-    envelope = {
-        "workflow_id": workflow_id,
-        "source": "hermes-coordinator",
-        "source_profile": "coordinator",
-        "routing_alias": "@atlas",
-        "capability_id": "openclaw.atlas.trigger_sprint",
-        "operation": "trigger_atlas_sprint",
-        "risk_class": "gated-mutation",
-        "timestamp": timestamp,
-        "signature": signature,
-        "payload": payload,
-    }
-    return envelope
-
-
-def _build_forge_envelope(claimed_task: "Task", signer) -> dict:
-    """Build a fully-signed ``request_forge_review`` envelope (safe-read-only).
-
-    ``target_paths`` are parsed from the task body lines (repo-relative paths),
-    falling back to ``["."]``; ``review_kind`` defaults to ``code-quality``.
-    """
-    import uuid
-    from datetime import datetime, timezone
-
-    deliver_to = _openclaw_deliver_to(claimed_task)
-    body_lines = _openclaw_body_lines(claimed_task)
-    # Each non-empty body line is treated as a repo-relative path candidate
-    # (schema caps item length at 256 and the array at 24 items).
-    target_paths = [ln[:256] for ln in body_lines][:24] or ["."]
-    payload = {
-        "review_kind": "code-quality",
-        "target_paths": target_paths,
-        "deliver_to": deliver_to,
-    }
-    workflow_id = f"wf-openclaw-forge-{uuid.uuid4().hex[:8]}"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    signature = signer.compute_signature(payload, workflow_id, timestamp)
-    envelope = {
-        "workflow_id": workflow_id,
-        "source": "hermes-coordinator",
-        "source_profile": "coordinator",
-        "routing_alias": "@forge",
-        "capability_id": "openclaw.forge.request_review",
-        "operation": "request_forge_review",
-        "risk_class": "safe-read-only",
-        "timestamp": timestamp,
-        "signature": signature,
-        "payload": payload,
-    }
-    return envelope
-
-
 def _extract_target_url(claimed_task: "Task") -> str:
     """Pull the first http(s) URL out of the task body for Pixel UI QA.
 
@@ -22362,53 +22210,6 @@ def _extract_target_url(claimed_task: "Task") -> str:
         if m:
             return m.group(0)[:512]
     return "http://127.0.0.1:9119/control"
-
-
-def _build_pixel_envelope(claimed_task: "Task", signer) -> dict:
-    """Build a fully-signed ``request_pixel_ui_qa`` envelope (safe-read-only).
-
-    Pixel is a normal UI-QA worker doing read-only browser inspection — same
-    risk tier as lens/forge. The former ``operator-lock`` risk class (and its
-    ``operator_lock_acknowledged`` payload field) was a leftover from the
-    standalone-OpenClaw era and has been removed: the operator's task creation
-    is the authorization.
-    """
-    import uuid
-    from datetime import datetime, timezone
-
-    deliver_to = _openclaw_deliver_to(claimed_task)
-    target_url = _extract_target_url(claimed_task)
-    payload = {
-        "target_url": target_url,
-        "qa_kind": "layout-check",
-        "deliver_to": deliver_to,
-    }
-    workflow_id = f"wf-openclaw-pixel-{uuid.uuid4().hex[:8]}"
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    signature = signer.compute_signature(payload, workflow_id, timestamp)
-    envelope = {
-        "workflow_id": workflow_id,
-        "source": "hermes-coordinator",
-        "source_profile": "coordinator",
-        "routing_alias": "@pixel",
-        "capability_id": "openclaw.pixel.request_ui_qa",
-        "operation": "request_pixel_ui_qa",
-        "risk_class": "safe-read-only",
-        "timestamp": timestamp,
-        "signature": signature,
-        "payload": payload,
-    }
-    return envelope
-
-
-# Map each MC operation to its envelope builder. All four converge on the same
-# envelope shape for historical compatibility fixtures.
-_OPENCLAW_ENVELOPE_BUILDERS = {
-    "request_lens_audit": _build_lens_envelope,
-    "trigger_atlas_sprint": _build_atlas_envelope,
-    "request_forge_review": _build_forge_envelope,
-    "request_pixel_ui_qa": _build_pixel_envelope,
-}
 
 
 def reviewer_role_fit_hold_reason(
