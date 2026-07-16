@@ -458,6 +458,10 @@ class DictateOverlayService :
                 polish = prefs.flowPolish && cloudPolishAllowed,
                 appCategory = cloudAppCategory,
                 style = cloudStyle,
+                initialPrompt = BiasingVocabulary
+                    .fromRules(prefs.dictionaryRules, prefs.snippetRules)
+                    .joinToString(", ")
+                    .ifBlank { null },
             )
             val canRetry =
                 !retryUsed && (outcome is CloudOutcome.Network || outcome is CloudOutcome.Server)

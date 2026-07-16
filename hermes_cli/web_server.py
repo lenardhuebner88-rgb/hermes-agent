@@ -1192,6 +1192,10 @@ class AudioTranscriptionRequest(BaseModel):
     # deliberately not part of this endpoint's contract.
     app_category: Optional[str] = None
     style: Optional[str] = None
+    # Optional vocabulary bias for the local Whisper path (personal dictionary
+    # terms, snippet cues). Forwarded as faster-whisper ``initial_prompt``;
+    # other providers ignore it. Bounded server-side; never logged.
+    initial_prompt: Optional[str] = None
 
 
 class DictateStatusReport(BaseModel):
@@ -4480,6 +4484,10 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     if style and style not in _DICTATION_STYLES:
         raise HTTPException(status_code=400, detail="Invalid dictation style")
 
+    initial_prompt = (payload.initial_prompt or "").strip() or None
+    if initial_prompt and len(initial_prompt) > 600:
+        raise HTTPException(status_code=400, detail="Vocabulary bias is too long")
+
     temp_path = ""
     try:
         suffix = _audio_extension_for_mime(mime_type)
@@ -4495,6 +4503,8 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
         loop = asyncio.get_running_loop()
         transcribe_kwargs = {"language": language} if language else {}
+        if initial_prompt:
+            transcribe_kwargs["initial_prompt"] = initial_prompt
         result = await loop.run_in_executor(
             None, functools.partial(transcribe_audio, temp_path, **transcribe_kwargs)
         )

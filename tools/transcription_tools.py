@@ -1135,7 +1135,12 @@ def _load_local_whisper_model(model_name: str):
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
-def _transcribe_local(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
+def _transcribe_local(
+    file_path: str,
+    model_name: str,
+    language: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     global _local_model, _local_model_name
 
@@ -1160,6 +1165,11 @@ def _transcribe_local(file_path: str, model_name: str, language: Optional[str] =
         transcribe_kwargs = {"beam_size": 5}
         if _forced_lang:
             transcribe_kwargs["language"] = _forced_lang
+        if initial_prompt:
+            # Whisper conditions on this text like preceding context — personal
+            # vocabulary ("Hermes, PlanSpec, …") measurably steers recognition
+            # of exactly those terms. Never logged (may contain names).
+            transcribe_kwargs["initial_prompt"] = initial_prompt
 
         try:
             segments, info = _local_model.transcribe(file_path, **transcribe_kwargs)
@@ -1724,7 +1734,12 @@ def _transcribe_deepinfra(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None, language: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -1739,6 +1754,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None, language: Opti
                    configured provider language. If None, provider auto-detects
                    or falls back to its configured/default language (unchanged
                    behavior).
+        initial_prompt: Optional vocabulary bias (personal dictionary terms),
+                   honored by the local faster-whisper provider only; other
+                   providers have no equivalent knob and ignore it.
 
     Returns:
         dict with keys:
@@ -1768,7 +1786,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None, language: Opti
         model_name = _normalize_local_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local(file_path, model_name, language=language)
+        return _transcribe_local(
+            file_path, model_name, language=language, initial_prompt=initial_prompt
+        )
 
     if provider == "local_command":
         local_cfg = stt_config.get("local") or {}

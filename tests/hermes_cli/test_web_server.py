@@ -2012,6 +2012,38 @@ class TestWebServerEndpoints:
         assert resp.json()["transcript"] == "hallo aus dem diktat"
         assert captured["kwargs"] == {"language": "de"}
 
+    def test_audio_transcription_passes_initial_prompt(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        captured = {}
+
+        def fake_transcribe_audio(path, **kwargs):
+            captured["kwargs"] = kwargs
+            return {"success": True, "transcript": "Hermes läuft", "provider": "test"}
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe_audio)
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "initial_prompt": "Hermes, PlanSpec, Leitstand",
+            },
+        )
+        assert resp.status_code == 200
+        assert captured["kwargs"] == {"initial_prompt": "Hermes, PlanSpec, Leitstand"}
+
+        rejected = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+                "initial_prompt": "x" * 601,
+            },
+        )
+        assert rejected.status_code == 400
+
     def test_audio_transcription_rejects_bad_language_tag(self):
         resp = self.client.post(
             "/api/audio/transcribe",

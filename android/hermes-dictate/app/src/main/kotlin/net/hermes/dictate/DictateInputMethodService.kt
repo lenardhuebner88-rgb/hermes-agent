@@ -278,6 +278,10 @@ class DictateInputMethodService :
                 polish = prefs.flowPolish && cloudPolishAllowed,
                 appCategory = cloudAppCategory,
                 style = cloudStyle,
+                initialPrompt = BiasingVocabulary
+                    .fromRules(prefs.dictionaryRules, prefs.snippetRules)
+                    .joinToString(", ")
+                    .ifBlank { null },
             )
             cloudAppCategory = null
             cloudStyle = null

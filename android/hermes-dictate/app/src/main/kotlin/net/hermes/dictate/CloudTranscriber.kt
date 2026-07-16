@@ -46,6 +46,7 @@ class CloudTranscriber(
         polish: Boolean = false,
         appCategory: String? = null,
         style: String? = null,
+        initialPrompt: String? = null,
     ): CloudOutcome {
         if (audio.isEmpty()) return CloudOutcome.Server("Empty recording")
         if (audio.size > MAX_AUDIO_BYTES) return CloudOutcome.TooLarge
@@ -62,6 +63,11 @@ class CloudTranscriber(
                     put("app_category", it)
                 }
                 style?.takeIf { it in ALLOWED_STYLES }?.let { put("style", it) }
+                // Personal vocabulary bias for the server-side Whisper pass; the server
+                // caps at 600 chars, so the client truncates instead of failing the upload.
+                initialPrompt?.takeIf { it.isNotBlank() }?.let {
+                    put("initial_prompt", it.take(MAX_INITIAL_PROMPT_CHARS))
+                }
             }
             .toString()
             .toByteArray(Charsets.UTF_8)
@@ -121,6 +127,9 @@ class CloudTranscriber(
     companion object {
         /** Client-side guard, far under the server's 25 MiB decoded cap (3 min AAC ~ 1.1 MiB). */
         const val MAX_AUDIO_BYTES = 8 * 1024 * 1024
+
+        /** Matches the server's initial_prompt bound (600) — truncate, never fail the upload. */
+        const val MAX_INITIAL_PROMPT_CHARS = 600
 
         const val CONNECT_TIMEOUT_MS = 10_000
 

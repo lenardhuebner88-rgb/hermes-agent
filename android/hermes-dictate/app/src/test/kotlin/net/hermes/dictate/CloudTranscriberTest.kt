@@ -103,6 +103,26 @@ class CloudTranscriberTest {
     }
 
     @Test
+    fun `initial prompt is sent bounded and omitted when blank`() {
+        val transport = FakeTransport(HttpResponse(200, """{"ok":true,"transcript":"x"}""", emptyList()))
+        transcriber(transport).transcribe(
+            audio,
+            "audio/mp4",
+            initialPrompt = "Hermes, PlanSpec, " + "x".repeat(700),
+        )
+        val body = JSONObject(String(transport.lastBody, Charsets.UTF_8))
+        val sent = body.getString("initial_prompt")
+        assertEquals(CloudTranscriber.MAX_INITIAL_PROMPT_CHARS, sent.length)
+        assertTrue(sent.startsWith("Hermes, PlanSpec"))
+
+        transcriber(transport).transcribe(audio, "audio/mp4", initialPrompt = "   ")
+        assertTrue(!JSONObject(String(transport.lastBody, Charsets.UTF_8)).has("initial_prompt"))
+
+        transcriber(transport).transcribe(audio, "audio/mp4")
+        assertTrue(!JSONObject(String(transport.lastBody, Charsets.UTF_8)).has("initial_prompt"))
+    }
+
+    @Test
     fun `missing cookie header is simply omitted`() {
         val transport = FakeTransport(HttpResponse(200, """{"ok":true,"transcript":"x"}""", emptyList()))
         transcriber(transport, FakeCookies(header = null)).transcribe(audio, "audio/mp4")
