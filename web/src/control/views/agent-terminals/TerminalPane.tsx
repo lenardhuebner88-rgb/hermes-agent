@@ -15,6 +15,7 @@ import {
   TERMINAL_THEME_STATIC,
 } from "../../../lib/xtermSurface";
 import type { TerminalTarget } from "./layout";
+import { extractTerminalBufferText } from "./TerminalSelectOverlay";
 import { buildAttachQuery, canFitTerminal, reconnectDelayMs } from "./terminalPaneModel";
 
 const RESIZE_SEND_DEBOUNCE_MS = 300;
@@ -34,6 +35,8 @@ export interface TerminalPaneHandle {
   scrollPages(pages: number): void;
   scrollToBottom(): void;
   getSelection(): string;
+  /** Full buffer snapshot for the mobile "Text auswählen" overlay. */
+  getBufferText(): string;
 }
 
 export interface TerminalPaneProps {
@@ -281,6 +284,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       },
       getSelection() {
         return termRef.current?.getSelection() ?? "";
+      },
+      getBufferText() {
+        return extractTerminalBufferText(termRef.current);
       },
     }),
     [fitAndResize],

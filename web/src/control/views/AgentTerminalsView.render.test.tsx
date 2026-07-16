@@ -35,6 +35,7 @@ const terminalScrollToBottomMock = vi.fn();
 const terminalFocusMock = vi.fn();
 const terminalResetMock = vi.fn();
 const clipboardWriteMock = vi.fn();
+const copyTextToClipboardMock = vi.fn();
 let triggerResize: (() => void) | null = null;
 let websocketSends: string[] = [];
 let documentHidden = false;
@@ -45,6 +46,14 @@ let terminalSelection = "";
 // owns its own selection; the copy chord must read the pane it was fired in, not
 // whatever pane happens to be active.
 let paneSelections: Record<string, string> = {};
+// Realistic terminal buffer lines for the select-snapshot overlay (not lorem).
+// Shape mirrors xterm buffer.active: length + getLine(i).translateToString(true).
+let terminalBufferLines: string[] = [
+  "piet@homeserver:~$ hermes --tui",
+  "Working (5s · esc to interrupt)",
+  "▌ Analysiere PlanSpec …",
+  "",
+];
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -54,6 +63,10 @@ vi.mock("@/lib/api", async () => {
     buildWsUrl: vi.fn().mockResolvedValue("ws://example.test/attach"),
   };
 });
+
+vi.mock("@/lib/clipboard", () => ({
+  copyTextToClipboard: (...args: unknown[]) => copyTextToClipboardMock(...args),
+}));
 
 vi.mock("@xterm/xterm", () => ({ Terminal: class Terminal {} }));
 vi.mock("@/lib/xtermSurface", async () => {
@@ -79,6 +92,22 @@ vi.mock("@/lib/xtermSurface", async () => {
         options: {},
         cols: 80,
         rows: 24,
+        buffer: {
+          active: {
+            get length() {
+              return terminalBufferLines.length;
+            },
+            getLine(index: number) {
+              if (index < 0 || index >= terminalBufferLines.length) return undefined;
+              return {
+                translateToString: (trimRight?: boolean) => {
+                  const raw = terminalBufferLines[index] ?? "";
+                  return trimRight ? raw.replace(/\s+$/u, "") : raw;
+                },
+              };
+            },
+          },
+        },
       },
       fit: { fit: fitFitMock },
     })),
@@ -219,6 +248,11 @@ function installDom(matches = false) {
     configurable: true,
     value: { writeText: clipboardWriteMock },
   });
+  // Hardened helper only uses writeText in secure contexts.
+  Object.defineProperty(window, "isSecureContext", {
+    configurable: true,
+    get: () => true,
+  });
 }
 
 /** Renders the view under a MemoryRouter — the "Zurück"-chip needs useNavigate() context. */
@@ -236,9 +270,20 @@ beforeEach(() => {
   websocketSends = [];
   terminalSelection = "";
   paneSelections = {};
+  terminalBufferLines = [
+    "piet@homeserver:~$ hermes --tui",
+    "Working (5s · esc to interrupt)",
+    "▌ Analysiere PlanSpec …",
+    "",
+  ];
   window.localStorage.clear();
   installDom(false);
   clipboardWriteMock.mockResolvedValue(undefined);
+  // Default: helper succeeds and still exercises writeText when tests assert on it.
+  copyTextToClipboardMock.mockImplementation(async (text: string) => {
+    await clipboardWriteMock(text);
+    return true;
+  });
   apiMock.getAgentTerminalCapabilities.mockResolvedValue(capability);
   apiMock.getAgentTerminalWindows.mockResolvedValue({ windows });
   apiMock.ensureAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
@@ -691,7 +736,44 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.keyDown(host, { key: "C", ctrlKey: true, shiftKey: true });
 
     expect(clipboardWriteMock).not.toHaveBeenCalled();
+    expect(copyTextToClipboardMock).not.toHaveBeenCalled();
     expect(await screen.findByText("Keine Auswahl")).toBeTruthy();
+  });
+
+  // Mobile has no xterm touch selection — "Text auswählen" freezes the active
+  // pane buffer into a native selectable <pre> overlay (S5).
+  it("opens the select overlay with a frozen snapshot of the fake terminal buffer", async () => {
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+    expect(dialog).toBeTruthy();
+    // Distinctive real-looking shell/agent line from the fake buffer (scoped to
+    // the overlay — the fleet strip also shows overview tails with similar text).
+    const snapshot = dialog.querySelector("pre");
+    expect(snapshot?.textContent).toContain("piet@homeserver:~$ hermes --tui");
+    expect(snapshot?.textContent).toContain("Analysiere PlanSpec");
+  });
+
+  it("copies the full buffer snapshot via Alles kopieren through the clipboard helper", async () => {
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Text auswählen" }));
+    await screen.findByRole("dialog", { name: "Terminal-Text auswählen" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Alles kopieren" }));
+
+    const expectedSnapshot = [
+      "piet@homeserver:~$ hermes --tui",
+      "Working (5s · esc to interrupt)",
+      "▌ Analysiere PlanSpec …",
+    ].join("\n");
+
+    await waitFor(() => expect(copyTextToClipboardMock).toHaveBeenCalledWith(expectedSnapshot));
+    expect(websocketSends).not.toContain("\x03");
   });
 
   // Plain Ctrl+C stays the agent interrupt — hijacking it whenever a stale

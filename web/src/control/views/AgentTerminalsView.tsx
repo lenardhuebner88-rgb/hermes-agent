@@ -40,6 +40,7 @@ import {
   Share2,
   Sparkles,
   TerminalSquare,
+  TextSelect,
   Trash2,
   Wrench,
   X,
@@ -61,6 +62,7 @@ import {
   type SkillInfo,
   type ToolsetInfo,
 } from "@/lib/api";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
 import {
   createHermesXtermSurface,
@@ -76,6 +78,10 @@ import { Sparkline } from "../components/fleet/Sparkline";
 import { KpiTile, SignalChip, type SignalTone } from "../components/leitstand";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
+import {
+  extractTerminalBufferText,
+  TerminalSelectOverlay,
+} from "./agent-terminals/TerminalSelectOverlay";
 import { TerminalUsageDock } from "./agent-terminals/TerminalUsageDock";
 import {
   normalizeDesktopLayout,
@@ -826,6 +832,8 @@ export function AgentTerminalsView() {
   const [pendingTerminate, setPendingTerminate] = useState<string | null>(null);
   const [terminateBusy, setTerminateBusy] = useState(false);
   const [copyState, setCopyState] = useState<TerminalCopyState>("idle");
+  /** Frozen buffer snapshot for the "Text auswählen" overlay; null = closed. */
+  const [selectSnapshot, setSelectSnapshot] = useState<string | null>(null);
   const [view, setView] = useState<"terminal" | "flotte">("terminal");
   const [overview, setOverview] = useState<AgentTerminalOverviewWindow[]>([]);
   const [overviewNow, setOverviewNow] = useState<number>(() => Date.now() / 1000);
@@ -1484,14 +1492,16 @@ export function AgentTerminalsView() {
 
   // Copy path. Never touches wsRef: a copy must not put ETX (or any byte) on the
   // socket, otherwise "copy" would SIGINT the very agent whose output is being copied.
+  // Routes through the hardened clipboard helper (secure-context + execCommand fallback)
+  // — navigator.clipboard.writeText alone silently fails on plain HTTP / non-secure.
   const copyText = useCallback(async (selection: string): Promise<void> => {
     if (!selection) {
       setCopyState("empty");
       return;
     }
     try {
-      await navigator.clipboard.writeText(selection);
-      setCopyState("copied");
+      const ok = await copyTextToClipboard(selection);
+      setCopyState(ok ? "copied" : "error");
     } catch {
       setCopyState("error");
     }
@@ -1508,6 +1518,23 @@ export function AgentTerminalsView() {
     (): Promise<void> => copyText(readActiveSelection()),
     [copyText, readActiveSelection],
   );
+
+  /** Active pane buffer as plain text — used for the mobile select-snapshot overlay. */
+  const readActiveBufferText = useCallback((): string => {
+    if (activePane > 0) {
+      return extraPaneRefs[activePane - 1]?.current?.getBufferText() ?? "";
+    }
+    return extractTerminalBufferText(termRef.current);
+  }, [activePane, extraPaneRefs]);
+
+  const openSelectOverlay = useCallback(() => {
+    // Capture once at open so polling / WS traffic cannot destroy a native selection.
+    setSelectSnapshot(readActiveBufferText());
+  }, [readActiveBufferText]);
+
+  const closeSelectOverlay = useCallback(() => {
+    setSelectSnapshot(null);
+  }, []);
 
   useEffect(() => {
     if (copyState === "idle") return;
@@ -2787,6 +2814,40 @@ export function AgentTerminalsView() {
           )}
         >
           {compactLayout && chipStrip}
+          {compactLayout && view === "terminal" && (
+            // Mobile toolbar: xterm has no touch selection, so "Auswählen" opens a
+            // frozen native-text snapshot; copy stays reachable next to it.
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft bg-surface-1 px-2 py-1 text-xs text-ink-2">
+              <div className="min-w-0">
+                {copyState !== "idle" && (
+                  <span role="status" className={cn("shrink-0 text-[10px]", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
+                    {copyState === "copied" ? "Kopiert" : copyState === "empty" ? "Keine Auswahl" : "Kopieren fehlgeschlagen"}
+                  </span>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  aria-label="Auswahl kopieren"
+                  title="Auswahl kopieren"
+                  onClick={() => void copySelection()}
+                  className="grid h-11 w-11 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Text auswählen"
+                  title="Text auswählen"
+                  onClick={openSelectOverlay}
+                  className="inline-flex h-11 items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                >
+                  <TextSelect className="h-3.5 w-3.5" />
+                  Auswählen
+                </button>
+              </div>
+            </div>
+          )}
           {!compactLayout && view === "terminal" && (
             <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-soft bg-surface-1 px-3 py-2 text-xs text-ink-2">
               <div className="flex min-w-0 items-center gap-2">
@@ -2809,6 +2870,15 @@ export function AgentTerminalsView() {
                   className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
                 >
                   <Copy className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Text auswählen"
+                  title="Text auswählen (Snapshot zum Markieren)"
+                  onClick={openSelectOverlay}
+                  className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                >
+                  <TextSelect className="h-3.5 w-3.5" />
                 </button>
                 {([1, 2, 4] as DesktopTerminalLayout[]).map((layout) => (
                   <button
@@ -2910,6 +2980,10 @@ export function AgentTerminalsView() {
           getSelection={readActiveSelection}
           onClose={() => setHandoffOpen(false)}
         />
+      )}
+
+      {selectSnapshot !== null && (
+        <TerminalSelectOverlay text={selectSnapshot} onClose={closeSelectOverlay} />
       )}
     </div>
   );
