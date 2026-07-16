@@ -513,14 +513,496 @@ def build_projects_payload(
     }
 
 
+# ---------------------------------------------------------------------------
+# Stage 3 — "who is working on what right now" (/api/projects/agents)
+# ---------------------------------------------------------------------------
+#
+# Four independent sources (tmux, coordination notes, kanban, loops). Each is
+# wrapped in its own try/except at the top of :func:`build_agents_payload` —
+# an exception in one source degrades to a single ``errors[]`` entry, the
+# other three still deliver. Every seam a test needs to override is a plain
+# module-level function called by name at call time (``get_hermes_home``,
+# ``_default_coordination_dir``, ``control_loops._all_pack_names``, ...) so
+# ``monkeypatch.setattr`` on the module attribute is enough — same pattern
+# stage 2 already uses for ``get_hermes_home``.
+
+_TMUX_TIMEOUT_SECONDS = 2
+_TMUX_LIST_PANES_CMD = [
+    "tmux",
+    "list-panes",
+    "-a",
+    "-F",
+    "#{session_name}|#{window_index}|#{window_name}|#{pane_current_command}|#{pane_current_path}",
+]
+_TMUX_LIST_SESSIONS_CMD = ["tmux", "list-sessions", "-F", "#{session_name}|#{session_created}"]
+_TMUX_SHELL_COMMANDS = frozenset({"bash", "zsh", "sh", "fish", "dash"})
+# Priority order matters: first kind whose name appears wins (see
+# _classify_tmux_kind).
+_TMUX_KIND_ORDER = ("claude", "codex", "kimi", "grok", "hermes")
+
+_COORDINATION_KIND_VALUES = frozenset(
+    {"claude", "codex", "kimi", "grok", "hermes", "kanban", "loop"}
+)
+_COORDINATION_FRONTMATTER_BYTES = 4096
+
+
+def _default_coordination_dir() -> Path:
+    return Path.home() / "vault" / "_agents" / "_coordination"
+
+
+def _attribute_project(paths: list[str], registry: ProjectsRegistry) -> str | None:
+    """Longest ``repo_path`` prefix match across ``paths`` wins.
+
+    Boundary-aware: a path only matches a registry entry if it equals the
+    entry's ``repo_path`` or starts with ``repo_path + "/"`` — so
+    ``/home/piet`` never matches an entry rooted at
+    ``/home/piet/.hermes/hermes-agent`` (the reverse would be a false
+    positive). Ties (a parent project and a sub-project sharing one
+    ``repo_path``) resolve to the entry WITHOUT ``parent`` set.
+    """
+    best_len = -1
+    candidates: list[ProjectEntry] = []
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        candidate = raw_path.rstrip("/")
+        for entry in registry.projects:
+            repo = entry.repo_path.rstrip("/")
+            if not repo:
+                continue
+            if candidate == repo or candidate.startswith(repo + "/"):
+                if len(repo) > best_len:
+                    best_len = len(repo)
+                    candidates = [entry]
+                elif len(repo) == best_len:
+                    candidates.append(entry)
+
+    if not candidates:
+        return None
+    without_parent = [entry for entry in candidates if entry.parent is None]
+    chosen = without_parent[0] if without_parent else candidates[0]
+    return chosen.slug
+
+
+def _run_tmux_command(cmd: list[str]) -> tuple[str | None, str | None]:
+    """Returns ``(stdout, error)``.
+
+    ``("", None)`` is the truthful "tmux server not running" state (not an
+    error) — ``tmux list-panes -a`` needs a running server and fails with
+    ``"no server running"`` on stderr when there is none.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_TMUX_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except FileNotFoundError:
+        return None, "tmux: tmux is not installed"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"tmux: {exc}"
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        if "no server running" in stderr.lower():
+            return "", None
+        return None, f"tmux: {stderr or 'tmux command failed'}"
+    return result.stdout, None
+
+
+def _classify_tmux_kind(window_name: str, pane_command: str) -> str:
+    window_lower = window_name.lower()
+    for kind in _TMUX_KIND_ORDER:
+        if kind in window_lower:
+            return kind
+    command_lower = pane_command.lower()
+    for kind in _TMUX_KIND_ORDER:
+        if kind in command_lower:
+            return kind
+    return "unknown"
+
+
+def _tmux_agents(
+    *,
+    tmux_panes_text: str | None,
+    tmux_sessions_text: str | None,
+    registry: ProjectsRegistry,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if tmux_panes_text is not None:
+        panes_text, panes_error = tmux_panes_text, None
+    else:
+        panes_text, panes_error = _run_tmux_command(_TMUX_LIST_PANES_CMD)
+    if panes_error:
+        return [], [panes_error]
+    if not panes_text:
+        return [], []
+
+    if tmux_sessions_text is not None:
+        sessions_text, sessions_error = tmux_sessions_text, None
+    else:
+        sessions_text, sessions_error = _run_tmux_command(_TMUX_LIST_SESSIONS_CMD)
+    if sessions_error:
+        return [], [sessions_error]
+
+    session_created: dict[str, int] = {}
+    for line in (sessions_text or "").splitlines():
+        parts = line.split("|")
+        if len(parts) != 2:
+            continue
+        session_name, created_raw = parts
+        try:
+            session_created[session_name] = int(created_raw)
+        except ValueError:
+            continue
+
+    agents: list[dict[str, Any]] = []
+    for line in panes_text.splitlines():
+        parts = line.split("|")
+        if len(parts) != 5:
+            continue
+        session_name, window_index, window_name, pane_command, pane_path = parts
+        if pane_command.strip().lower() in _TMUX_SHELL_COMMANDS:
+            continue
+        agents.append(
+            {
+                "kind": _classify_tmux_kind(window_name, pane_command),
+                "label": f"{session_name}:{window_index} {window_name}",
+                "task": None,
+                "project": _attribute_project([pane_path], registry),
+                "since": session_created.get(session_name),
+                "source": "tmux",
+            }
+        )
+    return agents, []
+
+
+def _extract_frontmatter(text: str) -> str | None:
+    """Text between the first two ``---`` lines, or ``None`` if malformed."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[1:index])
+    return None
+
+
+def _parse_coordination_timestamp(value: Any) -> int | None:
+    """Parses a frontmatter ``started``/``ended`` value.
+
+    ``yaml.safe_load`` already turns an unquoted ISO instant into a
+    ``datetime`` (PyYAML's implicit timestamp resolver) — handle both that
+    and the plain-string case. Naive values (no explicit zone) are assumed to
+    be local-clock artifacts, matching stage 2's loop-heartbeat handling.
+    """
+    dt: datetime | None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return int(dt.timestamp())
+
+
+def _strip_touching_annotation(raw: str) -> str:
+    """Strips a trailing `` (neu)``-style annotation off a ``touching`` path."""
+    idx = raw.find(" (")
+    return raw[:idx] if idx != -1 else raw
+
+
+def _coordination_agents(
+    coordination_dir: Path, *, registry: ProjectsRegistry
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not coordination_dir.exists():
+        # No-config default: nothing to scan is not an error, mirroring the
+        # missing-registry-file default elsewhere in this module.
+        return [], []
+    if not coordination_dir.is_dir():
+        return [], [f"coordination: {coordination_dir} is not a directory"]
+
+    try:
+        note_paths = sorted(coordination_dir.glob("*.md"))
+    except OSError as exc:
+        return [], [f"coordination: {exc}"]
+
+    agents: list[dict[str, Any]] = []
+    for path in note_paths:
+        try:
+            with path.open("rb") as fh:
+                raw = fh.read(_COORDINATION_FRONTMATTER_BYTES)
+        except OSError:
+            # Unreadable single note: many legacy notes are dirty — skip
+            # silently rather than spam errors[] per file.
+            continue
+
+        text = raw.decode("utf-8", errors="replace")
+        frontmatter_text = _extract_frontmatter(text)
+        if frontmatter_text is None:
+            continue
+        try:
+            data = yaml.safe_load(frontmatter_text)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        agent_field = data.get("agent")
+        started_raw = data.get("started")
+        if not isinstance(agent_field, str) or not agent_field.strip() or started_raw is None:
+            continue
+
+        ended_val = data.get("ended")
+        if ended_val not in (None, ""):
+            continue  # note is closed
+
+        kind = agent_field.strip().lower()
+        if kind not in _COORDINATION_KIND_VALUES:
+            kind = "unknown"
+
+        task_raw = data.get("task")
+        task = task_raw if isinstance(task_raw, str) else None
+
+        touching_raw = data.get("touching")
+        touching_paths: list[str] = []
+        if isinstance(touching_raw, list):
+            touching_paths = [
+                _strip_touching_annotation(item) for item in touching_raw if isinstance(item, str)
+            ]
+
+        agents.append(
+            {
+                "kind": kind,
+                "label": path.stem,
+                "task": task,
+                "project": _attribute_project(touching_paths, registry),
+                "since": _parse_coordination_timestamp(started_raw),
+                "source": "coordination",
+            }
+        )
+
+    return agents, []
+
+
+def _kanban_running_agents(
+    *, kanban_db_path: Path, projects_db_path: Path, registry: ProjectsRegistry
+) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        conn = _open_sqlite_ro(kanban_db_path)
+    except sqlite3.DatabaseError as exc:
+        return [], [f"kanban: could not open kanban.db: {exc}"]
+
+    try:
+        rows = conn.execute(
+            "SELECT id, title, status, project_id, started_at, assignee FROM tasks "
+            "WHERE status = 'running'"
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        return [], [f"kanban: {exc}"]
+    finally:
+        conn.close()
+
+    # project_id -> board_slug, reversing stage 2's board -> project_id
+    # lookup. An unreadable/missing projects.db just means project_id-bound
+    # tasks resolve to project=None — not a hard error (default-board tasks
+    # with project_id NULL never need this map at all).
+    board_slug_by_project_id: dict[str, str | None] = {}
+    try:
+        pconn = _open_sqlite_ro(projects_db_path)
+        try:
+            for row in projects_db.list_projects(pconn, include_archived=True):
+                board_slug_by_project_id[row.id] = row.board_slug
+        finally:
+            pconn.close()
+    except sqlite3.DatabaseError:
+        pass
+
+    default_slug = next(
+        (entry.slug for entry in registry.projects if entry.kanban_project == "default"),
+        None,
+    )
+    slug_by_board_slug = {
+        entry.kanban_project: entry.slug
+        for entry in registry.projects
+        if entry.kanban_project and entry.kanban_project != "default"
+    }
+
+    agents: list[dict[str, Any]] = []
+    for row in rows:
+        project_id = row["project_id"]
+        if project_id is None:
+            project = default_slug
+        else:
+            board_slug = board_slug_by_project_id.get(project_id)
+            if board_slug == "default":
+                # Tasks explicitly bound to the default board's project row
+                # (the common live case) belong to the default project too.
+                project = default_slug
+            else:
+                project = slug_by_board_slug.get(board_slug) if board_slug else None
+        agents.append(
+            {
+                "kind": "kanban",
+                "label": row["id"],
+                "task": row["title"],
+                "project": project,
+                "since": row["started_at"],
+                "source": "kanban",
+            }
+        )
+    return agents, []
+
+
+def _loop_started_at(heartbeat: dict[str, Any] | None) -> int | None:
+    if not heartbeat:
+        return None
+    current = heartbeat.get("current")
+    if not isinstance(current, dict):
+        return None
+    return _parse_loop_iso_timestamp(current.get("started_at"))
+
+
+def _loop_agents(
+    *,
+    registry: ProjectsRegistry,
+    loops_state_root: Path | None,
+    pack_names: list[str] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    root = loops_state_root if loops_state_root is not None else control_loops._state_root()
+    names = (
+        pack_names
+        if pack_names is not None
+        else [name for name, _source in control_loops._all_pack_names()]
+    )
+
+    project_by_pack: dict[str, str] = {}
+    for entry in registry.projects:
+        for pack_name in entry.loop_packs:
+            project_by_pack.setdefault(pack_name, entry.slug)
+
+    agents: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for name in names:
+        try:
+            state = root / name
+            running = control_loops._is_running(state)
+            if not running:
+                continue
+            since = _loop_started_at(control_loops._heartbeat(state))
+        except Exception as exc:  # isolate: one bad pack never kills the list
+            errors.append(f"loops: pack '{name}': {exc}")
+            continue
+        agents.append(
+            {
+                "kind": "loop",
+                "label": name,
+                "task": None,
+                "project": project_by_pack.get(name),
+                "since": since,
+                "source": "loop",
+            }
+        )
+    return agents, errors
+
+
+def build_agents_payload(
+    registry: ProjectsRegistry,
+    *,
+    tmux_panes_text: str | None = None,
+    tmux_sessions_text: str | None = None,
+    coordination_dir: Path | None = None,
+    kanban_db_path: Path | None = None,
+    projects_db_path: Path | None = None,
+    loops_state_root: Path | None = None,
+    pack_names: list[str] | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Assemble the frozen ``/api/projects/agents`` payload.
+
+    Four independent sources — tmux panes, coordination notes, kanban
+    running tasks, active loop packs — each isolated: an exception in one
+    becomes a single ``errors[]`` entry, the others still deliver. ``None``
+    for any keyword means "use the real source"; tests inject fixtures.
+    """
+    resolved_now = now if now is not None else int(time.time())
+    home = get_hermes_home()
+    resolved_kanban_db_path = kanban_db_path if kanban_db_path is not None else home / "kanban.db"
+    resolved_projects_db_path = (
+        projects_db_path if projects_db_path is not None else home / "projects.db"
+    )
+    resolved_coordination_dir = (
+        coordination_dir if coordination_dir is not None else _default_coordination_dir()
+    )
+
+    agents: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    try:
+        tmux_result = _tmux_agents(
+            tmux_panes_text=tmux_panes_text,
+            tmux_sessions_text=tmux_sessions_text,
+            registry=registry,
+        )
+    except Exception as exc:
+        tmux_result = [], [f"tmux: {exc}"]
+    agents.extend(tmux_result[0])
+    errors.extend(tmux_result[1])
+
+    try:
+        coordination_result = _coordination_agents(resolved_coordination_dir, registry=registry)
+    except Exception as exc:
+        coordination_result = [], [f"coordination: {exc}"]
+    agents.extend(coordination_result[0])
+    errors.extend(coordination_result[1])
+
+    try:
+        kanban_result = _kanban_running_agents(
+            kanban_db_path=resolved_kanban_db_path,
+            projects_db_path=resolved_projects_db_path,
+            registry=registry,
+        )
+    except Exception as exc:
+        kanban_result = [], [f"kanban: {exc}"]
+    agents.extend(kanban_result[0])
+    errors.extend(kanban_result[1])
+
+    try:
+        loop_result = _loop_agents(
+            registry=registry,
+            loops_state_root=loops_state_root,
+            pack_names=pack_names,
+        )
+    except Exception as exc:
+        loop_result = [], [f"loops: {exc}"]
+    agents.extend(loop_result[0])
+    errors.extend(loop_result[1])
+
+    return {
+        "generated_at": resolved_now,
+        "errors": errors,
+        "agents": agents,
+    }
+
+
 def register_projects_routes(app: FastAPI) -> None:
-    """Register the read-only ``GET /api/projects`` route.
+    """Register the read-only ``GET /api/projects`` + ``/api/projects/agents``.
 
     Auth comes automatically from the dashboard's ``/api/*`` middleware —
     nothing to do here as long as the path stays out of the public whitelist.
-    The handler is wrapped once more on top of :func:`build_projects_payload`'s
-    own per-source isolation so a truly unexpected failure (e.g. the registry
-    file itself becoming unreadable) still answers with JSON, never a 500.
+    Each handler is wrapped once more on top of its builder's own per-source
+    isolation so a truly unexpected failure (e.g. the registry file itself
+    becoming unreadable) still answers with JSON, never a 500.
     """
 
     @app.get("/api/projects")
@@ -533,4 +1015,16 @@ def register_projects_routes(app: FastAPI) -> None:
                 "generated_at": int(time.time()),
                 "registry_errors": [f"projects: unexpected error: {exc}"],
                 "projects": [],
+            }
+
+    @app.get("/api/projects/agents")
+    def get_project_agents() -> dict[str, Any]:
+        try:
+            registry = load_projects_registry()
+            return build_agents_payload(registry)
+        except Exception as exc:
+            return {
+                "generated_at": int(time.time()),
+                "errors": [f"agents: unexpected error: {exc}"],
+                "agents": [],
             }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 import time
@@ -9,11 +10,13 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import hermes_cli.control_loops as control_loops
 import hermes_cli.kanban_db as kanban_db
 import hermes_cli.projects_db as projects_db
 from hermes_cli.projects_overview import (
     ProjectEntry,
     ProjectsRegistry,
+    build_agents_payload,
     build_projects_payload,
     load_projects_registry,
     register_projects_routes,
@@ -576,3 +579,393 @@ def test_isolation_one_broken_project_does_not_affect_others(tmp_path: Path) -> 
     assert good_out["last_commit"] is not None
     assert good_out["last_commit"]["message"] == "ok"
     assert good_out["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 — /api/projects/agents (tmux / coordination / kanban / loops)
+# ---------------------------------------------------------------------------
+
+# Real `tmux list-panes -a -F '#{session_name}|#{window_index}|#{window_name}|
+# #{pane_current_command}|#{pane_current_path}'` output captured on this
+# machine 2026-07-16, used verbatim.
+_REAL_TMUX_PANES_TEXT = """\
+fable-babysit-3|0|claude|claude|/home/piet
+work|0|claude|claude|/home/piet
+work|1|codex|codex|/home/piet
+work|2|kimi|kimi-code|/home/piet/.hermes/hermes-agent
+work|3|grok|node|/home/piet
+work|4|claude-agent|2.1.211|/home/piet/.hermes/hermes-agent
+work|5|claude-agent-2|2.1.211|/home/piet/.hermes/hermes-agent
+work|6|claude-agent-3|2.1.211|/home/piet/.hermes/hermes-agent
+"""
+
+# Real `tmux list-sessions -F '#{session_name}|#{session_created}'` output,
+# same capture.
+_REAL_TMUX_SESSIONS_TEXT = """\
+fable-babysit-3|1784229852
+work|1784140154
+"""
+
+
+def _hermes_infra_registry() -> ProjectsRegistry:
+    hermes_infra = _entry(
+        slug="hermes-infra",
+        name="Hermes Infra",
+        repo_path="/home/piet/.hermes/hermes-agent",
+        parent=None,
+    )
+    diktat = _entry(
+        slug="diktat",
+        name="Diktat",
+        repo_path="/home/piet/.hermes/hermes-agent",
+        parent="hermes-infra",
+    )
+    return ProjectsRegistry(projects=[hermes_infra, diktat], errors=[])
+
+
+def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> None:
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text=_REAL_TMUX_PANES_TEXT,
+        tmux_sessions_text=_REAL_TMUX_SESSIONS_TEXT,
+        coordination_dir=tmp_path / "no-coordination-here",
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+
+    assert payload["errors"] == []
+    tmux_agents = [a for a in payload["agents"] if a["source"] == "tmux"]
+    assert len(tmux_agents) == 8  # no plain-shell panes in the fixture
+
+    by_label = {a["label"]: a for a in tmux_agents}
+
+    fable_pane = by_label["fable-babysit-3:0 claude"]
+    assert fable_pane["kind"] == "claude"
+    assert fable_pane["project"] is None  # /home/piet does not match the repo
+    assert fable_pane["since"] == 1784229852
+
+    work_claude = by_label["work:0 claude"]
+    assert work_claude["kind"] == "claude"
+    assert work_claude["project"] is None
+    assert work_claude["since"] == 1784140154
+
+    work_codex = by_label["work:1 codex"]
+    assert work_codex["kind"] == "codex"
+    assert work_codex["project"] is None
+
+    work_kimi = by_label["work:2 kimi"]
+    assert work_kimi["kind"] == "kimi"
+    # Path is exactly the shared repo_path; hermes-infra (no parent) wins over diktat.
+    assert work_kimi["project"] == "hermes-infra"
+
+    work_grok = by_label["work:3 grok"]
+    assert work_grok["kind"] == "grok"  # window_name "grok" wins over command "node"
+    assert work_grok["project"] is None
+
+    for index, window_name in enumerate(("claude-agent", "claude-agent-2", "claude-agent-3"), start=4):
+        pane = by_label[f"work:{index} {window_name}"]
+        assert pane["kind"] == "claude"  # window name wins over command "2.1.211"
+        assert pane["project"] == "hermes-infra"
+        assert pane["since"] == 1784140154
+
+
+def test_tmux_source_no_server_running_yields_zero_agents_no_error(tmp_path: Path) -> None:
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",  # simulates "tmux list-panes -a" with no server running
+        tmux_sessions_text="",
+        coordination_dir=tmp_path / "no-coordination-here",
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+
+    assert payload["errors"] == []
+    assert [a for a in payload["agents"] if a["source"] == "tmux"] == []
+
+
+# --- coordination source ------------------------------------------------------
+
+# Verbatim copy of the real open check-in note
+# vault/_agents/_coordination/2026-07-16_2333_claude_projekte-tab-nachtlauf.md
+_REAL_COORDINATION_NOTE = """\
+---
+agent: claude
+started: 2026-07-16T23:33:00+02:00
+ended: null
+task: "Projekte-Tab-Nachtlauf (Goal-Prompt vault/03-Agents/Claude/plans/2026-07-16-projekte-tab-nachtlauf-goal-prompt.md): Leitstand-Tab /control → Projekt-Karten + Agent-Sessions-Discovery, 12 Stufen, seriell gelandet. Baut in Worktree Branch projekte-tab-nacht."
+touching:
+  - /home/piet/.hermes/hermes-agent/hermes_cli/projects_overview.py (neu)
+  - /home/piet/.hermes/hermes-agent/tests/hermes_cli/test_projects_overview*.py (neu)
+  - /home/piet/.hermes/hermes-agent/web/src/control/views/ProjekteView.tsx (neu)
+  - /home/piet/.hermes/hermes-agent/web/src/control/views/projekte/ (neu)
+  - /home/piet/.hermes/hermes-agent/hermes_cli/web_server.py (NUR eine register_projects_routes-Zeile)
+  - /home/piet/.hermes/hermes-agent/web/src/control/ControlPage.tsx (nur Tab-Registrierung)
+  - /home/piet/.hermes/hermes-agent/web/src/control/components/ControlShell.tsx (nur ControlTab-Union + Nav-Eintrag)
+  - /home/piet/.hermes/hermes-agent/web/src/control/hooks/useControlData.ts (nur neue Hooks angehängt)
+  - /home/piet/.hermes/hermes-agent/web/src/control/lib/schemas.ts (nur neue Schemas angehängt)
+  - /home/piet/.hermes/hermes-agent/web/src/control/lib/types.ts (nur neue Typen angehängt)
+  - /home/piet/.hermes/hermes-agent/web/src/control/i18n/de.ts (nur neue Labels)
+  - /home/piet/.hermes/projects.yaml (neu, Runtime-Config)
+operator: Piet (Grill-Session 16.07., Roadmap Punkt 8; /goal-Start 23:33)
+---
+
+# Projekte-Tab-Nachtlauf — Check-IN
+
+Tabu-Zonen respektiert: `AgentTerminalsView.tsx` + `agent_terminals.py` (frage-assistent-p0)
+werden NICHT editiert — Terminal-Daten nur via Import/Aufruf bestehender Module.
+`web_server.py`: nur EINE Registrierungszeile für register_projects_routes (Rebase-freundlich).
+`useControlData.ts`: nur append neuer Hooks — Hinweis an godfile-split-Session (refactort die
+Datei im isolierten Worktree): vor Mergeback auf frisches main rebasen.
+Landen seriell mit Rebase auf frisches main, fast-forward piet-fork, Deploy nur bei
+UI-Checkpoints (Stufen 4/6/9/12) in sauberem Fenster (keine fremden uncommitted .py).
+"""
+
+_CLOSED_COORDINATION_NOTE = """\
+---
+agent: claude
+started: 2026-07-16T20:00:00+02:00
+ended: 2026-07-16T23:00:00+02:00
+task: "Vorheriger, längst abgeschlossener Auftrag."
+touching:
+  - /home/piet/.hermes/hermes-agent/hermes_cli/kanban_db.py
+---
+
+# Erledigt — Check-OUT
+"""
+
+_GARBAGE_COORDINATION_NOTE = """\
+Kein Frontmatter hier, nur ein loser Notizzettel ohne --- Delimiter.
+agent: claude
+started: not-even-close-to-yaml: [
+"""
+
+
+def test_coordination_source_open_note_parsed_closed_and_garbage_skipped(
+    tmp_path: Path,
+) -> None:
+    coordination_dir = tmp_path / "_coordination"
+    coordination_dir.mkdir()
+    (coordination_dir / "2026-07-16_2333_claude_projekte-tab-nachtlauf.md").write_text(
+        _REAL_COORDINATION_NOTE, encoding="utf-8"
+    )
+    (coordination_dir / "2026-07-16_2000_claude_closed-note.md").write_text(
+        _CLOSED_COORDINATION_NOTE, encoding="utf-8"
+    )
+    (coordination_dir / "2026-07-16_garbage.md").write_text(
+        _GARBAGE_COORDINATION_NOTE, encoding="utf-8"
+    )
+
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        coordination_dir=coordination_dir,
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+
+    assert payload["errors"] == []
+    coordination_agents = [a for a in payload["agents"] if a["source"] == "coordination"]
+    assert len(coordination_agents) == 1
+
+    note = coordination_agents[0]
+    assert note["kind"] == "claude"
+    assert note["label"] == "2026-07-16_2333_claude_projekte-tab-nachtlauf"
+    assert "Projekte-Tab-Nachtlauf" in note["task"]
+    assert note["project"] == "hermes-infra"
+    expected_epoch = int(
+        __import__("datetime")
+        .datetime.fromisoformat("2026-07-16T23:33:00+02:00")
+        .timestamp()
+    )
+    assert note["since"] == expected_epoch
+
+
+def test_coordination_source_broken_dir_is_isolated_error(tmp_path: Path) -> None:
+    broken_dir = tmp_path / "not-a-dir"
+    broken_dir.write_text("i am a file, not a directory", encoding="utf-8")
+
+    registry = _hermes_infra_registry()
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        coordination_dir=broken_dir,
+        now=1_700_000_000,
+    )
+
+    assert any(e.startswith("coordination:") for e in payload["errors"])
+    assert [a for a in payload["agents"] if a["source"] == "coordination"] == []
+
+
+# --- kanban source ------------------------------------------------------------
+
+
+def test_kanban_source_running_tasks_attributed_by_project(tmp_path: Path) -> None:
+    kdb = tmp_path / "kanban.db"
+    pdb = tmp_path / "projects.db"
+    _make_kanban_db(kdb)
+    health_track_pid = _make_projects_db(pdb, name="Health Track", board_slug="health-track")
+    conn = projects_db.connect(pdb)
+    try:
+        default_pid = projects_db.create_project(conn, name="Hermes Infra", board_slug="default")
+    finally:
+        conn.close()
+
+    now = 1_700_100_000
+    _insert_task(kdb, task_id="r1", status="running", project_id=None, created_at=now - 10)
+    # The common live case: a task explicitly bound to the default board's
+    # project row must attribute to the default project, not fall to None.
+    _insert_task(
+        kdb, task_id="r0", status="running", project_id=default_pid, created_at=now - 10
+    )
+    _insert_task(
+        kdb, task_id="r2", status="running", project_id=health_track_pid, created_at=now - 10
+    )
+    _insert_task(
+        kdb, task_id="r3", status="running", project_id="ghost-project-id", created_at=now - 10
+    )
+    conn = kanban_db.connect(kdb)
+    try:
+        conn.execute("UPDATE tasks SET started_at = ? WHERE id = 'r1'", (now - 500,))
+        conn.execute("UPDATE tasks SET started_at = ? WHERE id = 'r2'", (now - 600,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    registry = ProjectsRegistry(
+        projects=[
+            _entry(slug="hermes-infra", kanban_project="default"),
+            _entry(slug="health-track", kanban_project="health-track"),
+        ],
+        errors=[],
+    )
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        coordination_dir=tmp_path / "no-coordination-here",
+        kanban_db_path=kdb,
+        projects_db_path=pdb,
+        now=now,
+    )
+
+    kanban_agents = {a["label"]: a for a in payload["agents"] if a["source"] == "kanban"}
+    assert set(kanban_agents) == {"r0", "r1", "r2", "r3"}
+    assert kanban_agents["r0"]["project"] == "hermes-infra"
+    assert kanban_agents["r1"]["project"] == "hermes-infra"
+    assert kanban_agents["r1"]["since"] == now - 500
+    assert kanban_agents["r1"]["kind"] == "kanban"
+    assert kanban_agents["r2"]["project"] == "health-track"
+    assert kanban_agents["r2"]["since"] == now - 600
+    assert kanban_agents["r3"]["project"] is None
+
+
+# --- loops source --------------------------------------------------------------
+
+
+def _make_running_pack(state_root: Path, name: str) -> None:
+    state_dir = state_root / name
+    _write_heartbeat(
+        state_dir,
+        started_at="2026-07-16T21:37:59Z",
+        last_at=["2026-07-16T19:25:36Z"],
+    )
+    lock = state_dir / ".lock"
+    lock.write_text("", encoding="utf-8")
+
+
+def test_loops_source_running_pack_attributed_project(tmp_path: Path) -> None:
+    state_root = tmp_path / "loops"
+    _make_running_pack(state_root, "dashboard-experience")
+    _make_running_pack(state_root, "orphan-pack")
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+
+    lock1 = (state_root / "dashboard-experience" / ".lock").open("r+", encoding="utf-8")
+    lock2 = (state_root / "orphan-pack" / ".lock").open("r+", encoding="utf-8")
+    fcntl.flock(lock1, fcntl.LOCK_EX)
+    fcntl.flock(lock2, fcntl.LOCK_EX)
+    try:
+        registry = ProjectsRegistry(
+            projects=[_entry(slug="hermes-infra", loop_packs=["dashboard-experience"])],
+            errors=[],
+        )
+        payload = build_agents_payload(
+            registry,
+            tmux_panes_text="",
+            coordination_dir=tmp_path / "no-coordination-here",
+            kanban_db_path=kdb,
+            projects_db_path=tmp_path / "projects.db",
+            loops_state_root=state_root,
+            pack_names=["dashboard-experience", "orphan-pack", "never-ran-pack"],
+            now=int(time.time()),
+        )
+    finally:
+        fcntl.flock(lock1, fcntl.LOCK_UN)
+        fcntl.flock(lock2, fcntl.LOCK_UN)
+        lock1.close()
+        lock2.close()
+
+    loop_agents = {a["label"]: a for a in payload["agents"] if a["source"] == "loop"}
+    assert set(loop_agents) == {"dashboard-experience", "orphan-pack"}  # never-ran-pack not running
+    assert loop_agents["dashboard-experience"]["project"] == "hermes-infra"
+    assert loop_agents["orphan-pack"]["project"] is None
+    expected_epoch = int(
+        __import__("datetime").datetime.fromisoformat("2026-07-16T21:37:59+00:00").timestamp()
+    )
+    assert loop_agents["dashboard-experience"]["since"] == expected_epoch
+    assert payload["errors"] == []
+
+
+# --- endpoint ------------------------------------------------------------------
+
+
+def test_agents_endpoint_returns_200_frozen_shape_sources_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    _make_kanban_db(tmp_path / "kanban.db")
+
+    broken_coordination_dir = tmp_path / "coordination-is-a-file"
+    broken_coordination_dir.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._default_coordination_dir",
+        lambda: broken_coordination_dir,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
+    monkeypatch.setattr(control_loops, "_all_pack_names", lambda: [])
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    resp = client.get("/api/projects/agents")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body["generated_at"], int)
+    assert isinstance(body["agents"], list)
+    assert body["agents"] == []
+    assert any(e.startswith("coordination:") for e in body["errors"])
+    assert not any(e.startswith("tmux:") for e in body["errors"])
+    assert not any(e.startswith("kanban:") for e in body["errors"])
+    assert not any(e.startswith("loops:") for e in body["errors"])
