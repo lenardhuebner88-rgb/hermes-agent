@@ -19,6 +19,22 @@ import threading
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep hermes_constants / image_gen_provider purges from leaking.
+
+    ``http_server`` deletes ``hermes_constants`` and ``agent.image_gen_provider``
+    so they re-import against the fixture's temporary HERMES_HOME. Without a
+    restore, later files in the same worker keep import-time bindings to the
+    orphaned pre-purge objects while lazy imports resolve to the reimport
+    (module-identity split) — same class as the empty-tool-name /
+    verification-stop-caching leaks (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the table
+    back on teardown.
+    """
+    yield
+
+
 PNG_1PX = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
     "53de00000010494441547801635c0e000000feff03000006000557bfabd400"
