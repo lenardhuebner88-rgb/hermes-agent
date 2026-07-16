@@ -3,8 +3,30 @@ from datetime import datetime, timezone
 from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
+    _fetch_xai_account_usage,
     fetch_account_usage,
     render_account_usage_lines,
+)
+
+# Real Grok CLI billing line captured 2026-07-16 (verbatim).
+_XAI_BILLING_FIXTURE_LINE = (
+    '{"ts":"2026-07-16T09:47:14.767Z","src":"shell","pid":3418557,"lvl":"info",'
+    '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":21.0,'
+    '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+    '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
+    '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true,'
+    '"billingPeriodStart":"2026-07-12T17:58:33.973068+00:00",'
+    '"billingPeriodEnd":"2026-07-19T17:58:33.973068+00:00","historyLen":0},'
+    '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+)
+
+_XAI_BILLING_OLDER_LINE = (
+    '{"ts":"2026-07-16T08:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
+    '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":32.0,'
+    '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+    '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
+    '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true},'
+    '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
 )
 
 
@@ -301,3 +323,121 @@ def test_fetch_account_usage_kimi_rejected_api_key_returns_unavailable(monkeypat
 
     assert snapshot is not None
     assert snapshot.unavailable_reason == "Kimi API key rejected."
+
+
+def test_fetch_xai_account_usage_latest_billing_line_wins(tmp_path):
+    log_path = tmp_path / "unified.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                '{"ts":"2026-07-16T07:00:00Z","msg":"noise line one","lvl":"info"}',
+                _XAI_BILLING_OLDER_LINE,
+                '{"ts":"2026-07-16T09:00:00Z","msg":"noise line two","lvl":"debug"}',
+                _XAI_BILLING_FIXTURE_LINE,
+                '{"msg":"unrelated shell event"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.available is True
+    assert snapshot.provider == "xai"
+    assert snapshot.source == "grok_cli_log"
+    assert snapshot.title == "Grok"
+    assert snapshot.plan == "SuperGrok"
+    assert len(snapshot.windows) == 1
+    window = snapshot.windows[0]
+    assert window.label == "Diese Woche"
+    assert window.used_percent == 21.0
+    assert window.window_key == "weekly"
+    assert window.reset_at == datetime(2026, 7, 19, 17, 58, 33, 973068, tzinfo=timezone.utc)
+    assert snapshot.details
+    assert snapshot.details[0].startswith("Stand: 2026-07-16")
+    assert len(snapshot.details) == 1
+
+
+def test_fetch_xai_account_usage_missing_file(tmp_path):
+    missing = tmp_path / "does-not-exist.jsonl"
+
+    snapshot = _fetch_xai_account_usage(log_path=missing)
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.provider == "xai"
+    assert snapshot.source == "grok_cli_log"
+    assert snapshot.unavailable_reason is not None
+    assert "nicht gefunden" in snapshot.unavailable_reason
+    assert snapshot.windows == ()
+
+
+def test_fetch_xai_account_usage_noise_only(tmp_path):
+    log_path = tmp_path / "unified.jsonl"
+    log_path.write_text(
+        "\n".join(
+            [
+                '{"ts":"2026-07-16T07:00:00Z","msg":"shell start","lvl":"info"}',
+                "not even json",
+                '{"msg":"some other event","ctx":{}}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason == "Keine Billing-Daten im Grok-CLI-Log."
+
+
+def test_fetch_xai_account_usage_malformed_newest_falls_back_to_older(tmp_path):
+    log_path = tmp_path / "unified.jsonl"
+    # Newest line contains the marker but is truncated JSON; older valid line wins.
+    malformed = (
+        '{"ts":"2026-07-16T10:00:00Z","msg":"billing: fetched credits config",'
+        '"ctx":{"config":{"creditUsagePercent":99.0'
+    )
+    log_path.write_text(
+        "\n".join([_XAI_BILLING_FIXTURE_LINE, malformed]) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.available is True
+    assert snapshot.windows[0].used_percent == 21.0
+    assert snapshot.plan == "SuperGrok"
+
+
+def test_fetch_account_usage_dispatches_xai_and_grok(monkeypatch):
+    sentinel = AccountUsageSnapshot(
+        provider="xai",
+        source="grok_cli_log",
+        fetched_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+        title="Grok",
+        plan="SuperGrok",
+        windows=(
+            AccountUsageWindow(
+                label="Diese Woche",
+                used_percent=21.0,
+                window_key="weekly",
+            ),
+        ),
+    )
+    calls = []
+
+    def _fake_fetch(log_path=None):
+        calls.append(log_path)
+        return sentinel
+
+    monkeypatch.setattr("agent.account_usage._fetch_xai_account_usage", _fake_fetch)
+
+    assert fetch_account_usage("xai") is sentinel
+    assert fetch_account_usage("grok") is sentinel
+    assert len(calls) == 2
