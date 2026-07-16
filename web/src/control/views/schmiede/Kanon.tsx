@@ -15,7 +15,7 @@ export function Kanon({ catalog }: { catalog: PromptForgeCatalog }) {
               </div>
               <p className="mt-1 text-ink-2 text-xs">{b.description}</p>
               <div className="mt-1.5 flex items-start justify-between gap-2">
-                <code className="font-data tabular-nums min-w-0 flex-1 whitespace-pre-wrap break-words text-xs text-ink-2">{b.body}</code>
+                <code className="font-data tabular-nums min-w-0 flex-1 whitespace-pre-wrap break-words rounded bg-surface-0 p-2 text-xs text-ink-2">{b.body}</code>
                 <CopyButton text={b.body} label="Kopieren" copiedLabel="Kopiert" />
               </div>
               <p className="mt-1 text-ink-3 text-micro">{b.source}</p>
