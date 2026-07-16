@@ -269,10 +269,15 @@ export function StatsMasthead({
         </div>
         <span className="st-mast-meta">{meta}</span>
       </div>
-      <div className="st-mast" data-testid="stats-masthead-figure">
-        <span className="st-mast-value">{acc.rate == null ? "—" : pctText(acc.rate)}</span>
-        {acc.rate != null ? <small>%</small> : null}
-      </div>
+      {/* Kein Balken-Torso im Leerzustand (Empty-States-Doktrin W4-7): die
+          große Figur rendert nur mit echter Akzeptanzrate — bei 0 Urteilen
+          trägt die Note-Zeile darunter den Zustand allein. */}
+      {acc.rate != null ? (
+        <div className="st-mast" data-testid="stats-masthead-figure">
+          <span className="st-mast-value">{pctText(acc.rate)}</span>
+          <small>%</small>
+        </div>
+      ) : null}
       <div className="st-mast-foot">
         <span className="st-note">{note}</span>
         <span className={cn("st-mast-delta", deltaTone === "up" ? "text-status-ok" : deltaTone === "down" ? "text-status-alert" : "text-ink-3")}>

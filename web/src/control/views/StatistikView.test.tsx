@@ -578,6 +578,9 @@ describe("StatsMasthead (ST4)", () => {
     expect(html).toContain("Noch keine Verifier-Urteile im Fenster");
     expect(html).toContain("keine 30-Tage-Baseline");
     expect(html).toContain("veraltet");
+    // Empty-States-Doktrin (W4-7): kein Balken-Torso ohne Daten — die große
+    // Prozent-Figur bleibt weg, die Note-Zeile trägt den Zustand allein.
+    expect(html).not.toContain('data-testid="stats-masthead-figure"');
   });
 });
 
