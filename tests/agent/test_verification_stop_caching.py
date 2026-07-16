@@ -19,6 +19,21 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep ``_fresh_run_agent``'s sys.modules purge from leaking into later files.
+
+    The helper below deletes ``run_agent`` / ``agent.*`` / ``tools.*`` / ``hermes_*``
+    and re-imports them so flags are read fresh against the test HERMES_HOME.
+    Without a restore, later files in the same worker keep import-time bindings
+    to the orphaned reimport (module-identity split) — same class as the
+    empty-tool-name dampening leak (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the table
+    back on teardown.
+    """
+    yield
+
+
 def _fresh_run_agent(hermes_home):
     for mod in list(sys.modules):
         if mod == "run_agent" or mod.startswith("agent.") or mod.startswith("tools.") or mod.startswith("hermes_"):
