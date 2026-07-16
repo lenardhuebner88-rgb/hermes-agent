@@ -198,12 +198,13 @@ def test_specify_task_llm_api_error_keeps_task_in_triage(kanban_home):
     client = MagicMock()
     with patch(
         "agent.auxiliary_client.call_llm",
-        side_effect=RuntimeError("429 rate limited"),
+        side_effect=RuntimeError("credit exhausted for model xyz"),
     ):
         outcome = spec.specify_task(tid)
 
     assert outcome.ok is False
-    assert "LLM error" in outcome.reason
+    assert outcome.reason == "LLM error: RuntimeError"
+    assert "credit exhausted" in outcome.detail
     with kb.connect() as conn:
         assert kb.get_task(conn, tid).status == "triage"
 
