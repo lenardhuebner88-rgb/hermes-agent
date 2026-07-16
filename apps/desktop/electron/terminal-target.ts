@@ -17,6 +17,7 @@ export interface TerminalShellSpec {
 function isExecutableFile(candidate: string): boolean {
   try {
     const stat = fs.statSync(candidate)
+
     return stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0)
   } catch {
     return false
@@ -27,25 +28,43 @@ export function findOnPath(command: string): string | null {
   const extensions = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : ['']
 
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-    if (!dir) continue
+    if (!dir) {
+      continue
+    }
+
     for (const ext of extensions) {
       const candidate = path.join(dir, command.endsWith(ext) ? command : `${command}${ext}`)
-      if (isExecutableFile(candidate)) return candidate
+
+      if (isExecutableFile(candidate)) {
+        return candidate
+      }
     }
   }
+
   return null
 }
 
 export function normalizeTmuxTarget(rawTarget: unknown): TerminalTmuxTarget | null {
-  if (!rawTarget) return null
+  if (!rawTarget) {
+    return null
+  }
+
   if (typeof rawTarget !== 'object' || Array.isArray(rawTarget)) {
     throw new Error('Invalid terminal target: tmuxTarget must be an object')
   }
+
   const raw = rawTarget as Record<string, unknown>
   const session = String(raw.session || '').trim()
   const windowName = String(raw.window || '').trim()
-  if (!session || !TMUX_TARGET_PART_RE.test(session)) throw new Error('Invalid tmux session')
-  if (windowName && !TMUX_TARGET_PART_RE.test(windowName)) throw new Error('Invalid tmux window')
+
+  if (!session || !TMUX_TARGET_PART_RE.test(session)) {
+    throw new Error('Invalid tmux session')
+  }
+
+  if (windowName && !TMUX_TARGET_PART_RE.test(windowName)) {
+    throw new Error('Invalid tmux window')
+  }
+
   return { session, window: windowName || undefined }
 }
 
@@ -63,9 +82,16 @@ export function resolveTerminalSpawnSpec({
   findOnPath?: (command: string) => string | null
 }): TerminalShellSpec & { target: TerminalTmuxTarget | null } {
   const target = normalizeTmuxTarget(payload.tmuxTarget)
-  if (!target) return { ...shellSpec, target: null }
+
+  if (!target) {
+    return { ...shellSpec, target: null }
+  }
   const tmux = lookup('tmux')
-  if (!tmux) throw new Error('tmux is unavailable; cannot attach desktop terminal to an agent session')
+
+  if (!tmux) {
+    throw new Error('tmux is unavailable; cannot attach desktop terminal to an agent session')
+  }
+
   return {
     args: ['attach-session', '-t', buildTmuxTargetArg(target)],
     command: tmux,
@@ -76,6 +102,7 @@ export function resolveTerminalSpawnSpec({
 
 export function sanitizeTerminalStartOptions(options: Record<string, unknown> = {}) {
   const target = options.tmuxTarget as Record<string, unknown> | undefined
+
   return {
     cols: options.cols,
     cwd: options.cwd,
