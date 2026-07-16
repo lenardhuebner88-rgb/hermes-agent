@@ -25,7 +25,7 @@ export function statusClass(status: string): string {
 export function statusBadge(status: string | null | undefined) {
   const s = status ?? "open";
   return (
-    <span className={`hc-type-label ${statusClass(s)}`}>
+    <span className={`text-micro ${statusClass(s)}`}>
       {statusLabel(s)}
     </span>
   );

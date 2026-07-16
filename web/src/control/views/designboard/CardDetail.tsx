@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { fetchJSON } from "@/lib/api";
-import { SectionHeader, FleetEmptyState } from "@/control/components/leitstand";
+import { SectionHeader, FleetEmptyState, FleetPanel } from "@/control/components/leitstand";
 import { de } from "@/control/i18n/de";
 import { PinOverlay, type Pin } from "./PinOverlay";
 import { STATUS_LABELS, statusBadge, statusLabel } from "./status";
@@ -168,7 +168,7 @@ export function CardDetail(_props: { density?: string } = {}) {
   }
 
   if (error) return <div className="p-4"><FleetEmptyState title="Laden fehlgeschlagen" desc={error} /></div>;
-  if (!card) return <div className="p-4 hc-type-label hc-dim">Laden…</div>;
+  if (!card) return <div className="p-4 text-micro text-ink-3">Laden…</div>;
 
   const beforeScreenshot = card.entries.find((entry) =>
     entry.kind === "screenshot" && entry.asset && entry.author !== "system",
@@ -181,10 +181,10 @@ export function CardDetail(_props: { density?: string } = {}) {
     <div className="min-h-full bg-surface-0 p-4">
       <SectionHeader label={card.title} meta={statusBadge(card.derived_status ?? card.status)} />
       {card.target?.view && (
-        <div className="mt-1 hc-type-label hc-dim">→ {card.target.view}</div>
+        <div className="mt-1 font-data text-micro text-ink-3">→ {card.target.view}</div>
       )}
       {card.derived_status && card.derived_status !== card.status && (
-        <div className="mt-1 hc-type-label hc-soft">
+        <div className="mt-1 text-sec text-ink-2">
           Kartenstatus: {statusLabel(card.status)}
         </div>
       )}
@@ -204,22 +204,22 @@ export function CardDetail(_props: { density?: string } = {}) {
             {promoteBusy ? de.designBoard.promoting : de.designBoard.promote}
           </button>
           {promotedTaskId && (
-            <span className="hc-type-label text-status-ok">{de.designBoard.promoted(promotedTaskId)}</span>
+            <span className="text-micro text-status-ok">{de.designBoard.promoted(promotedTaskId)}</span>
           )}
           {promoteError && (
-            <span className="hc-type-label text-status-warn">{promoteError}</span>
+            <span className="text-micro text-status-warn">{promoteError}</span>
           )}
         </div>
       )}
 
       <div className="mt-3 flex items-center gap-2">
-        <span className="hc-type-label hc-dim">Status:</span>
+        <span className="text-micro text-ink-3">Status:</span>
         {statusDraft === null ? (
           <button
             data-testid="status-edit"
             onClick={() => setStatusDraft(card.status)}
             disabled={busy}
-            className="rounded-card border border-line px-2 py-1 hc-type-label text-live disabled:opacity-45"
+            className="rounded-card border border-line px-2 py-1 text-micro text-live disabled:opacity-45"
           >
             {statusLabel(card.status)} ✎
           </button>
@@ -230,7 +230,7 @@ export function CardDetail(_props: { density?: string } = {}) {
               value={statusDraft}
               onChange={(e) => setStatusDraft(e.target.value)}
               disabled={busy}
-              className="rounded-card border border-line bg-surface-1 px-2 py-1 text-sm text-white"
+              className="rounded-card border border-line bg-surface-1 px-2 py-1 text-sm text-ink"
             >
               {Object.entries(STATUS_LABELS).map(([value, label]) => (
                 <option key={value} value={value}>{label}</option>
@@ -239,14 +239,14 @@ export function CardDetail(_props: { density?: string } = {}) {
             <button
               onClick={() => void updateStatus(statusDraft)}
               disabled={busy || statusDraft === card.status}
-              className="rounded-card border border-live px-2 py-1 hc-type-label text-live disabled:opacity-45"
+              className="rounded-card border border-live px-2 py-1 text-micro text-live disabled:opacity-45"
             >
               Speichern
             </button>
             <button
               onClick={() => setStatusDraft(null)}
               disabled={busy}
-              className="rounded-card border border-line px-2 py-1 hc-type-label text-ink-3"
+              className="rounded-card border border-line px-2 py-1 text-micro text-ink-3"
             >
               Abbrechen
             </button>
@@ -254,7 +254,7 @@ export function CardDetail(_props: { density?: string } = {}) {
         )}
       </div>
       {card.derived_status && (
-        <div className="mt-1 hc-type-label hc-soft">
+        <div className="mt-1 text-sec text-ink-2">
           Abgeleitet aus verknüpften Aufgaben: {statusLabel(card.derived_status)}
         </div>
       )}
@@ -263,7 +263,7 @@ export function CardDetail(_props: { density?: string } = {}) {
         <div className="mt-3 flex flex-wrap gap-2">
           {card.task_facets.map((f) => (
             <span key={f.id} data-testid={`facet-${f.id}`}
-              className={`rounded-card border border-line px-2 py-1 hc-type-label ${f.terminal ? "text-status-ok" : "text-status-warn"}`}>
+              className={`rounded-card border border-line px-2 py-1 text-micro ${f.terminal ? "text-status-ok" : "text-status-warn"}`}>
               {f.id} · {f.status}{f.assignee ? ` · ${f.assignee}` : ""}
             </span>
           ))}
@@ -272,40 +272,38 @@ export function CardDetail(_props: { density?: string } = {}) {
 
       {beforeScreenshot && afterScreenshot && (
         <div className="mt-4 grid gap-3 md:grid-cols-2" aria-label="Vorher-Nachher Screenshots">
-          <div className="hc-surface-card p-3">
-            <div className="hc-type-label hc-dim">Vorher · Operator-Screenshot</div>
+          <FleetPanel eyebrow="Vorher · Operator-Screenshot">
             <PinOverlay src={assetUrl(card.id, beforeScreenshot.asset!)} pins={beforeScreenshot.pins} editable={false} />
-          </div>
-          <div className="hc-surface-card p-3">
-            <div className="hc-type-label hc-dim">Nachher · System-Screenshot</div>
+          </FleetPanel>
+          <FleetPanel eyebrow="Nachher · System-Screenshot">
             <PinOverlay src={assetUrl(card.id, afterScreenshot.asset!)} pins={afterScreenshot.pins} editable={false} />
-          </div>
+          </FleetPanel>
         </div>
       )}
 
       <div className="mt-4 space-y-4">
         {card.entries.map((entry) => (
-          <div key={entry.id} data-testid={`entry-${entry.id}`} className="hc-surface-card p-3" aria-label="Verlaufszeile">
-            <div className="hc-type-label hc-dim">{entryTime(entry)} · {entry.author} · {entry.kind}</div>
-            {entry.note && <div className="mt-1 text-sm text-white">{entry.note}</div>}
-            {entry.asset && (
-              <div className="mt-2">
-                <PinOverlay src={assetUrl(card.id, entry.asset)} pins={entry.pins} editable={false} />
-              </div>
-            )}
-            {entry.html && <MockupToggle cardId={card.id} html={entry.html} png={entry.asset} />}
+          <div key={entry.id} data-testid={`entry-${entry.id}`} aria-label="Verlaufszeile">
+            <FleetPanel eyebrow={`${entryTime(entry)} · ${entry.author} · ${entry.kind}`}>
+              {entry.note && <div className="text-sm text-ink">{entry.note}</div>}
+              {entry.asset && (
+                <div className="mt-2">
+                  <PinOverlay src={assetUrl(card.id, entry.asset)} pins={entry.pins} editable={false} />
+                </div>
+              )}
+              {entry.html && <MockupToggle cardId={card.id} html={entry.html} png={entry.asset} />}
+            </FleetPanel>
           </div>
         ))}
       </div>
 
-      <div className="mt-6 hc-surface-card p-3">
-        <div className="hc-type-label hc-dim">Kommentar hinzufügen</div>
+      <FleetPanel eyebrow="Kommentar hinzufügen" className="mt-6">
         <textarea
           value={commentDraft}
           onChange={(e) => setCommentDraft(e.target.value)}
           placeholder="Notiz zur Karte…"
           disabled={busy}
-          className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white placeholder:text-ink-3"
+          className="w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-ink placeholder:text-ink-3"
         />
         <button
           onClick={() => void submitComment()}
@@ -314,24 +312,23 @@ export function CardDetail(_props: { density?: string } = {}) {
         >
           Kommentar speichern
         </button>
-      </div>
+      </FleetPanel>
 
-      <div className="mt-6 hc-surface-card p-3">
-        <div className="hc-type-label hc-dim">Screenshot hinzufügen</div>
+      <FleetPanel eyebrow="Screenshot hinzufügen" className="mt-6">
         <input ref={fileRef} type="file" accept="image/*" onChange={onFile}
-          className="mt-2 text-sm text-white" disabled={busy} />
+          className="text-sm text-ink" disabled={busy} />
         {draftAsset && (
           <div className="mt-3">
             <PinOverlay src={assetUrl(card.id, draftAsset)} pins={draftPins} editable
               onAddPin={(p) => setDraftPins((prev) => [
                 ...prev, { id: `p${prev.length + 1}`, x: p.x, y: p.y, note: "" },
               ])} />
-            <div className="mt-1 hc-type-label hc-soft">{draftPins.length} Markierung(en) — ins Bild klicken, um hinzuzufügen</div>
+            <div className="mt-1 text-sec text-ink-2">{draftPins.length} Markierung(en) — ins Bild klicken, um hinzuzufügen</div>
             {draftPins.length > 0 && (
               <div className="mt-2 space-y-1">
                 {draftPins.map((p, i) => (
                   <div key={p.id} className="flex items-center gap-2">
-                    <span className="hc-type-label hc-dim">#{i + 1}</span>
+                    <span className="text-micro text-ink-3">#{i + 1}</span>
                     <input
                       data-testid={`pin-note-${p.id}`}
                       value={p.note}
@@ -342,7 +339,7 @@ export function CardDetail(_props: { density?: string } = {}) {
                         );
                       }}
                       placeholder={de.designBoard.pinNotePlaceholder}
-                      className="flex-1 rounded-card border border-line bg-surface-1 px-2 py-1 text-xs text-white placeholder:text-ink-3"
+                      className="flex-1 rounded-card border border-line bg-surface-1 px-2 py-1 text-xs text-ink placeholder:text-ink-3"
                     />
                   </div>
                 ))}
@@ -350,28 +347,27 @@ export function CardDetail(_props: { density?: string } = {}) {
             )}
             <textarea value={note} onChange={(e) => setNote(e.target.value)}
               placeholder="Beschreibe das Problem…"
-              className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-white" />
+              className="mt-2 w-full rounded-card border border-line bg-surface-1 p-2 text-sm text-ink" />
             <button onClick={submitEntry} disabled={busy}
               className="mt-2 rounded-card border border-line px-3 py-1 text-sm text-live">
               Eintrag speichern
             </button>
           </div>
         )}
-      </div>
+      </FleetPanel>
 
-      <div className="mt-6 hc-surface-card p-3">
-        <div className="hc-type-label hc-dim">{de.designBoard.mockupUploadLabel}</div>
+      <FleetPanel eyebrow={de.designBoard.mockupUploadLabel} className="mt-6">
         <input ref={mockupRef} type="file" accept=".html,.htm,text/html"
           data-testid="mockup-upload" onChange={onMockupFile}
-          className="mt-2 text-sm text-white" disabled={busy} />
-        <div className="mt-1 hc-type-label hc-soft">{de.designBoard.mockupUploadHint}</div>
-        {mockupBusy && <div className="mt-1 hc-type-label hc-dim">{de.designBoard.mockupUploading}</div>}
+          className="text-sm text-ink" disabled={busy} />
+        <div className="mt-1 text-sec text-ink-2">{de.designBoard.mockupUploadHint}</div>
+        {mockupBusy && <div className="mt-1 text-micro text-ink-3">{de.designBoard.mockupUploading}</div>}
         {mockupError && (
           <div className="mt-2 rounded-card border border-status-warn/20 bg-status-warn/10 p-2 text-xs text-status-warn">
             {mockupError}
           </div>
         )}
-      </div>
+      </FleetPanel>
     </div>
   );
 }
@@ -389,7 +385,7 @@ function MockupToggle(props: { cardId: string; html: string; png: string | null 
   return (
     <div className="mt-2">
       <button onClick={() => setLive((v) => !v)}
-        className="mb-2 rounded-card border border-line px-2 py-1 hc-type-label text-live">
+        className="mb-2 rounded-card border border-line px-2 py-1 text-micro text-live">
         {live ? "PNG anzeigen" : "Live-HTML anzeigen"}
       </button>
       {live ? (
