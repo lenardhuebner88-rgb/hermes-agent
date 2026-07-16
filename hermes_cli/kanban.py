@@ -33,9 +33,7 @@ from hermes_cli import kanban_swarm as ks
 from hermes_cli.profiles import get_active_profile_name
 from hermes_cli.scoped_auto_commit import create_scoped_local_commit
 
-
 _log = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Small formatting helpers
@@ -50,7 +48,6 @@ _STATUS_ICONS = {
     "done":     "✓",
     "archived": "—",
 }
-
 
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
@@ -67,19 +64,16 @@ def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
             return False
     return default
 
-
 def _fmt_ts(ts: Optional[int]) -> str:
     if not ts:
         return ""
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-
 
 def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
     tenant = f" [{t.tenant}]" if t.tenant else ""
     return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}"
-
 
 def _task_to_dict(t: kb.Task) -> dict[str, Any]:
     return {
@@ -112,7 +106,6 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "kind": t.kind,
     }
 
-
 def _run_state_kwargs(args: argparse.Namespace) -> Optional[dict[str, str]]:
     st = getattr(args, "state_type", None)
     sn = getattr(args, "state_name", None)
@@ -121,7 +114,6 @@ def _run_state_kwargs(args: argparse.Namespace) -> Optional[dict[str, str]]:
     if st is None:
         return {}
     return {"state_type": st, "state_name": sn}
-
 
 def _parse_workspace_flag(value: str) -> tuple[str, Optional[str]]:
     """Parse ``--workspace`` into ``(kind, path|None)``.
@@ -147,7 +139,6 @@ def _parse_workspace_flag(value: str) -> tuple[str, Optional[str]]:
         "worktree:<path>, or dir:<path>"
     )
 
-
 def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     """Normalize an optional branch name from ``kanban create --branch``."""
     if value is None:
@@ -160,7 +151,6 @@ def _parse_branch_flag(value: Optional[str]) -> Optional[str]:
     if any(ch.isspace() for ch in branch):
         raise argparse.ArgumentTypeError("--branch must not contain whitespace")
     return branch
-
 
 def _check_dispatcher_presence() -> tuple[bool, str]:
     """Return ``(running, message)``.
@@ -216,7 +206,6 @@ def _check_dispatcher_presence() -> tuple[bool, str]:
         "default); your task will be picked up on the next tick after "
         "the gateway comes up."
     )
-
 
 # ---------------------------------------------------------------------------
 # Argparse builder
@@ -311,9 +300,8 @@ def _register_boards_parsers(sub: argparse._SubParsersAction) -> None:
     b_set_wd.add_argument("path", nargs="?", default=None,
                           help="Absolute path to use as default workdir. Omit to clear.")
 
-
-def _register_task_create_parsers(sub: argparse._SubParsersAction) -> None:
-    """Register ``create`` and ``swarm`` task-creation subcommands."""
+def _register_create_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``create`` subcommand."""
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")
@@ -423,6 +411,8 @@ def _register_task_create_parsers(sub: argparse._SubParsersAction) -> None:
                                "'hermes kanban show' or effective_ui_impact().")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
+def _register_swarm_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``swarm`` subcommand."""
     # --- swarm ---
     p_swarm = sub.add_parser(
         "swarm",
@@ -443,6 +433,11 @@ def _register_task_create_parsers(sub: argparse._SubParsersAction) -> None:
     p_swarm.add_argument("--created-by", default=None, help="Creator/anchor profile")
     p_swarm.add_argument("--idempotency-key", default=None, help="Dedup key for the root card")
     p_swarm.add_argument("--json", action="store_true", help="Emit JSON output")
+
+def _register_task_create_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register ``create`` and ``swarm`` task-creation subcommands."""
+    _register_create_parser(sub)
+    _register_swarm_parser(sub)
 
 def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
     """Register list/show/assign/reclaim/reassign subcommands."""
@@ -559,8 +554,8 @@ def _register_diagnostics_parsers(sub: argparse._SubParsersAction) -> None:
         help="Emit JSON (structured) instead of the default human table",
     )
 
-def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
-    """Register link/claim/comment/complete/edit/block/promote/archive and related."""
+def _register_link_claim_comment_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register link, unlink, claim, and comment subcommands."""
     # --- link / unlink ---
     p_link = sub.add_parser("link", help="Add a parent->child dependency")
     p_link.add_argument("parent_id")
@@ -591,6 +586,8 @@ def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
                                 "supersedes the task body in worker context. Operator-"
                                 "only: rejected inside a spawned worker (HERMES_KANBAN_TASK set).")
 
+def _register_complete_review_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register complete and review-commit subcommands."""
     p_complete = sub.add_parser("complete", help="Mark one or more tasks done")
     p_complete.add_argument("task_ids", nargs="+",
                             help="One or more task ids (only --result applies to all of them)")
@@ -625,6 +622,8 @@ def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
     p_review_commit.add_argument("--message", required=True, help="Local commit message")
     p_review_commit.add_argument("--json", action="store_true")
 
+def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register edit/respec/block/set-workflow/schedule/unblock/promote."""
     p_edit = sub.add_parser(
         "edit",
         help="Edit recovery fields on an already-completed task",
@@ -749,6 +748,8 @@ def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
         help="Emit machine-readable JSON result",
     )
 
+def _register_close_report_archive_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register close-sprint, report-discord, and archive."""
     p_close_sprint = sub.add_parser(
         "close-sprint",
         help=(
@@ -892,6 +893,13 @@ def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Permanently delete already-archived task ids from the board",
     )
+
+def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register link/claim/comment/complete/edit/block/promote/archive and related."""
+    _register_link_claim_comment_parsers(sub)
+    _register_complete_review_parsers(sub)
+    _register_edit_status_parsers(sub)
+    _register_close_report_archive_parsers(sub)
 
 def _register_dispatch_daemon_parsers(sub: argparse._SubParsersAction) -> None:
     """Register tail/dispatch/holds/daemon/watch subcommands."""
@@ -1194,8 +1202,8 @@ def _register_epic_parsers(sub: argparse._SubParsersAction) -> None:
     e_close = epic_sub.add_parser("close", help="Mark an epic closed")
     e_close.add_argument("epic_id", help="Epic id")
 
-def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
-    """Register closeout and release-*/complete-freigabe subcommands."""
+def _register_closeout_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``closeout`` subcommand."""
     p_closeout = sub.add_parser(
         "closeout",
         help="Process a durable task closeout in a detached transient unit",
@@ -1209,6 +1217,8 @@ def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_closeout.add_argument("--json", action="store_true", help="Emit JSON result")
 
+def _register_release_gate_parser(sub: argparse._SubParsersAction) -> None:
+    """Register the ``release-gate`` subcommand."""
     p_release_gate = sub.add_parser(
         "release-gate",
         help="Execute a parked release-gate child: run the dashboard gate in "
@@ -1238,6 +1248,8 @@ def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
              "old synchronous behaviour for tests and never spawns a unit.",
     )
 
+def _register_release_operator_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register release-uireal, release-freigabe, complete-freigabe."""
     p_release_uireal = sub.add_parser(
         "release-uireal",
         help="Explicit operator GO: release a ui-real PlanSpec chain root held "
@@ -1301,6 +1313,12 @@ def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
         "--json", action="store_true", help="Emit JSON result"
     )
 
+def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register closeout and release-*/complete-freigabe subcommands."""
+    _register_closeout_parser(sub)
+    _register_release_gate_parser(sub)
+    _register_release_operator_parsers(sub)
+
 def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
     """Attach the ``kanban`` subcommand tree under an existing subparsers.
 
@@ -1350,8 +1368,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
 
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
-
-
 
 # ---------------------------------------------------------------------------
 # Command dispatch
@@ -1435,7 +1451,6 @@ def kanban_command(args: argparse.Namespace) -> int:
             print(f"kanban: {exc}", file=sys.stderr)
             return 1
 
-
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
@@ -1451,7 +1466,6 @@ def _profile_author() -> str:
         return get_active_profile_name() or "user"
     except Exception:
         return "user"
-
 
 # ---------------------------------------------------------------------------
 # Boards management (hermes kanban boards …)
@@ -1484,7 +1498,6 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
     print(f"kanban boards: unknown action {sub!r}", file=sys.stderr)
     return 2
 
-
 def _board_task_counts(slug: str) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
@@ -1498,7 +1511,6 @@ def _board_task_counts(slug: str) -> dict[str, int]:
         return {r["status"]: int(r["n"]) for r in rows}
     except Exception:
         return {}
-
 
 def _cmd_boards_list(args: argparse.Namespace) -> int:
     include_archived = bool(getattr(args, "all", False))
@@ -1534,7 +1546,6 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
         print("Switch boards with `hermes kanban boards switch <slug>`.")
     return 0
 
-
 def _cmd_boards_create(args: argparse.Namespace) -> int:
     try:
         normed = kb._normalize_board_slug(args.slug)
@@ -1564,7 +1575,6 @@ def _cmd_boards_create(args: argparse.Namespace) -> int:
         print(f"  Use `hermes kanban boards switch {meta['slug']}` to make it current.")
     return 0
 
-
 def _cmd_boards_rm(args: argparse.Namespace) -> int:
     # When the user runs `hermes kanban boards delete <slug>` (alias), the
     # boards_action is 'delete' but args.delete is never set to True because
@@ -1583,7 +1593,6 @@ def _cmd_boards_rm(args: argparse.Namespace) -> int:
     else:
         print(f"Board {res['slug']!r} deleted.")
     return 0
-
 
 def _cmd_boards_switch(args: argparse.Namespace) -> int:
     try:
@@ -1605,7 +1614,6 @@ def _cmd_boards_switch(args: argparse.Namespace) -> int:
     print(f"Active board is now {normed!r}.")
     return 0
 
-
 def _cmd_boards_show(args: argparse.Namespace) -> int:
     current = kb.get_current_board()
     meta = kb.read_board_metadata(current)
@@ -1621,7 +1629,6 @@ def _cmd_boards_show(args: argparse.Namespace) -> int:
              if counts else ""))
     return 0
 
-
 def _cmd_boards_rename(args: argparse.Namespace) -> int:
     try:
         normed = kb._normalize_board_slug(args.slug)
@@ -1635,7 +1642,6 @@ def _cmd_boards_rename(args: argparse.Namespace) -> int:
     meta = kb.write_board_metadata(normed, name=args.name)
     print(f"Board {normed!r} renamed to {meta['name']!r}.")
     return 0
-
 
 def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
     try:
@@ -1655,9 +1661,7 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
         print(f"Board {normed!r} default workdir cleared.")
     return 0
 
-
 # ---------------------------------------------------------------------------
-
 
 def _parse_duration(val) -> Optional[int]:
     """Parse ``30s`` / ``5m`` / ``2h`` / ``1d`` or a raw integer → seconds.
@@ -1682,7 +1686,6 @@ def _parse_duration(val) -> Optional[int]:
             raise ValueError(f"malformed duration {val!r}") from exc
         return int(n * units[s[-1]])
     raise ValueError(f"malformed duration {val!r} (expected 30s, 5m, 2h, 1d, or a number)")
-
 
 def _cmd_init(args: argparse.Namespace) -> int:
     path = kb.init_db()
@@ -1717,7 +1720,6 @@ def _cmd_init(args: argparse.Namespace) -> int:
     )
     return 0
 
-
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         ok = kb.heartbeat_worker(
@@ -1731,7 +1733,6 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
         return 1
     print(f"Heartbeat recorded for {args.task_id}")
     return 0
-
 
 def _cmd_closeout(args: argparse.Namespace) -> int:
     """Launch closeout detached, or run the single-task unit core inline.
@@ -1787,7 +1788,6 @@ def _cmd_closeout(args: argparse.Namespace) -> int:
     if payload.get("state") in {"held", "ambiguous"}:
         return 2
     return 1
-
 
 def _cmd_release_gate(args: argparse.Namespace) -> int:
     """Run the release gate on a parked release-gate child.
@@ -1860,7 +1860,6 @@ def _cmd_release_gate(args: argparse.Namespace) -> int:
         )
     return 0 if result.get("status") == "green" else 2
 
-
 def _cmd_release_uireal(args: argparse.Namespace) -> int:
     """Release a ui-real PlanSpec chain root held in 'scheduled' for an explicit
     operator GO. Records a ``uireal_released`` event with operator identity and
@@ -1888,7 +1887,6 @@ def _cmd_release_uireal(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0 if released else 1
-
 
 def _cmd_release_freigabe(args: argparse.Namespace) -> int:
     """Release a freigabe:operator PlanSpec chain root held in 'scheduled' for an
@@ -1919,7 +1917,6 @@ def _cmd_release_freigabe(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0 if released else 1
-
 
 def _cmd_complete_freigabe(args: argparse.Namespace) -> int:
     """Close a held freigabe:operator PlanSpec root as done elsewhere.
@@ -1956,7 +1953,6 @@ def _cmd_complete_freigabe(args: argparse.Namespace) -> int:
         )
     return 0 if completed else 1
 
-
 def _cmd_assignees(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         data = kb.known_assignees(conn)
@@ -1974,7 +1970,6 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
         count_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "(idle)"
         print(f"{entry['name']:20s}  {on_disk:8s}  {count_str}")
     return 0
-
 
 def _cmd_create(args: argparse.Namespace) -> int:
     try:
@@ -2092,7 +2087,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
                 print(f"\n⚠  {message}", file=sys.stderr)
     return 0
 
-
 def _dispatch_epic(args: argparse.Namespace) -> int:
     """Handle ``hermes kanban epic <create|list|show|close>`` (N-E3)."""
     sub = getattr(args, "epic_action", None) or "list"
@@ -2107,7 +2101,6 @@ def _dispatch_epic(args: argparse.Namespace) -> int:
     print(f"kanban epic: unknown action {sub!r}", file=sys.stderr)
     return 2
 
-
 def _cmd_epic_create(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         eid = kb.create_epic(conn, title=args.title, body=getattr(args, "body", None))
@@ -2117,7 +2110,6 @@ def _cmd_epic_create(args: argparse.Namespace) -> int:
     else:
         print(f"Created epic {eid}  ({epic['title']})")
     return 0
-
 
 def _cmd_epic_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -2135,7 +2127,6 @@ def _cmd_epic_list(args: argparse.Namespace) -> int:
             f"({e['done_tasks']}/{e['task_count']} done, {cost})"
         )
     return 0
-
 
 def _cmd_epic_show(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -2155,7 +2146,6 @@ def _cmd_epic_show(args: argparse.Namespace) -> int:
         print(f"    {t['id']}  [{t['status']}]  {t['title']}")
     return 0
 
-
 def _cmd_epic_close(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         ok = kb.close_epic(conn, args.epic_id)
@@ -2164,7 +2154,6 @@ def _cmd_epic_close(args: argparse.Namespace) -> int:
         return 1
     print(f"Closed epic {args.epic_id}")
     return 0
-
 
 def _cmd_swarm(args: argparse.Namespace) -> int:
     try:
@@ -2195,7 +2184,6 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         print(f"Verifier: {created.verifier_id}")
         print(f"Synthesizer: {created.synthesizer_id}")
     return 0
-
 
 def _cmd_list(args: argparse.Namespace) -> int:
     assignee = args.assignee
@@ -2241,7 +2229,6 @@ def _cmd_list(args: argparse.Namespace) -> int:
     for t in tasks:
         print(_fmt_task_line(t))
     return 0
-
 
 def _cmd_show(args: argparse.Namespace) -> int:
     rsk = _run_state_kwargs(args)
@@ -2420,7 +2407,6 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 print(f"        ! {r.error.splitlines()[0][:160]}")
     return 0
 
-
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
     if profile:
@@ -2437,7 +2423,6 @@ def _cmd_assign(args: argparse.Namespace) -> int:
     print(f"Assigned {args.task_id} to {profile or '(unassigned)'}")
     return 0
 
-
 def _cmd_reclaim(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         ok = kb.reclaim_task(
@@ -2452,7 +2437,6 @@ def _cmd_reclaim(args: argparse.Namespace) -> int:
         return 1
     print(f"Reclaimed {args.task_id}")
     return 0
-
 
 def _cmd_reassign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
@@ -2481,7 +2465,6 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
         + (" (claim reclaimed)" if getattr(args, "reclaim", False) else "")
     )
     return 0
-
 
 def _cmd_diagnostics(args: argparse.Namespace) -> int:
     """List active diagnostics on the board. Wraps the same rule engine
@@ -2632,13 +2615,11 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
         print()
     return 0
 
-
 def _cmd_link(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         kb.link_tasks(conn, args.parent_id, args.child_id)
     print(f"Linked {args.parent_id} -> {args.child_id}")
     return 0
-
 
 def _cmd_unlink(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -2648,7 +2629,6 @@ def _cmd_unlink(args: argparse.Namespace) -> int:
         return 1
     print(f"Unlinked {args.parent_id} -> {args.child_id}")
     return 0
-
 
 def _cmd_claim(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -2670,7 +2650,6 @@ def _cmd_claim(args: argparse.Namespace) -> int:
     print(f"Claimed {task.id}")
     print(f"Workspace: {workspace}")
     return 0
-
 
 def _cmd_comment(args: argparse.Namespace) -> int:
     kind = "comment"
@@ -2702,7 +2681,6 @@ def _cmd_comment(args: argparse.Namespace) -> int:
     print(f"{label} added to {args.task_id}")
     return 0
 
-
 def _worker_run_id_for(task_id: str) -> Optional[int]:
     if os.environ.get("HERMES_KANBAN_TASK") != task_id:
         return None
@@ -2713,7 +2691,6 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return int(raw)
     except ValueError:
         return None
-
 
 def _latest_completed_metadata(
     conn,
@@ -2730,7 +2707,6 @@ def _latest_completed_metadata(
     if not isinstance(run.metadata, dict):
         raise ValueError(f"{label} metadata object is required: {task_id}")
     return run.metadata
-
 
 def _cmd_review_commit(args: argparse.Namespace) -> int:
     """Opt-in local scoped commit after Coder handoff and Reviewer-B verdict."""
@@ -2783,7 +2759,6 @@ def _cmd_review_commit(args: argparse.Namespace) -> int:
             print("Pre-existing dirty left untouched: " + ", ".join(receipt.preexisting_dirty_paths))
         print("Push: not executed")
     return 0
-
 
 def _cmd_complete(args: argparse.Namespace) -> int:
     """Mark one or more tasks done. Supports a single id or a list."""
@@ -2893,7 +2868,6 @@ def _cmd_complete(args: argparse.Namespace) -> int:
                 print(f"Completed {tid}")
     return 0 if not failed else 1
 
-
 def _cmd_edit(args: argparse.Namespace) -> int:
     raw_meta = getattr(args, "metadata", None)
     metadata = None
@@ -2920,7 +2894,6 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             return 1
     print(f"Edited {args.task_id}")
     return 0
-
 
 def _cmd_respec(args: argparse.Namespace) -> int:
     body = getattr(args, "body", None)
@@ -2961,7 +2934,6 @@ def _cmd_respec(args: argparse.Namespace) -> int:
     print(new_id)
     return 0
 
-
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     kind = getattr(args, "kind", None)
@@ -3000,7 +2972,6 @@ def _cmd_block(args: argparse.Namespace) -> int:
                     print(f"Blocked {tid}{suffix}")
     return 0 if not failed else 1
 
-
 def _cmd_set_workflow(args: argparse.Namespace) -> int:
     from hermes_cli.kanban_workflows import load_workflow_template
 
@@ -3025,7 +2996,6 @@ def _cmd_set_workflow(args: argparse.Namespace) -> int:
     print(f"cannot set workflow on {args.task_id}", file=sys.stderr)
     return 1
 
-
 def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     author = _profile_author()
@@ -3047,7 +3017,6 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 print(f"Scheduled {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
 
-
 def _cmd_unblock(args: argparse.Namespace) -> int:
     ids = list(args.task_ids or [])
     if not ids:
@@ -3068,7 +3037,6 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
             else:
                 print(f"Unblocked {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
-
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
@@ -3119,7 +3087,6 @@ def _cmd_promote(args: argparse.Namespace) -> int:
         else:
             print(f"cannot promote {r['task_id']}: {r['error']}", file=sys.stderr)
     return 0 if not failed else 1
-
 
 def _cmd_report_discord(args: argparse.Namespace) -> int:
     """Render a read-only Discord report with a kanban-report-v1 JSON block."""
@@ -3175,7 +3142,6 @@ def _cmd_report_discord(args: argparse.Namespace) -> int:
 
     print(full_markdown, end="")
     return 0
-
 
 def _cmd_close_sprint(args: argparse.Namespace) -> int:
     """Aggregate kid receipts into a SPRINT CLOSURE comment and complete
@@ -3266,7 +3232,6 @@ def _cmd_close_sprint(args: argparse.Namespace) -> int:
     )
     return 0 if outcome.completed else 1
 
-
 def _cmd_archive(args: argparse.Namespace) -> int:
     ids = list(args.task_ids or [])
     purge_ids = list(getattr(args, "purge_ids", None) or [])
@@ -3294,7 +3259,6 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                 print(f"Archived {tid}")
     return 0 if not failed else 1
 
-
 def _cmd_tail(args: argparse.Namespace) -> int:
     last_id = 0
     print(f"Tailing events for {args.task_id}. Ctrl-C to stop.")
@@ -3311,7 +3275,6 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n(stopped)")
         return 0
-
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:
     # Honour kanban.default_assignee as the fallback for unassigned ready
@@ -3438,7 +3401,6 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     return 0
 
-
 def _cmd_holds(args: argparse.Namespace) -> int:
     """Handle ``hermes kanban holds [--json]``."""
     try:
@@ -3476,7 +3438,6 @@ def _cmd_holds(args: argparse.Namespace) -> int:
             line += f"  reason={hold['reason']}"
         print(line)
     return 0
-
 
 def _cmd_daemon(args: argparse.Namespace) -> int:
     """Deprecated — the dispatcher now runs inside the gateway.
@@ -3652,7 +3613,6 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     print("(dispatcher stopped)")
     return 0
 
-
 def _cmd_watch(args: argparse.Namespace) -> int:
     """Live-stream task_events to the terminal."""
     kinds = (
@@ -3701,7 +3661,6 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         print("\n(stopped)")
         return 0
 
-
 def _cmd_stats(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         stats = kb.board_stats(conn)
@@ -3725,7 +3684,6 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     if age is not None:
         print(f"\nOldest ready task age: {int(age)}s")
     return 0
-
 
 def _cmd_backfill_costs(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -3776,7 +3734,6 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             print(f"Repaired cost_usd_equivalent for {n_repair} frozen closed run(s).")
     return 0
 
-
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
@@ -3792,7 +3749,6 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
           + (f":{args.thread_id}" if args.thread_id else "")
           + f" to {args.task_id}")
     return 0
-
 
 def _cmd_notify_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -3810,7 +3766,6 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
               f"  (since event {s['last_event_id']}){owner}")
     return 0
 
-
 def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         ok = kb.remove_notify_sub(
@@ -3824,7 +3779,6 @@ def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
     print(f"Unsubscribed from {args.task_id}")
     return 0
 
-
 def _cmd_log(args: argparse.Namespace) -> int:
     content = kb.read_worker_log(args.task_id, tail_bytes=args.tail)
     if content is None:
@@ -3835,7 +3789,6 @@ def _cmd_log(args: argparse.Namespace) -> int:
     if not content.endswith("\n"):
         sys.stdout.write("\n")
     return 0
-
 
 def _cmd_runs(args: argparse.Namespace) -> int:
     """Show attempt history for a task."""
@@ -3888,13 +3841,11 @@ def _cmd_runs(args: argparse.Namespace) -> int:
             print(f"     ✖ {r.error[:100]}")
     return 0
 
-
 def _cmd_context(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         text = kb.build_worker_context(conn, args.task_id)
     print(text)
     return 0
-
 
 def _cmd_specify(args: argparse.Namespace) -> int:
     """Flesh out a triage task (or all of them) via auxiliary LLM,
@@ -3967,7 +3918,6 @@ def _cmd_specify(args: argparse.Namespace) -> int:
     # --all: succeed if at least one promotion landed; exit 1 only when
     # every candidate failed (honest signal for scripts).
     return 0 if (ok_count > 0 or not ids) else 1
-
 
 def _cmd_decompose(args: argparse.Namespace) -> int:
     """Fan a triage task (or all of them) out into a graph of child
@@ -4061,7 +4011,6 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
         return 0 if ok_count == 1 else 1
     return 0 if (ok_count > 0 or not ids) else 1
 
-
 def _cmd_gc(args: argparse.Namespace) -> int:
     """Remove scratch workspaces of archived tasks, prune old events, and
     delete old worker logs."""
@@ -4102,7 +4051,6 @@ def _cmd_gc(args: argparse.Namespace) -> int:
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
     return 0
 
-
 # ---------------------------------------------------------------------------
 # Slash-command entry point (used by /kanban from CLI and gateway)
 # ---------------------------------------------------------------------------
@@ -4128,8 +4076,6 @@ Common subcommands:
 Run `/kanban <subcommand> -h` for arguments. \
 Read-only commands are safe while an agent is running.\
 """
-
-
 
 # ---------------------------------------------------------------------------
 # Module-level dispatch table (command name → handler).
@@ -4189,7 +4135,6 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "release-freigabe": _cmd_release_freigabe,
     "complete-freigabe": _cmd_complete_freigabe,
 }
-
 
 def run_slash(rest: str) -> str:
     """Execute a ``/kanban …`` string and return captured stdout/stderr.
