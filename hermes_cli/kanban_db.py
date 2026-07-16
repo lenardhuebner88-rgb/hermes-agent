@@ -6334,7 +6334,7 @@ def _resolve_model_override(
       cannot be resolved.  When ``task_id`` and ``conn`` are supplied, a
       ``model_override_incompatible`` event is appended to the task.
     """
-    from hermes_cli.models import detect_static_provider_for_model
+    from hermes_cli.models import detect_static_provider_for_model, parse_model_input
 
     if "/" in model_override:
         explicit_provider, explicit_model = model_override.split("/", 1)
@@ -6344,6 +6344,15 @@ def _resolve_model_override(
             return _handle_incompatible_model_override(
                 model_override, provider, task_id, conn, reason="malformed_provider_model_pair"
             )
+        resolved_explicit_provider, _ = parse_model_input(
+            f"{explicit_provider}:model", ""
+        )
+        if not resolved_explicit_provider:
+            # A slash can be part of an opaque model identifier (for example,
+            # ``override/model``). Preserve the legacy task_override meaning
+            # unless its left-hand segment is a known provider name.
+            return model_override, provider, "task_override"
+        explicit_provider = resolved_explicit_provider
         # Accept an explicit provider/model pair unless the static map
         # attributes the model to a *different* family than the one claimed.
         # ``detect_static_provider_for_model`` returns None when the model is
@@ -6454,12 +6463,21 @@ def _spawn_identity_metadata(
         override_provider: Optional[str] = None
         current_provider = lane_provider or profile_provider
         if isinstance(model_override, str) and model_override.strip():
-            resolved_model, resolved_provider, resolved_source = _resolve_model_override(
-                model_override.strip(),
-                current_provider,
-                task_id=task_id,
-                conn=conn,
-            )
+            if is_claude_cli:
+                # Claude CLI owns this model family, so a task override remains
+                # a direct ``--model`` value rather than a routed provider pair.
+                resolved_model, resolved_provider, resolved_source = (
+                    model_override.strip(),
+                    None,
+                    "task_override",
+                )
+            else:
+                resolved_model, resolved_provider, resolved_source = _resolve_model_override(
+                    model_override.strip(),
+                    current_provider,
+                    task_id=task_id,
+                    conn=conn,
+                )
             if resolved_model is not None:
                 model = resolved_model
                 model_source = resolved_source
