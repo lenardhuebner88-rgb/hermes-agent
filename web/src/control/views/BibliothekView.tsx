@@ -26,6 +26,7 @@ import {
   dedupeById,
   groupBySeries,
   newestPerCategory,
+  plainMarkdownPreview,
   seriesNeighbors,
   sortItems,
   type LesesaalSort,
@@ -627,7 +628,7 @@ export function LesesaalBody() {
                     trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
                     className={selected ? "h-full shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "h-full hover:bg-surface-3"}
                   >
-                    <span className="line-clamp-3">{item.preview}</span>
+                    <span className="line-clamp-3">{plainMarkdownPreview(item.preview)}</span>
                     <span className="mt-2 block font-data text-micro text-ink-3">{item.series}</span>
                   </ListRow>
                 </div>

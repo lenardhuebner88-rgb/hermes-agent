@@ -10,6 +10,7 @@ import { VaultProvenanceShelf } from "../BibliothekView";
 import type { LibraryItem, LibraryListResponse, StructuredModelBrief } from "../BibliothekView";
 import { CollectionGlyph } from "../knowledge/KnowledgeShelf";
 import type { KnowledgeCatalog } from "../knowledge/knowledge.helpers";
+import { plainMarkdownPreview } from "../BibliothekView.helpers";
 
 const t = {
   heroEyebrow: "Bibliothek",
@@ -147,7 +148,7 @@ function BriefingCard({ item, featured = false, onOpen }: { item: LibraryItem; f
       <div className={featured ? "p-6" : "p-5"}>
         <Eyebrow>{featured ? t.featuredLabel : t.briefingLabel}</Eyebrow>
         <h3 className={`mt-4 font-semibold leading-snug text-ink ${featured ? "text-h2" : "text-emph"}`}>{item.title}</h3>
-        <p className={`mt-2 leading-relaxed text-ink-2 ${featured ? "line-clamp-4 text-body" : "line-clamp-3 text-sec"}`}>{item.preview}</p>
+        <p className={`mt-2 leading-relaxed text-ink-2 ${featured ? "line-clamp-4 text-body" : "line-clamp-3 text-sec"}`}>{plainMarkdownPreview(item.preview)}</p>
         <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-micro text-ink-3">
           <span className="font-data">{item.series}</span>
           <span>·</span>

@@ -99,3 +99,30 @@ export function filterBriefings(items: LibraryItem[]): LibraryItem[] {
 export function newestBriefing(items: LibraryItem[]): LibraryItem | null {
   return filterBriefings(items)[0] ?? null;
 }
+
+/** Bereinigt einen Markdown-Vorschautext für Karten/Zeilenvorschauen:
+ *  Heading-Marker, Inline-Emphasis, Code-Backticks und Links werden entfernt,
+ *  der sichtbare Text bleibt erhalten. Kein globales Zeichen-Strippen, damit
+ *  Identifiers wie `t_7ab7e21a` oder `GPT-5.6` intakt bleiben. */
+export function plainMarkdownPreview(value: string): string {
+  return (
+    value
+      // Heading-Marker am Zeilenanfang
+      .replace(/^#{1,6}\s+/gm, "")
+      // Heading-Marker als eigenständiges Token (Anfang oder nach Whitespace)
+      .replace(/(^|\s)#{1,6}\s+/g, "$1")
+      // Fett **…**
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      // Kursiv *…* (nicht Teil eines **-Paars; Wortgrenzen vermeiden Strippen in IDs)
+      .replace(/(?<![A-Za-z0-9_])\*(?!\*)(.+?)(?<!\*)\*(?![A-Za-z0-9_])/g, "$1")
+      // Kursiv _…_ (wortumschließend, damit Unterstriche in IDs erhalten bleiben)
+      .replace(/(?<![A-Za-z0-9_])_(?=\S)(.+?)(?<=\S)_(?![A-Za-z0-9_])/g, "$1")
+      // Inline-Code `…`
+      .replace(/`([^`]+)`/g, "$1")
+      // Markdown-Links [Label](url) → Label
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+      // Mehrfach-Whitespace flachziehen (Vorschau bleibt einzeilig)
+      .replace(/\s+/g, " ")
+      .trim()
+  );
+}

@@ -200,6 +200,37 @@ describe("BriefingsShelf: strukturierte KI-Frontpage (S5)", () => {
   });
 });
 
+describe("BriefingsShelf: Markdown-Preview wird in Karten bereinigt", () => {
+  const MARKDOWN_BRIEFING = {
+    id: "brief-md-1",
+    category: "briefings",
+    series_id: "main/ki",
+    series: "KI Modell-Brief (Abend)",
+    title: "KI Modell-Brief (Abend) — Ausgabe 16.07. 20:03",
+    ts: 1_752_670_980,
+    preview:
+      "OpenAI hat GPT-5.6 heute aus der Preview in den echten Rollout geschoben: ChatGPT, Codex und API starten gleichzeitig. Anthropic zieht mit einer Fable-5-Preisstaffel nach, die Batch-Workloads deutlich günstiger macht. ## Modell-News - **OpenAI — GPT-5.6 (Sol/Terra/Luna)**: GA-Rol",
+    source_ref: "cron:ki",
+    series_meta: "0 20 * * *",
+    structured: false,
+    structured_brief: undefined,
+  };
+
+  it("zeigt Featured-Karten-Text ohne Roh-Markdown-Tokens", async () => {
+    mockFetch({ ...EMPTY_ITEMS, items: [MARKDOWN_BRIEFING], count: 1 });
+    const { container } = render(
+      <MemoryRouter><BriefingsShelf onOpenItem={() => {}} /></MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Modell-News/)).toBeTruthy();
+    expect(screen.getByText(/OpenAI/)).toBeTruthy();
+
+    const cardText = container.textContent ?? "";
+    expect(cardText).not.toContain("##");
+    expect(cardText).not.toContain("**");
+  });
+});
+
 describe("BriefingsShelf: Sheet-A negative guard über alle Renderzweige", () => {
   it("enthält weder die beiden alten Cyan-Glows noch die migrierten Legacy-Klassen im Quelltext", () => {
     expectRemovedLegacyMarksGone(BRIEFINGS_SOURCE);
