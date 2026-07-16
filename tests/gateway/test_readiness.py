@@ -18,6 +18,12 @@ def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monke
     with sqlite3.connect(home / "state.db") as conn:
         conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
     monkeypatch.setenv("HERMES_HOME", str(home))
+    # Host disk fill is not under test control; keep this case hermetic so a
+    # >90% full box does not fold overall readiness to degraded.
+    monkeypatch.setattr(
+        "gateway.readiness._probe_disk",
+        lambda home: {"status": "ok", "used_percent": 42.0, "free_bytes": 10**11},
+    )
 
     result = collect_runtime_readiness(
         configured_model="test/model",
@@ -35,7 +41,7 @@ def test_collect_runtime_readiness_reports_healthy_local_runtime(tmp_path, monke
     assert result["checks"]["model"]["status"] == "ok"
     assert result["checks"]["gateway"]["status"] == "ok"
     assert result["checks"]["background_queues"]["active_api_runs"] == 2
-    assert result["checks"]["disk"]["status"] in {"ok", "degraded"}
+    assert result["checks"]["disk"]["status"] == "ok"
 
 
 def test_collect_runtime_readiness_degrades_on_invalid_config_and_stopped_gateway(
