@@ -19769,6 +19769,24 @@ def _park_budget_runaway(
                 "stall_class": BUDGET_RUNAWAY_STALL_CLASS,
             },
         )
+        # Per-evidence page dedup (sibling: nonspawnable_assignee at ~24016).
+        # Operator unblock clears _operator_escalation_is_active, so the next
+        # ready tick would re-park the same stale sum and page Discord again
+        # (live: t_852cf8ee ×3 identical pages, 2026-07-16). Skip the page
+        # when an earlier budget-runaway escalation already carries this
+        # input_token_sum; re-page when the sum grows (new run burned tokens).
+        # Park/block + budget_runaway_parked stay unconditional above.
+        already_paged = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? "
+            "AND kind = ? AND json_extract(payload, "
+            "'$.evidence.input_token_sum') = ? "
+            "AND json_extract(payload, "
+            "'$.evidence.per_task_input_token_cap') IS NOT NULL "
+            "LIMIT 1",
+            (task_id, OPERATOR_ESCALATION_EVENT, token_sum),
+        ).fetchone()
+        if already_paged is not None:
+            return True
         esc_payload = _budget_runaway_escalation_payload(
             row=fresh,
             token_sum=token_sum,
