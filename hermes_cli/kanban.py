@@ -2506,118 +2506,124 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
     )
     return 0
 
-def _cmd_diagnostics(args: argparse.Namespace) -> int:
-    """List active diagnostics on the board. Wraps the same rule engine
-    the dashboard uses, so CLI output matches what the UI shows.
+def _diagnostics_collect(
+    args: argparse.Namespace,
+    conn: Any,
+    diag_config: Any,
+    kd: Any,
+) -> tuple[dict[str, Any], dict[str, dict]]:
+    """Compute diagnostics_by_task + meta under an open connection.
+
+    Pure extraction of the DB/collection phase of ``_cmd_diagnostics``.
+    Missing-task early exit raises ``_DiagnosticsEarlyExit``.
     """
-    from hermes_cli import kanban_diagnostics as kd
-    from hermes_cli.config import load_config
-
-    diag_config = kd.config_from_runtime_config(load_config())
-
-    with kb.connect_closing() as conn:
-        # Either one-task mode or fleet mode.
-        if getattr(args, "task", None):
-            task = kb.get_task(conn, args.task)
-            if task is None:
-                print(f"no such task: {args.task}", file=sys.stderr)
-                return 1
-            diags_by_task = {
-                args.task: kd.compute_task_diagnostics(
-                    task,
-                    kb.list_events(conn, args.task),
-                    kb.list_runs(conn, args.task),
+    # Either one-task mode or fleet mode.
+    if getattr(args, "task", None):
+        task = kb.get_task(conn, args.task)
+        if task is None:
+            raise _DiagnosticsEarlyExit(
+                1, f"no such task: {args.task}",
+            )
+        diags_by_task = {
+            args.task: kd.compute_task_diagnostics(
+                task,
+                kb.list_events(conn, args.task),
+                kb.list_runs(conn, args.task),
+                config=diag_config,
+            )
+        }
+    else:
+        # Fleet mode: pull all non-archived tasks + their events/runs.
+        rows = list(conn.execute(
+            "SELECT * FROM tasks WHERE status != 'archived'"
+        ).fetchall())
+        ids = [r["id"] for r in rows]
+        if not ids:
+            diags_by_task = {}
+        else:
+            placeholders = ",".join(["?"] * len(ids))
+            ev_by = {i: [] for i in ids}
+            for row in conn.execute(
+                f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
+                tuple(ids),
+            ):
+                ev_by.setdefault(row["task_id"], []).append(row)
+            run_by = {i: [] for i in ids}
+            for row in conn.execute(
+                f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
+                tuple(ids),
+            ):
+                run_by.setdefault(row["task_id"], []).append(row)
+            diags_by_task = {}
+            for r in rows:
+                tid = r["id"]
+                dl = kd.compute_task_diagnostics(
+                    r,
+                    ev_by.get(tid, []),
+                    run_by.get(tid, []),
                     config=diag_config,
                 )
-            }
-        else:
-            # Fleet mode: pull all non-archived tasks + their events/runs.
-            rows = list(conn.execute(
-                "SELECT * FROM tasks WHERE status != 'archived'"
-            ).fetchall())
-            ids = [r["id"] for r in rows]
-            if not ids:
-                diags_by_task = {}
+                if dl:
+                    diags_by_task[tid] = dl
+
+    # K4 cross-task pass: flag todo tasks stranded by a sticky-blocked
+    # parent. The per-task engine above is graph-blind, so this runs as a
+    # board-level pass with the open conn. Read-only and fail-soft — a
+    # diagnostics hiccup must never break the command.
+    try:
+        cross = kd.find_descendants_blocked_by_stuck_parent(
+            conn, config=diag_config,
+        )
+        root_branch_diags = kd.find_stranded_decompose_root_branches(conn)
+        for tid, dl in root_branch_diags.items():
+            cross.setdefault(tid, []).extend(dl)
+        focus = getattr(args, "task", None)
+        for tid, dl in cross.items():
+            if focus and tid != focus:
+                continue
+            diags_by_task.setdefault(tid, []).extend(dl)
+    except Exception:
+        pass
+
+    # Severity filter.
+    sev = getattr(args, "severity", None)
+    if sev:
+        for tid in list(diags_by_task.keys()):
+            kept = [d for d in diags_by_task[tid] if kd.SEVERITY_ORDER.index(d.severity) >= kd.SEVERITY_ORDER.index(sev)]
+            if kept:
+                diags_by_task[tid] = kept
             else:
-                placeholders = ",".join(["?"] * len(ids))
-                ev_by = {i: [] for i in ids}
-                for row in conn.execute(
-                    f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
-                    tuple(ids),
-                ):
-                    ev_by.setdefault(row["task_id"], []).append(row)
-                run_by = {i: [] for i in ids}
-                for row in conn.execute(
-                    f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
-                    tuple(ids),
-                ):
-                    run_by.setdefault(row["task_id"], []).append(row)
-                diags_by_task = {}
-                for r in rows:
-                    tid = r["id"]
-                    dl = kd.compute_task_diagnostics(
-                        r,
-                        ev_by.get(tid, []),
-                        run_by.get(tid, []),
-                        config=diag_config,
-                    )
-                    if dl:
-                        diags_by_task[tid] = dl
+                del diags_by_task[tid]
 
-        # K4 cross-task pass: flag todo tasks stranded by a sticky-blocked
-        # parent. The per-task engine above is graph-blind, so this runs as a
-        # board-level pass with the open conn. Read-only and fail-soft — a
-        # diagnostics hiccup must never break the command.
-        try:
-            cross = kd.find_descendants_blocked_by_stuck_parent(
-                conn, config=diag_config,
-            )
-            root_branch_diags = kd.find_stranded_decompose_root_branches(conn)
-            for tid, dl in root_branch_diags.items():
-                cross.setdefault(tid, []).extend(dl)
-            focus = getattr(args, "task", None)
-            for tid, dl in cross.items():
-                if focus and tid != focus:
-                    continue
-                diags_by_task.setdefault(tid, []).extend(dl)
-        except Exception:
-            pass
-
-        # Severity filter.
-        sev = getattr(args, "severity", None)
-        if sev:
-            for tid in list(diags_by_task.keys()):
-                kept = [d for d in diags_by_task[tid] if kd.SEVERITY_ORDER.index(d.severity) >= kd.SEVERITY_ORDER.index(sev)]
-                if kept:
-                    diags_by_task[tid] = kept
-                else:
-                    del diags_by_task[tid]
-
-        # Map task_id → title/status/assignee for the table output.
-        meta: dict[str, dict] = {}
-        if diags_by_task:
-            placeholders = ",".join(["?"] * len(diags_by_task))
-            for r in conn.execute(
-                f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
-                tuple(diags_by_task.keys()),
-            ):
-                meta[r["id"]] = {
-                    "title": r["title"], "status": r["status"],
-                    "assignee": r["assignee"],
-                }
-
-    if getattr(args, "json", False):
-        out_json = [
-            {
-                "task_id": tid,
-                **meta.get(tid, {}),
-                "diagnostics": [d.to_dict() for d in dl],
+    # Map task_id → title/status/assignee for the table output.
+    meta: dict[str, dict] = {}
+    if diags_by_task:
+        placeholders = ",".join(["?"] * len(diags_by_task))
+        for r in conn.execute(
+            f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
+            tuple(diags_by_task.keys()),
+        ):
+            meta[r["id"]] = {
+                "title": r["title"], "status": r["status"],
+                "assignee": r["assignee"],
             }
-            for tid, dl in diags_by_task.items()
-        ]
-        print(json.dumps(out_json, indent=2, ensure_ascii=False))
-        return 0
+    return diags_by_task, meta
 
+
+class _DiagnosticsEarlyExit(Exception):
+    """Internal control-flow for diagnostics collect early returns."""
+
+    def __init__(self, code: int, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def _diagnostics_print_human(
+    diags_by_task: dict[str, Any],
+    meta: dict[str, dict],
+) -> int:
+    """Render human-readable diagnostics table. Returns exit code."""
     if not diags_by_task:
         print("No active diagnostics on this board.")
         return 0
@@ -2654,6 +2660,38 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
                     print(f"       → {a.label}")
         print()
     return 0
+
+
+def _cmd_diagnostics(args: argparse.Namespace) -> int:
+    """List active diagnostics on the board. Wraps the same rule engine
+    the dashboard uses, so CLI output matches what the UI shows.
+    """
+    from hermes_cli import kanban_diagnostics as kd
+    from hermes_cli.config import load_config
+
+    diag_config = kd.config_from_runtime_config(load_config())
+
+    with kb.connect_closing() as conn:
+        try:
+            diags_by_task, meta = _diagnostics_collect(args, conn, diag_config, kd)
+        except _DiagnosticsEarlyExit as early:
+            print(early.message, file=sys.stderr)
+            return early.code
+
+    if getattr(args, "json", False):
+        out_json = [
+            {
+                "task_id": tid,
+                **meta.get(tid, {}),
+                "diagnostics": [d.to_dict() for d in dl],
+            }
+            for tid, dl in diags_by_task.items()
+        ]
+        print(json.dumps(out_json, indent=2, ensure_ascii=False))
+        return 0
+
+    return _diagnostics_print_human(diags_by_task, meta)
+
 
 def _cmd_link(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
