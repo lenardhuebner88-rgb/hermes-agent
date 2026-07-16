@@ -181,19 +181,20 @@ export function AccountUsageTile({
     .sort((a, b) => providerOrder(config, a.provider) - providerOrder(config, b.provider));
   const available = providers.filter((p) => p.available).length;
   const nowMs = nowSec() * 1000;
-  // Abo = ein Provider mit Subscription-Lane (Claude/anthropic, ChatGPT/Codex,
-  // Kimi). Operator-Direktive: ALLE drei Abos als gleichwertige Karten — auch
-  // Kimi (lokale Schätzung), das fehlende Provider-Fenster wird in der Karte als
-  // ehrlicher Leerzustand beschriftet statt in eine Strichel-Fußzeile geworfen.
-  // OpenRouter (= $-Guthaben, keine Lane) bleibt die einzige Fußzeilen-Restklasse.
-  const isAbo = (p: AccountUsageProvider) => providerToLane(p.provider, config) != null;
+  // Abo-Karte = Provider mit Subscription-Lane ODER echtem Provider-Fenster
+  // (Grok: Fenster ohne Lane — xai hat lane:null by design, kein Worker-Run-
+  // Reconciliation). Lane-Abos (Claude/Codex/Kimi) behalten die Karte auch offline
+  // (ehrlicher Leerzustand). Fußzeile = nur fensterlose Nicht-Abos (OpenRouter-
+  // $-Guthaben, offline Provider ohne Lane und ohne Fenster). Tradeoff: unavailable
+  // xai ohne Fenster fällt bewusst in die Fußzeile (im Gegensatz zu Lane-Abos).
+  const isAbo = (p: AccountUsageProvider) =>
+    providerToLane(p.provider, config) != null || p.windows.length > 0;
   // Kimi = lokale Schätzung, kein hartes Provider-Limit → zählt nie als Engpass (§8).
   const bottleneck = pickBottleneck(
     providers.filter((p) => providerToLane(p.provider, config) !== "kimi"),
   );
-  // Alle drei Abos bekommen eine gleichwertige Karte — auch wenn der Provider
-  // gerade offline ist (dann trägt die Karte den unavailable_reason als ehrlichen
-  // Leerzustand). Nur echte Nicht-Abos (OpenRouter = $-Guthaben) landen in der Fußzeile.
+  // Cockpit: Lane-Abos (auch offline) + Provider mit echtem Fenster (Grok).
+  // Fußzeile: fensterlose Nicht-Abos (OpenRouter, offline window-less xai, …).
   const cockpit = providers.filter((p) => isAbo(p));
   const footer = providers.filter((p) => !cockpit.includes(p));
   // Engpass-Ton: rot ab 90 %, gelb ab 75 %, sonst neutral (kein ⚠) — §3.

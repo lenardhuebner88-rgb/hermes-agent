@@ -238,4 +238,120 @@ describe("AccountUsageTile", () => {
     expect(html).toContain('aria-label="Diese Woche: unbekannt"');
     expect(html).toContain('aria-valuetext="unbekannt"');
   });
+
+  it("rendert xai mit weekly-Fenster als Grok-Abo-Karte (lane:null, Fenster zählt)", () => {
+    // REAL payload shape from live /api/account-usage (SuperGrok weekly ~21 %).
+    const cfg: StatsFieldConfig = {
+      ...DEFAULT_STATS_CONFIG,
+      providers: [
+        ...DEFAULT_STATS_CONFIG.providers.filter((p) => p.id !== "xai"),
+        { id: "xai", label: "Grok", lane: null, visible: true },
+      ],
+    };
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "xai",
+          available: true,
+          source: "grok_log",
+          fetched_at: "2026-07-16T09:47:00+00:00",
+          title: "Grok usage",
+          plan: "SuperGrok",
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            {
+              label: "Diese Woche",
+              window_key: "weekly",
+              used_percent: 21,
+              reset_at: "2026-07-21T00:00:00+00:00",
+              detail: null,
+            },
+          ],
+          details: ["Stand: 2026-07-16 11:47 CEST"],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={cfg} />,
+    );
+    // Card, not footer: article titled Grok with plan + weekly meter.
+    expect(html).toContain("<article");
+    expect(html).toContain("Grok");
+    expect(html).toContain("SuperGrok");
+    expect(html).toContain("Diese Woche");
+    expect(html).toContain("21 %");
+    expect(html).toContain('role="meter"');
+    expect(html).toContain('aria-label="Diese Woche: 21 % genutzt"');
+    expect(html).not.toContain("Ohne Fenster-Limit");
+  });
+
+  it("hält openrouter (details only, lane null, no windows) in der Fußzeile (Regression)", () => {
+    const cfg: StatsFieldConfig = {
+      ...DEFAULT_STATS_CONFIG,
+      providers: [
+        ...DEFAULT_STATS_CONFIG.providers.filter((p) => p.id !== "openrouter"),
+        { id: "openrouter", label: "OpenRouter", lane: null, visible: true },
+      ],
+    };
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "openrouter",
+          available: true,
+          source: "credits",
+          fetched_at: "2026-07-16T09:47:00+00:00",
+          title: "OpenRouter",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [],
+          details: ["Guthaben: 8.50 USD"],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={cfg} />,
+    );
+    expect(html).toContain("Ohne Fenster-Limit");
+    expect(html).toContain("OpenRouter");
+    expect(html).toContain("Guthaben: 8.50 USD");
+    expect(html).not.toContain("<article");
+  });
+
+  it("unavailable xai ohne Fenster fällt in die Fußzeile (dokumentierter Tradeoff)", () => {
+    const cfg: StatsFieldConfig = {
+      ...DEFAULT_STATS_CONFIG,
+      providers: [
+        ...DEFAULT_STATS_CONFIG.providers.filter((p) => p.id !== "xai"),
+        { id: "xai", label: "Grok", lane: null, visible: true },
+      ],
+    };
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "xai",
+          available: false,
+          source: "grok_log",
+          fetched_at: "2026-07-16T09:47:00+00:00",
+          title: "Grok usage",
+          plan: null,
+          cached: false,
+          unavailable_reason: "grok log missing",
+          windows: [],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={cfg} />,
+    );
+    expect(html).toContain("Ohne Fenster-Limit");
+    expect(html).toContain("Grok");
+    expect(html).toContain("grok log missing");
+    expect(html).not.toContain("<article");
+  });
 });
