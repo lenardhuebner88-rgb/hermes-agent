@@ -21613,10 +21613,21 @@ def escalate_silent_blocks_sweep(
             tid = str(waiting["id"])
             if _operator_escalation_is_active(conn, tid):
                 continue
+            archived_parent_ids = [
+                str(row["id"])
+                for row in conn.execute(
+                    "SELECT parent.id FROM task_links AS link "
+                    "JOIN tasks AS parent ON parent.id = link.parent_id "
+                    "WHERE link.child_id = ? AND parent.status = 'archived' "
+                    "ORDER BY parent.id ASC",
+                    (tid,),
+                ).fetchall()
+            ]
             payload = {
                 "why_now": "waiting_on_archived_parent",
                 "reason": "All remaining open dependencies are archived.",
                 "task_title": str(waiting["title"]),
+                "archived_parent_ids": archived_parent_ids,
             }
             _append_event(conn, tid, OPERATOR_ESCALATION_EVENT, payload)
             summary["archived_dependency_escalated"].append({"task_id": tid})

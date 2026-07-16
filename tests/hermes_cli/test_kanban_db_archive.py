@@ -59,8 +59,14 @@ def test_silent_block_sweep_escalates_legacy_archived_dependency_waits(
 ):
     with kb.connect_closing() as conn:
         archived_parent = kb.create_task(conn, title="legacy parent", assignee="alice")
+        other_archived_parent = kb.create_task(
+            conn, title="other legacy parent", assignee="alice"
+        )
         waiting = kb.create_task(
-            conn, title="legacy wait", assignee="alice", parents=[archived_parent]
+            conn,
+            title="legacy wait",
+            assignee="alice",
+            parents=[archived_parent, other_archived_parent],
         )
         held_parent = kb.create_task(conn, title="held parent", assignee="alice")
         held_waiting = kb.create_task(
@@ -71,8 +77,8 @@ def test_silent_block_sweep_escalates_legacy_archived_dependency_waits(
             freigabe="operator",
         )
         conn.execute(
-            "UPDATE tasks SET status = 'archived' WHERE id IN (?, ?)",
-            (archived_parent, held_parent),
+            "UPDATE tasks SET status = 'archived' WHERE id IN (?, ?, ?)",
+            (archived_parent, other_archived_parent, held_parent),
         )
         conn.execute(
             "UPDATE tasks SET status = 'scheduled' WHERE id = ?",
@@ -89,6 +95,9 @@ def test_silent_block_sweep_escalates_legacy_archived_dependency_waits(
         assert len(escalations) == 1
         assert escalations[0].payload is not None
         assert escalations[0].payload["why_now"] == "waiting_on_archived_parent"
+        assert escalations[0].payload["archived_parent_ids"] == sorted(
+            [archived_parent, other_archived_parent]
+        )
         assert not [
             event
             for event in kb.list_events(conn, held_waiting)
