@@ -14,15 +14,52 @@ readable, and that the existing ``skills/.hub`` deny still applies.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
 
+def _file_safety_module():
+    """Return the live ``agent.file_safety`` module object.
+
+    Order-leak guard: ``import agent.file_safety as fs`` resolves via
+    attribute lookup on the (long-lived) ``agent`` package object, NOT via
+    a fresh ``sys.modules`` dict lookup. Other tests in this process (e.g.
+    test_empty_tool_name_loop_dampening.py) purge ``agent.*`` from
+    ``sys.modules`` and reimport it inside ``preserve_sys_modules()`` —
+    that helper restores the ``sys.modules`` dict entry on exit but cannot
+    restore the ``agent`` package's now-stale ``.file_safety`` attribute
+    (a side effect of the reimport). ``import agent.file_safety as fs``
+    then silently returns the orphaned reimport-generation module while
+    ``from agent.file_safety import get_read_block_error`` (which resolves
+    the source module via the ``sys.modules`` dict directly) keeps using
+    the restored, original module — so patches applied via the attribute
+    form never take effect. Going through ``sys.modules`` explicitly here
+    matches ``from X import Y``'s resolution and side-steps the split.
+    """
+    import agent.file_safety  # noqa: F401 — ensure it's imported
+    return sys.modules["agent.file_safety"]
+
+
+def _file_tools_module():
+    """Return the live ``tools.file_tools`` module object.
+
+    Same order-leak class as :func:`_file_safety_module` — ``tools.`` is
+    also purged and reimported by test_empty_tool_name_loop_dampening.py's
+    ``preserve_sys_modules()`` dance, so ``import tools.file_tools as ft``
+    can silently return an orphaned generation whose own
+    ``from agent.file_safety import get_read_block_error`` binding doesn't
+    match the (correctly patched) live ``agent.file_safety`` module.
+    """
+    import tools.file_tools  # noqa: F401 — ensure it's imported
+    return sys.modules["tools.file_tools"]
+
+
 @pytest.fixture()
 def fake_home(tmp_path, monkeypatch):
     """Point ``_hermes_home_path()`` at a tmp dir for isolated checks."""
-    import agent.file_safety as fs
+    fs = _file_safety_module()
 
     home = tmp_path / "hermes_home"
     home.mkdir()
@@ -143,7 +180,7 @@ def test_read_file_tool_blocks_relative_path_under_terminal_cwd(
     """
     import json
 
-    import tools.file_tools as ft
+    ft = _file_tools_module()
 
     _create(fake_home, "auth.json")
     # Force the file_tools resolver to anchor relative paths at HERMES_HOME
@@ -165,7 +202,7 @@ def test_read_file_tool_blocks_nested_google_oauth_path(
     """The real read_file tool must not return Gemini OAuth token material."""
     import json
 
-    import tools.file_tools as ft
+    ft = _file_tools_module()
 
     oauth = _create(fake_home, Path("auth") / "google_oauth.json")
     oauth.write_text(
@@ -194,7 +231,7 @@ def test_search_tool_blocks_direct_auth_json_path(fake_home, monkeypatch):
     """Searching a credential file directly must not invoke the search backend."""
     import json
 
-    import tools.file_tools as ft
+    ft = _file_tools_module()
 
     auth = _create(fake_home, "auth.json")
     auth.write_text("SEARCH_DIRECT_AUTH_SECRET", encoding="utf-8")
@@ -222,7 +259,7 @@ def test_search_tool_filters_credential_results(fake_home, tmp_path, monkeypatch
     import json
 
     from tools.file_operations import SearchMatch, SearchResult
-    import tools.file_tools as ft
+    ft = _file_tools_module()
 
     auth = _create(fake_home, "auth.json")
     token = _create(fake_home, Path("mcp-tokens") / "provider.json")
@@ -391,7 +428,7 @@ def test_profile_mode_blocks_root_credentials(tmp_path, monkeypatch):
     """Under a profile, HERMES_HOME = <root>/profiles/<name>, but
     <root>/auth.json must ALSO be blocked — credentials at root are
     inherited by every profile."""
-    import agent.file_safety as fs
+    fs = _file_safety_module()
 
     root = tmp_path / "hermes"
     profile = root / "profiles" / "coder"
