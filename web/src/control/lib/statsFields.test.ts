@@ -79,7 +79,7 @@ describe("visibility + order (declutter knobs)", () => {
 describe("StatsFieldConfigSchema (fail-soft parsing)", () => {
   it("parses a well-formed payload", () => {
     const parsed = StatsFieldConfigSchema.parse(DEFAULT_STATS_CONFIG);
-    expect(parsed.providers).toHaveLength(4);
+    expect(parsed.providers).toHaveLength(5);
   });
 
   it("coerces missing/garbage fields via .catch instead of throwing", () => {

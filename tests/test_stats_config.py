@@ -23,7 +23,7 @@ def test_missing_file_falls_back_to_defaults(config_file):
     assert cfg == DEFAULT_STATS_CONFIG
     # Returned object is a copy — mutating it must not poison the module default.
     cfg["providers"].clear()
-    assert len(DEFAULT_STATS_CONFIG["providers"]) == 4
+    assert len(DEFAULT_STATS_CONFIG["providers"]) == 5
 
 
 def test_valid_yaml_is_parsed_and_normalized(config_file):

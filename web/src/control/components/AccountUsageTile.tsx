@@ -31,6 +31,7 @@ function fallbackProviderLabel(provider: string): string {
   if (provider === "openai-codex") return "ChatGPT / Codex";
   if (provider === "anthropic") return "Claude";
   if (provider === "kimi") return "Kimi";
+  if (provider === "xai") return "Grok";
   if (provider === "openrouter") return "OpenRouter";
   return provider;
 }

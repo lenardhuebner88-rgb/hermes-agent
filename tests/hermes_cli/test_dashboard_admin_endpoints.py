@@ -624,6 +624,7 @@ class TestAccountUsageEndpoint:
             "anthropic",
             "openai-codex",
             "kimi",
+            "xai",
         ]
         codex = [row for row in first.json()["providers"] if row["provider"] == "openai-codex"][0]
         assert codex["available"] is True
@@ -633,7 +634,7 @@ class TestAccountUsageEndpoint:
         assert codex["details"] == ["openai-codex detail"]
         assert all(row["cached"] is False for row in first.json()["providers"])
         assert all(row["cached"] is True for row in second.json()["providers"])
-        assert len(calls) == 3
+        assert len(calls) == 4
 
     def test_unavailable_reason_replaces_500_and_scrubs_exception_secrets(self, monkeypatch):
         import agent.account_usage as account_usage

@@ -52,6 +52,7 @@ export const DEFAULT_STATS_CONFIG: StatsFieldConfig = {
     { id: "anthropic", label: "Claude", lane: "claude", visible: true },
     { id: "openai-codex", label: "ChatGPT / Codex", lane: "chatgpt", visible: true },
     { id: "kimi", label: "Kimi", lane: "kimi", visible: true },
+    { id: "xai", label: "Grok", lane: null, visible: true },
     { id: "openrouter", label: "OpenRouter", lane: null, visible: true },
   ],
   windows: [

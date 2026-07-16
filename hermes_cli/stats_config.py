@@ -32,6 +32,7 @@ DEFAULT_STATS_CONFIG: dict[str, Any] = {
         {"id": "anthropic", "label": "Claude", "lane": "claude", "visible": True},
         {"id": "openai-codex", "label": "ChatGPT / Codex", "lane": "chatgpt", "visible": True},
         {"id": "kimi", "label": "Kimi", "lane": "kimi", "visible": True},
+        {"id": "xai", "label": "Grok", "lane": None, "visible": True},
         {"id": "openrouter", "label": "OpenRouter", "lane": None, "visible": True},
     ],
     "windows": [
