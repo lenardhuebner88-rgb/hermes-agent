@@ -8,9 +8,11 @@ import type { DecisionInboxData } from "../hooks/useControlData";
 import type { SystemHealthResponse } from "../lib/types";
 
 const notificationBridgeSpy = vi.fn((_props: unknown) => <div data-testid="notification-bridge-mock" />);
+const liveStatusMock = vi.hoisted(() => vi.fn());
 vi.mock("./NotificationBridge", () => ({ NotificationBridge: (props: unknown) => notificationBridgeSpy(props) }));
 vi.mock("./Overlay", () => ({ Overlay: ({ children }: { children: ReactNode }) => <div>{children}</div> }));
 vi.mock("../lib/clock", () => ({ useClientNowSeconds: () => 1783025500 }));
+vi.mock("../hooks/useLiveEvents", () => ({ useLiveStatus: liveStatusMock }));
 
 const baseProps = {
   density: "compact" as const,
@@ -61,6 +63,7 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
   afterEach(() => {
     cleanup();
     notificationBridgeSpy.mockClear();
+    liveStatusMock.mockReset();
   });
 
   it("keeps the five PlanSpec primary tabs reachable and drops the retired ones", () => {
@@ -150,6 +153,19 @@ describe("ControlShell unified responsive shell (W2-a)", () => {
     renderShell("fleet");
     const masthead = screen.getByTestId("control-masthead");
     expect(masthead.textContent).toContain("Fleet");
+  });
+
+  it("renders each visible live-chip connection state", () => {
+    for (const [state, label] of [
+      ["connected", "Live: verbunden"],
+      ["reconnecting", "Live: verbindet"],
+      ["off", "Live: aus"],
+    ]) {
+      liveStatusMock.mockReturnValue(state);
+      renderShell("fleet");
+      expect(screen.getByText(label)).toBeTruthy();
+      cleanup();
+    }
   });
 
   it("shows the shared masthead for Start now that it joins the Puls-Leiste (W3-2)", () => {
