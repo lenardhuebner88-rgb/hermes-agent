@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from hermes_cli import kanban_db as kb
+from hermes_cli.kanban import _task_to_dict
 from plugins.kanban.dashboard import plugin_api
 
 
@@ -97,3 +99,71 @@ def test_extension_handlers_are_physically_outside_the_core_api_module():
             assert endpoint_path == core_path
         else:
             assert endpoint_path != core_path
+
+
+def test_task_detail_read_models_project_planspec_metadata():
+    """The task-detail route and CLI JSON expose structured PlanSpec metadata."""
+    acceptance_criteria = [
+        {
+            "id": "AC-1",
+            "statement": "Projection is available",
+            "verification": "GET task detail",
+            "done_signal": "fields returned",
+        }
+    ]
+    task = kb.Task(
+        id="t_projection",
+        title="Projection",
+        body=None,
+        assignee=None,
+        status="done",
+        priority=0,
+        created_by=None,
+        created_at=0,
+        started_at=None,
+        completed_at=None,
+        workspace_kind="scratch",
+        workspace_path=None,
+        claim_lock=None,
+        claim_expires=None,
+        tenant=None,
+        acceptance_criteria=plugin_api.json.dumps(acceptance_criteria),
+        planspec_subtask_id="S1",
+        freigabe="complete",
+        live_test_depth="smoke",
+    )
+
+    route_task = getattr(plugin_api, "_task_dict")(task)
+    cli_task = _task_to_dict(task)
+
+    for projected in (route_task, cli_task):
+        assert projected["acceptance_criteria"] == acceptance_criteria
+        assert projected["planspec_subtask_id"] == "S1"
+        assert projected["freigabe"] == "complete"
+        assert projected["live_test_depth"] == "smoke"
+
+
+def test_task_detail_read_models_fail_soft_on_invalid_acceptance_json():
+    task = kb.Task(
+        id="t_invalid_projection",
+        title="Invalid Projection",
+        body=None,
+        assignee=None,
+        status="done",
+        priority=0,
+        created_by=None,
+        created_at=0,
+        started_at=None,
+        completed_at=None,
+        workspace_kind="scratch",
+        workspace_path=None,
+        claim_lock=None,
+        claim_expires=None,
+        tenant=None,
+        acceptance_criteria="not json",
+    )
+
+    projected = getattr(plugin_api, "_task_dict")(task)
+
+    assert projected["acceptance_criteria"] is None
+    assert projected["acceptance_criteria_raw"] == "not json"

@@ -1173,6 +1173,12 @@ class Task:
     transient_retry_count: int = 0
     block_kind: Optional[str] = None
     block_recurrences: int = 0
+    # PlanSpec task-detail metadata. ``acceptance_criteria`` remains the
+    # database JSON string here; API/CLI read models expose the parsed list.
+    acceptance_criteria: Optional[str] = None
+    planspec_subtask_id: Optional[str] = None
+    freigabe: Optional[str] = None
+    live_test_depth: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1309,7 +1315,44 @@ class Task:
             block_recurrences=(
                 row["block_recurrences"] if "block_recurrences" in keys else 0
             ),
+            acceptance_criteria=(
+                row["acceptance_criteria"] if "acceptance_criteria" in keys else None
+            ),
+            planspec_subtask_id=(
+                row["planspec_subtask_id"] if "planspec_subtask_id" in keys else None
+            ),
+            freigabe=row["freigabe"] if "freigabe" in keys else None,
+            live_test_depth=(
+                row["live_test_depth"] if "live_test_depth" in keys else None
+            ),
         )
+
+
+def task_detail_projection(task: Task) -> dict[str, Any]:
+    """Return additive PlanSpec detail fields safe for JSON read models.
+
+    A malformed or non-list acceptance-criteria blob must never make the
+    dashboard or CLI show command fail. Preserve it under the explicit raw
+    field so an operator can repair the source data.
+    """
+    projection: dict[str, Any] = {
+        "acceptance_criteria": None,
+        "planspec_subtask_id": task.planspec_subtask_id,
+        "freigabe": task.freigabe,
+        "live_test_depth": task.live_test_depth,
+    }
+    raw = task.acceptance_criteria
+    if raw is None:
+        return projection
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, list):
+        projection["acceptance_criteria"] = parsed
+    else:
+        projection["acceptance_criteria_raw"] = raw
+    return projection
 
 
 @dataclass

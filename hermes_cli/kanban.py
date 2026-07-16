@@ -111,6 +111,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "current_step_key": t.current_step_key,
         "epic_id": t.epic_id,
         "kind": t.kind,
+        **kb.task_detail_projection(t),
     }
 
 
