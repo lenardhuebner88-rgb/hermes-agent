@@ -84,7 +84,7 @@ export function ModelPicker({ value, onChange, label, placeholder, disabled, cla
         onChange={(e) => onChange(e.target.value)}
         className={
           className ??
-          "hc-mono w-48 rounded-md border border-[var(--hc-border)] bg-black/25 px-2 py-1.5 text-xs text-white"
+          "font-data w-48 rounded-card border border-line bg-surface-2 px-2 py-1.5 text-xs text-ink placeholder:text-ink-3"
         }
       />
       <datalist id={datalistId}>
