@@ -5,8 +5,13 @@
 // Dateiende gebraucht (echter Fetch-Mock + Router-Kontext).
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+
+// Under full-suite CPU pressure the catalog fetch can resolve before the router
+// commits the collection deep-link filter. Keep Testing Library's per-file async
+// budget aligned with the other control-view integration suites.
+configure({ asyncUtilTimeout: 5000 });
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
 
@@ -356,7 +361,7 @@ describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
 
     expect(await screen.findByText("Overview")).toBeTruthy();
     // Kanon ist gefiltert weg — nur die vorselektierte Sammlung zeigt Docs.
-    expect(screen.queryByText("Canon-Index")).toBeNull();
+    await waitFor(() => expect(screen.queryByText("Canon-Index")).toBeNull());
     expect(screen.getByRole("button", { name: /Kanon/ }).getAttribute("aria-pressed")).toBe("false");
     expect(screen.getByRole("button", { name: /LLM-Wiki/ }).getAttribute("aria-pressed")).toBe("true");
   });
