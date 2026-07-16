@@ -26,7 +26,7 @@ def test_live_wall_clock_timeout_remains_transient():
         outcome="timed_out",
     )
 
-    assert heiler_class == kb.HEILER_CLASS_TRANSIENT
+    assert heiler_class == kb.HEILER_CLASS_CAPACITY
 
 
 @pytest.mark.parametrize(

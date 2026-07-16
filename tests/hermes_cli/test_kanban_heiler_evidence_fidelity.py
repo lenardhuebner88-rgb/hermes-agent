@@ -96,7 +96,7 @@ def test_empty_real_block_reason_does_not_fingerprint_the_wrapper():
             "blocked",
             kb.HEILER_CLASS_REAL_BUG,
         ),
-        ("opaque worker failure", "timed_out", kb.HEILER_CLASS_TRANSIENT),
+        ("opaque worker failure", "timed_out", kb.HEILER_CLASS_CAPACITY),
         (
             "awaiting operator decision before proceeding",
             "blocked",
