@@ -85,6 +85,18 @@ describe("apkVersion / updateHint / olderBuilds", () => {
     expect(updateHint(status, null)).toBeNull();
   });
 
+  it("compares versions numerically, not lexically", () => {
+    const withLatest = (v: string) => [{ name: `hermes-dictate-${v}-abc.apk`, size: 1, mtime: 1 }];
+    // "1.10" is NEWER than "1.9" — no hint despite string inequality.
+    expect(updateHint({ ...status, app_version: "1.10" }, withLatest("1.9"))).toBeNull();
+    expect(updateHint({ ...status, app_version: "1.9" }, withLatest("1.10"))).toContain("1.10");
+    // Longer-but-equal prefixes: 1.3 vs 1.3.1 is an update; 1.3.1 vs 1.3 is not.
+    expect(updateHint({ ...status, app_version: "1.3" }, withLatest("1.3.1"))).toContain("1.3.1");
+    expect(updateHint({ ...status, app_version: "1.3.1" }, withLatest("1.3"))).toBeNull();
+    // Unparseable dev builds never trigger the hint.
+    expect(updateHint({ ...status, app_version: "dev" }, withLatest("1.3"))).toBeNull();
+  });
+
   it("drops byte-identical alias twins from the history", () => {
     expect(olderBuilds(artifacts).map((a) => a.name)).toEqual([
       "hermes-dictate-wispr-flow-87ed6d36b.apk",

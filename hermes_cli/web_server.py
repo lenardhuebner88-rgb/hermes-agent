@@ -739,6 +739,11 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
         _authed = (
             getattr(request.state, "token_authenticated", False)
             or getattr(request.app.state, "auth_required", False)
+            # Cookie-session fallback (native apps): auth_middleware runs
+            # before this gate and attaches the verified session — without
+            # this arm a cookie-authed caller would skip the disabled-plugin
+            # enforcement below.
+            or getattr(request.state, "session", None) is not None
             or _has_valid_session_token(request)
             or _has_valid_query_token(request, path)
         )
@@ -2388,10 +2393,27 @@ def _load_dictate_status() -> None:
         return
     status = raw.get("status")
     samples = raw.get("latency_samples")
+    # Per-field type guards: a hand-edited or corrupted state file must not
+    # poison the counters (a str "dictations" would TypeError every report).
+    _counter_keys = {"dictations", "failures", "retries", "busy"}
+    _int_keys = {"last_contact_at", "latency_ms"}
+    _bool_keys = {"microphone_permission", "service_enabled"}
+
+    def _valid(key: str, value: Any) -> bool:
+        if key in _counter_keys:
+            return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        if key in _int_keys:
+            return value is None or (
+                isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            )
+        if key in _bool_keys:
+            return value is None or isinstance(value, bool)
+        return value is None or isinstance(value, str)
+
     with _DICTATE_STATUS_LOCK:
         if isinstance(status, dict):
             for key in _DICTATE_STATUS:
-                if key in status:
+                if key in status and _valid(key, status[key]):
                     _DICTATE_STATUS[key] = status[key]
         if isinstance(samples, list):
             _DICTATE_LATENCY_SAMPLES[:] = [

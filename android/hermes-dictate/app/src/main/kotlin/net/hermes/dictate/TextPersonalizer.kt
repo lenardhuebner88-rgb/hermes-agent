@@ -90,7 +90,9 @@ class DictationTextPipeline(
  * correct spellings the recognizer should prefer) and snippet SPOKEN cues (deliberately spoken
  * trigger phrases). Dictionary spoken forms are deliberately excluded — they are typically the
  * mishearing ("her mess"), and biasing them would reinforce exactly the error the rule fixes.
- * Everything stays on the phone; the list only parameterizes the on-device recognizer.
+ * On-device dictation keeps the list on the phone (recognizer parameter only). On the CLOUD
+ * path — user opt-in per dictation — the same list is sent to Piet's server as the Whisper
+ * `initial_prompt` vocabulary bias; it is bounded there and never logged.
  */
 object BiasingVocabulary {
     private const val MAX_PHRASES = 100

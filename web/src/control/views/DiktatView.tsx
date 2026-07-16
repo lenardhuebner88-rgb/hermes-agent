@@ -69,8 +69,21 @@ export function updateHint(
   const latest = artifacts?.map((a) => apkVersion(a.name)).find((v) => v !== null) ?? null;
   const reported = status?.connected ? status.app_version : null;
   if (!latest || !reported) return null;
-  if (reported === latest || reported.startsWith(`${latest}-`)) return null;
-  return `Update verfügbar: App meldet ${reported}, aktuell ist ${latest}`;
+  // Numeric segment compare — string inequality would flag a NEWER app
+  // ("1.10" vs artifact "1.9") as outdated. Unparseable app versions
+  // (dev builds) never trigger the hint.
+  const reportedParts = /^\d+(?:\.\d+)*/.exec(reported)?.[0]?.split(".").map(Number) ?? null;
+  if (!reportedParts) return null;
+  const latestParts = latest.split(".").map(Number);
+  for (let i = 0; i < Math.max(reportedParts.length, latestParts.length); i += 1) {
+    const have = reportedParts[i] ?? 0;
+    const want = latestParts[i] ?? 0;
+    if (have === want) continue;
+    return have < want
+      ? `Update verfügbar: App meldet ${reported}, aktuell ist ${latest}`
+      : null;
+  }
+  return null;
 }
 
 /** Fehlerklassen des Status-Reports → verständliche Ursache + nächster Schritt. */
@@ -300,7 +313,7 @@ export function DiktatBody({
             <ShieldCheck aria-hidden className="mt-0.5 size-5 shrink-0 text-ink-2" />
             <div className="space-y-1.5 text-sm text-ink-2">
               <p><strong className="text-ink">On-Device by default:</strong> ohne Cloud-Opt-in verlässt kein Audio das Handy — es wird ausschließlich der Offline-Recognizer gebunden, ein Netz-Fallback existiert nicht.</p>
-              <p><strong className="text-ink">Cloud = Homeserver:</strong> das Opt-in schickt Audio an den eigenen Whisper auf dem Homeserver, an keinen Drittanbieter. Nach jedem Cloud-Diktat springt der Modus sichtbar zurück.</p>
+              <p><strong className="text-ink">Cloud = dein Server:</strong> das Opt-in schickt Audio an den Hermes-Server; der transkribiert nach seiner STT-Konfiguration — aktuell lokales Whisper, kein Drittanbieter (`stt.provider` in der config entscheidet). Nach jedem Cloud-Diktat springt der Modus sichtbar zurück.</p>
               <p><strong className="text-ink">Diese Seite sieht nur Metadaten:</strong> Version, Zähler, Latenz, Fehlerklassen — nie Audio, nie Diktattext.</p>
             </div>
           </div>

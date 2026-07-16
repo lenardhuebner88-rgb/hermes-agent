@@ -471,6 +471,47 @@ class TestWebServerEndpoints:
         assert status["dictations"] == 1
         assert status["latency_p50_ms"] == 1200
 
+    def test_dictate_status_load_ignores_type_corrupted_fields(self):
+        import hermes_cli.web_server as web_server
+        from hermes_constants import get_hermes_home
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "status": {
+                "app_version": "1.3",
+                "dictations": "x",
+                "failures": True,
+                "last_contact_at": "gestern",
+                "microphone_permission": "ja",
+            },
+            "latency_samples": [900, "fast", -5, 999999999],
+        }), encoding="utf-8")
+
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({
+                "app_version": None, "dictations": 0, "failures": 0,
+                "last_contact_at": None, "microphone_permission": None,
+            })
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+        web_server._load_dictate_status()
+
+        status = self.client.get("/api/dictate/status").json()
+        assert status["app_version"] == "1.3"
+        assert status["dictations"] == 0
+        assert status["failures"] == 0
+        assert status["last_contact_at"] is None
+        assert status["microphone_permission"] is None
+        assert status["latency_p50_ms"] == 900
+
+        # A success report on the rehydrated state must not TypeError.
+        report = {
+            "app_version": "1.3", "engine": "on_device", "language": "system",
+            "style": "auto", "surface": "ime", "microphone_permission": True,
+            "service_enabled": True, "event": "success", "latency_ms": 500,
+        }
+        assert self.client.post("/api/dictate/status", json=report).status_code == 200
+
     def test_api_accepts_valid_session_cookie_without_header_token(self, monkeypatch):
         """Native apps (Diktat/Voice) hold only the WebView-login cookie —
         never the SPA-injected session token. A valid cookie session must
@@ -503,6 +544,14 @@ class TestWebServerEndpoints:
         response = self.client.get("/api/dictate/status")
         assert response.status_code == 200
         assert response.json()["schema"] == "hermes-dictate-status-v1"
+
+        # The plugin runtime gate must treat the cookie session as authed —
+        # otherwise cookie callers would skip the disabled-plugin enforcement
+        # (Codex review finding, stage 6). The gate's own 404 shape proves the
+        # enforcement branch ran (the router's fallback says "Not Found").
+        gated = self.client.get("/api/plugins/definitely-not-installed/x")
+        assert gated.status_code == 404
+        assert gated.json()["detail"] == "Plugin not found"
 
         self.client.cookies.set("hermes_session_at", "forged-at")
         assert self.client.get("/api/dictate/status").status_code == 401
