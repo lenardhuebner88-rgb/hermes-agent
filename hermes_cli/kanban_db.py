@@ -12123,11 +12123,16 @@ def _merge_review_submission_artifacts(
         # and must never shadow the latest coder artifact contract.
         if _run_originated_from_review(conn, task_id, source_run_id):
             continue
-        if isinstance(source_metadata, dict):
-            add_entries(source_metadata.get("artifacts"))
+        if not isinstance(source_metadata, dict) or "artifacts" not in source_metadata:
+            # Malformed metadata or a submission that never mentions
+            # ``artifacts`` makes no assertion either way — unlike an
+            # explicit empty list, it must not shadow an older implementer
+            # handoff. Keep walking further back for an authoritative one.
+            continue
         # The latest implementer submission is authoritative even when its
-        # artifacts list is explicitly empty (or its metadata is malformed):
-        # never resurrect a rejected earlier round by falling back further.
+        # artifacts list is explicitly empty: never resurrect a rejected
+        # earlier round by falling back further.
+        add_entries(source_metadata.get("artifacts"))
         break
     if isinstance(metadata, dict):
         add_entries(metadata.get("artifacts"))

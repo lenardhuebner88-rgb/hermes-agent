@@ -530,3 +530,79 @@ def test_empty_latest_implementer_artifacts_supersede_rejected_handoff(
         )
 
     assert not (kanban_home / "reports" / "by-task" / tid).exists()
+
+
+def test_missing_artifacts_key_does_not_supersede_earlier_handoff(
+    kanban_home, monkeypatch
+):
+    """A second coder submission whose metadata never mentions ``artifacts``
+    makes no assertion about deliverables — unlike an explicit empty list, it
+    must not shadow the earlier round's artifact contract (#artifacts-key)."""
+    import hermes_cli.profiles as profiles_mod
+
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder"}),
+            "verifier_profile": "verifier",
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="keep artifact", assignee="coder")
+        workspace = _scratch_dir_for(kanban_home, tid)
+        _bind_scratch_workspace(conn, tid, workspace)
+        artifact = workspace / "RESULT.md"
+        artifact.write_text("# coder deliverable\n", encoding="utf-8")
+
+        kb.claim_task(conn, tid)
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="first implementation",
+            metadata={"artifacts": [str(artifact)]},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="needs a tweak",
+            metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["needs a tweak"],
+            },
+            review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "blocked"
+
+        promoted, reason = kb.promote_task(
+            conn, tid, actor="test", reason="address review"
+        )
+        assert promoted, reason
+        kb.claim_task(conn, tid)
+        # Second coder completion has NO ``artifacts`` key at all — not an
+        # explicit empty list — so it must not erase the first round's file.
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="minor fix, same deliverable",
+            metadata={},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="APPROVED",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "done"
+
+    dest = kanban_home / "reports" / "by-task" / tid / "RESULT.md"
+    assert dest.exists()
+    assert dest.read_text(encoding="utf-8") == "# coder deliverable\n"
