@@ -8,6 +8,8 @@ Two-phase design:
      status_callback (gateway platforms)
 """
 
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -440,14 +442,14 @@ def test_warning_stored_for_gateway_replay(mock_get_client, mock_ctx_len):
     )
 
 
-def test_codex_gpt55_autoraise_is_not_replayed_as_gateway_warning():
-    """The Codex gpt-5.5 threshold auto-raise is a startup info line.
+def test_codex_gpt55_autoraise_notice_replays_once_then_dedupes():
+    """The Codex gpt-5.5 threshold auto-raise notice fires at most once.
 
-    Gateway agents may be constructed per incoming message, so storing this
-    informational notice for first-turn status replay makes Discord/Telegram
-    see it on every message. The threshold override should still apply, but
-    `_compression_warning` must stay reserved for actionable compression
-    feasibility warnings.
+    Gateway agents may be constructed per incoming message; the notice is
+    stashed in ``_compression_warning`` for first-turn replay, but a
+    per-profile marker (``$HERMES_HOME/.codex_gpt55_autoraise_notice``)
+    dedupes it: the first init replays, every later init with the same
+    threshold state stays silent while the override itself remains active.
     """
 
     class _StubCompressor:
@@ -474,26 +476,45 @@ def test_codex_gpt55_autoraise_is_not_replayed_as_gateway_warning():
         },
     }
 
-    with (
-        patch("hermes_cli.config.load_config", return_value=cfg),
-        patch("run_agent.get_tool_definitions", return_value=[]),
-        patch("run_agent.check_toolset_requirements", return_value={}),
-        patch("run_agent.OpenAI"),
-        patch("agent.agent_init.ContextCompressor", new=_StubCompressor),
-    ):
-        agent = AIAgent(
-            model="gpt-5.5",
-            provider="openai-codex",
-            api_key="test-key-1234567890",
-            base_url="https://chatgpt.com/backend-api/codex",
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-        )
+    hermes_home = Path(tempfile.mkdtemp(prefix="hermes-test-home-"))
 
+    def _init_agent():
+        with (
+            patch("hermes_cli.config.load_config", return_value=cfg),
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+            patch("agent.agent_init.ContextCompressor", new=_StubCompressor),
+            patch("agent.agent_init.get_hermes_home", return_value=hermes_home),
+        ):
+            return AIAgent(
+                model="gpt-5.5",
+                provider="openai-codex",
+                api_key="test-key-1234567890",
+                base_url="https://chatgpt.com/backend-api/codex",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+    # First init in a fresh profile: override applies, notice stashed for
+    # one gateway replay, marker written.
+    agent = _init_agent()
     assert agent.context_compressor.threshold_percent == 0.85
-    assert agent._compression_threshold_autoraised == {"from": 0.60, "to": 0.85}
-    assert agent._compression_warning is None
+    assert agent._compression_threshold_autoraised == {
+        "from": 0.60,
+        "to": 0.85,
+        "model": "gpt-5.5",
+    }
+    assert agent._compression_warning is not None
+    assert "85%" in agent._compression_warning
+    assert (hermes_home / ".codex_gpt55_autoraise_notice").exists()
+
+    # Re-init with the same threshold state (gateway rebuilds the agent per
+    # inbound message): override still active, but no repeated notice.
+    agent2 = _init_agent()
+    assert agent2.context_compressor.threshold_percent == 0.85
+    assert agent2._compression_warning is None
 
 
 @patch("agent.model_metadata.get_model_context_length", return_value=200_000)

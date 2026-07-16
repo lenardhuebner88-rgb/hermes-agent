@@ -378,11 +378,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             )
             continue
 
-        # Reset nudge counters only for a structurally valid invocation.
-        if function_name == "memory":
-            agent._turns_since_memory = 0
-        elif function_name == "skill_manage":
-            agent._iters_since_skill = 0
+        # Nudge counters are reset further down, after scope/plugin/guardrail
+        # checks — a blocked memory/skill_manage call must not silence the
+        # corresponding nudge (see the `block_result is None` guard below).
 
         # ── Tool Search unwrap ────────────────────────────────────────
         # When the model invokes the tool_call bridge, peel it open so

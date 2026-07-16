@@ -90,7 +90,7 @@ def test_blocked_memory_call_does_not_reset_nudge_counter():
     agent._turns_since_memory = 7
 
     with patch(
-        "hermes_cli.plugins.get_pre_tool_call_block_message",
+        "hermes_cli.plugins.resolve_pre_tool_block",
         return_value="memory is blocked in this session",
     ):
         messages = _run_concurrent(
@@ -112,7 +112,7 @@ def test_executed_memory_call_resets_nudge_counter():
 
     with (
         patch(
-            "hermes_cli.plugins.get_pre_tool_call_block_message",
+            "hermes_cli.plugins.resolve_pre_tool_block",
             return_value=None,
         ),
         patch.object(agent, "_invoke_tool", return_value="memory ok"),
