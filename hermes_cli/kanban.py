@@ -106,6 +106,17 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "kind": t.kind,
     }
 
+
+def _emit_json(obj: Any) -> None:
+    """Pretty-print ``obj`` as JSON on stdout (indent=2, ensure_ascii=False)."""
+    print(json.dumps(obj, indent=2, ensure_ascii=False))
+
+
+def _kanban_err(msg: Any) -> None:
+    """Print a ``kanban: …`` error line on stderr."""
+    print(f"kanban: {msg}", file=sys.stderr)
+
+
 def _run_state_kwargs(args: argparse.Namespace) -> Optional[dict[str, str]]:
     st = getattr(args, "state_type", None)
     sn = getattr(args, "state_name", None)
@@ -1411,7 +1422,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         try:
             normed = kb._normalize_board_slug(board_override)
         except ValueError as exc:
-            print(f"kanban: {exc}", file=sys.stderr)
+            _kanban_err(exc)
             return 2
         if not normed:
             print("kanban: --board requires a slug", file=sys.stderr)
@@ -1448,7 +1459,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         try:
             return int(handler(args) or 0)
         except (ValueError, RuntimeError) as exc:
-            print(f"kanban: {exc}", file=sys.stderr)
+            _kanban_err(exc)
             return 1
 
 # ---------------------------------------------------------------------------
@@ -1522,7 +1533,7 @@ def _cmd_boards_list(args: argparse.Namespace) -> int:
         b["counts"] = _board_task_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
     if getattr(args, "json", False):
-        print(json.dumps(boards, indent=2, ensure_ascii=False))
+        _emit_json(boards)
         return 0
     # Human table: marker (•) for current, slug, display name, counts.
     if not boards:
@@ -1957,7 +1968,7 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         data = kb.known_assignees(conn)
     if getattr(args, "json", False):
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        _emit_json(data)
         return 0
     if not data:
         print("(no assignees — create a profile with `hermes -p <name> setup`)")
@@ -1981,7 +1992,7 @@ def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
         ws_kind, ws_path = _parse_workspace_flag(args.workspace)
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
     except argparse.ArgumentTypeError as exc:
-        print(f"kanban: {exc}", file=sys.stderr)
+        _kanban_err(exc)
         return 2
     if branch_name and ws_kind != "worktree":
         print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
@@ -1990,7 +2001,7 @@ def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
         try:
             args.assignee = kb.validate_spawnable_assignee(args.assignee)
         except ValueError as exc:
-            print(f"kanban: {exc}", file=sys.stderr)
+            _kanban_err(exc)
             return 2
     try:
         max_runtime = _parse_duration(getattr(args, "max_runtime", None))
@@ -2088,7 +2099,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             _create_subscribe_home_channels(conn, task_id)
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
-        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+        _emit_json(_task_to_dict(task))
     else:
         print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
 
@@ -2125,7 +2136,7 @@ def _cmd_epic_create(args: argparse.Namespace) -> int:
         eid = kb.create_epic(conn, title=args.title, body=getattr(args, "body", None))
         epic = kb.get_epic(conn, eid)
     if getattr(args, "json", False):
-        print(json.dumps(epic, indent=2, ensure_ascii=False))
+        _emit_json(epic)
     else:
         print(f"Created epic {eid}  ({epic['title']})")
     return 0
@@ -2134,7 +2145,7 @@ def _cmd_epic_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         epics = kb.list_epics(conn, include_closed=not getattr(args, "open_only", False))
     if getattr(args, "json", False):
-        print(json.dumps({"epics": epics, "count": len(epics)}, indent=2, ensure_ascii=False))
+        _emit_json({"epics": epics, "count": len(epics)})
         return 0
     if not epics:
         print("No epics.")
@@ -2154,7 +2165,7 @@ def _cmd_epic_show(args: argparse.Namespace) -> int:
         print(f"kanban epic: no such epic {args.epic_id!r}", file=sys.stderr)
         return 1
     if getattr(args, "json", False):
-        print(json.dumps(epic, indent=2, ensure_ascii=False))
+        _emit_json(epic)
         return 0
     cost = f"${epic['cost_usd']:.2f}" if epic.get("cost_usd") is not None else "—"
     print(f"{epic['id']}  [{epic['status']}]  {epic['title']}")
@@ -2196,7 +2207,7 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
             idempotency_key=getattr(args, "idempotency_key", None),
         )
     if getattr(args, "json", False):
-        print(json.dumps(created.as_dict(), indent=2, ensure_ascii=False))
+        _emit_json(created.as_dict())
     else:
         print(f"Swarm root: {created.root_id}")
         print("Workers: " + ", ".join(created.worker_ids))
@@ -2225,7 +2236,7 @@ def _cmd_list(args: argparse.Namespace) -> int:
             current_step_key=args.current_step_key,
         )
     if getattr(args, "json", False):
-        print(json.dumps([_task_to_dict(t) for t in tasks], indent=2, ensure_ascii=False))
+        _emit_json([_task_to_dict(t) for t in tasks])
         return 0
     # Passive discoverability: when the user has multiple boards, surface
     # which one they're looking at in the list header. Single-board users
@@ -2455,7 +2466,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         payload = _show_build_json_payload(
             task, comments, events, parents, children, runs, latest_summary,
         )
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        _emit_json(payload)
         return 0
 
     _show_print_header(task)
@@ -2472,7 +2483,7 @@ def _cmd_assign(args: argparse.Namespace) -> int:
         try:
             profile = kb.validate_spawnable_assignee(profile)
         except ValueError as exc:
-            print(f"kanban: {exc}", file=sys.stderr)
+            _kanban_err(exc)
             return 2
     with kb.connect_closing() as conn:
         ok = kb.assign_task(conn, args.task_id, profile)
@@ -2503,7 +2514,7 @@ def _cmd_reassign(args: argparse.Namespace) -> int:
         try:
             profile = kb.validate_spawnable_assignee(profile)
         except ValueError as exc:
-            print(f"kanban: {exc}", file=sys.stderr)
+            _kanban_err(exc)
             return 2
     with kb.connect_closing() as conn:
         ok = kb.reassign_task(
@@ -2706,7 +2717,7 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             }
             for tid, dl in diags_by_task.items()
         ]
-        print(json.dumps(out_json, indent=2, ensure_ascii=False))
+        _emit_json(out_json)
         return 0
 
     return _diagnostics_print_human(diags_by_task, meta)
@@ -2924,7 +2935,7 @@ def _complete_one_task(
             review_gate=worker_run_id is not None,
         )
     except kb.ReviewVerdictRequiredError as exc:
-        print(f"kanban: {exc}", file=sys.stderr)
+        _kanban_err(exc)
         return False
     if not completed:
         print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
@@ -3198,7 +3209,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     if as_json:
         # Single-id stays a flat object for back-compat; bulk emits a list.
         payload: object = results[0] if len(results) == 1 else results
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        _emit_json(payload)
         return 0 if not failed else 1
 
     tag = " (dry)" if args.dry_run else ""
@@ -3239,7 +3250,7 @@ def _cmd_report_discord(args: argparse.Namespace) -> int:
         output_path.write_text(full_markdown, encoding="utf-8")
 
     if getattr(args, "json", False):
-        print(json.dumps(report["structured"], indent=2, ensure_ascii=False))
+        _emit_json(report["structured"])
         return 0
 
     if getattr(args, "chunks", False):
@@ -3340,7 +3351,7 @@ def _cmd_close_sprint(args: argparse.Namespace) -> int:
             "kid_count": len(outcome.kid_receipts or []),
             "comment_body": outcome.comment_body,
         }
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        _emit_json(payload)
         return 0 if outcome.ok and outcome.completed else 1
 
     if not outcome.ok:
@@ -3562,7 +3573,7 @@ def _cmd_holds(args: argparse.Namespace) -> int:
             **dispatch_kwargs,
         )
     if getattr(args, "json", False):
-        print(json.dumps(report, indent=2, ensure_ascii=False))
+        _emit_json(report)
         return 0
     if report["count"] == 0:
         print("No dispatch holds.")
@@ -3826,7 +3837,7 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         stats = kb.board_stats(conn)
     if getattr(args, "json", False):
-        print(json.dumps(stats, indent=2, ensure_ascii=False))
+        _emit_json(stats)
         return 0
     print("By status:")
     for k in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
@@ -3915,7 +3926,7 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         subs = kb.list_notify_subs(conn, args.task_id)
     if getattr(args, "json", False):
-        print(json.dumps(subs, indent=2, ensure_ascii=False))
+        _emit_json(subs)
         return 0
     if not subs:
         print("(no subscriptions)")
