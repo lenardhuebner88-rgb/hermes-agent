@@ -3538,6 +3538,132 @@ def _cmd_holds(args: argparse.Namespace) -> int:
         print(line)
     return 0
 
+def _daemon_print_deprecation() -> None:
+    """Print the deprecation / migration message for ``kanban daemon``."""
+    print(
+        "hermes kanban daemon: DEPRECATED — the dispatcher now runs\n"
+        "inside the gateway. To use kanban:\n"
+        "\n"
+        "    hermes gateway start       # starts the gateway + embedded dispatcher\n"
+        "\n"
+        "Ready tasks will be picked up on the next dispatcher tick\n"
+        "(default: every 60 seconds). Configure via config.yaml:\n"
+        "\n"
+        "    kanban:\n"
+        "      dispatch_in_gateway: true      # default\n"
+        "      dispatch_interval_seconds: 60\n"
+        "      failure_limit: 2              # consecutive non-success attempts before auto-block\n"
+        "\n"
+        "Running both the gateway AND this standalone daemon will\n"
+        "race for claims. If you truly need the old standalone\n"
+        "daemon (no gateway available), rerun with --force.",
+        file=sys.stderr,
+    )
+
+
+def _daemon_write_pidfile(pidfile: str) -> None:
+    """Best-effort pidfile write used by the --force daemon path."""
+    try:
+        Path(pidfile).parent.mkdir(parents=True, exist_ok=True)
+        Path(pidfile).write_text(str(os.getpid()), encoding="utf-8")
+    except OSError as exc:
+        print(f"warning: could not write pidfile {pidfile}: {exc}", file=sys.stderr)
+
+
+def _daemon_ready_queue_nonempty() -> bool:
+    """Cheap probe — is there at least one ready+assigned+unclaimed
+    task whose assignee maps to a real Hermes profile (i.e. one the
+    dispatcher would actually try to spawn for)?
+
+    Filters out tasks assigned to control-plane lanes
+    (e.g. ``orion-cc``, ``orion-research``) that are pulled by
+    terminals via ``claim_task`` directly — those are correctly idle
+    from the dispatcher's perspective, not stuck.
+    """
+    try:
+        with kb.connect_closing() as conn:
+            return kb.has_spawnable_ready(conn)
+    except Exception:
+        return False
+
+
+def _daemon_on_tick(res: Any, health_state: dict[str, int], verbose: bool) -> None:
+    """Per-tick health telemetry + optional verbose progress for --force daemon."""
+    HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
+    ready_pending = bool(res.skipped_unassigned) or _daemon_ready_queue_nonempty()
+    spawned_any = bool(res.spawned)
+    if ready_pending and not spawned_any:
+        total_held, hold_counts, _dominant = kb.summarize_dispatch_holds([res])
+        now = int(time.time())
+        # An expected hold (repo-serialized / respawn-guarded / budget /
+        # role-fit / per-profile cap) is not a profile-health stuck. A task
+        # with no assignee IS operator-actionable, so it stays on the stuck
+        # path even when other tasks are merely held.
+        if total_held > 0 and not res.skipped_unassigned:
+            health_state["bad_ticks"] = 0
+            rg_count = hold_counts.get("respawn_guarded", 0)
+            if rg_count > 0:
+                # Canary: track persistence whenever ANY task is respawn-
+                # guarded (not only when it dominates) so a stuck guard can't
+                # be masked forever by a larger unrelated hold bucket.
+                if health_state["respawn_held_since"] == 0:
+                    health_state["respawn_held_since"] = now
+                elif (
+                    now - health_state["respawn_held_since"]
+                    >= kb._RESPAWN_GUARD_SUCCESS_WINDOW
+                    and now - health_state["last_warn_at"] >= 300
+                ):
+                    print(
+                        f"[{_fmt_ts(now)}] WARN dispatcher: {rg_count} "
+                        f"ready task(s) respawn-guarded for "
+                        f"{kb._RESPAWN_GUARD_SUCCESS_WINDOW}s and never "
+                        f"cleared — possible stuck guard. holds={hold_counts}.",
+                        file=sys.stderr, flush=True,
+                    )
+                    health_state["last_warn_at"] = now
+            else:
+                health_state["respawn_held_since"] = 0
+        else:
+            health_state["respawn_held_since"] = 0
+            health_state["bad_ticks"] += 1
+    else:
+        health_state["bad_ticks"] = 0
+        health_state["respawn_held_since"] = 0
+    # Emit a warning once per HEALTH_WINDOW bad ticks (not every tick)
+    # so log volume stays bounded while the problem persists.
+    if health_state["bad_ticks"] >= HEALTH_WINDOW:
+        now = int(time.time())
+        # Rate-limit repeats: at most one warning per 5 minutes.
+        if now - health_state["last_warn_at"] >= 300:
+            print(
+                f"[{_fmt_ts(now)}] WARN dispatcher stuck: "
+                f"ready queue non-empty for {health_state['bad_ticks']} "
+                f"consecutive ticks but 0 workers spawned successfully, and "
+                f"no expected hold explains it. "
+                f"Check profile health (venv, PATH, credentials) and "
+                f"`hermes kanban list --status ready` / "
+                f"`hermes kanban list --status blocked` for recent "
+                f"spawn_failed tasks.",
+                file=sys.stderr, flush=True,
+            )
+            health_state["last_warn_at"] = now
+    if not verbose:
+        return
+    did_work = (
+        res.reclaimed or res.crashed or res.timed_out or res.promoted
+        or res.spawned or res.auto_blocked or res.stale
+    )
+    if did_work:
+        print(
+            f"[{_fmt_ts(int(time.time()))}] "
+            f"reclaimed={res.reclaimed} crashed={len(res.crashed)} "
+            f"timed_out={len(res.timed_out)} stale={len(res.stale)} "
+            f"promoted={res.promoted} spawned={len(res.spawned)} "
+            f"auto_blocked={len(res.auto_blocked)}",
+            flush=True,
+        )
+
+
 def _cmd_daemon(args: argparse.Namespace) -> int:
     """Deprecated — the dispatcher now runs inside the gateway.
 
@@ -3554,25 +3680,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     # release cycle. Undocumented in `--help` so nobody discovers it
     # casually — intentional.
     if not getattr(args, "force", False):
-        print(
-            "hermes kanban daemon: DEPRECATED — the dispatcher now runs\n"
-            "inside the gateway. To use kanban:\n"
-            "\n"
-            "    hermes gateway start       # starts the gateway + embedded dispatcher\n"
-            "\n"
-            "Ready tasks will be picked up on the next dispatcher tick\n"
-            "(default: every 60 seconds). Configure via config.yaml:\n"
-            "\n"
-            "    kanban:\n"
-            "      dispatch_in_gateway: true      # default\n"
-            "      dispatch_interval_seconds: 60\n"
-            "      failure_limit: 2              # consecutive non-success attempts before auto-block\n"
-            "\n"
-            "Running both the gateway AND this standalone daemon will\n"
-            "race for claims. If you truly need the old standalone\n"
-            "daemon (no gateway available), rerun with --force.",
-            file=sys.stderr,
-        )
+        _daemon_print_deprecation()
         return 2
 
     # Legacy path — same logic as before, kept behind --force.
@@ -3582,11 +3690,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     pidfile = getattr(args, "pidfile", None)
     if pidfile:
-        try:
-            Path(pidfile).parent.mkdir(parents=True, exist_ok=True)
-            Path(pidfile).write_text(str(os.getpid()), encoding="utf-8")
-        except OSError as exc:
-            print(f"warning: could not write pidfile {pidfile}: {exc}", file=sys.stderr)
+        _daemon_write_pidfile(pidfile)
 
     verbose = bool(getattr(args, "verbose", False))
     print(
@@ -3603,98 +3707,10 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     # credential loss — cases where the per-task circuit breaker auto-blocks
     # each task quietly but the operator has no signal that the dispatcher
     # itself is dysfunctional.
-    HEALTH_WINDOW = 6  # ticks (default 30s at interval=5)
     health_state = {"bad_ticks": 0, "last_warn_at": 0, "respawn_held_since": 0}
 
     def _on_tick(res):
-        ready_pending = bool(res.skipped_unassigned) or _ready_queue_nonempty()
-        spawned_any = bool(res.spawned)
-        if ready_pending and not spawned_any:
-            total_held, hold_counts, _dominant = kb.summarize_dispatch_holds([res])
-            now = int(time.time())
-            # An expected hold (repo-serialized / respawn-guarded / budget /
-            # role-fit / per-profile cap) is not a profile-health stuck. A task
-            # with no assignee IS operator-actionable, so it stays on the stuck
-            # path even when other tasks are merely held.
-            if total_held > 0 and not res.skipped_unassigned:
-                health_state["bad_ticks"] = 0
-                rg_count = hold_counts.get("respawn_guarded", 0)
-                if rg_count > 0:
-                    # Canary: track persistence whenever ANY task is respawn-
-                    # guarded (not only when it dominates) so a stuck guard can't
-                    # be masked forever by a larger unrelated hold bucket.
-                    if health_state["respawn_held_since"] == 0:
-                        health_state["respawn_held_since"] = now
-                    elif (
-                        now - health_state["respawn_held_since"]
-                        >= kb._RESPAWN_GUARD_SUCCESS_WINDOW
-                        and now - health_state["last_warn_at"] >= 300
-                    ):
-                        print(
-                            f"[{_fmt_ts(now)}] WARN dispatcher: {rg_count} "
-                            f"ready task(s) respawn-guarded for "
-                            f">{kb._RESPAWN_GUARD_SUCCESS_WINDOW}s and never "
-                            f"cleared — possible stuck guard. holds={hold_counts}.",
-                            file=sys.stderr, flush=True,
-                        )
-                        health_state["last_warn_at"] = now
-                else:
-                    health_state["respawn_held_since"] = 0
-            else:
-                health_state["respawn_held_since"] = 0
-                health_state["bad_ticks"] += 1
-        else:
-            health_state["bad_ticks"] = 0
-            health_state["respawn_held_since"] = 0
-        # Emit a warning once per HEALTH_WINDOW bad ticks (not every tick)
-        # so log volume stays bounded while the problem persists.
-        if health_state["bad_ticks"] >= HEALTH_WINDOW:
-            now = int(time.time())
-            # Rate-limit repeats: at most one warning per 5 minutes.
-            if now - health_state["last_warn_at"] >= 300:
-                print(
-                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: "
-                    f"ready queue non-empty for {health_state['bad_ticks']} "
-                    f"consecutive ticks but 0 workers spawned successfully, and "
-                    f"no expected hold explains it. "
-                    f"Check profile health (venv, PATH, credentials) and "
-                    f"`hermes kanban list --status ready` / "
-                    f"`hermes kanban list --status blocked` for recent "
-                    f"spawn_failed tasks.",
-                    file=sys.stderr, flush=True,
-                )
-                health_state["last_warn_at"] = now
-        if not verbose:
-            return
-        did_work = (
-            res.reclaimed or res.crashed or res.timed_out or res.promoted
-            or res.spawned or res.auto_blocked or res.stale
-        )
-        if did_work:
-            print(
-                f"[{_fmt_ts(int(time.time()))}] "
-                f"reclaimed={res.reclaimed} crashed={len(res.crashed)} "
-                f"timed_out={len(res.timed_out)} stale={len(res.stale)} "
-                f"promoted={res.promoted} spawned={len(res.spawned)} "
-                f"auto_blocked={len(res.auto_blocked)}",
-                flush=True,
-            )
-
-    def _ready_queue_nonempty() -> bool:
-        """Cheap probe — is there at least one ready+assigned+unclaimed
-        task whose assignee maps to a real Hermes profile (i.e. one the
-        dispatcher would actually try to spawn for)?
-
-        Filters out tasks assigned to control-plane lanes
-        (e.g. ``orion-cc``, ``orion-research``) that are pulled by
-        terminals via ``claim_task`` directly — those are correctly idle
-        from the dispatcher's perspective, not stuck.
-        """
-        try:
-            with kb.connect_closing() as conn:
-                return kb.has_spawnable_ready(conn)
-        except Exception:
-            return False
+        _daemon_on_tick(res, health_state, verbose)
 
     try:
         kb.run_daemon(
@@ -3711,6 +3727,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                 pass
     print("(dispatcher stopped)")
     return 0
+
 
 def _cmd_watch(args: argparse.Namespace) -> int:
     """Live-stream task_events to the terminal."""
