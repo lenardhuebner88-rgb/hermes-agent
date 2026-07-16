@@ -11,6 +11,7 @@ import { NotificationBridge } from "./NotificationBridge";
 import { Overlay } from "./Overlay";
 import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
+import { useLiveStatus } from "../hooks/useLiveEvents";
 
 export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat";
 
@@ -199,6 +200,7 @@ export function ControlShell(props: Props) {
  *  Utilities — ⌘K nur unterhalb von `tab:` (die Rail trägt ihr eigenes ab
  *  `tab:`). */
 function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: ControlTab; inbox: DecisionInboxData; health: Props["health"]; pulse: Props["pulse"]; onOpenCommand: () => void }) {
+  const liveState = useLiveStatus();
   const { gateway, stale, title } = useGatewayHealth(health);
   return (
     <div data-testid="control-masthead">
@@ -212,6 +214,7 @@ function Masthead({ active, inbox, health, pulse, onOpenCommand }: { active: Con
         gateway={{ status: gateway, stale, title }}
       >
         <NotificationBridge inbox={inbox} />
+        <span className={cn("rounded-full border px-2 py-0.5 text-[10px]", liveState === "connected" ? "border-live/30 text-live" : "border-status-warn/30 text-status-warn")}>Live: {liveState === "connected" ? "verbunden" : liveState === "reconnecting" ? "verbindet" : "aus"}</span>
         <StatusDots health={health} demoted={Boolean(pulse)} />
         <CommandButton onOpen={onOpenCommand} />
       </PulsLeiste>

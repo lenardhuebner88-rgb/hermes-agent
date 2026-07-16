@@ -34,6 +34,8 @@ const hooks = vi.hoisted(() => ({
   useRunLiveEvents: vi.fn(),
   useWorkerLifecycle: vi.fn(),
   useWorkerActivity: vi.fn(),
+  useHermesRecentResults: vi.fn(),
+  useCronObservability: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => hooks);
@@ -208,6 +210,8 @@ function setHookDefaults() {
     clearError: vi.fn(),
   });
   hooks.useWorkerActivity.mockReturnValue({ data: { events: [] }, loading: false, error: null, reload });
+  hooks.useHermesRecentResults.mockReturnValue({ data: { results: [] }, loading: false, error: null, lastUpdated: null, reload });
+  hooks.useCronObservability.mockReturnValue({ data: { jobs: [] }, loading: false, error: null, lastUpdated: null, reload });
   hooks.usePlanSpecDetail.mockImplementation((path: string | null) => {
     return {
       data: path

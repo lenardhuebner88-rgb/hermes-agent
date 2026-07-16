@@ -1,7 +1,15 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SystemHealthStrip } from "./SystemHealthStrip";
 import type { SystemHealthResponse } from "../lib/types";
+import { de } from "../i18n/de";
+import { OfflineStaleBanner } from "./OfflineStaleBanner";
+
+const clock = vi.hoisted(() => ({ now: 100 }));
+
+vi.mock("../lib/clock", () => ({
+  useClientNowSeconds: () => clock.now,
+}));
 
 const baseHealth: SystemHealthResponse = {
   schema: "hermes-health-v1",
@@ -21,8 +29,22 @@ describe("SystemHealthStrip", () => {
     expect(html).toContain("Hermes-Gateway");
     expect(html).toContain("Autoresearch-Loop");
     expect(html).toContain("Kanban-DB");
+    expect(html).toContain("Kanban-Dispatcher");
     // OpenClaw wurde 2026-06-01 abgeschaltet — nicht mehr in der Ampel.
     expect(html).not.toContain("OpenClaw-Proxy");
+  });
+
+  it("distinguishes fetch errors from paused or age-stale health refreshes with translated labels", () => {
+    const errorHtml = renderToStaticMarkup(
+      <OfflineStaleBanner health={{ data: baseHealth, error: "network down", lastUpdated: 99, pollIntervalMs: 10000 }} />,
+    );
+    const ageStaleHtml = renderToStaticMarkup(
+      <OfflineStaleBanner health={{ data: baseHealth, error: null, lastUpdated: 0, pollIntervalMs: 10000 }} />,
+    );
+
+    expect(errorHtml).toContain(de.staleBanner.fetchError);
+    expect(ageStaleHtml).toContain(de.staleBanner.pausedOrStale);
+    expect(ageStaleHtml).not.toContain(de.staleBanner.fetchError);
   });
 
   it("shows amber tone for degraded subsystems", () => {

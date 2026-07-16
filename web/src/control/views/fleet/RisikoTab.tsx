@@ -19,6 +19,7 @@
  */
 import { de } from "../../i18n/de";
 import { buildReliabilityRiskModel } from "../../lib/fleetRisk";
+import { usePulseData } from "../../hooks/usePulseData";
 import type { ReliabilityResponse, LanesCatalogResponse, KanbanDecision } from "../../lib/schemas";
 import type { SystemHealthResponse, PressureStatusResponse, Worker } from "../../lib/types";
 import { FleetTaskActions } from "./TaskActions";
@@ -85,6 +86,7 @@ export function RisikoTab({
   onTaskChanged,
 }: RisikoTabProps) {
   const releaseGate = useReleaseGateExecute();
+  const { fresh } = usePulseData({ proposals: [], proposalsLastUpdated: null });
 
   // Operator-Halts — echte Klassifikation (mirrort backend _AUTO_RETRY_QUESTION_RE);
   // alles andere blockierte behandelt die Retry-Sweep selbst, gehört nicht hierher.
@@ -172,7 +174,7 @@ export function RisikoTab({
       <RisikoActivity releaseStatus={releaseStatus} />
 
       {/* Zone 4: System-Puls */}
-      <RisikoPulse pressureStatus={pressureStatus} systemHealth={systemHealth} reliabilityModel={reliabilityModel} />
+      <RisikoPulse pressureStatus={pressureStatus} systemHealth={systemHealth} reliabilityModel={reliabilityModel} fresh={fresh} />
     </div>
   );
 }

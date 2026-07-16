@@ -1,5 +1,7 @@
 import { StaleBadge } from "../../components/atoms";
 import type { StructuredError } from "../../hooks/pollingStore";
+import { useClientNowSeconds } from "../../lib/clock";
+import { freshness } from "../../lib/derive";
 
 export interface FleetFreshnessSource {
   label: string;
@@ -7,10 +9,12 @@ export interface FleetFreshnessSource {
   errorObj?: StructuredError | null;
   isStale?: boolean;
   lastUpdated?: number | null;
+  pollIntervalMs?: number;
 }
 
 export function FleetSourceFreshness({ sources }: { sources: FleetFreshnessSource[] }) {
-  const affected = sources.filter((source) => source.isStale || source.error || source.errorObj);
+  const now = useClientNowSeconds();
+  const affected = sources.filter((source) => source.isStale || source.error || source.errorObj || (source.lastUpdated != null && freshness(source.lastUpdated, source.pollIntervalMs ?? 10000, now).stale));
   if (affected.length === 0) return null;
 
   return (
@@ -24,6 +28,7 @@ export function FleetSourceFreshness({ sources }: { sources: FleetFreshnessSourc
           <StaleBadge
             isStale={source.isStale}
             lastUpdated={source.lastUpdated}
+            pollIntervalMs={source.pollIntervalMs}
             errorObj={source.errorObj}
             error={source.error}
           />

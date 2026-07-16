@@ -17,6 +17,11 @@ export const de = {
     staleUnknown: "Daten nicht frisch",
     error: "Quelle meldet Fehler",
   },
+  staleBanner: {
+    fetchError: "Health-Poll fehlgeschlagen",
+    pausedOrStale: "Health-Refresh pausiert oder veraltet",
+    stale: "Health-Daten sind stale",
+  },
   tabs: { overview: "Übersicht", inbox: "Postfach", pulse: "Puls", workstreams: "Ströme", hermes: "Hermes", flow: "Flow", statistik: "Statistik", autoresearch: "Autoresearch", backlog: "Family Organizer", orchestrator: "Orchestrator", crons: "Crons", schmiede: "Prompt-Schmiede", ketten: "Ketten", loops: "Loops" },
   stats: {
     eyebrow: "Statistik",
@@ -677,6 +682,7 @@ export const de = {
     gateway: "Hermes-Gateway",
     autoresearch: "Autoresearch-Loop",
     kanban: "Kanban-DB",
+    dispatcher: "Kanban-Dispatcher",
     healthy: "Gesund",
     degraded: "Beeinträchtigt",
     offline: "Offline",

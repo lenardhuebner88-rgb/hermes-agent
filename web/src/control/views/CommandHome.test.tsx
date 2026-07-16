@@ -100,6 +100,7 @@ function installCommandHomeFixtures() {
       gateway: { status: "healthy", detail: "ok" },
       autoresearch: { status: "healthy", detail: "ok" },
       kanban_db: { status: "degraded", detail: "1 held" },
+      kanban_dispatcher: { status: "healthy", detail: "ok" },
       scheduler: { status: "healthy", detail: "ok" },
     },
   }));
@@ -193,6 +194,10 @@ describe("CommandHome", () => {
     expect(html).toContain("Attention Inbox");
     expect(html).toContain("Held Task braucht Fix-Redispatch");
     expect(html).toContain("System-/Kosten-Puls");
+    expect(html).toContain("Gateway");
+    expect(html).toContain("Research");
+    expect(html).toContain("Kanban");
+    expect(html).toContain("Dispatcher");
     expect(html).toContain("Max Limit");
     expect(html).toContain("Hermes Diktat");
     expect(html).toContain("Quick-Jumps");

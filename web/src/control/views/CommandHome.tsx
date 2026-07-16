@@ -462,7 +462,7 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
   const healthTone: SignalTone = !health.data ? "neutral" : overall === "healthy" ? "ok" : overall === "degraded" ? "warn" : "alert";
   const subs = health.data?.subsystems;
   const sysLabel: Array<[string, "healthy" | "degraded" | "offline" | undefined]> = [
-    ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status],
+    ["Gateway", subs?.gateway.status], ["Research", subs?.autoresearch.status], ["Kanban", subs?.kanban_db.status], ["Dispatcher", subs?.kanban_dispatcher?.status],
   ];
   return (
     <div className="ch-panel flex flex-col gap-3 p-3">
@@ -478,10 +478,10 @@ function PulseRail({ health, running, inReview, blocked, shippedToday, now, boar
           <SignalChip tone={healthTone} label={!health.data ? "unbekannt" : overall === "healthy" ? "gesund" : overall} />
         </div>
         <div className="mb-2 flex flex-wrap gap-1.5">
-          <StaleBadge isStale={health.isStale} lastUpdated={health.lastUpdated} errorObj={health.errorObj} error={health.error} now={now} />
-          <StaleBadge isStale={board.isStale} lastUpdated={board.lastUpdated} errorObj={board.errorObj} error={board.error} now={now} />
-          <StaleBadge isStale={workers.isStale} lastUpdated={workers.lastUpdated} errorObj={workers.errorObj} error={workers.error} now={now} />
-          <StaleBadge isStale={digest.isStale} lastUpdated={digest.lastUpdated} errorObj={digest.errorObj} error={digest.error} now={now} />
+          <StaleBadge isStale={health.isStale} lastUpdated={health.lastUpdated} errorObj={health.errorObj} error={health.error} now={now} pollIntervalMs={5000} />
+          <StaleBadge isStale={board.isStale} lastUpdated={board.lastUpdated} errorObj={board.errorObj} error={board.error} now={now} pollIntervalMs={10000} />
+          <StaleBadge isStale={workers.isStale} lastUpdated={workers.lastUpdated} errorObj={workers.errorObj} error={workers.error} now={now} pollIntervalMs={10000} />
+          <StaleBadge isStale={digest.isStale} lastUpdated={digest.lastUpdated} errorObj={digest.errorObj} error={digest.error} now={now} pollIntervalMs={20000} />
         </div>
         <div className="flex flex-col gap-1.5">
           {sysLabel.map(([label, st]) => (
