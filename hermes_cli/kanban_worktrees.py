@@ -4454,40 +4454,19 @@ def integrate_chain(
             _release_file_lock(lock)
 
 
-def maybe_integrate_on_complete(
+def _find_open_chain_sibling(
     conn: sqlite3.Connection,
     task_id: str,
-    *,
-    gate_runner=None,
-) -> Optional[dict]:
-    """Completion hook (called by ``complete_task`` on the direct done
-    path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
-    open task of a provisioned chain, integrate the chain.
+    members: set[str],
+    wt: Path,
+):
+    """Chain-complete check via BOTH signals, conservatively OR-ed.
 
-    Returns ``None`` when not applicable (non-provisioned workspace),
-    ``{"action": "deferred"}`` while chain siblings are still open, or the
-    ``integrate_chain`` outcome (events + receipt comment already written).
-    A ``parked`` outcome means the caller must NOT move the task to done.
+    (a) task_links membership from the chain root — covers unclaimed
+    children whose workspace_path still points at the repo root;
+    (b) same provisioned worktree path — covers tasks attached to the
+    worktree outside the link graph (e.g. cloned fix tasks).
     """
-    row = conn.execute(
-        "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
-    ).fetchone()
-    if not row or not row["workspace_path"]:
-        return None
-    provisioned = split_provisioned_path(row["workspace_path"])
-    if provisioned is None:
-        return None
-    repo_root, root_id, wt = provisioned
-
-    from hermes_cli import kanban_db as kb
-
-    # Chain-complete check via BOTH signals, conservatively OR-ed:
-    # (a) task_links membership from the chain root — covers unclaimed
-    #     children whose workspace_path still points at the repo root;
-    # (b) same provisioned worktree path — covers tasks attached to the
-    #     worktree outside the link graph (e.g. cloned fix tasks).
-    members = _chain_member_ids(conn, root_id)
-    members.discard(task_id)
     open_sibling = None
     if members:
         placeholders = ",".join("?" for _ in members)
@@ -4511,160 +4490,210 @@ def maybe_integrate_on_complete(
             "LIMIT 1",
             (like, task_id),
         ).fetchone()
-    auto_complete_root_id = None
-    if open_sibling:
-        pending_root_id = _pending_root_finalizer_id(
-            conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
-        )
-        if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
-            auto_complete_root_id = pending_root_id
-        elif pending_root_id is not None:
-            try:
-                _record_pending_root_finalizer(
-                    conn,
-                    pending_root_id=pending_root_id,
-                    completed_task_id=task_id,
-                    root_id=root_id,
-                    branch=chain_branch(root_id),
-                )
-            except Exception:
-                _log.debug("pending-root-finalizer event failed", exc_info=True)
-        else:
-            return {"action": "deferred", "reason": "chain has open siblings"}
-        if auto_complete_root_id is None:
-            return {"action": "deferred", "reason": "chain has open siblings"}
+    return open_sibling
 
-    target = frozen_merge_target(conn, root_id)
-    branch = chain_branch(root_id)
-    if not _branch_exists(repo_root, branch):
-        # A previous completion attempt may have merged, gated, and removed the
-        # branch/worktree before its later DB done/outbox transaction rolled
-        # back.  Recover only from two durable integration witnesses whose
-        # commit still reaches the frozen target; a bare missing branch remains
-        # a hard park.
-        merged_row = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? "
-            "AND kind = 'integration_merged' ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-        verified_row = conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? "
-            "AND kind = 'INTEGRATOR_VERIFIED' ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
+
+def _resolve_open_sibling_finalizer(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    wt: Path,
+    members: set[str],
+    open_sibling,
+) -> tuple[Optional[dict], Optional[str]]:
+    """If open siblings remain, decide deferred vs auto-complete root.
+
+    Returns ``(deferred_result, None)`` or ``(None, auto_complete_root_id)``.
+    """
+    auto_complete_root_id = None
+    if not open_sibling:
+        return None, auto_complete_root_id
+    pending_root_id = _pending_root_finalizer_id(
+        conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
+    )
+    if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
+        auto_complete_root_id = pending_root_id
+    elif pending_root_id is not None:
         try:
-            merged_payload = json.loads(merged_row["payload"]) if merged_row else {}
-            verified_payload = (
-                json.loads(verified_row["payload"]) if verified_row else {}
+            _record_pending_root_finalizer(
+                conn,
+                pending_root_id=pending_root_id,
+                completed_task_id=task_id,
+                root_id=root_id,
+                branch=chain_branch(root_id),
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            merged_payload = {}
-            verified_payload = {}
-        merge_commit = str(merged_payload.get("merge_commit") or "").strip()
-        verified_commit = str(verified_payload.get("merge_commit") or "").strip()
-        recorded_target = str(merged_payload.get("target") or target).strip()
-        if (
-            merge_commit
-            and merge_commit == verified_commit
-            and recorded_target == target
-            and _branch_is_ancestor(repo_root, merge_commit, target)
-        ):
-            changed_files = [
-                str(path)
-                for path in merged_payload.get("changed_files", [])
-                if str(path).strip()
-            ]
-            content_differs = False
-            if changed_files:
-                try:
-                    _git(
-                        repo_root,
-                        "diff",
-                        "--quiet",
-                        merge_commit,
-                        target,
-                        "--",
-                        *changed_files,
-                    )
-                except WorktreeError:
-                    content_differs = True
-            if content_differs:
-                revert_commits = _revert_commits_for_merge(
-                    repo_root, merge_commit, target,
+        except Exception:
+            _log.debug("pending-root-finalizer event failed", exc_info=True)
+    else:
+        return {"action": "deferred", "reason": "chain has open siblings"}, None
+    if auto_complete_root_id is None:
+        return {"action": "deferred", "reason": "chain has open siblings"}, None
+    return None, auto_complete_root_id
+
+
+def _recover_missing_branch_integration(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    repo_root: Path,
+    branch: str,
+    target: Optional[str],
+    kb,
+) -> dict:
+    """Recover or park when the chain branch is already gone after a prior merge."""
+    # A previous completion attempt may have merged, gated, and removed the
+    # branch/worktree before its later DB done/outbox transaction rolled
+    # back.  Recover only from two durable integration witnesses whose
+    # commit still reaches the frozen target; a bare missing branch remains
+    # a hard park.
+    merged_row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'integration_merged' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    verified_row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'INTEGRATOR_VERIFIED' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    try:
+        merged_payload = json.loads(merged_row["payload"]) if merged_row else {}
+        verified_payload = (
+            json.loads(verified_row["payload"]) if verified_row else {}
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        merged_payload = {}
+        verified_payload = {}
+    merge_commit = str(merged_payload.get("merge_commit") or "").strip()
+    verified_commit = str(verified_payload.get("merge_commit") or "").strip()
+    recorded_target = str(merged_payload.get("target") or target).strip()
+    if (
+        merge_commit
+        and merge_commit == verified_commit
+        and recorded_target == target
+        and _branch_is_ancestor(repo_root, merge_commit, target)
+    ):
+        changed_files = [
+            str(path)
+            for path in merged_payload.get("changed_files", [])
+            if str(path).strip()
+        ]
+        content_differs = False
+        if changed_files:
+            try:
+                _git(
+                    repo_root,
+                    "diff",
+                    "--quiet",
+                    merge_commit,
+                    target,
+                    "--",
+                    *changed_files,
                 )
-                return {
-                    **merged_payload,
-                    "action": "parked",
-                    "reason": (
-                        "recorded green merge content is no longer active on "
-                        f"{target}; refusing already-integrated recovery"
-                    ),
-                    "branch": branch,
-                    "target": target,
-                    "merge_commit": merge_commit,
-                    "revert_commits": revert_commits,
-                    "content_drift_after_merge": True,
-                }
-            outcome = {
+            except WorktreeError:
+                content_differs = True
+        if content_differs:
+            revert_commits = _revert_commits_for_merge(
+                repo_root, merge_commit, target,
+            )
+            return {
                 **merged_payload,
-                "action": "clean",
-                "already_integrated": True,
-                "merge_commit": merge_commit,
+                "action": "parked",
+                "reason": (
+                    "recorded green merge content is no longer active on "
+                    f"{target}; refusing already-integrated recovery"
+                ),
                 "branch": branch,
                 "target": target,
-                "reconciled_from": "integration_merged+INTEGRATOR_VERIFIED",
+                "merge_commit": merge_commit,
+                "revert_commits": revert_commits,
+                "content_drift_after_merge": True,
             }
-            release_row = conn.execute(
-                "SELECT payload FROM task_events WHERE task_id = ? "
-                "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            if release_row is not None:
-                try:
-                    release_payload = json.loads(release_row["payload"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    release_payload = {}
-                child_id = str(release_payload.get("child_id") or "").strip()
-                if child_id:
-                    outcome["release_gate_child_id"] = child_id
-            if (
-                "release_gate_child_id" not in outcome
-                and outcome.get("release_gate_required")
-            ):
-                try:
-                    _create_parked_release_gate_child(
-                        conn, task_id, root_id, outcome,
-                    )
-                except Exception as exc:
-                    return {
-                        **outcome,
-                        "action": "parked",
-                        "reason": f"required release-gate creation failed: {exc}",
-                        "release_gate_creation_failed": True,
-                    }
-            return outcome
         outcome = {
-            "action": "parked",
-            "reason": f"missing branch evidence for root finalizer: {branch}",
+            **merged_payload,
+            "action": "clean",
+            "already_integrated": True,
+            "merge_commit": merge_commit,
             "branch": branch,
             "target": target,
+            "reconciled_from": "integration_merged+INTEGRATOR_VERIFIED",
         }
-        try:
-            with kb.write_txn(conn):
-                kb._append_event(conn, task_id, "integration_parked", outcome)
-        except Exception:
-            _log.warning("could not record missing-branch event for %s", task_id,
-                         exc_info=True)
+        release_row = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'release_gate_created' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if release_row is not None:
+            try:
+                release_payload = json.loads(release_row["payload"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                release_payload = {}
+            child_id = str(release_payload.get("child_id") or "").strip()
+            if child_id:
+                outcome["release_gate_child_id"] = child_id
+        if (
+            "release_gate_child_id" not in outcome
+            and outcome.get("release_gate_required")
+        ):
+            try:
+                _create_parked_release_gate_child(
+                    conn, task_id, root_id, outcome,
+                )
+            except Exception as exc:
+                return {
+                    **outcome,
+                    "action": "parked",
+                    "reason": f"required release-gate creation failed: {exc}",
+                    "release_gate_creation_failed": True,
+                }
         return outcome
-    outcome = integrate_chain(
-        repo_root, wt, branch, target, gate_runner=gate_runner,
-    )
-    if outcome.get("action") == "merged" and any(
-        str(path).startswith("web/")
-        for path in outcome.get("changed_files", [])
-    ):
-        outcome["release_gate_required"] = True
+    outcome = {
+        "action": "parked",
+        "reason": f"missing branch evidence for root finalizer: {branch}",
+        "branch": branch,
+        "target": target,
+    }
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, "integration_parked", outcome)
+    except Exception:
+        _log.warning("could not record missing-branch event for %s", task_id,
+                     exc_info=True)
+    return outcome
 
+
+def _maybe_auto_complete_after_integration(
+    conn: sqlite3.Connection,
+    auto_complete_root_id: Optional[str],
+    task_id: str,
+    outcome: dict,
+) -> None:
+    if auto_complete_root_id is not None:
+        try:
+            _auto_complete_decompose_root(
+                conn,
+                root_id=auto_complete_root_id,
+                completed_task_id=task_id,
+                outcome=outcome,
+            )
+        except Exception:
+            _log.warning(
+                "could not auto-complete decompose root %s",
+                auto_complete_root_id,
+                exc_info=True,
+            )
+
+
+def _record_integration_events_and_receipts(
+    conn: sqlite3.Connection,
+    task_id: str,
+    root_id: str,
+    target: Optional[str],
+    outcome: dict,
+    auto_complete_root_id: Optional[str],
+    kb,
+) -> dict:
+    """Write integration events/comments/release-gate; return final outcome."""
     try:
         with kb.write_txn(conn):
             kind = {
@@ -4732,20 +4761,9 @@ def maybe_integrate_on_complete(
                     "reason": f"required release-gate creation failed: {exc}",
                     "release_gate_creation_failed": True,
                 }
-        if auto_complete_root_id is not None:
-            try:
-                _auto_complete_decompose_root(
-                    conn,
-                    root_id=auto_complete_root_id,
-                    completed_task_id=task_id,
-                    outcome=outcome,
-                )
-            except Exception:
-                _log.warning(
-                    "could not auto-complete decompose root %s",
-                    auto_complete_root_id,
-                    exc_info=True,
-                )
+        _maybe_auto_complete_after_integration(
+            conn, auto_complete_root_id, task_id, outcome,
+        )
     elif outcome["action"] == "clean" and outcome.get("already_integrated"):
         try:
             kb.add_comment(
@@ -4756,18 +4774,68 @@ def maybe_integrate_on_complete(
             )
         except Exception:
             _log.debug("already-integrated receipt comment failed", exc_info=True)
-        if auto_complete_root_id is not None:
-            try:
-                _auto_complete_decompose_root(
-                    conn,
-                    root_id=auto_complete_root_id,
-                    completed_task_id=task_id,
-                    outcome=outcome,
-                )
-            except Exception:
-                _log.warning(
-                    "could not auto-complete decompose root %s",
-                    auto_complete_root_id,
-                    exc_info=True,
-                )
+        _maybe_auto_complete_after_integration(
+            conn, auto_complete_root_id, task_id, outcome,
+        )
     return outcome
+
+
+def maybe_integrate_on_complete(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    gate_runner=None,
+) -> Optional[dict]:
+    """Completion hook (called by ``complete_task`` on the direct done
+    path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
+    open task of a provisioned chain, integrate the chain.
+
+    Returns ``None`` when not applicable (non-provisioned workspace),
+    ``{"action": "deferred"}`` while chain siblings are still open, or the
+    ``integrate_chain`` outcome (events + receipt comment already written).
+    A ``parked`` outcome means the caller must NOT move the task to done.
+    """
+    row = conn.execute(
+        "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if not row or not row["workspace_path"]:
+        return None
+    provisioned = split_provisioned_path(row["workspace_path"])
+    if provisioned is None:
+        return None
+    repo_root, root_id, wt = provisioned
+
+    from hermes_cli import kanban_db as kb
+
+    # Chain-complete check via BOTH signals, conservatively OR-ed:
+    # (a) task_links membership from the chain root — covers unclaimed
+    #     children whose workspace_path still points at the repo root;
+    # (b) same provisioned worktree path — covers tasks attached to the
+    #     worktree outside the link graph (e.g. cloned fix tasks).
+    members = _chain_member_ids(conn, root_id)
+    members.discard(task_id)
+    open_sibling = _find_open_chain_sibling(conn, task_id, members, wt)
+    deferred, auto_complete_root_id = _resolve_open_sibling_finalizer(
+        conn, task_id, root_id, wt, members, open_sibling,
+    )
+    if deferred is not None:
+        return deferred
+
+    target = frozen_merge_target(conn, root_id)
+    branch = chain_branch(root_id)
+    if not _branch_exists(repo_root, branch):
+        return _recover_missing_branch_integration(
+            conn, task_id, root_id, repo_root, branch, target, kb,
+        )
+    outcome = integrate_chain(
+        repo_root, wt, branch, target, gate_runner=gate_runner,
+    )
+    if outcome.get("action") == "merged" and any(
+        str(path).startswith("web/")
+        for path in outcome.get("changed_files", [])
+    ):
+        outcome["release_gate_required"] = True
+
+    return _record_integration_events_and_receipts(
+        conn, task_id, root_id, target, outcome, auto_complete_root_id, kb,
+    )
