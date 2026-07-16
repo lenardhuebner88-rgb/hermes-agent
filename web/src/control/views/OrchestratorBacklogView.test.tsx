@@ -1,9 +1,15 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { OrchestratorQueueTable } from "./OrchestratorBacklogView";
 import { CommissionBanner, OrchestratorHeroPanel } from "./orchestrator/OrchestratorSections";
 import type { OrchestrationItem } from "../lib/schemas";
+
+afterEach(() => {
+  cleanup();
+});
 
 const item = (overrides: Partial<OrchestrationItem>): OrchestrationItem => ({
   id: "f-a",
@@ -73,6 +79,55 @@ describe("OrchestratorQueueTable", () => {
     );
 
     expect(html).toContain("Dependency klären: ghost");
+  });
+
+  it("queue table exposes all columns through a horizontal scroll region", () => {
+    // Track minima from the 8-col md grid + 7×gap-3 (12px): 1074 + 84 = 1158px ≈ 72.375rem.
+    const COLUMN_MINIMA_PX = 220 + 96 + 112 + 112 + 84 + 140 + 150 + 160;
+    const GAP_PX = 7 * 12;
+    const REQUIRED_MIN_WIDTH_PX = COLUMN_MINIMA_PX + GAP_PX;
+
+    const rows = [item({ id: "ready", title: "Ready Item", source: "MiniMax-Audit", lastProof: "smoke ok" })];
+    render(
+      <OrchestratorQueueTable
+        items={rows}
+        allItems={rows}
+        nowSec={Date.parse("2026-06-04T12:00:00Z") / 1000}
+        nextTaskId="ready"
+        onOpen={() => undefined}
+        onCommission={() => undefined}
+      />,
+    );
+
+    const section = screen.getByRole("heading", { name: "Dispatch Queue" }).closest("section");
+    expect(section).not.toBeNull();
+
+    const scrollRegion = section!.querySelector(".overflow-x-auto");
+    expect(scrollRegion).not.toBeNull();
+
+    // Header labels + data rows share one scroll region so columns stay aligned.
+    expect(scrollRegion!.textContent).toContain("Next Action");
+    expect(scrollRegion!.textContent).toContain("Source");
+    expect(scrollRegion!.textContent).toContain("Last Proof");
+
+    const row = screen.getByRole("button", { name: /Ready Item/ });
+    expect(scrollRegion!.contains(row)).toBe(true);
+    expect(screen.getByRole("button", { name: "An Fleet kopieren" })).toBeTruthy();
+    expect(scrollRegion!.contains(screen.getByRole("button", { name: "An Fleet kopieren" }))).toBe(true);
+
+    // md grids (or a shared host) must declare a min-width covering column track minima.
+    const minWidthNodes = [
+      scrollRegion as Element,
+      ...Array.from(scrollRegion!.querySelectorAll("[class*='min-w-']")),
+    ];
+    const minWidthPx = minWidthNodes.reduce((best, node) => {
+      const match = node.className.match(/(?:^|\s)(?:md:)?min-w-\[(\d+(?:\.\d+)?)(rem|px)\]/);
+      if (!match) return best;
+      const value = Number(match[1]);
+      const px = match[2] === "rem" ? value * 16 : value;
+      return Math.max(best, px);
+    }, 0);
+    expect(minWidthPx).toBeGreaterThanOrEqual(REQUIRED_MIN_WIDTH_PX);
   });
 });
 
