@@ -1494,3 +1494,43 @@ def test_silent_block_sweep_classifies_born_blocked_as_operator_intent(
     assert classification.payload["class"] == kb.HEILER_CLASS_OPERATOR_INTENT
     assert classification.payload["evidence"]["matched"] == "born_blocked"
     assert classification.payload["evidence"]["signal_source"] == "blocked_kind"
+
+
+def test_archived_dependency_sweep_skips_child_held_by_scheduled_operator_root(
+    kanban_home, all_assignees_spawnable
+):
+    """A legacy archived link must not page for a chain the operator still holds."""
+    with kb.connect_closing() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="operator-held root",
+            triage=True,
+            freigabe="operator",
+        )
+        child_id = kb.create_task(conn, title="held build child", assignee="coder")
+        kb.link_tasks(conn, child_id, root_id)
+
+        archived_parent_id = kb.create_task(conn, title="legacy archived parent")
+        assert kb.archive_task(conn, archived_parent_id) is True
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'scheduled' WHERE id IN (?, ?)",
+                (root_id, child_id),
+            )
+            # Simulate a pre-unlink legacy row retained after its parent archived.
+            conn.execute(
+                "INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)",
+                (archived_parent_id, child_id),
+            )
+
+        held_child = conn.execute(
+            "SELECT * FROM tasks WHERE id = ?", (child_id,)
+        ).fetchone()
+        assert held_child is not None
+        assert kb._is_operator_held(conn, held_child) is True
+
+        summary = kb.escalate_silent_blocks_sweep(conn, now=1_800_000_000)
+        events = kb.list_events(conn, child_id)
+
+    assert summary["archived_dependency_escalated"] == []
+    assert "operator_escalation" not in [event.kind for event in events]

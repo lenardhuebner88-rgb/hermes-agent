@@ -21589,11 +21589,11 @@ def escalate_silent_blocks_sweep(
         # archive_task started removing them. These waits cannot become ready,
         # so surface them to an operator rather than letting todo/scheduled
         # cards stall invisibly. A freigabe hold is deliberate operator state
-        # and must remain untouched by sweeps.
+        # and must remain untouched by sweeps, including descendants whose
+        # hold is carried by their scheduled root.
         archived_waits = conn.execute(
-            "SELECT child.id, child.title FROM tasks AS child "
+            "SELECT child.* FROM tasks AS child "
             "WHERE child.status IN ('todo', 'scheduled') "
-            "AND COALESCE(child.freigabe, '') != 'operator' "
             "AND EXISTS ("
             "  SELECT 1 FROM task_links AS link "
             "  JOIN tasks AS parent ON parent.id = link.parent_id "
@@ -21608,6 +21608,8 @@ def escalate_silent_blocks_sweep(
             "ORDER BY child.created_at ASC, child.id ASC"
         ).fetchall()
         for waiting in archived_waits:
+            if _is_operator_held(conn, waiting):
+                continue
             tid = str(waiting["id"])
             if _operator_escalation_is_active(conn, tid):
                 continue
