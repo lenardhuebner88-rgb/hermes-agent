@@ -10,6 +10,8 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { CardDetail } from "./CardDetail";
+import { statusBadge } from "./status";
+import { renderToStaticMarkup } from "react-dom/server";
 
 afterEach(cleanup);
 
@@ -277,5 +279,71 @@ describe("CardDetail (jsdom)", () => {
     expect(screen.getByText("Nachher · System-Screenshot")).toBeTruthy();
     expect(document.querySelector('img[src="/api/design-board/cards/c_1/assets/before.png"]')).toBeTruthy();
     expect(document.querySelector('img[src="/api/design-board/cards/c_1/assets/after.png"]')).toBeTruthy();
+  });
+});
+
+describe("CardDetail / status.tsx — leitstand token migration guard", () => {
+  // `statusBadge` (status.tsx) is a self-contained export — its markup must be
+  // fully free of the legacy hc- compat vocabulary and raw text-white.
+  it("statusBadge renders with token classes only, no hc- compat class", () => {
+    const html = renderToStaticMarkup(statusBadge("in_progress"));
+    expect(html).not.toMatch(/\bhc-[a-z-]+/);
+    expect(html).not.toContain("text-white");
+  });
+
+  it("keeps the loading state fully free of legacy hc- classes / text-white", () => {
+    // Never resolves -> the component stays on the `!card` early-return branch,
+    // which (unlike the loaded branch) does not route through SectionHeader/
+    // FleetPanel, so it can be asserted 100% clean.
+    fetchJSONMock.mockReset();
+    fetchJSONMock.mockImplementation(() => new Promise(() => {}));
+    const { container } = render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(container.innerHTML).not.toMatch(/\bhc-[a-z-]+/);
+    expect(container.innerHTML).not.toContain("text-white");
+  });
+
+  it("keeps the fully loaded card view free of CardDetail's own legacy classes", async () => {
+    // The loaded view still routes meta through SectionHeader (component/
+    // leitstand/SectionHeader.tsx, out of this slice's scope), which always
+    // wraps a truthy `meta` in one "hc-type-label hc-dim" span, and through
+    // FleetPanel (components/leitstand/atoms.tsx, likewise out of scope),
+    // whose own surface still carries the "hc-surface-card" compat class.
+    // Those two are the ONE known, accepted, out-of-scope exception — this
+    // guard proves CardDetail itself contributes no more than that.
+    fetchJSONMock.mockReset();
+    fetchJSONMock.mockResolvedValue({
+      id: "c_1", kind: "bug", title: "Header overlaps", status: "in_progress",
+      target: { view: "FleetView" }, linked_tasks: ["t_1"],
+      entries: [
+        {
+          id: "e_before", author: "piet", kind: "screenshot", note: "before",
+          asset: "assets/before.png", html: null, pins: [], created_at: 1,
+        },
+        {
+          id: "e_after", author: "system", kind: "screenshot", note: "sieht gut aus",
+          asset: "assets/after.png", html: null, pins: [{ id: "p1", x: 0.5, y: 0.5, note: "x" }], created_at: 2,
+        },
+      ],
+      task_facets: [{ id: "t_1", status: "running", assignee: "coder", terminal: false }],
+      derived_status: "addressed",
+      kanban_ok: false,
+    });
+    const { container } = render(
+      <MemoryRouter initialEntries={["/x/c_1"]}>
+        <Routes><Route path="/x/:cardId" element={<CardDetail />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByTestId("facet-t_1")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("status-edit"));
+
+    const html = container.innerHTML;
+    expect(html).not.toContain("text-white");
+    expect(html).not.toContain("hc-soft");
+    expect((html.match(/hc-type-label/g) ?? []).length).toBe(1);
+    expect((html.match(/hc-dim/g) ?? []).length).toBe(1);
   });
 });
