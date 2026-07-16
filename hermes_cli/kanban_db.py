@@ -15427,10 +15427,35 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
             summary="task archived with run still active",
         )
         _append_event(conn, task_id, "archived", None, run_id=run_id)
-    # Re-run promotion for any descendants whose other parents may have
-    # completed concurrently. Archiving this task itself does not satisfy
-    # child dependencies.
-    recompute_ready(conn)
+        released_links = conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+            (task_id,),
+        ).fetchall()
+        conn.execute("DELETE FROM task_links WHERE parent_id = ?", (task_id,))
+        comment_now = int(time.time())
+        for link in released_links:
+            child_id = str(link["child_id"])
+            payload = {
+                "archived_parent_id": task_id,
+                "removed_link": {"parent_id": task_id, "child_id": child_id},
+            }
+            _append_event(conn, child_id, "dependency_released_by_archive", payload)
+            comment_body = (
+                f"Dependency {task_id} was released because its parent was archived."
+            )
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+                "VALUES (?, ?, ?, ?, 'comment')",
+                (child_id, "kanban", comment_body, comment_now),
+            )
+            _append_event(
+                conn,
+                child_id,
+                "commented",
+                {"author": "kanban", "len": len(comment_body), "kind": "comment"},
+            )
+    # Archiving does not satisfy a dependency. In particular, do not promote
+    # children merely because their obsolete parent links were removed above.
     return True
 
 
@@ -19890,6 +19915,18 @@ def no_silent_stall_sweep(
             # Intentional propose-and-wait / ui-real hold — not a stall.
             summary["skipped_held"].append(row["id"])
             continue
+        released_by_archive = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'dependency_released_by_archive' "
+            "LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        if released_by_archive:
+            # archive_task removes obsolete physical links but archive never
+            # satisfies the logical dependency, so this child must not be
+            # nudged to ready by the scheduled-overdue healer.
+            summary["skipped_archived_chain"].append(row["id"])
+            continue
         from hermes_cli import kanban_worktrees as _kwt
 
         root_id = _kwt.chain_root_id(conn, row["id"])
@@ -21378,6 +21415,7 @@ def escalate_silent_blocks_sweep(
         "escalated": [],
         "autonomy_reready": [],
         "autonomy_held": [],
+        "archived_dependency_escalated": [],
     }
     ids = silent_block_task_ids(
         conn,
@@ -21386,8 +21424,6 @@ def escalate_silent_blocks_sweep(
         failure_limit=failure_limit,
         backoff_seconds=backoff_seconds,
     )
-    if not ids:
-        return summary
     with write_txn(conn):
         for tid in ids:
             row = conn.execute(
@@ -21562,6 +21598,39 @@ def escalate_silent_blocks_sweep(
                 run_id=run_id,
             )
             summary["escalated"].append({"task_id": tid, "blocked_kind": blocked_kind})
+        # Legacy data can retain parent links to archived cards from before
+        # archive_task started removing them. These waits cannot become ready,
+        # so surface them to an operator rather than letting todo/scheduled
+        # cards stall invisibly. A freigabe hold is deliberate operator state
+        # and must remain untouched by sweeps.
+        archived_waits = conn.execute(
+            "SELECT child.id, child.title FROM tasks AS child "
+            "WHERE child.status IN ('todo', 'scheduled') "
+            "AND COALESCE(child.freigabe, '') != 'operator' "
+            "AND EXISTS ("
+            "  SELECT 1 FROM task_links AS link "
+            "  JOIN tasks AS parent ON parent.id = link.parent_id "
+            "  WHERE link.child_id = child.id AND parent.status = 'archived'"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM task_links AS link "
+            "  JOIN tasks AS parent ON parent.id = link.parent_id "
+            "  WHERE link.child_id = child.id "
+            "    AND parent.status NOT IN ('done', 'archived')"
+            ") "
+            "ORDER BY child.created_at ASC, child.id ASC"
+        ).fetchall()
+        for waiting in archived_waits:
+            tid = str(waiting["id"])
+            if _operator_escalation_is_active(conn, tid):
+                continue
+            payload = {
+                "why_now": "waiting_on_archived_parent",
+                "reason": "All remaining open dependencies are archived.",
+                "task_title": str(waiting["title"]),
+            }
+            _append_event(conn, tid, OPERATOR_ESCALATION_EVENT, payload)
+            summary["archived_dependency_escalated"].append({"task_id": tid})
     return summary
 
 
