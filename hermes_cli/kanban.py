@@ -222,43 +222,19 @@ def _check_dispatcher_presence() -> tuple[bool, str]:
 # Argparse builder
 # ---------------------------------------------------------------------------
 
-def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    """Attach the ``kanban`` subcommand tree under an existing subparsers.
+# ---------------------------------------------------------------------------
+# Parser registration helpers (extracted from build_parser for readability).
+# Registration order is load-bearing for help-text grouping; do not reorder
+# calls in build_parser without an intentional UX change.
+# ---------------------------------------------------------------------------
 
-    Returns the top-level ``kanban`` parser so caller can ``set_defaults``.
-    """
-    kanban_parser = parent_subparsers.add_parser(
-        "kanban",
-        help="Multi-profile collaboration board (tasks, links, comments)",
-        description=(
-            "Durable SQLite-backed task board shared across Hermes profiles. "
-            "Tasks are claimed atomically, can depend on other tasks, and "
-            "are executed by a named profile in an isolated workspace. "
-            "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban "
-            "or docs/hermes-kanban-v1-spec.pdf for the full design."
-        ),
-    )
-    # --- global --board flag ---
-    # Applies to every subcommand below. When set, scopes all reads and
-    # writes to that board's DB. When omitted, resolves via the
-    # HERMES_KANBAN_BOARD env var, then the persisted current-board
-    # file, then "default". See kanban_db.get_current_board().
-    kanban_parser.add_argument(
-        "--board",
-        default=None,
-        metavar="<slug>",
-        help=(
-            "Board slug to operate on. Defaults to the current board "
-            "(set via `hermes kanban boards switch <slug>` or the "
-            "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards list` "
-            "to see all boards."
-        ),
-    )
-    sub = kanban_parser.add_subparsers(dest="kanban_action")
-
+def _register_init_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register the ``init`` subcommand."""
     # --- init ---
     sub.add_parser("init", help="Create kanban.db if missing (idempotent)")
 
+def _register_boards_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register ``boards`` and its nested subcommands."""
     # --- boards (new in v2: multi-project support) ---
     p_boards = sub.add_parser(
         "boards",
@@ -335,6 +311,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     b_set_wd.add_argument("path", nargs="?", default=None,
                           help="Absolute path to use as default workdir. Omit to clear.")
 
+
+def _register_task_create_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register ``create`` and ``swarm`` task-creation subcommands."""
     # --- create ---
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")
@@ -465,6 +444,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_swarm.add_argument("--idempotency-key", default=None, help="Dedup key for the root card")
     p_swarm.add_argument("--json", action="store_true", help="Emit JSON output")
 
+def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register list/show/assign/reclaim/reassign subcommands."""
     # --- list ---
     p_list = sub.add_parser("list", aliases=["ls"], help="List tasks")
     p_list.add_argument("--mine", action="store_true",
@@ -554,6 +535,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Human-readable reason (recorded on the reclaimed event)",
     )
 
+def _register_diagnostics_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register the ``diagnostics`` (``diag``) subcommand."""
     # --- diagnostics (board-wide health) ---
     p_diag = sub.add_parser(
         "diagnostics",
@@ -576,6 +559,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Emit JSON (structured) instead of the default human table",
     )
 
+def _register_task_lifecycle_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register link/claim/comment/complete/edit/block/promote/archive and related."""
     # --- link / unlink ---
     p_link = sub.add_parser("link", help="Add a parent->child dependency")
     p_link.add_argument("parent_id")
@@ -908,6 +893,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Permanently delete already-archived task ids from the board",
     )
 
+def _register_dispatch_daemon_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register tail/dispatch/holds/daemon/watch subcommands."""
     # --- tail ---
     p_tail = sub.add_parser("tail", help="Follow a task's event stream")
     p_tail.add_argument("task_id")
@@ -970,6 +957,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_watch.add_argument("--interval", type=float, default=0.5,
                          help="Poll interval in seconds (default: 0.5)")
 
+def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register stats, backfill-costs, and notify-* subcommands."""
     # --- stats ---
     p_stats = sub.add_parser(
         "stats", help="Per-status + per-assignee counts + oldest-ready age",
@@ -1042,6 +1031,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_nrm.add_argument("--chat-id", required=True)
     p_nrm.add_argument("--thread-id", default=None)
 
+def _register_worker_inspect_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register log/runs/heartbeat/assignees/context subcommands."""
     # --- log ---
     p_log = sub.add_parser(
         "log",
@@ -1097,6 +1088,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     )
     p_ctx.add_argument("task_id")
 
+def _register_triage_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register specify/decompose/gc subcommands."""
     # --- specify --- (triage → todo via auxiliary LLM)
     p_specify = sub.add_parser(
         "specify",
@@ -1179,6 +1172,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_gc.add_argument("--log-retention-days", type=int, default=30,
                       help="Delete worker log files older than N days (default: 30)")
 
+def _register_epic_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register the ``epic`` nested subcommand tree."""
     # --- epic (N-E3): durable goals spanning multiple task trees ---
     p_epic = sub.add_parser(
         "epic",
@@ -1199,6 +1194,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     e_close = epic_sub.add_parser("close", help="Mark an epic closed")
     e_close.add_argument("epic_id", help="Epic id")
 
+def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
+    """Register closeout and release-*/complete-freigabe subcommands."""
     p_closeout = sub.add_parser(
         "closeout",
         help="Process a durable task closeout in a detached transient unit",
@@ -1304,8 +1301,56 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "--json", action="store_true", help="Emit JSON result"
     )
 
+def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.ArgumentParser:
+    """Attach the ``kanban`` subcommand tree under an existing subparsers.
+
+    Returns the top-level ``kanban`` parser so caller can ``set_defaults``.
+    """
+    kanban_parser = parent_subparsers.add_parser(
+        "kanban",
+        help="Multi-profile collaboration board (tasks, links, comments)",
+        description=(
+            "Durable SQLite-backed task board shared across Hermes profiles. "
+            "Tasks are claimed atomically, can depend on other tasks, and "
+            "are executed by a named profile in an isolated workspace. "
+            "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban "
+            "or docs/hermes-kanban-v1-spec.pdf for the full design."
+        ),
+    )
+    # --- global --board flag ---
+    # Applies to every subcommand below. When set, scopes all reads and
+    # writes to that board's DB. When omitted, resolves via the
+    # HERMES_KANBAN_BOARD env var, then the persisted current-board
+    # file, then "default". See kanban_db.get_current_board().
+    kanban_parser.add_argument(
+        "--board",
+        default=None,
+        metavar="<slug>",
+        help=(
+            "Board slug to operate on. Defaults to the current board "
+            "(set via `hermes kanban boards switch <slug>` or the "
+            "HERMES_KANBAN_BOARD env var). Use `hermes kanban boards list` "
+            "to see all boards."
+        ),
+    )
+    sub = kanban_parser.add_subparsers(dest="kanban_action")
+
+    _register_init_parsers(sub)
+    _register_boards_parsers(sub)
+    _register_task_create_parsers(sub)
+    _register_task_query_parsers(sub)
+    _register_diagnostics_parsers(sub)
+    _register_task_lifecycle_parsers(sub)
+    _register_dispatch_daemon_parsers(sub)
+    _register_stats_notify_parsers(sub)
+    _register_worker_inspect_parsers(sub)
+    _register_triage_parsers(sub)
+    _register_epic_parsers(sub)
+    _register_release_parsers(sub)
+
     kanban_parser.set_defaults(_kanban_parser=kanban_parser)
     return kanban_parser
+
 
 
 # ---------------------------------------------------------------------------
@@ -1380,60 +1425,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             print(f"kanban: could not initialize database: {exc}", file=sys.stderr)
             return 1
 
-        handlers = {
-            "init":     _cmd_init,
-            "create":   _cmd_create,
-            "swarm":    _cmd_swarm,
-            "list":     _cmd_list,
-            "ls":       _cmd_list,
-            "show":     _cmd_show,
-            "assign":   _cmd_assign,
-            "reclaim":  _cmd_reclaim,
-            "reassign": _cmd_reassign,
-            "diagnostics": _cmd_diagnostics,
-            "diag":     _cmd_diagnostics,
-            "link":     _cmd_link,
-            "unlink":   _cmd_unlink,
-            "claim":    _cmd_claim,
-            "comment":  _cmd_comment,
-            "complete": _cmd_complete,
-            "review-commit": _cmd_review_commit,
-            "edit":     _cmd_edit,
-            "respec":   _cmd_respec,
-            "block":    _cmd_block,
-            "set-workflow": _cmd_set_workflow,
-            "schedule": _cmd_schedule,
-            "unblock":  _cmd_unblock,
-            "promote":  _cmd_promote,
-            "close-sprint": _cmd_close_sprint,
-            "report-discord": _cmd_report_discord,
-            "archive":  _cmd_archive,
-            "tail":     _cmd_tail,
-            "dispatch": _cmd_dispatch,
-            "holds":    _cmd_holds,
-            "daemon":   _cmd_daemon,
-            "watch":    _cmd_watch,
-            "stats":    _cmd_stats,
-            "backfill-costs": _cmd_backfill_costs,
-            "log":      _cmd_log,
-            "runs":     _cmd_runs,
-            "heartbeat": _cmd_heartbeat,
-            "assignees": _cmd_assignees,
-            "notify-subscribe":   _cmd_notify_subscribe,
-            "notify-list":        _cmd_notify_list,
-            "notify-unsubscribe": _cmd_notify_unsubscribe,
-            "context":  _cmd_context,
-            "specify":  _cmd_specify,
-            "decompose":  _cmd_decompose,
-            "gc":       _cmd_gc,
-            "epic":     _dispatch_epic,
-            "closeout": _cmd_closeout,
-            "release-gate": _cmd_release_gate,
-            "release-uireal": _cmd_release_uireal,
-            "release-freigabe": _cmd_release_freigabe,
-            "complete-freigabe": _cmd_complete_freigabe,
-        }
-        handler = handlers.get(action)
+        handler = _KANBAN_ACTION_HANDLERS.get(action)
         if not handler:
             print(f"kanban: unknown action {action!r}", file=sys.stderr)
             return 2
@@ -4136,6 +4128,67 @@ Common subcommands:
 Run `/kanban <subcommand> -h` for arguments. \
 Read-only commands are safe while an agent is running.\
 """
+
+
+
+# ---------------------------------------------------------------------------
+# Module-level dispatch table (command name → handler).
+# Defined here so every ``_cmd_*`` / ``_dispatch_*`` is already bound.
+# ---------------------------------------------------------------------------
+
+_KANBAN_ACTION_HANDLERS: dict[str, Any] = {
+    "init":     _cmd_init,
+    "create":   _cmd_create,
+    "swarm":    _cmd_swarm,
+    "list":     _cmd_list,
+    "ls":       _cmd_list,
+    "show":     _cmd_show,
+    "assign":   _cmd_assign,
+    "reclaim":  _cmd_reclaim,
+    "reassign": _cmd_reassign,
+    "diagnostics": _cmd_diagnostics,
+    "diag":     _cmd_diagnostics,
+    "link":     _cmd_link,
+    "unlink":   _cmd_unlink,
+    "claim":    _cmd_claim,
+    "comment":  _cmd_comment,
+    "complete": _cmd_complete,
+    "review-commit": _cmd_review_commit,
+    "edit":     _cmd_edit,
+    "respec":   _cmd_respec,
+    "block":    _cmd_block,
+    "set-workflow": _cmd_set_workflow,
+    "schedule": _cmd_schedule,
+    "unblock":  _cmd_unblock,
+    "promote":  _cmd_promote,
+    "close-sprint": _cmd_close_sprint,
+    "report-discord": _cmd_report_discord,
+    "archive":  _cmd_archive,
+    "tail":     _cmd_tail,
+    "dispatch": _cmd_dispatch,
+    "holds":    _cmd_holds,
+    "daemon":   _cmd_daemon,
+    "watch":    _cmd_watch,
+    "stats":    _cmd_stats,
+    "backfill-costs": _cmd_backfill_costs,
+    "log":      _cmd_log,
+    "runs":     _cmd_runs,
+    "heartbeat": _cmd_heartbeat,
+    "assignees": _cmd_assignees,
+    "notify-subscribe":   _cmd_notify_subscribe,
+    "notify-list":        _cmd_notify_list,
+    "notify-unsubscribe": _cmd_notify_unsubscribe,
+    "context":  _cmd_context,
+    "specify":  _cmd_specify,
+    "decompose":  _cmd_decompose,
+    "gc":       _cmd_gc,
+    "epic":     _dispatch_epic,
+    "closeout": _cmd_closeout,
+    "release-gate": _cmd_release_gate,
+    "release-uireal": _cmd_release_uireal,
+    "release-freigabe": _cmd_release_freigabe,
+    "complete-freigabe": _cmd_complete_freigabe,
+}
 
 
 def run_slash(rest: str) -> str:
