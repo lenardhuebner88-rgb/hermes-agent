@@ -21,6 +21,25 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep hermes_cli.stdio / tui_gateway purges from leaking into later files.
+
+    ``TestConfigureWindowsStdio._reset_configured`` pops ``hermes_cli.stdio``
+    before and after each test so the ``_CONFIGURED`` flag resets; teardown
+    leaves the name missing rather than restoring the pre-test object.
+    ``TestTuiGatewayEntryWindowsGuard.test_module_imports_cleanly`` deletes
+    every ``tui_gateway*`` entry and re-imports. Without a restore, later
+    files in the same worker keep import-time bindings to the orphaned
+    pre-purge objects while lazy imports resolve to the reimport
+    (module-identity split) — same class as the empty-tool-name /
+    verification-stop-caching leaks (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the
+    table (plus parent-package attributes) back on teardown.
+    """
+    yield
+
+
 # ---------------------------------------------------------------------------
 # configure_windows_stdio
 # ---------------------------------------------------------------------------
