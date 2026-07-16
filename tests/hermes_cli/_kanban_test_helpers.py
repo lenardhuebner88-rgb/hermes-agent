@@ -18,6 +18,7 @@ import unittest.mock
 from pathlib import Path
 import pytest
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
 
 def _write_state_session(
     home, session_id, *,
@@ -205,3 +206,40 @@ def _write_test_profile(home: Path, name: str) -> None:
     d = home / "profiles" / name
     d.mkdir(parents=True, exist_ok=True)
     (d / "config.yaml").write_text("model: {}\n")
+
+
+def _git(repo, *args) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True, capture_output=True, text=True,
+    )
+    return proc.stdout.strip()
+
+
+def _commit_in(repo_or_wt, relpath, content, msg="change"):
+    p = Path(repo_or_wt) / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    _git(repo_or_wt, "add", "-A")
+    _git(repo_or_wt, "commit", "-m", msg)
+
+
+def _ok_gate(_repo, _files):
+    return True, "stub gate"
+
+
+def _events(conn, task_id, kind):
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? "
+        "ORDER BY id",
+        (task_id, kind),
+    ).fetchall()
+    return [json.loads(r["payload"]) if r["payload"] else {} for r in rows]
+
+
+def _provisioned_chain(repo, root_id, relpath="feature.py",
+                       content="VALUE = 1\n"):
+    """Worktree with one committed change, ready to integrate."""
+    info = kwt.ensure_worktree(repo, root_id)
+    _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): work")
+    return info
