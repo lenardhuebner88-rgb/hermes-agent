@@ -98,6 +98,64 @@ QUOTED_TITLE_PLAN = BROKEN_TITLE_PLAN.replace(
     'title: "\\"Landen\\"-Aktion in Loops nutzt Bronze/neutral statt Status-Grün (DESIGN-Doktrin #3)"',
 )
 
+# Belegter Vorfall 2026-07-15 03:10: unquoted Doppelpunkt im title-Skalar
+# (YAML "mapping values are not allowed here") → vorher Frontmatter {} und
+# parse_plan_id "" → Slot vor dem Build gebounct. Verbatim aus
+# /home/piet/.hermes/loops/builder-reviewer/queue/90-bounced/
+# P2-decompose-specify-preserve-llm-error-message.md (komplette Frontmatter).
+REAL_COLON_TITLE_BOUNCED_PLAN = """---
+id: fl-20260715-decompose-specify-preserve-llm-error-message
+title: Auto-decompose and specify swallow the LLM exception message, so every failure logs an opaque "LLM error: BadRequestError"
+priority: P2
+retry: 0
+created_by: loop-planner
+done_when: |
+  Neuer Test tests/hermes_cli/test_decompose_error_message_preserved.py beweist ueber die
+  Produktions-Funktionen kanban_decompose.decompose_task und kanban_specify.specify_task
+  (aux-Client gemockt, sodass client.chat.completions.create eine ECHTE OpenAI-SDK-Exception
+  wirft — Format wie live, z.B. eine BadRequestError-Subklasse von Exception mit
+  Message-Text), dass:
+  (1) DecomposeOutcome.reason NICHT nur "LLM error: BadRequestError" ist, sondern die
+      Original-Message (bis auf eine Laengenbegrenzung, z.B. ~200 Zeichen) enthaelt —
+      Assertion: eine markante Message-Teilzeichenkette (z.B. "maximum context length")
+      steckt im reason.
+  (2) SpecifyOutcome.reason analog die Message enthaelt (identisches Anti-Pattern in
+      kanban_specify.py:210).
+  (3) Der Reason bleibt eine EINZEILIGE, gekappte Zeichenkette (Newlines entfernt/ersetzt,
+      Laenge begrenzt), damit er sicher als Event-Payload-Feld
+      (decompose_attempt_failed via kanban_db.record_decompose_failure) taugt.
+  (4) Der Praefix "LLM error: <ClassName>" bleibt erhalten, sodass bestehende
+      Substring-Klassifikation (_decompose_failure_is_transient, "llm error") unveraendert
+      weiter matcht — bestehende Tests gruen (run-affected, insb.
+      tests/hermes_cli/test_kanban_decompose.py, test_kanban_specify.py).
+anti_scope: |
+  KEINE Schema-Aenderung, keine Migration. KEINE Aenderung an der Retry-/Transient-Logik
+  oder an _decompose_failure_is_transient (separater Plan). KEIN Loggen von Secrets — nur
+  die bereits von der SDK-Exception gelieferte Message, gekappt. Kein Anfassen der
+  restlichen (nicht-LLM) Reason-Zweige. Kein UI/Dashboard-Teil.
+tests: |
+  tests/hermes_cli/test_decompose_error_message_preserved.py (neu)
+files_hint: hermes_cli/kanban_decompose.py (~1501-1505), hermes_cli/kanban_specify.py (~204-211)
+---
+## Kontext & Schwachstelle
+Sowohl `decompose_task` (kanban_decompose.py:1501-1505) als auch `specify_task`
+(kanban_specify.py:204-211) verwerfen bei einem LLM-API-Fehler die eigentliche
+Exception-Message und speichern nur den Klassennamen.
+"""
+
+# Fail-closed Fixture: Frontmatter-Fences vorhanden, aber id unbrauchbar (kein
+# PLAN_ID_RE-Match) — muss weiter vor dem Build gebounct werden.
+INVALID_ID_PLAN = """---
+id: [kaputt]
+title: "Valid title, invalid id shape"
+priority: P1
+retry: 0
+created_by: loop-test
+---
+## Ansatz
+Keine ID, kein Auto-Land.
+"""
+
 # Belegter Vorfall (2026-07-13 Nachtlauf): wortgleich geerntet aus
 # /home/piet/.hermes/loops/ht-ux-polish/queue/90-bounced/P1-settings-controls-first.md
 # (Dateiname-Stamm P1-settings-controls-first). Builder (grok) und Verifier
@@ -571,17 +629,91 @@ def test_pass_status_tolerates_filename_stem_on_real_bounced_plan():
     )
 
 
-def test_broken_title_frontmatter_from_real_bounced_plan_is_unparseable():
-    """Belegte Regression (2026-07-12): `title: "Landen"-Aktion …` beginnt mit
-    einem nackten `"` und läuft dann unquotiert weiter — invalides YAML. Der
-    fail-closed Parser liefert leer statt zu raten, damit kein impliziter PASS
-    entsteht — genau das ließ vorher einen echten Verifier-PASS als
-    PASS_ID_MISMATCH revertieren."""
-    assert parse_plan_frontmatter(BROKEN_TITLE_PLAN) == {}
-    assert parse_plan_id(BROKEN_TITLE_PLAN) == ""
-    assert not pass_status_matches_plan(
+def test_broken_title_frontmatter_recovers_scalars_via_fallback():
+    """Belegte Fallgrube (2026-07-12): `title: "Landen"-Aktion …` ist invalides
+    YAML. Der zeilenbasierte Fallback rettet die einzeiligen Skalare (inkl. id),
+    damit der Build-Slot nicht vor dem Build verloren geht. Auto-Land bleibt an
+    parse_plan_id / PLAN_ID_RE gebunden."""
+    frontmatter = parse_plan_frontmatter(BROKEN_TITLE_PLAN)
+    assert frontmatter["id"] == "dx-20260712-loops-land-status-green"
+    assert frontmatter["priority"] == "P1"
+    assert frontmatter["created_by"] == "opus-ux-planner"
+    assert "Landen" in frontmatter["title"]
+    assert parse_plan_id(BROKEN_TITLE_PLAN) == "dx-20260712-loops-land-status-green"
+    assert pass_status_matches_plan(
         "PASS dx-20260712-loops-land-status-green", BROKEN_TITLE_PLAN
     )
+
+
+def test_real_colon_title_bounced_plan_recovers_via_fallback():
+    """Belegter Vorfall 2026-07-15: unquoted Doppelpunkt im title (verbatim aus
+    90-bounced/P2-decompose-specify-preserve-llm-error-message.md). Ohne Fallback
+    war parse_plan_id == '' und der Slot ging vor dem Build verloren."""
+    # Sicherstellen: raw YAML knallt wirklich (sonst testen wir den Fallback nie).
+    assert REAL_COLON_TITLE_BOUNCED_PLAN.startswith("---\n")
+    end = REAL_COLON_TITLE_BOUNCED_PLAN.find("\n---\n", 4)
+    with pytest.raises(yaml.YAMLError):
+        yaml.safe_load(REAL_COLON_TITLE_BOUNCED_PLAN[4:end])
+
+    frontmatter = parse_plan_frontmatter(REAL_COLON_TITLE_BOUNCED_PLAN)
+    assert frontmatter["id"] == "fl-20260715-decompose-specify-preserve-llm-error-message"
+    assert frontmatter["title"] == (
+        'Auto-decompose and specify swallow the LLM exception message, so every '
+        'failure logs an opaque "LLM error: BadRequestError"'
+    )
+    assert frontmatter["priority"] == "P2"
+    assert frontmatter["retry"] == "0"
+    assert frontmatter["created_by"] == "loop-planner"
+    # Mehrzeilige Block-Felder werden vom Fallback nicht rekonstruiert — nur der
+    # Marker der Startzeile (Runner braucht nur die Skalare).
+    assert frontmatter.get("done_when") in (None, "|")
+    assert parse_plan_id(REAL_COLON_TITLE_BOUNCED_PLAN) == (
+        "fl-20260715-decompose-specify-preserve-llm-error-message"
+    )
+
+
+def test_frontmatter_fallback_stays_fail_closed():
+    """Fallback extrahiert NUR einzeilige `key: value`-Skalare innerhalb der
+    Fences. Ohne Fences, mit PLAN_ID_RE-ungültiger id oder eingerücktem id-Wert
+    (Fallback-Pfad) bleibt {} bzw. ''."""
+    # (a) keine Frontmatter-Fences
+    assert parse_plan_frontmatter("id: fl-no-fences\ntitle: x\n") == {}
+    assert parse_plan_id("id: fl-no-fences\ntitle: x\n") == ""
+
+    # (b) id matched PLAN_ID_RE nicht (Listen-Form, valides YAML → safe_load-Pfad)
+    assert parse_plan_id(INVALID_ID_PLAN) == ""
+    assert not pass_status_matches_plan("PASS fl-whatever", INVALID_ID_PLAN)
+
+    # (c) eingerückter id-Wert + kaputter title → Fallback, id wird NICHT extrahiert
+    fallback_indented_id = """---
+id:
+  fl-20260716-indented-fallback
+title: broken: because unquoted colon
+priority: P1
+---
+body
+"""
+    with pytest.raises(yaml.YAMLError):
+        end = fallback_indented_id.find("\n---\n", 4)
+        yaml.safe_load(fallback_indented_id[4:end])
+    fb = parse_plan_frontmatter(fallback_indented_id)
+    assert "id" not in fb
+    assert fb.get("priority") == "P1"
+    assert "broken: because unquoted colon" in fb.get("title", "")
+    assert parse_plan_id(fallback_indented_id) == ""
+
+
+def test_wellformed_frontmatter_matches_yaml_safe_load_byte_identical():
+    """Regression: bei wohlgeformtem YAML (Queue-Form inkl. Block-Skalare) ist
+    parse_plan_frontmatter byte-identisch zu yaml.safe_load — Fallback feuert nicht."""
+    end = PLAN_BODY.find("\n---\n", 4)
+    expected = yaml.safe_load(PLAN_BODY[4:end])
+    assert parse_plan_frontmatter(PLAN_BODY) == expected
+    assert parse_plan_frontmatter(PLAN_BODY) is not expected  # frisches Mapping ok
+    # QUOTED_TITLE_PLAN ebenfalls wohlgeformt.
+    end_q = QUOTED_TITLE_PLAN.find("\n---\n", 4)
+    expected_q = yaml.safe_load(QUOTED_TITLE_PLAN[4:end_q])
+    assert parse_plan_frontmatter(QUOTED_TITLE_PLAN) == expected_q
 
 
 def test_properly_quoted_title_frontmatter_parses_and_matches_pass():
@@ -601,7 +733,10 @@ def test_cmd_plan_bounces_plans_with_invalid_frontmatter_before_build(
 ):
     """Bug #2 Teil A: ein Plan, dessen id sich nicht sicher parsen lässt, kann
     nie autolanden (pass_status_matches_plan bindet an genau diese ID) — vor
-    Build+Verify verwerfen statt einen ganzen Zyklus zu verschwenden."""
+    Build+Verify verwerfen statt einen ganzen Zyklus zu verschwenden.
+
+    Title-Tippfehler mit unquoted Colon retten wir jetzt via Fallback; gebounct
+    bleibt nur echte unparsierbare/ungültige id (hier: Listen-Form)."""
     behaviors, _ = fake_engine
     repo = init_repo(tmp_path / "repo")
     write_pack(tmp_path / "packs", "planval", "pipeline", repo)
@@ -614,7 +749,7 @@ def test_cmd_plan_bounces_plans_with_invalid_frontmatter_before_build(
             PLAN_BODY, encoding="utf-8"
         )
         (state_dir / "queue" / "00-planned" / "P1-kaputt.md").write_text(
-            BROKEN_TITLE_PLAN, encoding="utf-8"
+            INVALID_ID_PLAN, encoding="utf-8"
         )
         (state_dir / "last-status").write_text("PLANNED 2\n", encoding="utf-8")
         return engines.EngineResult(rc=0, output="", usage_limit=False)

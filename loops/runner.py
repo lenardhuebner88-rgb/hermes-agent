@@ -99,6 +99,10 @@ PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
 RETRY_RE = re.compile(r"^retry:\s*(\d+)", re.MULTILINE)
 PLAN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PASS_STATUS_RE = re.compile(r"^PASS\s+([A-Za-z0-9][A-Za-z0-9._-]{0,127})$")
+# Einzeilige Frontmatter-Skalare am Zeilenanfang (kein Indent) — Fallback bei
+# YAMLError/Nicht-Mapping. Mehrzeilige Felder (done_when, anti_scope, …) werden
+# bewusst nicht rekonstruiert; der Runner braucht nur id/title/priority/…
+_FRONTMATTER_SCALAR_RE = re.compile(r"^([a-z_]+):\s*(.+)$")
 
 
 class ManifestError(ValueError):
@@ -310,18 +314,50 @@ def parse_retry(plan_text: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _unquote_frontmatter_scalar(value: str) -> str:
+    """Trim + strip one matching quote layer if the whole value is quoted."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def _frontmatter_scalar_fallback(block: str) -> dict:
+    """Zeilenbasierter Fallback: nur `key: value`-Skalare ohne Indent.
+
+    Rettet Build-Slots bei Tippfehler-Titles (unquoted Colon → YAMLError),
+    ohne komplexe/eingerückte Werte zu raten. parse_plan_id validiert die id
+    weiter via PLAN_ID_RE (fail-closed für Auto-Land).
+    """
+    result: dict[str, str] = {}
+    for line in block.splitlines():
+        match = _FRONTMATTER_SCALAR_RE.match(line)
+        if not match:
+            continue
+        result[match.group(1)] = _unquote_frontmatter_scalar(match.group(2))
+    return result
+
+
 def parse_plan_frontmatter(plan_text: str) -> dict:
-    """Liest das Plan-Frontmatter fail-closed als Mapping."""
+    """Liest das Plan-Frontmatter fail-closed als Mapping.
+
+    Primärpfad: yaml.safe_load. Bei YAMLError oder Nicht-Mapping greift ein
+    strenger zeilenbasierter Skalar-Fallback (nur einzeilige Keys am
+    Zeilenanfang) — typischer Auslöser: unquoted Doppelpunkt im title.
+    """
     if not plan_text.startswith("---\n"):
         return {}
     end = plan_text.find("\n---\n", 4)
     if end < 0:
         return {}
+    block = plan_text[4:end]
     try:
-        frontmatter = yaml.safe_load(plan_text[4:end])
+        frontmatter = yaml.safe_load(block)
     except yaml.YAMLError:
-        return {}
-    return frontmatter if isinstance(frontmatter, dict) else {}
+        return _frontmatter_scalar_fallback(block)
+    if isinstance(frontmatter, dict):
+        return frontmatter
+    return _frontmatter_scalar_fallback(block)
 
 
 def parse_plan_id(plan_text: str) -> str:
