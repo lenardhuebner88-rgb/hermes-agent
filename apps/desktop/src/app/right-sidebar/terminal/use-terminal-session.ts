@@ -215,6 +215,7 @@ export function cleanReviveSnapshot(serialized: string): string {
 // of one idle prompt line. Real sessions vary and are retained.
 export function isIdlePromptOnly(serialized: string): boolean {
   const lines = serialized.split(/\r?\n/).map(visibleText).filter(Boolean)
+
   return lines.length === 0 || lines.every(line => line === lines[0])
 }
 

@@ -1,9 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  resolveTerminalSpawnSpec,
-  sanitizeTerminalStartOptions
-} from './terminal-target'
+import { resolveTerminalSpawnSpec, sanitizeTerminalStartOptions } from './terminal-target'
 
 describe('desktop controlled terminal target', () => {
   const shellSpec = { command: '/bin/bash', args: ['-il'], name: 'bash' }
