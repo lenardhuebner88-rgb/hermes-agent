@@ -100,9 +100,13 @@ def test_iteration_budget_exhausted_at_limit_blocks_with_reason(kanban_home):
         assert task.consecutive_failures == 0
 
         events = kb.list_events(conn, tid)
-        assert events[-1].kind == "auto_continuation_exhausted"
-        assert events[-1].payload["count"] == 1
-        assert events[-1].payload["limit"] == 1
+        assert events[-2].kind == "auto_continuation_exhausted"
+        assert events[-2].payload["count"] == 1
+        assert events[-2].payload["limit"] == 1
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 def test_max_continuations_zero_disables_auto_continuation(kanban_home):
@@ -118,7 +122,12 @@ def test_max_continuations_zero_disables_auto_continuation(kanban_home):
         assert task.status == "blocked"
         assert task.continuation_count == 0
         assert "auto-continuation disabled" in (task.result or "")
-        assert kb.list_events(conn, tid)[-1].kind == "auto_continuation_disabled"
+        events = kb.list_events(conn, tid)
+        assert events[-2].kind == "auto_continuation_disabled"
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 def test_expected_run_id_prevents_double_continuation_schedule(kanban_home):

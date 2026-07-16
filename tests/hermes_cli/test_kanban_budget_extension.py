@@ -92,9 +92,14 @@ def test_extension_disabled_by_default_blocks_at_limit(kanban_home, monkeypatch)
         assert task.status == "blocked"
         assert task.continuation_count == 1
         assert int(task.budget_extension_count or 0) == 0
-        kinds = [e.kind for e in kb.list_events(conn, tid)]
+        events = kb.list_events(conn, tid)
+        kinds = [e.kind for e in events]
         assert "budget_extension_granted" not in kinds
-        assert kinds[-1] == "auto_continuation_exhausted"
+        assert events[-2].kind == "auto_continuation_exhausted"
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 def test_extension_string_false_blocks_at_limit(kanban_home, monkeypatch):
@@ -152,9 +157,14 @@ def test_progress_gated_extension_grants_exactly_one_more_run(kanban_home, monke
         t3 = kb.get_task(conn, tid)
         assert t3.status == "blocked"
         assert int(t3.budget_extension_count) == 1
-        last = kb.list_events(conn, tid)[-1]
+        events = kb.list_events(conn, tid)
+        last = events[-2]
         assert last.kind == "auto_continuation_exhausted"
         assert last.payload.get("extension_skipped") == "already_used"
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
         # Guardrail: at most ONE extension event over the whole task lifetime.
         granted = [e for e in kb.list_events(conn, tid)
@@ -180,12 +190,15 @@ def test_looping_task_not_extended_and_escalates(kanban_home, monkeypatch):
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert int(task.budget_extension_count or 0) == 0
-        last = kb.list_events(conn, tid)[-1]
+        events = kb.list_events(conn, tid)
+        last = events[-2]
         assert last.kind == "auto_continuation_exhausted"
         assert last.payload.get("extension_skipped") == "no_progress"
-        assert "budget_extension_granted" not in [
-            e.kind for e in kb.list_events(conn, tid)
-        ]
+        assert "budget_extension_granted" not in [e.kind for e in events]
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 def test_progress_below_min_delta_is_not_extended(kanban_home, monkeypatch):
@@ -199,9 +212,12 @@ def test_progress_below_min_delta_is_not_extended(kanban_home, monkeypatch):
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert int(task.budget_extension_count or 0) == 0
-        assert kb.list_events(conn, tid)[-1].payload.get(
-            "extension_skipped"
-        ) == "no_progress"
+        events = kb.list_events(conn, tid)
+        assert events[-2].payload.get("extension_skipped") == "no_progress"
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 # --------------------------------------------------------------------------- #
@@ -218,7 +234,12 @@ def test_extension_does_not_override_disabled_continuations(kanban_home, monkeyp
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
         assert int(task.budget_extension_count or 0) == 0
-        assert kb.list_events(conn, tid)[-1].kind == "auto_continuation_disabled"
+        events = kb.list_events(conn, tid)
+        assert events[-2].kind == "auto_continuation_disabled"
+        # System-park stamp (4bfd80370): the final event is the block_kind
+        # rollup so operator triage never sees an unclassified blocked card.
+        assert events[-1].kind == "blocked"
+        assert events[-1].payload["kind"] == "capacity"
 
 
 # --------------------------------------------------------------------------- #
