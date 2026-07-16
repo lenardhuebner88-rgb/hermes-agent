@@ -28,6 +28,10 @@ providers:
     label: Kimi
     lane: kimi
     visible: true
+  - id: xai
+    label: Grok
+    lane: null
+    visible: true
   - id: openrouter
     label: OpenRouter
     lane: null

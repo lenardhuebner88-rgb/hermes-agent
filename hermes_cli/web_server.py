@@ -3645,7 +3645,7 @@ async def get_portal_status():
     }
 
 
-_ACCOUNT_USAGE_PROVIDERS: Tuple[str, ...] = ("anthropic", "openai-codex", "kimi")
+_ACCOUNT_USAGE_PROVIDERS: Tuple[str, ...] = ("anthropic", "openai-codex", "kimi", "xai")
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 60
 _ACCOUNT_USAGE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _ACCOUNT_USAGE_CACHE_LOCK = threading.Lock()
