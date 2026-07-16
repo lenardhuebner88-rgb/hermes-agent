@@ -15,6 +15,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_DIR = REPO_ROOT / "plugins" / "observability" / "langfuse"
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep langfuse / hermes_cli.config purges from leaking into later files.
+
+    Several tests here force a clean plugin re-read via
+    ``sys.modules.pop("plugins.observability.langfuse")`` (and in a few
+    places ``hermes_cli.config``) then re-import. Without a restore, later
+    files in the same worker keep import-time bindings to the orphaned
+    pre-purge objects while lazy imports resolve to the reimport
+    (module-identity split) — same class as the security-guidance /
+    empty-tool-name leaks (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the
+    table (plus parent-package attributes) back on teardown.
+    """
+    yield
+
+
 # ---------------------------------------------------------------------------
 # Manifest + layout
 # ---------------------------------------------------------------------------
