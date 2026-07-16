@@ -305,6 +305,50 @@ def test_terminate_live_on_dead_pane_is_success(
     assert not service.window_exists("work", "codex")
 
 
+def test_list_windows_managed_flag_true_for_spawned_false_for_foreign(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inventory marks dashboard-spawned windows managed; foreign stay visible as unmanaged.
+
+    managed gates only the terminate UI affordance. kill_dead must still remove
+    dead foreign panes (intentional cleanup — not gated by managed).
+    """
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    spawned = service.ensure("claude")
+    assert spawned.managed is True
+    assert spawned.to_dict()["managed"] is True
+
+    # Non-parseable name in the work session (same pattern as terminate guard tests).
+    service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sleep 60")
+    # Window in a different session — terminate_live refuses non-work sessions.
+    service._run("new-session", "-d", "-s", "other-agent", "-n", "python3", "sleep 60")
+
+    listed = {f"{w.session}:{w.window}": w for w in service.list_windows()}
+    assert listed["work:claude"].managed is True
+    assert listed["work:scratch-thing"].managed is False
+    assert listed["other-agent:python3"].managed is False
+    assert listed["work:scratch-thing"].to_dict()["managed"] is False
+    assert listed["other-agent:python3"].to_dict()["managed"] is False
+
+    # show() uses the same managed rule (single-window, cheap).
+    assert service.show("work", "scratch-thing").managed is False
+    assert service.show("work", "claude").managed is True
+
+    # kill_dead on a dead foreign window still works (managed only gates terminate).
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("new-window", "-d", "-t", "work:", "-n", "foreign-dead", "sh -c 'exit 0'")
+    time.sleep(0.3)
+    dead_foreign = service.show("work", "foreign-dead")
+    assert dead_foreign.managed is False
+    assert dead_foreign.dead or not dead_foreign.pid
+    service.kill_dead("work", "foreign-dead")
+    assert not service.window_exists("work", "foreign-dead")
+
+
 def test_kill_dead_nonexistent_window_is_success(
     tmp_path: Path, tmux_service: TmuxAgentSessionService
 ) -> None:

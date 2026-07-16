@@ -676,6 +676,82 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => expect(screen.getByText(/kill-dead failed/)).toBeTruthy());
   });
 
+  // S3: foreign windows stay visible (attach) but read-only for terminate; managed keeps close.
+  // managed is additive on the backend payload — cast through the optional field without
+  // extending api.ts (parallel-session claim).
+  it("hides terminate and shows extern badge for managed:false; keeps close for managed", async () => {
+    const managedWin = {
+      session: "work",
+      window: "claude",
+      active: true,
+      pane_id: "%1",
+      pid: 111,
+      command: "claude",
+      cwd: "/home/piet",
+      managed: true,
+    } as AgentTerminalWindow;
+    const foreignWin = {
+      session: "kimi-goal-test",
+      window: "python3",
+      active: false,
+      pane_id: "%6",
+      pid: 222,
+      command: "python3",
+      cwd: "/home/piet/.hermes/hermes-agent",
+      managed: false,
+    } as AgentTerminalWindow;
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [managedWin, foreignWin] });
+
+    await renderView();
+
+    // Managed window still offers terminate (session rail).
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Session beenden work:claude" })).toBeTruthy();
+    });
+    // Foreign live window: no terminate, "extern" badge present, still listed.
+    expect(screen.queryByRole("button", { name: "Session beenden kimi-goal-test:python3" })).toBeNull();
+    expect(screen.getByTestId("extern-badge-kimi-goal-test:python3").textContent).toMatch(/extern/i);
+    // Managed must not get the extern badge.
+    expect(screen.queryByTestId("extern-badge-work:claude")).toBeNull();
+    // Foreign window stays in inventory (badge + absence of terminate already prove visibility).
+    expect(screen.getAllByTestId("extern-badge-kimi-goal-test:python3").length).toBeGreaterThan(0);
+  });
+
+  it("treats legacy windows payload without managed as closable", async () => {
+    // Baseline fixture has no managed field — backward compatible: all live rows closable.
+    await renderView();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Session beenden hermes-agents:hermes" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Session beenden hermes-agents:codex" })).toBeTruthy();
+    });
+    expect(screen.queryByText("extern")).toBeNull();
+  });
+
+  it("keeps kill-dead remove affordance for dead foreign (managed:false) windows", async () => {
+    const deadForeign = {
+      session: "work",
+      window: "scratch-thing",
+      active: false,
+      pane_id: "%9",
+      pid: null,
+      command: "",
+      cwd: null,
+      dead: true,
+      managed: false,
+    } as AgentTerminalWindow;
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [deadForeign] });
+
+    await renderView();
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Fenster schließen work:scratch-thing" })).toBeTruthy();
+    });
+    // Live terminate must not appear on a dead row.
+    expect(screen.queryByRole("button", { name: "Session beenden work:scratch-thing" })).toBeNull();
+    expect(screen.getByTestId("extern-badge-work:scratch-thing").textContent).toMatch(/extern/i);
+  });
+
   it("copies the xterm selection via Ctrl+Shift+C without sending ETX to tmux", async () => {
     await renderView();
     const host = await screen.findByTestId("terminal-pane-host-0");

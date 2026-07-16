@@ -196,6 +196,11 @@ class TmuxWindow:
     cwd: str | None = None
     dead: bool = False
     activity: int | None = None
+    # Whether terminate_live() will accept this window. Additive inventory field:
+    # True = dashboard-managed (session==work + resolvable identity); False =
+    # foreign (visible/attachable, but close would 503); None = unknown (callers
+    # that did not compute it — safe default so older constructors stay valid).
+    managed: bool | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -208,6 +213,7 @@ class TmuxWindow:
             "cwd": self.cwd,
             "dead": self.dead,
             "activity": self.activity,
+            "managed": self.managed,
         }
 
 
@@ -442,6 +448,21 @@ class TmuxAgentSessionService:
                 return kind, workdir_key
         return self._identity_from_window(window)
 
+    def is_managed_window(self, session: str, window: str) -> bool:
+        """True iff terminate_live() would accept this window (not raise CapabilityError).
+
+        Mirrors terminate_live guards: session must be ``work`` and identity_for
+        must resolve without raising. Foreign names must not break callers —
+        wrap identity lookup so inventory stays complete.
+        """
+        if session != "work":
+            return False
+        try:
+            self.identity_for(session, window)
+        except (CapabilityError, InvalidTarget):
+            return False
+        return True
+
     def capabilities(self) -> CapabilityState:
         tmux_available = shutil.which(self.tmux_binary) is not None or Path(self.tmux_binary).exists()
         agents: dict[str, dict[str, object]] = {}
@@ -612,7 +633,25 @@ class TmuxAgentSessionService:
             dead = parts[5] == "1"
             activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
             cwd = ("\t".join(parts[9:]) or None) if len(parts) > 9 else None
-            windows.append(TmuxWindow(parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6], cwd, dead, activity))
+            session_name = parts[0]
+            window_name = parts[1]
+            # managed gates the UI terminate affordance only; kill_dead stays
+            # available for dead foreign panes (intentional cleanup path).
+            managed = self.is_managed_window(session_name, window_name)
+            windows.append(
+                TmuxWindow(
+                    session_name,
+                    window_name,
+                    parts[2] == "1",
+                    parts[3],
+                    pid,
+                    parts[6],
+                    cwd,
+                    dead,
+                    activity,
+                    managed,
+                )
+            )
         return windows
 
     def window_exists(self, session: str, window: str) -> bool:
@@ -866,8 +905,22 @@ class TmuxAgentSessionService:
         dead = len(parts) > 5 and parts[5] == "1"
         activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
         cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+        session_name = parts[0]
+        window_name = parts[1]
+        # Cheap for a single window (two show-options + optional name parse) —
+        # same rule as list_windows so show/ensure/respawn payloads stay consistent.
+        managed = self.is_managed_window(session_name, window_name)
         return TmuxWindow(
-            parts[0], parts[1], parts[2] == "1", parts[3], pid, parts[6] if len(parts) > 6 else "", cwd, dead, activity
+            session_name,
+            window_name,
+            parts[2] == "1",
+            parts[3],
+            pid,
+            parts[6] if len(parts) > 6 else "",
+            cwd,
+            dead,
+            activity,
+            managed,
         )
 
     def capture(self, session: str, window: str, *, start: int = -200, log: bool = True) -> str:

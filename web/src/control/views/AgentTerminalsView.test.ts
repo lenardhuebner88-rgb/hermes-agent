@@ -8,6 +8,7 @@ import {
   formatCwdShort,
   formatPtyResize,
   hasUnseenActivity,
+  isManagedWindow,
   isTerminalCopyShortcut,
   orderOverviewForFleet,
   orderWindowsForStrip,
@@ -59,6 +60,29 @@ const dead: AgentTerminalWindow = {
   pid: null,
   command: "",
 };
+
+describe("isManagedWindow", () => {
+  const base: AgentTerminalWindow = {
+    session: "work",
+    window: "claude",
+    active: true,
+    pane_id: "%1",
+    pid: 1,
+    command: "claude",
+  };
+
+  it("treats managed:true as closable", () => {
+    expect(isManagedWindow({ ...base, managed: true } as AgentTerminalWindow)).toBe(true);
+  });
+
+  it("treats managed:false as foreign (not closable)", () => {
+    expect(isManagedWindow({ ...base, managed: false } as AgentTerminalWindow)).toBe(false);
+  });
+
+  it("treats legacy payloads without managed as closable (backward compatible)", () => {
+    expect(isManagedWindow(base)).toBe(true);
+  });
+});
 
 describe("AgentTerminalsView state helpers", () => {
   it("marks attach and reconnect states explicitly", () => {

@@ -226,6 +226,19 @@ function isDeadWindow(window: AgentTerminalWindow): boolean {
   return !window.pid || window.dead === true;
 }
 
+/**
+ * Whether the UI may offer terminate (close) for this window.
+ *
+ * Backend additive field (`managed` on TmuxWindow.to_dict). api.ts is claimed
+ * by a parallel session, so we read the optional field via a safe cast rather
+ * than extending the shared type. Absent / non-false → treated as managed
+ * (legacy payloads keep the close affordance).
+ */
+export function isManagedWindow(window: AgentTerminalWindow): boolean {
+  const managed = (window as { managed?: unknown }).managed;
+  return managed !== false;
+}
+
 // eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
 export function pickInitialTarget(
   windows: AgentTerminalWindow[],
@@ -648,6 +661,7 @@ function FleetCard({
 }) {
   const meta = fleetStateMeta(win.state);
   const dead = win.state === "dead";
+  const managed = isManagedWindow(win);
   const selectable = broadcastMode && !dead;
   return (
     <div
@@ -679,6 +693,15 @@ function FleetCard({
       <div className="flex min-w-0 items-center gap-1.5 pr-5">
         <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[10px]" />
         <span className="min-w-0 truncate font-mono text-xs text-ink-2">{chipLabel(win)}</span>
+        {!managed && (
+          <span
+            data-testid={`extern-badge-${win.session}:${win.window}`}
+            className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+            title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+          >
+            extern
+          </span>
+        )}
       </div>
       <div className="text-[10px] text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
       <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-card bg-surface-2 p-1.5 font-mono text-[10px] leading-tight text-ink-2">
@@ -709,8 +732,9 @@ function FleetCard({
         </div>
       )}
       {/* Two-step close, same guard as the session rail — a single click on a Fleet
-          card must never be able to kill a live agent session. */}
-      {!dead && (
+          card must never be able to kill a live agent session.
+          Foreign (managed===false) windows stay visible but read-only for close. */}
+      {!dead && managed && (
         <div className="flex gap-1.5">
           {terminateArmed ? (
             <>
@@ -2012,12 +2036,27 @@ export function AgentTerminalsView() {
               {windows.filter((w) => w.session === session).map((win) => {
                 const active = activeTarget?.session === win.session && activeTarget.window === win.window;
                 const dead = isDeadWindow(win);
+                const managed = isManagedWindow(win);
                 const laneOverview = overviewByKey.get(`${win.session}:${win.window}`);
                 const laneState: AgentTerminalOverviewState = laneOverview?.state ?? (dead ? "dead" : "idle");
                 return (
                   <div key={`${win.session}:${win.window}`} className={cn("flex min-h-12 items-stretch border-l-2", active ? "border-l-live bg-surface-3" : "border-l-transparent")}>
                     <button type="button" onClick={() => selectPaneTarget(activePane, targetFromWindow(win))} className={cn("min-w-0 flex-1 px-2.5 py-2 text-left text-xs transition", active ? "text-live" : "text-ink-2 hover:bg-surface-3")}>
-                      <span className="flex items-center justify-between gap-2"><span className="truncate">{win.window}</span><span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} /></span>
+                      <span className="flex items-center justify-between gap-2">
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate">{win.window}</span>
+                          {!managed && (
+                            <span
+                              data-testid={`extern-badge-${win.session}:${win.window}`}
+                              className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+                              title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+                            >
+                              extern
+                            </span>
+                          )}
+                        </span>
+                        <span className={cn("h-2 w-2 shrink-0 rounded-full", dead ? "bg-status-alert" : "bg-status-ok")} />
+                      </span>
                       <span className="mt-0.5 block truncate text-[10px] text-ink-3">{dead ? "dead pane" : win.command || "—"}</span>
                       <span className="mt-0.5 block truncate font-mono text-[10px] text-ink-3" title={win.cwd?.trim() || undefined}>
                         {formatCwdShort(win.cwd)}
@@ -2037,7 +2076,8 @@ export function AgentTerminalsView() {
                         </button>
                       </>
                     )}
-                    {!dead && (pendingTerminate === `${win.session}:${win.window}` ? (
+                    {/* Foreign live windows: visible + attachable, no terminate (backend would 503). */}
+                    {!dead && managed && (pendingTerminate === `${win.session}:${win.window}` ? (
                       <>
                         <button type="button" aria-label={`Beenden bestätigen ${win.session}:${win.window}`} title="Wirklich beenden — die laufende Agent-Arbeit geht verloren" disabled={terminateBusy} onClick={() => void confirmTerminate(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft bg-status-alert/20 text-status-alert hover:bg-status-alert/30 disabled:cursor-not-allowed disabled:opacity-40">
                           <Check className="h-3.5 w-3.5" />
@@ -2379,6 +2419,7 @@ export function AgentTerminalsView() {
 
   const sessionSheetKind = kindFromWindow(selectedWindow, selectedKind);
   const sessionSheetDead = selectedWindow ? isDeadWindow(selectedWindow) : false;
+  const sessionSheetManaged = selectedWindow ? isManagedWindow(selectedWindow) : true;
 
   const chipStrip = (
     <div className="flex h-11 shrink-0 items-stretch border-b border-line-soft bg-surface-1">
@@ -2443,7 +2484,18 @@ export function AgentTerminalsView() {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <Eyebrow>{AGENT_LABELS[sessionSheetKind] ?? sessionSheetKind}</Eyebrow>
-          <h2 className="truncate font-mono text-sm font-semibold text-ink">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <h2 className="truncate font-mono text-sm font-semibold text-ink">{`${selectedWindow.session}:${selectedWindow.window}`}</h2>
+            {!sessionSheetManaged && (
+              <span
+                data-testid={`extern-badge-${selectedWindow.session}:${selectedWindow.window}`}
+                className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
+                title="Externes Fenster — nur anzeigen/anhängen, Schließen deaktiviert"
+              >
+                extern
+              </span>
+            )}
+          </div>
         </div>
         <button type="button" onClick={() => setSessionSheetOpen(false)} aria-label="Sitzung schließen" className="shrink-0 rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
       </div>
@@ -2498,8 +2550,9 @@ export function AgentTerminalsView() {
           </button>
         )}
         {/* Same two-step guard as the desktop rail: the first tap arms, the second kills.
-            The sheet stays open in between so the armed state is visible where it was armed. */}
-        {!sessionSheetDead && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
+            The sheet stays open in between so the armed state is visible where it was armed.
+            Foreign (managed===false) windows stay attachable but offer no terminate. */}
+        {!sessionSheetDead && sessionSheetManaged && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
           <button type="button" aria-label={`Beenden bestätigen ${selectedWindow.session}:${selectedWindow.window}`} disabled={terminateBusy} onClick={() => { void confirmTerminate(selectedWindow).then(() => setSessionSheetOpen(false)); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/50 bg-status-alert/15 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/25 disabled:cursor-not-allowed disabled:opacity-40">
             <Check className="h-4 w-4" /><span>Wirklich beenden</span>
           </button>
