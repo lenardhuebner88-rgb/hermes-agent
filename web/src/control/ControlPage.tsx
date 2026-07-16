@@ -83,6 +83,9 @@ const DiktatView = lazy(() =>
 const SystemView = lazy(() =>
   import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
 );
+const ProjekteView = lazy(() =>
+  import("./views/ProjekteView").then((m) => ({ default: m.ProjekteView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/fleet")) return "fleet";
@@ -99,6 +102,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
   if (pathname.includes("/control/crons")) return "crons";
   if (pathname.includes("/control/loops")) return "loops";
+  if (pathname.includes("/control/projekte")) return "projekte";
   if (pathname.includes("/control/lanes")) return "lanes";
   if (pathname.includes("/control/system")) return "system";
   if (pathname.includes("/control/pressure")) return "system";
@@ -131,6 +135,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   orchestrator: () => import("./views/OrchestratorBacklogView"),
   crons: () => import("./views/CronView"),
   loops: () => import("./views/LoopsView"),
+  projekte: () => import("./views/ProjekteView"),
   lanes: () => import("./views/LanesView"),
   system: () => import("./views/system/SystemView"),
   research: () => import("./views/ResearchView"),
@@ -162,6 +167,7 @@ const tabPath: Record<ControlTab, string> = {
   orchestrator: "/control/orchestrator",
   crons: "/control/crons",
   loops: "/control/loops",
+  projekte: "/control/projekte",
   lanes: "/control/lanes",
   system: "/control/system",
   pressure: "/control/system",
@@ -295,6 +301,7 @@ export default function ControlPage() {
             <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
             <Route path="crons" element={<CronView density={density.density} />} />
             <Route path="loops" element={<LoopsView />} />
+            <Route path="projekte" element={<ProjekteView />} />
             <Route path="lanes" element={<LanesView density={density.density} />} />
             <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
             {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}

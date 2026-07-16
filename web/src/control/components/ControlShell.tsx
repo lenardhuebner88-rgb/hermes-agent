@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, ChartSpline, Clock, Command, FlaskConical, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { BookOpen, ChartSpline, Clock, Command, FlaskConical, FolderGit2, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -13,7 +13,7 @@ import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
 import { useLiveStatus } from "../hooks/useLiveEvents";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat" | "projekte";
 
 // The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
 // live in Fleet now, and System remains reachable through "Mehr" + deep-link.
@@ -45,6 +45,15 @@ const moreTabs: Array<{ id: ControlTab; label: string; path: string; icon: React
   { id: "orchestrator", label: de.tabs.orchestrator, path: "/control/orchestrator", icon: Workflow },
   { id: "crons", label: de.tabs.crons, path: "/control/crons", icon: Clock },
   { id: "loops", label: de.tabs.loops, path: "/control/loops", icon: RefreshCw },
+  // Projekte (Stufe 4, erste sichtbare Slice): Karten-Übersicht über die
+  // registrierten Projekte (~/.hermes/projects.yaml). Bewusst in "Mehr" statt
+  // in den 5 primären Tabs/mobileTabs — die Primaries sind die kuratierte
+  // "tägliche Wirbelsäule" (Fleet/Start/Terminal/Statistik/Regal) und haben
+  // seit deren Fixierung keinen weiteren Zugang bekommen (Stratege/Schmiede/
+  // Diktat liefen alle über diesen Weg). Phone-Erreichbarkeit ist über das
+  // mobile "Mehr"-Sheet identisch zu diesen (2 Taps), siehe DESIGN.md UX-
+  // Kontrakt Punkt 1 ("in höchstens zwei Interaktionen").
+  { id: "projekte", label: de.tabs.projekte, path: "/control/projekte", icon: FolderGit2 },
   // Label literal (wie "Start"): die Lanes-Strings leben im View, nicht in
   // i18n/de.ts — kein Edit an Shared-Dateien paralleler Sessions.
   { id: "lanes", label: "Lanes", path: "/control/lanes", icon: Shield },

@@ -71,8 +71,11 @@ import {
   LanesCatalogResponseSchema,
   ReleaseStatusResponseSchema,
   ReleaseModeResponseSchema,
+  ProjectsResponseSchema,
+  ProjectsAgentsResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
+import type { ProjectsResponse, ProjectsAgentsResponse } from "../lib/schemas";
 import type { DictateStatusResponse, TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
@@ -3088,4 +3091,24 @@ export function useTaskDeliverablesOnDemand(taskId: string | null) {
   const result = usePolling<TaskDeliverablesResponse>(key, loader, taskId ? 15_000 : 600_000);
   if (!taskId) return { ...result, data: { task_id: "", deliverables: [] } as TaskDeliverablesResponse };
   return result;
+}
+
+// ─── Projekte-Tab (Stufe 4): GET /api/projects + GET /api/projects/agents ───
+// Beide read-only, quellenisoliert (siehe Backend-Kommentar) — 12s Poll passt
+// zur "10-15s" Vorgabe und dedupliziert automatisch über mehrere Karten/Views
+// hinweg (gleicher Poll-Key = ein Subscriber der Polling-Store).
+export function useProjects() {
+  return usePolling<ProjectsResponse>(
+    "projects/list",
+    async () => parseOrThrow(ProjectsResponseSchema, await fetchJSON<unknown>("/api/projects"), "projects/list"),
+    12000,
+  );
+}
+
+export function useProjectAgents() {
+  return usePolling<ProjectsAgentsResponse>(
+    "projects/agents",
+    async () => parseOrThrow(ProjectsAgentsResponseSchema, await fetchJSON<unknown>("/api/projects/agents"), "projects/agents"),
+    12000,
+  );
 }
