@@ -17326,6 +17326,18 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         "last_failure_error = ? WHERE id = ?",
                         (error_text[:500], row["id"]),
                     )
+                    # Sticky park: bare status='blocked' is not enough —
+                    # recompute_ready only holds when a 'blocked' event
+                    # exists (_has_sticky_block). Without this event the
+                    # next dispatch tick silently promotes back to ready
+                    # and discards the posted deliverable evidence.
+                    _append_event(
+                        conn,
+                        row["id"],
+                        "blocked",
+                        {"reason": error_text},
+                        run_id=run_id,
+                    )
                 else:
                     if protocol_violation:
                         # Stamp the failure error now: a below-budget
