@@ -2230,73 +2230,60 @@ def _cmd_list(args: argparse.Namespace) -> int:
         print(_fmt_task_line(t))
     return 0
 
-def _cmd_show(args: argparse.Namespace) -> int:
-    rsk = _run_state_kwargs(args)
-    if rsk is None:
-        print(
-            "kanban show: pass both --state-type and --state-name, or omit both",
-            file=sys.stderr,
-        )
-        return 2
-    with kb.connect_closing() as conn:
-        task = kb.get_task(conn, args.task_id)
-        if not task:
-            print(f"no such task: {args.task_id}", file=sys.stderr)
-            return 1
-        comments = kb.list_comments(conn, args.task_id)
-        events = kb.list_events(conn, args.task_id)
-        parents = kb.parent_ids(conn, args.task_id)
-        children = kb.child_ids(conn, args.task_id)
-        runs = kb.list_runs(conn, args.task_id, **rsk)
-        # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
-        # ``result=``. Surfacing the latest summary here keeps ``show`` from
-        # looking like a no-op when the worker actually did real work.
-        latest_summary = kb.latest_summary(conn, args.task_id)
+def _show_build_json_payload(
+    task: Any,
+    comments: Any,
+    events: Any,
+    parents: Any,
+    children: Any,
+    runs: Any,
+    latest_summary: Any,
+) -> dict[str, Any]:
+    """Build the ``kanban show --json`` payload (pure; no I/O)."""
+    return {
+        "task": _task_to_dict(task),
+        "ui_impact": task.ui_impact,
+        "effective_ui_impact": kb.effective_ui_impact(task),
+        "latest_summary": latest_summary,
+        "parents": parents,
+        "children": children,
+        "comments": [
+            {"author": c.author, "body": c.body, "created_at": c.created_at}
+            for c in comments
+        ],
+        "events": [
+            {
+                "kind": e.kind,
+                "payload": e.payload,
+                "created_at": e.created_at,
+                "run_id": e.run_id,
+            }
+            for e in events
+        ],
+        "runs": [
+            {
+                "id": r.id,
+                "profile": r.profile,
+                "step_key": r.step_key,
+                "status": r.status,
+                "outcome": r.outcome,
+                "summary": r.summary,
+                "error": r.error,
+                "metadata": r.metadata,
+                "worker_pid": r.worker_pid,
+                "started_at": r.started_at,
+                "ended_at": r.ended_at,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cost_usd": r.cost_usd,
+            }
+            for r in runs
+        ],
+    }
 
-    if getattr(args, "json", False):
-        payload = {
-            "task": _task_to_dict(task),
-            "ui_impact": task.ui_impact,
-            "effective_ui_impact": kb.effective_ui_impact(task),
-            "latest_summary": latest_summary,
-            "parents": parents,
-            "children": children,
-            "comments": [
-                {"author": c.author, "body": c.body, "created_at": c.created_at}
-                for c in comments
-            ],
-            "events": [
-                {
-                    "kind": e.kind,
-                    "payload": e.payload,
-                    "created_at": e.created_at,
-                    "run_id": e.run_id,
-                }
-                for e in events
-            ],
-            "runs": [
-                {
-                    "id": r.id,
-                    "profile": r.profile,
-                    "step_key": r.step_key,
-                    "status": r.status,
-                    "outcome": r.outcome,
-                    "summary": r.summary,
-                    "error": r.error,
-                    "metadata": r.metadata,
-                    "worker_pid": r.worker_pid,
-                    "started_at": r.started_at,
-                    "ended_at": r.ended_at,
-                    "input_tokens": r.input_tokens,
-                    "output_tokens": r.output_tokens,
-                    "cost_usd": r.cost_usd,
-                }
-                for r in runs
-            ],
-        }
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-        return 0
 
+def _show_print_header(task: Any) -> None:
+    """Print task identity / status / workspace / max-retries header fields."""
     print(f"Task {task.id}: {task.title}")
     print(f"  status:    {task.status}")
     print(f"  assignee:  {task.assignee or '-'}")
@@ -2331,6 +2318,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
             print(f"  max-retries: {kb.DEFAULT_FAILURE_LIMIT} (default)")
     print(f"  created:   {_fmt_ts(task.created_at)} by {task.created_by or '-'}")
 
+
+def _show_print_diagnostics(task: Any, events: Any, runs: Any) -> None:
+    """Print the diagnostics block used by human-readable ``show`` output."""
     # Diagnostics section — surface active distress signals at the top
     # of show output so CLI users see them before scrolling through
     # comments / runs.
@@ -2355,6 +2345,18 @@ def _cmd_show(args: argparse.Namespace) -> int:
             for a in d.actions:
                 if a.suggested:
                     print(f"       → {a.label}")
+
+
+def _show_print_timeline(
+    task: Any,
+    parents: Any,
+    children: Any,
+    latest_summary: Any,
+    comments: Any,
+    events: Any,
+    runs: Any,
+) -> None:
+    """Print started/completed, parents/children, body/result, comments/events/runs."""
     if task.started_at:
         print(f"  started:   {_fmt_ts(task.started_at)}")
     if task.completed_at:
@@ -2405,7 +2407,45 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 print(f"        → {r.summary.splitlines()[0][:160]}")
             if r.error:
                 print(f"        ! {r.error.splitlines()[0][:160]}")
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    rsk = _run_state_kwargs(args)
+    if rsk is None:
+        print(
+            "kanban show: pass both --state-type and --state-name, or omit both",
+            file=sys.stderr,
+        )
+        return 2
+    with kb.connect_closing() as conn:
+        task = kb.get_task(conn, args.task_id)
+        if not task:
+            print(f"no such task: {args.task_id}", file=sys.stderr)
+            return 1
+        comments = kb.list_comments(conn, args.task_id)
+        events = kb.list_events(conn, args.task_id)
+        parents = kb.parent_ids(conn, args.task_id)
+        children = kb.child_ids(conn, args.task_id)
+        runs = kb.list_runs(conn, args.task_id, **rsk)
+        # Workers hand off via ``task_runs.summary``; ``tasks.result`` is left NULL unless the caller explicitly passed
+        # ``result=``. Surfacing the latest summary here keeps ``show`` from
+        # looking like a no-op when the worker actually did real work.
+        latest_summary = kb.latest_summary(conn, args.task_id)
+
+    if getattr(args, "json", False):
+        payload = _show_build_json_payload(
+            task, comments, events, parents, children, runs, latest_summary,
+        )
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    _show_print_header(task)
+    _show_print_diagnostics(task, events, runs)
+    _show_print_timeline(
+        task, parents, children, latest_summary, comments, events, runs,
+    )
     return 0
+
 
 def _cmd_assign(args: argparse.Namespace) -> int:
     profile = None if args.profile.lower() in {"none", "-", "null"} else args.profile
