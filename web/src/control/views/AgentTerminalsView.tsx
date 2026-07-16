@@ -718,6 +718,10 @@ export function AgentTerminalsView() {
   const reconnectTimerRef = useRef<number | null>(null);
   const resizeSendTimerRef = useRef<number | null>(null);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  // Monotonic seq for windows-list fetches: an in-flight poll issued before a
+  // close must never overwrite a newer post-close list (stale tab flash).
+  const windowsSeqRef = useRef(0);
+  const windowsAppliedSeqRef = useRef(0);
   const [capability, setCapability] = useState<AgentTerminalCapabilityState | null>(null);
   const [windows, setWindows] = useState<AgentTerminalWindow[]>([]);
   const [selectedKind, setSelectedKind] = useState<AgentTerminalKind>("hermes");
@@ -765,6 +769,9 @@ export function AgentTerminalsView() {
   const [rightRail, setRightRail] = useState<"usage" | "tools" | null>(() => !compactLayout && desktopLayout === 4 ? null : "usage");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Close/kill failures must survive a concurrent websocket onopen (which clears
+  // attach errors). Track them in a ref so onopen only clears connection noise.
+  const actionErrorRef = useRef<string | null>(null);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
@@ -894,12 +901,17 @@ export function AgentTerminalsView() {
 
   const refresh = useCallback(async () => {
     setLoading(true);
+    actionErrorRef.current = null;
     setError(null);
+    const seq = ++windowsSeqRef.current;
     try {
       const [cap, win] = await Promise.all([api.getAgentTerminalCapabilities(), api.getAgentTerminalWindows()]);
       setCapability(cap);
-      setWindows(win.windows);
-      setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+      if (seq > windowsAppliedSeqRef.current) {
+        windowsAppliedSeqRef.current = seq;
+        setWindows(win.windows);
+        setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -908,9 +920,13 @@ export function AgentTerminalsView() {
   }, [selectedKind]);
 
   const refreshWindowInventory = useCallback(async () => {
+    const seq = ++windowsSeqRef.current;
     const win = await api.getAgentTerminalWindows();
-    setWindows(win.windows);
-    setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+    if (seq > windowsAppliedSeqRef.current) {
+      windowsAppliedSeqRef.current = seq;
+      setWindows(win.windows);
+      setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+    }
   }, [selectedKind]);
 
   useEffect(() => {
@@ -1282,7 +1298,8 @@ export function AgentTerminalsView() {
           reconnectAttemptRef.current = 0;
           setSocketReady(true);
           setSocketConnecting(false);
-          setError(null);
+          // Clear attach/connection errors only — never wipe a close/kill banner.
+          if (actionErrorRef.current == null) setError(null);
           term.clear();
           // Ungedebounct: dieser Send folgt direkt auf den Handshake — kein Storm-Risiko.
           try {
@@ -1387,15 +1404,26 @@ export function AgentTerminalsView() {
 
   const killWindow = useCallback(
     async (win: { session: string; window: string }) => {
+      actionErrorRef.current = null;
       setError(null);
       try {
         await api.killDeadAgentTerminalWindow(win.session, win.window);
-        await refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        const msg = err instanceof Error ? err.message : String(err);
+        actionErrorRef.current = msg;
+        setError(msg);
+      } finally {
+        // Always resync inventory — even on failure the server may have
+        // partially applied / the local dead-flag may be stale. Prefer the
+        // windows-only path so refresh()'s setError(null) does not race the banner.
+        try {
+          await refreshWindowInventory();
+        } catch {
+          // Inventory failures stay silent here; the kill error (if any) remains.
+        }
       }
     },
-    [refresh],
+    [refreshWindowInventory],
   );
 
   // Close guard, step 1 of 2. window.confirm() blocks the renderer thread: against a
@@ -1403,6 +1431,7 @@ export function AgentTerminalsView() {
   // guard is therefore in-app — arming a row, never blocking, and auto-disarming so a
   // forgotten armed row cannot be killed by a later stray click.
   const requestTerminate = useCallback((win: { session: string; window: string }) => {
+    actionErrorRef.current = null;
     setError(null);
     setPendingTerminate(paneTargetKey(win));
   }, []);
@@ -1412,19 +1441,30 @@ export function AgentTerminalsView() {
   // Close guard, step 2 of 2 — the only path that actually kills a tmux window.
   const confirmTerminate = useCallback(
     async (win: { session: string; window: string }) => {
+      actionErrorRef.current = null;
       setError(null);
       setTerminateBusy(true);
       try {
         await api.terminateAgentTerminalWindow(win.session, win.window);
-        setPendingTerminate(null);
+        // Success: full refresh (capabilities + windows).
         await refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
+        // Keep the error banner across inventory resync + any concurrent socket onopen.
+        const msg = err instanceof Error ? err.message : String(err);
+        actionErrorRef.current = msg;
+        setError(msg);
+        try {
+          await refreshWindowInventory();
+        } catch {
+          // Keep the terminate error; background inventory owns no error UI.
+        }
       } finally {
+        // Always disarm: an error must not leave the row armed.
+        setPendingTerminate(null);
         setTerminateBusy(false);
       }
     },
-    [refresh],
+    [refresh, refreshWindowInventory],
   );
 
   useEffect(() => {

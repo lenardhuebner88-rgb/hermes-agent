@@ -540,6 +540,93 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByRole("button", { name: "Session beenden hermes-agents:hermes" })).toBeTruthy();
   });
 
+  // Stale-poll race: an inventory response issued BEFORE a close can resolve AFTER
+  // the post-close list. Without a monotonic seq guard the closed tab flashes back.
+  it("drops stale windows-list responses so a newer inventory wins over an older one", async () => {
+    type WindowsPayload = { windows: AgentTerminalWindow[] };
+    const resolvers: Array<(value: WindowsPayload) => void> = [];
+    apiMock.getAgentTerminalWindows.mockImplementation(
+      () =>
+        new Promise<WindowsPayload>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    // Capabilities resolve immediately so refresh() is only gated on windows-list.
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue(capability);
+
+    await renderView();
+    await waitFor(() => expect(resolvers.length).toBeGreaterThanOrEqual(1));
+
+    // Issue a second fetch (manual refresh) while the first is still in flight.
+    fireEvent.click(screen.getByRole("button", { name: "Refresh agent terminals" }));
+    await waitFor(() => expect(resolvers.length).toBeGreaterThanOrEqual(2));
+
+    const staleList = windows; // includes codex
+    const newestList = windows.filter((w) => w.window !== "codex"); // post-close
+
+    // Newest request (seq=2) resolves first, then the older one (seq=1).
+    await act(async () => {
+      resolvers[1]!({ windows: newestList });
+    });
+    // Session-rail terminate buttons are the windows-state surface (not fleet overview).
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Session beenden hermes-agents:codex" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Session beenden hermes-agents:hermes" })).toBeTruthy();
+    });
+
+    await act(async () => {
+      resolvers[0]!({ windows: staleList });
+    });
+    // Give React a tick to apply a wrongly-ordered setWindows if the guard is missing.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Final rendered tab list must still reflect the NEWEST response, not the stale one.
+    expect(screen.queryByRole("button", { name: "Session beenden hermes-agents:codex" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Session beenden hermes-agents:hermes" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Fenster schließen hermes-agents:claude" })).toBeTruthy();
+  });
+
+  // Close error path: row must disarm and inventory must re-fetch even when terminate rejects.
+  it("disarms the terminate guard and refreshes windows when terminate fails", async () => {
+    apiMock.terminateAgentTerminalWindow.mockRejectedValueOnce(new Error("terminate failed: 503"));
+
+    await renderView();
+    await screen.findByRole("button", { name: "Session beenden hermes-agents:codex" });
+    const callsAfterMount = apiMock.getAgentTerminalWindows.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Session beenden hermes-agents:codex" }));
+    expect(screen.getByRole("button", { name: "Beenden bestätigen hermes-agents:codex" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Beenden bestätigen hermes-agents:codex" }));
+
+    await waitFor(() => expect(apiMock.terminateAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "codex"));
+    // Armed state cleared — confirm gone, arm button back.
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Beenden bestätigen hermes-agents:codex" })).toBeNull();
+      expect(screen.getByRole("button", { name: "Session beenden hermes-agents:codex" })).toBeTruthy();
+    });
+    // refresh() ran after the failure (post-mount windows-list call).
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows.mock.calls.length).toBeGreaterThan(callsAfterMount));
+    // Error banner kept visible (survives concurrent websocket onopen clear).
+    await waitFor(() => expect(screen.getByText(/terminate failed: 503/)).toBeTruthy());
+  });
+
+  // kill-dead error path: same finally-refresh contract as live terminate.
+  it("refreshes windows when kill-dead fails", async () => {
+    apiMock.killDeadAgentTerminalWindow.mockRejectedValueOnce(new Error("kill-dead failed"));
+    await renderView();
+    await screen.findByRole("button", { name: "Fenster schließen hermes-agents:claude" });
+    const callsAfterMount = apiMock.getAgentTerminalWindows.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Fenster schließen hermes-agents:claude" }));
+
+    await waitFor(() => expect(apiMock.killDeadAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
+    await waitFor(() => expect(apiMock.getAgentTerminalWindows.mock.calls.length).toBeGreaterThan(callsAfterMount));
+    await waitFor(() => expect(screen.getByText(/kill-dead failed/)).toBeTruthy());
+  });
+
   it("copies the xterm selection via Ctrl+Shift+C without sending ETX to tmux", async () => {
     await renderView();
     const host = await screen.findByTestId("terminal-pane-host-0");
