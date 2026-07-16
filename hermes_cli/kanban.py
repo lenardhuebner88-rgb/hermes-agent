@@ -2,14 +2,21 @@
 
 Exposes the full Kanban command surface documented in the design spec
 (``docs/hermes-kanban-v1-spec.pdf``).  All DB work is delegated to
-``kanban_db``.  This module adds:
+``kanban_db``.  This module owns:
 
   * Argparse subcommand construction (``build_parser``).
-  * Argument dispatch (``kanban_command``).
+  * Argument dispatch (``kanban_command`` + ``_KANBAN_ACTION_HANDLERS``).
   * Output formatting (plain text + ``--json``).
-  * A short shared helper that parses a single slash-style string
-    (used by ``/kanban …`` in CLI and gateway) and forwards it to the
-    argparse surface.
+  * Slash-style entry (``run_slash``) used by interactive CLI and gateway.
+
+Module layout (top → bottom; section banners mark each region):
+
+  1. Small formatting / shared helpers (``_fmt_*``, ``_emit_json``, …)
+  2. Parser registration helpers (``_register_*_parsers``) + ``build_parser``
+  3. Command dispatch (``kanban_command``)
+  4. Handlers — boards, then task CRUD / lifecycle / dispatch / notify /
+     triage / epic / release / gc (``_cmd_*``, ``_dispatch_*``)
+  5. Slash-command entry (``run_slash``) + module-level handler table
 """
 
 from __future__ import annotations
@@ -1673,6 +1680,8 @@ def _cmd_boards_set_default_workdir(args: argparse.Namespace) -> int:
     return 0
 
 # ---------------------------------------------------------------------------
+# Shared task-handler utilities + command handlers
+# ---------------------------------------------------------------------------
 
 def _parse_duration(val) -> Optional[int]:
     """Parse ``30s`` / ``5m`` / ``2h`` / ``1d`` or a raw integer → seconds.
@@ -1981,6 +1990,10 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
         count_str = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "(idle)"
         print(f"{entry['name']:20s}  {on_disk:8s}  {count_str}")
     return 0
+
+# ---------------------------------------------------------------------------
+# Task create / swarm / list / show
+# ---------------------------------------------------------------------------
 
 def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
     """Validate create flags.
@@ -3410,6 +3423,10 @@ def _cmd_tail(args: argparse.Namespace) -> int:
         print("\n(stopped)")
         return 0
 
+# ---------------------------------------------------------------------------
+# Dispatch / holds / daemon
+# ---------------------------------------------------------------------------
+
 def _dispatch_load_kwargs(args: argparse.Namespace) -> tuple[dict[str, Any], bool, int]:
     """Resolve dispatch_kwargs + auto-retry settings from config / CLI flags.
 
@@ -4018,6 +4035,10 @@ def _cmd_context(args: argparse.Namespace) -> int:
         text = kb.build_worker_context(conn, args.task_id)
     print(text)
     return 0
+
+# ---------------------------------------------------------------------------
+# Triage (specify / decompose) + GC
+# ---------------------------------------------------------------------------
 
 def _cmd_specify(args: argparse.Namespace) -> int:
     """Flesh out a triage task (or all of them) via auxiliary LLM,
