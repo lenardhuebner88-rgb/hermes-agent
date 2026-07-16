@@ -82,6 +82,32 @@ _FIXTURE_LONG_SELECT_LABEL_CHANGE = (
     "    8. Roll back previous release\n"
 )
 
+# VERBATIM long prompt: question + 8 long option labels, total length > 600.
+# overview() would have cut at [-600:] and lost option 1 + question text;
+# direct capture_pane must keep all 8 options for ingest/recheck fingerprint match.
+_FIXTURE_OVER_600_SELECT = (
+    "  Which of the following deployment and release strategies should we apply "
+    "to the production Kubernetes cluster for the multi-region customer-facing "
+    "API gateway during the next scheduled maintenance window this quarter?\n"
+    "  ❯ 1. Rolling update with progressive health checks, automated rollback on "
+    "SLO burn-rate alerts, and staggered pod disruption budgets across zones\n"
+    "    2. Blue-green swap with full traffic drain validation, canary smoke on "
+    "the green pool, and instant DNS cutover only after synthetic checks pass\n"
+    "    3. Canary five percent traffic for thirty minutes with error-budget "
+    "guardrails, then automatic promotion in ten-percent steps to one hundred\n"
+    "    4. Recreate all pods in a controlled wave with pre-flight capacity "
+    "checks, temporary replica boost, and post-wave readiness gate enforcement\n"
+    "    5. Shadow traffic mirror of production requests into a dark cluster "
+    "for parity comparison without user impact before any live cutover begins\n"
+    "    6. Manual stepwise promote with operator approval gates between each "
+    "region and an explicit hold-point after the first region succeeds cleanly\n"
+    "    7. Abort and hold the current production release unchanged while the "
+    "incident bridge investigates residual risk from the previous deploy attempt\n"
+    "    8. Roll back to the previous known-good release tag immediately and "
+    "freeze further deploys until a postmortem action item is fully completed\n"
+)
+assert len(_FIXTURE_OVER_600_SELECT) > 600
+
 
 # ---------------------------------------------------------------------------
 # Parser
@@ -346,17 +372,47 @@ def test_store_unique_open_pane_fingerprint_idempotent(qdb: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Ingestor with stubbed overview
+# Ingestor with stubbed list_windows + capture_pane (not overview)
 # ---------------------------------------------------------------------------
 
 
 class _StubService:
-    def __init__(self, windows: list[dict[str, Any]], now: float | None = None) -> None:
+    """Stub matching the ingest path: list_windows() + capture_pane().
+
+    ``windows`` entries are plain dicts (same shape as TmuxWindow.to_dict())
+    with an extra ``tail`` field used as the capture_pane return value.
+    Optional ``capture_errors`` pane_ids raise on capture (per-pane skip).
+    """
+
+    def __init__(
+        self,
+        windows: list[dict[str, Any]],
+        now: float | None = None,
+        *,
+        capture_errors: set[str] | None = None,
+    ) -> None:
         self._windows = windows
         self._now = now if now is not None else time.time()
+        self._capture_errors = set(capture_errors or ())
+        self.capture_starts: list[int] = []
 
-    def overview(self, *, tail_lines: int = 10) -> dict[str, Any]:
-        return {"now": int(self._now), "windows": list(self._windows)}
+    def list_windows(self, session: str | None = None) -> list[dict[str, Any]]:
+        wins = list(self._windows)
+        if session is not None:
+            wins = [w for w in wins if w.get("session") == session]
+        return wins
+
+    def capture_pane(self, pane_id: str, *, start: int = -25) -> str:
+        self.capture_starts.append(int(start))
+        if pane_id in self._capture_errors:
+            raise RuntimeError(f"capture failed for {pane_id}")
+        for w in self._windows:
+            if str(w.get("pane_id")) == pane_id:
+                return str(w.get("tail") or "")
+        return ""
+
+    def send_keys_to_pane(self, pane_id: str, text: str, *, enter: bool = False) -> None:
+        return None
 
 
 def _frage_window(
@@ -368,7 +424,7 @@ def _frage_window(
     session: str = "work",
     window: str = "claude",
     command: str = "claude",
-    state: str = "frage",
+    dead: bool = False,
 ) -> dict[str, Any]:
     t = time.time() if now is None else float(now)
     if activity is None:
@@ -381,12 +437,10 @@ def _frage_window(
         "pid": 4242,
         "command": command,
         "cwd": "/tmp/proj",
-        "dead": False,
+        "dead": dead,
         "activity": int(activity),
         "managed": True,
         "tail": tail,
-        "state": state,
-        "state_source": "heuristic",
     }
 
 
@@ -476,7 +530,7 @@ def test_ingestor_fingerprint_change_supersedes(qdb: Path) -> None:
 
 
 def test_ingestor_expires_when_frage_disappears(qdb: Path) -> None:
-    """F1: two-poll expiry — state flip to idle needs a second poll to expire."""
+    """F1: two-poll expiry — capture no longer classifies as frage → expire."""
     now = 1_700_000_300.0
     win = _frage_window(now=now, activity=now - 10)
     service = _StubService([win], now=now)
@@ -489,9 +543,8 @@ def test_ingestor_expires_when_frage_disappears(qdb: Path) -> None:
     ing.poll_once()
     assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
 
-    # Pane still listed but no longer in frage state
+    # Pane still listed but capture no longer classifies as frage
     gone = dict(win)
-    gone["state"] = "idle"
     gone["tail"] = _FIXTURE_NOT_QUESTION
     service._windows = [gone]
 
@@ -506,7 +559,7 @@ def test_ingestor_expires_when_frage_disappears(qdb: Path) -> None:
 
 
 def test_ingestor_empty_snapshot_skips_expiry(qdb: Path) -> None:
-    """F1/F6: empty overview must not expire open events (transient tmux fail)."""
+    """F1/F6: empty list_windows must not expire open events (transient tmux fail)."""
     now = 1_700_000_350.0
     win = _frage_window(now=now, activity=now - 10)
     service = _StubService([win], now=now)
@@ -528,7 +581,7 @@ def test_ingestor_empty_snapshot_skips_expiry(qdb: Path) -> None:
 
 
 def test_ingestor_persistently_empty_snapshots_eventually_expire(qdb: Path) -> None:
-    """Truly gone windows (>= 3 consecutive empty overviews) must not leave
+    """Truly gone windows (>= 3 consecutive empty list_windows) must not leave
     events open forever; expiry stays two-poll confirmed on top."""
     now = 1_700_000_360.0
     win = _frage_window(now=now, activity=now - 10)
@@ -587,6 +640,138 @@ def test_ingestor_filters_only_work_when_mixed(qdb: Path) -> None:
     opens = aq.list_question_events(status="open", db_path=qdb)
     assert len(opens) == 1
     assert opens[0]["pane_id"] == "%w"
+
+
+def test_ingestor_answer_cooldown_blocks_reinsert_then_allows(qdb: Path) -> None:
+    """R1: answered pane+fp within 60s must not open a duplicate; after 61s may."""
+    now = 1_700_000_500.0
+    win = _frage_window(now=now, activity=now - 10)
+    service = _StubService([win], now=now)
+    clock = {"t": now}
+
+    def _now() -> float:
+        return float(clock["t"])
+
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=_now,
+    )
+    ing.poll_once()
+    assert ing.poll_once()["created"] == 1
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    eid = int(opens[0]["id"])
+    fp = opens[0]["fingerprint"]
+    pane_id = opens[0]["pane_id"]
+
+    # Claim as answered at current clock (same standing capture remains).
+    assert aq._claim_event(
+        eid, answer="1", answered_by="operator", db_path=qdb, now=clock["t"]
+    )
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+
+    s_cd1 = ing.poll_once()
+    s_cd2 = ing.poll_once()
+    assert s_cd1["created"] == 0
+    assert s_cd2["created"] == 0
+    assert s_cd1["cooldown"] + s_cd2["cooldown"] >= 1
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+    assert aq.recently_answered(pane_id, fp, db_path=qdb, now=clock["t"]) is True
+
+    # After 61s the same standing question may reappear (send was ineffective).
+    clock["t"] = now + 61.0
+    # activity still aged relative to the new clock
+    service._windows = [
+        _frage_window(now=clock["t"], activity=clock["t"] - 10, pane_id=pane_id)
+    ]
+    # Pending still holds the same fp from cooldown polls → may create on first
+    # post-cooldown tick (already stable); second poll is idempotent either way.
+    s_late1 = ing.poll_once()
+    s_late2 = ing.poll_once()
+    assert s_late1["cooldown"] == 0
+    assert s_late1["created"] + s_late2["created"] == 1, (
+        f"expected re-create after cooldown: {s_late1=} {s_late2=}"
+    )
+    opens2 = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens2) == 1
+    assert opens2[0]["fingerprint"] == fp
+    assert opens2[0]["id"] != eid
+
+
+def test_ingestor_long_prompt_over_600_keeps_all_options_and_recheck_matches(
+    qdb: Path,
+) -> None:
+    """R2: ingest keeps all 8 options (>600 chars); recheck fp matches → not superseded."""
+    assert len(_FIXTURE_OVER_600_SELECT) > 600
+    now = 1_700_000_550.0
+    win = _frage_window(
+        pane_id="%long600",
+        tail=_FIXTURE_OVER_600_SELECT,
+        now=now,
+        activity=now - 10,
+    )
+    service = _StubService([win], now=now)
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=lambda: now,
+    )
+    assert ing.poll_once()["created"] == 0
+    assert ing.poll_once()["created"] == 1
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    event = opens[0]
+    assert len(event["options"]) == 8
+    assert event["options"][0]["nr"] == 1
+    assert "Rolling update" in event["options"][0]["label"]
+    assert event["options"][7]["nr"] == 8
+    assert "Roll back" in event["options"][7]["label"]
+    assert "multi-region" in event["question_text"]
+
+    # Recheck fingerprint over the same stub capture must match stored fp.
+    recheck_fp = aq._recheck_fingerprint(service, "%long600")
+    assert recheck_fp == event["fingerprint"]
+    # capture_pane start must be -25 for both ingest and recheck
+    assert all(s == -25 for s in service.capture_starts)
+
+    svc_ans = _RecordingService([_FIXTURE_OVER_600_SELECT, ""])
+    result = aq.answer_question(
+        int(event["id"]),
+        "1",
+        db_path=qdb,
+        service=svc_ans,
+        verify_delay_s=0,
+        sleep=lambda _s: None,
+    )
+    assert result["ok"] is True, result
+    assert result.get("reason") != "superseded"
+    assert aq.list_question_events(status="superseded", db_path=qdb) == []
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answer"] == "1"
+
+
+def test_ingestor_capture_error_skips_pane_counts_and_continues(qdb: Path) -> None:
+    """R2: one pane capture failure must not abort the poll; summary counts it."""
+    now = 1_700_000_600.0
+    bad = _frage_window(pane_id="%bad", now=now, activity=now - 10)
+    good = _frage_window(pane_id="%good", now=now, activity=now - 10)
+    service = _StubService([bad, good], now=now, capture_errors={"%bad"})
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=lambda: now,
+    )
+    s1 = ing.poll_once()
+    assert s1["capture_errors"] >= 1
+    assert s1["created"] == 0
+    s2 = ing.poll_once()
+    assert s2["capture_errors"] >= 1
+    assert s2["created"] == 1
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["pane_id"] == "%good"
 
 
 # ---------------------------------------------------------------------------

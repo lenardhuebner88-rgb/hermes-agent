@@ -17557,11 +17557,14 @@ class AgentQuestionAnswerRequest(BaseModel):
 
 
 @app.get("/api/agent-questions")
-async def agent_questions_list(
+def agent_questions_list(
     status: str = "open",
     limit: int = 50,
 ) -> Dict[str, object]:
-    """List standing/answered agent questions from the scrape store."""
+    """List standing/answered agent questions from the scrape store.
+
+    Sync endpoint so FastAPI runs SQLite work in the threadpool.
+    """
     from hermes_cli import agent_questions as _agent_questions
 
     try:
@@ -17573,11 +17576,15 @@ async def agent_questions_list(
 
 
 @app.post("/api/agent-questions/{event_id}/answer")
-async def agent_questions_answer(
+def agent_questions_answer(
     event_id: int,
     req: AgentQuestionAnswerRequest,
 ) -> Dict[str, object]:
-    """Claim + recheck + send answer to a standing agent question (P0b)."""
+    """Claim + recheck + send answer to a standing agent question (P0b).
+
+    Sync endpoint: answer path includes sleep/verify and must not block the
+    event loop (FastAPI runs def routes in a threadpool).
+    """
     from hermes_cli import agent_questions as _agent_questions
 
     try:

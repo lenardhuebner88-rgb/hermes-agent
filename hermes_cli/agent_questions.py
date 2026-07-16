@@ -496,9 +496,42 @@ def expire_open_events(
             return int(cur.rowcount or 0)
 
 
+def recently_answered(
+    pane_id: str,
+    fingerprint: str,
+    *,
+    within_s: float = 60.0,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> bool:
+    """True when pane+fingerprint was answered with ``updated_ts`` within ``within_s``.
+
+    Blocks re-insert of the same standing prompt right after claim (send can take
+    seconds; the next poller tick must not open a duplicate event).
+    """
+    now_ts = time.time() if now is None else float(now)
+    with connect_closing(db_path=db_path) as conn:
+        row = conn.execute(
+            "SELECT updated_ts FROM question_events "
+            "WHERE pane_id = ? AND fingerprint = ? AND status = 'answered' "
+            "ORDER BY id DESC LIMIT 1",
+            (pane_id, fingerprint),
+        ).fetchone()
+    if row is None:
+        return False
+    try:
+        updated = _parse_iso_ts(str(row["updated_ts"] or ""))
+    except (TypeError, ValueError):
+        return False
+    return (now_ts - updated) < float(within_s)
+
+
 # ---------------------------------------------------------------------------
 # Answer path (P0b): claim → recheck → send → verify
 # ---------------------------------------------------------------------------
+
+# Ingest and recheck must share the same capture window so fingerprints match.
+_CAPTURE_TAIL_LINES = 25
 
 
 def _load_event(event_id: int, *, db_path: Optional[Path] = None) -> dict[str, Any] | None:
@@ -535,7 +568,7 @@ def _answer_enter_flag(kind: str | None, answer: str) -> bool:
 def _normalize_capture_tail(raw: str) -> str:
     """ANSI-strip + drop trailing blank rows (tmux pads short panes to height).
 
-    Mirrors overview's tail cleanup so recheck fingerprints match ingest.
+    Shared by ingest and recheck — no 600-char cut; full capture content.
     """
     cleaned = _agent_terminals.strip_ansi(raw or "")
     lines = cleaned.splitlines()
@@ -544,9 +577,25 @@ def _normalize_capture_tail(raw: str) -> str:
     return "\n".join(lines)
 
 
+def _window_as_dict(win: Any) -> dict[str, Any] | None:
+    """Normalize TmuxWindow / to_dict() result / plain dict for ingest."""
+    if isinstance(win, dict):
+        return win
+    to_dict = getattr(win, "to_dict", None)
+    if callable(to_dict):
+        d = to_dict()
+        if isinstance(d, dict):
+            return d
+    return None
+
+
 def _recheck_fingerprint(service: Any, pane_id: str) -> str | None:
-    """Capture pane and return current question fingerprint, or None if gone."""
-    raw = service.capture_pane(pane_id, start=-50)
+    """Capture pane and return current question fingerprint, or None if gone.
+
+    Uses the same ``start=-{_CAPTURE_TAIL_LINES}`` window and
+    ``_normalize_capture_tail`` as the scrape ingestor so fingerprints match.
+    """
+    raw = service.capture_pane(pane_id, start=-_CAPTURE_TAIL_LINES)
     tail = _normalize_capture_tail(raw)
     parsed = parse_question(tail)
     if parsed is None:
@@ -744,12 +793,15 @@ def answer_question(
 
 
 class QuestionScrapeIngestor:
-    """Poll tmux overview for standing questions; write stable open events.
+    """Poll tmux panes for standing questions; write stable open events.
 
-    Double-capture stability: an event is only inserted when the same
-    fingerprint was already seen on the previous ``poll_once`` *and*
-    ``activity_age > 3`` seconds. Expiry is also two-poll confirmed so a
-    single empty/transient overview does not wipe open events.
+    Uses ``list_windows`` + per-pane ``capture_pane`` (not dashboard
+    ``overview()``, which caps tails at 600 chars). Double-capture stability:
+    an event is only inserted when the same fingerprint was already seen on
+    the previous ``poll_once`` *and* ``activity_age > 3`` seconds. Expiry is
+    also two-poll confirmed so a single empty/transient list does not wipe
+    open events. After claim, a 60s answered-cooldown blocks re-insert of the
+    same pane+fingerprint while send may still leave the prompt visible.
     """
 
     def __init__(
@@ -759,7 +811,7 @@ class QuestionScrapeIngestor:
         service_factory: Optional[Callable[[], Any]] = None,
         now: Optional[Callable[[], float]] = None,
         activity_age_threshold_s: float = 3.0,
-        overview_tail_lines: int = 25,
+        overview_tail_lines: int = _CAPTURE_TAIL_LINES,
         session_filter: str = "work",
     ) -> None:
         self.db_path = db_path
@@ -791,42 +843,60 @@ class QuestionScrapeIngestor:
             "skipped_age": 0,
             "parse_none": 0,
             "skipped_expiry_empty_snapshot": 0,
+            "cooldown": 0,
+            "capture_errors": 0,
         }
         now = float(self._now())
-        overview = self._service().overview(tail_lines=self.overview_tail_lines)
-        windows = list(overview.get("windows") or [])
-        overview_now = overview.get("now")
-        if overview_now is not None:
-            try:
-                now = float(overview_now)
-            except (TypeError, ValueError):
-                pass
+        svc = self._service()
+        # Empty-snapshot guard uses the full list_windows length (all sessions)
+        # before session filtering — same reference size as former overview.
+        try:
+            raw_windows = list(svc.list_windows())
+        except Exception:
+            logger.warning("agent_questions list_windows failed", exc_info=True)
+            raw_windows = []
 
-        summary["windows"] = len(windows)
+        summary["windows"] = len(raw_windows)
         frage_panes: set[str] = set()
         next_pending: dict[str, str] = {}
+        tail_start = -abs(self.overview_tail_lines)
 
-        for win in windows:
-            if not isinstance(win, dict):
+        for win_obj in raw_windows:
+            win = _window_as_dict(win_obj)
+            if win is None:
                 continue
             if win.get("session") != self.session_filter:
-                continue
-            if win.get("state") != "frage":
                 continue
 
             pane_id = str(win.get("pane_id") or "")
             if not pane_id:
                 continue
 
+            try:
+                raw = svc.capture_pane(pane_id, start=tail_start)
+            except Exception:
+                summary["capture_errors"] += 1
+                logger.debug(
+                    "agent_questions capture_pane failed pane_id=%s",
+                    pane_id,
+                    exc_info=True,
+                )
+                continue
+
+            tail = _normalize_capture_tail(raw)
+            age = _activity_age_s(win, now)
+            dead = bool(win.get("dead", False))
+            state = _agent_terminals.classify_agent_pane(tail, age, dead)
+            if state != "frage":
+                continue
+
             summary["frage"] += 1
-            tail = win.get("tail") or ""
-            parsed = parse_question(str(tail))
+            parsed = parse_question(tail)
             if parsed is None:
                 summary["parse_none"] += 1
                 continue
 
             fp = compute_fingerprint(pane_id, parsed["region"])
-            age = _activity_age_s(win, now)
 
             if find_open_event(pane_id, fp, db_path=self.db_path) is not None:
                 summary["idempotent"] += 1
@@ -839,6 +909,15 @@ class QuestionScrapeIngestor:
             age_ok = age is not None and age > self.activity_age_threshold_s
 
             if stable and age_ok:
+                # Claim→poller race: after answer the prompt may still stand
+                # for a few seconds; do not open a duplicate event.
+                if recently_answered(
+                    pane_id, fp, within_s=60.0, db_path=self.db_path, now=now
+                ):
+                    summary["cooldown"] += 1
+                    next_pending[pane_id] = fp
+                    frage_panes.add(pane_id)
+                    continue
                 # Supersede only after the new fingerprint is stable (not on
                 # first observation) so a 1-poll flicker cannot kill a valid
                 # open; both writes share one transaction so no interleaving
@@ -878,12 +957,12 @@ class QuestionScrapeIngestor:
 
         self._pending = next_pending
 
-        # Empty overview (e.g. transient tmux list_windows failure) must not
-        # expire everything — skip the expiry passage. But a PERSISTENTLY
-        # empty overview (>= 3 consecutive polls) means the windows are truly
-        # gone; from then on the expiry passage runs again (still two-poll
+        # Empty list_windows (e.g. transient tmux failure) must not expire
+        # everything — skip the expiry passage. But a PERSISTENTLY empty
+        # list (>= 3 consecutive polls) means the windows are truly gone;
+        # from then on the expiry passage runs again (still two-poll
         # confirmed via _expire_pending) so events cannot stay open forever.
-        if len(windows) == 0:
+        if len(raw_windows) == 0:
             self._empty_snapshots += 1
             if self._empty_snapshots < 3:
                 summary["skipped_expiry_empty_snapshot"] = 1
