@@ -3,18 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 // Unter Voll-Suite-Last fällt die async Capture-/Validate-/Ingest-Kette (React-
-// Re-Render nach Mock-Resolve) hinter den waitFor-Default-Timeout (1s) zurück —
-// das war der post-merge Bounce (Fremd-Flake in t_7b260029). Timeout auf 5s
-// hochsetzen härtet alle waitFor-Instanzen dieser Datei, analog
-// AgentTerminalsView.render.test.tsx.
-configure({ asyncUtilTimeout: 5000 });
-// asyncUtilTimeout (5s) == vitests Default-testTimeout (5s): ein Test mit zwei
-// sequentiellen waitFor-Instanzen (AC-5: Triage-Modus → Auswahl → Task anlegen)
-// kann unter Voll-Suite-CPU-Druck die 5s-Test-Grenze reißen, obwohl jedes
-// einzelne waitFor im Budget bleibt — das war der post-merge Bounce des
-// t_56adaae8-Integrations-Gates (import 218s, AC-5 timeout @5000ms). Test-Timeout
-// über das waitFor-Budget heben, damit gestaffelte waitFors nicht kollidieren.
-vi.setConfig({ testTimeout: 15000 });
+// Re-Render nach Mock-Resolve) hinter das Standard-budget zurück. Die Datei hat
+// absichtlich ein 30-s-Testbudget für mehrere sequentielle async-Schritte; das
+// waitFor-Budget muss dieses Budget unter Voll-Suite-CPU-Druck ebenfalls nutzen.
+// Damit bleibt der Timeout file-spezifisch, ohne Assertions abzuschwächen.
+configure({ asyncUtilTimeout: 30000 });
+vi.setConfig({ testTimeout: 30000 });
 
 const { captureMock, fetchJSONMock } = vi.hoisted(() => ({
   captureMock: vi.fn(),
