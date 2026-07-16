@@ -25,6 +25,23 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _restore_sys_modules_after_purge(restore_sys_modules):
+    """Keep hermes_cli.plugins / hermes_plugins purges from leaking into later files.
+
+    ``TestPluginDiscovery.test_loads_via_plugin_manager`` deletes
+    ``hermes_cli.plugins`` / ``hermes_plugins*`` and re-imports them so the
+    PluginManager discovers a fresh config. ``_load_plugin_init`` also plants
+    synthetic ``hermes_plugins*`` entries in ``sys.modules``. Without a restore,
+    later files in the same worker keep import-time bindings to the orphaned
+    reimport (module-identity split) — same class as the empty-tool-name /
+    verification-stop-caching leaks (see ``tests/_module_isolation.py``).
+    ``restore_sys_modules`` snapshots before the test body and puts the table
+    back on teardown.
+    """
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
