@@ -6861,6 +6861,47 @@ def test_blocked_kind_superseded_and_capacity_never_auto_retryable():
     )
 
 
+def test_blocked_kind_deterministic_fail_fast_markers_need_operator():
+    """Deterministic spawn-refusal / decompose-LLM-client-error markers never
+    self-heal on retry — auto-retry must escalate, not respawn (live incident
+    2026-07-15, t_df10f6b1)."""
+    for marker in kb._DETERMINISTIC_SPAWN_FAILURE_MARKERS:
+        reason = f"worktree provisioning: {marker} for assignee coder"
+        assert kb._blocked_kind_for_auto_retry(reason) == "needs_operator", marker
+
+    for reason in kb._DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS:
+        assert kb._blocked_kind_for_auto_retry(reason) == "needs_operator", reason
+        # Case-insensitive, matching how reasons are recorded/read elsewhere.
+        assert kb._blocked_kind_for_auto_retry(reason.upper()) == "needs_operator"
+
+
+def test_dispatch_auto_retry_needs_operator_deterministic_spawn_failure_marker(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Auto-retry must not respawn a task blocked on a deterministic fail-fast
+    marker, even after the normal backoff window (t_df10f6b1)."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="blocked", assignee="coder")
+        kb.claim_task(conn, t)
+        kb.block_task(
+            conn,
+            t,
+            reason="worktree provisioning: spawn_refused_allowlist_unenforceable",
+        )
+
+        monkeypatch.setattr(kb.time, "time", lambda: base + 301)
+        res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
+
+        assert res.auto_retried_blocked == []
+        assert kb.get_task(conn, t).status == "blocked"
+        event = [
+            e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"
+        ][-1]
+        assert event.payload["blocked_kind"] == "needs_operator"
+
+
 def test_block_task_superseded_auto_archives(kanban_home):
     """B4a: SUPERSEDED block leaves the active board (archived, not blocked)."""
     with kb.connect_closing() as conn:
@@ -8605,6 +8646,102 @@ def test_dispatch_worktree_task_rerun_reuses_existing_linked_worktree_and_branch
     assert listed.count(f"worktree {expected}\n") == 1
     assert f"worktree {expected}/.worktrees/{tid}" not in listed
     assert f"branch refs/heads/{actual_branch}" in listed
+
+
+# ---------------------------------------------------------------------------
+# Identity-drift guard ordering (worker base preparation must see the
+# still-unmaterialized recorded workspace_path, not the freshly resolved one)
+# ---------------------------------------------------------------------------
+
+def test_dispatch_rejects_when_materialized_workspace_drifts_from_recorded(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """A task whose freshly resolved workspace no longer matches its recorded
+    provisioned workspace_path must be rejected (worker_base_rejected) BEFORE
+    the drifted path is persisted — the drift check would be tautological if
+    workspace_path were overwritten first (#identity-drift)."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    workspace_a = repo / ".worktrees" / "kanban" / "root-a"
+    workspace_b = repo / ".worktrees" / "kanban" / "root-b"
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="drifted worktree",
+            assignee="coder-claude",
+            workspace_kind="worktree",
+            workspace_path=str(workspace_a),
+        )
+
+        monkeypatch.setattr(
+            kb,
+            "_resolve_dispatch_workspace",
+            lambda conn, task, board=None: (workspace_b, task.branch_name),
+        )
+        result = kb.dispatch_once(conn, board="default")
+        stored = kb.get_task(conn, tid)
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert not result.spawned
+    assert stored is not None
+    # The recorded path must NOT have been overwritten with the drifted one.
+    assert stored.workspace_path == str(workspace_a)
+    reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
+    assert len(reject_events) == 1
+    payload = json.loads(reject_events[0]["payload"])
+    assert "identity drifted" in payload["reason"]
+
+
+def test_dispatch_reused_worktree_no_reject_when_recorded_path_matches(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Gegenprobe: an identical resolved path is not treated as drift."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="reused worktree",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        first_task = kb.get_task(conn, tid)
+        assert first_task is not None
+        expected = repo / ".worktrees" / "kanban" / tid
+
+        conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+            (tid,),
+        )
+        conn.commit()
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        second_task = kb.get_task(conn, tid)
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert first.spawned == [(tid, "sentinel", str(expected))]
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert second_task is not None
+    assert second_task.workspace_path == str(expected)
+    assert not any(e["kind"] == "worker_base_rejected" for e in events)
 
 
 # ---------------------------------------------------------------------------
@@ -11272,8 +11409,21 @@ def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
 # ---------------------------------------------------------------------------
 
 def _redispatch(conn, task_id):
-    """Simulate an operator unblock + re-dispatch: counter reset, re-claimed."""
-    assert kb.unblock_task(conn, task_id)
+    """Simulate a bounded auto-retry re-dispatch (NOT an operator resolving
+    the escalation): counter reset, re-claimed. Mirrors the raw status flip
+    ``auto_retry_blocked_tasks`` performs — no ``unblocked``/``promoted_manual``
+    event. Genuine operator resolution (``unblock_task`` / ``promote_task`` /
+    ``answer_operator_question``) starts a NEW escalation episode instead and
+    is exercised separately below (episode-boundary tests).
+    """
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks SET status='ready', claim_lock=NULL, "
+            "claim_expires=NULL, worker_pid=NULL, block_kind=NULL, "
+            "block_recurrences=0 WHERE id=? AND status='blocked'",
+            (task_id,),
+        )
+        assert cur.rowcount == 1
     assert kb.claim_task(conn, task_id) is not None
 
 
@@ -11355,13 +11505,14 @@ def test_escalation_coalesce_decision_queue_counter(kanban_home):
             ("tests failed: assertion", "crashed"),  # new real-bug class
         ]
         for i, (err, oc) in enumerate(cycles):
-            kb.claim_task(conn, tid)
+            if i == 0:
+                kb.claim_task(conn, tid)
             assert kb._record_task_failure(
                 conn, tid, err, outcome=oc, failure_limit=1,
                 release_claim=True, end_run=True,
             )
             if i < len(cycles) - 1:
-                assert kb.unblock_task(conn, tid)
+                _redispatch(conn, tid)
         result = kb.decision_queue(conn)
 
     row = next(d for d in result["decisions"] if d["task_id"] == tid)
@@ -11412,6 +11563,37 @@ def test_escalation_coalesce_counts_gave_up_after_non_gave_up_writer(kanban_home
     assert row["escalation_classes"] == ["capacity"]
     # exactly one suppressed repeat, made explicit (was invisibly dropped before)
     assert row["coalesced_repeats"] == 1
+
+
+def test_escalation_coalesce_resets_after_operator_unblock(kanban_home):
+    """Episode-scoped write-side gate (mirrors ``_operator_escalation_is_active``
+    / commit 28c296871): a genuine operator resolution (``unblock_task``)
+    starts a NEW escalation episode, so the SAME class recurring afterwards
+    must escalate again — not be coalesced away forever."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="loops", assignee="coder")
+        kb.claim_task(conn, tid)
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        # Operator resolves the hold (NOT the bounded auto-retry lane) —
+        # ends the current escalation episode.
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        # Same (transient) class recurs in the new episode.
+        assert kb._record_task_failure(
+            conn, tid, "spawn boom 2", outcome="spawn_failed",
+            failure_limit=1, release_claim=True, end_run=True,
+        )
+        events = kb.list_events(conn, tid)
+
+    escalations = [e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT]
+    gave_ups = [e for e in events if e.kind == "gave_up"]
+    assert len(gave_ups) == 2
+    # NOT coalesced: the operator unblock reset the episode boundary.
+    assert len(escalations) == 2
+    assert gave_ups[1].payload.get("escalation_coalesced") is False
 
 
 def test_4a_scheduled_overdue_is_unblocked_once(kanban_home):

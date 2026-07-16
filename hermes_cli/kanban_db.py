@@ -12123,11 +12123,16 @@ def _merge_review_submission_artifacts(
         # and must never shadow the latest coder artifact contract.
         if _run_originated_from_review(conn, task_id, source_run_id):
             continue
-        if isinstance(source_metadata, dict):
-            add_entries(source_metadata.get("artifacts"))
+        if not isinstance(source_metadata, dict) or "artifacts" not in source_metadata:
+            # Malformed metadata or a submission that never mentions
+            # ``artifacts`` makes no assertion either way — unlike an
+            # explicit empty list, it must not shadow an older implementer
+            # handoff. Keep walking further back for an authoritative one.
+            continue
         # The latest implementer submission is authoritative even when its
-        # artifacts list is explicitly empty (or its metadata is malformed):
-        # never resurrect a rejected earlier round by falling back further.
+        # artifacts list is explicitly empty: never resurrect a rejected
+        # earlier round by falling back further.
+        add_entries(source_metadata.get("artifacts"))
         break
     if isinstance(metadata, dict):
         add_entries(metadata.get("artifacts"))
@@ -17036,7 +17041,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     the task was still ``running`` in the DB, treat it as a protocol
     violation (worker answered conversationally without calling
     ``kanban_complete`` / ``kanban_block``) and trip the circuit breaker
-    on the first occurrence — retrying a worker whose CLI keeps
+    once the trailing violation streak reaches
+    ``_PROTOCOL_VIOLATION_FAILURE_LIMIT`` (default 3, overridable via the
+    task's ``max_retries``) — retrying a worker whose CLI keeps
     returning 0 without a terminal transition just loops forever.
 
     When the reap registry shows the worker exited with the rate-limit
@@ -17684,6 +17691,7 @@ _HEILER_OUTCOME_CLASS = {
 }
 _HEILER_STALL_CLASS = {
     "scheduled_overdue": HEILER_CLASS_TRANSIENT,
+    "scheduled_due": HEILER_CLASS_TRANSIENT,
     "rate_limited_loop": HEILER_CLASS_TRANSIENT,
     "review_without_verifier": HEILER_CLASS_BAD_SPEC,
     "triage_decompose_failed": HEILER_CLASS_BAD_SPEC,
@@ -20565,11 +20573,24 @@ def _escalated_classes_for_task(
     ALREADY escalated must not append a duplicate raw event (≤ 1 raw event per
     class per root), while a genuinely NEW class still writes — and stays
     visible. Pure read; safe to call inside an open ``write_txn``.
+
+    Episode-scoped exactly like :func:`_operator_escalation_is_active`: an
+    ``"unblocked"`` (``unblock_task`` / ``answer_operator_question``) or
+    ``"promoted_manual"`` event resolves the prior hold, so only escalations
+    since that boundary belong to the CURRENT episode. Without this, a class
+    that escalated once, was operator-resolved, and later recurs would be
+    coalesced away forever instead of escalating again.
     """
+    boundary = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events "
+        "WHERE task_id = ? AND kind IN ('unblocked', 'promoted_manual')",
+        (task_id,),
+    ).fetchone()
+    since_id = int(boundary["m"]) if boundary and boundary["m"] is not None else 0
     counts: dict[str, int] = {}
     for r in conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-        (task_id, OPERATOR_ESCALATION_EVENT),
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > ?",
+        (task_id, OPERATOR_ESCALATION_EVENT, since_id),
     ).fetchall():
         try:
             payload = json.loads(r["payload"] or "{}")
@@ -22787,6 +22808,14 @@ def _blocked_kind_for_auto_retry(
         return "capacity"
     if text and _AUTO_RETRY_QUESTION_RE.search(text):
         return "operator_question"
+    # Deterministic fail-fast markers (spawn refusal / decompose LLM client
+    # errors) never self-heal on retry — respawning burns the retry budget
+    # (incl. premium/opus escalation) on a task that needs an operator, not
+    # another attempt (live incident 2026-07-15, t_df10f6b1).
+    if text and _deterministic_spawn_failure_marker(text) is not None:
+        return "needs_operator"
+    if text and text.lower() in _DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS:
+        return "needs_operator"
     return "retryable"
 
 
@@ -24225,10 +24254,10 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist and refresh the claim object consumed by the immediate spawn.
-        _apply_materialized_dispatch_workspace(
-            conn, claimed, workspace, resolved_branch_name
-        )
+        # Identity-drift guard first: prepare_reused_task_worktree compares the
+        # task's still-unmaterialized workspace_path against the freshly
+        # resolved one, so it must run before that field is overwritten below
+        # (otherwise the comparison is tautological and drift is never caught).
         try:
             _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
         except _kwt.WorktreeError as exc:
@@ -24250,6 +24279,11 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
+        # Persist and refresh the claim object consumed by the immediate spawn
+        # only now that the drift guard above has passed.
+        _apply_materialized_dispatch_workspace(
+            conn, claimed, workspace, resolved_branch_name
+        )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
