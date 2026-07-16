@@ -122,9 +122,78 @@ def test_silent_block_sweep_escalates_block_without_run(
         # raw flip to blocked, no blocked run (mirrors contract/integration park)
         conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (t,))
         conn.commit()
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                t,
+                "blocked",
+                {"kind": None, "recurrences": 1, "status": "blocked"},
+            )
         assert kb.silent_block_task_ids(conn, now=base) == [t]
         kb.escalate_silent_blocks_sweep(conn, now=base)
-        assert len(_operator_escalations(conn, t)) == 1
+        escalation = _escalation_event(conn, t)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert escalation.payload["evidence"]["last_error"] == ""
+    assert "excerpt" not in heiler.payload["evidence"]
+    assert "fingerprint" not in heiler.payload
+
+
+def test_silent_block_sweep_uses_blocked_event_reason_without_run_text(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    reason = (
+        "no actionable implementation spec: RAW-FLIP-EVENT-REASON "
+        + "x" * 500
+    )
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="event reason", assignee="alice")
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        kb.claim_task(conn, t)
+        assert kb.block_task(conn, t, reason=reason)
+        blocked_event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert json.loads(blocked_event["payload"])["reason"] == reason
+
+        # Contract/integration parks can retain only the production blocked-event
+        # payload. Remove the duplicate run text while preserving that real shape.
+        conn.execute(
+            "UPDATE task_runs SET summary = NULL, error = NULL WHERE task_id = ?",
+            (t,),
+        )
+        conn.commit()
+        run = conn.execute(
+            "SELECT summary, error FROM task_runs WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (t,),
+        ).fetchone()
+        assert run is not None
+        assert not (run["summary"] or "").strip()
+        assert not (run["error"] or "").strip()
+
+        result = kb.escalate_silent_blocks_sweep(
+            conn,
+            retry_limit=kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT,
+            failure_limit=kb.DEFAULT_FAILURE_LIMIT,
+            backoff_seconds=kb.DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+        )
+        escalation = _escalation_event(conn, t)
+        heiler = _heiler_events(conn, t)[0]
+
+    assert [item["task_id"] for item in result["escalated"]] == [t]
+    assert escalation.payload["evidence"]["last_error"] == reason[:500]
+    assert heiler.payload["class"] == kb.HEILER_CLASS_BAD_SPEC
+    assert heiler.payload["evidence"]["signal_source"] == "text"
+    assert heiler.payload["evidence"]["excerpt"] == reason[:300]
+    assert heiler.payload["fingerprint"] == kb._error_fingerprint(reason[:300])
 
 
 def test_silent_block_sweep_escalates_transient_past_grace(
@@ -1391,4 +1460,3 @@ def test_dispatch_respawn_guard_emits_event_for_skipped_task(
     # Event.payload is already parsed as a dict by list_events.
     assert isinstance(guarded_evt.payload, dict)
     assert guarded_evt.payload.get("reason") == "recent_success"
-

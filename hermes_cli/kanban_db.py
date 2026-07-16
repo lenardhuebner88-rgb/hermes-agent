@@ -21238,9 +21238,9 @@ def escalate_silent_blocks_sweep(
                 else (int(last_run["id"]) if last_run is not None else None)
             )
             blocked_event = conn.execute(
-                "SELECT id FROM task_events WHERE task_id = ? AND run_id IS ? "
+                "SELECT id, payload FROM task_events WHERE task_id = ? "
                 "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
-                (tid, run_id),
+                (tid,),
             ).fetchone()
             reason = ""
             if blocked_run is not None:
@@ -21250,6 +21250,10 @@ def escalate_silent_blocks_sweep(
             if not reason and last_run is not None:
                 reason = (last_run["summary"] or "").strip() or (
                     last_run["error"] or ""
+                ).strip()
+            if not reason and blocked_event is not None:
+                reason = (
+                    _decision_event_reason(blocked_event["payload"]) or ""
                 ).strip()
             if not reason:
                 reason = _latest_release_gate_block_reason(conn, tid)
