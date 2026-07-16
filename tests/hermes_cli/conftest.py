@@ -2,7 +2,27 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+
+@pytest.fixture
+def kanban_home(tmp_path, monkeypatch):
+    """Isolated HERMES_HOME with an empty kanban DB.
+
+    Moved from test_kanban_db.py for shared use across split DB test modules.
+    Modules that need a different setup (crash grace, kanban env clearing)
+    continue to define their own module-level ``kanban_home`` override.
+    """
+    from hermes_cli import kanban_db as kb
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    return home
 
 
 @pytest.fixture
