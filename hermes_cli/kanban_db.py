@@ -6314,14 +6314,100 @@ def _profile_model_provider_for_spawn(
         return None, None, None
 
 
+def _resolve_model_override(
+    model_override: str,
+    provider: Optional[str],
+    *,
+    task_id: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Validate a model override against the effective provider.
+
+    Returns a tuple ``(model, provider, model_source)`` where ``model_source``
+    is one of:
+
+    * ``task_override`` — the model is compatible with the current provider.
+    * ``task_override_with_provider_switch`` — the override explicitly carries
+      a provider/model pair (e.g. ``anthropic/claude-opus-4-8``) and the spawn
+      should follow the requested provider.
+    * ``None`` — the override is incompatible with the current provider and
+      cannot be resolved.  When ``task_id`` and ``conn`` are supplied, a
+      ``model_override_incompatible`` event is appended to the task.
+    """
+    from hermes_cli.models import detect_static_provider_for_model
+
+    if "/" in model_override:
+        explicit_provider, explicit_model = model_override.split("/", 1)
+        explicit_provider = explicit_provider.strip() or None
+        explicit_model = explicit_model.strip() or None
+        if not explicit_provider or not explicit_model:
+            return _handle_incompatible_model_override(
+                model_override, provider, task_id, conn, reason="malformed_provider_model_pair"
+            )
+        # Accept an explicit provider/model pair unless the static map
+        # attributes the model to a *different* family than the one claimed.
+        # ``detect_static_provider_for_model`` returns None when the model is
+        # already in the current provider catalog OR when it is unknown.
+        redirected = detect_static_provider_for_model(explicit_model, explicit_provider)
+        if redirected is None or redirected[0] == explicit_provider:
+            return explicit_model, explicit_provider, "task_override_with_provider_switch"
+        return _handle_incompatible_model_override(
+            model_override, provider, task_id, conn, reason="explicit_provider_mismatch"
+        )
+
+    redirected = detect_static_provider_for_model(model_override, provider)
+    if redirected is not None:
+        # The override names a model that belongs to a different provider
+        # family than the effective lane/profile.  Without an explicit
+        # provider/model pair this is a poison-pill: ignore it.
+        return _handle_incompatible_model_override(
+            model_override, provider, task_id, conn, reason="provider_family_mismatch"
+        )
+
+    # Compatible with the current provider (or unknown to the static map).
+    return model_override, provider, "task_override"
+
+
+def _handle_incompatible_model_override(
+    model_override: str,
+    provider: Optional[str],
+    task_id: Optional[str],
+    conn: Optional[sqlite3.Connection],
+    *,
+    reason: str,
+) -> tuple[None, None, None]:
+    """Record a model_override_incompatible event and return "use lane" signals."""
+    if task_id and conn:
+        _append_event(
+            conn,
+            task_id,
+            "model_override_incompatible",
+            {
+                "model_override": model_override,
+                "provider": provider,
+                "reason": reason,
+            },
+        )
+    return None, None, None
+
+
 def _spawn_identity_metadata(
     profile: Optional[str],
     *,
     model_override: Optional[str] = None,
     board: Optional[str] = None,
     lane_entry: Optional[dict] = None,
+    task_id: Optional[str] = None,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> Optional[dict[str, Any]]:
     """Resolve and return the single spawn-time identity for a claimed run.
+
+    When ``model_override`` names a model from a different provider family than
+    the effective lane/profile, it is ignored and a ``model_override_incompatible``
+    event is appended (if ``task_id`` and ``conn`` are provided).  When the caller
+    explicitly supplies a provider/model pair (e.g. ``anthropic/claude-opus-4-8``)
+    the spawn follows that provider.  This prevents a persisted poison-pill model
+    override from surviving across provider/lane changes.
 
     Active lanes are mutable. Cost consumers may run long after dispatch, so the
     backfill path must not re-read the then-active lane to decide whether a
@@ -6365,9 +6451,20 @@ def _spawn_identity_metadata(
 
         model: Optional[str] = None
         model_source: Optional[str] = None
+        override_provider: Optional[str] = None
+        current_provider = lane_provider or profile_provider
         if isinstance(model_override, str) and model_override.strip():
-            model = model_override.strip()
-            model_source = "task_override"
+            resolved_model, resolved_provider, resolved_source = _resolve_model_override(
+                model_override.strip(),
+                current_provider,
+                task_id=task_id,
+                conn=conn,
+            )
+            if resolved_model is not None:
+                model = resolved_model
+                model_source = resolved_source
+                if resolved_source == "task_override_with_provider_switch":
+                    override_provider = resolved_provider
         if not model and lane_model:
             model = lane_model
             model_source = "lane"
@@ -6385,11 +6482,16 @@ def _spawn_identity_metadata(
 
         # Preserve the existing task-override routing contract: a model-only
         # task override stays on the profile provider instead of silently
-        # adopting a mutable lane provider. Otherwise each independently pinned
-        # lane component wins: a provider-only lane combines with the concrete
-        # profile model, while a model-only lane combines with profile provider.
+        # adopting a mutable lane provider. Explicit provider/model pairs
+        # (``provider/model``) may switch the provider; poison-pill overrides
+        # are ignored by ``_resolve_model_override`` above. Otherwise each
+        # independently pinned lane component wins: a provider-only lane
+        # combines with the concrete profile model, while a model-only lane
+        # combines with profile provider.
         if is_claude_cli:
             route_provider: Optional[str] = "claude-cli"
+        elif model_source == "task_override_with_provider_switch" and override_provider:
+            route_provider = override_provider
         elif model_source != "task_override" and (lane_provider or model_source == "lane"):
             route_provider = lane_provider or profile_provider
             if lane_provider:
@@ -9203,6 +9305,8 @@ def claim_task(
             model_override=trow["model_override"] if trow else None,
             board=board_slug_for_conn(conn) or get_current_board(),
             lane_entry=lane_entry,
+            task_id=task_id,
+            conn=conn,
         )
         requested_provider = (
             spawn_metadata.get("route_provider") if spawn_metadata else None
@@ -9348,6 +9452,8 @@ def claim_review_task(
             model_override=trow["model_override"] if trow else None,
             board=board_slug_for_conn(conn) or get_current_board(),
             lane_entry=lane_entry,
+            task_id=task_id,
+            conn=conn,
         )
         metadata_json = (
             json.dumps(spawn_metadata, sort_keys=True) if spawn_metadata else None
@@ -23167,7 +23273,8 @@ def _latest_blocked_run_for_auto_retry(
 ) -> Optional[sqlite3.Row]:
     row = conn.execute(
         """
-        SELECT id, profile, summary, error, ended_at, verdict, metadata
+        SELECT id, profile, summary, error, ended_at, verdict, metadata,
+               requested_provider, requested_model
           FROM task_runs
          WHERE task_id = ?
            AND outcome IN ('blocked', ?)
@@ -23189,7 +23296,8 @@ def _latest_blocked_run_for_auto_retry(
     # the subquery enforces that the candidate is the absolute latest ended run.
     return conn.execute(
         """
-        SELECT id, profile, summary, error, ended_at, verdict, metadata
+        SELECT id, profile, summary, error, ended_at, verdict, metadata,
+               requested_provider, requested_model
           FROM task_runs
          WHERE task_id = ?
            AND outcome = 'completed'
@@ -23526,6 +23634,44 @@ def auto_retry_blocked_tasks(
                 continue
         attempt = current_count + 1
         escalated = attempt >= 2
+        escalated_model_override: Optional[str] = None
+        if escalated:
+            # Prefer an explicit provider/model pair when the escalation model
+            # belongs to a different family than the blocked run's route. A
+            # model-only override would be a poison-pill against the lane
+            # provider (HTTP 400 on every subsequent spawn).
+            from hermes_cli.models import detect_static_provider_for_model
+
+            current_provider = None
+            try:
+                raw_provider = blocked_run["requested_provider"]
+                if isinstance(raw_provider, str) and raw_provider.strip():
+                    current_provider = raw_provider.strip()
+            except Exception:
+                current_provider = None
+            if not current_provider:
+                try:
+                    meta = blocked_run["metadata"]
+                    if isinstance(meta, str) and meta.strip():
+                        import json as _json
+                        parsed = _json.loads(meta)
+                        raw_provider = parsed.get("route_provider") or parsed.get("provider")
+                        if isinstance(raw_provider, str) and raw_provider.strip():
+                            current_provider = raw_provider.strip()
+                except Exception:
+                    current_provider = current_provider
+            if not current_provider:
+                # Safe default for family detection; avoids NoneType in models.py.
+                current_provider = "openai-codex"
+            redirected = detect_static_provider_for_model(
+                AUTO_RETRY_ESCALATION_MODEL, current_provider
+            )
+            if redirected is not None:
+                escalated_model_override = (
+                    f"{redirected[0]}/{AUTO_RETRY_ESCALATION_MODEL}"
+                )
+            else:
+                escalated_model_override = AUTO_RETRY_ESCALATION_MODEL
         with write_txn(conn):
             latest = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?",
@@ -23550,7 +23696,7 @@ def auto_retry_blocked_tasks(
                 (
                     attempt,
                     AUTO_RETRY_ESCALATION_PROFILE if escalated else None,
-                    AUTO_RETRY_ESCALATION_MODEL if escalated else None,
+                    escalated_model_override,
                     task_id,
                 ),
             )
@@ -23591,7 +23737,7 @@ def auto_retry_blocked_tasks(
                 "body_hash": body_hash,
             }
             if escalated:
-                payload["model_override"] = AUTO_RETRY_ESCALATION_MODEL
+                payload["model_override"] = escalated_model_override
                 payload["assignee"] = AUTO_RETRY_ESCALATION_PROFILE
             _append_event(conn, task_id, "auto_retried", payload)
         retried.append((task_id, attempt))
