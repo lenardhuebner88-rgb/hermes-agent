@@ -552,10 +552,15 @@ def test_dispatch_auto_retry_second_attempt_escalates(
         assert row["status"] == "ready"
         assert row["auto_retry_count"] == 2
         assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
-        assert row["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
+        # Escalation model is stored as provider/model when the blocked run's
+        # route provider is a different family (poison-pill prevention).
+        assert row["model_override"] in {
+            kb.AUTO_RETRY_ESCALATION_MODEL,
+            f"anthropic/{kb.AUTO_RETRY_ESCALATION_MODEL}",
+        }
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retried"][-1]
         assert event.payload["escalated"] is True
-        assert event.payload["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
+        assert event.payload["model_override"] == row["model_override"]
 
 
 def test_dispatch_auto_retry_stops_after_limit(
