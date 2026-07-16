@@ -4027,6 +4027,9 @@ HEILER_CLASS_UNCLASSIFIED = "unclassified"
 # (kein Token-Runaway): capacity intentionally has no _LEDGER_TEMPLATES entry and
 # is NOT in vision_metrics._NON_TRANSIENT_HEILER_CLASSES (pure observability).
 HEILER_CLASS_CAPACITY = "capacity"
+# A worker that exits cleanly without the required terminal Kanban call is a
+# protocol compliance signal, kept distinct from transient infrastructure.
+HEILER_CLASS_PROTOCOL_NONCOMPLIANCE = "protocol-noncompliance"
 # HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose only signal is a
 # deliberate operator decision (supersede) or a run that actually SUCCEEDED
 # (green gate, task blocked by something outside the run) is not a product
@@ -17812,6 +17815,11 @@ _HEILER_TEXT_SIGNALS = (
         # is the same capacity signal, reusing this class (no new class).
         "input-token runaway",
     )),
+    # Keep this precise terminal-call omission ahead of the broad transient
+    # protocol wording below so repeated misses remain visible in by_class.
+    (HEILER_CLASS_PROTOCOL_NONCOMPLIANCE, (
+        "without calling kanban_complete",
+    )),
     (HEILER_CLASS_TRANSIENT, (
         "dirty",
         "overlap",
@@ -17826,8 +17834,9 @@ _HEILER_TEXT_SIGNALS = (
         "checkout",
         "rate limit",
         "rate_limited",
-        # REASON-FIDELITY-S1: harness-protocol faults are operational, not
-        # product defects. Budget exhaustion is capacity above, not transient.
+        # Other harness-protocol faults are operational, not product defects.
+        # The terminal-call omission has its own class above; budget exhaustion
+        # is capacity above, not transient.
         "protocol violation",
         "git",
         "branch",
@@ -17864,7 +17873,7 @@ _HEILER_OUTCOME_CLASS = {
     # limits, not product defects. Mapped structurally so a settled block that
     # carries one as its real ``trigger_outcome`` (now carried by the
     # silent-block sweep) lands honestly instead of defaulting to real-bug.
-    "timed_out": HEILER_CLASS_TRANSIENT,
+    "timed_out": HEILER_CLASS_CAPACITY,
     "reclaimed": HEILER_CLASS_TRANSIENT,
     # HEILER-CLASSIFY-SIGNAL-GAP-S2: a mis-assigned (nonspawnable) assignee is
     # a structural config/spec gap by construction, never free-text — mapped
@@ -17899,6 +17908,9 @@ _HEILER_STALL_CLASS = {
 _HEILER_OUTCOME_FALLBACK_CLASS = {
     "crashed": HEILER_CLASS_TRANSIENT,
     "iteration_budget_exhausted": HEILER_CLASS_CAPACITY,
+    # The detector retains the posted deliverable and leaves the task blocked
+    # for operator-facing repair; this is an explicit operator gate.
+    "deliverable_posted_not_completed": HEILER_CLASS_OPERATOR_GATED,
     # HEILER-CLASSIFY-SIGNAL-GAP-S2: a settled block whose last ended run
     # actually COMPLETED (green gate) carries no failure signal by
     # definition — WEAK so a completed run whose reason text still reveals a
