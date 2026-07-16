@@ -22,7 +22,7 @@ from hermes_cli import control_loops
 _REAL_SYSTEMCTL = control_loops._systemctl
 
 
-def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path) -> None:
+def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) -> None:
     d = packs_dir / name
     d.mkdir(parents=True)
     phase_names = ("plan", "build", "verify") if ptype == "pipeline" else ("round",)
@@ -37,23 +37,25 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path) -> None:
             "engine": "claude", "model": "claude-sonnet-5",
             "timeout": 600, "prompt": f"{pname}.md",
         }
-    (d / "pack.yaml").write_text(
-        yaml.safe_dump({
-            "name": name, "type": ptype, "repo": str(repo),
-            "description": f"Testpack {name}", "stability": "experimental",
-            "phases": phases,
-            "params": {"fokus": "standard-fokus"},
-        }),
-        encoding="utf-8",
-    )
+    manifest = {
+        "name": name, "type": ptype, "repo": str(repo),
+        "description": f"Testpack {name}", "stability": "experimental",
+        "phases": phases,
+        "params": {"fokus": "standard-fokus"},
+        **overrides,
+    }
+    (d / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
 
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     packs = tmp_path / "packs"
     repo = tmp_path / "kein-repo"  # existiert nicht → commits_ahead == 0
-    write_pack(packs, "nacht", "sweep", repo)
-    write_pack(packs, "fliessband", "pipeline", repo)
+    write_pack(packs, "nacht", "sweep", repo)  # keine land_*-Felder → Loader-Defaults
+    write_pack(
+        packs, "fliessband", "pipeline", repo,
+        land_remote="origin", land_push=False, land_gates=["npm run gate", "pytest -q"],
+    )
     (packs / "_vorlage").mkdir()  # Unterstrich-Packs sind unsichtbar
 
     models = tmp_path / "models.yaml"
@@ -102,9 +104,15 @@ def test_list_loops_shows_packs_hides_templates(api):
     assert nacht["autoland"] is False
     assert nacht["repo"] == str((tmp / "kein-repo").resolve())
     assert nacht["base_branch"] == "main"
+    assert nacht["land_remote"] == "piet-fork"
+    assert nacht["land_push"] is True
+    assert nacht["land_gates"] is None
     band = next(p for p in data["packs"] if p["name"] == "fliessband")
     assert band["queue"] == {s: 0 for s in ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")}
     assert band["phases"]["build"]["model"] == "claude-sonnet-5"
+    assert band["land_remote"] == "origin"
+    assert band["land_push"] is False
+    assert band["land_gates"] == ["npm run gate", "pytest -q"]
 
 
 def test_real_phase_usage_ledger_flows_to_summary_and_detail(api):

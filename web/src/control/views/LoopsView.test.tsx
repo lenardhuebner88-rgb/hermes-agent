@@ -52,6 +52,11 @@ const runningPipeline: LoopPack = {
   source: "repo",
   repo: "/home/piet/.hermes/hermes-agent",
   base_branch: "main",
+  // land_remote/land_push/land_gates: builder-reviewer/pack.yaml setzt keins
+  // davon → Loader-Defaults (piet-fork/true/null), real geerntet (2026-07-16).
+  land_remote: "piet-fork",
+  land_push: true,
+  land_gates: null,
   description: "Fable plant Schwachstellen-Fixes, Sonnet baut, Fable verifiziert adversarial",
   stability: "stable",
   phases: {
@@ -92,6 +97,10 @@ const idleSweepWithCommits: LoopPack = {
   source: "repo",
   repo: "/home/piet/.hermes/hermes-agent",
   base_branch: "main",
+  // doc-sweep/pack.yaml setzt ebenfalls keins der drei Felder → dieselben Defaults.
+  land_remote: "piet-fork",
+  land_push: true,
+  land_gates: null,
   description: "Pro Runde EINE Doku-Drift zwischen Repo-Doku und Code-Verhalten finden und die Doku korrigieren",
   stability: "experimental",
   phases: { round: { engine: "claude", model: "claude-sonnet-5", timeout: 2400 } },
@@ -302,6 +311,33 @@ describe("LoopsGrid", () => {
     expect(html).toContain(t.commitsAhead(4));
     // sweep hat keine Queue → keine Queue-Stat-Kacheln fuer dieses Pack.
     expect(html).not.toContain(t.queueBuilding);
+  });
+
+  it("shows the land remote when land_push is true (default builder-reviewer/doc-sweep config)", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain((runningPipeline as LoopPackSummary).land_remote);
+    expect(html).not.toContain(t.landNoAutoPush);
+  });
+
+  it("shows a neutral 'kein Auto-Push' hint instead of the remote when land_push is false", () => {
+    const noAutoPush: LoopPack = { ...idleSweepWithCommits, name: "ht-locked", land_push: false };
+    const html = renderGrid([noAutoPush]);
+    expect(html).toContain(t.landNoAutoPush);
+    expect(html).not.toContain((idleSweepWithCommits as LoopPackSummary).land_remote);
+  });
+
+  it("shows the land-gates count with the commands as a tooltip when land_gates is set, nothing when null", () => {
+    const withGates: LoopPack = {
+      ...idleSweepWithCommits,
+      name: "gated",
+      land_gates: ["npm run gate", "pytest -q"],
+    };
+    const html = renderGrid([withGates]);
+    expect(html).toContain(t.landGatesCount(2));
+    expect(html).toContain('title="npm run gate, pytest -q"');
+
+    const withoutGates = renderGrid([idleSweepWithCommits]);
+    expect(withoutGates).not.toContain("Land-Gate");
   });
 
   it("renders a manifest-error pack as an error card, not a crash", () => {

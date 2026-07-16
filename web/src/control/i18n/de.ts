@@ -766,6 +766,11 @@ export const de = {
     repoFilterLabel: "Projekt filtern",
     boundRepo: "Gebundenes Projekt",
     boundBranch: (branch: string) => `Basis ${branch}`,
+    landRemoteArrow: "→",
+    // Bewusst neutral (kein Warn-/Alarmton) — land_push=false ist ein gewollter
+    // Zustand (z.B. Dreifach-Lock), keine Fehlkonfiguration.
+    landNoAutoPush: "kein Auto-Push",
+    landGatesCount: (n: number) => `${n} ${n === 1 ? "Land-Gate" : "Land-Gates"}`,
     progressRound: (round: number | null, max: number) => `Runde ${round ?? "–"} / ${max}`,
     progressEvidence: "Fortschritt aus belegten Zuständen — keine Fake-ETA.",
     phaseStateDone: "fertig",
