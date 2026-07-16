@@ -20570,11 +20570,24 @@ def _escalated_classes_for_task(
     ALREADY escalated must not append a duplicate raw event (≤ 1 raw event per
     class per root), while a genuinely NEW class still writes — and stays
     visible. Pure read; safe to call inside an open ``write_txn``.
+
+    Episode-scoped exactly like :func:`_operator_escalation_is_active`: an
+    ``"unblocked"`` (``unblock_task`` / ``answer_operator_question``) or
+    ``"promoted_manual"`` event resolves the prior hold, so only escalations
+    since that boundary belong to the CURRENT episode. Without this, a class
+    that escalated once, was operator-resolved, and later recurs would be
+    coalesced away forever instead of escalating again.
     """
+    boundary = conn.execute(
+        "SELECT MAX(id) AS m FROM task_events "
+        "WHERE task_id = ? AND kind IN ('unblocked', 'promoted_manual')",
+        (task_id,),
+    ).fetchone()
+    since_id = int(boundary["m"]) if boundary and boundary["m"] is not None else 0
     counts: dict[str, int] = {}
     for r in conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
-        (task_id, OPERATOR_ESCALATION_EVENT),
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > ?",
+        (task_id, OPERATOR_ESCALATION_EVENT, since_id),
     ).fetchall():
         try:
             payload = json.loads(r["payload"] or "{}")
