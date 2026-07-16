@@ -767,6 +767,11 @@ def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons.",
     )
+    p_unblock.add_argument(
+        "--force",
+        action="store_true",
+        help="Unblock even when an exhausted per-task input-token budget would immediately re-park it",
+    )
     p_unblock.add_argument("task_ids", nargs="+")
 
     p_promote = sub.add_parser(
@@ -3215,6 +3220,19 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
+            refusal = None if args.force else kb.budget_runaway_unblock_refusal(conn, tid)
+            if refusal:
+                failed.append(tid)
+                print(
+                    f"Refusing to unblock {tid}: exhausted budget-runaway park "
+                    f"(input_token_sum={refusal['input_token_sum']}, cap={refusal['cap']}, "
+                    "budget_extension_count="
+                    f"{refusal['budget_extension_count']}/{refusal['budget_extension_limit']}). "
+                    "Use --force to retain the previous unblock behavior, create a fresh bounded "
+                    "task, respec this task, or raise kanban.per_task_input_token_cap in config.",
+                    file=sys.stderr,
+                )
+                continue
             if reason:
                 kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
             if not kb.unblock_task(conn, tid):
