@@ -2,7 +2,7 @@
 
 The unsafe one-liner ``scripts/run_tests.sh $(scripts/affected-tests.sh)``
 expands to a bare ``run_tests.sh`` when the diff maps no test files, which runs
-the WHOLE suite (~31k tests, timeout / EXIT 124). ``run-affected.sh`` must
+the WHOLE suite (~44k tests, timeout / EXIT 124). ``run-affected.sh`` must
 instead SKIP pytest (exit 0) and never reach the canonical runner.
 
 These drive the real shell scripts in a throwaway git repo with a *stubbed*

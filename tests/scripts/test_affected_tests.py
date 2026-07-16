@@ -24,17 +24,17 @@ def _load_module():
 
 def test_source_file_maps_to_its_test_file():
     mod = _load_module()
-    # hermes_cli/kanban_db.py -> tests/hermes_cli/test_kanban_db.py (both real).
-    out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/kanban_db.py"])
-    assert "tests/hermes_cli/test_kanban_db.py" in out
+    # hermes_cli/commands.py -> tests/hermes_cli/test_commands.py (both real).
+    out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/commands.py"])
+    assert "tests/hermes_cli/test_commands.py" in out
 
 
 def test_changed_test_file_runs_itself():
     mod = _load_module()
     out = mod.affected_pytest_modules(
-        REPO_ROOT, ["tests/hermes_cli/test_kanban_db.py"]
+        REPO_ROOT, ["tests/hermes_cli/test_commands.py"]
     )
-    assert out == ["tests/hermes_cli/test_kanban_db.py"]
+    assert out == ["tests/hermes_cli/test_commands.py"]
 
 
 def test_non_python_and_unmapped_yield_nothing():
@@ -110,14 +110,17 @@ def test_matches_kanban_worktrees_mapping():
 
 
 def test_changed_module_selects_feature_named_sibling_tests_from_imports():
-    """Historical stale-sibling shape: direct test green, feature test stale."""
+    """Historical stale-sibling shape: direct test green, feature test stale.
+
+    tests/hermes_cli/test_kanban_db.py was split into domain files
+    (2213f85be); the import-based siblings must still be selected."""
     mod = _load_module()
 
     selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/kanban_db.py"])
 
-    assert "tests/hermes_cli/test_kanban_db.py" in selected
-    assert "tests/hermes_cli/test_kanban_core_functionality.py" in selected
-    assert "tests/hermes_cli/" not in selected
+    assert "tests/hermes_cli/test_kanban_db_schema.py" in selected
+    # Root-level feature tests are import-scanned too.
+    assert "tests/test_design_board_kanban.py" in selected
 
 
 def test_changed_module_selects_submodule_from_import_sibling_tests():
@@ -129,3 +132,25 @@ def test_changed_module_selects_submodule_from_import_sibling_tests():
     assert "tests/hermes_cli/test_commands.py" in selected
     assert "tests/hermes_cli/test_goals.py" in selected
     assert "tests/hermes_cli/" not in selected
+
+
+def test_changed_module_selects_root_level_sibling_tests():
+    """Feature tests also live directly at tests/ root: changing
+    hermes_cli/design_board_store.py must select
+    tests/test_design_board_store.py (zero-selection blind spot)."""
+    mod = _load_module()
+
+    selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
+
+    assert "tests/test_design_board_store.py" in selected
+
+
+def test_fallback_cap_covers_hermes_cli_package_dir():
+    """tests/hermes_cli/ (592 files at calibration) is under the raised cap,
+    so a hermes_cli source without a 1:1 test file selects the package
+    directory again instead of silently downgrading to no selection."""
+    mod = _load_module()
+    # tests/hermes_cli/test_design_board_store.py does not exist (the 1:1
+    # test lives at tests/ root), so the directory fallback applies.
+    out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
+    assert "tests/hermes_cli/" in out

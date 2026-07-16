@@ -45,13 +45,13 @@ from pathlib import Path
 # monolith edit from turning the targeted gate into a de-facto full-suite
 # run, satisfying the AC-2 counter-metric: no gate-tempo-for-coverage trade.
 #
-# Calibrated against real package directories (2026-06-23):
-#   tests/hermes_cli/  437 files / 9076 tests / ~26s wall
-#   tests/gateway/     356 files / 7516 tests / ~41s wall
-#   tests/tools/       270 files
-# 500 covers all current directories with headroom; anything larger would
+# Calibrated against real package directories (2026-07-16):
+#   tests/hermes_cli/  592 files / 11276 tests
+#   tests/gateway/     460 files / 8647 tests
+#   tests/tools/       318 files
+# 800 covers all current directories with headroom; anything larger would
 # push walltime past the targeted-gate budget.
-_FALLBACK_MAX_TEST_FILES = 500
+_FALLBACK_MAX_TEST_FILES = 800
 
 
 def _imports_changed_module(test_path: Path, module_import: str) -> bool:
@@ -77,14 +77,19 @@ def _imports_changed_module(test_path: Path, module_import: str) -> bool:
 
 def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) -> list[str]:
     """Bounded import-based sibling tests for a changed module."""
+    module_import = str(source.with_suffix("")).replace("/", ".")
+    # Feature tests also live directly at tests/ root (e.g.
+    # tests/test_design_board_store.py for hermes_cli/design_board_store.py);
+    # glob is non-recursive, so the root scan only matches those.
+    test_dirs = [repo_root / "tests"]
     pkg_test_dir = Path("tests") / rel_dir
     absolute_pkg_test_dir = repo_root / pkg_test_dir
-    if pkg_test_dir == Path("tests") or not absolute_pkg_test_dir.is_dir():
-        return []
-    module_import = str(source.with_suffix("")).replace("/", ".")
+    if pkg_test_dir != Path("tests") and absolute_pkg_test_dir.is_dir():
+        test_dirs.append(absolute_pkg_test_dir)
     return [
         str(path.relative_to(repo_root))
-        for path in sorted(absolute_pkg_test_dir.glob("test_*.py"))
+        for test_dir in test_dirs
+        for path in sorted(test_dir.glob("test_*.py"))
         if _imports_changed_module(path, module_import)
     ]
 

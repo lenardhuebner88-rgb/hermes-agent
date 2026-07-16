@@ -790,3 +790,15 @@ def test_affected_pytest_module_no_fallback_for_root_source(repo):
     mods = kwt._affected_pytest_modules(repo, ["run_agent.py"])
     assert mods == []
 
+
+def test_affected_pytest_module_selects_root_level_sibling(repo):
+    """Feature tests directly at tests/ root are import-scanned too (e.g.
+    tests/test_design_board_store.py for hermes_cli/design_board_store.py)."""
+    (repo / "hermes_cli").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_design_board_store.py").write_text(
+        "from hermes_cli import design_board_store\n"
+    )
+    mods = kwt._affected_pytest_modules(repo, ["hermes_cli/design_board_store.py"])
+    assert mods == ["tests/test_design_board_store.py"]
+

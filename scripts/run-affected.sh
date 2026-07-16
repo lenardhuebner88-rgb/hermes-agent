@@ -6,7 +6,7 @@
 #
 # This replaces the unsafe one-liner `scripts/run_tests.sh $(scripts/affected-tests.sh)`:
 # when affected-tests.sh prints nothing, the command substitution expands to
-# nothing and `run_tests.sh` runs with no path args = the WHOLE suite (~31k
+# nothing and `run_tests.sh` runs with no path args = the WHOLE suite (~44k
 # tests, timeout / EXIT 124). That is exactly the "accidentally ran the full
 # suite" failure the targeted-scope rule exists to prevent.
 #
