@@ -14,6 +14,31 @@ import os
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _reset_check_fn_cache():
+    """``_check_kanban_mode``/``_check_kanban_orchestrator_mode`` results are
+    memoized process-globally in ``tools/registry.py`` (30s TTL, plus a 60s
+    "last-good" grace on failure) keyed only by the check_fn callable, not by
+    env state. Several tests below flip ``HERMES_KANBAN_TASK`` to probe both
+    gating states and already call ``invalidate_check_fn_cache()`` on entry
+    to protect themselves from a prior leak, but leave the cache dirty on
+    exit. In a raw multi-file pytest invocation (single interpreter, e.g. a
+    reviewer debugging with ``pytest tests/hermes_cli tests/tools``) that
+    residue can outlive ``monkeypatch``'s teardown and leak a stale ``True``
+    into an unrelated later test, making the real registry expose
+    ``kanban_complete``/``kanban_block`` even without the env var set (seen
+    2026-07-16: broke
+    ``test_terminalization_nudge_filters_flat_runtime_tool_schemas``, which
+    expects those tools ABSENT from the real registry). Reset before AND
+    after every test in this file so it is hermetic in both directions.
+    """
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    yield
+    invalidate_check_fn_cache()
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
