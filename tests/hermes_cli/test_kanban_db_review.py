@@ -211,6 +211,65 @@ def test_b1_submit_for_review_non_git_payload_has_no_snapshot_keys(
         assert "diff_stat" not in ev[0].payload
 
 
+def test_review_diff_snapshot_walks_back_and_resubmit_carries_snapshot(
+    kanban_home, tmp_path
+):
+    """A vanished workspace must not erase prior diff evidence for review."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    snapshot = {
+        "changed_files": ["hermes_cli/kanban_db.py"],
+        "diff_stat": " hermes_cli/kanban_db.py | 12 ++++++++++++\n",
+        "diff_base_commit": "deadbeef",
+        "diff_baseline": "pre_run_commit",
+    }
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="carry prior diff",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(scratch),
+            initial_status="running",
+        )
+        kb.add_event(conn, tid, "submitted_for_review", snapshot)
+        assert kb._submit_for_review(
+            conn,
+            tid,
+            result="done",
+            summary="resubmit after workspace vanished",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+
+        events = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "submitted_for_review"
+        ]
+        payload = events[-1].payload
+        assert payload is not None
+        assert payload["changed_files"] == snapshot["changed_files"]
+        assert payload["diff_stat"] == snapshot["diff_stat"]
+        assert payload["diff_base_commit"] == snapshot["diff_base_commit"]
+        assert payload["diff_baseline"] == snapshot["diff_baseline"]
+
+        kb.add_event(
+            conn,
+            tid,
+            "submitted_for_review",
+            {"review_stage": 1, "target_profile": "critical"},
+        )
+        _set_task_status(conn, tid, "review")
+        assert kb.claim_review_task(conn, tid) is not None
+        section = "\n".join(kb._render_review_verifier_section(conn, tid))
+
+    assert "`hermes_cli/kanban_db.py`" in section
+    assert snapshot["diff_stat"].strip() in section
+    assert "No machine diff snapshot was captured" not in section
+
+
 def test_b2_verdict_column_present_and_migrate_idempotently(kanban_home):
     """task_runs gains a ``verdict`` column; re-running the additive migration
     is a no-op (idempotent, no duplicate-column crash)."""

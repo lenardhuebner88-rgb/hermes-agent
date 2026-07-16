@@ -11473,6 +11473,33 @@ def _submit_for_review(
         task_id,
         expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
     )
+    # A workspace can disappear between review stages.  Preserve the most
+    # recent handoff's evidence when that makes the fresh capture empty, so the
+    # new submitted_for_review event remains self-contained for its verifier.
+    if not diff_snapshot.get("changed_files") and not diff_snapshot.get("diff_stat"):
+        try:
+            previous = conn.execute(
+                "SELECT payload FROM task_events "
+                "WHERE task_id = ? AND kind = 'submitted_for_review' "
+                "ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            previous_payload = json.loads(previous["payload"]) if previous else None
+        except (sqlite3.Error, ValueError, TypeError):
+            previous_payload = None
+        if isinstance(previous_payload, dict):
+            carried_snapshot = {
+                key: previous_payload[key]
+                for key in (
+                    "changed_files",
+                    "diff_stat",
+                    "diff_base_commit",
+                    "diff_baseline",
+                )
+                if key in previous_payload
+            }
+            if carried_snapshot:
+                diff_snapshot = carried_snapshot
     if diff_snapshot:
         run_metadata = (
             {**metadata, **diff_snapshot}
@@ -25757,34 +25784,37 @@ _VERIFIER_ANALYSIS_CLASS_HEADER = (
 def _latest_review_diff_snapshot(
     conn: sqlite3.Connection, task_id: str
 ) -> tuple[list, Optional[str]]:
-    """Return ``(changed_files, diff_stat)`` from the most recent B1 snapshot.
+    """Return ``(changed_files, diff_stat)`` from the latest usable B1 snapshot.
 
-    Reads the latest ``submitted_for_review`` event payload. Fail-soft: returns
-    ``([], None)`` when there is no such event, no snapshot keys, or the payload
-    is unreadable.
+    Walks backward over recent ``submitted_for_review`` events because a fresh
+    capture can be empty when the workspace vanished after an earlier handoff.
+    Fail-soft: returns ``([], None)`` when no usable snapshot is found.
     """
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT payload FROM task_events "
             "WHERE task_id = ? AND kind = 'submitted_for_review' "
-            "ORDER BY id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
+            "ORDER BY id DESC LIMIT ?",
+            (task_id, _CTX_REVIEW_MAX_GATE_EVENTS),
+        ).fetchall()
     except sqlite3.Error:
         return [], None
-    if not row or not row["payload"]:
-        return [], None
-    try:
-        payload = json.loads(row["payload"])
-    except (ValueError, TypeError):
-        return [], None
-    if not isinstance(payload, dict):
-        return [], None
-    cf = payload.get("changed_files")
-    changed = [str(x) for x in cf] if isinstance(cf, list) else []
-    ds = payload.get("diff_stat")
-    diff_stat = ds if isinstance(ds, str) and ds.strip() else None
-    return changed, diff_stat
+    for row in rows:
+        if not row["payload"]:
+            continue
+        try:
+            payload = json.loads(row["payload"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        cf = payload.get("changed_files")
+        changed = [str(x) for x in cf] if isinstance(cf, list) else []
+        ds = payload.get("diff_stat")
+        diff_stat = ds if isinstance(ds, str) and ds.strip() else None
+        if changed or diff_stat:
+            return changed, diff_stat
+    return [], None
 
 
 def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> list:
