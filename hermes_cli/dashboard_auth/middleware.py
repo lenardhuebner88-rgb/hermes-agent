@@ -127,6 +127,39 @@ def _ordered_session_providers(
     return providers
 
 
+def verify_cookie_session(request: Request):
+    """Verify the request's session cookie against the registered providers.
+
+    Verification-only slice of ``gated_auth_middleware`` for callers outside
+    the gate: the legacy loopback token middleware uses it so cookie-holding
+    native clients (the Hermes Diktat/Voice Android apps authenticate via the
+    WebView login and can never present the SPA-injected session token) are
+    accepted on ``/api/*`` in loopback mode. No refresh, no cookie mutation,
+    no redirects — an expired access token simply returns ``None`` and the
+    client re-runs its login flow, matching the apps' existing UX.
+
+    Returns the verified ``Session`` or ``None``. Never raises: a provider
+    whose backing store is unreachable is skipped (the token may belong to a
+    different provider; loopback callers still hold the header-token path).
+    """
+    at, _rt = read_session_cookies(request)
+    if not at:
+        return None
+    for provider in _ordered_session_providers(read_session_provider(request)):
+        try:
+            session = provider.verify_session(access_token=at)
+        except ProviderError as e:
+            _log.warning(
+                "dashboard-auth: provider %r unreachable during loopback "
+                "cookie verify: %s",
+                provider.name, e,
+            )
+            continue
+        if session is not None:
+            return session
+    return None
+
+
 def _unauth_response(request: Request, *, reason: str) -> Response:
     """API routes → 401 JSON with ``login_url``; HTML routes → 302 → /login.
 

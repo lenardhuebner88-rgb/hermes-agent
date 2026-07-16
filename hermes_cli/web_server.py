@@ -813,10 +813,22 @@ async def auth_middleware(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
         if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Unauthorized"},
+            # Native clients (Hermes Diktat/Voice) authenticate with the
+            # WebView-login session cookie and can never present the
+            # SPA-injected header token, so a valid cookie session must also
+            # authorize /api/* in loopback mode — otherwise the apps' cloud
+            # transcribe, auth probe, and status heartbeats all 401 behind
+            # Tailscale Serve (which proxies onto this loopback bind).
+            from hermes_cli.dashboard_auth.middleware import (
+                verify_cookie_session,
             )
+            session = verify_cookie_session(request)
+            if session is None:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Unauthorized"},
+                )
+            request.state.session = session
     return await call_next(request)
 
 
@@ -2355,6 +2367,52 @@ _DICTATE_ERRORS = {
     "cloud_too_large", "cloud_empty", "insert_failed",
 }
 
+# The dashboard process restarts on every deploy; keeping the (metadata-only)
+# Dictate status purely in memory reset the tile to "kein Bericht" each time
+# and threw away the counters. Persisted bounded + atomically, loaded once at
+# import. Path resolved at call time so HERMES_HOME isolation (tests) holds.
+def _dictate_state_path() -> Path:
+    return get_hermes_home() / "state" / "dictate-status.json"
+
+
+def _load_dictate_status() -> None:
+    try:
+        raw = json.loads(_dictate_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    status = raw.get("status")
+    samples = raw.get("latency_samples")
+    with _DICTATE_STATUS_LOCK:
+        if isinstance(status, dict):
+            for key in _DICTATE_STATUS:
+                if key in status:
+                    _DICTATE_STATUS[key] = status[key]
+        if isinstance(samples, list):
+            _DICTATE_LATENCY_SAMPLES[:] = [
+                int(value) for value in samples[-100:]
+                if isinstance(value, (int, float)) and 0 <= value <= 120_000
+            ]
+
+
+def _persist_dictate_status(
+    status: Dict[str, Any], samples: List[int],
+) -> None:
+    """Write the current snapshot to disk; never fails the report request."""
+    payload = json.dumps({"status": status, "latency_samples": samples[-100:]})
+    target = _dictate_state_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(target)
+    except OSError as e:
+        _log.warning("dictate-status: persist failed: %s", e)
+
+
+_load_dictate_status()
+
 
 def _latest_dictate_artifact() -> Optional[Dict[str, Any]]:
     if not _ARTIFACTS_DIR.is_dir():
@@ -2457,6 +2515,8 @@ async def report_dictate_status(payload: DictateStatusReport):
         elif event == "retry":
             _DICTATE_STATUS["retries"] += 1
         snapshot = dict(_DICTATE_STATUS)
+        samples = list(_DICTATE_LATENCY_SAMPLES)
+    _persist_dictate_status(snapshot, samples)
     return {"ok": True, **snapshot}
 
 

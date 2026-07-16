@@ -79,7 +79,9 @@ fun interface RecognizerFactory {
  */
 class OnDeviceRecognizerFactory(private val context: Context) : RecognizerFactory {
     override fun create(): SpeechRecognizer? {
-        if (!isAvailable(context)) return null
+        // The SDK_INT check is repeated inline (not only inside isAvailable) so the
+        // NewApi lint pass can prove the API-31 call below is guarded.
+        if (Build.VERSION.SDK_INT < 31 || !isAvailable(context)) return null
         return SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
     }
 

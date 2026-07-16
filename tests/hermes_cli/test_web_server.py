@@ -417,6 +417,93 @@ class TestWebServerEndpoints:
         )
         assert rejected.status_code == 422
 
+    def test_dictate_status_survives_restart_via_persisted_state(self):
+        import hermes_cli.web_server as web_server
+        from hermes_constants import get_hermes_home
+
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({
+                key: None for key in web_server._DICTATE_STATUS
+                if key not in ("dictations", "failures", "retries", "busy")
+            })
+            web_server._DICTATE_STATUS.update(
+                {"dictations": 0, "failures": 0, "retries": 0, "busy": 0}
+            )
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+
+        report = {
+            "app_version": "1.1",
+            "engine": "cloud",
+            "language": "german",
+            "style": "auto",
+            "surface": "ime",
+            "microphone_permission": True,
+            "service_enabled": True,
+            "event": "success",
+            "latency_ms": 1200,
+        }
+        assert self.client.post("/api/dictate/status", json=report).status_code == 200
+
+        state_path = get_hermes_home() / "state" / "dictate-status.json"
+        assert state_path.is_file()
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert persisted["status"]["app_version"] == "1.1"
+        assert persisted["status"]["dictations"] == 1
+        assert persisted["latency_samples"] == [1200]
+
+        # Simulate the deploy restart: wipe in-memory state, then rehydrate.
+        with web_server._DICTATE_STATUS_LOCK:
+            web_server._DICTATE_STATUS.update({
+                "last_contact_at": None, "app_version": None, "dictations": 0,
+            })
+            web_server._DICTATE_LATENCY_SAMPLES.clear()
+        web_server._load_dictate_status()
+
+        status = self.client.get("/api/dictate/status").json()
+        assert status["connected"] is True
+        assert status["app_version"] == "1.1"
+        assert status["dictations"] == 1
+        assert status["latency_p50_ms"] == 1200
+
+    def test_api_accepts_valid_session_cookie_without_header_token(self, monkeypatch):
+        """Native apps (Diktat/Voice) hold only the WebView-login cookie —
+        never the SPA-injected session token. A valid cookie session must
+        authorize /api/* in loopback mode; an invalid one must still 401."""
+        import time as _time
+
+        import hermes_cli.dashboard_auth.middleware as auth_mw
+        from hermes_cli.dashboard_auth.base import Session
+
+        session = Session(
+            user_id="piet", email="", display_name="piet", org_id="",
+            provider="basic", expires_at=int(_time.time()) + 3600,
+            access_token="valid-at", refresh_token="rt",
+        )
+
+        class _StubProvider:
+            name = "basic"
+
+            def verify_session(self, *, access_token):
+                return session if access_token == "valid-at" else None
+
+        monkeypatch.setattr(
+            auth_mw, "list_session_providers", lambda: [_StubProvider()]
+        )
+
+        del self.client.headers["X-Hermes-Session-Token"]
+
+        self.client.cookies.set("hermes_session_at", "valid-at")
+        self.client.cookies.set("hermes_session_provider", "basic")
+        response = self.client.get("/api/dictate/status")
+        assert response.status_code == 200
+        assert response.json()["schema"] == "hermes-dictate-status-v1"
+
+        self.client.cookies.set("hermes_session_at", "forged-at")
+        assert self.client.get("/api/dictate/status").status_code == 401
+
+        self.client.cookies.clear()
+        assert self.client.get("/api/dictate/status").status_code == 401
+
     def test_gateway_drain_begin_writes_marker(self):
         from gateway import drain_control
 
