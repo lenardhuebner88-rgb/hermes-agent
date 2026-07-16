@@ -18795,12 +18795,32 @@ def _record_task_failure(
             run_id = None
             if end_run:
                 # Only the spawn path has an open run to close.
+                # Honest terminal text: the raw caller error alone looks like a
+                # duplicate of the previous timed_out/crashed run. Prefix the
+                # trip so operators reading task_runs.error see the breaker;
+                # keep the original as suffix so text-signal matchers still hit.
+                # Fingerprint/same-cause grouping must stay on the ORIGINAL
+                # error (_end_run stamps worker_failure_fingerprint from its
+                # error arg), so we close with the raw error then rewrite only
+                # the error column for the operator-facing terminal line.
+                _orig = (error or "")[:500]
+                _prefix = (
+                    f"circuit breaker tripped after {failures} consecutive "
+                    f"{outcome} failures (limit {effective_limit}): "
+                )
+                _room = 500 - len(_prefix)
+                if _room <= 0:
+                    _terminal_error = _prefix[:500]
+                elif not _orig:
+                    _terminal_error = _prefix.rstrip()[:500]
+                else:
+                    _terminal_error = _prefix + _orig[:_room]
                 run_id = _end_run(
                     conn,
                     task_id,
                     outcome="gave_up",
                     status="gave_up",
-                    error=error[:500],
+                    error=_orig if _orig else None,
                     metadata={
                         "failures": failures,
                         "trigger_outcome": outcome,
@@ -18808,6 +18828,11 @@ def _record_task_failure(
                         "limit_source": limit_source,
                     },
                 )
+                if run_id is not None and _terminal_error:
+                    conn.execute(
+                        "UPDATE task_runs SET error = ? WHERE id = ?",
+                        (_terminal_error, int(run_id)),
+                    )
             payload = {
                 "failures": failures,
                 "effective_limit": effective_limit,
