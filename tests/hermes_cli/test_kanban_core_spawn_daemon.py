@@ -133,6 +133,7 @@ def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawna
         assert tid in res4.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
+        assert task.block_kind == "transient"
         assert task.consecutive_failures >= 2
         assert task.last_failure_error and "no PATH" in task.last_failure_error
     finally:
@@ -1052,4 +1053,3 @@ def test_cli_create_with_idempotency_key(kanban_home):
     out2 = run_slash("create 'y' --idempotency-key abc --json")
     tid2 = json.loads(out2)["id"]
     assert tid1 == tid2
-

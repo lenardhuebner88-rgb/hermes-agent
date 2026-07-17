@@ -81,6 +81,7 @@ def test_deterministic_spawn_failure_escalates_without_transient_retry(
 
         assert result == ("escalated", True)
         assert task.status == "blocked"
+        assert task.block_kind == "needs_input"
         assert task.transient_retry_count == 0
         assert kb.TRANSIENT_RETRY_EVENT not in [event.kind for event in events]
         assert kb.check_respawn_guard(conn, task_id) != "transient_retry_backoff"

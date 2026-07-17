@@ -18788,6 +18788,17 @@ def _classify_failure(
     return HEILER_CLASS_UNCLASSIFIED, _ev("default", "default")
 
 
+def _failure_block_kind(heiler_class: str) -> str:
+    """Map a terminal failure class onto the board's stable block taxonomy."""
+    if heiler_class == HEILER_CLASS_CONFLICT:
+        return "integration"
+    if heiler_class == HEILER_CLASS_CAPACITY:
+        return "capacity"
+    if heiler_class in {HEILER_CLASS_TRANSIENT, HEILER_CLASS_FLAKY}:
+        return "transient"
+    return "needs_input"
+
+
 def _heiler_classification_payload(
     *,
     heiler_class: str,
@@ -19134,6 +19145,11 @@ def _record_task_failure(
             effective_limit = int(failure_limit)
             limit_source = "dispatcher"
 
+        # Classify once so the terminal task state and the Heiler ledger cannot
+        # disagree about the failure that tripped the breaker.
+        h_class, h_ev = _classify_failure(error=error, outcome=outcome)
+        failure_block_kind = _failure_block_kind(h_class)
+
         # run_id stays None unless a branch closes an open run; the S4 Heiler
         # classification event at the end of the txn links to it when present.
         run_id = None
@@ -19147,9 +19163,10 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
+                    "block_kind = ?, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('running', 'ready')",
-                    (failures, error[:500], task_id),
+                    (failure_block_kind, failures, error[:500], task_id),
                 )
             else:
                 # Timeout/crash path: the caller's own txn already released
@@ -19343,7 +19360,6 @@ def _record_task_failure(
         # ledger (one heiler_classification event per failure) so the Stratege
         # (Phase 1.5) can aggregate causes. Pure read of error+outcome; emitted
         # inside this txn so it commits atomically with the status change.
-        h_class, h_ev = _classify_failure(error=error, outcome=outcome)
         _append_event(
             conn,
             task_id,
