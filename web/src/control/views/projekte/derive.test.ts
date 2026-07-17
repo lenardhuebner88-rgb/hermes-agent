@@ -4,6 +4,8 @@ import {
   countAgentsByProject,
   groupAgentsByKind,
   groupAgentsByProject,
+  kanbanTaskTone,
+  loopOutcomeTone,
   parentDisplayName,
 } from "./derive";
 
@@ -148,5 +150,44 @@ describe("parentDisplayName", () => {
 
   it("falls back to the raw slug when the parent is missing from the registry", () => {
     expect(parentDisplayName("ghost-parent", [{ slug: "hermes-infra", name: "Hermes Infra" }])).toBe("ghost-parent");
+  });
+});
+
+// Real last_outcome.verdict values from loops/ledger.jsonl (ok / landed / fail /
+// bounced / blocked / stopped) — map onto Leitstand SignalTone for the drawer.
+describe("loopOutcomeTone (real ledger verdicts)", () => {
+  it("tints landed/passed/ok as ok", () => {
+    expect(loopOutcomeTone("landed")).toBe("ok");
+    expect(loopOutcomeTone("passed")).toBe("ok");
+    expect(loopOutcomeTone("ok")).toBe("ok");
+    expect(loopOutcomeTone("LANDED")).toBe("ok");
+  });
+
+  it("tints fail/stopped/bounced/blocked as warn", () => {
+    expect(loopOutcomeTone("fail")).toBe("warn");
+    expect(loopOutcomeTone("stopped")).toBe("warn");
+    expect(loopOutcomeTone("bounced")).toBe("warn");
+    expect(loopOutcomeTone("blocked")).toBe("warn");
+  });
+
+  it("returns neutral for empty/unknown verdicts", () => {
+    expect(loopOutcomeTone(null)).toBe("neutral");
+    expect(loopOutcomeTone(undefined)).toBe("neutral");
+    expect(loopOutcomeTone("")).toBe("neutral");
+    expect(loopOutcomeTone("running")).toBe("neutral");
+  });
+});
+
+describe("kanbanTaskTone", () => {
+  it("tints blocked+needs_input as alert, other blocked as warn", () => {
+    expect(kanbanTaskTone("blocked", "needs_input")).toBe("alert");
+    expect(kanbanTaskTone("blocked", "dependency")).toBe("warn");
+    expect(kanbanTaskTone("blocked", null)).toBe("warn");
+  });
+
+  it("tints running as ok and open statuses as neutral", () => {
+    expect(kanbanTaskTone("running", null)).toBe("ok");
+    expect(kanbanTaskTone("todo", null)).toBe("neutral");
+    expect(kanbanTaskTone("ready", null)).toBe("neutral");
   });
 });

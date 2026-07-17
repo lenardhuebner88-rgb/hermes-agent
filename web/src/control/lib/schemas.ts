@@ -2392,6 +2392,70 @@ export const ProjectsAgentsResponseSchema = z.object({
 }).passthrough().catch({ generated_at: invalidEpochSeconds, errors: [], agents: [] });
 export type ProjectsAgentsResponse = z.infer<typeof ProjectsAgentsResponseSchema>;
 
+// ─── Projekte-Tab Stage 6 — GET /api/projects/{slug} detail drilldown ──────
+// Frozen shape from hermes_cli/projects_overview.build_project_detail. Unknown
+// slug answers 404 with {error, slug}; the schema still accepts that body so
+// the loader can surface it without a hard parse crash. Every field catch()es
+// to a neutral default; unknown extra keys pass through.
+
+const ProjectDetailCommitSchema = z.object({
+  hash: z.string().catch(""),
+  message: z.string().catch(""),
+  committed_at: epochSeconds,
+  age_seconds: z.coerce.number().catch(0),
+}).passthrough();
+
+const ProjectDetailKanbanTaskSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch(""),
+  status: z.string().catch(""),
+  block_kind: nullableString,
+  priority: z.coerce.number().catch(0),
+  created_at: epochSeconds,
+  age_seconds: z.coerce.number().catch(0),
+}).passthrough();
+
+const ProjectDetailLoopOutcomeSchema = z.object({
+  verdict: z.string().catch(""),
+  phase: nullableString,
+  reason: nullableString,
+  plan: nullableString,
+  ts: nullableEpochSeconds,
+}).passthrough().nullable().catch(null);
+
+const ProjectDetailLoopSchema = z.object({
+  name: z.string().catch(""),
+  running: z.boolean().catch(false),
+  last_heartbeat_at: nullableEpochSeconds,
+  last_outcome: ProjectDetailLoopOutcomeSchema,
+}).passthrough();
+
+// Detail agents drop the project field (already scoped to this slug).
+const ProjectDetailAgentSchema = z.object({
+  kind: ProjectAgentKindSchema,
+  label: z.string().catch(""),
+  task: nullableString,
+  since: nullableEpochSeconds,
+  source: z.string().catch(""),
+}).passthrough();
+
+export const ProjectDetailResponseSchema = z.object({
+  // Present only on the 404 unknown-slug body (or a soft error field).
+  error: z.string().optional().catch(undefined),
+  generated_at: epochSeconds,
+  slug: z.string().catch(""),
+  name: z.string().catch(""),
+  repo_path: z.string().catch(""),
+  parent: nullableString,
+  links: z.array(ProjectLinkSchema).catch([]),
+  recent_commits: z.array(ProjectDetailCommitSchema).catch([]),
+  kanban_tasks: z.array(ProjectDetailKanbanTaskSchema).nullable().catch(null),
+  loops: z.array(ProjectDetailLoopSchema).catch([]),
+  agents: z.array(ProjectDetailAgentSchema).catch([]),
+  errors: z.array(z.string()).catch([]),
+}).passthrough();
+export type ProjectDetail = z.infer<typeof ProjectDetailResponseSchema>;
+
 export function parseOrThrow<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
   const result = schema.safeParse(data);
   if (!result.success) {

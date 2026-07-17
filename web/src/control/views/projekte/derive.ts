@@ -1,7 +1,8 @@
-// Pure derivation logic for the Projekte-Tab card grid + agents rail
-// (Stufe 4/5). No React/no fetch — unit-tested in derive.test.ts against the
-// real /api/projects(/agents) payload shape (hermes_cli/projects_overview.py).
+// Pure derivation logic for the Projekte-Tab card grid + agents rail +
+// detail drawer (Stufe 4/5/6). No React/no fetch — unit-tested in
+// derive.test.ts against the real /api/projects payload shapes.
 import type { ProjectAgent, ProjectAgentKind, ProjectEntry } from "../../lib/schemas";
+import type { SignalTone } from "../../components/leitstand";
 import { PROJECT_AGENT_KIND_ORDER } from "./agentKinds";
 
 /** Agents grouped by project slug. Agents without a resolved project
@@ -60,4 +61,25 @@ export function parentDisplayName(
 ): string | null {
   if (!parentSlug) return null;
   return projects.find((p) => p.slug === parentSlug)?.name ?? parentSlug;
+}
+
+/** Map a loop ledger verdict to a Leitstand SignalTone.
+ *  landed/passed/ok → ok; fail/stopped/bounced/blocked → warn; else neutral. */
+export function loopOutcomeTone(verdict: string | null | undefined): SignalTone {
+  const v = (verdict ?? "").trim().toLowerCase();
+  if (v === "landed" || v === "passed" || v === "ok") return "ok";
+  if (v === "fail" || v === "stopped" || v === "bounced" || v === "blocked") return "warn";
+  return "neutral";
+}
+
+/** Kanban task status / block_kind → SignalTone for the detail list. */
+export function kanbanTaskTone(
+  status: string | null | undefined,
+  blockKind: string | null | undefined,
+): SignalTone {
+  if (status === "blocked") {
+    return blockKind === "needs_input" ? "alert" : "warn";
+  }
+  if (status === "running") return "ok";
+  return "neutral";
 }

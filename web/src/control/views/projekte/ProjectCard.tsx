@@ -1,3 +1,4 @@
+import type { KeyboardEvent } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "../../components/primitives";
@@ -17,13 +18,14 @@ export interface ProjectCardProps {
   /** Anzeigename des Elternprojekts, falls `project.parent` gesetzt ist. */
   parentName: string | null;
   now: number;
+  /** Opens the project detail drawer (Stufe 6). */
+  onOpen: () => void;
 }
 
-/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5).
- *  Bewusst ohne Klick-/Drilldown-Verhalten (kommt in Stufe 6); die Struktur
- *  hält sich an die Leitstand-Bausteine, damit spätere Stufen (Attention-
- *  Sortierung) hier andocken können, ohne die Karte neu zu bauen. */
-export function ProjectCard({ project, agents, parentName, now }: ProjectCardProps) {
+/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5/6).
+ *  Klick / Enter / Space öffnet den Detail-Drawer; Agent-Chip-Tooltips bleiben
+ *  erhalten (title auf den Chips, kein stopPropagation nötig). */
+export function ProjectCard({ project, agents, parentName, now, onOpen }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
   const loopsActive = project.loops?.active ?? 0;
@@ -32,8 +34,24 @@ export function ProjectCard({ project, agents, parentName, now }: ProjectCardPro
   const visibleAgents = agents.slice(0, AGENTS_CHIP_MAX_VISIBLE);
   const overflow = agentCount - visibleAgents.length;
 
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onOpen();
+    }
+  };
+
   return (
-    <Card surface="card" className="flex h-full flex-col gap-3 p-4" ariaLabel={project.name}>
+    <Card
+      surface="card"
+      interactive
+      className="flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze"
+      ariaLabel={t.detailOpenAria(project.name)}
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={onKeyDown}
+    >
       <header className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <h3 className="truncate text-sec font-semibold text-ink">{project.name}</h3>

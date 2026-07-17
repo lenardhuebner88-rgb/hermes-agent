@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Eyebrow } from "../components/primitives";
 import { FleetEmptyState } from "../components/leitstand";
@@ -6,18 +7,21 @@ import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
 import { groupAgentsByProject, parentDisplayName } from "./projekte/derive";
 import { ProjectCard } from "./projekte/ProjectCard";
+import { ProjectDetailDrawer } from "./projekte/ProjectDetailDrawer";
 import { AgentsRail } from "./projekte/AgentsRail";
 
 const t = de.projekte;
 
-/** Projekte-Tab (Stufe 5) — Karten-Grid + Agents-Rail: eine Karte pro
- *  registriertem Projekt (`~/.hermes/projects.yaml`), gespeist aus
- *  GET /api/projects + GET /api/projects/agents. Bewusst noch ohne
- *  Drilldown/Klick (Stufe 6) und ohne Attention-Sortierung (Stufe 7). */
+/** Projekte-Tab (Stufe 5/6) — Karten-Grid + Agents-Rail + Detail-Drawer:
+ *  eine Karte pro registriertem Projekt (`~/.hermes/projects.yaml`), gespeist
+ *  aus GET /api/projects + GET /api/projects/agents; Klick öffnet den
+ *  read-only Drilldown (GET /api/projects/{slug}). Attention-Sortierung
+ *  kommt in Stufe 7. */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
   const now = nowSec();
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
 
   const list = projects.data?.projects ?? [];
   const registryErrors = projects.data?.registry_errors ?? [];
@@ -27,6 +31,10 @@ export function ProjekteView() {
   for (const project of list) {
     projectNames[project.slug] = project.name;
   }
+  const selectedParentName =
+    selectedSlug == null
+      ? null
+      : parentDisplayName(list.find((p) => p.slug === selectedSlug)?.parent ?? null, list);
 
   return (
     <section aria-label={t.title} className="space-y-5">
@@ -74,6 +82,7 @@ export function ProjekteView() {
               agents={agentsByProject[project.slug] ?? []}
               parentName={parentDisplayName(project.parent, list)}
               now={now}
+              onOpen={() => setSelectedSlug(project.slug)}
             />
           ))}
         </div>
@@ -81,6 +90,14 @@ export function ProjekteView() {
 
       {agents.data !== null || agentList.length > 0 ? (
         <AgentsRail agents={agentList} projectNames={projectNames} now={now} />
+      ) : null}
+
+      {selectedSlug ? (
+        <ProjectDetailDrawer
+          slug={selectedSlug}
+          parentName={selectedParentName}
+          onClose={() => setSelectedSlug(null)}
+        />
       ) : null}
     </section>
   );

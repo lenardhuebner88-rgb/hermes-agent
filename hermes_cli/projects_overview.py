@@ -26,6 +26,7 @@ erhalten.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import subprocess
@@ -37,6 +38,7 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 from hermes_cli import control_loops, projects_db
 from hermes_cli.config import get_hermes_home
@@ -995,14 +997,355 @@ def build_agents_payload(
     }
 
 
+# ---------------------------------------------------------------------------
+# Stage 6 — project drilldown (/api/projects/{slug})
+# ---------------------------------------------------------------------------
+#
+# Read-only detail payload for one registry entry. Same isolation contract as
+# stages 2/3: git / kanban / loops each degrade independently (empty list or
+# null + ``errors[]``); the route never 500s. Unknown slug → 404 JSON body
+# ``{"error": "unknown project", "slug": …}`` (not a 500).
+
+_RECENT_COMMITS_LIMIT = 10
+_KANBAN_TASKS_LIMIT = 25
+_KANBAN_OPEN_STATUSES = ("triage", "todo", "scheduled", "ready", "running", "blocked")
+_LEDGER_TAIL_BYTES = 4096
+
+
+def _project_recent_commits(
+    entry: ProjectEntry, *, now: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """``git log -n 10`` for ``entry`` → ``(commits, error)``.
+
+    Same field-splitting and ``path_filters`` pathspecs as
+    :func:`_project_last_commit`; empty repo / no matching commits → ``[]``
+    without an error.
+    """
+    cmd = [
+        "git",
+        "-C",
+        entry.repo_path,
+        "log",
+        f"-n{_RECENT_COMMITS_LIMIT}",
+        "--abbrev=9",
+        "--format=%h\x1f%s\x1f%ct",
+    ]
+    if entry.path_filters:
+        cmd.append("--")
+        cmd.extend(entry.path_filters)
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_LOG_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f"git: {exc}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "git log failed").strip()
+        return [], f"git: {detail or 'git log failed'}"
+
+    commits: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\x1f")
+        if len(parts) != 3:
+            return [], "git: unexpected `git log` output"
+        commit_hash, message, committed_at_raw = parts
+        try:
+            committed_at = int(committed_at_raw)
+        except ValueError:
+            return [], "git: unparsable commit timestamp"
+        commits.append(
+            {
+                "hash": commit_hash,
+                "message": message,
+                "committed_at": committed_at,
+                "age_seconds": max(0, now - committed_at),
+            }
+        )
+    return commits, None
+
+
+def _kanban_tasks(
+    entry: ProjectEntry, *, kanban_db_path: Path, projects_db_path: Path, now: int
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """Open + blocked tasks for the project's board, newest/priority order.
+
+    Returns ``(None, None)`` when the registry entry has no ``kanban_project``
+    (honest "no board" — not an error). Same board→project_id scoping as
+    :func:`_kanban_counts`.
+    """
+    if entry.kanban_project is None:
+        return None, None
+
+    board_slug = entry.kanban_project
+    project_id, resolve_error = _resolve_kanban_project_id(board_slug, projects_db_path)
+    if resolve_error is not None:
+        return None, resolve_error
+
+    if board_slug == "default":
+        if project_id is not None:
+            scope_clause = "(project_id IS NULL OR project_id = ?)"
+            scope_params: tuple[Any, ...] = (project_id,)
+        else:
+            scope_clause = "project_id IS NULL"
+            scope_params = ()
+    else:
+        scope_clause = "project_id = ?"
+        scope_params = (project_id,)
+
+    status_placeholders = ", ".join("?" for _ in _KANBAN_OPEN_STATUSES)
+    try:
+        conn = _open_sqlite_ro(kanban_db_path)
+    except sqlite3.DatabaseError as exc:
+        return None, f"kanban: could not open kanban.db: {exc}"
+
+    try:
+        rows = conn.execute(
+            f"SELECT id, title, status, block_kind, priority, created_at "
+            f"FROM tasks WHERE {scope_clause} AND status IN ({status_placeholders}) "
+            f"ORDER BY priority DESC, created_at DESC "
+            f"LIMIT {_KANBAN_TASKS_LIMIT}",
+            scope_params + _KANBAN_OPEN_STATUSES,
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        return None, f"kanban: {exc}"
+    finally:
+        conn.close()
+
+    tasks: list[dict[str, Any]] = []
+    for row in rows:
+        created_at = int(row["created_at"] or 0)
+        block_kind = row["block_kind"]
+        tasks.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "status": row["status"],
+                "block_kind": block_kind if isinstance(block_kind, str) else None,
+                "priority": int(row["priority"] or 0),
+                "created_at": created_at,
+                "age_seconds": max(0, now - created_at),
+            }
+        )
+    return tasks, None
+
+
+def _read_file_tail_text(path: Path, *, max_bytes: int = _LEDGER_TAIL_BYTES) -> str | None:
+    """Read the last ``max_bytes`` of a text file; drop a partial first line."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    try:
+        with path.open("rb") as fh:
+            if size > max_bytes:
+                fh.seek(-max_bytes, 2)
+                data = fh.read()
+                nl = data.find(b"\n")
+                if nl != -1:
+                    data = data[nl + 1 :]
+            else:
+                data = fh.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def _loop_last_outcome(state_dir: Path) -> dict[str, Any] | None:
+    """Most recent ``ledger.jsonl`` line that parses and carries a ``verdict``.
+
+    Reads only the file tail (≈4 KB) so a huge ledger never lands fully in
+    memory. Missing ledger → ``None`` (not an error).
+    """
+    ledger = state_dir / "ledger.jsonl"
+    if not ledger.is_file():
+        return None
+    text = _read_file_tail_text(ledger)
+    if not text:
+        return None
+
+    # Walk newest-first among the tail lines.
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict) or "verdict" not in event:
+            continue
+        verdict = event.get("verdict")
+        if not isinstance(verdict, str):
+            continue
+        phase = event.get("phase")
+        reason = event.get("reason")
+        plan = event.get("plan")
+        return {
+            "verdict": verdict,
+            "phase": phase if isinstance(phase, str) else None,
+            "reason": reason if isinstance(reason, str) else None,
+            "plan": plan if isinstance(plan, str) else None,
+            "ts": _parse_loop_iso_timestamp(event.get("ts")),
+        }
+    return None
+
+
+def _detail_loops_for_entry(
+    entry: ProjectEntry, *, loops_state_root: Path | None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """One row per registry ``loop_pack`` with running + last ledger outcome."""
+    root = loops_state_root if loops_state_root is not None else control_loops._state_root()
+    errors: list[str] = []
+    packs: list[dict[str, Any]] = []
+
+    for name in entry.loop_packs:
+        try:
+            state = root / name
+            running = control_loops._is_running(state)
+            heartbeat = control_loops._heartbeat(state)
+            heartbeat_at = _last_heartbeat_at(heartbeat)
+            last_outcome = _loop_last_outcome(state)
+        except Exception as exc:  # isolate: one bad pack never kills the list
+            errors.append(f"loops: pack '{name}': {exc}")
+            packs.append(
+                {
+                    "name": name,
+                    "running": False,
+                    "last_heartbeat_at": None,
+                    "last_outcome": None,
+                }
+            )
+            continue
+        packs.append(
+            {
+                "name": name,
+                "running": running,
+                "last_heartbeat_at": heartbeat_at,
+                "last_outcome": last_outcome,
+            }
+        )
+    return packs, errors
+
+
+def build_project_detail(
+    entry: ProjectEntry,
+    registry: ProjectsRegistry,
+    *,
+    kanban_db_path: Path | None = None,
+    projects_db_path: Path | None = None,
+    loops_state_root: Path | None = None,
+    now: int | None = None,
+    tmux_panes_text: str | None = None,
+    tmux_sessions_text: str | None = None,
+    coordination_dir: Path | None = None,
+    pack_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Assemble the frozen ``GET /api/projects/{slug}`` detail payload.
+
+    Pure-ish: all data sources are overridable so tests never touch real
+    ``~/.hermes`` state. Agents are :func:`build_agents_payload` filtered to
+    ``project == entry.slug`` (``project`` field dropped from each agent).
+    """
+    resolved_now = now if now is not None else int(time.time())
+    home = get_hermes_home()
+    resolved_kanban_db_path = kanban_db_path if kanban_db_path is not None else home / "kanban.db"
+    resolved_projects_db_path = (
+        projects_db_path if projects_db_path is not None else home / "projects.db"
+    )
+
+    errors: list[str] = []
+
+    try:
+        recent_commits, git_error = _project_recent_commits(entry, now=resolved_now)
+    except Exception as exc:
+        recent_commits, git_error = [], f"git: {exc}"
+    if git_error:
+        errors.append(git_error)
+
+    try:
+        kanban_tasks, kanban_error = _kanban_tasks(
+            entry,
+            kanban_db_path=resolved_kanban_db_path,
+            projects_db_path=resolved_projects_db_path,
+            now=resolved_now,
+        )
+    except Exception as exc:
+        kanban_tasks, kanban_error = None, f"kanban: {exc}"
+    if kanban_error:
+        errors.append(kanban_error)
+
+    try:
+        loops, loop_errors = _detail_loops_for_entry(entry, loops_state_root=loops_state_root)
+    except Exception as exc:
+        loops, loop_errors = [], [f"loops: {exc}"]
+    errors.extend(loop_errors)
+
+    try:
+        agents_payload = build_agents_payload(
+            registry,
+            tmux_panes_text=tmux_panes_text,
+            tmux_sessions_text=tmux_sessions_text,
+            coordination_dir=coordination_dir,
+            kanban_db_path=resolved_kanban_db_path,
+            projects_db_path=resolved_projects_db_path,
+            loops_state_root=loops_state_root,
+            pack_names=pack_names,
+            now=resolved_now,
+        )
+        agents = [
+            {
+                "kind": agent["kind"],
+                "label": agent["label"],
+                "task": agent.get("task"),
+                "since": agent.get("since"),
+                "source": agent["source"],
+            }
+            for agent in agents_payload.get("agents", [])
+            if agent.get("project") == entry.slug
+        ]
+        # Agents-source errors stay on the agents endpoint; detail only
+        # surfaces git/kanban/loops isolation (agents list simply empty).
+    except Exception as exc:
+        agents = []
+        errors.append(f"agents: {exc}")
+
+    return {
+        "generated_at": resolved_now,
+        "slug": entry.slug,
+        "name": entry.name,
+        "repo_path": entry.repo_path,
+        "parent": entry.parent,
+        "links": [{"label": link.label, "url": link.url} for link in entry.links],
+        "recent_commits": recent_commits,
+        "kanban_tasks": kanban_tasks,
+        "loops": loops,
+        "agents": agents,
+        "errors": errors,
+    }
+
+
 def register_projects_routes(app: FastAPI) -> None:
-    """Register the read-only ``GET /api/projects`` + ``/api/projects/agents``.
+    """Register read-only ``GET /api/projects`` (+ agents + ``{slug}`` detail).
 
     Auth comes automatically from the dashboard's ``/api/*`` middleware —
     nothing to do here as long as the path stays out of the public whitelist.
     Each handler is wrapped once more on top of its builder's own per-source
     isolation so a truly unexpected failure (e.g. the registry file itself
     becoming unreadable) still answers with JSON, never a 500.
+
+    Unknown slug on the detail route answers **404** with body
+    ``{"error": "unknown project", "slug": <slug>}`` (JSON, never a 500).
+    Static ``/api/projects/agents`` is registered before ``/{slug}`` so the
+    path is never captured as a slug.
     """
 
     @app.get("/api/projects")
@@ -1027,4 +1370,30 @@ def register_projects_routes(app: FastAPI) -> None:
                 "generated_at": int(time.time()),
                 "errors": [f"agents: unexpected error: {exc}"],
                 "agents": [],
+            }
+
+    @app.get("/api/projects/{slug}")
+    def get_project_detail(slug: str) -> Any:
+        try:
+            registry = load_projects_registry()
+            entry = next((p for p in registry.projects if p.slug == slug), None)
+            if entry is None:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "unknown project", "slug": slug},
+                )
+            return build_project_detail(entry, registry)
+        except Exception as exc:
+            return {
+                "generated_at": int(time.time()),
+                "slug": slug,
+                "name": "",
+                "repo_path": "",
+                "parent": None,
+                "links": [],
+                "recent_commits": [],
+                "kanban_tasks": None,
+                "loops": [],
+                "agents": [],
+                "errors": [f"projects: unexpected error: {exc}"],
             }

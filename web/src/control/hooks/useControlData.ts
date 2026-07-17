@@ -73,9 +73,10 @@ import {
   ReleaseModeResponseSchema,
   ProjectsResponseSchema,
   ProjectsAgentsResponseSchema,
+  ProjectDetailResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { ProjectsResponse, ProjectsAgentsResponse } from "../lib/schemas";
+import type { ProjectsResponse, ProjectsAgentsResponse, ProjectDetail } from "../lib/schemas";
 import type { DictateStatusResponse, TaskBodyResponse, TaskDeliverablesResponse, ReleaseStatusResponse, ReleaseModeResponse } from "../lib/schemas";
 import type { StrategistLastRuns, DispositionListResponse } from "../lib/schemas";
 import type { WorkerActivityResponse } from "../lib/schemas";
@@ -3110,5 +3111,20 @@ export function useProjectAgents() {
     "projects/agents",
     async () => parseOrThrow(ProjectsAgentsResponseSchema, await fetchJSON<unknown>("/api/projects/agents"), "projects/agents"),
     12000,
+  );
+}
+
+/** Project drilldown (Stufe 6). Only mounted while the detail drawer is open
+ *  (`key` includes the slug), so polling naturally pauses when the drawer closes. */
+export function useProjectDetail(slug: string) {
+  return usePolling<ProjectDetail>(
+    `projects/detail/${slug}`,
+    async () =>
+      parseOrThrow(
+        ProjectDetailResponseSchema,
+        await fetchJSON<unknown>(`/api/projects/${encodeURIComponent(slug)}`),
+        `projects/detail/${slug}`,
+      ),
+    8000,
   );
 }

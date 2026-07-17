@@ -17,6 +17,7 @@ from hermes_cli.projects_overview import (
     ProjectEntry,
     ProjectsRegistry,
     build_agents_payload,
+    build_project_detail,
     build_projects_payload,
     load_projects_registry,
     register_projects_routes,
@@ -969,3 +970,474 @@ def test_agents_endpoint_returns_200_frozen_shape_sources_isolated(
     assert not any(e.startswith("tmux:") for e in body["errors"])
     assert not any(e.startswith("kanban:") for e in body["errors"])
     assert not any(e.startswith("loops:") for e in body["errors"])
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 — /api/projects/{slug} project drilldown
+# ---------------------------------------------------------------------------
+
+
+def _add_commits(repo: Path, commits: list[tuple[int, str, str]]) -> None:
+    """Append commits as (epoch, message, relative_path content)."""
+    import os
+
+    for committed_at, message, relpath in commits:
+        path = repo / relpath
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{message}\n", encoding="utf-8")
+        _git(repo, "add", relpath)
+        env = dict(os.environ)
+        env["GIT_AUTHOR_DATE"] = f"{committed_at} +0000"
+        env["GIT_COMMITTER_DATE"] = f"{committed_at} +0000"
+        _git(repo, "commit", "-q", "-m", message, env=env)
+
+
+def _insert_task_full(
+    db_path: Path,
+    *,
+    task_id: str,
+    title: str,
+    status: str,
+    project_id: str | None,
+    created_at: int,
+    priority: int = 0,
+    block_kind: str | None = None,
+) -> None:
+    conn = kanban_db.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO tasks "
+            "(id, title, status, project_id, created_at, priority, block_kind) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, title, status, project_id, created_at, priority, block_kind),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_detail_recent_commits_order_and_path_filters(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    base = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=base, message="c0: seed")
+    _add_commits(
+        repo,
+        [
+            (base + 100, "c1: sub touch", "sub/a.txt"),
+            (base + 200, "c2: parent only", "README.md"),
+            (base + 300, "c3: sub again", "sub/b.txt"),
+            (base + 400, "c4: parent again", "other.txt"),
+        ],
+    )
+
+    parent = _entry(slug="parent", repo_path=str(repo))
+    sub = _entry(
+        slug="sub",
+        repo_path=str(repo),
+        parent="parent",
+        path_filters=["sub"],
+    )
+    registry = ProjectsRegistry(projects=[parent, sub], errors=[])
+    now = base + 1000
+
+    parent_detail = build_project_detail(
+        parent,
+        registry,
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=now,
+    )
+    assert len(parent_detail["recent_commits"]) == 5  # seed + 4
+    assert parent_detail["recent_commits"][0]["message"] == "c4: parent again"
+    assert parent_detail["recent_commits"][1]["message"] == "c3: sub again"
+    assert all(len(c["hash"]) == 9 for c in parent_detail["recent_commits"])
+    assert parent_detail["recent_commits"][0]["age_seconds"] == now - (base + 400)
+
+    sub_detail = build_project_detail(
+        sub,
+        registry,
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=now,
+    )
+    messages = [c["message"] for c in sub_detail["recent_commits"]]
+    assert messages == ["c3: sub again", "c1: sub touch"]
+
+
+def test_detail_kanban_tasks_open_blocked_scoped_cap(tmp_path: Path) -> None:
+    kdb = tmp_path / "kanban.db"
+    pdb = tmp_path / "projects.db"
+    _make_kanban_db(kdb)
+    pid = _make_projects_db(pdb, name="Hermes Infra", board_slug="default")
+    now = 1_700_100_000
+
+    _insert_task_full(
+        kdb,
+        task_id="open1",
+        title="Open task",
+        status="todo",
+        project_id=None,  # legacy default-board
+        created_at=now - 50,
+        priority=1,
+    )
+    _insert_task_full(
+        kdb,
+        task_id="blocked1",
+        title="Blocked task",
+        status="blocked",
+        project_id=pid,
+        created_at=now - 40,
+        priority=5,
+        block_kind="needs_input",
+    )
+    _insert_task_full(
+        kdb,
+        task_id="running1",
+        title="Running task",
+        status="running",
+        project_id=pid,
+        created_at=now - 30,
+        priority=3,
+    )
+    _insert_task_full(
+        kdb,
+        task_id="done1",
+        title="Done task",
+        status="done",
+        project_id=pid,
+        created_at=now - 20,
+        priority=9,
+    )
+    # Foreign board must not leak into default.
+    other_pid = _make_projects_db(pdb, name="Other", board_slug="other-board")
+    _insert_task_full(
+        kdb,
+        task_id="foreign",
+        title="Foreign",
+        status="todo",
+        project_id=other_pid,
+        created_at=now - 10,
+        priority=99,
+    )
+
+    entry = _entry(slug="hermes-infra", kanban_project="default", repo_path=str(tmp_path))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=kdb,
+        projects_db_path=pdb,
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=now,
+    )
+
+    tasks = detail["kanban_tasks"]
+    assert tasks is not None
+    ids = [t["id"] for t in tasks]
+    assert "done1" not in ids
+    assert "foreign" not in ids
+    assert set(ids) == {"open1", "blocked1", "running1"}
+    # priority DESC then created_at DESC: blocked1 (5), running1 (3), open1 (1)
+    assert ids == ["blocked1", "running1", "open1"]
+    blocked = next(t for t in tasks if t["id"] == "blocked1")
+    assert blocked["block_kind"] == "needs_input"
+    assert blocked["status"] == "blocked"
+    assert blocked["age_seconds"] == 40
+
+    # Cap: 25 open tasks max.
+    for i in range(30):
+        _insert_task_full(
+            kdb,
+            task_id=f"cap{i}",
+            title=f"Cap {i}",
+            status="todo",
+            project_id=pid,
+            created_at=now - i,
+            priority=0,
+        )
+    detail_cap = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=kdb,
+        projects_db_path=pdb,
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=now,
+    )
+    assert len(detail_cap["kanban_tasks"]) == 25
+
+
+def test_detail_kanban_null_when_no_board(tmp_path: Path) -> None:
+    entry = _entry(slug="no-board", kanban_project=None, repo_path=str(tmp_path))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=int(time.time()),
+    )
+    assert detail["kanban_tasks"] is None
+    assert not any(e.startswith("kanban:") for e in detail["errors"])
+
+
+def test_detail_loop_last_outcome_from_ledger_tail(tmp_path: Path) -> None:
+    state_root = tmp_path / "loops"
+    pack_dir = state_root / "dashboard-experience"
+    pack_dir.mkdir(parents=True)
+    ledger = pack_dir / "ledger.jsonl"
+    # Mix of non-verdict usage lines + older verdict + newer verdict — last
+    # verdict line wins. Real ledger mixes zoned and (older) naive ts; only
+    # zoned ones parse via _parse_loop_iso_timestamp.
+    lines = [
+        json.dumps(
+            {
+                "phase": "verify",
+                "verdict": "ok",
+                "plan": "old-plan.md",
+                "reason": "old",
+                "ts": "2026-07-16T10:00:00Z",
+            }
+        ),
+        json.dumps(
+            {
+                "event": "phase_usage",
+                "phase": "verify",
+                "secs": 12,
+                "ts": "2026-07-16T11:00:00Z",
+            }
+        ),  # no verdict
+        "not-json-at-all",
+        json.dumps(
+            {
+                "phase": "land",
+                "verdict": "landed",
+                "plan": "P1-ship.md",
+                "reason": "main=abc",
+                "ts": "2026-07-16T12:00:00Z",
+            }
+        ),
+        json.dumps({"event": "heartbeat_only", "ts": "2026-07-16T12:01:00Z"}),
+    ]
+    ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    entry = _entry(slug="hermes-infra", loop_packs=["dashboard-experience"], repo_path=str(tmp_path))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=tmp_path / "k.db",
+        projects_db_path=tmp_path / "p.db",
+        loops_state_root=state_root,
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=["dashboard-experience"],
+        now=int(time.time()),
+    )
+
+    assert len(detail["loops"]) == 1
+    pack = detail["loops"][0]
+    assert pack["name"] == "dashboard-experience"
+    assert pack["running"] is False
+    outcome = pack["last_outcome"]
+    assert outcome is not None
+    assert outcome["verdict"] == "landed"
+    assert outcome["phase"] == "land"
+    assert outcome["plan"] == "P1-ship.md"
+    assert outcome["reason"] == "main=abc"
+    expected_ts = int(
+        __import__("datetime").datetime.fromisoformat("2026-07-16T12:00:00+00:00").timestamp()
+    )
+    assert outcome["ts"] == expected_ts
+
+
+def test_detail_loop_missing_ledger_last_outcome_null(tmp_path: Path) -> None:
+    state_root = tmp_path / "loops"
+    (state_root / "never-ran").mkdir(parents=True)
+    entry = _entry(slug="p", loop_packs=["never-ran"], repo_path=str(tmp_path))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        loops_state_root=state_root,
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=[],
+        now=int(time.time()),
+    )
+    assert detail["loops"][0]["last_outcome"] is None
+    assert not any(e.startswith("loops:") for e in detail["errors"])
+
+
+def test_detail_broken_source_isolated(tmp_path: Path) -> None:
+    # Git broken (missing repo), kanban board unresolvable, loops pack ok.
+    state_root = tmp_path / "loops"
+    pack_dir = state_root / "ok-pack"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "ledger.jsonl").write_text(
+        json.dumps({"verdict": "ok", "phase": "verify", "ts": "2026-07-16T12:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+    kdb = tmp_path / "kanban.db"
+    pdb = tmp_path / "projects.db"
+    _make_kanban_db(kdb)
+    _make_projects_db(pdb, name="Other", board_slug="other")
+
+    entry = _entry(
+        slug="broken-ish",
+        repo_path=str(tmp_path / "no-such-repo"),
+        kanban_project="ghost-board",
+        loop_packs=["ok-pack"],
+    )
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=kdb,
+        projects_db_path=pdb,
+        loops_state_root=state_root,
+        coordination_dir=tmp_path / "coord",
+        tmux_panes_text="",
+        pack_names=["ok-pack"],
+        now=int(time.time()),
+    )
+
+    assert detail["recent_commits"] == []
+    assert detail["kanban_tasks"] is None
+    assert any(e.startswith("git:") for e in detail["errors"])
+    assert any(e.startswith("kanban:") for e in detail["errors"])
+    assert detail["loops"][0]["last_outcome"]["verdict"] == "ok"
+    assert not any(e.startswith("loops:") for e in detail["errors"])
+
+
+def test_detail_unknown_slug_endpoint_404_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    _write(
+        tmp_path,
+        """\
+projects:
+  - slug: known
+    name: Known
+    repo_path: /tmp/known
+""",
+    )
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    resp = client.get("/api/projects/does-not-exist")
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body == {"error": "unknown project", "slug": "does-not-exist"}
+
+
+def test_detail_endpoint_returns_frozen_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    committed_at = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=committed_at, message="feat: detail")
+    _add_commits(repo, [(committed_at + 10, "feat: two", "two.txt"), (committed_at + 20, "feat: three", "three.txt")])
+
+    kdb = tmp_path / "kanban.db"
+    pdb = tmp_path / "projects.db"
+    _make_kanban_db(kdb)
+    pid = _make_projects_db(pdb, name="Hermes Infra", board_slug="default")
+    _insert_task_full(
+        kdb,
+        task_id="t1",
+        title="A task",
+        status="todo",
+        project_id=pid,
+        created_at=committed_at,
+        priority=2,
+    )
+
+    state_root = tmp_path / "loops"
+    pack_dir = state_root / "builder-reviewer"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "verdict": "landed",
+                "phase": "land",
+                "plan": "P1.md",
+                "reason": "ok",
+                "ts": "2026-07-16T12:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    yaml_text = f"""\
+projects:
+  - slug: hermes-infra
+    name: Hermes Infra
+    repo_path: {repo}
+    kanban_project: default
+    loop_packs:
+      - builder-reviewer
+    links:
+      - label: Control
+        url: /control
+"""
+    _write(tmp_path, yaml_text)
+    # Production path uses get_hermes_home()/projects.yaml + default DB paths.
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    # Loops state root is control_loops._state_root(); override via home layout
+    # or by monkeypatching the detail builder's default — production resolves
+    # via control_loops._state_root which uses HERMES_HOME/loops. Point it.
+    monkeypatch.setattr(control_loops, "_state_root", lambda: state_root)
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._default_coordination_dir",
+        lambda: tmp_path / "coord",
+    )
+    monkeypatch.setattr(control_loops, "_all_pack_names", lambda: [("builder-reviewer", "repo")])
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    resp = client.get("/api/projects/hermes-infra")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["slug"] == "hermes-infra"
+    assert body["name"] == "Hermes Infra"
+    assert body["parent"] is None
+    assert body["links"] == [{"label": "Control", "url": "/control"}]
+    assert len(body["recent_commits"]) == 3
+    assert body["recent_commits"][0]["message"] == "feat: three"
+    assert body["kanban_tasks"] is not None
+    assert body["kanban_tasks"][0]["id"] == "t1"
+    assert body["loops"][0]["last_outcome"]["verdict"] == "landed"
+    assert isinstance(body["agents"], list)
+    assert isinstance(body["errors"], list)
+    assert isinstance(body["generated_at"], int)
+
+    # agents path still works (not swallowed by {slug})
+    agents_resp = client.get("/api/projects/agents")
+    assert agents_resp.status_code == 200
+    assert "agents" in agents_resp.json()
