@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -83,7 +83,12 @@ class ProjectsRegistry:
 # (/api/projects/agents, /api/projects/sessions, /api/projects/commits — all
 # registered before /{slug}).
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_RESERVED_SLUGS = frozenset({"agents", "sessions", "commits"})
+_RESERVED_SLUGS = frozenset({"agents", "sessions", "commits", "receipts"})
+
+_RECEIPTS_ROOT = Path.home() / "vault" / "03-Agents"
+_RECEIPTS_HEAD_BYTES = 4 * 1024
+_RECEIPTS_LIMIT = 30
+_RECEIPT_CONTENT_LIMIT_BYTES = 200 * 1024
 
 
 def _default_registry_path(home: Path | None) -> Path:
@@ -1379,6 +1384,8 @@ def build_project_detail(
     coordination_dir: Path | None = None,
     pack_names: list[str] | None = None,
     agents_payload: dict[str, Any] | None = None,
+    receipts_payload: dict[str, Any] | None = None,
+    receipts_root: Path | None = None,
 ) -> dict[str, Any]:
     """Assemble the frozen ``GET /api/projects/{slug}`` detail payload.
 
@@ -1389,7 +1396,8 @@ def build_project_detail(
     Pass ``agents_payload`` (e.g. the route-level TTL-cached agents payload)
     to skip re-running discovery on every drilldown poll. Filtering always
     builds a new agent list and copies each kept agent dict — the shared
-    cached structure is never mutated in place.
+    cached structure is never mutated in place. ``receipts_payload`` follows
+    the same contract for the cross-agent receipt scan.
     """
     resolved_now = now if now is not None else int(time.time())
     home = get_hermes_home()
@@ -1462,6 +1470,22 @@ def build_project_detail(
         agents = []
         errors.append(f"agents: {exc}")
 
+    try:
+        if receipts_payload is None:
+            receipts_payload = build_receipts_payload(
+                registry,
+                receipts_root=receipts_root,
+                now=resolved_now,
+            )
+        receipts = [
+            dict(receipt)
+            for receipt in receipts_payload.get("receipts", [])
+            if receipt.get("project") == entry.slug
+        ][:5]
+    except Exception as exc:
+        receipts = []
+        errors.append(f"receipts: {exc}")
+
     return {
         "generated_at": resolved_now,
         "slug": entry.slug,
@@ -1473,6 +1497,7 @@ def build_project_detail(
         "kanban_tasks": kanban_tasks,
         "loops": loops,
         "agents": agents,
+        "receipts": receipts,
         "errors": errors,
     }
 
@@ -1747,6 +1772,162 @@ def build_commits_payload(
 
 
 # ---------------------------------------------------------------------------
+# Stage 12 — cross-agent receipt feed (/api/projects/receipts)
+# ---------------------------------------------------------------------------
+
+
+def _receipt_title_and_excerpt(head: str, fallback_title: str) -> tuple[str, str | None]:
+    """Extract display fields without requiring valid YAML frontmatter."""
+    lines = head.splitlines()
+    frontmatter_end: int | None = None
+    if lines and lines[0].strip() == "---":
+        frontmatter_end = next(
+            (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+            None,
+        )
+        # An unterminated frontmatter block is not trustworthy content.
+        if frontmatter_end is None:
+            return fallback_title, None
+
+    title = fallback_title
+    for index, line in enumerate(lines):
+        if frontmatter_end is not None and index <= frontmatter_end:
+            continue
+        if line.startswith("# ") and line[2:].strip():
+            title = line[2:].strip()
+            break
+
+    for index, line in enumerate(lines):
+        if frontmatter_end is not None and index <= frontmatter_end:
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped == "---":
+            continue
+        return title, stripped[:200]
+    return title, None
+
+
+def _attribute_receipt_project(head: str, registry: ProjectsRegistry) -> str | None:
+    """Choose the project with the longest matching registry identifier."""
+    lowered = head.casefold()
+    best_slug: str | None = None
+    best_length = -1
+    for entry in registry.projects:
+        for candidate in (entry.repo_path, entry.slug, entry.name):
+            needle = candidate.strip().casefold()
+            if needle and needle in lowered and len(needle) > best_length:
+                best_slug = entry.slug
+                best_length = len(needle)
+    return best_slug
+
+
+def build_receipts_payload(
+    registry: ProjectsRegistry,
+    *,
+    receipts_root: Path | None = None,
+    now: int | float | None = None,
+) -> dict[str, Any]:
+    """Scan the newest Markdown receipts across every agent directory."""
+    root = receipts_root if receipts_root is not None else _RECEIPTS_ROOT
+    resolved_now = now if now is not None else time.time()
+    candidates: list[tuple[float, str, Path]] = []
+
+    try:
+        agent_dirs = sorted(path for path in root.iterdir() if path.is_dir())
+    except OSError:
+        agent_dirs = []
+
+    for agent_dir in agent_dirs:
+        receipts_dir = agent_dir / "receipts"
+        try:
+            paths = list(receipts_dir.iterdir())
+        except OSError:
+            continue
+        for path in paths:
+            if path.suffix.lower() != ".md":
+                continue
+            try:
+                if path.is_file():
+                    candidates.append((path.stat().st_mtime, agent_dir.name, path))
+            except OSError:
+                continue
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    receipts: list[dict[str, Any]] = []
+    for mtime, agent, path in candidates[:_RECEIPTS_LIMIT]:
+        fallback_title = path.stem
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(_RECEIPTS_HEAD_BYTES).decode("utf-8", errors="replace")
+            title, excerpt = _receipt_title_and_excerpt(head, fallback_title)
+            project = _attribute_receipt_project(head, registry)
+        except OSError:
+            title, excerpt, project = fallback_title, None, None
+        receipts.append(
+            {
+                "agent": agent,
+                "filename": path.name,
+                "title": title,
+                "mtime": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
+                "age_seconds": max(0, int(resolved_now - mtime)),
+                "project": project,
+                "excerpt": excerpt,
+            }
+        )
+
+    return {"generated_at": int(resolved_now), "receipts": receipts}
+
+
+def _unknown_receipt_response() -> JSONResponse:
+    return JSONResponse(status_code=404, content={"error": "unknown receipt"})
+
+
+def _read_receipt_content(agent: str, filename: str) -> dict[str, Any] | None:
+    """Validate and read one receipt, returning ``None`` for every violation."""
+    if (
+        not agent
+        or Path(agent).name != agent
+        or "/" in agent
+        or "\\" in agent
+        or not filename
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+        or not filename.lower().endswith(".md")
+    ):
+        return None
+
+    try:
+        root = _RECEIPTS_ROOT.resolve()
+        agent_dir = root / agent
+        if not agent_dir.is_dir():
+            return None
+        path = (agent_dir / "receipts" / filename).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            return None
+        stat = path.stat()
+        with path.open("rb") as handle:
+            raw = handle.read(_RECEIPT_CONTENT_LIMIT_BYTES + 1)
+        truncated = len(raw) > _RECEIPT_CONTENT_LIMIT_BYTES
+        markdown = raw[:_RECEIPT_CONTENT_LIMIT_BYTES].decode("utf-8", errors="replace")
+        title, _excerpt = _receipt_title_and_excerpt(
+            raw[:_RECEIPTS_HEAD_BYTES].decode("utf-8", errors="replace"),
+            path.stem,
+        )
+    except OSError:
+        return None
+
+    return {
+        "agent": agent,
+        "filename": filename,
+        "title": title,
+        "mtime": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "truncated": truncated,
+        "markdown": markdown,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Stage 9 — short process-level TTL cache for route handlers
 # ---------------------------------------------------------------------------
 #
@@ -1799,11 +1980,13 @@ class _TtlMemo:
 
 
 _projects_cache = _TtlMemo(ttl=_PROJECTS_CACHE_TTL_SECONDS)
+_receipts_cache = _TtlMemo(ttl=30.0)
 
 
 def _reset_projects_cache() -> None:
     """Test hook: drop all cached route payloads so suites stay isolated."""
     _projects_cache.clear()
+    _receipts_cache.clear()
 
 
 def _cache_view(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1860,8 +2043,19 @@ def _cached_commits_payload() -> dict[str, Any]:
     return _cache_view(payload)
 
 
+def _cached_receipts_payload() -> dict[str, Any]:
+    """Route/detail accessor for the 30-second receipt scan."""
+    cached = _receipts_cache.get("receipts")
+    if cached is not None:
+        return cached
+    registry = load_projects_registry()
+    payload = build_receipts_payload(registry)
+    _receipts_cache.set("receipts", payload)
+    return _cache_view(payload)
+
+
 def register_projects_routes(app: FastAPI) -> None:
-    """Register read-only ``GET /api/projects`` (+ agents/sessions/commits + ``{slug}`` detail).
+    """Register the read-only ``/api/projects`` overview surfaces.
 
     Auth comes automatically from the dashboard's ``/api/*`` middleware —
     nothing to do here as long as the path stays out of the public whitelist.
@@ -1926,6 +2120,20 @@ def register_projects_routes(app: FastAPI) -> None:
                 "commits": [],
             }
 
+    @app.get("/api/projects/receipts")
+    def get_project_receipts() -> dict[str, Any]:
+        try:
+            return _cached_receipts_payload()
+        except Exception:
+            return {"generated_at": int(time.time()), "receipts": []}
+
+    @app.get("/api/projects/receipts/{agent}/{filename:path}")
+    def get_project_receipt(agent: str, filename: str) -> Any:
+        receipt = _read_receipt_content(agent, filename)
+        if receipt is None:
+            return _unknown_receipt_response()
+        return receipt
+
     @app.get("/api/projects/{slug}")
     def get_project_detail(slug: str) -> Any:
         try:
@@ -1939,7 +2147,13 @@ def register_projects_routes(app: FastAPI) -> None:
             # Reuse the same TTL-cached agents scan the agents route serves —
             # do not re-pay coordination discovery on every drilldown poll.
             agents_payload = _cached_agents_payload()
-            return build_project_detail(entry, registry, agents_payload=agents_payload)
+            receipts_payload = _cached_receipts_payload()
+            return build_project_detail(
+                entry,
+                registry,
+                agents_payload=agents_payload,
+                receipts_payload=receipts_payload,
+            )
         except Exception as exc:
             return {
                 "generated_at": int(time.time()),
@@ -1952,5 +2166,6 @@ def register_projects_routes(app: FastAPI) -> None:
                 "kanban_tasks": None,
                 "loops": [],
                 "agents": [],
+                "receipts": [],
                 "errors": [f"projects: unexpected error: {exc}"],
             }

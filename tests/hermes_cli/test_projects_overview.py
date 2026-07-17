@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ from hermes_cli.projects_overview import (
     ProjectsRegistry,
     _attribute_project,
     _cached_agents_payload,
+    _cached_receipts_payload,
     _coordination_agents,
     _parse_coordination_note,
     _reset_projects_cache,
@@ -26,6 +28,7 @@ from hermes_cli.projects_overview import (
     build_commits_payload,
     build_project_detail,
     build_projects_payload,
+    build_receipts_payload,
     build_sessions_payload,
     load_projects_registry,
     register_projects_routes,
@@ -2551,3 +2554,200 @@ def test_sessions_and_commits_endpoints_return_200_frozen_shape(
     # as project slugs (which would answer 404 unknown-project).
     assert client.get("/api/projects/sessions").status_code == 200
     assert client.get("/api/projects/commits").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Stage 12 — /api/projects/receipts + detail join
+# ---------------------------------------------------------------------------
+
+
+def _receipt(root: Path, agent: str, filename: str, content: str) -> Path:
+    receipts_dir = root / agent / "receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    path = receipts_dir / filename
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def test_receipts_title_frontmatter_leniency_and_attribution(tmp_path: Path) -> None:
+    root = tmp_path / "Agents"
+    real_format = _receipt(
+        root,
+        "Codex",
+        "teil-b.md",
+        """\
+# Receipt — Teil B Projekte-Backend
+
+- Agent: Codex
+- Scope: /srv/repos/hermes-agent/hermes_cli/projects_overview.py
+""",
+    )
+    broken = _receipt(
+        root,
+        "Claude",
+        "broken-frontmatter.md",
+        "---\ntitle: [kaputt\n# This heading is inside broken frontmatter\nbody\n",
+    )
+    empty = _receipt(root, "Hermes", "empty.md", "")
+    valid_frontmatter = _receipt(
+        root,
+        "Codex",
+        "frontmatter-only.md",
+        "---\ntitle: Metadata Title\ndate: 2026-07-18\n---\nBody after metadata\n",
+    )
+    miss = _receipt(root, "Codex", "unrelated.md", "# Unrelated\n\nNo registry terms here.\n")
+    for index, path in enumerate((real_format, broken, empty, valid_frontmatter, miss)):
+        os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+
+    registry = ProjectsRegistry(
+        projects=[
+            _entry(
+                slug="hermes-infra",
+                name="Hermes Infra",
+                repo_path="/srv/repos/hermes-agent",
+            )
+        ],
+        errors=[],
+    )
+    payload = build_receipts_payload(registry, receipts_root=root, now=1_700_000_100)
+    by_filename = {row["filename"]: row for row in payload["receipts"]}
+
+    assert by_filename["teil-b.md"]["title"] == "Receipt — Teil B Projekte-Backend"
+    assert by_filename["teil-b.md"]["excerpt"] == "- Agent: Codex"
+    assert by_filename["teil-b.md"]["project"] == "hermes-infra"
+    assert by_filename["broken-frontmatter.md"]["title"] == "broken-frontmatter"
+    assert by_filename["broken-frontmatter.md"]["excerpt"] is None
+    assert by_filename["empty.md"]["title"] == "empty"
+    assert by_filename["empty.md"]["excerpt"] is None
+    assert by_filename["frontmatter-only.md"]["title"] == "frontmatter-only"
+    assert by_filename["frontmatter-only.md"]["excerpt"] == "Body after metadata"
+    assert by_filename["unrelated.md"]["project"] is None
+    assert by_filename["teil-b.md"]["mtime"].endswith("+00:00")
+
+
+def test_receipts_mtime_order_and_cap_skips_non_markdown(tmp_path: Path) -> None:
+    root = tmp_path / "Agents"
+    for index in range(35):
+        path = _receipt(root, "Codex", f"receipt-{index:02d}.md", f"# Receipt {index}\n")
+        os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+    junk = _receipt(root, "Codex", "ignore.txt", "not markdown")
+    os.utime(junk, (1_800_000_000, 1_800_000_000))
+
+    payload = build_receipts_payload(
+        ProjectsRegistry(), receipts_root=root, now=1_800_000_100
+    )
+
+    assert len(payload["receipts"]) == 30
+    assert [row["filename"] for row in payload["receipts"][:3]] == [
+        "receipt-34.md",
+        "receipt-33.md",
+        "receipt-32.md",
+    ]
+    assert payload["receipts"][-1]["filename"] == "receipt-05.md"
+
+
+def test_receipt_content_route_rejects_traversal_and_unknowns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "Agents"
+    _receipt(root, "Codex", "known.md", "# Known Receipt\n\nBody\n")
+    monkeypatch.setattr("hermes_cli.projects_overview._RECEIPTS_ROOT", root)
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    known = client.get("/api/projects/receipts/Codex/known.md")
+    assert known.status_code == 200
+    assert known.json()["title"] == "Known Receipt"
+    assert known.json()["truncated"] is False
+
+    invalid_urls = [
+        "/api/projects/receipts/Codex/%2E%2E%2Fevil.md",
+        "/api/projects/receipts/Codex/%2Ftmp%2Fevil.md",
+        "/api/projects/receipts/Codex%2Fnested/known.md",
+        "/api/projects/receipts/Unknown/known.md",
+        "/api/projects/receipts/Codex/missing.md",
+    ]
+    for url in invalid_urls:
+        response = client.get(url)
+        assert response.status_code == 404, url
+        assert response.json() == {"error": "unknown receipt"}, url
+
+
+def test_receipt_content_route_truncates_at_200_kib(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "Agents"
+    _receipt(root, "Codex", "large.md", "# Large\n" + "x" * (205 * 1024))
+    monkeypatch.setattr("hermes_cli.projects_overview._RECEIPTS_ROOT", root)
+    app = FastAPI()
+    register_projects_routes(app)
+
+    body = TestClient(app).get("/api/projects/receipts/Codex/large.md").json()
+    assert body["truncated"] is True
+    assert len(body["markdown"].encode("utf-8")) == 200 * 1024
+
+
+def test_receipts_cache_uses_30_second_ttl_and_deep_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "Agents"
+    _receipt(root, "Codex", "one.md", "# One\n")
+    monkeypatch.setattr("hermes_cli.projects_overview._RECEIPTS_ROOT", root)
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    fake_now = {"t": 100.0}
+    monkeypatch.setattr("hermes_cli.projects_overview._clock", lambda: fake_now["t"])
+    calls = {"n": 0}
+    real_build = build_receipts_payload
+
+    def counting_build(*args: object, **kwargs: object) -> dict:
+        calls["n"] += 1
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("hermes_cli.projects_overview.build_receipts_payload", counting_build)
+    first = _cached_receipts_payload()
+    first["receipts"].clear()
+    assert len(_cached_receipts_payload()["receipts"]) == 1
+    assert calls["n"] == 1
+    fake_now["t"] = 130.1
+    assert len(_cached_receipts_payload()["receipts"]) == 1
+    assert calls["n"] == 2
+
+
+def test_project_detail_joins_only_matching_receipts_and_caps_five(tmp_path: Path) -> None:
+    entry = _entry(slug="alpha", name="Alpha")
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    receipts = [
+        {
+            "agent": "Codex",
+            "filename": f"alpha-{index}.md",
+            "title": f"Alpha {index}",
+            "mtime": "2026-07-18T00:00:00+00:00",
+            "age_seconds": index,
+            "project": "alpha",
+            "excerpt": None,
+        }
+        for index in range(6)
+    ]
+    receipts.append({**receipts[0], "filename": "beta.md", "project": "beta"})
+
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        now=1_700_000_000,
+        agents_payload={"generated_at": 1_700_000_000, "errors": [], "agents": []},
+        receipts_payload={"generated_at": 1_700_000_000, "receipts": receipts},
+    )
+
+    assert [row["filename"] for row in detail["receipts"]] == [
+        "alpha-0.md",
+        "alpha-1.md",
+        "alpha-2.md",
+        "alpha-3.md",
+        "alpha-4.md",
+    ]
+    assert all(row["project"] == "alpha" for row in detail["receipts"])
