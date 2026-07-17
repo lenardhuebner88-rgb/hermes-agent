@@ -36,20 +36,31 @@ const hooks = vi.hoisted(() => {
   };
 });
 
-vi.mock("../hooks/useControlData", () => ({
-  useDecisionInbox: hooks.useDecisionInbox,
-  useSystemHealth: hooks.useSystemHealth,
+vi.mock("../hooks/costsUsage", () => ({
   useAccountUsage: hooks.useAccountUsage,
-  useDictateStatus: hooks.useDictateStatus,
-  useHermesWorkers: hooks.useHermesWorkers,
-  useHermesTodayDigest: hooks.useHermesTodayDigest,
-  useBoard: hooks.useBoard,
+}));
+vi.mock("../hooks/decisionInbox", () => ({
+  useDecisionInbox: hooks.useDecisionInbox,
+}));
+vi.mock("../hooks/runsDigestRollup", () => ({
   useHermesRunsDaily: hooks.useHermesRunsDaily,
+  useHermesTodayDigest: hooks.useHermesTodayDigest,
+}));
+vi.mock("../hooks/strategist", () => ({
   useStrategistCount: hooks.useStrategistCount,
+}));
+vi.mock("../hooks/systemReleaseHealth", () => ({
+  useDictateStatus: hooks.useDictateStatus,
+  useSystemHealth: hooks.useSystemHealth,
+}));
+vi.mock("../hooks/taskActions", () => ({
   useFixRedispatch: hooks.useFixRedispatch,
   useRepairDeliverable: hooks.useRepairDeliverable,
   useVetoEscalation: hooks.useVetoEscalation,
-  useCaptureTask: hooks.useCaptureTask,
+}));
+vi.mock("../hooks/workersBoard", () => ({
+  useBoard: hooks.useBoard,
+  useHermesWorkers: hooks.useHermesWorkers,
 }));
 
 vi.mock("../components/fleet/FlowCapture", () => ({
