@@ -157,14 +157,20 @@ export function FleetView() {
 
   // Ketten-Chips für Badge und persistente rechte Spalte aus derselben Board-Payload.
   const activeBoardData = selectedBoard ? selectedBoardData.data : board.data;
-  const activeBoardTasksForKetten = (activeBoardData?.columns ?? []).flatMap((column) => column.tasks).map((t) => ({
-    id: t.id,
-    title: t.title,
-    root_id: t.root_id,
-    status: t.status,
-    completed_at: t.completed_at,
-  }));
-  const kettenChipsForAside = buildChainChips(activeBoardTasksForKetten);
+  const activeBoardTasksForKetten = useMemo(
+    () => (activeBoardData?.columns ?? []).flatMap((column) => column.tasks).map((t) => ({
+      id: t.id,
+      title: t.title,
+      root_id: t.root_id,
+      status: t.status,
+      completed_at: t.completed_at,
+    })),
+    [activeBoardData],
+  );
+  const kettenChipsForAside = useMemo(
+    () => buildChainChips(activeBoardTasksForKetten),
+    [activeBoardTasksForKetten],
+  );
   const runningChainCount = kettenChipsForAside.filter((chip) => chip.state === "active").length;
 
   const subtabDefs: SubtabDef[] = [
