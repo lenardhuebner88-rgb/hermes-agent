@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +17,9 @@ import hermes_cli.projects_db as projects_db
 from hermes_cli.projects_overview import (
     ProjectEntry,
     ProjectsRegistry,
+    _attribute_project,
     _cached_agents_payload,
+    _coordination_agents,
     _parse_coordination_note,
     _reset_projects_cache,
     build_agents_payload,
@@ -217,6 +220,45 @@ projects:
     assert [p.name for p in result.projects] == ["First"]
     assert len(result.errors) == 1
     assert "dup" in result.errors[0]
+
+
+def test_reserved_slug_agents_is_rejected(tmp_path: Path) -> None:
+    """A project slugged 'agents' would shadow GET /api/projects/agents (Codex
+    review #5) — the loader must reject it, keeping the valid sibling."""
+    path = _write(
+        tmp_path,
+        """\
+projects:
+  - slug: agents
+    name: Collides
+    repo_path: /tmp/collides
+  - slug: real
+    name: Real
+    repo_path: /tmp/real
+""",
+    )
+    result = load_projects_registry(path)
+    assert [p.slug for p in result.projects] == ["real"]
+    assert any("reserved" in e and "agents" in e for e in result.errors)
+
+
+def test_non_url_safe_slug_is_rejected(tmp_path: Path) -> None:
+    """Slugs become URL path segments + React keys — reject unsafe ones."""
+    path = _write(
+        tmp_path,
+        """\
+projects:
+  - slug: "bad/slug"
+    name: Bad
+    repo_path: /tmp/bad
+  - slug: good-1
+    name: Good
+    repo_path: /tmp/good
+""",
+    )
+    result = load_projects_registry(path)
+    assert [p.slug for p in result.projects] == ["good-1"]
+    assert any("URL-safe" in e for e in result.errors)
 
 
 # ---------------------------------------------------------------------------
@@ -953,6 +995,38 @@ def test_coordination_source_broken_dir_is_isolated_error(tmp_path: Path) -> Non
 
     assert any(e.startswith("coordination:") for e in payload["errors"])
     assert [a for a in payload["agents"] if a["source"] == "coordination"] == []
+
+
+def test_coordination_one_pathological_note_does_not_kill_scan(tmp_path: Path) -> None:
+    """Codex review #6: a deeply-nested YAML note raises RecursionError (not a
+    YAMLError) inside the thread pool; it must skip only that note, not abort
+    the whole scan and lose every valid coordination agent."""
+    coord = tmp_path / "coord"
+    coord.mkdir()
+    (coord / "a-open.md").write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+    # A note whose frontmatter nests far past the recursion limit; safe_load of
+    # this raises RecursionError, which is NOT a yaml.YAMLError.
+    depth = sys.getrecursionlimit() + 200
+    bomb = "---\nagent: claude\nstarted: 2026-07-17T00:00:00+02:00\nx: " + "[" * depth + "]" * depth + "\n---\n"
+    (coord / "b-bomb.md").write_text(bomb, encoding="utf-8")
+
+    registry = _hermes_infra_registry()
+    agents, errors = _coordination_agents(coord, registry=registry)
+    # The valid open note still comes through; the bomb is silently skipped.
+    labels = [a["label"] for a in agents]
+    assert "a-open" in labels
+    assert errors == []
+
+
+def test_attribute_project_rejects_dotdot_escape() -> None:
+    """Codex review #7: a touching-path escaping the repo via `..` must not be
+    attributed to that repo."""
+    reg = ProjectsRegistry(
+        projects=[_entry(slug="r", name="R", repo_path="/home/piet/repo")],
+        errors=[],
+    )
+    assert _attribute_project(["/home/piet/repo/sub/file"], reg) == "r"
+    assert _attribute_project(["/home/piet/repo/../outside/file"], reg) is None
 
 
 # --- kanban source ------------------------------------------------------------

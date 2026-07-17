@@ -92,8 +92,8 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
           <p className="text-micro text-ink-3">{t.detailNoLinks}</p>
         ) : (
           <ul className="flex min-w-0 flex-col gap-1.5">
-            {data.links.map((link) => (
-              <li key={`${link.label}:${link.url}`} className="min-w-0">
+            {data.links.map((link, index) => (
+              <li key={`${link.label}:${link.url}:${index}`} className="min-w-0">
                 <a
                   href={link.url}
                   target={link.url.startsWith("/") ? undefined : "_blank"}
@@ -185,12 +185,12 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
           <p className="text-micro text-ink-3">{t.detailNoLoops}</p>
         ) : (
           <ul className="min-w-0 space-y-2">
-            {data.loops.map((pack) => {
+            {data.loops.map((pack, index) => {
               const outcome = pack.last_outcome;
               const tone = loopOutcomeTone(outcome?.verdict);
               return (
                 <li
-                  key={pack.name}
+                  key={`${pack.name}:${index}`}
                   className="min-w-0 rounded-card border border-line-soft bg-surface-2 px-3 py-2"
                 >
                   <div className="flex min-w-0 flex-wrap items-center gap-2">

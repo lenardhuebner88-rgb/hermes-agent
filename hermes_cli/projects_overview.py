@@ -27,6 +27,7 @@ erhalten.
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import json
 import os
 import re
@@ -77,6 +78,12 @@ class ProjectsRegistry:
     errors: list[str] = field(default_factory=list)
 
 
+# A slug becomes a URL path segment (GET /api/projects/{slug}) and a React key.
+# Keep it URL-safe and reject segments that collide with sibling static routes.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_RESERVED_SLUGS = frozenset({"agents"})
+
+
 def _default_registry_path(home: Path | None) -> Path:
     return (home if home is not None else get_hermes_home()) / "projects.yaml"
 
@@ -122,6 +129,18 @@ def _parse_entry(index: int, raw: Any, errors: list[str]) -> ProjectEntry | None
     slug = raw.get("slug")
     if not isinstance(slug, str) or not slug.strip():
         errors.append(f"project at {label}: missing or empty 'slug'")
+        return None
+    slug = slug.strip()
+    if not _SLUG_RE.match(slug):
+        errors.append(
+            f"project at {label}: slug {slug!r} must be URL-safe "
+            "([a-z0-9] start, then [a-z0-9._-])"
+        )
+        return None
+    if slug in _RESERVED_SLUGS:
+        # A project slugged 'agents' would collide with GET /api/projects/agents
+        # (registered before /{slug}), making its detail endpoint unreachable.
+        errors.append(f"project at {label}: slug {slug!r} is reserved")
         return None
     label = f"'{slug}'"
 
@@ -316,8 +335,11 @@ def _resolve_kanban_project_id(
     try:
         conn = _open_sqlite_ro(projects_db_path)
     except sqlite3.DatabaseError as exc:
-        if board_slug == "default":
-            return None, None
+        # A projects.db READ failure is a real degradation, even for the default
+        # board: without it we cannot count tasks explicitly bound to the default
+        # project row, so returning "no binding" would silently drop them.
+        # Distinguish this from the readable-but-no-row case below (which
+        # legitimately counts NULL-scoped legacy tasks only).
         return None, f"kanban: could not open projects.db: {exc}"
     try:
         rows = projects_db.list_projects(conn, include_archived=True)
@@ -577,9 +599,12 @@ def _attribute_project(paths: list[str], registry: ProjectsRegistry) -> str | No
     for raw_path in paths:
         if not raw_path:
             continue
-        candidate = raw_path.rstrip("/")
+        # Collapse ``..`` / ``.`` segments before matching so a touching-path
+        # like ``/home/piet/repo/../outside`` cannot be mis-attributed to a
+        # project rooted at ``/home/piet/repo``.
+        candidate = os.path.normpath(raw_path).rstrip("/")
         for entry in registry.projects:
-            repo = entry.repo_path.rstrip("/")
+            repo = os.path.normpath(entry.repo_path).rstrip("/")
             if not repo:
                 continue
             if candidate == repo or candidate.startswith(repo + "/"):
@@ -758,7 +783,11 @@ def _parse_coordination_note(
         return None
     try:
         data = yaml.safe_load(frontmatter_text)
-    except yaml.YAMLError:
+    except Exception:
+        # yaml.YAMLError for ordinary garbage, but a pathologically nested doc
+        # can raise RecursionError (not a YAMLError). This runs inside a thread
+        # pool via pool.map, which propagates the FIRST exception and would kill
+        # the whole coordination scan — so one bad note must never escape here.
         return None
     if not isinstance(data, dict):
         return None
@@ -816,13 +845,20 @@ def _coordination_agents(
 
     # I/O-bound per-file work: bounded thread pool. Collect by input order
     # (sorted glob), not completion order, so the agents list stays deterministic.
+    def _safe_parse(path: Path) -> dict[str, Any] | None:
+        # Final guard: _parse_coordination_note already swallows read/parse
+        # errors, but any unexpected failure in one worker must never propagate
+        # out of the pool (it would abort the whole scan). Skip that note only.
+        try:
+            return _parse_coordination_note(path, registry)
+        except Exception:
+            return None
+
     max_workers = min(8, os.cpu_count() or 4)
     agents: list[dict[str, Any]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         # map preserves the order of note_paths.
-        for parsed in pool.map(
-            lambda path: _parse_coordination_note(path, registry), note_paths
-        ):
+        for parsed in pool.map(_safe_parse, note_paths):
             if parsed is not None:
                 agents.append(parsed)
 
@@ -1382,8 +1418,8 @@ def build_project_detail(
 # Polling (agents ~12s, detail ~8s, grid) and multiple browser tabs must not
 # re-pay the coordination-dir scan on every hit. Cache sits at the ROUTE
 # boundary only — builders stay pure/injectable for tests. Values are treated
-# as read-only; :meth:`_TtlMemo.get` returns a shallow copy of the top-level
-# dict so accidental top-level mutation cannot bleed across requests.
+# as read-only; :meth:`_TtlMemo.get` returns a deep copy so no caller can mutate
+# a shared nested structure (agent rows, project cards) and poison later hits.
 
 # 10s (top of the "~5-10s" budget): the frontend polls agents ~12s and the
 # drilldown ~8s, so a TTL below the poll interval would miss on every single
@@ -1413,13 +1449,10 @@ class _TtlMemo:
             if _clock() - stored_at >= self._ttl:
                 del self._store[key]
                 return None
-            # Top-level dict + top-level lists are copied so rebinding keys or
-            # clearing/replacing a list on the returned value cannot bleed into
-            # the store. Nested dicts (agent rows, project cards) stay shared
-            # and must be treated as read-only (detail filtering always copies).
-            return {
-                k: (list(v) if isinstance(v, list) else v) for k, v in value.items()
-            }
+            # Deep copy: the payload's nested agent rows / project cards are
+            # otherwise shared with the store, so a caller mutating one (e.g.
+            # popping a field off a cached agent dict) would poison later hits.
+            return copy.deepcopy(value)
 
     def set(self, key: str, value: dict[str, Any]) -> None:
         with self._lock:
@@ -1439,8 +1472,9 @@ def _reset_projects_cache() -> None:
 
 
 def _cache_view(payload: dict[str, Any]) -> dict[str, Any]:
-    """Return a request-local view of a cached payload (top-level lists copied)."""
-    return {k: (list(v) if isinstance(v, list) else v) for k, v in payload.items()}
+    """Return a request-local deep copy so the freshly-stored payload the store
+    holds can never be mutated through the value handed back on a cold miss."""
+    return copy.deepcopy(payload)
 
 
 def _cached_projects_payload() -> dict[str, Any]:
