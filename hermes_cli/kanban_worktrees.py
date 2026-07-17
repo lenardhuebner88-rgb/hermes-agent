@@ -964,6 +964,7 @@ def prepare_worker_base(
     *,
     recorded_head: str,
     merge_target: str,
+    task_id: str | None = None,
 ) -> dict[str, str]:
     """Fail closed on reused-worktree drift, then update a clean stale base.
 
@@ -972,6 +973,11 @@ def prepare_worker_base(
     edit.  Dirty state or an unexpected HEAD is never rewritten.  A clean
     branch whose target advanced is rebased, with an automatic abort on
     conflict so the dispatcher can block with the original worktree intact.
+
+    When ``task_id`` is provided, known artifact-only dirt (scratch, receipts,
+    screenshots, archived artifact dirs) is preserved to the receipts area and
+    removed before the dirty check, so artefakt-only leftovers from a crashed
+    predecessor do not park the chain.  Real source edits still park.
     """
     wt = Path(worktree)
     actual_head = _git(wt, "rev-parse", "HEAD")
@@ -983,10 +989,27 @@ def prepare_worker_base(
         )
     dirty = dirty_files(wt)
     if dirty:
-        raise WorktreeError(
-            "worktree is dirty before worker edits; refusing automatic base "
-            f"update ({', '.join(dirty[:8])})"
-        )
+        if task_id is None:
+            raise WorktreeError(
+                "worktree is dirty before worker edits; refusing automatic base "
+                f"update ({', '.join(dirty[:8])})"
+            )
+        artifact_paths = [
+            p for p in dirty
+            if _classify_dirty_paths([p]) == PRESERVABLE_ARTIFACTS_CLASS
+        ]
+        if not artifact_paths:
+            raise WorktreeError(
+                "worktree is dirty before worker edits; refusing automatic base "
+                f"update ({', '.join(dirty[:8])})"
+            )
+        receipt = _preserve_artifact_files(wt, task_id, artifact_paths)
+        remaining = dirty_files(wt)
+        if remaining:
+            raise WorktreeError(
+                "worktree is dirty before worker edits; refusing automatic base "
+                f"update ({', '.join(remaining[:8])})"
+            )
     target = str(merge_target or "").strip()
     if not target:
         raise WorktreeError("worktree merge target is missing")
@@ -1076,6 +1099,7 @@ def prepare_reused_task_worktree(
         wt,
         recorded_head=recorded_head,
         merge_target=merge_target,
+        task_id=task.id,
     )
     from hermes_cli import kanban_db as kb
 

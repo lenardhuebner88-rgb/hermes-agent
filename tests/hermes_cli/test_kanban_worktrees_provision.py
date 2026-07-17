@@ -239,6 +239,68 @@ def test_prepare_worker_base_rejects_dirty_current_worktree(repo):
         )
 
 
+# ---------------------------------------------------------------------------
+# Regression — artifact-only dirty reused worktree: preserve-and-remove before
+# the dirty gate so artefakt-only-Schmutz die Kette nicht parkt.
+# ---------------------------------------------------------------------------
+
+def test_prepare_worker_base_preserves_artifact_only_dirt_and_proceeds(repo, tmp_path):
+    """Artifact-only dirt (screenshots/) is preserved to receipts and removed
+    from the worktree; the base update proceeds instead of parking."""
+    info = kwt.ensure_worktree(repo, "t_reused_artifact_only")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    # Plant artifact-only dirt matching _PRESERVABLE_ARTIFACT_PREFIXES.
+    (worktree / "screenshots").mkdir()
+    (worktree / "screenshots" / "shot1.png").write_text("fake-png-bytes")
+
+    # Redirect receipts root to a tmp dir so we don't write into the Vault.
+    receipts_root = tmp_path / "receipts" / "artifacts"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", receipts_root)
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_reused_artifact_only",
+    )
+    monkeypatch.undo()
+
+    assert result["action"] == "current"
+    # Artifact removed from worktree and preserved under receipts root.
+    assert not (worktree / "screenshots").exists()
+    assert any(receipts_root.iterdir()), "receipts root must hold the preserved artifact"
+
+
+def test_prepare_worker_base_still_parks_on_real_source_edit(repo, tmp_path):
+    """Real uncommitted source edits must still park and escalate — no silent
+    discarding of load-bearing work."""
+    info = kwt.ensure_worktree(repo, "t_reused_source_edit")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    # Plant artifact dirt AND a real source edit.
+    (worktree / "screenshots").mkdir()
+    (worktree / "screenshots" / "shot1.png").write_text("fake-png-bytes")
+    (worktree / "a.txt").write_text("uncommitted worker edit\n")
+
+    receipts_root = tmp_path / "receipts" / "artifacts"
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(kwt, "_ARTIFACT_RECEIPTS_ROOT", receipts_root)
+
+    with pytest.raises(kwt.WorktreeError, match="dirty before worker edits"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            task_id="t_reused_source_edit",
+        )
+    monkeypatch.undo()
+
+    # Source edit must still be present (not silently discarded).
+    assert (worktree / "a.txt").read_text() == "uncommitted worker edit\n"
+
+
 def test_ensure_worktree_symlinks_node_modules(repo):
     (repo / "node_modules").mkdir()
     (repo / "web" / "node_modules").mkdir()
