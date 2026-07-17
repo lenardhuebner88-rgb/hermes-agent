@@ -2864,6 +2864,12 @@ def project_strategist_outcomes(
             "done", "archived", "failed", "cancelled", "canceled"
         } or (task is None and terminalize_missing)
         if terminal:
+            # Monotonic: once shipped, never re-terminalize to archived/n/a.
+            # Delivery evidence may be missing after event retention; a prior
+            # ship stamp remains a durable fact for reflect measurement.
+            if rec.get("status") == "shipped":
+                projected.append(rec)
+                continue
             disposition = {
                 "freigabe_completed": "done_elsewhere",
                 "freigabe_vetoed": "vetoed",

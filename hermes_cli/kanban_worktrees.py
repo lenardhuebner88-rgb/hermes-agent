@@ -3327,6 +3327,25 @@ def _auto_complete_decompose_root(
                 "merge_commit": outcome.get("merge_commit"),
             },
         )
+        # Mirror child-side delivery witnesses onto the decompose root so
+        # project_strategist_outcomes (root_id only) can mark the lever shipped.
+        # Same event shapes as _record_integration_events_and_receipts.
+        merge_commit = str(outcome.get("merge_commit") or "").strip()
+        if (
+            outcome.get("action") == "merged"
+            and re.fullmatch(r"[0-9a-fA-F]{40}", merge_commit) is not None
+        ):
+            kb._append_event(conn, root_id, "integration_merged", outcome)
+            kb._append_event(
+                conn,
+                root_id,
+                "INTEGRATOR_VERIFIED",
+                {
+                    "merge_commit": outcome.get("merge_commit"),
+                    "gate": outcome.get("gate"),
+                    "state": outcome.get("state"),
+                },
+            )
         payload = {
             "completed_by": completed_task_id,
             "integration_action": outcome.get("action"),
