@@ -172,9 +172,13 @@ export function pickDeepLinkedTarget(
   session: string,
   window?: string | null,
 ): { session: string; window: string } | null {
-  const match = window
-    ? windows.find((candidate) => candidate.session === session && candidate.window === window)
-    : windows.find((candidate) => candidate.session === session);
+  // Exaktes Fenster zuerst; kennt die Inventur das Fenster nicht (stale Link,
+  // Index-statt-Name aus älteren Backends), fällt der Link auf die Session
+  // zurück statt auf die globale Default-Auswahl (ui-verify 2026-07-18).
+  const match =
+    (window
+      ? windows.find((candidate) => candidate.session === session && candidate.window === window)
+      : undefined) ?? windows.find((candidate) => candidate.session === session);
   return match ? targetFromWindow(match) : null;
 }
 

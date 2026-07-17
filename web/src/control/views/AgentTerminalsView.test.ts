@@ -177,6 +177,10 @@ describe("pickDeepLinkedTarget", () => {
   it("selects the session's first window when no window is requested", () => {
     expect(pickDeepLinkedTarget(LIVE_WINDOWS, "work")).toEqual({ session: "work", window: "claude" });
   });
+
+  it("falls back to the session when the requested window is unknown (stale/index link)", () => {
+    expect(pickDeepLinkedTarget(LIVE_WINDOWS, "work", "2")).toEqual({ session: "work", window: "claude" });
+  });
 });
 
 describe("orderWindowsForStrip", () => {
