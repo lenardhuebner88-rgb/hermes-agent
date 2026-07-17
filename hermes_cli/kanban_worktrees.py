@@ -2641,15 +2641,32 @@ def _finish_release_gate_green(
             with kb.write_txn(conn):
                 # Only promote a still-open gate child — never resurrect a
                 # concurrently archived/failed task.
-                conn.execute(
-                    "UPDATE tasks SET status = 'done' WHERE id = ? "
-                    "AND status IN ('blocked', 'ready', 'todo', 'running')",
-                    (task_id,),
+                now = int(time.time())
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'done', result = ?, completed_at = ?, "
+                    "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+                    "block_kind = NULL, block_recurrences = 0 "
+                    "WHERE id = ? AND status IN ('blocked', 'ready', 'todo', 'running')",
+                    ("release-gate green", now, task_id),
                 )
-                kb._append_event(
-                    conn, task_id, "release_gate_green",
-                    {"root_id": root_id, "fixer_attempts": fixer_attempts},
-                )
+                if cur.rowcount == 1:
+                    run_id = kb._end_run(
+                        conn,
+                        task_id,
+                        outcome="completed",
+                        status="done",
+                        summary=(
+                            "release gate green after "
+                            f"{fixer_attempts} fixer attempt(s)"
+                        ),
+                    )
+                    kb._append_event(
+                        conn,
+                        task_id,
+                        "release_gate_green",
+                        {"root_id": root_id, "fixer_attempts": fixer_attempts},
+                        run_id=run_id,
+                    )
         except Exception:
             _log.warning("could not mark release-gate child %s done",
                          task_id, exc_info=True)

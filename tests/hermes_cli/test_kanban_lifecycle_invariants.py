@@ -370,10 +370,6 @@ def test_i11_ready_requeue_has_no_runtime_identity(
         _assert_runtime_cleared(task)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I12 broken: release-gate SQL fallback omits completed_at and cleanup",
-)
 def test_i12_release_gate_done_fallback_sets_terminal_evidence(kanban_home):
     """I12: even the fallback done path sets completed_at and terminal hygiene."""
     with kb.connect_closing() as conn:
