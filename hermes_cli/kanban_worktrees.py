@@ -1139,21 +1139,29 @@ def prepare_reused_task_worktree(
                 merge_target = str(payload.get("merge_target") or "").strip()
         except (TypeError, ValueError):
             pass
-    # WIP adoption evidence: only the immediately preceding run of THIS task
-    # (not an unrelated predecessor's leftovers) ending resumably (worker
-    # blocked, e.g. needs_input) makes leftover dirt "our own WIP" rather
-    # than garbage from a crashed run — anything else stays fail-closed.
-    prior_run = conn.execute(
+    # WIP adoption evidence: walk prior runs of THIS task, most recent
+    # first, SKIPPING outcomes where no worker process ever touched the
+    # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
+    # cycle after a worktree-prep rejection, not a worker attempt). The
+    # first non-skipped run is the actual last worker attempt; only when
+    # THAT ended resumably (``blocked``, e.g. needs_input) is leftover dirt
+    # "our own WIP" rather than garbage from some other predecessor — a
+    # crashed/timed-out/completed run (or exhausting the bounded window
+    # without finding one) stays fail-closed.
+    _NON_WORKER_RETRY_OUTCOMES = ("spawn_failed", "gave_up")
+    candidate_runs = conn.execute(
         "SELECT id, outcome FROM task_runs "
         "WHERE task_id = ? AND id < ? "
-        "ORDER BY id DESC LIMIT 1",
+        "ORDER BY id DESC LIMIT 20",
         (task.id, run_id),
-    ).fetchone()
-    adopt_wip_run_id = (
-        int(prior_run["id"])
-        if prior_run is not None and prior_run["outcome"] == "blocked"
-        else None
-    )
+    ).fetchall()
+    adopt_wip_run_id = None
+    for candidate in candidate_runs:
+        if candidate["outcome"] in _NON_WORKER_RETRY_OUTCOMES:
+            continue
+        if candidate["outcome"] == "blocked":
+            adopt_wip_run_id = int(candidate["id"])
+        break
     result = prepare_worker_base(
         wt,
         recorded_head=recorded_head,

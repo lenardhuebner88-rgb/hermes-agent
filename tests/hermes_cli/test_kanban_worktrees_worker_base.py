@@ -165,10 +165,14 @@ def _init_git_repo(repo: Path) -> None:
 def test_dispatch_adopts_wip_left_by_own_blocked_run(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):
-    """End-to-end reproduction of the live incident (t_bfb52c79): a worker
-    run ends ``blocked`` leaving real source edits uncommitted in the shared
-    chain worktree. Re-dispatch must adopt that WIP and spawn -- not raise
-    ``worker_base_rejected`` and give up."""
+    """End-to-end reproduction of the ACTUAL live incident (t_bfb52c79),
+    verified read-only against ``kanban.db``: run 7301 ``blocked`` (worker
+    left real source edits uncommitted), run 7302 ``spawn_failed``, run 7303
+    ``gave_up`` -- TWO re-dispatch attempts failed the dirty-worktree guard
+    before the breaker tripped, neither of which ever touched the tree.
+    The next re-dispatch must skip past the spawn_failed/gave_up rows,
+    find the original ``blocked`` run as evidence, adopt that WIP, and
+    spawn -- not raise ``worker_base_rejected`` and give up again."""
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
@@ -205,19 +209,63 @@ def test_dispatch_adopts_wip_left_by_own_blocked_run(
 
         assert kb.unblock_task(conn, tid)
 
-        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
-        events = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+        # Reproduce the two dispatcher-side worktree-prep rejections that
+        # produced runs 7302 (spawn_failed) and 7303 (gave_up) in the real
+        # incident: no worker process is ever spawned, the tree is never
+        # touched -- only the dispatcher's own failure/breaker bookkeeping
+        # (real code, real task_runs/task_events writes) runs.
+        real_prepare_worker_base = kwt.prepare_worker_base
+
+        def _still_dirty(*_args, **_kwargs):
+            raise kwt.WorktreeError(
+                "worktree is dirty before worker edits; refusing automatic "
+                "base update (simulated concurrent prep failure)"
+            )
+
+        monkeypatch.setattr(kwt, "prepare_worker_base", _still_dirty)
+        spawn_failed_attempt = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        assert spawn_failed_attempt.spawned == []
+        gave_up_attempt = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        assert gave_up_attempt.spawned == []
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        run_rows = conn.execute(
+            "SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id",
             (tid,),
         ).fetchall()
+        outcomes = [(r["id"], r["outcome"]) for r in run_rows]
+        assert [o for _, o in outcomes] == ["blocked", "spawn_failed", "gave_up"]
+        assert outcomes[0][0] == run1_id
 
-    assert second.spawned == [(tid, "sentinel", str(expected))]
+        # The two simulated dispatcher-side rejections above each emit their
+        # own worker_base_rejected event, exactly like the real incident's
+        # two failed re-dispatch attempts. Watermark here so the assertions
+        # below only judge the THIRD (real) dispatch, not the setup.
+        watermark = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?",
+            (tid,),
+        ).fetchone()[0]
+
+        # The breaker tripped the task to 'blocked' on the gave_up run;
+        # unblock once more before the real re-dispatch that must adopt.
+        assert kb.unblock_task(conn, tid)
+
+        third = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? AND id > ? "
+            "ORDER BY id",
+            (tid, watermark),
+        ).fetchall()
+
+    assert third.spawned == [(tid, "sentinel", str(expected))]
     assert not any(e["kind"] == "worker_base_rejected" for e in events)
     assert kwt.dirty_files(expected) == []
     adopted = [
         json.loads(e["payload"]) for e in events if e["kind"] == "wip_adopted"
     ]
     assert len(adopted) == 1
+    # Adoption is attributed to the ORIGINAL blocked run (7301-equivalent),
+    # not either of the intervening spawn_failed/gave_up rows.
     assert adopted[0]["run_id"] == run1_id
     assert adopted[0]["files"] == ["NodeDetailDrawer.tsx"]
     commit_msg = _git(expected, "log", "-1", "--format=%s")
@@ -276,6 +324,91 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
         ).fetchall()
 
     assert second.spawned == []
+    reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
+    assert len(reject_events) == 1
+    assert not any(e["kind"] == "wip_adopted" for e in events)
+    assert (expected / "leftover.py").read_text() == "half-written garbage\n"
+
+
+def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Gegenprobe: the skip-list only skips spawn_failed/gave_up. A crashed
+    run BEHIND those rows is still not resumable evidence -- the walk must
+    land on it (not fall through to None by accident) and still refuse."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="crash-then-two-failed-spawns",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+        run1_id = kb.get_task(conn, tid).current_run_id
+
+        # run1 crashes (not blocked) -- dispatchable again, no worker touched
+        # the tree since.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET status='crashed', outcome='crashed', "
+                "ended_at=strftime('%s','now') WHERE id=?",
+                (run1_id,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+                (tid,),
+            )
+        # A crashed predecessor's uncommitted leftovers land in the shared
+        # worktree.
+        (expected / "leftover.py").write_text("half-written garbage\n")
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+
+        def _still_dirty(*_args, **_kwargs):
+            raise kwt.WorktreeError(
+                "worktree is dirty before worker edits; refusing automatic "
+                "base update (simulated concurrent prep failure)"
+            )
+
+        monkeypatch.setattr(kwt, "prepare_worker_base", _still_dirty)
+        assert kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default").spawned == []
+        assert kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default").spawned == []
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        run_rows = conn.execute(
+            "SELECT id, outcome FROM task_runs WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [r["outcome"] for r in run_rows] == ["crashed", "spawn_failed", "gave_up"]
+
+        watermark = conn.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id = ?",
+            (tid,),
+        ).fetchone()[0]
+
+        assert kb.unblock_task(conn, tid)
+
+        third = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? AND id > ? "
+            "ORDER BY id",
+            (tid, watermark),
+        ).fetchall()
+
+    assert third.spawned == []
     reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
     assert len(reject_events) == 1
     assert not any(e["kind"] == "wip_adopted" for e in events)
