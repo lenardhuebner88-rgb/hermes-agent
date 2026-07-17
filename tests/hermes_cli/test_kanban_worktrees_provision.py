@@ -273,6 +273,37 @@ def test_prepare_worker_base_preserves_artifact_only_dirt_and_proceeds(repo, tmp
     assert any(receipts_root.iterdir()), "receipts root must hold the preserved artifact"
 
 
+def test_prepare_worker_base_wraps_artifact_preserve_failure(repo, tmp_path, monkeypatch):
+    info = kwt.ensure_worktree(repo, "t_reused_artifact_failure")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    artifact = worktree / "screenshots" / "shot1.png"
+    artifact.parent.mkdir()
+    artifact.write_text("fake-png-bytes")
+    monkeypatch.setattr(
+        kwt, "_ARTIFACT_RECEIPTS_ROOT", tmp_path / "receipts" / "artifacts"
+    )
+    monkeypatch.setattr(
+        kwt.shutil,
+        "copy2",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(
+        kwt.WorktreeError,
+        match="artifact preserve failed before base update.*disk full",
+    ) as exc_info:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            task_id="t_reused_artifact_failure",
+        )
+
+    assert artifact.read_text() == "fake-png-bytes"
+    assert isinstance(exc_info.value.__cause__, OSError)
+
+
 def test_prepare_worker_base_still_parks_on_real_source_edit(repo, tmp_path):
     """Real uncommitted source edits must still park and escalate — no silent
     discarding of load-bearing work."""
@@ -806,6 +837,53 @@ def test_dispatch_once_blocks_dirty_worktree_before_worker_spawn(
     assert result.auto_blocked == [tid]
     assert len(rejected) == kb.DEFAULT_FAILURE_LIMIT
     assert "dirty before worker edits" in rejected[-1]["reason"]
+
+
+def test_dispatch_once_parks_artifact_preserve_failure(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    monkeypatch.setattr(
+        kwt,
+        "_preserve_artifact_files",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    spawned: list[str] = []
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.dispatch_once(conn, spawn_fn=lambda _task, workspace: spawned.append(workspace))
+        assert kb.reclaim_task(conn, tid, reason="prepare artifact retry")
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.workspace_path is not None
+        artifact = Path(task.workspace_path) / "screenshots" / "shot1.png"
+        artifact.parent.mkdir()
+        artifact.write_text("fake-png-bytes")
+
+        result = kb.dispatch_once(
+            conn,
+            spawn_fn=lambda _task, workspace: spawned.append(workspace),
+            failure_limit=1,
+        )
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        rejected = _events(conn, tid, "worker_base_rejected")
+
+    assert len(spawned) == 1, "preserve failure must not reach the worker spawn"
+    assert result.spawned == []
+    assert task.status == "blocked"
+    assert task.consecutive_failures == 1
+    assert result.auto_blocked == [tid]
+    assert len(rejected) == 1
+    assert "artifact preserve failed before base update" in rejected[0]["reason"]
+    assert artifact.read_text() == "fake-png-bytes"
 
 
 def test_dispatch_once_flag_off_is_unchanged(

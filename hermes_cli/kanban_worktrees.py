@@ -1003,7 +1003,13 @@ def prepare_worker_base(
                 "worktree is dirty before worker edits; refusing automatic base "
                 f"update ({', '.join(dirty[:8])})"
             )
-        receipt = _preserve_artifact_files(wt, task_id, artifact_paths)
+        try:
+            _preserve_artifact_files(wt, task_id, artifact_paths)
+        except Exception as exc:
+            raise WorktreeError(
+                "artifact preserve failed before base update; parking dirty "
+                f"worktree ({exc})"
+            ) from exc
         remaining = dirty_files(wt)
         if remaining:
             raise WorktreeError(
