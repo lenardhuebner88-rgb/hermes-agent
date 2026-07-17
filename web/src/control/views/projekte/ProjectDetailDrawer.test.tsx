@@ -76,6 +76,26 @@ const REAL_DETAIL_PAYLOAD = {
   errors: ["git: sample isolation"],
 };
 
+// Real-shaped detail payload for the additive task correlation (backend
+// 2026-07-17): the tmux agent carries @hermes_session_id/@hermes_task_id plus
+// the resolved kanban task title in `task`.
+const CORRELATED_DETAIL_PAYLOAD = {
+  ...REAL_DETAIL_PAYLOAD,
+  agents: [
+    {
+      kind: "kimi",
+      label: "work:3 kimi",
+      task: "B1-Frontend: Task-Korrelation im LiveBoard",
+      since: 1784239000,
+      source: "tmux",
+      assignee: null,
+      operator: null,
+      session_id: "s_9f8e7d6c5b",
+      task_id: "t_b1frontend",
+    },
+  ],
+};
+
 const { hookState } = vi.hoisted(() => ({
   hookState: {
     data: null as import("../../lib/schemas").ProjectDetail | null,
@@ -114,6 +134,16 @@ describe("ProjectDetailResponseSchema (real detail fixture)", () => {
     expect(parsed.loops[0].last_outcome?.verdict).toBe("landed");
     expect(parsed.agents[0].kind).toBe("kimi");
     expect(parsed.errors).toEqual(["git: sample isolation"]);
+    // Legacy payload without the additive correlation fields parses unchanged.
+    expect(parsed.agents[0].session_id).toBeNull();
+    expect(parsed.agents[0].task_id).toBeNull();
+  });
+
+  it("parses the additive session/task correlation fields on tmux rows", () => {
+    const parsed = parseOrThrow(ProjectDetailResponseSchema, CORRELATED_DETAIL_PAYLOAD, "detail-correlated");
+    expect(parsed.agents[0].session_id).toBe("s_9f8e7d6c5b");
+    expect(parsed.agents[0].task_id).toBe("t_b1frontend");
+    expect(parsed.agents[0].task).toBe("B1-Frontend: Task-Korrelation im LiveBoard");
   });
 
   it("accepts the unknown-slug error body without throwing", () => {
@@ -144,6 +174,13 @@ describe("ProjectDetailBody (loaded fixture)", () => {
     expect(screen.getByText("Kimi")).toBeTruthy();
     expect(screen.getByText("git: sample isolation")).toBeTruthy();
     expect(screen.getByText("Control-Dashboard")).toBeTruthy();
+  });
+
+  it("shows the task-id chip in the agent meta line when the backend resolved one", () => {
+    const data = parseOrThrow(ProjectDetailResponseSchema, CORRELATED_DETAIL_PAYLOAD, "detail-correlated");
+    render(<ProjectDetailBody data={data} now={1784240000} />);
+    const chip = screen.getByText("t_b1frontend");
+    expect(chip.getAttribute("title")).toBe("t_b1frontend");
   });
 
   it("shows honest empty states when lists are empty", () => {

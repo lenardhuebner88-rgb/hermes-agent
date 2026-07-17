@@ -118,6 +118,14 @@ function LiveBoardRow({
               </span>
             </>
           ) : null}
+          {agent.task_id ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="truncate font-data" title={agent.task_id}>
+                {agent.task_id}
+              </span>
+            </>
+          ) : null}
         </p>
       </div>
       {isClaim ? (

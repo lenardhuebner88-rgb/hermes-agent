@@ -15,6 +15,8 @@ const TMUX_AGENT: ProjectAgent = {
   tmux_window: "2",
   assignee: null,
   operator: null,
+  session_id: null,
+  task_id: null,
 };
 
 const KANBAN_AGENT: ProjectAgent = {
@@ -28,6 +30,8 @@ const KANBAN_AGENT: ProjectAgent = {
   tmux_window: null,
   assignee: "coder",
   operator: null,
+  session_id: null,
+  task_id: null,
 };
 
 const CLAIM_AGENT: ProjectAgent = {
@@ -41,6 +45,8 @@ const CLAIM_AGENT: ProjectAgent = {
   tmux_window: null,
   assignee: null,
   operator: "piet",
+  session_id: null,
+  task_id: null,
 };
 
 const UNASSIGNED: ProjectAgent = {
@@ -54,6 +60,26 @@ const UNASSIGNED: ProjectAgent = {
   tmux_window: "0",
   assignee: null,
   operator: null,
+  session_id: null,
+  task_id: null,
+};
+
+// Real /api/projects/agents tmux row with the additive task correlation
+// (backend 2026-07-17): session/task resolved from the tmux options
+// @hermes_session_id/@hermes_task_id; task carries the resolved kanban title.
+const CORRELATED_TMUX_AGENT: ProjectAgent = {
+  kind: "kimi",
+  label: "work:3 kimi",
+  task: "B1-Frontend: Task-Korrelation im LiveBoard",
+  project: "hermes-infra",
+  since: 1784239000,
+  source: "tmux",
+  tmux_session: "work",
+  tmux_window: "3",
+  assignee: null,
+  operator: null,
+  session_id: "s_9f8e7d6c5b",
+  task_id: "t_b1frontend",
 };
 
 const NAMES = { "hermes-infra": "Hermes Infra", "family-organizer": "Family Organizer" };
@@ -95,5 +121,20 @@ describe("LiveBoard", () => {
   it("renders a calm empty state when nobody is working", () => {
     const html = renderBoard([]);
     expect(html).toContain("Gerade arbeitet niemand an diesen Projekten.");
+  });
+
+  it("renders the task-id chip only when the backend resolved one", () => {
+    const html = renderBoard([CORRELATED_TMUX_AGENT, TMUX_AGENT]);
+    const rows = html.match(/<li[\s\S]*?<\/li>/g) ?? [];
+    expect(rows).toHaveLength(2);
+    const correlated = rows.find((row) => row.includes("work:3 kimi")) ?? "";
+    const legacy = rows.find((row) => row.includes("work:2 kimi")) ?? "";
+    // Chip: visible font-data id with the full id in the title; the headline
+    // keeps preferring the resolved task title (agent.task ?? agent.label).
+    expect(correlated).toContain('title="t_b1frontend"');
+    expect(correlated).toContain(">t_b1frontend</span>");
+    expect(correlated).toContain("B1-Frontend: Task-Korrelation im LiveBoard");
+    // Row without markers renders exactly as before — no chip.
+    expect(legacy).not.toContain("t_b1frontend");
   });
 });

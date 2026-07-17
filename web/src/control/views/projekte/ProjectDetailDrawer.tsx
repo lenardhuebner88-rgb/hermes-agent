@@ -259,6 +259,12 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
                           <span>{t.operatorLabel(agent.operator)}</span>
                         </>
                       ) : null}
+                      {agent.task_id ? (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span title={agent.task_id}>{agent.task_id}</span>
+                        </>
+                      ) : null}
                       {agent.since != null && Number.isFinite(agent.since) ? (
                         <>
                           <span aria-hidden>·</span>
