@@ -52,7 +52,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 # Cap for the package-directory fallback in _affected_pytest_modules: if the
 # package test directory contains more than this many test_*.py files, the
@@ -880,6 +880,28 @@ def _preserve_artifact_files(worktree: Path, task_id: str, paths: Sequence[str])
     return {"destination": str(dest), "file_count": len(copied), "paths": dirty_paths}
 
 
+def _adopt_wip_commit(worktree: Path, task_id: str, run_id: int, dirty_paths: Sequence[str]) -> list[str]:
+    """Commit *dirty_paths* on the chain branch as adopted WIP from a blocked
+    predecessor run, instead of parking the chain.
+
+    Uses a fixed, deterministic author identity so the commit is
+    unambiguously attributable to the guard rather than to whichever human
+    or worker identity happened to be configured in the worktree.
+    """
+    _git(worktree, "add", "-A")
+    _git(
+        worktree,
+        "-c",
+        "user.name=Hermes Worker Base",
+        "-c",
+        "user.email=worker-base@hermes.local",
+        "commit",
+        "-m",
+        f"wip({task_id}): adopt uncommitted WIP from blocked run {run_id}",
+    )
+    return list(dirty_paths)
+
+
 # ---------------------------------------------------------------------------
 # Provisioning
 # ---------------------------------------------------------------------------
@@ -965,7 +987,8 @@ def prepare_worker_base(
     recorded_head: str,
     merge_target: str,
     task_id: str | None = None,
-) -> dict[str, str]:
+    adopt_wip_run_id: int | None = None,
+) -> dict[str, Any]:
     """Fail closed on reused-worktree drift, then update a clean stale base.
 
     This runs after claim/provisioning but before the worker process starts.
@@ -977,7 +1000,12 @@ def prepare_worker_base(
     When ``task_id`` is provided, known artifact-only dirt (scratch, receipts,
     screenshots, archived artifact dirs) is preserved to the receipts area and
     removed before the dirty check, so artefakt-only leftovers from a crashed
-    predecessor do not park the chain.  Real source edits still park.
+    predecessor do not park the chain.  Real source edits still park — unless
+    ``adopt_wip_run_id`` names a prior *resumable* run of this same task
+    (caller-verified, e.g. that run ended ``blocked``), in which case the
+    remaining non-artifact dirt is committed as adopted WIP instead of
+    parking. This is intentionally narrow: it never fires for a fresh task or
+    for dirt left by an unrelated predecessor.
     """
     wt = Path(worktree)
     actual_head = _git(wt, "rev-parse", "HEAD")
@@ -988,6 +1016,7 @@ def prepare_worker_base(
             f"(recorded={recorded or 'missing'}, actual={actual_head})"
         )
     dirty = dirty_files(wt)
+    adopted_wip_files: list[str] | None = None
     if dirty:
         if task_id is None:
             raise WorktreeError(
@@ -999,29 +1028,41 @@ def prepare_worker_base(
             if _classify_dirty_paths([p]) == PRESERVABLE_ARTIFACTS_CLASS
         ]
         if not artifact_paths:
-            raise WorktreeError(
-                "worktree is dirty before worker edits; refusing automatic base "
-                f"update ({', '.join(dirty[:8])})"
-            )
-        receipt = _preserve_artifact_files(wt, task_id, artifact_paths)
-        remaining = dirty_files(wt)
-        if remaining:
-            raise WorktreeError(
-                "worktree is dirty before worker edits; refusing automatic base "
-                f"update ({', '.join(remaining[:8])})"
-            )
+            if adopt_wip_run_id is None:
+                raise WorktreeError(
+                    "worktree is dirty before worker edits; refusing automatic "
+                    f"base update ({', '.join(dirty[:8])})"
+                )
+            adopted_wip_files = _adopt_wip_commit(wt, task_id, adopt_wip_run_id, dirty)
+        else:
+            receipt = _preserve_artifact_files(wt, task_id, artifact_paths)
+            remaining = dirty_files(wt)
+            if remaining:
+                if adopt_wip_run_id is None:
+                    raise WorktreeError(
+                        "worktree is dirty before worker edits; refusing "
+                        f"automatic base update ({', '.join(remaining[:8])})"
+                    )
+                adopted_wip_files = _adopt_wip_commit(
+                    wt, task_id, adopt_wip_run_id, remaining
+                )
+    if adopted_wip_files is not None:
+        actual_head = _git(wt, "rev-parse", "HEAD")
     target = str(merge_target or "").strip()
     if not target:
         raise WorktreeError("worktree merge target is missing")
     target_head = _git(wt, "rev-parse", target)
     if actual_head == target_head or _branch_is_ancestor(wt, target_head, actual_head):
-        return {
+        result: dict[str, Any] = {
             "action": "current",
             "previous_head": actual_head,
             "head": actual_head,
             "merge_target": target,
             "merge_target_head": target_head,
         }
+        if adopted_wip_files is not None:
+            result["adopted_wip_files"] = adopted_wip_files
+        return result
     try:
         _git(wt, "rebase", target)
     except WorktreeError as exc:
@@ -1034,20 +1075,23 @@ def prepare_worker_base(
         raise WorktreeError(
             "worktree became dirty while preparing the worker base"
         )
-    return {
+    result = {
         "action": "rebased",
         "previous_head": actual_head,
         "head": new_head,
         "merge_target": target,
         "merge_target_head": target_head,
     }
+    if adopted_wip_files is not None:
+        result["adopted_wip_files"] = adopted_wip_files
+    return result
 
 
 def prepare_reused_task_worktree(
     conn: sqlite3.Connection,
     task,
     workspace: Path | str,
-) -> Optional[dict[str, str]]:
+) -> Optional[dict[str, Any]]:
     """Prepare a task retry's already-provisioned worktree before spawn.
 
     First-time chain provisioning is excluded: a sibling may legitimately
@@ -1095,11 +1139,35 @@ def prepare_reused_task_worktree(
                 merge_target = str(payload.get("merge_target") or "").strip()
         except (TypeError, ValueError):
             pass
+    # WIP adoption evidence: walk prior runs of THIS task, most recent
+    # first, SKIPPING outcomes where no worker process ever touched the
+    # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
+    # cycle after a worktree-prep rejection, not a worker attempt). The
+    # first non-skipped run is the actual last worker attempt; only when
+    # THAT ended resumably (``blocked``, e.g. needs_input) is leftover dirt
+    # "our own WIP" rather than garbage from some other predecessor — a
+    # crashed/timed-out/completed run (or exhausting the bounded window
+    # without finding one) stays fail-closed.
+    _NON_WORKER_RETRY_OUTCOMES = ("spawn_failed", "gave_up")
+    candidate_runs = conn.execute(
+        "SELECT id, outcome FROM task_runs "
+        "WHERE task_id = ? AND id < ? "
+        "ORDER BY id DESC LIMIT 20",
+        (task.id, run_id),
+    ).fetchall()
+    adopt_wip_run_id = None
+    for candidate in candidate_runs:
+        if candidate["outcome"] in _NON_WORKER_RETRY_OUTCOMES:
+            continue
+        if candidate["outcome"] == "blocked":
+            adopt_wip_run_id = int(candidate["id"])
+        break
     result = prepare_worker_base(
         wt,
         recorded_head=recorded_head,
         merge_target=merge_target,
         task_id=task.id,
+        adopt_wip_run_id=adopt_wip_run_id,
     )
     from hermes_cli import kanban_db as kb
 
@@ -1115,6 +1183,15 @@ def prepare_reused_task_worktree(
             {**result, "run_id": run_id},
             run_id=run_id,
         )
+        adopted_wip_files = result.get("adopted_wip_files")
+        if adopted_wip_files is not None:
+            kb._append_event(
+                conn,
+                task.id,
+                "wip_adopted",
+                {"run_id": adopt_wip_run_id, "files": adopted_wip_files},
+                run_id=run_id,
+            )
     return result
 
 
