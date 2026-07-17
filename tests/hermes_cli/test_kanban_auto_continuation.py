@@ -34,10 +34,13 @@ def _ready_task(conn, *, max_continuations=None):
 
 
 def _claim(conn, tid):
-    claimed = kb.claim_task(conn, tid, claimer="test-host:worker")
+    claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
     assert claimed is not None
     assert claimed.current_run_id is not None
-    return claimed
+    # Test-owned synthetic PGID. It is deliberately absent, so the dedicated
+    # continuation reaper can confirm ESRCH without signalling a real process.
+    kb._set_worker_pid(conn, tid, 987654321)
+    return kb.get_task(conn, tid)
 
 
 def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
@@ -55,12 +58,15 @@ def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
 
         assert ok is True
         task = kb.get_task(conn, tid)
-        assert task.status == "ready"
+        assert task.status == "running"
         assert task.current_run_id is None
         assert task.continuation_count == 1
         assert task.max_continuations == 2
         assert task.last_continuation_reason == "iteration_budget_exhausted"
         assert task.consecutive_failures == 0
+        assert task.claim_lock is not None
+        assert task.worker_pid == 987654321
+        assert task.continuation_pending_exit_run_id == claimed.current_run_id
 
         run = kb.list_runs(conn, tid)[-1]
         assert run.status == "iteration_budget_exhausted"
@@ -72,10 +78,17 @@ def test_iteration_budget_exhausted_schedules_bounded_continuation(kanban_home):
         events = kb.list_events(conn, tid)
         assert [event.kind for event in events][-2:] == [
             "iteration_budget_exhausted",
-            "auto_continuation_scheduled",
+            "auto_continuation_pending_worker_exit",
         ]
         assert events[-1].payload["count"] == 1
         assert events[-1].payload["limit"] == 2
+
+        assert kb.reap_pending_continuations(conn) == [tid]
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.worker_pid is None
+        assert kb.list_events(conn, tid)[-1].kind == "auto_continuation_scheduled"
 
 
 def test_iteration_budget_exhausted_at_limit_blocks_with_reason(kanban_home):
@@ -86,6 +99,7 @@ def test_iteration_budget_exhausted_at_limit_blocks_with_reason(kanban_home):
         assert kb.record_iteration_budget_exhausted(
             conn, tid, summary="first slice", expected_run_id=first.current_run_id,
         )
+        assert kb.reap_pending_continuations(conn) == [tid]
 
         second = _claim(conn, tid)
         assert kb.record_iteration_budget_exhausted(
@@ -142,6 +156,7 @@ def test_expected_run_id_prevents_double_continuation_schedule(kanban_home):
             conn, tid, expected_run_id=claimed.current_run_id,
         )
 
+        assert kb.reap_pending_continuations(conn) == [tid]
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         assert task.continuation_count == 1
@@ -165,6 +180,7 @@ def test_worker_context_adds_continuation_hint_only_after_requeue(kanban_home):
             expected_run_id=claimed.current_run_id,
         )
 
+        assert kb.reap_pending_continuations(conn) == [tid]
         continuation_context = kb.build_worker_context(conn, tid)
         assert "This is continuation run 1/3" in continuation_context
         assert "Continue from the latest run summary/log" in continuation_context
@@ -189,9 +205,108 @@ def test_kanban_continue_tool_uses_worker_ownership_and_run_guard(kanban_home, m
     assert payload["task_id"] == tid
 
     with kb.connect() as conn:
+        assert kb.reap_pending_continuations(conn) == [tid]
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         assert task.continuation_count == 1
         run = kb.list_runs(conn, tid)[-1]
         assert run.outcome == "iteration_budget_exhausted"
         assert run.metadata["next"] == "tests"
+
+
+
+def test_iteration_budget_timeout_is_not_claimable_until_worker_exit(kanban_home):
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        claimed = _claim(conn, tid)
+        kb._set_worker_pid(conn, tid, 41001)
+        before = kb.get_task(conn, tid)
+
+        assert kb.record_iteration_budget_exhausted(
+            conn, tid, expected_run_id=claimed.current_run_id,
+        )
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.claim_lock == before.claim_lock
+        assert task.claim_expires == before.claim_expires
+        assert task.worker_pid == 41001
+        assert task.continuation_pending_exit_run_id == claimed.current_run_id
+        assert kb.claim_task(conn, tid, claimer="test-host:retry") is None
+
+
+def test_pending_continuation_becomes_ready_only_after_group_absent(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        claimed = _claim(conn, tid)
+        kb._set_worker_pid(conn, tid, 41002)
+        assert kb.record_iteration_budget_exhausted(
+            conn, tid, expected_run_id=claimed.current_run_id,
+        )
+
+        results = iter(
+            [
+                {
+                    "prev_pid": 41002,
+                    "host_local": True,
+                    "termination_attempted": True,
+                    "terminated": False,
+                    "sigkill": True,
+                },
+                {
+                    "prev_pid": 41002,
+                    "host_local": True,
+                    "termination_attempted": True,
+                    "terminated": True,
+                    "sigkill": True,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            kb, "_terminate_reclaimed_worker", lambda *_a, **_k: next(results),
+        )
+
+        assert kb.reap_pending_continuations(conn) == []
+        assert kb.get_task(conn, tid).status == "running"
+        assert kb.reap_pending_continuations(conn) == [tid]
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.worker_pid is None
+        assert task.continuation_pending_exit_run_id is None
+
+
+def test_pending_continuation_reap_is_cas_fenced(kanban_home, monkeypatch):
+    monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        claimed = _claim(conn, tid)
+        kb._set_worker_pid(conn, tid, 41003)
+        assert kb.record_iteration_budget_exhausted(
+            conn, tid, expected_run_id=claimed.current_run_id,
+        )
+
+        def ownership_changes_before_reap(*_args, **_kwargs):
+            conn.execute(
+                "UPDATE tasks SET claim_lock = 'test-host:replacement' WHERE id = ?",
+                (tid,),
+            )
+            return {
+                "prev_pid": 41003,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(
+            kb, "_terminate_reclaimed_worker", ownership_changes_before_reap,
+        )
+        assert kb.reap_pending_continuations(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.claim_lock == "test-host:replacement"
+        assert task.continuation_pending_exit_run_id == claimed.current_run_id

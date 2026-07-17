@@ -1131,6 +1131,9 @@ class Task:
     continuation_count: int = 0
     max_continuations: Optional[int] = None
     last_continuation_reason: Optional[str] = None
+    # Closed run waiting for dispatcher-confirmed worker process-group exit.
+    # While set, the task remains running and its ownership fence is retained.
+    continuation_pending_exit_run_id: Optional[int] = None
     # HEILER-BUDGET-BOUNDED-EXTEND-S1: progress-gated one-time extension state.
     # ``budget_extension_count`` is hard-capped at 1 in code; ``budget_progress_marker``
     # is the last-checkpoint workspace work proxy (diff lines + changed files).
@@ -1272,6 +1275,11 @@ class Task:
             last_continuation_reason=(
                 row["last_continuation_reason"]
                 if "last_continuation_reason" in keys
+                else None
+            ),
+            continuation_pending_exit_run_id=(
+                row["continuation_pending_exit_run_id"]
+                if "continuation_pending_exit_run_id" in keys
                 else None
             ),
             budget_extension_count=(
@@ -1988,6 +1996,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     continuation_count   INTEGER NOT NULL DEFAULT 0,
     max_continuations    INTEGER,
     last_continuation_reason TEXT,
+    -- Closed continuation run whose worker process group has not yet been
+    -- confirmed absent by dispatcher maintenance. While non-NULL the task
+    -- remains running and ownership fields stay fenced.
+    continuation_pending_exit_run_id INTEGER,
     -- HEILER-BUDGET-BOUNDED-EXTEND-S1: progress-gated, one-time bounded
     -- extension. When a task hits its continuation limit but is STILL making
     -- measurable progress, it gets EXACTLY ONE extra continuation before being
@@ -3145,6 +3157,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "tasks",
             "last_continuation_reason",
             "last_continuation_reason TEXT",
+        )
+    if "continuation_pending_exit_run_id" not in cols:
+        _add_column_if_missing(
+            conn,
+            "tasks",
+            "continuation_pending_exit_run_id",
+            "continuation_pending_exit_run_id INTEGER",
         )
     if "budget_extension_count" not in cols:
         # HEILER-BUDGET-BOUNDED-EXTEND-S1: one-time progress-gated extension
@@ -8549,14 +8568,13 @@ def _schedule_continuation_after_closed_run(
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
-                       worker_pid = NULL,
-                       budget_extension_count = budget_extension_count + 1,
+                   SET budget_extension_count = budget_extension_count + 1,
                        budget_progress_marker = ?,
-                       last_continuation_reason = ?
+                       last_continuation_reason = ?,
+                       continuation_pending_exit_run_id = ?
                  WHERE id = ? AND status = 'running' AND current_run_id IS NULL
                 """,
-                (int(_progress), reason, task_id),
+                (int(_progress), reason, run_id, task_id),
             )
             if cur.rowcount != 1:
                 return False
@@ -8572,6 +8590,19 @@ def _schedule_continuation_after_closed_run(
                     "prior_marker": int(_prior_marker),
                     "extension": _ext_count + 1,
                     "extension_limit": BUDGET_PROGRESS_EXTENSION_LIMIT,
+                },
+                run_id=run_id,
+            )
+            _append_event(
+                conn,
+                task_id,
+                "auto_continuation_pending_worker_exit",
+                {
+                    "reason": reason,
+                    "count": int(task.continuation_count or 0),
+                    "limit": limit,
+                    "pending_exit_run_id": run_id,
+                    "budget_extension": True,
                 },
                 run_id=run_id,
             )
@@ -8636,13 +8667,12 @@ def _schedule_continuation_after_closed_run(
     cur = conn.execute(
         """
         UPDATE tasks
-           SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
-               worker_pid = NULL,
-               continuation_count = continuation_count + 1,
-               last_continuation_reason = ?
+           SET continuation_count = continuation_count + 1,
+               last_continuation_reason = ?,
+               continuation_pending_exit_run_id = ?
          WHERE id = ? AND status = 'running' AND current_run_id IS NULL
         """,
-        (reason, task_id),
+        (reason, run_id, task_id),
     )
     if cur.rowcount != 1:
         return False
@@ -8657,8 +8687,13 @@ def _schedule_continuation_after_closed_run(
     _append_event(
         conn,
         task_id,
-        "auto_continuation_scheduled",
-        {"reason": reason, "count": new_count, "limit": limit},
+        "auto_continuation_pending_worker_exit",
+        {
+            "reason": reason,
+            "count": new_count,
+            "limit": limit,
+            "pending_exit_run_id": run_id,
+        },
         run_id=run_id,
     )
     return True
@@ -9898,6 +9933,7 @@ def release_stale_claims(
         "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
+        "  AND continuation_pending_exit_run_id IS NULL "
         "  AND claim_expires < ?",
         (now,),
     ).fetchall()
@@ -9998,8 +10034,15 @@ def release_stale_claims(
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL "
                 "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                "AND worker_pid IS ? "
                 "AND claim_expires IS NOT NULL AND claim_expires < ?",
-                (_reclaim_target, row["id"], row["claim_lock"], now),
+                (
+                    _reclaim_target,
+                    row["id"],
+                    row["claim_lock"],
+                    row["worker_pid"],
+                    now,
+                ),
             )
             if cur.rowcount != 1:
                 continue
@@ -16702,83 +16745,238 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
 
 def _terminate_reclaimed_worker(
-    pid: Optional[int],
+    worker_pid: Optional[int],
     claim_lock: Optional[str],
     *,
-    signal_fn=None,
-) -> dict[str, Any]:
-    """Best-effort host-local worker termination for reclaim paths."""
+    signal_fn: Optional[Callable[[int, int], None]] = None,
+    probe_fn: Optional[Callable[[int], bool]] = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> dict:
+    """Terminate a locally owned worker and confirm its process is absent.
+
+    POSIX workers are launched with ``start_new_session=True``; the persisted
+    worker PID is therefore also the intended process-group ID. Never derive a
+    replacement PGID from a leader that may already have exited. Confirmation
+    is conservative: ESRCH means absent; permission and unknown errors mean the
+    group may still be alive.
+    """
+
+    import errno
     import signal
 
-    info: dict[str, Any] = {
-        "prev_pid": int(pid) if pid else None,
+    info = {
+        "prev_pid": int(worker_pid) if worker_pid else None,
         "host_local": False,
         "termination_attempted": False,
         "terminated": False,
         "sigkill": False,
     }
-    if not pid or pid <= 0 or not claim_lock:
+    if not worker_pid:
+        info["terminated"] = True
+        return info
+    if not claim_lock:
+        return info
+    try:
+        pid = int(worker_pid)
+    except (TypeError, ValueError):
+        return info
+    if pid <= 1:
+        info["invalid_worker_pid"] = True
         return info
 
-    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
-    if not str(claim_lock).startswith(host_prefix):
+    owner_host = str(claim_lock).split(":", 1)[0]
+    local_host = _claimer_id().split(":", 1)[0]
+    info["host_local"] = owner_host == local_host
+    if not info["host_local"]:
         return info
-    info["host_local"] = True
 
-    kill = (
-        signal_fn
-        if signal_fn is not None
-        else (os.kill if hasattr(os, "kill") else None)
-    )
-    if kill is None:
+    if os.name == "posix":
+        try:
+            dispatcher_pgid = os.getpgrp()
+        except OSError:
+            dispatcher_pgid = None
+        if dispatcher_pgid is not None and pid == dispatcher_pgid:
+            info["dispatcher_group_rejected"] = True
+            return info
+
+        # ``signal_fn`` is a compatibility/test seam. Production always uses
+        # os.killpg; tests supplying a signal seam may rely on the historical
+        # _pid_alive seam unless they provide an explicit group probe.
+        send_signal = signal_fn or os.killpg
+        if probe_fn is not None:
+            group_alive = lambda: bool(probe_fn(pid))
+        elif signal_fn is not None:
+            group_alive = lambda: bool(_pid_alive(pid))
+        else:
+            def group_alive() -> bool:
+                # Reap dispatcher-owned zombie leaders before probing the
+                # group; otherwise killpg(..., 0) can keep reporting a dead
+                # worker group solely because its leader awaits waitpid().
+                reap_worker_zombies()
+                try:
+                    os.killpg(pid, 0)
+                except ProcessLookupError:
+                    return False
+                except PermissionError:
+                    return True
+                except OSError as exc:
+                    return exc.errno != errno.ESRCH
+                return True
+    else:
+        send_signal = signal_fn or os.kill
+        group_alive = (
+            (lambda: bool(probe_fn(pid)))
+            if probe_fn is not None
+            else (lambda: bool(_pid_alive(pid)))
+        )
+
+    def wait_until_absent() -> bool:
+        for _ in range(10):
+            if not group_alive():
+                return True
+            sleep_fn(0.5)
+        return not group_alive()
+
+    if not group_alive():
+        info["terminated"] = True
         return info
 
     info["termination_attempted"] = True
     try:
-        kill(int(pid), signal.SIGTERM)
+        send_signal(pid, signal.SIGTERM)
     except ProcessLookupError:
-        # Process is already gone — that's a successful termination, not a
-        # survival. Leaving terminated=False here would make the reclaim guard
-        # misread a dead worker as still-alive and defer forever.
+        pass
+    except (PermissionError, OSError) as exc:
+        info["term_error"] = f"{type(exc).__name__}: {exc}"
+    if wait_until_absent():
         info["terminated"] = True
         return info
-    except OSError:
-        return info
 
-    for _ in range(10):
-        if not _pid_alive(pid):
-            info["terminated"] = True
-            return info
-        time.sleep(0.5)
-
-    if _pid_alive(pid):
-        try:
-            # signal.SIGKILL doesn't exist on Windows; fall back to SIGTERM
-            # (which maps to TerminateProcess via the stdlib shim).
-            _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-            kill(int(pid), _sigkill)
-            info["sigkill"] = True
-        except (ProcessLookupError, OSError):
-            return info
-
-    info["terminated"] = not _pid_alive(pid)
+    info["sigkill"] = True
+    try:
+        send_signal(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except (PermissionError, OSError) as exc:
+        info["kill_error"] = f"{type(exc).__name__}: {exc}"
+    info["terminated"] = wait_until_absent()
     return info
 
 
-def _worker_survived_termination(termination: dict) -> bool:
-    """True when we tried to kill our own host-local worker and it is still alive.
+def _worker_survived_termination(termination: Optional[dict]) -> bool:
+    """Return True when persisted worker ownership is not confirmed absent."""
 
-    Reclaiming in this state would release the claim and let the dispatcher
-    spawn a second worker while the first is still running — the duplication
-    loop. Only host-local workers we actually signalled count: a non-local
-    claim lock or a no-op attempt (no ``os.kill`` available) must fall through
-    to the normal release path, since we cannot manage that worker anyway.
+    if not termination:
+        return False
+    return not bool(termination.get("terminated"))
+
+def reap_pending_continuations(
+    conn: sqlite3.Connection,
+    *,
+    now: Optional[int] = None,
+    signal_fn: Optional[Callable[[int, int], None]] = None,
+) -> list[str]:
+    """Publish continuations only after the prior worker group is absent.
+
+    A worker-originated budget handoff cannot certify its own exit. The closed
+    run ID plus current ownership fields form a durable CAS fence until this
+    dispatcher-owned maintenance step confirms process-group death.
     """
-    return bool(
-        termination.get("termination_attempted")
-        and termination.get("host_local")
-        and not termination.get("terminated")
-    )
+
+    ts = int(now or time.time())
+    local_host = _claimer_id().split(":", 1)[0]
+    rows = conn.execute(
+        """
+        SELECT id, worker_pid, claim_lock, continuation_pending_exit_run_id,
+               continuation_count, max_continuations, last_continuation_reason
+          FROM tasks
+         WHERE status = 'running'
+           AND worker_pid IS NOT NULL
+           AND continuation_pending_exit_run_id IS NOT NULL
+           AND claim_lock LIKE ?
+         ORDER BY id
+        """,
+        (f"{local_host}:%",),
+    ).fetchall()
+    reaped: list[str] = []
+    for row in rows:
+        task_id = str(row["id"])
+        worker_pid = int(row["worker_pid"])
+        claim_lock = str(row["claim_lock"])
+        pending_run_id = int(row["continuation_pending_exit_run_id"])
+        termination = _terminate_reclaimed_worker(
+            worker_pid,
+            claim_lock,
+            signal_fn=signal_fn,
+        )
+        if _worker_survived_termination(termination):
+            with write_txn(conn):
+                current = conn.execute(
+                    """
+                    SELECT 1
+                      FROM tasks
+                     WHERE id = ? AND status = 'running'
+                       AND worker_pid = ? AND claim_lock = ?
+                       AND continuation_pending_exit_run_id = ?
+                    """,
+                    (task_id, worker_pid, claim_lock, pending_run_id),
+                ).fetchone()
+                if current is None:
+                    continue
+                recent = conn.execute(
+                    """
+                    SELECT 1 FROM task_events
+                     WHERE task_id = ?
+                       AND kind = 'continuation_worker_exit_unconfirmed'
+                       AND created_at >= ?
+                     LIMIT 1
+                    """,
+                    (task_id, ts - RECLAIM_DEFER_GRACE_SECONDS),
+                ).fetchone()
+                if recent is None:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "continuation_worker_exit_unconfirmed",
+                        {
+                            "pending_exit_run_id": pending_run_id,
+                            "worker_pid": worker_pid,
+                            "termination": termination,
+                        },
+                        run_id=pending_run_id,
+                    )
+            continue
+
+        with write_txn(conn):
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status = 'ready', claim_lock = NULL, claim_expires = NULL,
+                       worker_pid = NULL, last_heartbeat_at = NULL,
+                       continuation_pending_exit_run_id = NULL
+                 WHERE id = ? AND status = 'running'
+                   AND worker_pid = ? AND claim_lock = ?
+                   AND continuation_pending_exit_run_id = ?
+                """,
+                (task_id, worker_pid, claim_lock, pending_run_id),
+            )
+            if cur.rowcount != 1:
+                continue
+            _append_event(
+                conn,
+                task_id,
+                "auto_continuation_scheduled",
+                {
+                    "reason": row["last_continuation_reason"],
+                    "count": int(row["continuation_count"] or 0),
+                    "limit": row["max_continuations"],
+                    "pending_exit_run_id": pending_run_id,
+                    "termination": termination,
+                },
+                run_id=pending_run_id,
+            )
+            reaped.append(task_id)
+    return reaped
 
 
 def _defer_reclaim_for_live_worker(
@@ -17114,8 +17312,6 @@ def enforce_max_runtime(
     (same reasoning as ``detect_crashed_workers``). ``signal_fn`` is a
     test hook; defaults to ``os.kill`` on POSIX.
     """
-    import signal
-
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
@@ -17127,6 +17323,7 @@ def enforce_max_runtime(
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "  AND t.continuation_pending_exit_run_id IS NULL "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
@@ -17143,33 +17340,21 @@ def enforce_max_runtime(
 
         pid = int(row["worker_pid"])
         tid = row["id"]
-        # SIGTERM then SIGKILL. Keep it simple: 5 s grace. Workers that
-        # want a cleaner shutdown can install their own SIGTERM handler
-        # before the grace expires.
-        killed = False
-        kill = (
-            signal_fn
-            if signal_fn is not None
-            else (os.kill if hasattr(os, "kill") else None)
+        termination = _terminate_reclaimed_worker(
+            pid,
+            row["claim_lock"],
+            signal_fn=signal_fn,
         )
-        if kill is not None:
-            try:
-                kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
-            # Short polling wait — no time.sleep on the write txn.
-            for _ in range(10):
-                if not _pid_alive(pid):
-                    break
-                time.sleep(0.5)
-            if _pid_alive(pid):
-                try:
-                    # signal.SIGKILL doesn't exist on Windows.
-                    _sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-                    kill(pid, _sigkill)
-                    killed = True
-                except (ProcessLookupError, OSError):
-                    pass
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn,
+                tid,
+                row["claim_lock"],
+                now,
+                termination,
+                reason="runtime_timeout_worker_group_alive",
+            )
+            continue
 
         with write_txn(conn):
             # Review-claimed runs bounce back to the REVIEW column, not
@@ -17196,7 +17381,8 @@ def enforce_max_runtime(
                     "pid": pid,
                     "elapsed_seconds": int(elapsed),
                     "limit_seconds": int(row["max_runtime_seconds"]),
-                    "sigkill": killed,
+                    "sigkill": bool(termination.get("sigkill")),
+                    "termination": termination,
                     "reclaim_target": _reclaim_target,
                 }
                 run_id = _end_run(
@@ -17228,7 +17414,11 @@ def enforce_max_runtime(
                 outcome="timed_out",
                 release_claim=False,
                 end_run=False,
-                event_payload_extra={"pid": pid, "sigkill": killed},
+                event_payload_extra={
+                    "pid": pid,
+                    "sigkill": bool(termination.get("sigkill")),
+                    "termination": termination,
+                },
                 closed_run_id=run_id,
             )
     return timed_out
@@ -17281,7 +17471,8 @@ def detect_stale_running(
         "       COALESCE(r.started_at, t.started_at) AS active_started_at "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running'"
+        "WHERE t.status = 'running' "
+        "  AND t.continuation_pending_exit_run_id IS NULL"
     ).fetchall()
 
     for row in rows:
@@ -17340,8 +17531,8 @@ def detect_stale_running(
                 "claim_expires = NULL, worker_pid = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ?",
-                (_reclaim_target, tid, row["claim_lock"]),
+                "  AND claim_lock IS ? AND worker_pid IS ?",
+                (_reclaim_target, tid, row["claim_lock"], row["worker_pid"]),
             )
             if cur.rowcount != 1:
                 continue
@@ -17532,13 +17723,52 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # immediately instead of incrementing by 1.
     crash_details: list[tuple[str, int, str, bool, str, Optional[int]]] = []
     # (task_id, pid, claimer, protocol_violation, error_text, run_id)
+    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    confirmed_absent: dict[tuple[str, int, str], dict] = {}
+    candidates = conn.execute(
+        "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
+        "WHERE status = 'running' AND worker_pid IS NOT NULL "
+        "  AND continuation_pending_exit_run_id IS NULL"
+    ).fetchall()
+    for candidate in candidates:
+        lock = candidate["claim_lock"] or ""
+        if not lock.startswith(host_prefix):
+            continue
+        started_at = candidate["started_at"]
+        if started_at is not None:
+            grace = _resolve_crash_grace_seconds()
+            if time.time() - started_at < grace:
+                continue
+        if _pid_alive(candidate["worker_pid"]):
+            continue
+        termination = _terminate_reclaimed_worker(
+            candidate["worker_pid"],
+            candidate["claim_lock"],
+        )
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn,
+                candidate["id"],
+                candidate["claim_lock"],
+                int(time.time()),
+                termination,
+                reason="crash_worker_group_alive",
+            )
+            continue
+        key = (
+            str(candidate["id"]),
+            int(candidate["worker_pid"]),
+            str(candidate["claim_lock"]),
+        )
+        confirmed_absent[key] = termination
+
     with write_txn(conn):
         rows = conn.execute(
             "SELECT id, worker_pid, claim_lock, started_at, current_run_id, "
             "transient_retry_count FROM tasks "
-            "WHERE status = 'running' AND worker_pid IS NOT NULL"
+            "WHERE status = 'running' AND worker_pid IS NOT NULL "
+            "  AND continuation_pending_exit_run_id IS NULL"
         ).fetchall()
-        host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
             # Only check liveness for claims owned by this host.
             lock = row["claim_lock"] or ""
@@ -17556,6 +17786,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
 
             pid = int(row["worker_pid"])
+            confirmed_key = (str(row["id"]), pid, str(row["claim_lock"]))
+            termination = confirmed_absent.get(confirmed_key)
+            if termination is None:
+                continue
             kind, code = _classify_worker_exit(pid)
             rate_limited_exit = False
             recoverable_protocol_miss = False
@@ -17658,6 +17892,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 if code is not None and kind != "unknown":
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
+
+            event_payload["termination"] = termination
 
             # Preserve a pending review stage when the dead worker owned a
             # review-claimed run. Resolve before _end_run clears current_run_id.
@@ -24100,6 +24336,7 @@ def _dispatch_once_locked(
         # The hold report reuses only candidate evaluation. All maintenance
         # before it can write and therefore remains exclusive to real ticks.
         reap_worker_zombies()
+        reap_pending_continuations(conn)
         result.heartbeated = heartbeat_live_claude_cli_workers(conn, board=board)
         result.reclaimed = release_stale_claims(conn)
         result.stale = detect_stale_running(

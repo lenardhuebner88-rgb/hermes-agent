@@ -66,10 +66,29 @@ def _ready_task(conn, *, max_iterations=6, max_continuations=2):
 
 
 def _claim(conn, tid):
-    claimed = kb.claim_task(conn, tid, claimer="test-host:worker")
+    host = kb._claimer_id().split(":", 1)[0]
+    claimed = kb.claim_task(conn, tid, claimer=f"{host}:worker")
     assert claimed is not None
     assert claimed.current_run_id is not None
+    kb._set_worker_pid(conn, tid, 987654)
     return claimed
+
+
+def _finish_pending_continuation(conn, tid):
+    task = kb.get_task(conn, tid)
+    if task is None or task.continuation_pending_exit_run_id is None:
+        return
+    termination = {
+        "prev_pid": task.worker_pid,
+        "host_local": True,
+        "termination_attempted": True,
+        "terminated": True,
+        "sigkill": False,
+    }
+    from unittest.mock import patch
+
+    with patch.object(kb, "_terminate_reclaimed_worker", return_value=termination):
+        assert kb.reap_pending_continuations(conn) == [tid]
 
 
 def _production_timeout_failure(
@@ -123,6 +142,7 @@ def test_timed_out_with_progress_schedules_continuation_not_failure(kanban_home)
             workspace_progress_size=12,
             budget_progress_marker=3,
         )
+        _finish_pending_continuation(conn, tid)
 
         assert blocked is False
         task = kb.get_task(conn, tid)
@@ -205,6 +225,7 @@ def test_timed_out_with_progress_at_continuation_cap_falls_back_to_failure(
             summary="voluntary slice",
             expected_run_id=first.current_run_id,
         )
+        _finish_pending_continuation(conn, tid)
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         assert task.continuation_count == 1

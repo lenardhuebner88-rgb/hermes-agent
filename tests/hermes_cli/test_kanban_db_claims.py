@@ -310,7 +310,7 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
         reclaimed = kb.release_stale_claims(conn, signal_fn=_signal)
         assert reclaimed == 1
         assert kb.get_task(conn, t).status == "ready"
-        assert killed == [signal.SIGTERM]
+        assert killed == []
 
 
 def test_stale_claim_with_live_pid_extends_instead_of_reclaiming(
@@ -525,14 +525,10 @@ def test_stale_claim_reclaimed_when_termination_succeeds(
         assert kb.get_task(conn, t).status == "ready"
 
 
-def test_stale_claim_released_when_worker_not_host_local(
+def test_stale_claim_retained_when_worker_exit_not_confirmed(
     kanban_home, monkeypatch,
 ):
-    """The defer guard only holds OUR own surviving workers.
-
-    A claim we cannot manage (different host, or no kill attempted) must still
-    be released, otherwise a foreign-host claim could strand a task forever.
-    """
+    """Unknown/foreign worker state is not proof that its process is absent."""
     import hermes_cli.kanban_db as _kb
 
     with kb.connect_closing() as conn:
@@ -555,8 +551,10 @@ def test_stale_claim_released_when_worker_not_host_local(
             },
         )
         reclaimed = kb.release_stale_claims(conn, signal_fn=lambda _p, _s: None)
-        assert reclaimed == 1
-        assert kb.get_task(conn, t).status == "ready"
+        assert reclaimed == 0
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
 
 
 def test_detect_stale_defers_when_live_worker_survives(kanban_home, monkeypatch):
@@ -1304,3 +1302,163 @@ def test_concurrent_claims_only_one_wins(kanban_home):
     assert len(winners) == 1
     assert winners[0].status == "running"
 
+
+
+
+def test_terminate_worker_group_term_wait_kill_wait_order(monkeypatch):
+    import signal
+
+    monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
+    signals = []
+    sleeps = []
+    state = {"killed": False}
+
+    def signal_group(pgid, sig):
+        signals.append((pgid, sig))
+        if sig == signal.SIGKILL:
+            state["killed"] = True
+
+    def group_alive(_pgid):
+        return not state["killed"]
+
+    result = kb._terminate_reclaimed_worker(
+        42001,
+        "test-host:worker",
+        signal_fn=signal_group,
+        probe_fn=group_alive,
+        sleep_fn=lambda seconds: sleeps.append(seconds),
+    )
+
+    assert result["terminated"] is True
+    assert result["sigkill"] is True
+    assert signals == [(42001, signal.SIGTERM), (42001, signal.SIGKILL)]
+    assert sleeps
+
+
+def test_worker_leader_dead_but_descendant_group_alive_is_not_requeued(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        kb,
+        "_terminate_reclaimed_worker",
+        lambda *_a, **_k: {
+            "prev_pid": 42002,
+            "host_local": True,
+            "termination_attempted": True,
+            "terminated": False,
+            "sigkill": True,
+        },
+    )
+    with kb.connect_closing() as conn:
+        host = kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="live descendant", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        kb._set_worker_pid(conn, tid, 42002)
+
+        assert kb.detect_crashed_workers(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.worker_pid == 42002
+
+
+def test_group_surviving_sigkill_retains_claim(kanban_home, monkeypatch):
+    with kb.connect_closing() as conn:
+        host = kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="unkillable group", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        kb._set_worker_pid(conn, tid, 42003)
+        old_expires = int(time.time()) - 60
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = NULL WHERE id = ?",
+            (old_expires, tid),
+        )
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_a, **_k: {
+                "prev_pid": 42003,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": False,
+                "sigkill": True,
+            },
+        )
+
+        assert kb.release_stale_claims(conn) == 0
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.claim_lock == f"{host}:worker"
+        assert task.worker_pid == 42003
+
+
+def test_runtime_timeout_requeues_only_after_group_death(kanban_home, monkeypatch):
+    with kb.connect_closing() as conn:
+        host = kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(
+            conn, title="runtime group fence", assignee="a", max_runtime_seconds=1,
+        )
+        claimed = kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        kb._set_worker_pid(conn, tid, 42004)
+        conn.execute(
+            "UPDATE task_runs SET started_at = ? WHERE id = ?",
+            (int(time.time()) - 60, claimed.current_run_id),
+        )
+        results = iter(
+            [
+                {
+                    "prev_pid": 42004,
+                    "host_local": True,
+                    "termination_attempted": True,
+                    "terminated": False,
+                    "sigkill": True,
+                },
+                {
+                    "prev_pid": 42004,
+                    "host_local": True,
+                    "termination_attempted": True,
+                    "terminated": True,
+                    "sigkill": True,
+                },
+            ]
+        )
+        monkeypatch.setattr(
+            kb, "_terminate_reclaimed_worker", lambda *_a, **_k: next(results),
+        )
+
+        assert kb.enforce_max_runtime(conn) == []
+        assert kb.get_task(conn, tid).status == "running"
+        assert kb.enforce_max_runtime(conn) == [tid]
+        assert kb.get_task(conn, tid).status == "ready"
+
+
+def test_stale_claim_requeue_waits_for_process_group_not_only_pid(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+    with kb.connect_closing() as conn:
+        host = kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="stale group fence", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:worker")
+        kb._set_worker_pid(conn, tid, 42005)
+        conn.execute(
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = NULL WHERE id = ?",
+            (int(time.time()) - 60, tid),
+        )
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_a, **_k: {
+                "prev_pid": 42005,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": False,
+                "sigkill": True,
+            },
+        )
+
+        assert kb.release_stale_claims(conn) == 0
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.worker_pid == 42005

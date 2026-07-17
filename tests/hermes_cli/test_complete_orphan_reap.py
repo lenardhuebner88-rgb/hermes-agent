@@ -65,7 +65,7 @@ def test_manual_complete_reaps_live_worker(conn):
     host = kb._claimer_id().split(":", 1)[0]
     tid = kb.create_task(conn, title="orphan", assignee="w")
     kb.claim_task(conn, tid, claimer=f"{host}:A")
-    proc = subprocess.Popen(["sleep", "300"])
+    proc = subprocess.Popen(["sleep", "300"], start_new_session=True)
     try:
         kb._set_worker_pid(conn, tid, proc.pid)
         run_row = conn.execute(
@@ -88,7 +88,7 @@ def test_manual_complete_reaps_live_worker(conn):
     finally:
         if proc.poll() is None:
             proc.kill()
-            proc.wait()
+        proc.wait()
 
 
 def test_worker_self_completion_does_not_signal(conn):

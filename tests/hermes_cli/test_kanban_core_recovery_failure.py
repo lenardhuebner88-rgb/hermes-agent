@@ -500,7 +500,7 @@ def test_enforce_max_runtime_increments_consecutive_failures(kanban_home, monkey
             max_runtime_seconds=1,
         )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kb._set_worker_pid(conn, tid, 54321)
         # Since PR #19473 (salvaged) changed enforce_max_runtime to read
         # from task_runs.started_at (per-attempt) rather than
         # tasks.started_at (lifetime), we need to backdate BOTH to
@@ -555,6 +555,7 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
         # Drop the failure_limit to 3 so we don't need 5 timeouts.
         # This uses the module-level DEFAULT; we simulate by calling
         # _record_task_failure directly with a tight limit.
+        worker_pid = 54321
         for _ in range(3):
             # Fresh claim + "started long ago" each iteration.
             with kb.write_txn(conn):
@@ -565,7 +566,7 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
                     (
                         f"{_kb._claimer_id().split(':', 1)[0]}:lock",
                         int(time.time()) + 3600,
-                        os.getpid(),
+                        worker_pid,
                         int(time.time()) - 30,
                         tid,
                     ),
@@ -578,7 +579,7 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
                         tid,
                         f"{_kb._claimer_id().split(':', 1)[0]}:lock",
                         int(time.time()) + 3600,
-                        os.getpid(),
+                        worker_pid,
                         int(time.time()) - 30,
                     ),
                 )

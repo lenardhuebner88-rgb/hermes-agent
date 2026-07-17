@@ -176,7 +176,8 @@ def test_same_cause_count_in_escalation_after_two_crashes(kanban_home, monkeypat
 def test_timed_out_run_stamps_failure_metadata(kanban_home, monkeypatch):
     import hermes_cli.kanban_db as _kb
 
-    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+    state = {"alive": True}
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: state["alive"])
     monkeypatch.setattr(_kb, "DEFAULT_FAILURE_LIMIT", 10)
 
     with kb.connect() as conn:
@@ -198,7 +199,10 @@ def test_timed_out_run_stamps_failure_metadata(kanban_home, monkeypatch):
         )
         conn.commit()
 
-        kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
+        def _signal(_pid, _sig):
+            state["alive"] = False
+
+        kb.enforce_max_runtime(conn, signal_fn=_signal)
 
         rows = _run_rows(conn, tid)
 

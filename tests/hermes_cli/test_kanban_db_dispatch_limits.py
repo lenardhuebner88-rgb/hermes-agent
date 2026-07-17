@@ -498,7 +498,7 @@ def test_detect_stale_returns_running_task_with_no_heartbeat(kanban_home, monkey
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-no-hb", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         # Rewind started_at so the task appears to have been running for 5 hours.
         five_hours_ago = int(time.time()) - (5 * 3600)
@@ -530,7 +530,7 @@ def test_detect_stale_returns_task_with_stale_heartbeat(kanban_home, monkeypatch
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-hb", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         heartbeat_2h_ago = int(time.time()) - (2 * 3600)
@@ -563,7 +563,7 @@ def test_detect_stale_skips_task_with_recent_heartbeat(kanban_home, monkeypatch)
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="alive-hb", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         heartbeat_now = int(time.time())  # heartbeat just happened
@@ -594,7 +594,7 @@ def test_detect_stale_skips_recently_started_task(kanban_home, monkeypatch):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="fresh", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         # Started only 1 hour ago — well within the 4h threshold.
         one_hour_ago = int(time.time()) - 3600
@@ -622,7 +622,7 @@ def test_detect_stale_skips_when_timeout_zero(kanban_home, monkeypatch):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="disabled", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         with kb.write_txn(conn):
@@ -649,7 +649,7 @@ def test_detect_stale_skips_blocked_tasks(kanban_home, monkeypatch):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="blocked-task", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         with kb.write_txn(conn):
@@ -688,7 +688,7 @@ def test_detect_stale_does_not_tick_failure_counter(kanban_home, monkeypatch):
     with kb.connect_closing() as conn:
         t = kb.create_task(conn, title="stale-no-counter-tick", assignee="worker")
         kb.claim_task(conn, t)
-        kb._set_worker_pid(conn, t, os.getpid())
+        kb._set_worker_pid(conn, t, 54321)
 
         five_hours_ago = int(time.time()) - (5 * 3600)
         with kb.write_txn(conn):

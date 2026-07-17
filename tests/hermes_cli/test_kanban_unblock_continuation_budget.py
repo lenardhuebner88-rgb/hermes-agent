@@ -48,10 +48,29 @@ def _ready_task(conn, *, max_continuations: int):
 
 
 def _claim(conn, tid):
-    claimed = kb.claim_task(conn, tid, claimer="test-host:worker")
+    host = kb._claimer_id().split(":", 1)[0]
+    claimed = kb.claim_task(conn, tid, claimer=f"{host}:worker")
     assert claimed is not None
     assert claimed.current_run_id is not None
+    kb._set_worker_pid(conn, tid, 987654)
     return claimed
+
+
+def _finish_pending_continuation(conn, tid):
+    task = kb.get_task(conn, tid)
+    if task is None or task.continuation_pending_exit_run_id is None:
+        return
+    termination = {
+        "prev_pid": task.worker_pid,
+        "host_local": True,
+        "termination_attempted": True,
+        "terminated": True,
+        "sigkill": False,
+    }
+    from unittest.mock import patch
+
+    with patch.object(kb, "_terminate_reclaimed_worker", return_value=termination):
+        assert kb.reap_pending_continuations(conn) == [tid]
 
 
 def _exhaust(conn, tid, *, summary: str = "slice"):
@@ -64,6 +83,7 @@ def _exhaust(conn, tid, *, summary: str = "slice"):
         expected_run_id=claimed.current_run_id,
     )
     assert ok is True
+    _finish_pending_continuation(conn, tid)
     return kb.get_task(conn, tid)
 
 

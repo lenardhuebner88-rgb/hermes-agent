@@ -62,17 +62,38 @@ def _ready_task(conn, *, max_continuations=None):
 
 
 def _claim(conn, tid):
-    claimed = kb.claim_task(conn, tid, claimer="test-host:worker")
+    host = kb._claimer_id().split(":", 1)[0]
+    claimed = kb.claim_task(conn, tid, claimer=f"{host}:worker")
     assert claimed is not None
     assert claimed.current_run_id is not None
+    kb._set_worker_pid(conn, tid, 987654)
     return claimed
+
+
+def _finish_pending_continuation(conn, tid):
+    task = kb.get_task(conn, tid)
+    if task is None or task.continuation_pending_exit_run_id is None:
+        return
+    termination = {
+        "prev_pid": task.worker_pid,
+        "host_local": True,
+        "termination_attempted": True,
+        "terminated": True,
+        "sigkill": False,
+    }
+    from unittest.mock import patch
+
+    with patch.object(kb, "_terminate_reclaimed_worker", return_value=termination):
+        assert kb.reap_pending_continuations(conn) == [tid]
 
 
 def _exhaust(conn, tid):
     claimed = _claim(conn, tid)
-    return kb.record_iteration_budget_exhausted(
+    result = kb.record_iteration_budget_exhausted(
         conn, tid, summary="slice", expected_run_id=claimed.current_run_id,
     )
+    _finish_pending_continuation(conn, tid)
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -146,8 +167,11 @@ def test_progress_gated_extension_grants_exactly_one_more_run(kanban_home, monke
         assert int(t2.budget_extension_count) == 1
         assert t2.continuation_count == 1   # extension does NOT spend a continuation
         assert int(t2.budget_progress_marker) == 20
-        ev = kb.list_events(conn, tid)[-1]
-        assert ev.kind == "budget_extension_granted"
+        ev = next(
+            e
+            for e in reversed(kb.list_events(conn, tid))
+            if e.kind == "budget_extension_granted"
+        )
         assert ev.payload["progress"] == 20
         assert ev.payload["prior_marker"] == 5
         assert ev.payload["extension"] == 1

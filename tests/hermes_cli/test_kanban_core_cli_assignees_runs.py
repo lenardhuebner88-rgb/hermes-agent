@@ -147,13 +147,14 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
     """A running task whose elapsed time exceeds max_runtime_seconds gets
     SIGTERM'd, emits a ``timed_out`` event, and goes back to ready."""
     killed = []
+    state = {"sent_term": False}
     def _signal_fn(pid, sig):
         killed.append((pid, sig))
+        state["sent_term"] = True
 
-    # We bypass _pid_alive by stubbing it so the grace-poll exits fast.
     import hermes_cli.kanban_db as _kb
     original_alive = _kb._pid_alive
-    _kb._pid_alive = lambda pid: False  # pretend SIGTERM worked immediately
+    _kb._pid_alive = lambda pid: not state["sent_term"]
 
     try:
         conn = kb.connect()
@@ -164,7 +165,7 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
             )
             # Spawn by hand: claim + set pid + set active run start to the past.
             kb.claim_task(conn, tid)
-            kb._set_worker_pid(conn, tid, os.getpid())   # any live pid works
+            kb._set_worker_pid(conn, tid, os.getpid() + 1_000_000)
             # Backdate both the task-level first-start timestamp and the active
             # run timestamp so elapsed > limit under the per-run runtime model.
             old_started = int(time.time()) - 30
@@ -181,7 +182,7 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
 
             timed_out = kb.enforce_max_runtime(conn, signal_fn=_signal_fn)
             assert tid in timed_out
-            assert killed and killed[0][0] == os.getpid()
+            assert killed and killed[0][0] == os.getpid() + 1_000_000
 
             task = kb.get_task(conn, tid)
             assert task.status == "ready",                 f"timed-out task should reset to ready, got {task.status}"
@@ -223,7 +224,7 @@ def test_repeated_timeouts_auto_block_at_default_limit(kanban_home):
             )
             for expected_failures in (1, 2):
                 kb.claim_task(conn, tid)
-                kb._set_worker_pid(conn, tid, os.getpid())
+                kb._set_worker_pid(conn, tid, os.getpid() + 1_000_000)
                 _age_active_run(conn, tid)
                 timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda pid, sig: None)
                 assert tid in timed_out
@@ -248,7 +249,7 @@ def test_max_runtime_none_means_no_cap(kanban_home):
     try:
         tid = kb.create_task(conn, title="uncapped", assignee="worker")
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kb._set_worker_pid(conn, tid, os.getpid() + 1_000_000)
         # Backdate aggressively; no cap means we don't care.
         with kb.write_txn(conn):
             conn.execute(
@@ -297,7 +298,7 @@ def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
             max_runtime_seconds=1,
         )
         kb.claim_task(conn, tid)
-        kb._set_worker_pid(conn, tid, os.getpid())
+        kb._set_worker_pid(conn, tid, os.getpid() + 1_000_000)
         old_started = int(time.time()) - 30
         with kb.write_txn(conn):
             conn.execute(
