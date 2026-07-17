@@ -470,6 +470,34 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(within(kettenTab).getByText("1")).toBeTruthy();
   });
 
+  it("renders compact summary totals for a completed chain absent from columns", () => {
+    setLgViewport(true);
+    hooks.useBoard.mockReturnValue({
+      data: {
+        ...DEFAULT_BOARD,
+        columns: [],
+        chain_summaries: [{
+          root_id: "t_compact_complete",
+          root_title: "Fleet kompakte Kette",
+          total: 35,
+          done: 35,
+          status_counts: { done: 35 },
+          latest_completed_at: 9,
+        }],
+      },
+      loading: false,
+      error: null,
+      reload,
+    });
+
+    renderFleetView();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Board" }));
+
+    const item = screen.getByText("Fleet kompakte Kette").closest(".chain-item");
+    expect(item).not.toBeNull();
+    expect(within(item as HTMLElement).getByText("35/35")).toBeTruthy();
+  });
+
   it("qualifies the operator approval CTA as a chain release and start action", () => {
     renderFleetView();
     fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));

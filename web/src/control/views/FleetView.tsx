@@ -168,8 +168,8 @@ export function FleetView() {
     [activeBoardData],
   );
   const kettenChipsForAside = useMemo(
-    () => buildChainChips(activeBoardTasksForKetten),
-    [activeBoardTasksForKetten],
+    () => buildChainChips(activeBoardTasksForKetten, activeBoardData?.chain_summaries),
+    [activeBoardTasksForKetten, activeBoardData?.chain_summaries],
   );
   const runningChainCount = kettenChipsForAside.filter((chip) => chip.state === "active").length;
 

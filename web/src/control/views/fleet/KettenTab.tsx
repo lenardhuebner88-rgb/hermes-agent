@@ -64,6 +64,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
       status: t.status,
       completed_at: t.completed_at,
     })),
+    board?.chain_summaries,
   );
 
   const [userSelectedRootId, setUserSelectedRootId] = useState<string | null>(initialRootId);
@@ -79,8 +80,9 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const allBoardRootIds = useMemo(() => {
     const ids = new Set<string>();
     for (const t of allBoardTasks) if (t.root_id) ids.add(t.root_id);
+    for (const summary of board?.chain_summaries ?? []) ids.add(summary.root_id);
     return ids;
-  }, [allBoardTasks]);
+  }, [allBoardTasks, board?.chain_summaries]);
   const validRootId = useMemo(() => {
     if (!selectedRootId) return null;
     return allBoardRootIds.has(selectedRootId) ? selectedRootId : null;

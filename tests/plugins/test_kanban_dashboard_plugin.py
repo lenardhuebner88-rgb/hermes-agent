@@ -3296,6 +3296,169 @@ def test_board_root_id_resolves_chain(client):
     assert cards[lone["id"]]["root_id"] == lone["id"]
 
 
+def _create_board_compaction_fixture():
+    """Create 31 done + 1 active members, followed by an omitted done chain."""
+    with kb.connect() as conn:
+        first_root = "t_compact_large_root"
+        first_done = [first_root]
+        rows = [
+            (first_root, "Large chain root", "done", 10, 1_790_000_000, 1_800_000_000)
+        ]
+        for index in range(30):
+            member = f"t_compact_large_done_{index:02d}"
+            first_done.append(member)
+            rows.append(
+                (member, f"Large done {index}", "done", 10, 1_790_000_001 + index, 1_800_000_001 + index)
+            )
+        active = "t_compact_large_active"
+        rows.append((active, "Large active", "running", 10, 1_790_000_100, None))
+
+        completed_root = "t_compact_completed_root"
+        completed_child = "t_compact_completed_child"
+        rows.extend(
+            [
+                (completed_root, "Completed omitted root", "done", 0, 1_790_000_200, 1_800_000_100),
+                (completed_child, "Completed omitted child", "done", 0, 1_790_000_201, 1_800_000_200),
+            ]
+        )
+
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO tasks (id, title, status, priority, created_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.executemany(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                [(task_id, first_root) for task_id in [*first_done[1:], active]]
+                + [(completed_child, completed_root)],
+            )
+    return {
+        "large_root": first_root,
+        "active": active,
+        "completed_root": completed_root,
+        "completed_child": completed_child,
+    }
+
+
+def test_board_done_limit_returns_authoritative_full_chain_summary(client, monkeypatch):
+    fixture = _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+    monkeypatch.setattr(kb, "latest_summaries", lambda *a, **k: {})
+    monkeypatch.setattr(kb, "batch_task_costs", lambda *a, **k: {})
+    monkeypatch.setattr(kb, "batch_active_review_stages", lambda *a, **k: {})
+    monkeypatch.setattr(kb, "vault_memory_links_for_task", lambda *a, **k: [])
+
+    response = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 30, "card_diagnostics": "summary", "card_body": "none"},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+    summaries = {row["root_id"]: row for row in data["chain_summaries"]}
+    large = summaries[fixture["large_root"]]
+    assert large == {
+        "root_id": fixture["large_root"],
+        "root_title": "Large chain root",
+        "total": 32,
+        "done": 31,
+        "status_counts": {"done": 31, "running": 1},
+        "latest_completed_at": 1_800_000_030,
+    }
+    done_cards = next(column["tasks"] for column in data["columns"] if column["name"] == "done")
+    assert len(done_cards) <= 30
+    assert any(task["id"] == fixture["active"] for column in data["columns"] for task in column["tasks"])
+
+
+def test_board_done_limit_keeps_fully_completed_omitted_chain_summary(client, monkeypatch):
+    fixture = _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+
+    data = client.get("/api/plugins/kanban/board", params={"done_limit": 30}).json()
+
+    returned_ids = {
+        task["id"] for column in data["columns"] for task in column["tasks"]
+    }
+    assert fixture["completed_root"] not in returned_ids
+    assert fixture["completed_child"] not in returned_ids
+    summary = next(
+        row
+        for row in data["chain_summaries"]
+        if row["root_id"] == fixture["completed_root"]
+    )
+    assert summary == {
+        "root_id": fixture["completed_root"],
+        "root_title": "Completed omitted root",
+        "total": 2,
+        "done": 2,
+        "status_counts": {"done": 2},
+        "latest_completed_at": 1_800_000_200,
+    }
+
+
+def test_board_without_done_limit_preserves_legacy_shape(client, monkeypatch):
+    _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+
+    data = client.get("/api/plugins/kanban/board").json()
+
+    assert set(data) == {
+        "columns",
+        "tenants",
+        "assignees",
+        "latest_event_id",
+        "now",
+    }
+    assert "chain_summaries" not in data
+    assert "done_page" not in data
+
+
+def test_board_done_page_total_count_uses_untruncated_done_count(client, monkeypatch):
+    _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+
+    data = client.get("/api/plugins/kanban/board", params={"done_limit": 30}).json()
+
+    assert data["done_page"]["total_count"] == 33
+    assert data["done_page"]["loaded_count"] == 30
+    assert data["done_page"]["has_more"] is True
+
+
+def test_board_chain_summaries_participate_in_cache_and_etag(client, monkeypatch):
+    fixture = _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+    params = {"done_limit": 30, "card_diagnostics": "summary", "card_body": "none"}
+
+    first = client.get("/api/plugins/kanban/board", params=params)
+    etag = first.headers["etag"]
+    cached = client.get(
+        "/api/plugins/kanban/board",
+        params=params,
+        headers={"If-None-Match": etag},
+    )
+    assert cached.status_code == 304
+
+    renamed = client.patch(
+        f"/api/plugins/kanban/tasks/{fixture['completed_root']}",
+        json={"title": "Renamed omitted chain"},
+    )
+    assert renamed.status_code == 200, renamed.text
+    changed = client.get(
+        "/api/plugins/kanban/board",
+        params=params,
+        headers={"If-None-Match": etag},
+    )
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != etag
+    summary = next(
+        row
+        for row in changed.json()["chain_summaries"]
+        if row["root_id"] == fixture["completed_root"]
+    )
+    assert summary["root_title"] == "Renamed omitted chain"
+
+
 # ---------------------------------------------------------------------------
 # Auto-init on first board read
 # ---------------------------------------------------------------------------

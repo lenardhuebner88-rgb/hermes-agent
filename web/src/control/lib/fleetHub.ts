@@ -2,7 +2,7 @@
  * Fleet-Hub — pure derivation helpers.
  * No React, no side-effects, no fetch — injizierbare `now` für Tests.
  */
-import type { Worker, ChainGraphResponse } from "./types";
+import type { Worker, ChainGraphResponse, ChainSummary } from "./types";
 import type { RunsDailyResponse, RunsDailyPoint } from "./schemas";
 import { elapsedSeconds, inspectEpochSeconds } from "./derive";
 
@@ -424,6 +424,26 @@ export interface ChainChipDef {
   completedAt: number | null;
 }
 
+function sortChainChips(chips: ChainChipDef[]): ChainChipDef[] {
+  const stateOrder: Record<ChainChipState, number> = {
+    active: 0,
+    blocked: 1,
+    held: 2,
+    pending: 3,
+    completed: 4,
+  };
+  chips.sort((a, b) => {
+    const oa = stateOrder[a.state];
+    const ob = stateOrder[b.state];
+    if (oa !== ob) return oa - ob;
+    if (a.state === "active") {
+      return b.done - a.done;
+    }
+    return (b.completedAt ?? 0) - (a.completedAt ?? 0);
+  });
+  return chips;
+}
+
 /**
  * buildChainChips: Gruppiert Board-Tasks nach root_id und leitet Chips ab.
  * Reihenfolge: active, blocked, held, pending, dann completed (✓ grün).
@@ -432,6 +452,9 @@ export interface ChainChipDef {
  *
  * Nur echte Ketten (Root + mind. 1 Kind) werden angezeigt. Solo-Tasks ohne
  * Kind-Tasks werden ignoriert.
+ * Wenn `chainSummaries` vorhanden ist, bleiben die Server-Aggregate für die
+ * vollständige Kette autoritativ; die nicht-fertigen Karten bestimmen nur die
+ * bestehende Sonderregel, dass ausschließlich ein laufendes KIND aktiv zählt.
  *
  * Drei-Zustands-Ableitung (state kommt ausschließlich aus dieser Funktion):
  * - 'active'    = mind. 1 Kind (id !== rootId) ist running/scheduled/blocked
@@ -446,7 +469,46 @@ export function buildChainChips(
     status: string;
     completed_at?: number | null;
   }>,
+  chainSummaries?: ChainSummary[],
 ): ChainChipDef[] {
+  if (chainSummaries !== undefined) {
+    const liveGroups = new Map<string, typeof boardTasks>();
+    for (const task of boardTasks) {
+      const key = task.root_id ?? task.id;
+      if (!liveGroups.has(key)) liveGroups.set(key, []);
+      liveGroups.get(key)!.push(task);
+    }
+    const chips = chainSummaries.flatMap((summary): ChainChipDef[] => {
+      if (summary.total <= 1) return [];
+      const liveMembers = liveGroups.get(summary.root_id) ?? [];
+      const hasRunningChild = liveMembers.some(
+        (task) => task.id !== summary.root_id && task.status === "running",
+      );
+      const hasBlocked = (summary.status_counts.blocked ?? 0) > 0;
+      const hasScheduled = (summary.status_counts.scheduled ?? 0) > 0;
+      const isCompleted = summary.done === summary.total;
+      const state: ChainChipState = hasRunningChild
+        ? "active"
+        : hasBlocked
+          ? "blocked"
+          : hasScheduled
+            ? "held"
+            : isCompleted
+              ? "completed"
+              : "pending";
+      return [{
+        rootId: summary.root_id,
+        label: summary.root_title,
+        progress: summary.total > 0 ? summary.done / summary.total : 0,
+        done: summary.done,
+        total: summary.total,
+        state,
+        completedAt: summary.latest_completed_at,
+      }];
+    });
+    return sortChainChips(chips);
+  }
+
   // Gruppiere nach root_id; Tasks ohne root_id gehören zu sich selbst (= Root).
   const groups = new Map<string, typeof boardTasks>();
   for (const t of boardTasks) {
@@ -491,26 +553,7 @@ export function buildChainChips(
   }
 
   // Sortierung: echte Aktivität zuerst, dann Aufmerksamkeit/Hold, dann offen/fertig.
-  const stateOrder: Record<ChainChipState, number> = {
-    active: 0,
-    blocked: 1,
-    held: 2,
-    pending: 3,
-    completed: 4,
-  };
-  chips.sort((a, b) => {
-    const oa = stateOrder[a.state];
-    const ob = stateOrder[b.state];
-    if (oa !== ob) return oa - ob;
-    if (a.state === "active") {
-      // Beide aktiv: mehr done = weiter vorn
-      return b.done - a.done;
-    }
-    // Beide pending oder beide completed: neueste zuerst
-    return (b.completedAt ?? 0) - (a.completedAt ?? 0);
-  });
-
-  return chips;
+  return sortChainChips(chips);
 }
 
 /**

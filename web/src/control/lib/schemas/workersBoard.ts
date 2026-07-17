@@ -208,15 +208,36 @@ export const BoardTaskSchema = z.object({
   cost_effective_usd: z.coerce.number().nullable().catch(null),
 });
 
+export const ChainSummarySchema = z.object({
+  root_id: z.string().catch(""),
+  root_title: z.string().catch("Ohne Titel"),
+  total: z.coerce.number().int().nonnegative().catch(0),
+  done: z.coerce.number().int().nonnegative().catch(0),
+  status_counts: z.record(z.string(), z.coerce.number().int().nonnegative()).catch({}),
+  latest_completed_at: nullableEpochSeconds,
+});
+
+export const DoneBoardPageSchema = z.object({
+  total_count: z.coerce.number().int().nonnegative().catch(0),
+  loaded_count: z.coerce.number().int().nonnegative().catch(0),
+  limit: z.coerce.number().int().positive().catch(1),
+  has_more: z.boolean().catch(false),
+  next_cursor: z.string().nullable().catch(null),
+});
+
 export const BoardResponseSchema = z.object({
   columns: z.array(z.object({ name: z.string(), tasks: z.array(BoardTaskSchema).catch([]) })).catch([]),
   tenants: z.array(z.string()).catch([]),
   assignees: z.array(z.string()).catch([]),
   latest_event_id: z.coerce.number().catch(0),
   source_errors: z.array(BoardSourceErrorSchema).catch([]),
+  chain_summaries: z.array(ChainSummarySchema).catch([]).optional(),
+  done_page: DoneBoardPageSchema.optional(),
   now: epochSeconds,
 });
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
+export type ChainSummary = z.infer<typeof ChainSummarySchema>;
+export type DoneBoardPage = z.infer<typeof DoneBoardPageSchema>;
 export type BoardResponse = z.infer<typeof BoardResponseSchema>;
 
 export const BoardArchiveResponseSchema = z.object({

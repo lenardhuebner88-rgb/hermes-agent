@@ -40,6 +40,7 @@ describe("boardLoader ETag revalidation", () => {
 
     expect(first).toEqual(payload);
     expect(second).toBe(first);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("done_limit=30");
     const secondHeaders = fetchMock.mock.calls[1][1].headers as Headers;
     expect(secondHeaders.get("If-None-Match")).toBe('"board-v1"');
   });
