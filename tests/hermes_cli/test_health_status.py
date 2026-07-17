@@ -307,6 +307,44 @@ def test_probe_timeout_degrades_only_slow_subsystem(
     } == {"gateway": "healthy", "kanban_db": "healthy", "kanban_dispatcher": "healthy"}
 
 
+def test_health_status_not_starved_by_default_executor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Probes use a private pool; a saturated default executor must not stall them."""
+    _install_probe_sources(monkeypatch, tmp_path, gateway_pid=4242)
+
+    async def _run() -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        # Saturate the default ThreadPoolExecutor so probes would starve if they
+        # still shared it with PTY pumps / other to_thread work.
+        blockers = [loop.run_in_executor(None, time.sleep, 3) for _ in range(20)]
+        # Let blocker threads claim the default pool before probing.
+        await asyncio.sleep(0.05)
+        started = time.perf_counter()
+        result = await hs._get_health_status()
+        elapsed = time.perf_counter() - started
+        # Do not await blockers (would add ~3s); cancel scheduled work for teardown.
+        for fut in blockers:
+            fut.cancel()
+        return {"result": result, "elapsed": elapsed}
+
+    payload = asyncio.run(_run())
+    data = payload["result"]
+    elapsed = payload["elapsed"]
+
+    assert elapsed < 2.0, f"health status starved: {elapsed:.3f}s"
+    assert data["schema"] == "hermes-health-v1"
+    for name in ("gateway", "autoresearch", "kanban_db", "kanban_dispatcher"):
+        subsystem = data["subsystems"][name]
+        assert subsystem.get("error") != "timeout", (
+            f"{name} has timeout marker under default-executor load: {subsystem}"
+        )
+        assert "timeout" not in str(subsystem.get("detail", "")).lower(), (
+            f"{name} detail indicates timeout: {subsystem}"
+        )
+
+
 def test_health_endpoint_is_bounded_by_per_probe_timeout(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
