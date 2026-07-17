@@ -208,6 +208,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
         </div>
       ) : selectedRootId && nodes.length > 0 ? (
         <KettenGraphV4
+          key={selectedRootId}
           rootId={selectedRootId}
           nodes={nodes}
           now={now}
@@ -347,6 +348,10 @@ function KettenGraphV4({
   const hasBlockage = nodes.some((n) => n.status === "blocked");
 
   const [doneExpanded, setDoneExpanded] = useState(false);
+  const [showAllUpcoming, setShowAllUpcoming] = useState(false);
+  const [showAllDone, setShowAllDone] = useState(false);
+  const visibleUpcomingNodes = upcomingNodes.slice(0, showAllUpcoming ? undefined : 20);
+  const visibleDoneNodes = doneNodes.slice(0, showAllDone ? undefined : 20);
 
   return (
     <>
@@ -584,7 +589,7 @@ function KettenGraphV4({
             <span>Upcoming</span>
             <span className="upcoming-count">{upcomingNodes.length}</span>
           </div>
-          {upcomingNodes.map((n) => {
+          {visibleUpcomingNodes.map((n) => {
             const worker = workerByNodeId.get(n.id);
             const route = worker ?? n.latest_run;
             const hasOverride = worker?.model_override != null;
@@ -629,6 +634,11 @@ function KettenGraphV4({
               </button>
             );
           })}
+          {!showAllUpcoming && upcomingNodes.length > 20 ? (
+            <button type="button" className="fleet-list-expander" onClick={() => setShowAllUpcoming(true)}>
+              Weitere Upcoming anzeigen ({upcomingNodes.length - 20})
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -645,7 +655,7 @@ function KettenGraphV4({
             <span className="done-count">{doneNodes.length}</span>
             <span className="done-chev">{doneExpanded ? "▲" : "▼"}</span>
           </button>
-          {doneExpanded ? doneNodes.map((n) => (
+          {doneExpanded ? visibleDoneNodes.map((n) => (
             <button
               key={n.id}
               type="button"
@@ -667,6 +677,11 @@ function KettenGraphV4({
               </div>
             </button>
           )) : null}
+          {doneExpanded && !showAllDone && doneNodes.length > 20 ? (
+            <button type="button" className="fleet-list-expander" onClick={() => setShowAllDone(true)}>
+              Weitere fertige Schritte anzeigen ({doneNodes.length - 20})
+            </button>
+          ) : null}
         </div>
       ) : null}
 

@@ -278,6 +278,19 @@ export function BoardTab({
     });
   }, [archiveTasks, assigneeFilter, board, doneTasks, isArchive, q, statusFilter]);
 
+  const filtersActive = statusFilter !== "all" || assigneeFilter !== "all" || q.trim() !== "";
+  const activeFilterLabels = [
+    statusFilter !== "all" ? `Status: ${taskStatusLabel[statusFilter] ?? statusFilter}` : null,
+    assigneeFilter !== "all" ? `Assignee: ${assigneeFilter}` : null,
+    q.trim() ? `Suche: ${q.trim()}` : null,
+  ].filter((label): label is string => label != null);
+
+  const resetFilters = () => {
+    setQ("");
+    setStatusFilter("all");
+    setAssigneeFilter("all");
+  };
+
   // Filtergebnis nach Status gruppieren (nur Status mit sichtbaren Tasks).
   const grouped = useMemo(() => {
     const map = new Map<TaskStatus, BoardTask[]>();
@@ -333,6 +346,14 @@ export function BoardTab({
           ))}
         </select>
       </div>
+
+      {filtersActive ? (
+        <div className="fleet-boardtab-filter-active" role="status" aria-label="Aktive Board-Filter">
+          <span className="fleet-boardtab-filter-active-label">Filter aktiv</span>
+          {activeFilterLabels.map((label) => <span key={label} className="fleet-boardtab-filter-value">{label}</span>)}
+          <button type="button" onClick={resetFilters} aria-label="Alle Filter zurücksetzen">Zurücksetzen</button>
+        </div>
+      ) : null}
 
       {isArchive && archivePage ? (
         <div className="fleet-boardtab-archive-state" role="status" aria-live="polite">
