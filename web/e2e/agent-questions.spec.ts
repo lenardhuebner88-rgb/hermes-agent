@@ -29,6 +29,8 @@ type QuestionEvent = {
   latency_s: number | null;
   answer_verified: boolean | null;
   override: number;
+  action_context?: string | null;
+  hook_key?: string | null;
 };
 
 function eventFixture(id: number, text: string, options: Option[]): QuestionEvent {
@@ -64,6 +66,21 @@ const Q102 = eventFixture(102, "E2E Frage B: Continue? (y/n)", [
   { nr: "y", label: "Yes", recommended: true },
   { nr: "n", label: "No", recommended: false },
 ]);
+
+// I2 Test D: hook-sourced event — labels after hook-script convention
+// (no "(Recommended)" suffix; recommended flag; nr 1..3). Real CC payload.
+const Q_HOOK: QuestionEvent = {
+  ...eventFixture(201, "Which deployment strategy should we use?", [
+    { nr: 1, label: "Rolling update", recommended: true },
+    { nr: 2, label: "Blue-green", recommended: false },
+    { nr: 3, label: "Canary", recommended: false },
+  ]),
+  source: "hook",
+  kind: "claude",
+  action_context: "AskUserQuestion: Strategy",
+  pane_id: "%80",
+  fingerprint: "hook:e2e-fp-201",
+};
 
 async function installBaseMocks(page: Page) {
   // Catch-all FIRST — Playwright prefers later-registered routes.
@@ -362,5 +379,43 @@ test.describe("Frage-Assistent Antwort-Sheet", () => {
     await expect(page.getByTestId("answer-sheet")).toHaveCount(0);
     // View still intact — pill remains.
     await expect(page.getByTestId("frage-pill").first()).toBeVisible();
+  });
+
+  test("D: hook-sourced event shows exact option labels + Empfohlen badge", async ({
+    page,
+  }) => {
+    await installBaseMocks(page);
+    const mocks = await installQuestionMocks(page, [Q_HOOK]);
+    await gotoAgentTerminals(page);
+
+    const pill = page.getByTestId("frage-pill").first();
+    await expect(pill).toContainText("1 Frage");
+    await pill.click();
+
+    const sheet = page.getByTestId("answer-sheet");
+    await expect(sheet).toBeVisible();
+    await expect(
+      sheet.getByText("Which deployment strategy should we use?"),
+    ).toBeVisible();
+
+    // Three exact labels from the real PreToolUse payload after hook convention
+    // (no "(Recommended)" suffix on the label text).
+    await expect(sheet.getByRole("button", { name: /Rolling update/ })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: /Blue-green/ })).toBeVisible();
+    await expect(sheet.getByRole("button", { name: /Canary/ })).toBeVisible();
+    await expect(sheet.getByText("(Recommended)")).toHaveCount(0);
+
+    // Exactly one Empfohlen badge (on option 1).
+    await expect(sheet.getByText("Empfohlen")).toHaveCount(1);
+
+    const postPromise = page.waitForRequest(
+      (r) =>
+        r.method() === "POST" &&
+        r.url().includes("/api/agent-questions/201/answer"),
+    );
+    await sheet.getByRole("button", { name: /Rolling update/ }).click();
+    const post = await postPromise;
+    expect(post.postDataJSON()).toEqual({ answer: "1", answered_by: "operator" });
+    expect(mocks.posts.map((p) => p.id)).toEqual([201]);
   });
 });

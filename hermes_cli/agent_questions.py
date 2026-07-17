@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from hermes_cli import agent_terminals as _agent_terminals
-from hermes_cli.sqlite_util import write_txn
+from hermes_cli.sqlite_util import add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,9 @@ CREATE TABLE IF NOT EXISTS question_events (
     answer        TEXT,
     latency_s     REAL,
     answer_verified INTEGER,
-    override      INTEGER NOT NULL DEFAULT 0
+    override      INTEGER NOT NULL DEFAULT 0,
+    action_context TEXT,
+    hook_key      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_question_events_status
@@ -93,12 +95,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_question_events_open_pane_fp
     ON question_events(pane_id, fingerprint) WHERE status = 'open';
 """
 
+# Live DBs may predate I2 additive columns — migrate on connect.
+_SCHEMA_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("action_context", "action_context TEXT"),
+    ("hook_key", "hook_key TEXT"),
+)
+
+_PANE_ID_RE = re.compile(r"^%\d+$")
+_CAPTURE_GONE_MARKERS: tuple[str, ...] = (
+    "can't find",
+    "no such window",
+    "no such pane",
+    "no such session",
+    "no server running",
+)
+
 _INITIALIZED_PATHS: set[str] = set()
 
 
 def _iso_now(now: Optional[float] = None) -> str:
     ts = time.time() if now is None else float(now)
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _ensure_schema_migrations(conn: sqlite3.Connection) -> None:
+    """Idempotent additive columns for live P0 DBs (no data loss).
+
+    Uses ``add_column_if_missing`` so two PROCESSES migrating concurrently
+    (dashboard poller + a CLI connect) cannot fail each other on the
+    "duplicate column name" race of a raw ALTER.
+    """
+    for column, ddl in _SCHEMA_COLUMN_MIGRATIONS:
+        add_column_if_missing(conn, "question_events", column, ddl)
 
 
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
@@ -116,6 +144,9 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
         if resolved not in _INITIALIZED_PATHS:
             conn.executescript(SCHEMA_SQL)
             _INITIALIZED_PATHS.add(resolved)
+        # Always migrate: live DBs existed before I2 columns; CREATE IF NOT EXISTS
+        # does not add columns to an already-created table.
+        _ensure_schema_migrations(conn)
     except Exception:
         conn.close()
         raise
@@ -280,6 +311,30 @@ def compute_fingerprint(pane_id: str, region: str) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def compute_hook_fingerprint(
+    question_text: str, options: list[dict[str, Any]] | None
+) -> str:
+    """Hook-source fingerprint — own namespace, not shared with scrape.
+
+    Format: ``hook:`` + sha256(question_text + canonical option list).
+    Merge across sources is pane-scoped, never fingerprint-equality.
+    """
+    canon_opts: list[dict[str, Any]] = []
+    for opt in options or []:
+        if not isinstance(opt, dict):
+            continue
+        canon_opts.append(
+            {
+                "nr": opt.get("nr"),
+                "label": str(opt.get("label") or ""),
+                "recommended": bool(opt.get("recommended")),
+            }
+        )
+    canon = json.dumps(canon_opts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    digest = hashlib.sha256(f"{question_text or ''}{canon}".encode("utf-8")).hexdigest()
+    return f"hook:{digest}"
+
+
 def _kind_from_command(command: str | None) -> str:
     cmd = (command or "").lower()
     for hint in _KIND_HINTS:
@@ -368,6 +423,31 @@ def list_open_pane_ids(*, db_path: Optional[Path] = None) -> set[str]:
     return {str(row["pane_id"]) for row in rows}
 
 
+def list_open_events(*, db_path: Optional[Path] = None) -> list[dict[str, Any]]:
+    """Return all open events (any source), newest-first."""
+    with connect_closing(db_path=db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM question_events WHERE status = 'open' ORDER BY id DESC"
+        ).fetchall()
+    return [_row_to_event(row) for row in rows]
+
+
+def find_open_hook_event(
+    pane_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> dict[str, Any] | None:
+    """Return an open ``source='hook'`` event for ``pane_id``, if any."""
+    with connect_closing(db_path=db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM question_events "
+            "WHERE pane_id = ? AND status = 'open' AND source = 'hook' "
+            "ORDER BY id DESC LIMIT 1",
+            (pane_id,),
+        ).fetchone()
+    return _row_to_event(row) if row is not None else None
+
+
 def insert_question_event(
     *,
     session: str,
@@ -380,6 +460,8 @@ def insert_question_event(
     cwd: str | None = None,
     source: str = "scrape",
     class_: str = "unknown",
+    action_context: str | None = None,
+    hook_key: str | None = None,
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
 ) -> int | None:
@@ -391,8 +473,9 @@ def insert_question_event(
             cur = conn.execute(
                 "INSERT OR IGNORE INTO question_events ("
                 "ts, updated_ts, source, session, window, pane_id, fingerprint, "
-                "kind, cwd, question_text, options_json, class, status, override"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0)",
+                "kind, cwd, question_text, options_json, class, status, override, "
+                "action_context, hook_key"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)",
                 (
                     ts,
                     ts,
@@ -406,6 +489,8 @@ def insert_question_event(
                     question_text,
                     options_json,
                     class_,
+                    action_context,
+                    hook_key,
                 ),
             )
             if cur.rowcount == 0:
@@ -425,12 +510,18 @@ def supersede_and_insert(
     cwd: str | None = None,
     source: str = "scrape",
     class_: str = "unknown",
+    action_context: str | None = None,
+    hook_key: str | None = None,
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
 ) -> tuple[int, int | None]:
     """Supersede other open events on the pane and insert the new one in ONE
     transaction, so no interleaving writer can observe/leave two open rows
-    for the same pane. Returns ``(superseded_count, new_id_or_None)``."""
+    for the same pane. Returns ``(superseded_count, new_id_or_None)``.
+
+    Hook ingest does NOT use this helper — ``ingest_hook_event`` has its own
+    transaction (supersedes ALL open rows on the pane, dedups by hook_key).
+    """
     ts = _iso_now(now)
     options_json = json.dumps(options if options is not None else [], ensure_ascii=False)
     with connect_closing(db_path=db_path) as conn:
@@ -444,8 +535,9 @@ def supersede_and_insert(
             cur = conn.execute(
                 "INSERT OR IGNORE INTO question_events ("
                 "ts, updated_ts, source, session, window, pane_id, fingerprint, "
-                "kind, cwd, question_text, options_json, class, status, override"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0)",
+                "kind, cwd, question_text, options_json, class, status, override, "
+                "action_context, hook_key"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)",
                 (
                     ts,
                     ts,
@@ -459,6 +551,8 @@ def supersede_and_insert(
                     question_text,
                     options_json,
                     class_,
+                    action_context,
+                    hook_key,
                 ),
             )
             new_id = int(cur.lastrowid) if cur.rowcount != 0 else None
@@ -524,6 +618,232 @@ def recently_answered(
     except (TypeError, ValueError):
         return False
     return (now_ts - updated) < float(within_s)
+
+
+# ---------------------------------------------------------------------------
+# Hook-source ingest / resolve (I2)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_ws(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def _hook_question_needle(question_text: str) -> str:
+    """First ~80 chars of whitespace-normalized, ANSI-stripped question text."""
+    cleaned = _normalize_ws(_agent_terminals.strip_ansi(question_text or ""))
+    return cleaned[:80]
+
+
+def hook_question_still_present(
+    question_text: str,
+    raw_capture: str,
+    *,
+    options: list[dict[str, Any]] | None = None,
+) -> bool:
+    """True when the hook question_text substring is still in the pane capture.
+
+    Hook expiry must NOT use ``parse_question`` — real Claude Code prompts
+    fail the scrape options-block heuristic.
+
+    With ``options`` given (answer-path recheck), every option label must also
+    be present: a re-asked question with the SAME first-80-chars but DIFFERENT
+    options must fail the recheck (else a digit maps to the wrong option in
+    the ~2s window before the re-ask's fire-and-forget ingest lands). Expiry
+    stays on the question needle alone — lenient, softened by two-poll strike.
+    Wrong direction here is safe: refusal (superseded) instead of wrong send.
+    """
+    needle = _hook_question_needle(question_text)
+    if not needle:
+        return False
+    hay = _normalize_ws(_agent_terminals.strip_ansi(raw_capture or ""))
+    if needle not in hay:
+        return False
+    for opt in options or []:
+        label = _normalize_ws(str(opt.get("label") or ""))[:40]
+        if label and label not in hay:
+            return False
+    return True
+
+
+def _is_gone_capture_error(exc: BaseException) -> bool:
+    """True when capture failed because the pane/session is gone (strike).
+
+    ``subprocess.CalledProcessError`` puts the tmux message in ``stderr``, not
+    in ``str(exc)`` (which is only the command line) — check both.
+    """
+    parts = [str(exc)]
+    stderr = getattr(exc, "stderr", None)
+    if stderr:
+        parts.append(str(stderr))
+    msg = " ".join(parts).lower()
+    return any(marker in msg for marker in _CAPTURE_GONE_MARKERS)
+
+
+def _validate_hook_payload(event: dict[str, Any]) -> str | None:
+    """Return a reason string when invalid, else None."""
+    if not isinstance(event, dict):
+        return "invalid-payload"
+    pane_id = str(event.get("pane_id") or "")
+    if not _PANE_ID_RE.fullmatch(pane_id):
+        return "invalid-payload"
+    question_text = event.get("question_text")
+    if not isinstance(question_text, str) or not question_text.strip():
+        return "invalid-payload"
+    options = event.get("options")
+    if options is None:
+        options = []
+    if not isinstance(options, list):
+        return "invalid-payload"
+    return None
+
+
+def ingest_hook_event(
+    event: dict[str, Any],
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> dict[str, Any]:
+    """Ingest a pre-converted hook-source question into the store.
+
+    Input is store-near (hook script already converted CC payload)::
+
+        {pane_id, session, window, kind, cwd, question_text, options,
+         action_context, hook_key}
+
+    Atomic merge supersedes any open event on the same pane. Open events with
+    the same ``hook_key`` are idempotent no-ops.
+    """
+    if _validate_hook_payload(event) is not None:
+        return {"ok": False, "reason": "invalid-payload"}
+
+    pane_id = str(event["pane_id"])
+    question_text = str(event["question_text"])
+    options_raw = event.get("options")
+    options: list[dict[str, Any]] = list(options_raw) if isinstance(options_raw, list) else []
+    # Normalize option dicts for storage (tolerates partial shapes).
+    norm_opts: list[dict[str, Any]] = []
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        norm_opts.append(
+            {
+                "nr": opt.get("nr"),
+                "label": str(opt.get("label") or ""),
+                "recommended": bool(opt.get("recommended")),
+            }
+        )
+    hook_key = event.get("hook_key")
+    hook_key_s = str(hook_key) if hook_key is not None and str(hook_key) != "" else None
+    action_context = event.get("action_context")
+    action_context_s = (
+        str(action_context) if action_context is not None and str(action_context) != "" else None
+    )
+    session = str(event.get("session") or "")
+    window = str(event.get("window") or "")
+    kind = event.get("kind")
+    kind_s = str(kind) if kind is not None else None
+    cwd = event.get("cwd")
+    cwd_s = str(cwd) if cwd is not None else None
+    fp = compute_hook_fingerprint(question_text, norm_opts)
+    ts = _iso_now(now)
+    options_json = json.dumps(norm_opts, ensure_ascii=False)
+
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            if hook_key_s is not None:
+                # Dedup regardless of status: tool_use_ids are globally unique,
+                # so ANY prior row with this hook_key means this PreToolUse was
+                # already ingested — a re-POST must not resurrect an event that
+                # the dashboard or resolve path already closed.
+                existing = conn.execute(
+                    "SELECT id FROM question_events "
+                    "WHERE hook_key = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (hook_key_s,),
+                ).fetchone()
+                if existing is not None:
+                    return {"ok": True, "deduped": True, "id": int(existing["id"])}
+
+            conn.execute(
+                "UPDATE question_events SET status = 'superseded', "
+                "updated_ts = ? WHERE pane_id = ? AND status = 'open'",
+                (ts, pane_id),
+            )
+            cur = conn.execute(
+                "INSERT INTO question_events ("
+                "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+                "kind, cwd, question_text, options_json, class, status, override, "
+                "action_context, hook_key"
+                ") VALUES (?, ?, 'hook', ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', 'open', 0, ?, ?)",
+                (
+                    ts,
+                    ts,
+                    session,
+                    window,
+                    pane_id,
+                    fp,
+                    kind_s,
+                    cwd_s,
+                    question_text,
+                    options_json,
+                    action_context_s,
+                    hook_key_s,
+                ),
+            )
+            new_id = int(cur.lastrowid)
+            return {"ok": True, "id": new_id}
+
+
+def resolve_hook_event(
+    hook_key: str,
+    answer: str | None = None,
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> dict[str, Any]:
+    """Mark an open hook-sourced event answered (terminal-side resolve).
+
+    No open event (already answered via dashboard / expired) → no-op success
+    with ``resolved: False``. Atomic single UPDATE WHERE status='open'.
+    """
+    key = str(hook_key or "").strip()
+    if not key:
+        return {"ok": True, "resolved": False}
+
+    now_ts = time.time() if now is None else float(now)
+    ts = _iso_now(now_ts)
+    answer_s = None if answer is None else str(answer)
+
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            row = conn.execute(
+                "SELECT id, ts FROM question_events "
+                "WHERE status = 'open' AND hook_key = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return {"ok": True, "resolved": False}
+            event_id = int(row["id"])
+            try:
+                latency_s = max(0.0, now_ts - _parse_iso_ts(str(row["ts"] or "")))
+            except (TypeError, ValueError):
+                latency_s = 0.0
+            cur = conn.execute(
+                "UPDATE question_events SET status = 'answered', "
+                "answered_by = 'terminal', answer = ?, latency_s = ?, "
+                "updated_ts = ? WHERE id = ? AND status = 'open'",
+                (answer_s, float(latency_s), ts, event_id),
+            )
+            if int(cur.rowcount or 0) != 1:
+                return {"ok": True, "resolved": False}
+            return {
+                "ok": True,
+                "resolved": True,
+                "id": event_id,
+                "latency_s": float(latency_s),
+            }
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +921,33 @@ def _recheck_fingerprint(service: Any, pane_id: str) -> str | None:
     if parsed is None:
         return None
     return compute_fingerprint(pane_id, parsed["region"])
+
+
+def _recheck_event_standing(
+    service: Any,
+    event: dict[str, Any],
+) -> str | None:
+    """Recheck that the claimed event is still standing; return expected fp or None.
+
+    Scrape events: parse + fingerprint match (P0 path).
+    Hook events: substring presence of ``question_text`` AND every option
+    label (parse fails on real Claude Code prompts — must not use
+    parse_question; the option-label requirement blocks the same-question/
+    different-options re-ask window).
+    """
+    pane_id = str(event.get("pane_id") or "")
+    expected_fp = str(event.get("fingerprint") or "")
+    if event.get("source") == "hook":
+        raw = service.capture_pane(pane_id, start=-_CAPTURE_TAIL_LINES)
+        options = event.get("options")
+        if hook_question_still_present(
+            str(event.get("question_text") or ""),
+            raw,
+            options=options if isinstance(options, list) else None,
+        ):
+            return expected_fp
+        return None
+    return _recheck_fingerprint(service, pane_id)
 
 
 def _claim_event(
@@ -705,9 +1052,10 @@ def answer_question(
     expected_fp = str(event.get("fingerprint") or "")
     svc = service if service is not None else _agent_terminals.TmuxAgentSessionService()
 
-    # Step 4: fingerprint recheck (nothing sent yet → claim can roll back)
+    # Step 4: standing recheck (nothing sent yet → claim can roll back).
+    # Hook events use question_text presence; scrape uses fingerprint.
     try:
-        current_fp = _recheck_fingerprint(svc, pane_id)
+        current_fp = _recheck_event_standing(svc, event)
     except Exception as exc:
         logger.warning(
             "answer_question recheck failed event_id=%s pane_id=%s: %s",
@@ -752,7 +1100,7 @@ def answer_question(
     sleep(float(verify_delay_s))
     verified = False
     try:
-        fp2 = _recheck_fingerprint(svc, pane_id)
+        fp2 = _recheck_event_standing(svc, event)
         verified = fp2 is None or fp2 != expected_fp
         _set_verify_fields(
             event_id,
@@ -845,6 +1193,8 @@ class QuestionScrapeIngestor:
             "skipped_expiry_empty_snapshot": 0,
             "cooldown": 0,
             "capture_errors": 0,
+            "skipped_hook_authoritative": 0,
+            "cross_session_checked": 0,
         }
         now = float(self._now())
         svc = self._service()
@@ -857,7 +1207,10 @@ class QuestionScrapeIngestor:
             raw_windows = []
 
         summary["windows"] = len(raw_windows)
-        frage_panes: set[str] = set()
+        # standing_panes: panes confirmed still showing their open question
+        # (scrape-parse match OR hook question_text substring present).
+        standing_panes: set[str] = set()
+        scanned_panes: set[str] = set()
         next_pending: dict[str, str] = {}
         tail_start = -abs(self.overview_tail_lines)
 
@@ -871,6 +1224,7 @@ class QuestionScrapeIngestor:
             pane_id = str(win.get("pane_id") or "")
             if not pane_id:
                 continue
+            scanned_panes.add(pane_id)
 
             try:
                 raw = svc.capture_pane(pane_id, start=tail_start)
@@ -881,6 +1235,18 @@ class QuestionScrapeIngestor:
                     pane_id,
                     exc_info=True,
                 )
+                continue
+
+            # Hook is authoritative: skip scrape insert while an open hook
+            # event exists for this pane. Still confirm standing via
+            # question_text substring (parse_question fails on real CC prompts).
+            open_hook = find_open_hook_event(pane_id, db_path=self.db_path)
+            if open_hook is not None:
+                summary["skipped_hook_authoritative"] += 1
+                if hook_question_still_present(
+                    str(open_hook.get("question_text") or ""), raw
+                ):
+                    standing_panes.add(pane_id)
                 continue
 
             tail = _normalize_capture_tail(raw)
@@ -901,7 +1267,7 @@ class QuestionScrapeIngestor:
             if find_open_event(pane_id, fp, db_path=self.db_path) is not None:
                 summary["idempotent"] += 1
                 next_pending[pane_id] = fp
-                frage_panes.add(pane_id)
+                standing_panes.add(pane_id)
                 continue
 
             prev_fp = self._pending.get(pane_id)
@@ -911,12 +1277,13 @@ class QuestionScrapeIngestor:
             if stable and age_ok:
                 # Claim→poller race: after answer the prompt may still stand
                 # for a few seconds; do not open a duplicate event.
+                # 60s cooldown applies ONLY to scrape inserts (hook ignores it).
                 if recently_answered(
                     pane_id, fp, within_s=60.0, db_path=self.db_path, now=now
                 ):
                     summary["cooldown"] += 1
                     next_pending[pane_id] = fp
-                    frage_panes.add(pane_id)
+                    standing_panes.add(pane_id)
                     continue
                 # Supersede only after the new fingerprint is stable (not on
                 # first observation) so a 1-poll flicker cannot kill a valid
@@ -942,10 +1309,10 @@ class QuestionScrapeIngestor:
                 else:
                     summary["created"] += 1
                 next_pending[pane_id] = fp
-                frage_panes.add(pane_id)
+                standing_panes.add(pane_id)
             else:
                 next_pending[pane_id] = fp
-                frage_panes.add(pane_id)
+                standing_panes.add(pane_id)
                 if not stable:
                     summary["unstable"] += 1
                     summary["pending"] += 1
@@ -970,8 +1337,43 @@ class QuestionScrapeIngestor:
         else:
             self._empty_snapshots = 0
 
-        open_panes = list_open_pane_ids(db_path=self.db_path)
-        candidates = open_panes - frage_panes
+        # Cross-session / unscanned panes: open events whose pane was not in
+        # the work-session scan — capture pane-addressed and confirm standing.
+        open_events = list_open_events(db_path=self.db_path)
+        for ev in open_events:
+            pane_id = str(ev.get("pane_id") or "")
+            if not pane_id or pane_id in standing_panes:
+                continue
+            if pane_id in scanned_panes:
+                # Already evaluated during the work scan (hook substring or
+                # scrape standing). Missing from standing → expiry candidate.
+                continue
+            summary["cross_session_checked"] += 1
+            try:
+                raw = svc.capture_pane(pane_id, start=tail_start)
+            except Exception as exc:
+                if not _is_gone_capture_error(exc):
+                    # Transient tmux error ≠ strike (keep standing this poll).
+                    standing_panes.add(pane_id)
+                # Gone → leave out of standing → expiry strike.
+                continue
+            if ev.get("source") == "hook":
+                if hook_question_still_present(
+                    str(ev.get("question_text") or ""), raw
+                ):
+                    standing_panes.add(pane_id)
+            else:
+                # Scrape events outside the work scan: parse + fingerprint.
+                tail = _normalize_capture_tail(raw)
+                parsed = parse_question(tail)
+                if parsed is not None:
+                    fp = compute_fingerprint(pane_id, parsed["region"])
+                    if fp == str(ev.get("fingerprint") or ""):
+                        standing_panes.add(pane_id)
+
+        open_panes = {str(ev.get("pane_id") or "") for ev in open_events}
+        open_panes.discard("")
+        candidates = open_panes - standing_panes
         to_expire = candidates & self._expire_pending
         if to_expire:
             summary["expired"] += expire_open_events(

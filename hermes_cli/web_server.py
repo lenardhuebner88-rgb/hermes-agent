@@ -116,7 +116,7 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
     from fastapi.staticfiles import StaticFiles
-    from pydantic import BaseModel, SecretStr
+    from pydantic import BaseModel, Field, SecretStr
     from starlette.concurrency import run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
@@ -132,7 +132,7 @@ except ImportError:
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
         from fastapi.staticfiles import StaticFiles
-        from pydantic import BaseModel, SecretStr
+        from pydantic import BaseModel, Field, SecretStr
         from starlette.concurrency import run_in_threadpool
     except ImportError:
         raise SystemExit(
@@ -17550,10 +17550,35 @@ async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
         raise _agent_terminal_error(exc) from exc
 
 
-# --- agent questions (Frage-Assistent P0a/P0b) ---
+# --- agent questions (Frage-Assistent P0a/P0b/I2) ---
 class AgentQuestionAnswerRequest(BaseModel):
     answer: str
     answered_by: str = "operator"
+
+
+class AgentQuestionOptionIn(BaseModel):
+    nr: Any  # int | str — y/n or numbered select
+    label: str = ""
+    recommended: bool = False
+
+
+class AgentQuestionIngestRequest(BaseModel):
+    """Store-near payload from the Claude Code PreToolUse hook script."""
+
+    pane_id: str
+    session: str = ""
+    window: str = ""
+    kind: Optional[str] = None
+    cwd: Optional[str] = None
+    question_text: str
+    options: List[AgentQuestionOptionIn] = Field(default_factory=list)
+    action_context: Optional[str] = None
+    hook_key: Optional[str] = None
+
+
+class AgentQuestionResolveRequest(BaseModel):
+    hook_key: str
+    answer: Optional[str] = None
 
 
 @app.get("/api/agent-questions")
@@ -17573,6 +17598,54 @@ def agent_questions_list(
         detail = scrub_detail(str(exc)) or exc.__class__.__name__
         raise HTTPException(status_code=503, detail=detail) from exc
     return {"questions": questions}
+
+
+@app.post("/api/agent-questions/ingest")
+def agent_questions_ingest(req: AgentQuestionIngestRequest) -> Dict[str, object]:
+    """Ingest a hook-sourced question event (I2).
+
+    Sync endpoint: SQLite write + merge must not block the event loop
+    (FastAPI runs def routes in a threadpool).
+    """
+    from hermes_cli import agent_questions as _agent_questions
+
+    payload = {
+        "pane_id": req.pane_id,
+        "session": req.session,
+        "window": req.window,
+        "kind": req.kind,
+        "cwd": req.cwd,
+        "question_text": req.question_text,
+        "options": [opt.model_dump() for opt in req.options],
+        "action_context": req.action_context,
+        "hook_key": req.hook_key,
+    }
+    try:
+        result = _agent_questions.ingest_hook_event(payload)
+    except Exception as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+    if not result.get("ok") and result.get("reason") == "invalid-payload":
+        raise HTTPException(status_code=400, detail=result)
+    return result
+
+
+@app.post("/api/agent-questions/resolve")
+def agent_questions_resolve(req: AgentQuestionResolveRequest) -> Dict[str, object]:
+    """Resolve a hook-sourced event by hook_key (PostToolUse / terminal answer).
+
+    Sync endpoint: SQLite claim must not block the event loop.
+    Always 200 when the store call succeeds (resolved may be False = no-op).
+    """
+    from hermes_cli import agent_questions as _agent_questions
+
+    try:
+        result = _agent_questions.resolve_hook_event(req.hook_key, req.answer)
+    except Exception as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+    return result
 
 
 @app.post("/api/agent-questions/{event_id}/answer")
