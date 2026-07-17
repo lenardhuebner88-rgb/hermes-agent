@@ -117,7 +117,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
               onClick={() => setSelectedPath(ps.path)}
               aria-pressed={effectivePath === ps.path}
             >
-              <ExpandableText className="fleet-kchip-label" text={ps.topic || ps.filename} />
+              <span className="fleet-kchip-label">{ps.topic || ps.filename}</span>
             </button>
           ))}
         </div>

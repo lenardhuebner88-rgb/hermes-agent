@@ -229,18 +229,24 @@ describe("PlanTab ingest behaviour", () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/planspecs/ingest"))).toBe(false);
   });
 
-  it("uses CSS ellipsis for long PlanSpec labels and expands the complete text on tap", () => {
-    const topic = "Ein vollständiger PlanSpec-Name, der deutlich länger als zweiundzwanzig Zeichen ist";
+  it("selects a pending PlanSpec when the click lands on its CSS-ellipsis label", () => {
+    const longTopic = "Ein vollständiger PlanSpec-Name, der deutlich länger als zweiundzwanzig Zeichen ist";
     renderPlanTab([
-      { ...notIngestedSpec, topic },
+      { ...notIngestedSpec, topic: longTopic },
       { ...ingestedSpec, path: "/tmp/second-plan.md", topic: "Zweiter Plan" },
     ]);
 
-    const label = screen.getByText(topic, { selector: ".fleet-kchip-label" });
-    expect(label.className).toContain("fleet-kchip-label");
-    expect(label.textContent).toBe(topic);
-    expect(label.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(label);
-    expect(label.getAttribute("aria-expanded")).toBe("true");
+    const longLabel = screen.getByText(longTopic, { selector: ".fleet-kchip-label" });
+    expect(longLabel.textContent).toBe(longTopic);
+
+    const secondLabel = screen.getByText("Zweiter Plan", { selector: ".fleet-kchip-label" });
+    const secondChip = secondLabel.closest("button");
+    expect(secondChip?.getAttribute("aria-pressed")).toBe("false");
+
+    // Der Klick muss auf dem Label-Kind landen: stopPropagation im früheren
+    // ExpandableText maskierte genau diesen realen Tap-Pfad.
+    fireEvent.click(secondLabel);
+    expect(secondChip?.getAttribute("aria-pressed")).toBe("true");
+    expect(secondLabel.getAttribute("aria-expanded")).toBeNull();
   });
 });
