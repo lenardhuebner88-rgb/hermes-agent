@@ -366,10 +366,6 @@ def test_c8_dispatcher_death_after_spawn_does_not_requeue_unknown_live_child(
     assert recovered.status != "ready"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C9: git cleanup precedes durable integration witnesses",
-)
 def test_c9_integration_crash_before_witness_recovers_without_false_park(
     kanban_home, tmp_path, monkeypatch
 ):
@@ -412,6 +408,49 @@ def test_c9_integration_crash_before_witness_recovers_without_false_park(
             original,
         )
 
+        assert kb.complete_task(conn, task_id, result="retry completion")
+        recovered = kb.get_task(conn, task_id)
+
+    assert recovered.status == "done"
+
+
+def test_c9_integration_event_error_parks_and_preserves_recovery_branch(
+    kanban_home, tmp_path, monkeypatch
+):
+    """C9: an ordinary DB witness failure must preserve the landed branch."""
+    repo = _new_repo(tmp_path)
+    monkeypatch.setattr(kwt, "default_quick_gate", lambda *_args: (True, "green"))
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="integration event failure",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        task = kb.claim_task(conn, task_id)
+        worktree = kwt.provision_for_task(conn, task, str(repo))
+        (worktree / "feature.py").write_text("VALUE = 10\n", encoding="utf-8")
+        _git(worktree, "add", "-A")
+        _git(worktree, "commit", "-m", "worker change")
+
+        original = kb._append_event
+
+        def fail_integration_witness(event_conn, event_task_id, kind, *args, **kwargs):
+            if event_task_id == task_id and kind == "integration_merged":
+                raise RuntimeError("injected integration witness failure")
+            return original(event_conn, event_task_id, kind, *args, **kwargs)
+
+        monkeypatch.setattr(kb, "_append_event", fail_integration_witness)
+        assert kb.complete_task(conn, task_id, result="first completion")
+        parked = kb.get_task(conn, task_id)
+
+        assert parked.status == "blocked"
+        assert kwt._branch_exists(repo, kwt.chain_branch(task_id))
+        assert _event_payloads(conn, task_id, "integration_merged") == []
+
+        monkeypatch.setattr(kb, "_append_event", original)
         assert kb.complete_task(conn, task_id, result="retry completion")
         recovered = kb.get_task(conn, task_id)
 

@@ -4502,6 +4502,8 @@ def _integrate_empty_or_already_merged(
     cur: str,
     gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
     artifact_receipt: Optional[dict],
+    *,
+    cleanup: bool = True,
 ) -> dict:
     """Handle ``ahead == 0``: reintegrate-after-revert, already-integrated, or empty."""
     already_integrated = _branch_is_ancestor(repo_root, branch, cur)
@@ -4582,7 +4584,8 @@ def _integrate_empty_or_already_merged(
                         reintegrated_after_revert=True,
                         gate_output=detail,
                     )
-                remove_worktree(repo_root, wt_path, branch)
+                if cleanup:
+                    remove_worktree(repo_root, wt_path, branch)
                 result = {
                     "action": "merged",
                     "state": MERGED_GREEN,
@@ -4599,7 +4602,8 @@ def _integrate_empty_or_already_merged(
                 if artifact_receipt:
                     result["artifact_receipt"] = artifact_receipt
                 return result
-        remove_worktree(repo_root, wt_path, branch)
+        if cleanup:
+            remove_worktree(repo_root, wt_path, branch)
         result = {
             "action": "clean",
             "branch": branch,
@@ -4610,7 +4614,8 @@ def _integrate_empty_or_already_merged(
         if artifact_receipt:
             result["artifact_receipt"] = artifact_receipt
         return result
-    remove_worktree(repo_root, wt_path, branch)
+    if cleanup:
+        remove_worktree(repo_root, wt_path, branch)
     result = {"action": "clean", "branch": branch,
               "reason": "no commits on chain branch"}
     if artifact_receipt:
@@ -4676,6 +4681,8 @@ def _integrate_merge_and_gate(
     diff_files: list[str],
     gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]],
     artifact_receipt: Optional[dict],
+    *,
+    cleanup: bool = True,
 ) -> dict:
     """(b) --no-ff merge + post-merge gate; park on red/conflict."""
     # (b) the merge itself; conflicts → abort + park.
@@ -4713,7 +4720,8 @@ def _integrate_merge_and_gate(
             gate_output=detail,
         )
 
-    remove_worktree(repo_root, wt_path, branch)
+    if cleanup:
+        remove_worktree(repo_root, wt_path, branch)
     result = {
         "action": "merged",
         "state": MERGED_GREEN,
@@ -4736,6 +4744,7 @@ def integrate_chain(
     merge_target: Optional[str],
     *,
     gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]] = None,
+    cleanup: bool = True,
 ) -> dict:
     """Merge a finished chain branch into the live branch — THE single
     serialized integration point. Never pushes.
@@ -4778,7 +4787,7 @@ def integrate_chain(
             if ahead == "0":
                 return _integrate_empty_or_already_merged(
                     repo_root, wt_path, branch, cur, gate_runner,
-                    artifact_receipt,
+                    artifact_receipt, cleanup=cleanup,
                 )
 
             diff_files = [
@@ -4805,7 +4814,7 @@ def integrate_chain(
 
             return _integrate_merge_and_gate(
                 repo_root, wt_path, branch, cur, diff_files,
-                gate_runner, artifact_receipt,
+                gate_runner, artifact_receipt, cleanup=cleanup,
             )
         finally:
             _release_file_lock(lock)
@@ -5081,9 +5090,15 @@ def _record_integration_events_and_receipts(
                         "state": outcome.get("state"),
                     },
                 )
-    except Exception:
+    except Exception as exc:
         _log.warning("could not record integration event for %s", task_id,
                      exc_info=True)
+        return {
+            **outcome,
+            "action": "parked",
+            "reason": f"integration witness persistence failed: {exc}",
+            "integration_witness_failed": True,
+        }
     if outcome.get("artifact_receipt"):
         receipt = outcome["artifact_receipt"]
         paths = receipt.get("paths", [])
@@ -5189,7 +5204,7 @@ def maybe_integrate_on_complete(
             conn, task_id, root_id, repo_root, branch, target, kb,
         )
     outcome = integrate_chain(
-        repo_root, wt, branch, target, gate_runner=gate_runner,
+        repo_root, wt, branch, target, gate_runner=gate_runner, cleanup=False,
     )
     if outcome.get("action") == "merged" and any(
         str(path).startswith("web/")
@@ -5197,6 +5212,9 @@ def maybe_integrate_on_complete(
     ):
         outcome["release_gate_required"] = True
 
-    return _record_integration_events_and_receipts(
+    outcome = _record_integration_events_and_receipts(
         conn, task_id, root_id, target, outcome, auto_complete_root_id, kb,
     )
+    if outcome.get("action") in {"merged", "clean"}:
+        remove_worktree(repo_root, wt, branch)
+    return outcome
