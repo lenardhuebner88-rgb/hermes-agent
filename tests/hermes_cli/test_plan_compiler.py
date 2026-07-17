@@ -633,6 +633,28 @@ def test_subtask_scope_files_and_instructions_thread_into_body():
     assert "Instructions" in body
 
 
+def test_scope_files_body_carries_implicit_test_schema_scope_line():
+    """S9a — with scope_files set, the body must tell the worker that tests/
+    schemas of the listed components are implicitly in scope too, so it stops
+    blocking with needs_input over additive test/schema edits."""
+    children = taskgraph_hints_to_children(
+        {
+            "binding": True,
+            "subtasks": [
+                {
+                    "id": "S1",
+                    "title": "Fix CSS",
+                    "lane": "coder",
+                    "deps": [],
+                    "scope_files": ["web/src/control/styles/control-tokens.css"],
+                },
+            ],
+        }
+    )
+    body = children[0]["body"]
+    assert "implizit im Scope (additiv)" in body
+
+
 def test_scope_path_with_ac_token_is_not_parsed_as_acceptance_criterion():
     """Cross-family review (Codex 2026-07-12): a scope path containing an
     ``AC-<id>`` token (e.g. ``docs/AC-123.md``) must NOT be scooped up as an

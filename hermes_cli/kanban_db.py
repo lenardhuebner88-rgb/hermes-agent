@@ -24030,6 +24030,47 @@ def _blocked_comment_id_watermark(
         return None
 
 
+def _operator_answer_comment_after(
+    conn: sqlite3.Connection,
+    task_id: str,
+    watermark: Optional[int],
+    assignee: str,
+) -> Optional[sqlite3.Row]:
+    """First comment after ``watermark`` NOT authored by the task's own worker
+    lane identity — an answer to a ``needs_input``/``capability`` operator
+    question.
+
+    Unlike :func:`_latest_result_comment_after` this has NO body-pattern
+    filter: operators answer these questions in plain prose, not a
+    ``RESULT:``-prefixed handoff, so any non-self comment after the block
+    counts. ``watermark`` must be a validated comment-id boundary (see
+    :func:`_blocked_comment_id_watermark`) — a block episode with no recorded
+    watermark (older blocks) skips fail-closed rather than guessing a
+    ``created_at`` boundary, since a wrong guess here would auto-unblock
+    instead of merely delaying a retry.
+    """
+    if watermark is None:
+        return None
+    from hermes_cli.profiles import normalize_profile_name
+
+    try:
+        self_author = normalize_profile_name(assignee)
+    except ValueError:
+        self_author = ""
+    return conn.execute(
+        """
+        SELECT id, author, body, created_at
+          FROM task_comments
+         WHERE task_id = ?
+           AND id > ?
+           AND author != ?
+         ORDER BY id ASC
+         LIMIT 1
+        """,
+        (task_id, int(watermark), self_author),
+    ).fetchone()
+
+
 def _append_auto_retry_event_once(
     conn: sqlite3.Connection,
     task_id: str,
@@ -24141,7 +24182,28 @@ def auto_retry_blocked_tasks(
                         },
                     )
             continue
-        if explicit_block_kind == "needs_input":
+        if explicit_block_kind in ("needs_input", "capability"):
+            answer_comment = _operator_answer_comment_after(
+                conn,
+                task_id,
+                _blocked_comment_id_watermark(conn, task_id, int(blocked_run["id"])),
+                row["assignee"],
+            )
+            if answer_comment is not None:
+                if unblock_task(conn, task_id):
+                    with write_txn(conn):
+                        _append_event(
+                            conn,
+                            task_id,
+                            "block_answered",
+                            {
+                                "comment_id": int(answer_comment["id"]),
+                                "author": answer_comment["author"],
+                                "block_kind": explicit_block_kind,
+                            },
+                        )
+                    retried.append((task_id, int(row["auto_retry_count"] or 0)))
+                continue
             with write_txn(conn):
                 _append_auto_retry_event_once(
                     conn,

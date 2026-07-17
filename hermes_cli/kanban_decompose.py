@@ -913,6 +913,11 @@ def _render_scope_contract_yaml(contract: dict) -> str:
     ):
         vals = scope.get(key) or []
         lines.extend(_render_yaml_list(key, [str(v) for v in vals]))
+        if key == "allowed_paths" and vals:
+            lines.append(
+                "  # Tests und Schemas der genannten Komponenten sind "
+                "implizit im Scope (additiv)."
+            )
     lines.append(
         f"  ambiguity_policy: {_yaml_scalar(scope.get('ambiguity_policy', 'fail_closed_and_ask'))}"
     )
