@@ -330,6 +330,251 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
     assert (expected / "leftover.py").read_text() == "half-written garbage\n"
 
 
+# ---------------------------------------------------------------------------
+# S10: a deterministic prepare_worker_base rebase conflict (chain branch vs a
+# freshly-merged target) routes to the SAME bounded conflict-park fixer used
+# for integration parks, instead of burning the plain spawn-failure breaker
+# straight to an operator escalation on the first trip (t_ad03d43e incident).
+# ---------------------------------------------------------------------------
+
+
+def _rebase_conflict_error(target_dir: Path) -> "kwt.WorktreeError":
+    # Exact literal from kanban_worktrees.prepare_worker_base's re-raise.
+    return kwt.WorktreeError(
+        f"clean stale worktree could not rebase onto main: git rebase main "
+        f"failed in {target_dir}: Rebasing (1/6)"
+    )
+
+
+def test_dispatch_routes_base_prep_rebase_conflict_to_fixer(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="rebase conflict slice",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+
+        # Simulate a NEEDS_REVISION respin: block, then unblock so the next
+        # dispatch tick re-claims and re-enters prepare_reused_task_worktree
+        # against the already-provisioned worktree.
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(
+            kwt, "prepare_worker_base",
+            lambda *a, **k: (_ for _ in ()).throw(_rebase_conflict_error(expected)),
+        )
+        attempt = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        kinds = [e.kind for e in events]
+        dispatched = [
+            e for e in events if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        assert len(dispatched) == 1
+        child_id = dispatched[0].payload["child_id"]
+        child = kb.get_task(conn, child_id)
+
+    assert attempt.spawned == []
+    assert task.status == "blocked"
+    # Deterministic conflict never burns the plain spawn-failure breaker.
+    assert task.consecutive_failures == 0
+    assert kb.OPERATOR_ESCALATION_EVENT not in kinds
+    assert child.assignee == "premium"
+    assert child.status == "ready"
+    assert child.workspace_kind == "dir"
+    assert child.workspace_path == str(expected)
+
+
+def test_dispatch_base_prep_conflict_non_conflict_error_unchanged(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Gegenprobe: a plain (non-conflict) worker-base rejection is byte-
+    unchanged -- it still burns the normal breaker to gave_up/escalation, no
+    fixer ever gets routed."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    def _still_dirty(*_args, **_kwargs):
+        raise kwt.WorktreeError(
+            "worktree is dirty before worker edits; refusing automatic "
+            "base update (simulated concurrent prep failure)"
+        )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="dirty worktree, not a conflict",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        assert first.spawned
+        # Free the task back to a dispatchable state so the loop below can
+        # actually re-claim it (prepare_reused_task_worktree only fires on a
+        # re-dispatch of an already-provisioned worktree).
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(kwt, "prepare_worker_base", _still_dirty)
+        # DEFAULT_FAILURE_LIMIT rounds trip the breaker on the last one; below
+        # the threshold the sub-limit rounds land back on 'ready' on their
+        # own, so only the below-limit rounds need re-claim help.
+        for i in range(kb.DEFAULT_FAILURE_LIMIT):
+            kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+            if i < kb.DEFAULT_FAILURE_LIMIT - 1:
+                kb.unblock_task(conn, tid)
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        kinds = [e.kind for e in events]
+
+    assert task.status == "blocked"
+    assert task.consecutive_failures == kb.DEFAULT_FAILURE_LIMIT
+    assert "gave_up" in kinds
+    assert kb.OPERATOR_ESCALATION_EVENT in kinds
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+
+
+def test_dispatch_base_prep_conflict_fixer_bounded_then_escalates(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    monkeypatch.setattr(kb, "CONFLICT_FIXER_MAX_ATTEMPTS", 1)
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="bounded rebase conflict",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(
+            kwt, "prepare_worker_base",
+            lambda *a, **k: (_ for _ in ()).throw(_rebase_conflict_error(expected)),
+        )
+
+        # Round 1: fixer dispatched (budget = 1).
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        dispatched1 = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        assert len(dispatched1) == 1
+        child_id = dispatched1[0].payload["child_id"]
+        kb.complete_task(conn, child_id, summary="fixer ran, did not resolve")
+
+        assert kb.unblock_task(conn, tid)
+
+        # Round 2: budget already spent -> escalate exactly like the
+        # existing needs_orchestrator integration-park exhaustion path.
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        dispatched = [
+            e for e in events if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        escalations = [
+            e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert len(dispatched) == 1                  # no 2nd fixer stacked/created
+    assert len(escalations) == 1
+    assert escalations[0].payload["evidence"]["fixer_exhausted"] is True
+    assert task.status == "blocked"
+    assert task.consecutive_failures == 0         # breaker still untouched
+
+
+def test_dispatch_base_prep_conflict_fixer_not_stacked_while_open(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="in-flight fixer",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(
+            kwt, "prepare_worker_base",
+            lambda *a, **k: (_ for _ in ()).throw(_rebase_conflict_error(expected)),
+        )
+
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")  # round 1
+        assert kb.unblock_task(conn, tid)
+        # Round 2: the round-1 fixer is still 'ready' (not terminal) -- must
+        # NOT dispatch a second one.
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        task = kb.get_task(conn, tid)
+        events = kb.list_events(conn, tid)
+        dispatched = [
+            e for e in events if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        escalations = [
+            e for e in events if e.kind == kb.OPERATOR_ESCALATION_EVENT
+        ]
+
+    assert len(dispatched) == 1
+    assert escalations == []
+    assert task.status == "blocked"
+
+
 def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):
