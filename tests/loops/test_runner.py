@@ -2898,3 +2898,153 @@ def test_cmd_night_planned_one_reaches_build(tmp_path, fake_engine):
     ledger = runner.ledger_path.read_text(encoding="utf-8")
     assert "PLAN-ANOMALIE" not in ledger
     assert "PLAN-RETRY" not in ledger
+
+
+# ── Verify-Phase Statuskontrakt-Backstop (Incident 2026-07-17 empty last-status) ─
+
+def _verify_backstop_setup(tmp_path, fake_engine, name: str):
+    """Pipeline-Pack mit 1 Plan, fail_streak=1 (ein Fail stoppt), Fake-Build."""
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(
+        tmp_path / "packs", name, "pipeline", repo,
+        stop={"max_rounds": 2, "max_hours": 1, "fail_streak": 1, "dry_rounds": 1},
+    )
+    pack = load_pack(tmp_path / "packs", name)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    (runner.queue / "00-planned" / "P1-beispiel.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "vbs")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["build"] = build_phase
+    return behaviors, calls, runner
+
+
+def test_verify_empty_status_retries_once_then_fail_closed_revert(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Leerer last-status: genau 2× Verify, dann Revert + VERIFY-RETRY/ANOMALIE + notify.
+
+    MUSS auf altem Code rot sein (kein Retry, kein ANOMALIE-Ledger).
+    """
+    behaviors, calls, runner = _verify_backstop_setup(
+        tmp_path, fake_engine, "vbs-empty"
+    )
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+
+    def empty_verify(kv, cwd):
+        # Incident-Form: Prosa-PASS im Output, aber last-status bleibt leer.
+        return engines.EngineResult(
+            rc=0, output="Verdict: PASS (prose only)", usage_limit=False
+        )
+
+    behaviors["verify"] = empty_verify
+
+    runner.cmd_run()
+
+    assert calls.count("verify") == 2, f"erwartet 2× verify (1 Retry), got {calls}"
+    assert calls.count("build") == 1
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "VERIFY-RETRY nach Anomalie" in ledger
+    assert "VERIFY-ANOMALIE" in ledger
+    assert "2x ohne Statuskontrakt" in ledger or "2× ohne Statuskontrakt" in ledger
+    anom_msgs = [m for m in notifies if "2x ohne Statuskontrakt" in m]
+    assert anom_msgs, f"notify mit '2x ohne Statuskontrakt' erwartet, got {notifies!r}"
+    assert "fail-closed Revert" in anom_msgs[0]
+    # Fail-closed: Build-Commit revertiert, Arbeitsbaum netto = main
+    log = g(runner.wt, "log", "--oneline", f"main..{runner.pack.branch}").stdout
+    assert "Revert" in log
+    assert g(runner.wt, "diff", "main..HEAD", "--", "modul.py").stdout.strip() == ""
+    assert runner.qcount("20-verified") == 0
+
+
+def test_verify_empty_then_retry_pass_no_revert(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Leerer Status, Retry liefert PASS → KEIN Revert, VERIFY-RETRY, keine ANOMALIE."""
+    behaviors, calls, runner = _verify_backstop_setup(
+        tmp_path, fake_engine, "vbs-retry-pass"
+    )
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+    verify_n = {"n": 0}
+
+    def verify_empty_then_pass(kv, cwd):
+        verify_n["n"] += 1
+        if verify_n["n"] == 1:
+            return engines.EngineResult(rc=0, output="prose only", usage_limit=False)
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "PASS fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["verify"] = verify_empty_then_pass
+
+    runner.cmd_run()
+
+    assert calls.count("verify") == 2, f"erwartet 2× verify, got {calls}"
+    assert (runner.queue / "20-verified" / "P1-beispiel.md").is_file()
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "VERIFY-RETRY nach Anomalie" in ledger
+    assert "VERIFY-ANOMALIE" not in ledger
+    log = g(runner.wt, "log", "--oneline", f"main..{runner.pack.branch}").stdout
+    assert "Revert" not in log
+    assert "verified" in ledger
+    assert not any("2x ohne Statuskontrakt" in m for m in notifies)
+
+
+def test_verify_explicit_fail_reverts_immediately_no_retry(
+    tmp_path, fake_engine, monkeypatch
+):
+    """Explizites FAIL → sofortiger Revert, Verify genau 1×, keine RETRY-Zeile."""
+    behaviors, calls, runner = _verify_backstop_setup(
+        tmp_path, fake_engine, "vbs-fail"
+    )
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+    behaviors["verify"] = ok("FAIL tautologischer Test")
+
+    runner.cmd_run()
+
+    assert calls.count("verify") == 1, f"FAIL darf nicht retryen, got {calls}"
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "VERIFY-RETRY" not in ledger
+    assert "VERIFY-ANOMALIE" not in ledger
+    log = g(runner.wt, "log", "--oneline", f"main..{runner.pack.branch}").stdout
+    assert "Revert" in log
+    assert g(runner.wt, "diff", "main..HEAD", "--", "modul.py").stdout.strip() == ""
+    assert runner.qcount("20-verified") == 0
+    assert not any("2x ohne Statuskontrakt" in m for m in notifies)
+
+
+def test_verify_pass_direct_unchanged_no_retry(tmp_path, fake_engine):
+    """PASS direkt → unverändert (1× verify, kein Retry/Anomalie).
+
+    Bestands-Happy-Path: test_pipeline_happy_path_plan_build_verify deckt den
+    vollen Plan→Build→Verify-Pfad ab; hier die explizite Negativ-Assertion.
+    """
+    behaviors, calls, runner = _verify_backstop_setup(
+        tmp_path, fake_engine, "vbs-pass"
+    )
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+
+    runner.cmd_run()
+
+    assert calls.count("verify") == 1
+    assert calls.count("build") == 1
+    assert (runner.queue / "20-verified" / "P1-beispiel.md").is_file()
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "VERIFY-RETRY" not in ledger
+    assert "VERIFY-ANOMALIE" not in ledger
+    log = g(runner.wt, "log", "--oneline", f"main..{runner.pack.branch}").stdout
+    assert "Revert" not in log
+    assert "verified" in ledger

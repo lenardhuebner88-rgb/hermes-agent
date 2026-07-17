@@ -90,7 +90,7 @@ AUTOLAND_PROMPT_SHA256 = {
     "dashboard-experience": {
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
-        "VERIFIER-PROMPT.md": "f6f4db9b95c55f6ebbfc0514a656c1b362e997d3a9f64344621c786de9ca94db",
+        "VERIFIER-PROMPT.md": "05916a02da05f005c64407decb2468e296565e356d04c04da6ac5b3916ebd441",
     },
 }
 
@@ -1361,6 +1361,63 @@ class LoopRunner:
             status = "TIMEOUT" if verify.timed_out else self.last_status()
             if not self.guard_clean():
                 break
+            # Statuskontrakt-Anomalie (leer, weder PASS noch FAIL, nicht TIMEOUT):
+            # Verify ist read-only/idempotent → genau 1 Retry, dann fail-closed.
+            # Explizites FAIL / PASS / TIMEOUT bleiben unverändert (kein Retry).
+            # Status-Wahrheit = last-status-Datei, nie Agent-Prosa (Doktrin runner.py:24).
+            if (
+                not status.startswith("PASS")
+                and not status.startswith("FAIL")
+                and status != "TIMEOUT"
+            ):
+                self.ledger(f"VERIFY-RETRY nach Anomalie (status=[{status}])")
+                self.say(
+                    f"Verify-Anomalie (status=[{status}]) — genau 1 Verify-Retry."
+                )
+                evidence_before = self._verifier_evidence_dirs()
+                verify = self.run_phase(
+                    "verify",
+                    round_=rnd,
+                    PLAN_PATH=str(building),
+                    RANGE=f"{prehead}..HEAD",
+                    BUILD_PROVENANCE=build.provenance_path or "",
+                )
+                if verify.usage_limit:
+                    self.say(
+                        "Usage-Limit im Verifier — Commit bleibt UNVERIFIZIERT "
+                        "(Plan in 10-building/)."
+                    )
+                    self.ledger(
+                        f"R{rnd} ⚠️ {building.name} BUILT aber UNVERIFIED (usage-limit)"
+                    )
+                    self.notify(
+                        f"{self.pack.name}: Usage-Limit im Verifier — "
+                        f"{building.name} unverifiziert, gestoppt."
+                    )
+                    self.ledger_event(
+                        round=rnd, phase="verify", verdict="blocked",
+                        plan=building.name, fail_kind="usage_limit",
+                        reason="unverified",
+                        build_secs=self.phase_secs.get("build"),
+                    )
+                    break
+                status = "TIMEOUT" if verify.timed_out else self.last_status()
+                if not self.guard_clean():
+                    break
+                if (
+                    not status.startswith("PASS")
+                    and not status.startswith("FAIL")
+                    and status != "TIMEOUT"
+                ):
+                    self.ledger(
+                        f"VERIFY-ANOMALIE: status=[{status}] — "
+                        "Verifier-Turn 2x ohne Statuskontrakt"
+                    )
+                    self.notify(
+                        f"{self.pack.name}: Verify-Phase 2x ohne Statuskontrakt "
+                        "— fail-closed Revert, bitte Verifier-Log pruefen"
+                    )
+                    # Fall-through: fail-closed Revert wie bisher (status anomal).
             try:
                 plan_text = building.read_text(encoding="utf-8")
             except OSError:
