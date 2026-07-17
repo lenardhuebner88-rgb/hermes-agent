@@ -26,15 +26,18 @@ erhalten.
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import os
 import re
 import sqlite3
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from fastapi import FastAPI
@@ -731,6 +734,68 @@ def _strip_touching_annotation(raw: str) -> str:
     return raw[:idx] if idx != -1 else raw
 
 
+def _parse_coordination_note(
+    path: Path, registry: ProjectsRegistry
+) -> dict[str, Any] | None:
+    """Read + parse one coordination note into an agent dict, or ``None`` to skip.
+
+    Pure per-file body used by :func:`_coordination_agents` (and unit-tested in
+    isolation). Unreadable files, garbage frontmatter, closed notes, and notes
+    missing required fields all return ``None`` — never raise into ``errors[]``.
+    Workers only read their own file plus the shared read-only ``registry``.
+    """
+    try:
+        with path.open("rb") as fh:
+            raw = fh.read(_COORDINATION_FRONTMATTER_BYTES)
+    except OSError:
+        # Unreadable single note: many legacy notes are dirty — skip
+        # silently rather than spam errors[] per file.
+        return None
+
+    text = raw.decode("utf-8", errors="replace")
+    frontmatter_text = _extract_frontmatter(text)
+    if frontmatter_text is None:
+        return None
+    try:
+        data = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    agent_field = data.get("agent")
+    started_raw = data.get("started")
+    if not isinstance(agent_field, str) or not agent_field.strip() or started_raw is None:
+        return None
+
+    ended_val = data.get("ended")
+    if ended_val not in (None, ""):
+        return None  # note is closed
+
+    kind = agent_field.strip().lower()
+    if kind not in _COORDINATION_KIND_VALUES:
+        kind = "unknown"
+
+    task_raw = data.get("task")
+    task = task_raw if isinstance(task_raw, str) else None
+
+    touching_raw = data.get("touching")
+    touching_paths: list[str] = []
+    if isinstance(touching_raw, list):
+        touching_paths = [
+            _strip_touching_annotation(item) for item in touching_raw if isinstance(item, str)
+        ]
+
+    return {
+        "kind": kind,
+        "label": path.stem,
+        "task": task,
+        "project": _attribute_project(touching_paths, registry),
+        "since": _parse_coordination_timestamp(started_raw),
+        "source": "coordination",
+    }
+
+
 def _coordination_agents(
     coordination_dir: Path, *, registry: ProjectsRegistry
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -746,60 +811,20 @@ def _coordination_agents(
     except OSError as exc:
         return [], [f"coordination: {exc}"]
 
+    if not note_paths:
+        return [], []
+
+    # I/O-bound per-file work: bounded thread pool. Collect by input order
+    # (sorted glob), not completion order, so the agents list stays deterministic.
+    max_workers = min(8, os.cpu_count() or 4)
     agents: list[dict[str, Any]] = []
-    for path in note_paths:
-        try:
-            with path.open("rb") as fh:
-                raw = fh.read(_COORDINATION_FRONTMATTER_BYTES)
-        except OSError:
-            # Unreadable single note: many legacy notes are dirty — skip
-            # silently rather than spam errors[] per file.
-            continue
-
-        text = raw.decode("utf-8", errors="replace")
-        frontmatter_text = _extract_frontmatter(text)
-        if frontmatter_text is None:
-            continue
-        try:
-            data = yaml.safe_load(frontmatter_text)
-        except yaml.YAMLError:
-            continue
-        if not isinstance(data, dict):
-            continue
-
-        agent_field = data.get("agent")
-        started_raw = data.get("started")
-        if not isinstance(agent_field, str) or not agent_field.strip() or started_raw is None:
-            continue
-
-        ended_val = data.get("ended")
-        if ended_val not in (None, ""):
-            continue  # note is closed
-
-        kind = agent_field.strip().lower()
-        if kind not in _COORDINATION_KIND_VALUES:
-            kind = "unknown"
-
-        task_raw = data.get("task")
-        task = task_raw if isinstance(task_raw, str) else None
-
-        touching_raw = data.get("touching")
-        touching_paths: list[str] = []
-        if isinstance(touching_raw, list):
-            touching_paths = [
-                _strip_touching_annotation(item) for item in touching_raw if isinstance(item, str)
-            ]
-
-        agents.append(
-            {
-                "kind": kind,
-                "label": path.stem,
-                "task": task,
-                "project": _attribute_project(touching_paths, registry),
-                "since": _parse_coordination_timestamp(started_raw),
-                "source": "coordination",
-            }
-        )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # map preserves the order of note_paths.
+        for parsed in pool.map(
+            lambda path: _parse_coordination_note(path, registry), note_paths
+        ):
+            if parsed is not None:
+                agents.append(parsed)
 
     return agents, []
 
@@ -1255,12 +1280,18 @@ def build_project_detail(
     tmux_sessions_text: str | None = None,
     coordination_dir: Path | None = None,
     pack_names: list[str] | None = None,
+    agents_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the frozen ``GET /api/projects/{slug}`` detail payload.
 
     Pure-ish: all data sources are overridable so tests never touch real
     ``~/.hermes`` state. Agents are :func:`build_agents_payload` filtered to
     ``project == entry.slug`` (``project`` field dropped from each agent).
+
+    Pass ``agents_payload`` (e.g. the route-level TTL-cached agents payload)
+    to skip re-running discovery on every drilldown poll. Filtering always
+    builds a new agent list and copies each kept agent dict — the shared
+    cached structure is never mutated in place.
     """
     resolved_now = now if now is not None else int(time.time())
     home = get_hermes_home()
@@ -1297,17 +1328,21 @@ def build_project_detail(
     errors.extend(loop_errors)
 
     try:
-        agents_payload = build_agents_payload(
-            registry,
-            tmux_panes_text=tmux_panes_text,
-            tmux_sessions_text=tmux_sessions_text,
-            coordination_dir=coordination_dir,
-            kanban_db_path=resolved_kanban_db_path,
-            projects_db_path=resolved_projects_db_path,
-            loops_state_root=loops_state_root,
-            pack_names=pack_names,
-            now=resolved_now,
-        )
+        if agents_payload is not None:
+            source_payload = agents_payload
+        else:
+            source_payload = build_agents_payload(
+                registry,
+                tmux_panes_text=tmux_panes_text,
+                tmux_sessions_text=tmux_sessions_text,
+                coordination_dir=coordination_dir,
+                kanban_db_path=resolved_kanban_db_path,
+                projects_db_path=resolved_projects_db_path,
+                loops_state_root=loops_state_root,
+                pack_names=pack_names,
+                now=resolved_now,
+            )
+        # New list + new dicts per agent: never pop/mutate shared cache entries.
         agents = [
             {
                 "kind": agent["kind"],
@@ -1316,7 +1351,7 @@ def build_project_detail(
                 "since": agent.get("since"),
                 "source": agent["source"],
             }
-            for agent in agents_payload.get("agents", [])
+            for agent in source_payload.get("agents", [])
             if agent.get("project") == entry.slug
         ]
         # Agents-source errors stay on the agents endpoint; detail only
@@ -1340,6 +1375,100 @@ def build_project_detail(
     }
 
 
+# ---------------------------------------------------------------------------
+# Stage 9 — short process-level TTL cache for route handlers
+# ---------------------------------------------------------------------------
+#
+# Polling (agents ~12s, detail ~8s, grid) and multiple browser tabs must not
+# re-pay the coordination-dir scan on every hit. Cache sits at the ROUTE
+# boundary only — builders stay pure/injectable for tests. Values are treated
+# as read-only; :meth:`_TtlMemo.get` returns a shallow copy of the top-level
+# dict so accidental top-level mutation cannot bleed across requests.
+
+# 10s (top of the "~5-10s" budget): the frontend polls agents ~12s and the
+# drilldown ~8s, so a TTL below the poll interval would miss on every single
+# poll and never actually serve from cache. 10s lets the 8s detail poll reuse
+# the prior agents scan; staleness of "who is working / last commit" at ~10s is
+# fine for a read-only leitstand.
+_PROJECTS_CACHE_TTL_SECONDS = 10.0
+
+# Injectable clock for tests (no wall-clock sleeps). Production: monotonic.
+_clock: Callable[[], float] = time.monotonic
+
+
+class _TtlMemo:
+    """Thread-safe TTL memo: one entry per logical key, injectable clock."""
+
+    def __init__(self, ttl: float = _PROJECTS_CACHE_TTL_SECONDS) -> None:
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._store: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            item = self._store.get(key)
+            if item is None:
+                return None
+            stored_at, value = item
+            if _clock() - stored_at >= self._ttl:
+                del self._store[key]
+                return None
+            # Top-level dict + top-level lists are copied so rebinding keys or
+            # clearing/replacing a list on the returned value cannot bleed into
+            # the store. Nested dicts (agent rows, project cards) stay shared
+            # and must be treated as read-only (detail filtering always copies).
+            return {
+                k: (list(v) if isinstance(v, list) else v) for k, v in value.items()
+            }
+
+    def set(self, key: str, value: dict[str, Any]) -> None:
+        with self._lock:
+            self._store[key] = (_clock(), value)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()
+
+
+_projects_cache = _TtlMemo(ttl=_PROJECTS_CACHE_TTL_SECONDS)
+
+
+def _reset_projects_cache() -> None:
+    """Test hook: drop all cached route payloads so suites stay isolated."""
+    _projects_cache.clear()
+
+
+def _cache_view(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return a request-local view of a cached payload (top-level lists copied)."""
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in payload.items()}
+
+
+def _cached_projects_payload() -> dict[str, Any]:
+    """Route accessor for ``GET /api/projects`` (TTL 5s, key ``projects``)."""
+    cached = _projects_cache.get("projects")
+    if cached is not None:
+        return cached
+    registry = load_projects_registry()
+    payload = build_projects_payload(registry)
+    _projects_cache.set("projects", payload)
+    return _cache_view(payload)
+
+
+def _cached_agents_payload() -> dict[str, Any]:
+    """Route accessor for ``GET /api/projects/agents`` (TTL 5s, key ``agents``).
+
+    Also used by the detail route so drilldown reuses the same cached agents
+    scan instead of re-running coordination discovery (~314ms cold path).
+    """
+    cached = _projects_cache.get("agents")
+    if cached is not None:
+        return cached
+    registry = load_projects_registry()
+    payload = build_agents_payload(registry)
+    _projects_cache.set("agents", payload)
+    return _cache_view(payload)
+
+
 def register_projects_routes(app: FastAPI) -> None:
     """Register read-only ``GET /api/projects`` (+ agents + ``{slug}`` detail).
 
@@ -1353,13 +1482,16 @@ def register_projects_routes(app: FastAPI) -> None:
     ``{"error": "unknown project", "slug": <slug>}`` (JSON, never a 500).
     Static ``/api/projects/agents`` is registered before ``/{slug}`` so the
     path is never captured as a slug.
+
+    ``get_projects`` / ``get_project_agents`` consult a short process-level
+    TTL cache (~5s). ``get_project_detail`` reuses the cached agents payload
+    (does not cache per-slug detail bodies).
     """
 
     @app.get("/api/projects")
     def get_projects() -> dict[str, Any]:
         try:
-            registry = load_projects_registry()
-            return build_projects_payload(registry)
+            return _cached_projects_payload()
         except Exception as exc:
             return {
                 "generated_at": int(time.time()),
@@ -1370,8 +1502,7 @@ def register_projects_routes(app: FastAPI) -> None:
     @app.get("/api/projects/agents")
     def get_project_agents() -> dict[str, Any]:
         try:
-            registry = load_projects_registry()
-            return build_agents_payload(registry)
+            return _cached_agents_payload()
         except Exception as exc:
             return {
                 "generated_at": int(time.time()),
@@ -1389,7 +1520,10 @@ def register_projects_routes(app: FastAPI) -> None:
                     status_code=404,
                     content={"error": "unknown project", "slug": slug},
                 )
-            return build_project_detail(entry, registry)
+            # Reuse the same TTL-cached agents scan the agents route serves —
+            # do not re-pay coordination discovery on every drilldown poll.
+            agents_payload = _cached_agents_payload()
+            return build_project_detail(entry, registry, agents_payload=agents_payload)
         except Exception as exc:
             return {
                 "generated_at": int(time.time()),

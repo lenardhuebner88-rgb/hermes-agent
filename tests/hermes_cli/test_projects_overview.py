@@ -16,12 +16,23 @@ import hermes_cli.projects_db as projects_db
 from hermes_cli.projects_overview import (
     ProjectEntry,
     ProjectsRegistry,
+    _cached_agents_payload,
+    _parse_coordination_note,
+    _reset_projects_cache,
     build_agents_payload,
     build_project_detail,
     build_projects_payload,
     load_projects_registry,
     register_projects_routes,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_projects_cache_between_tests() -> None:
+    """Keep route TTL cache from leaking across tests (Stage 9)."""
+    _reset_projects_cache()
+    yield
+    _reset_projects_cache()
 
 # Verbatim copy of the REAL ~/.hermes/projects.yaml content (2026-07-16) so the
 # "valid" test exercises the exact on-disk format, not a synthetic simplification.
@@ -849,6 +860,24 @@ def test_coordination_source_open_note_parsed_closed_and_garbage_skipped(
     (coordination_dir / "2026-07-16_garbage.md").write_text(
         _GARBAGE_COORDINATION_NOTE, encoding="utf-8"
     )
+    # Second open note — names sort after the closed note and before the real
+    # open note so the parallel path's order-stability is actually exercised
+    # (sorted glob order, not completion order).
+    second_open = """\
+---
+agent: codex
+started: 2026-07-16T22:00:00+02:00
+ended: null
+task: "Second open note for order-stable parallel scan."
+touching:
+  - /home/piet/.hermes/hermes-agent/hermes_cli/projects_overview.py
+---
+
+# Second open
+"""
+    (coordination_dir / "2026-07-16_2200_codex_second-open.md").write_text(
+        second_open, encoding="utf-8"
+    )
 
     registry = _hermes_infra_registry()
     kdb = tmp_path / "kanban.db"
@@ -866,9 +895,13 @@ def test_coordination_source_open_note_parsed_closed_and_garbage_skipped(
 
     assert payload["errors"] == []
     coordination_agents = [a for a in payload["agents"] if a["source"] == "coordination"]
-    assert len(coordination_agents) == 1
+    # Closed + garbage skipped; two open notes in sorted-glob order.
+    assert [a["label"] for a in coordination_agents] == [
+        "2026-07-16_2200_codex_second-open",
+        "2026-07-16_2333_claude_projekte-tab-nachtlauf",
+    ]
 
-    note = coordination_agents[0]
+    note = coordination_agents[1]
     assert note["kind"] == "claude"
     assert note["label"] == "2026-07-16_2333_claude_projekte-tab-nachtlauf"
     assert "Projekte-Tab-Nachtlauf" in note["task"]
@@ -879,6 +912,31 @@ def test_coordination_source_open_note_parsed_closed_and_garbage_skipped(
         .timestamp()
     )
     assert note["since"] == expected_epoch
+
+    second = coordination_agents[0]
+    assert second["kind"] == "codex"
+    assert second["project"] == "hermes-infra"
+
+
+def test_parse_coordination_note_open_closed_garbage(tmp_path: Path) -> None:
+    """Unit: `_parse_coordination_note` open → dict, closed/garbage → None."""
+    registry = _hermes_infra_registry()
+    open_path = tmp_path / "open.md"
+    open_path.write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+    closed_path = tmp_path / "closed.md"
+    closed_path.write_text(_CLOSED_COORDINATION_NOTE, encoding="utf-8")
+    garbage_path = tmp_path / "garbage.md"
+    garbage_path.write_text(_GARBAGE_COORDINATION_NOTE, encoding="utf-8")
+
+    parsed = _parse_coordination_note(open_path, registry)
+    assert parsed is not None
+    assert parsed["kind"] == "claude"
+    assert parsed["label"] == "open"
+    assert parsed["source"] == "coordination"
+    assert parsed["project"] == "hermes-infra"
+
+    assert _parse_coordination_note(closed_path, registry) is None
+    assert _parse_coordination_note(garbage_path, registry) is None
 
 
 def test_coordination_source_broken_dir_is_isolated_error(tmp_path: Path) -> None:
@@ -1521,3 +1579,238 @@ projects:
     agents_resp = client.get("/api/projects/agents")
     assert agents_resp.status_code == 200
     assert "agents" in agents_resp.json()
+
+
+# ---------------------------------------------------------------------------
+# Stage 9 — parallel coordination + short route TTL cache
+# ---------------------------------------------------------------------------
+
+
+def test_ttl_cache_agents_builds_once_within_ttl_rebuilds_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Injectable clock: two hits within TTL → one build; past TTL → rebuild."""
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    _make_kanban_db(tmp_path / "kanban.db")
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._default_coordination_dir",
+        lambda: tmp_path / "coord",
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
+    monkeypatch.setattr(control_loops, "_all_pack_names", lambda: [])
+
+    calls = {"n": 0}
+    real_build = build_agents_payload
+
+    def counting_build(*args: object, **kwargs: object) -> dict:
+        calls["n"] += 1
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_agents_payload", counting_build
+    )
+
+    fake_now = {"t": 1000.0}
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._clock", lambda: fake_now["t"]
+    )
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    r1 = client.get("/api/projects/agents")
+    r2 = client.get("/api/projects/agents")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.json() == r2.json()
+    assert calls["n"] == 1  # second hit served from cache
+
+    fake_now["t"] = 1000.0 + 10.1  # past default 10s TTL
+    r3 = client.get("/api/projects/agents")
+    assert r3.status_code == 200
+    assert calls["n"] == 2
+
+
+def test_ttl_cache_projects_builds_once_within_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    calls = {"n": 0}
+    real_build = build_projects_payload
+
+    def counting_build(*args: object, **kwargs: object) -> dict:
+        calls["n"] += 1
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_projects_payload", counting_build
+    )
+    fake_now = {"t": 50.0}
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._clock", lambda: fake_now["t"]
+    )
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    assert client.get("/api/projects").status_code == 200
+    assert client.get("/api/projects").status_code == 200
+    assert calls["n"] == 1
+    fake_now["t"] = 61.0  # past default 10s TTL
+    assert client.get("/api/projects").status_code == 200
+    assert calls["n"] == 2
+
+
+def test_detail_reuses_prebuilt_agents_payload_no_coordination_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """build_project_detail(agents_payload=...) must not re-scan coordination."""
+    coordination_dir = tmp_path / "coord"
+    coordination_dir.mkdir()
+    (coordination_dir / "open.md").write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    prebuilt = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        coordination_dir=coordination_dir,
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+    assert any(a["source"] == "coordination" for a in prebuilt["agents"])
+
+    parse_calls = {"n": 0}
+    real_parse = _parse_coordination_note
+
+    def spy_parse(path: Path, reg: ProjectsRegistry) -> dict | None:
+        parse_calls["n"] += 1
+        return real_parse(path, reg)
+
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._parse_coordination_note", spy_parse
+    )
+
+    entry = next(p for p in registry.projects if p.slug == "hermes-infra")
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        coordination_dir=coordination_dir,
+        tmux_panes_text="",
+        pack_names=[],
+        now=1_700_000_000,
+        agents_payload=prebuilt,
+    )
+    assert parse_calls["n"] == 0  # coordination source not hit
+    # Filtered to hermes-infra; project field dropped.
+    assert all("project" not in a for a in detail["agents"])
+    assert any(a["source"] == "coordination" for a in detail["agents"])
+
+
+def test_agents_cache_mutation_does_not_bleed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mutating a returned agents payload must not corrupt the next cache hit."""
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    _make_kanban_db(tmp_path / "kanban.db")
+    coord = tmp_path / "coord"
+    coord.mkdir()
+    (coord / "open.md").write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._default_coordination_dir", lambda: coord
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
+    monkeypatch.setattr(control_loops, "_all_pack_names", lambda: [])
+    monkeypatch.setattr("hermes_cli.projects_overview._clock", lambda: 1.0)
+
+    # Direct accessor (not JSON round-trip) so we exercise the cache view itself.
+    first = _cached_agents_payload()
+    assert first["agents"]  # at least the coordination note
+    original_len = len(first["agents"])
+    first["agents"].clear()
+    first["errors"] = ["poison"]
+    first["generated_at"] = -1
+
+    second = _cached_agents_payload()
+    assert len(second["agents"]) == original_len
+    assert second["errors"] == []
+    assert second["generated_at"] != -1
+
+
+def test_detail_route_reuses_cached_agents_and_filter_copy_safe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Detail route uses _cached_agents_payload; filtering does not corrupt cache."""
+    # repo_path must match the coordination note's touching paths so the
+    # agent attributes to hermes-infra and survives detail filtering.
+    yaml_text = """\
+projects:
+  - slug: hermes-infra
+    name: Hermes Infra
+    repo_path: /home/piet/.hermes/hermes-agent
+    kanban_project: null
+    loop_packs: []
+"""
+    _write(tmp_path, yaml_text)
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    # Avoid live-repo git scan in this cache-focused test.
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._project_recent_commits",
+        lambda entry, *, now: ([], None),
+    )
+    coord = tmp_path / "coord"
+    coord.mkdir()
+    (coord / "open.md").write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._default_coordination_dir", lambda: coord
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
+    monkeypatch.setattr(control_loops, "_all_pack_names", lambda: [])
+    monkeypatch.setattr(control_loops, "_state_root", lambda: tmp_path / "loops")
+    monkeypatch.setattr("hermes_cli.projects_overview._clock", lambda: 10.0)
+
+    build_calls = {"n": 0}
+    real_build = build_agents_payload
+
+    def counting_build(*args: object, **kwargs: object) -> dict:
+        build_calls["n"] += 1
+        return real_build(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_agents_payload", counting_build
+    )
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    agents_body = client.get("/api/projects/agents").json()
+    assert build_calls["n"] == 1
+    assert any(a.get("project") == "hermes-infra" for a in agents_body["agents"])
+    detail = client.get("/api/projects/hermes-infra").json()
+    # Detail reuses cached agents — no second build.
+    assert build_calls["n"] == 1
+    assert detail["slug"] == "hermes-infra"
+    assert any(a["source"] == "coordination" for a in detail["agents"])
+    # Mutate detail agents list; cache must stay clean.
+    detail["agents"].clear()
+
+    agents_again = client.get("/api/projects/agents").json()
+    assert build_calls["n"] == 1
+    assert len(agents_again["agents"]) == len(agents_body["agents"])
+    assert agents_again["agents"]  # still present
