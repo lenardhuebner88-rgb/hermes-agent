@@ -763,6 +763,7 @@ def get_board(
             current_step_key=current_step_key,
         )
         done_page: Optional[dict[str, Any]] = None
+        compact_done_tasks: Optional[list[Any]] = None
         if done_cursor is not None and done_limit is None:
             raise HTTPException(status_code=400, detail="done_cursor requires done_limit")
         if done_limit is not None:
@@ -801,7 +802,7 @@ def get_board(
                 "has_more": has_more,
                 "next_cursor": next_cursor,
             }
-            tasks = [task for task in tasks if task.status != "done"] + page_tasks
+            compact_done_tasks = page_tasks
         # Pre-fetch link counts per task (cheap: one query). The same pass
         # collects the dependents adjacency (parent → children) used to
         # resolve each card's chain root below.
@@ -842,6 +843,52 @@ def get_board(
                 root_cache[v] = sink
             return sink
 
+        chain_summaries: Optional[list[dict[str, Any]]] = None
+        if done_limit is not None:
+            # Authoritative roll-up over the FULL board, before the done page is
+            # applied. This mirrors buildChainChips' flat root_id-or-self group
+            # exactly; it deliberately does not walk parent/child membership.
+            chain_groups: dict[str, list[Any]] = {}
+            for task in tasks:
+                chain_groups.setdefault(_resolve_root(task.id), []).append(task)
+            chain_summaries = []
+            for root_id, members in chain_groups.items():
+                if len(members) <= 1 and not any(
+                    member.status == "done" for member in members
+                ):
+                    continue
+                root = next(
+                    (member for member in members if member.id == root_id),
+                    members[0],
+                )
+                status_counts: dict[str, int] = {}
+                for member in members:
+                    status_counts[member.status] = status_counts.get(member.status, 0) + 1
+                completed_values = [
+                    member.completed_at
+                    for member in members
+                    if member.completed_at is not None
+                ]
+                chain_summaries.append(
+                    {
+                        "root_id": root_id,
+                        "root_title": root.title,
+                        "total": len(members),
+                        "done": sum(
+                            member.status in {"done", "archived"} for member in members
+                        ),
+                        "status_counts": status_counts,
+                        "latest_completed_at": (
+                            max(completed_values) if completed_values else None
+                        ),
+                    }
+                )
+
+            # Only returned cards incur the expensive per-task enrichment below.
+            tasks = [task for task in tasks if task.status != "done"] + (
+                compact_done_tasks or []
+            )
+
         # Comment + event counts (both cheap aggregates).
         comment_counts: dict[str, int] = {
             r["task_id"]: r["n"]
@@ -867,7 +914,9 @@ def get_board(
         # We get the full structured list per task AND a compact
         # summary for the card badge (so cards don't carry the detail
         # text; the drawer fetches that via /tasks/:id or /diagnostics).
-        diagnostics_per_task = _compute_task_diagnostics(conn, task_ids=None)
+        diagnostics_per_task = _compute_task_diagnostics(
+            conn, task_ids=[task.id for task in tasks]
+        )
 
         latest_event_id = conn.execute(
             "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
@@ -1001,6 +1050,7 @@ def get_board(
         }
         if done_page is not None:
             payload["done_page"] = done_page
+            payload["chain_summaries"] = chain_summaries
         if source_errors:
             payload["source_errors"] = source_errors
         # Conditional GET: a weak ETag over the content WITHOUT the volatile
