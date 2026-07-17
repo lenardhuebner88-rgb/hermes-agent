@@ -279,6 +279,84 @@ def test_pending_continuation_becomes_ready_only_after_group_absent(
         assert task.continuation_pending_exit_run_id is None
 
 
+def test_operator_reclaim_then_new_claim_does_not_reap_replacement_worker(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
+    terminated_pids = []
+
+    def terminate_worker(worker_pid, *_args, **_kwargs):
+        terminated_pids.append(worker_pid)
+        return {
+            "prev_pid": worker_pid,
+            "host_local": True,
+            "termination_attempted": True,
+            "terminated": True,
+            "sigkill": False,
+        }
+
+    monkeypatch.setattr(kb, "_terminate_reclaimed_worker", terminate_worker)
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        pending = _claim(conn, tid)
+        kb._set_worker_pid(conn, tid, 41004)
+        assert kb.record_iteration_budget_exhausted(
+            conn, tid, expected_run_id=pending.current_run_id,
+        )
+        assert kb.get_task(conn, tid).continuation_pending_exit_run_id == (
+            pending.current_run_id
+        )
+
+        assert kb.reclaim_task(conn, tid, reason="operator retry")
+
+        replacement = kb.claim_task(conn, tid, claimer="test-host:replacement")
+        assert replacement is not None
+        kb._set_worker_pid(conn, tid, 41005)
+
+        assert kb.reap_pending_continuations(conn) == []
+        task = kb.get_task(conn, tid)
+        assert task.status == "running"
+        assert task.worker_pid == 41005
+        assert task.continuation_pending_exit_run_id is None
+        assert terminated_pids == [41004]
+
+
+def test_operator_reclaim_clears_pending_exit_marker(kanban_home, monkeypatch):
+    monkeypatch.setattr(
+        kb,
+        "_terminate_reclaimed_worker",
+        lambda *_args, **_kwargs: {"terminated": True},
+    )
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        pending = _claim(conn, tid)
+        kb._set_worker_pid(conn, tid, 41004)
+        assert kb.record_iteration_budget_exhausted(
+            conn, tid, expected_run_id=pending.current_run_id,
+        )
+
+        assert kb.reclaim_task(conn, tid, reason="operator retry")
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.continuation_pending_exit_run_id is None
+
+
+def test_claim_consumption_clears_leaked_pending_exit_marker(kanban_home):
+    with kb.connect() as conn:
+        tid = _ready_task(conn, max_continuations=2)
+        conn.execute(
+            "UPDATE tasks SET continuation_pending_exit_run_id = 123 WHERE id = ?",
+            (tid,),
+        )
+
+        claimed = kb.claim_task(conn, tid, claimer="test-host:replacement")
+
+        assert claimed is not None
+        assert claimed.continuation_pending_exit_run_id is None
+        assert kb.get_task(conn, tid).continuation_pending_exit_run_id is None
+
+
 def test_pending_continuation_reap_is_cas_fenced(kanban_home, monkeypatch):
     monkeypatch.setattr(kb, "_claimer_id", lambda: "test-host:dispatcher")
     with kb.connect() as conn:

@@ -9368,7 +9368,8 @@ def claim_task(
                    claim_lock    = ?,
                    claim_expires = ?,
                    started_at    = COALESCE(started_at, ?),
-                   last_heartbeat_at = NULL
+                   last_heartbeat_at = NULL,
+                   continuation_pending_exit_run_id = NULL
              WHERE id = ?
                AND status = 'ready'
                AND claim_lock IS NULL
@@ -10118,7 +10119,8 @@ def reclaim_task(
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
+            "claim_expires = NULL, worker_pid = NULL, "
+            "continuation_pending_exit_run_id = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
             "AND claim_lock IS ?",
             (task_id, prev_lock),
