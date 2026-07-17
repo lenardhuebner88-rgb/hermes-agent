@@ -289,10 +289,6 @@ def test_c6_event_failure_rolls_back_the_status_transition(
     assert completed == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C7: _set_worker_pid has no status/run/claim ownership CAS",
-)
 def test_c7_spawn_pid_write_rejects_a_task_completed_during_spawn(
     kanban_home, all_assignees_spawnable
 ):
@@ -316,10 +312,14 @@ def test_c7_spawn_pid_write_rejects_a_task_completed_during_spawn(
         )
         task = kb.get_task(conn, task_id)
         spawned = _event_payloads(conn, task_id, "spawned")
+        rejected = _event_payloads(conn, task_id, "spawn_rejected_stale_claim")
 
     assert task.status == "done"
     assert task.worker_pid is None and task.claim_lock is None
     assert spawned == []
+    assert len(rejected) == 1
+    assert rejected[0]["pid"] == 70707
+    assert rejected[0]["termination"]["terminated"] is True
     assert result.spawned == []
 
 
