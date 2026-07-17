@@ -1,7 +1,7 @@
 import { AlertTriangle, PowerOff, Radio, Wifi, WifiOff } from "lucide-react";
 import type { PlatformStatus } from "@/lib/api";
 import { isoTimeAgo } from "@/lib/utils";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@nous-research/ui/ui/components/card";
 import { useI18n } from "@/i18n";
 

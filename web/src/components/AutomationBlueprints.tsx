@@ -6,7 +6,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { Input } from "@nous-research/ui/ui/components/input";
 import { Label } from "@nous-research/ui/ui/components/label";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Toast } from "@nous-research/ui/ui/components/toast";
 import { api } from "@/lib/api";

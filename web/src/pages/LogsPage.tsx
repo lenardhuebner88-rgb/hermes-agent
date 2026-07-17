@@ -7,7 +7,7 @@ import {
 } from "react";
 import { FileText, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { FilterGroup, Segmented } from "@nous-research/ui/ui/components/segmented";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";

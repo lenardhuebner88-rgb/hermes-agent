@@ -11,7 +11,7 @@ import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Input } from "@nous-research/ui/ui/components/input";
 import { Label } from "@nous-research/ui/ui/components/label";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { Switch } from "@nous-research/ui/ui/components/switch";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Toast } from "@nous-research/ui/ui/components/toast";

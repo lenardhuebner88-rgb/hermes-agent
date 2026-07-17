@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { KeyRound, Package, Power, Server, Trash2, X, Zap } from "lucide-react";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Select, SelectOption } from "@nous-research/ui/ui/components/select";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
