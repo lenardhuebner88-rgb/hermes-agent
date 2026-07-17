@@ -478,6 +478,7 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
 
     expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Werkzeuge umschalten" }));
     expect(apiMock.getSkills).not.toHaveBeenCalled();
     expect(apiMock.getControlOverviewHealth).not.toHaveBeenCalled();
 
@@ -487,6 +488,21 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => expect(apiMock.getSkills).toHaveBeenCalledTimes(1));
     expect(apiMock.getControlOverviewHealth).toHaveBeenCalledTimes(1);
     expect(apiMock.getControlOverviewDecisionQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not arm the read-only context poll while the tools drawer is closed and the composer is empty", async () => {
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    await renderView();
+
+    expect(await screen.findByText("Sessions / Windows")).not.toBeNull();
+    expect(apiMock.getSkills).not.toHaveBeenCalled();
+    const closedPollTimers = setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 20000).length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Werkzeuge umschalten" }));
+
+    await waitFor(() => expect(apiMock.getSkills).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(setTimeoutSpy.mock.calls.filter(([, delay]) => delay === 20000)).toHaveLength(closedPollTimers + 1));
+    setTimeoutSpy.mockRestore();
   });
 
   it("refreshes the tmux inventory when the dashboard becomes visible again", async () => {
