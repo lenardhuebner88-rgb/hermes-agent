@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
@@ -48,19 +48,11 @@ import {
 import {
   api,
   buildWsUrl,
-  type ControlOverviewDecisionQueueResponse,
-  type ControlOverviewHealthResponse,
-  type ControlOverviewKanbanBoardResponse,
-  type ControlOverviewKanbanTask,
-  type ControlOverviewVaultResponse,
   type AgentTerminalCapabilityState,
   type AgentTerminalKind,
   type AgentTerminalOverviewState,
   type AgentTerminalOverviewWindow,
   type AgentTerminalWindow,
-  type AgentTerminalWorkdirOption,
-  type SkillInfo,
-  type ToolsetInfo,
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { cn } from "@/lib/utils";
@@ -75,7 +67,6 @@ import {
 import { de } from "../i18n/de";
 import { Eyebrow } from "../components/primitives";
 import { Sparkline } from "../components/fleet/Sparkline";
-import { KpiTile, SignalChip, type SignalTone } from "../components/leitstand";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
 import {
@@ -90,713 +81,88 @@ import {
   type DesktopTerminalLayout,
   type TerminalTarget as PaneTarget,
 } from "./agent-terminals/layout";
+import {
+  AGENTS,
+  AGENT_LABELS,
+  CONTROL_CAPABILITIES,
+  COPY_STATUS_TIMEOUT_MS,
+  EMPTY_CONTROL_CONTEXT,
+  FALLBACK_WORKDIRS,
+  FONT_MAX,
+  FONT_MIN,
+  FONT_STORAGE_KEY,
+  KEYS_STORAGE_KEY,
+  LASTSEEN_STORAGE_KEY,
+  LAYOUT_STORAGE_KEY,
+  OVERVIEW_POLL_MS,
+  PANE_TARGETS_STORAGE_KEY,
+  QUICK_KEYS,
+  RESIZE_SEND_DEBOUNCE_MS,
+  TARGET_STORAGE_KEY,
+  TERMINATE_ARM_TIMEOUT_MS,
+  TMUX_COPY_MODE,
+  TMUX_LINE_STEP,
+  TMUX_PAGE_UP,
+  WINDOW_INVENTORY_POLL_MS,
+  WORKDIR_RESET_NOTE,
+  activeBoardTasks,
+  blockedBoardTasks,
+  buildComposerPayload,
+  capabilityState,
+  chipLabel,
+  classifyTerminalState,
+  formatActivityAge,
+  formatCwdShort,
+  formatPtyResize,
+  hasUnseenActivity,
+  isDeadWindow,
+  isManagedWindow,
+  isTerminalCopyShortcut,
+  kindFromWindow,
+  orderOverviewForFleet,
+  orderWindowsForStrip,
+  pickInitialTarget,
+  readStoredWorkdir,
+  reconnectDelayMs,
+  targetFromWindow,
+  terminalProcessLabel,
+  terminalSurfaceOrder,
+  useIsCompactTerminalLayout,
+  useIsMobile,
+  workdirStorageKeyForKind,
+  type ReadOnlyControlContext,
+  type TerminalCopyState,
+} from "./agent-terminals/terminalHelpers";
+import {
+  CapabilityPill,
+  FleetCard,
+  FleetStripCard,
+  StatTile,
+  STRIP_STATE_META,
+  TerminalControlButton,
+  TerminalIdentityBar,
+  TerminalStatusChip,
+} from "./agent-terminals/FleetCard";
 
-const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: string }> = [
-  { kind: "hermes", label: "Hermes", hint: "hermes --tui" },
-  { kind: "claude", label: "Claude", hint: "claude-cli" },
-  { kind: "codex", label: "Codex", hint: "codex-cli" },
-  { kind: "kimi", label: "Kimi", hint: "kimi-cli" },
-  { kind: "grok", label: "Grok", hint: "grok-build / Grok 4.5" },
-];
-
-const AGENT_LABELS: Record<AgentTerminalKind, string> = Object.fromEntries(AGENTS.map((agent) => [agent.kind, agent.label])) as Record<AgentTerminalKind, string>;
-const AGENT_KINDS = new Set<AgentTerminalKind>(AGENTS.map((agent) => agent.kind));
-
-const TMUX_PREFIX = "\x02";
-const TMUX_COPY_MODE = `${TMUX_PREFIX}[`;
-const TMUX_PAGE_UP = `${TMUX_PREFIX}\x1b[5~`;
-const TMUX_LINE_STEP = 5;
-
-const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
-/** Per-kind key; legacy global WORKDIR_STORAGE_KEY is still read once for migration. */
-function workdirStorageKeyForKind(kind: AgentTerminalKind): string {
-  return `${WORKDIR_STORAGE_KEY}:${kind}`;
-}
-const WORKDIR_RESET_NOTE =
-  "Gespeichertes Arbeitsverzeichnis nicht verfügbar — auf Zuhause zurückgesetzt.";
-const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
-const KEYS_STORAGE_KEY = "hermes-terminals-keysopen";
-const TARGET_STORAGE_KEY = "hermes-terminals-last-target";
-const LAYOUT_STORAGE_KEY = "hermes.control.agent-terminals.desktop-layout.v1";
-const PANE_TARGETS_STORAGE_KEY = "hermes.control.agent-terminals.pane-targets.v1";
-const LASTSEEN_STORAGE_KEY = "hermes-terminals-lastseen";
-const FONT_MIN = 8;
-const FONT_MAX = 20;
-const PRIMARY_SESSION = "work";
-const WINDOW_INVENTORY_POLL_MS = 10000;
-/** An armed close disarms itself, so a row armed and forgotten cannot be killed later by a stray click. */
-const TERMINATE_ARM_TIMEOUT_MS = 8000;
-const COPY_STATUS_TIMEOUT_MS = 2000;
-
-type TerminalCopyState = "idle" | "copied" | "empty" | "error";
-const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
-const OVERVIEW_POLL_MS = 5000;
-// Debounce window for RESIZE escape sends (fit() stays immediate).  Mobile keyboards
-// fire dozens of visualViewport events during the slide animation; 300 ms trailing
-// debounce collapses the storm to one send after the keyboard settles.
-const RESIZE_SEND_DEBOUNCE_MS = 300;
-
-const FLEET_STATE_PRIORITY: Record<AgentTerminalOverviewWindow["state"], number> = {
-  frage: 0,
-  laeuft: 1,
-  wartet: 2,
-  idle: 3,
-  dead: 4,
-};
-
-// Fallback, falls capabilities noch nicht geladen sind — Wahrheit kommt vom Backend.
-const FALLBACK_WORKDIRS: AgentTerminalWorkdirOption[] = [
-  { key: "home", label: "Zuhause (~)", path: "~" },
-  { key: "hermes-agent", label: "Hermes-Agent", path: "~/.hermes/hermes-agent" },
-  { key: "family-organizer", label: "Family Organizer", path: "~/projects/family-organizer" },
-  { key: "orchestration", label: "Orchestrierung", path: "~/orchestration" },
-];
-
-const QUICK_KEYS: Array<{ label: string; sequence: string }> = [
-  { label: "Esc", sequence: "\x1b" },
-  { label: "Tab", sequence: "\t" },
-  { label: "⇧Tab", sequence: "\x1b[Z" },
-  { label: "^C", sequence: "\x03" },
-  { label: "⏎", sequence: "\r" },
-];
-
-const CONTROL_CAPABILITIES: Array<{ label: string; patterns: string[]; command: string }> = [
-  { label: "Firecrawl", patterns: ["firecrawl"], command: "/firecrawl-search" },
-  { label: "Gmail", patterns: ["gmail"], command: "/gmail" },
-  { label: "Calendar", patterns: ["calendar", "google-calendar"], command: "/google-calendar" },
-  { label: "Kanban", patterns: ["kanban"], command: "/kanban list" },
-  { label: "Browser", patterns: ["browser", "browser_"], command: "/browser status" },
-];
-
-interface ReadOnlyControlContext {
-  skills: SkillInfo[];
-  toolsets: ToolsetInfo[];
-  health: ControlOverviewHealthResponse | null;
-  vault: ControlOverviewVaultResponse | null;
-  board: ControlOverviewKanbanBoardResponse | null;
-  decisions: ControlOverviewDecisionQueueResponse | null;
-  error: string | null;
-}
-
-const EMPTY_CONTROL_CONTEXT: ReadOnlyControlContext = {
-  skills: [],
-  toolsets: [],
-  health: null,
-  vault: null,
-  board: null,
-  decisions: null,
-  error: null,
-};
-
-export type TerminalUiState =
-  | "attached"
-  | "detached"
-  | "window running"
-  | "dead pane"
-  | "missing window"
-  | "Tailscale/mobile reconnect";
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function classifyTerminalState(args: {
-  window: AgentTerminalWindow | null;
-  socketReady: boolean;
-  socketConnecting: boolean;
-  mobile: boolean;
-}): TerminalUiState {
-  if (!args.window) return "missing window";
-  if (!args.window.pid || args.window.dead) return "dead pane";
-  if (args.socketReady) return "attached";
-  if (args.mobile && args.socketConnecting) return "Tailscale/mobile reconnect";
-  if (args.socketConnecting) return "window running";
-  return "detached";
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function buildComposerPayload(text: string, submit: boolean): string | null {
-  if (!text) return null;
-  // Mehrzeiliges als Bracketed Paste, damit CLIs (claude/codex) es als EINE
-  // Eingabe nehmen statt jede Zeile einzeln zu submitten.
-  // Eingebettete End-Sequenzen entfernen — sonst schließt der Text selbst den Paste-Modus
-  // vorzeitig und der Rest würde als Live-Keystrokes (inkl. \r) ausgeführt.
-  const body = text.includes("\n") ? `\x1b[200~${text.split("\x1b[201~").join("")}\x1b[201~` : text;
-  return submit ? `${body}\r` : body;
-}
-
-function isDeadWindow(window: AgentTerminalWindow): boolean {
-  return !window.pid || window.dead === true;
-}
-
-/**
- * Whether the UI may offer terminate (close) for this window.
- *
- * Backend additive field (`managed` on TmuxWindow.to_dict). api.ts is claimed
- * by a parallel session, so we read the optional field via a safe cast rather
- * than extending the shared type. Absent / non-false → treated as managed
- * (legacy payloads keep the close affordance).
- */
-export function isManagedWindow(window: AgentTerminalWindow): boolean {
-  const managed = (window as { managed?: unknown }).managed;
-  return managed !== false;
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function pickInitialTarget(
-  windows: AgentTerminalWindow[],
-  preferredKind: AgentTerminalKind,
-  previous: { session: string; window: string } | null,
-): { session: string; window: string } | null {
-  if (!windows.length) return null;
-  if (previous && windows.some((w) => w.session === previous.session && w.window === previous.window)) return previous;
-  const preferred = windows.find((w) => w.window === preferredKind);
-  return preferred ? { session: preferred.session, window: preferred.window } : { session: windows[0].session, window: windows[0].window };
-}
-
-function targetFromWindow(window: AgentTerminalWindow): { session: string; window: string } {
-  return { session: window.session, window: window.window };
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function orderWindowsForStrip(windows: AgentTerminalWindow[]): AgentTerminalWindow[] {
-  const primary = windows.filter((w) => w.session === PRIMARY_SESSION);
-  const rest = windows.filter((w) => w.session !== PRIMARY_SESSION);
-  return [...primary, ...rest];
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function chipLabel(window: AgentTerminalWindow): string {
-  return window.session === PRIMARY_SESSION ? window.window : `${window.session}:${window.window}`;
-}
-
-/**
- * Short display form for a pane cwd: $HOME → ~, then at most the last two path segments.
- * Backend may omit cwd (optional on AgentTerminalWindow); callers pass null/undefined safely.
- */
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function formatCwdShort(cwd: string | null | undefined): string {
-  const raw = cwd?.trim();
-  if (!raw) return "unbekannt";
-  let display = raw;
-  // Linux operator host: tmux pane_current_path is absolute under /home/<user>.
-  const homeMatch = display.match(/^\/home\/[^/]+/);
-  if (homeMatch) {
-    const rest = display.slice(homeMatch[0].length);
-    display = rest ? `~${rest}` : "~";
-  }
-  if (display === "~") return "~";
-  if (display.startsWith("~/")) {
-    const rest = display.slice(2).split("/").filter(Boolean);
-    if (rest.length <= 2) return `~/${rest.join("/")}`;
-    return `~/${rest.slice(-2).join("/")}`;
-  }
-  const segs = display.split("/").filter(Boolean);
-  if (segs.length <= 2) return display.startsWith("/") ? `/${segs.join("/")}` : segs.join("/");
-  return segs.slice(-2).join("/");
-}
-
-/** Read last workdir for a kind: per-kind key → legacy global (migration) → home. */
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function readStoredWorkdir(kind: AgentTerminalKind): string {
-  try {
-    const perKind = window.localStorage.getItem(workdirStorageKeyForKind(kind));
-    if (perKind) return perKind;
-    // One-shot migration read of the pre-S4 global key (do not delete it).
-    const legacy = window.localStorage.getItem(WORKDIR_STORAGE_KEY);
-    if (legacy) return legacy;
-  } catch {
-    /* storage optional */
-  }
-  return "home";
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function reconnectDelayMs(attempt: number): number {
-  const index = Math.min(Math.max(Math.trunc(attempt), 0), RECONNECT_DELAYS_MS.length - 1);
-  return RECONNECT_DELAYS_MS[index];
-}
-
-/**
- * True for the terminal's copy chords: Ctrl+Shift+C and Ctrl+Insert.
- *
- * Plain Ctrl+C is deliberately NOT a copy chord. It is the only way to interrupt
- * a running agent, and the common "copy when something is selected" shortcut would
- * silently swallow that interrupt whenever a stale selection is left in the buffer.
- * Both chords here are copy-only — neither ever writes ETX (or anything else) to
- * the socket. Cmd/Meta is left to the OS.
- */
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function isTerminalCopyShortcut(event: Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "shiftKey" | "key">): boolean {
-  if (event.metaKey || !event.ctrlKey) return false;
-  if (event.shiftKey) return event.key === "C" || event.key === "c";
-  return event.key === "Insert";
-}
-
-/**
- * Pane order of the xterm surface a keyboard event was fired in, or null when it
- * came from anywhere else (composer, rename field, session rail, Fleet card …).
- *
- * The copy chord has to be caught document-wide in the capture phase — xterm binds
- * its own keydown on the helper textarea, so a listener on the pane would be too
- * late. That makes rejecting foreign targets this function's job: without it, a
- * selection left behind in a terminal would hijack the user's Ctrl+Shift+C inside a
- * text field and silently put stale terminal output on the clipboard.
- */
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function terminalSurfaceOrder(target: EventTarget | null): number | null {
-  const element = target as Element | null;
-  if (typeof element?.closest !== "function") return null;
-  const surface = element.closest("[data-terminal-surface]");
-  const order = surface?.getAttribute("data-terminal-surface");
-  if (!order || !/^\d+$/.test(order)) return null;
-  return Number(order);
-}
-
-/** Build the PTY resize escape sequence, clamping to valid dimensions (≥ 2, floored).
- *  Handles NaN/Infinity by falling back to 2 (Math.max propagates NaN, so we guard). */
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function formatPtyResize(cols: number, rows: number): string {
-  const c = Math.max(2, Number.isFinite(cols) ? Math.floor(cols) : 0);
-  const r = Math.max(2, Number.isFinite(rows) ? Math.floor(rows) : 0);
-  return `\x1b[RESIZE:${c};${r}]`;
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function hasUnseenActivity(window: AgentTerminalWindow, lastSeen: Record<string, number>): boolean {
-  if (window.activity == null) return false;
-  const key = `${window.session}:${window.window}`;
-  return window.activity > lastSeen[key];
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function formatActivityAge(now: number, activity: number | null): string {
-  if (activity == null) return "—";
-  const deltaSeconds = Math.max(0, Math.round(now - activity));
-  if (deltaSeconds < 60) return `vor ${deltaSeconds}s`;
-  const minutes = Math.floor(deltaSeconds / 60);
-  if (minutes < 60) return `vor ${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return `vor ${hours}h`;
-}
-
-// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located for unit tests (HMR-only rule)
-export function orderOverviewForFleet(entries: AgentTerminalOverviewWindow[]): AgentTerminalOverviewWindow[] {
-  return [...entries].sort((a, b) => FLEET_STATE_PRIORITY[a.state] - FLEET_STATE_PRIORITY[b.state]);
-}
-
-function kindFromWindow(window: AgentTerminalWindow | null, fallback: AgentTerminalKind): AgentTerminalKind {
-  // Suffix-Fenster (claude-fo, hermes-agent, …) gehören zum Basis-Kind.
-  const base = (window?.window ?? "").split("-")[0] as AgentTerminalKind;
-  return AGENT_KINDS.has(base) ? base : fallback;
-}
-
-function terminalProcessLabel(window: AgentTerminalWindow | null, kind: AgentTerminalKind): string {
-  const command = (window?.command ?? "").trim();
-  if (!window?.pid || window.dead) return "dead pane";
-  if (!command) return kind;
-  return command.toLowerCase().includes(kind) ? command : `${command}/${kind}`;
-}
-
-function matchesCapabilityText(value: string, patterns: string[]): boolean {
-  const lower = value.toLowerCase();
-  return patterns.some((pattern) => lower.includes(pattern));
-}
-
-function capabilityState(
-  capability: (typeof CONTROL_CAPABILITIES)[number],
-  skills: SkillInfo[],
-  toolsets: ToolsetInfo[],
-): { label: string; tone: "ok" | "warn" | "idle"; detail: string } {
-  const matchingSkills = skills.filter((skill) =>
-    matchesCapabilityText(`${skill.name} ${skill.description} ${skill.category}`, capability.patterns),
-  );
-  const matchingToolsets = toolsets.filter((toolset) =>
-    matchesCapabilityText(`${toolset.name} ${toolset.label} ${toolset.description} ${toolset.tools.join(" ")}`, capability.patterns),
-  );
-  const enabled = matchingSkills.some((skill) => skill.enabled) || matchingToolsets.some((toolset) => toolset.enabled);
-  const known = matchingSkills.length > 0 || matchingToolsets.length > 0;
-  const setupMissing = matchingToolsets.some((toolset) => toolset.enabled && !toolset.configured);
-  if (enabled && setupMissing) return { label: "Setup prüfen", tone: "warn", detail: "aktiv, aber Env/Auth/Setup unvollständig" };
-  if (enabled) return { label: "aktiv", tone: "ok", detail: "Skill oder Toolset ist aktiv" };
-  if (known) return { label: "vorhanden", tone: "idle", detail: "vorhanden, aber nicht aktiv" };
-  return { label: "nicht gefunden", tone: "idle", detail: "kein passender Skill/Toolset sichtbar" };
-}
-
-function allBoardTasks(board: ControlOverviewKanbanBoardResponse | null): ControlOverviewKanbanTask[] {
-  return (board?.columns ?? []).flatMap((column) => column.tasks ?? []);
-}
-
-function activeBoardTasks(board: ControlOverviewKanbanBoardResponse | null): ControlOverviewKanbanTask[] {
-  return allBoardTasks(board).filter((task) => ["running", "review", "ready", "todo", "triage"].includes(task.status));
-}
-
-function blockedBoardTasks(board: ControlOverviewKanbanBoardResponse | null): ControlOverviewKanbanTask[] {
-  return allBoardTasks(board).filter((task) => task.status === "blocked");
-}
-
-function useMediaQuery(query: string, fallback = false): boolean {
-  const [matches, setMatches] = useState(() => (typeof window === "undefined" ? fallback : window.matchMedia(query).matches));
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const media = window.matchMedia(query);
-    const onChange = () => setMatches(media.matches);
-    onChange();
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, [query]);
-  return matches;
-}
-
-function useIsMobile(): boolean {
-  return useMediaQuery("(max-width: 767px)");
-}
-
-function useIsCompactTerminalLayout(): boolean {
-  return useMediaQuery("(max-width: 1023px)");
-}
-
-function TerminalStatusChip({ state }: { state: TerminalUiState }) {
-  const tone =
-    state === "attached"
-      ? "ok"
-      : state === "window running"
-        ? "ok"
-        : state === "Tailscale/mobile reconnect"
-          ? "warn"
-          : "alert";
-  return <SignalChip tone={tone} label={state} className="shrink-0" />;
-}
-
-function CapabilityPill({ capability, agent }: { capability: AgentTerminalCapabilityState | null; agent: (typeof AGENTS)[number] }) {
-  const windowsOk = capability?.tmux_available ?? false;
-  const agentState = capability?.agents?.[agent.kind] ?? null;
-  const agentOk = agentState ? agentState.available : agent.kind === "hermes" ? (capability?.hermes_tui_available ?? false) : windowsOk;
-  const ok = windowsOk && agentOk;
-  const reason = agentState?.reason ?? capability?.reason ?? null;
-  const label = ok ? "verfügbar" : reason?.includes("symlink") || reason?.includes("resolvable") ? "kaputter Symlink/Binary" : reason ? "CLI fehlt" : "unbekannt";
-  const title = reason ?? agentState?.binary ?? agent.hint;
-  return (
-    <span title={title} className={cn("rounded-card border px-1.5 py-0.5 text-[10px]", ok ? "border-status-ok/35 text-status-ok" : "border-line text-ink-3")}>
-      {label}
-    </span>
-  );
-}
-
-function TerminalIdentityBar({
-  window,
-  selectedKind,
-  state,
-}: {
-  window: AgentTerminalWindow | null;
-  selectedKind: AgentTerminalKind;
-  state: TerminalUiState;
-}) {
-  const kind = kindFromWindow(window, selectedKind);
-  const label = AGENT_LABELS[kind] ?? kind;
-  const target = window ? `${window.session}:${window.window}` : "missing window";
-  // cwd is optional on the windows payload (AgentTerminalWindow.cwd); shorten for chrome.
-  const cwdRaw = window?.cwd?.trim() || "";
-  const cwdShort = formatCwdShort(window?.cwd);
-  const process = terminalProcessLabel(window, kind);
-  return (
-    <div className="sticky top-0 z-10 border-b border-line-soft bg-surface-2/95 px-2.5 py-2 text-[11px] text-ink-2 backdrop-blur sm:px-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="shrink-0 font-semibold text-ink">{label}</span>
-        <span className="text-ink-3">·</span>
-        <span className="min-w-0 max-w-[9rem] truncate font-mono text-live sm:max-w-[14rem]" title={target}>{target}</span>
-        <span className="text-ink-3">·</span>
-        <span
-          data-testid="terminal-cwd-chip"
-          className="min-w-0 max-w-[13rem] truncate font-mono text-ink-2 sm:max-w-[28rem]"
-          title={cwdRaw || cwdShort}
-        >
-          {cwdShort}
-        </span>
-        <span className="text-ink-3">·</span>
-        <span className="min-w-0 max-w-[8rem] truncate font-mono text-ink-2" title={process}>{process}</span>
-        <span className="text-ink-3">·</span>
-        <TerminalStatusChip state={state} />
-      </div>
-    </div>
-  );
-}
-
-function TerminalControlButton({
-  label,
-  disabled = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      disabled={disabled}
-      onPointerDown={(event) => event.preventDefault()}
-      onMouseDown={(event) => event.preventDefault()}
-      onClick={onClick}
-      className="grid h-9 w-full min-w-0 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-live/10 hover:text-live active:bg-live/15 disabled:cursor-not-allowed disabled:opacity-35"
-    >
-      {children}
-    </button>
-  );
-}
-
-function fleetStateMeta(state: AgentTerminalOverviewWindow["state"]): { label: string; tone: SignalTone } {
-  switch (state) {
-    case "frage":
-      return { label: "Braucht dich", tone: "alert" };
-    case "laeuft":
-      return { label: "Läuft", tone: "ok" };
-    case "wartet":
-      return { label: "Fertig/wartet", tone: "ok" };
-    case "dead":
-      return { label: "Tot", tone: "alert" };
-    default:
-      return { label: "Idle", tone: "neutral" };
-  }
-}
-
-// Persistent fleet strip's status-chip vocabulary — deliberately distinct
-// from fleetStateMeta() above (used by the full-screen "Flotte" overlay).
-// Follows DESIGN.md rule 2 literally: läuft/ok = green,
-// frage/degraded = warn, tot/failed = alert, idle = neutral ink-3. "wartet"
-// (fertig, wartet auf Weiteres) reads as ok — same bucket as läuft's calm end.
-const STRIP_STATE_META: Record<AgentTerminalOverviewState, { label: string; tone: SignalTone }> = {
-  laeuft: { label: "läuft", tone: "ok" },
-  frage: { label: "frage", tone: "warn" },
-  wartet: { label: "wartet", tone: "ok" },
-  idle: { label: "idle", tone: "neutral" },
-  dead: { label: "tot", tone: "alert" },
-};
-
-function StatTile({
-  label,
-  value,
-  tone = "neutral",
-}: {
-  label: string;
-  value: string | number;
-  tone?: "neutral" | "ok" | "warn";
-}) {
-  return (
-    <KpiTile
-      label={label}
-      value={value}
-      dot={tone === "ok" ? "ready" : tone === "warn" ? "warn" : "idle"}
-      className="border-line-soft"
-    />
-  );
-}
-
-/** Persistent fleet-strip card — the always-on summary above the terminal
- *  pane (desktop only). Distinct from FleetCard: compact, one line of tail,
- *  no respawn/kill actions (those stay in the full "Flotte" overlay).
- *  Clicking selects that terminal. */
-function FleetStripCard({
-  win,
-  now,
-  isCurrent,
-  onSelect,
-}: {
-  win: AgentTerminalOverviewWindow;
-  now: number;
-  isCurrent: boolean;
-  onSelect: () => void;
-}) {
-  const meta = STRIP_STATE_META[win.state] ?? STRIP_STATE_META.idle;
-  const tailLine = (win.tail ?? "").split("\n").filter((line) => line.trim()).slice(-1)[0]?.trim();
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={cn(
-        "min-w-0 rounded-card border bg-surface-2 px-3 py-2.5 text-left transition hover:bg-surface-3",
-        win.state === "frage" ? "border-status-alert/50" : "border-line-soft",
-        isCurrent ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:border-line",
-      )}
-    >
-      <div className="flex min-w-0 items-center justify-between gap-2">
-        <span className={cn("min-w-0 truncate font-mono text-xs font-semibold", isCurrent ? "text-live" : "text-ink")}>{chipLabel(win)}</span>
-        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[9px]" />
-      </div>
-      <div className="mt-1.5 truncate text-[10px] text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
-    </button>
-  );
-}
-
-function FleetCard({
-  win,
-  now,
-  selected,
-  broadcastMode,
-  onToggleSelect,
-  onOpen,
-  onRespawn,
-  onKill,
-  onTerminate,
-  terminateArmed,
-  terminateBusy,
-  onConfirmTerminate,
-  onCancelTerminate,
-}: {
-  win: AgentTerminalOverviewWindow;
-  now: number;
-  selected: boolean;
-  broadcastMode: boolean;
-  onToggleSelect: () => void;
-  onOpen: () => void;
-  onRespawn: () => void;
-  onKill: () => void;
-  /** Arms the close guard (step 1) — it never kills on its own. */
-  onTerminate: () => void;
-  terminateArmed: boolean;
-  terminateBusy: boolean;
-  onConfirmTerminate: () => void;
-  onCancelTerminate: () => void;
-}) {
-  const meta = fleetStateMeta(win.state);
-  const dead = win.state === "dead";
-  const managed = isManagedWindow(win);
-  const selectable = broadcastMode && !dead;
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={() => (selectable ? onToggleSelect() : onOpen())}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        if (selectable) onToggleSelect();
-        else onOpen();
-      }}
-      className={cn(
-        "relative grid cursor-pointer gap-2 rounded-card border bg-surface-2 p-3 text-left transition hover:bg-surface-3",
-        selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "border-line hover:border-line",
-      )}
-    >
-      {selectable && (
-        <span
-          aria-hidden="true"
-          className={cn(
-            "absolute right-2 top-2 grid h-4 w-4 place-items-center rounded-card border",
-            selected ? "border-live bg-live/80 text-surface-0" : "border-line",
-          )}
-        >
-          {selected && <CheckCircle2 className="h-3 w-3" />}
-        </span>
-      )}
-      <div className="flex min-w-0 items-center gap-1.5 pr-5">
-        <SignalChip tone={meta.tone} label={meta.label} className="px-2 py-0.5 text-[10px]" />
-        <span className="min-w-0 truncate font-mono text-xs text-ink-2">{chipLabel(win)}</span>
-        {!managed && (
-          <span
-            data-testid={`extern-badge-${win.session}:${win.window}`}
-            className="shrink-0 rounded-full border border-line px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-ink-3"
-            title="Externes Fenster — gehört einem anderen Agenten/Prozess"
-          >
-            extern
-          </span>
-        )}
-      </div>
-      <div className="text-[10px] text-ink-3">{formatActivityAge(now, win.activity ?? null)}</div>
-      <pre className="max-h-24 overflow-hidden whitespace-pre-wrap break-words rounded-card bg-surface-2 p-1.5 font-mono text-[10px] leading-tight text-ink-2">
-        {(win.tail ?? "").split("\n").slice(-5).join("\n") || "—"}
-      </pre>
-      {dead && (
-        <div className="flex gap-1.5">
-          {/* Respawn only for dashboard-managed dead windows — foreign dead panes
-              keep Entfernen (kill-dead) but must not recreate under work. */}
-          {managed && (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onRespawn();
-              }}
-              className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-live/40 hover:text-live"
-            >
-              <RotateCcw className="h-3 w-3" />Respawn
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onKill();
-            }}
-            className="inline-flex flex-1 items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-2 hover:border-status-alert/40 hover:text-status-alert"
-          >
-            <Trash2 className="h-3 w-3" />Entfernen
-          </button>
-        </div>
-      )}
-      {/* Two-step close, same guard as the session rail — a single click on a Fleet
-          card must never be able to kill a live agent session.
-          Extern (managed===false) keeps the affordance with sharper confirm chrome. */}
-      {!dead && (
-        <div className="flex gap-1.5">
-          {terminateArmed ? (
-            <>
-              <button
-                type="button"
-                disabled={terminateBusy}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onConfirmTerminate();
-                }}
-                className={cn(
-                  "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
-                  managed
-                    ? "border border-status-alert/60 bg-status-alert/15 hover:bg-status-alert/25"
-                    : "border-2 border-status-alert/70 bg-status-alert/25 hover:bg-status-alert/35",
-                )}
-                aria-label={managed ? `Beenden bestätigen ${win.session}:${win.window}` : `Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. ${win.session}:${win.window}`}
-                title={managed ? undefined : "Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess."}
-              >
-                <Check className="h-3 w-3" />{managed ? "Wirklich beenden" : "Extern wirklich?"}
-              </button>
-              <button
-                type="button"
-                disabled={terminateBusy}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCancelTerminate();
-                }}
-                className="inline-flex items-center justify-center gap-1 rounded-card border border-line px-2 py-1.5 text-[11px] text-ink-3 hover:bg-surface-3 hover:text-ink-2 disabled:cursor-not-allowed disabled:opacity-40"
-                aria-label={`Beenden abbrechen ${win.session}:${win.window}`}
-              >
-                <X className="h-3 w-3" />Abbrechen
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                onTerminate();
-              }}
-              className={cn(
-                "inline-flex flex-1 items-center justify-center gap-1 rounded-card px-2 py-1.5 text-[11px] text-status-alert",
-                managed
-                  ? "border border-status-alert/30 hover:border-status-alert/60 hover:bg-status-alert/10"
-                  : "border-2 border-status-alert/50 bg-status-alert/10 hover:border-status-alert/70 hover:bg-status-alert/20",
-              )}
-              aria-label={managed ? `Session beenden ${win.session}:${win.window}` : `Externes Fenster beenden ${win.session}:${win.window}`}
-              title={managed ? undefined : "Externes Fenster beenden — gehört einem anderen Agenten/Prozess"}
-            >
-              <Trash2 className="h-3 w-3" />{managed ? "Session beenden" : "Extern beenden"}
-            </button>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
+// Re-export pure helpers so AgentTerminalsView.test.ts keeps importing from this module.
+export {
+  buildComposerPayload,
+  chipLabel,
+  classifyTerminalState,
+  formatActivityAge,
+  formatCwdShort,
+  formatPtyResize,
+  hasUnseenActivity,
+  isManagedWindow,
+  isTerminalCopyShortcut,
+  orderOverviewForFleet,
+  orderWindowsForStrip,
+  pickInitialTarget,
+  readStoredWorkdir,
+  reconnectDelayMs,
+  terminalSurfaceOrder,
+} from "./agent-terminals/terminalHelpers";
+export type { TerminalUiState } from "./agent-terminals/terminalHelpers";
 
 export function AgentTerminalsView() {
   const navigate = useNavigate();
