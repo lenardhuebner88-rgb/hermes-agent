@@ -3219,6 +3219,104 @@ def _terminal_status(status: str) -> bool:
     return status in {"done", "archived", "failed", "cancelled"}
 
 
+_REAL_COMPLETION_STATUSES = frozenset({"done", "running", "ready", "blocked"})
+
+
+def _is_real_completion_status(status: Optional[str]) -> bool:
+    """Fail CLOSED: a status counts as real completion evidence only if it is
+    one of the EXACT statuses that can legally reach this guard.
+
+    Narrowed (cross-family review finding, 2026-07-17 pass 3): this used to
+    accept every ``kanban_db.VALID_STATUSES`` member except ``archived`` — far
+    wider than what can actually appear here. The finalizer hook
+    (``maybe_integrate_on_complete`` -> ``_auto_complete_decompose_root``)
+    runs from INSIDE ``complete_task``, BEFORE the completing task's own
+    ``done`` write lands — so ``completed_task_id``'s row is read mid-flight.
+    ``complete_task``'s worker-isolation guard (``_wt_eligible``) only ever
+    invokes the hook for a task whose status is ``running``, ``ready``, or
+    ``blocked`` at that point; the commitless path
+    (``_direct_complete_decompose_root``) only ever passes already-``done``
+    siblings (``finalize_decompose_root_at_dispatch``'s ``children_pending``
+    guard requires every child to be ``done`` first). So exactly these four
+    statuses are real completion evidence — every other
+    ``kanban_db.VALID_STATUSES`` member (``triage``/``todo``/``scheduled``/
+    ``review``/``archived``), a missing row (``None``), or a blank/unknown
+    string means the root parks defensively instead of completing on
+    evidence that could never legitimately reach here."""
+    text = str(status or "").strip()
+    return text in _REAL_COMPLETION_STATUSES
+
+
+def _decompose_root_has_real_child_completion(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    completed_task_id: Optional[str] = None,
+    children: Optional[list[tuple[str, str]]] = None,
+) -> bool:
+    """True iff there is real evidence that a child actually did the work,
+    rather than the chain simply running out of open (non-terminal) members.
+
+    ``archive_task`` (a SUPERSEDED block) removes a child from ``task_links``
+    and from every open/pending-sibling check, so a chain whose every child
+    was only superseded-archived can otherwise look "no siblings left open"
+    and get auto-completed with zero real work landed (live incident
+    t_ecd5cf42, 2026-07-17). Guards ``_auto_complete_decompose_root``
+    (``completed_task_id`` — the task whose completion drove this call) and
+    ``_direct_complete_decompose_root`` (``children`` — the terminal-status
+    list the caller already gathered) against exactly that: refuse when the
+    only evidence on hand is an ``archived`` status, a missing row, or an
+    unrecognized status; accept a genuine ``done`` (or any other currently
+    valid in-flight status, e.g. a still-running completion) as real."""
+    if completed_task_id is not None:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (completed_task_id,),
+        ).fetchone()
+        status = row["status"] if row is not None else None
+        return _is_real_completion_status(status)
+    if children is not None:
+        return any(_is_real_completion_status(status) for _cid, status in children)
+    return False
+
+
+def _block_decompose_root_no_real_completion(
+    conn: sqlite3.Connection, *, root_id: str,
+) -> None:
+    """Park a decompose root instead of auto-completing it when none of its
+    chain's subtasks ever reached a real ``done`` (the whole chain is
+    archived/cancelled/failed) — mirrors :func:`_block_decompose_root`'s
+    shape, distinct reason so the operator sees exactly why."""
+    from hermes_cli import kanban_db as kb
+
+    reason = (
+        "auto-complete verweigert: kein Kind erfolgreich (alle archived/failed) "
+        "— Operator pruefen"
+    )
+    try:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+                (root_id,),
+            )
+            if cur.rowcount == 1:
+                kb._append_event(
+                    conn,
+                    root_id,
+                    "blocked",
+                    {
+                        "reason": reason,
+                        "source": "decompose_root_finalizer",
+                    },
+                )
+    except Exception:
+        _log.warning(
+            "could not block decompose root %s after no-real-completion guard",
+            root_id, exc_info=True,
+        )
+
+
 def _pending_root_finalizer_id(
     conn: sqlite3.Connection,
     *,
@@ -3296,6 +3394,12 @@ def _auto_complete_decompose_root(
     outcome: dict,
 ) -> None:
     from hermes_cli import kanban_db as kb
+
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, completed_task_id=completed_task_id,
+    ):
+        _block_decompose_root_no_real_completion(conn, root_id=root_id)
+        return
 
     now = int(time.time())
     summary = (
@@ -3382,6 +3486,12 @@ def _direct_complete_decompose_root(
     the children as evidence.
     """
     from hermes_cli import kanban_db as kb
+
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, children=children,
+    ):
+        _block_decompose_root_no_real_completion(conn, root_id=root_id)
+        return
 
     now = int(time.time())
     branch = chain_branch(root_id)
@@ -3637,16 +3747,34 @@ def provision_for_task(
             ensure_worktree(repo_root, root_id)
         return resolved
 
-    repo_root = repo_root_for(resolved)
-    if repo_root is None:
+    # Don't trust repo_root_for (git rev-parse --show-toplevel) here: if
+    # *resolved* is itself inside an existing LINKED worktree (e.g. a chain
+    # branch checkout, or an ad-hoc ``.worktrees/<task.id>`` path that
+    # split_provisioned_path didn't recognize above), --show-toplevel returns
+    # that worktree's own path, not the main repo — ensure_worktree would then
+    # nest a new provisioned worktree INSIDE the linked worktree and fail with
+    # "branch already used" (live incident t_87143651). Derive the real main
+    # repo root via --git-common-dir, which resolves to the main repo's .git
+    # in both a plain checkout and a linked worktree.
+    common_dir = kb._git_common_dir(resolved)
+    if common_dir is None:
         return resolved  # non-repo dir task: today's behavior, untouched
+    repo_root = common_dir.parent
 
     root_id = chain_root_id(conn, task.id)
     info = ensure_worktree(repo_root, root_id)
     # A workspace pointing at a SUBDIRECTORY of the repo keeps its relative
-    # part inside the worktree (e.g. <repo>/web → <worktree>/web).
+    # part inside the worktree (e.g. <repo>/web → <worktree>/web). Compute
+    # that relative part against *resolved*'s OWN containing checkout root
+    # (repo_root_for / --show-toplevel — main checkout OR a linked worktree,
+    # whichever directly contains *resolved*), NOT against the new provisioned
+    # repo_root above: a linked worktree lives at a different absolute path
+    # than the main repo, so relative_to(repo_root) raises for a subdir
+    # inside it and silently collapses to the new worktree's ROOT instead of
+    # <new-worktree>/<subdir> (cross-family review finding 3, 2026-07-17).
+    original_root = repo_root_for(resolved) or repo_root
     try:
-        rel = resolved.resolve().relative_to(Path(repo_root).resolve())
+        rel = resolved.resolve().relative_to(Path(original_root).resolve())
     except ValueError:
         rel = Path(".")
     workspace = info["path"] / rel if str(rel) != "." else info["path"]

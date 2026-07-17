@@ -331,6 +331,155 @@ def test_decompose_root_with_open_child_not_finalized(
     assert _git(repo, "log", "--merges", "--oneline") == ""
 
 
+def test_auto_complete_decompose_root_refuses_when_all_children_archived(
+    kanban_home,
+):
+    """S3 regression (t_ecd5cf42, 2026-07-17): a decompose root must not be
+    marked ``done`` when EVERY chain child was only superseded-archived (via
+    ``block_task`` + a SUPERSEDED reason, which auto-archives and DELETES the
+    child's task_links row to the root) — zero real work landed. Instead of
+    completing, the root is parked ``blocked`` with an operator-facing reason."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="all-archived decompose root", triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "child A", "assignee": "coder", "parents": []},
+                {"title": "child B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        for child in (child_a, child_b):
+            kb.claim_task(conn, child)
+            assert kb.block_task(
+                conn, child, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, child).status == "archived"
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=child_b, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status == "blocked"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+    assert "Operator pruefen" in blocked_events[-1]["reason"]
+
+
+def test_auto_complete_decompose_root_proceeds_when_one_child_really_done(
+    kanban_home,
+):
+    """Gegentest: as long as at least one chain child reached a REAL
+    ``done`` (its task_links row to the root survives), the root may still
+    auto-complete even if a sibling was superseded-archived."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="partial-done decompose root", triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "child A", "assignee": "coder", "parents": []},
+                {"title": "child B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        kb.claim_task(conn, child_a)
+        assert kb.complete_task(conn, child_a, result="child A done")
+        kb.claim_task(conn, child_b)
+        assert kb.block_task(
+            conn, child_b, reason="SUPERSEDED: recovery-loop stop",
+        )
+        assert kb.get_task(conn, child_b).status == "archived"
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=child_a, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        auto_done = _events(conn, root, "decompose_root_auto_completed")
+
+    assert root_task.status == "done"
+    assert auto_done and auto_done[-1]["completed_by"] == child_a
+
+
+def test_auto_complete_decompose_root_refuses_when_completed_task_row_missing(
+    kanban_home,
+):
+    """Cross-family review finding 2 (2026-07-17): the no-real-completion
+    guard must fail CLOSED, not open, when ``completed_task_id`` doesn't
+    resolve to a row at all (deleted / never existed / wrong id) — the
+    previous blacklist-based check treated a missing row (status=None) as
+    "not archived" and silently accepted it as real completion evidence."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="missing-completer root", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready' WHERE id = ?", (root,),
+            )
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id="t_doesnotexist", outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status != "done"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+
+
+def test_is_real_completion_status_narrow_whitelist():
+    """Fix 2 (cross-family review, 2026-07-17 pass 3): only the statuses that
+    can legally reach this guard mid-completion (see complete_task's
+    ``_wt_eligible`` guard: running/ready/blocked) plus the terminal ``done``
+    (already-finished siblings passed by ``_direct_complete_decompose_root``)
+    count as real completion evidence. Every other ``VALID_STATUSES`` member
+    — including ``scheduled``/``todo``/``triage``, which a root sink itself
+    can carry while parked, and ``review`` — must NOT count."""
+    for real in ("done", "running", "ready", "blocked"):
+        assert kwt._is_real_completion_status(real) is True, real
+    for not_real in (
+        "scheduled", "todo", "triage", "review", "archived",
+        None, "", "  ", "bogus",
+    ):
+        assert kwt._is_real_completion_status(not_real) is False, not_real
+
+
+def test_auto_complete_decompose_root_refuses_when_completed_task_status_scheduled(
+    kanban_home,
+):
+    """Fix 2 regression: a status like 'scheduled'/'todo'/'triage' can never
+    legitimately reach this guard mid-completion (see complete_task's
+    ``_wt_eligible`` guard), so it must NOT count as real completion evidence
+    — the root parks instead of completing on evidence that could not exist
+    on the real code path."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="scheduled-completer root", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (root,))
+        other = kb.create_task(conn, title="scheduled sibling", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (other,))
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=other, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status != "done"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+
+
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> real activation -> success event, no fixer,
     child done."""

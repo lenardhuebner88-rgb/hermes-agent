@@ -6292,6 +6292,111 @@ def test_flow_release_applies_lane_override_and_records_release_level(client):
 
 
 # ---------------------------------------------------------------------------
+# Additive-hold invariant (cross-family review finding, 2026-07-17 pass 3):
+# a root can be dual-held (freigabe:operator AND live_test_depth:ui-real) —
+# flow-release must not bypass the invariant by unblocking children while an
+# un-acked co-hold remains.
+# ---------------------------------------------------------------------------
+
+
+def _setup_dual_held_gated_root():
+    """A flow-gated root that ALSO carries the additive ui-real + operator
+    holds (mirrors a dual-held PlanSpec-ingested root, e.g. decompose_triage_
+    task's ``_held_for_operator`` path) — set directly via SQL like the
+    kanban_db escalation tests do, since ``_release_flow_gate`` only cares
+    about the root's committed columns/events at call time, not how they got
+    there."""
+    root, child_ids = _setup_gated_root(tenant="planspec")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            # decompose_triage_task flips a plain gated root straight to
+            # 'todo' (only the CHILDREN are held) — a real dual-held PlanSpec
+            # root additionally parks the ROOT ITSELF in 'scheduled' (see
+            # decompose_triage_task's ``_held_for_operator`` branch), so pin
+            # status back to 'scheduled' here too.
+            conn.execute(
+                "UPDATE tasks SET status='scheduled', freigabe='operator', "
+                "live_test_depth='ui-real' WHERE id=?",
+                (root,),
+            )
+    return root, child_ids
+
+
+def test_flow_release_dual_held_root_defers_children_and_reports_no_promotion(client):
+    root, child_ids = _setup_dual_held_gated_root()
+
+    r = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Truthful: nothing was promoted this call, and the response says so.
+    assert body["released"] == 0
+    assert body["released_ids"] == []
+    assert body["chain_held"] is True
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root)
+        child_statuses = {c: kb.get_task(conn, c).status for c in child_ids}
+        events = [e.kind for e in kb.list_events(conn, root)]
+    # LOAD-BEARING: root AND every child stay 'scheduled' — the un-acked
+    # ui-real hold must not let the flow gate promote the chain.
+    assert root_task.status == "scheduled"
+    assert all(status == "scheduled" for status in child_statuses.values()), child_statuses
+    # The freigabe side IS acked (flow-release still owns that hold) even
+    # though the flip was blocked by the outstanding ui-real co-hold.
+    assert "freigabe_released" in events
+    assert "uireal_released" not in events
+
+    # A second flow-release call is idempotent — still nothing to promote.
+    r2 = client.post(f"/api/plugins/kanban/tasks/{root}/flow-release")
+    assert r2.status_code == 200, r2.text
+    body2 = r2.json()
+    assert body2["released"] == 0
+    assert body2["chain_held"] is True
+
+    # Once the OTHER hold (ui-real) is also acked, the chain promotes — via
+    # the dedicated release_uireal_root ack (flow-release does not own the
+    # ui-real side).
+    with kb.connect() as conn:
+        assert kb.release_uireal_root(conn, root, author="pytest") is True
+        root_after = kb.get_task(conn, root)
+        child_status_after = {c: kb.get_task(conn, c).status for c in child_ids}
+    assert root_after.status == "todo"
+    assert child_status_after[child_ids[0]] == "ready"
+    assert child_status_after[child_ids[1]] == "ready"
+    assert child_status_after[child_ids[2]] == "todo"
+
+
+def test_flow_release_freigabe_operator_only_root_still_promotes_like_before(client):
+    """Regression: a single-hold (freigabe:operator only, no ui-real) root
+    must behave EXACTLY as before this fix — children promoted, scout
+    injected, root flipped to 'todo'."""
+    root, child_ids = _setup_gated_root(tenant="planspec")
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='scheduled', freigabe='operator' WHERE id=?",
+                (root,),
+            )
+
+    r = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-release",
+        json={"inject_scout": True},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["released"] == 3
+    assert set(body["released_ids"]) == set(child_ids)
+    assert "chain_held" not in body
+    assert body.get("scout_id") is not None
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root)
+        events = [e.kind for e in kb.list_events(conn, root)]
+    assert root_task.status == "todo"
+    assert "freigabe_released" in events
+
+
+# ---------------------------------------------------------------------------
 # Phase C — flow-release operator levers: review_tier + Scout injection
 # ---------------------------------------------------------------------------
 

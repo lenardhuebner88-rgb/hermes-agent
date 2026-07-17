@@ -1320,6 +1320,392 @@ def test_create_inventory_tool_path_forces_kind_analysis(worker_env, monkeypatch
         conn.close()
 
 
+def test_create_planspec_source_inherited_from_parent(worker_env):
+    """S4(a): a new child of a parent carrying ``planspec_source`` inherits it,
+    so downstream provenance (e.g. strategist lever outcomes) still resolves
+    for cards spawned mid-chain, not just the PlanSpec-ingested ones."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    parent_id = worker_env
+    conn = kb.connect()
+    try:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                ("/vault/03-Agents/plans/2026-07-17-example.md", parent_id),
+            )
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "planspec child",
+        "assignee": "peer",
+        "parents": [parent_id],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    from hermes_cli import kanban_db as kb
+    conn = kb.connect()
+    try:
+        assert kb.planspec_source_for_task(conn, d["task_id"]) == (
+            "/vault/03-Agents/plans/2026-07-17-example.md"
+        )
+    finally:
+        conn.close()
+
+
+def test_create_no_planspec_source_when_parent_has_none(worker_env):
+    """Control: a parent without planspec_source leaves the child's column
+    unset — no inheritance side effect when there is nothing to inherit."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    out = kt._handle_create({
+        "title": "plain child",
+        "assignee": "peer",
+        "parents": [worker_env],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        assert kb.planspec_source_for_task(conn, d["task_id"]) is None
+    finally:
+        conn.close()
+
+
+def test_create_idempotent_hit_does_not_overwrite_existing_planspec_source(
+    worker_env,
+):
+    """Cross-family review finding 6(a): an idempotency_key retry that returns
+    a PRE-EXISTING task must never have that task's planspec_source
+    overwritten by whatever the retry's (possibly different) parents carry —
+    create_task's idempotency fast path returns the existing row untouched;
+    the tool-level inheritance must respect that, not corrupt it."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    # First call: no parents with a planspec_source -> child stays unset.
+    first = kt._handle_create({
+        "title": "idempotent child",
+        "assignee": "peer",
+        "idempotency_key": "idem-test-1",
+    })
+    first_d = json.loads(first)
+    assert first_d["ok"] is True
+    task_id = first_d["task_id"]
+
+    conn = kb.connect()
+    try:
+        assert kb.planspec_source_for_task(conn, task_id) is None
+        # Give the (unrelated) worker_env task a planspec_source so a naive
+        # inheritance loop would try to stamp it onto the idempotent hit.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                ("/vault/plans/other.md", worker_env),
+            )
+    finally:
+        conn.close()
+
+    # Retry with the SAME idempotency_key but DIFFERENT parents (carrying a
+    # source) — must return the SAME existing task, untouched.
+    second = kt._handle_create({
+        "title": "idempotent child",
+        "assignee": "peer",
+        "idempotency_key": "idem-test-1",
+        "parents": [worker_env],
+    })
+    second_d = json.loads(second)
+    assert second_d["ok"] is True
+    assert second_d["task_id"] == task_id
+
+    conn = kb.connect()
+    try:
+        assert kb.planspec_source_for_task(conn, task_id) is None
+    finally:
+        conn.close()
+
+
+def test_create_conflicting_parent_sources_are_not_inherited(worker_env):
+    """Cross-family review finding 6(b): when multiple parents carry
+    DIFFERENT planspec_source values, silently taking the first is wrong —
+    inherit nothing rather than guess which one is authoritative."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        other_parent = kb.create_task(conn, title="other parent", assignee="peer")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                ("/vault/plans/a.md", worker_env),
+            )
+            conn.execute(
+                "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                ("/vault/plans/b.md", other_parent),
+            )
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "child of conflicting parents",
+        "assignee": "peer",
+        "parents": [worker_env, other_parent],
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    conn = kb.connect()
+    try:
+        assert kb.planspec_source_for_task(conn, d["task_id"]) is None
+    finally:
+        conn.close()
+
+
+def test_create_rejects_serial_recovery_for_same_root(worker_env):
+    """S4(b): >=2 SUPERSEDED-archived predecessor cards referencing the same
+    root task id, created by the same author-context within the window, must
+    stop a third recovery card for that root — the agent must escalate to the
+    operator instead of looping on fresh recovery cards."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_deadbeef"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"recovery attempt {i}",
+                body=f"recovering root {root_ref} after failure",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "third recovery attempt",
+        "body": f"retrying to fix {root_ref} after another failure",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d.get("error"), d
+    assert "serial-recovery stop" in d["error"]
+    assert "Operator" in d["error"]
+
+
+def test_create_allows_normal_card_without_recovery_reference(worker_env):
+    """Control: a card with no root-task-id reference in title/body is never
+    subject to the serial-recovery-stop guard."""
+    from tools import kanban_tools as kt
+
+    out = kt._handle_create({
+        "title": "normal card",
+        "body": "just a regular task, no recovery loop involved",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+
+def test_create_allows_legitimate_followup_that_merely_cites_the_id(worker_env):
+    """Cross-family review finding 4: a legitimate follow-up (e.g. an audit or
+    doc card) that merely CITES a task id with superseded history — but reads
+    nothing like a recovery attempt — must NOT be blocked, even though 2
+    superseded predecessors referencing that id already exist. The guard only
+    fires when the NEW card itself carries recovery vocabulary."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_cafef00d"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"recovery attempt {i}",
+                body=f"recovering root {root_ref} after failure",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "document lessons learned",
+        "body": f"write up what we learned while {root_ref} was in flight",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+
+
+def test_create_serial_recovery_like_pattern_does_not_match_wrong_separator(
+    worker_env,
+):
+    """Cross-family review finding 4(b): the LIKE match must be ESCAPEd — a
+    bare ``%t_deadbeef%`` would also match ``tXdeadbeef`` (SQL LIKE's ``_`` is
+    a single-char wildcard), false-positiving the stop on an unrelated id."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"recovery attempt {i}",
+                body="recovering root tXdeadbeef after failure",  # NOT t_deadbeef
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "recovery attempt for a different root",
+        "body": "retrying t_deadbeef after failure",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+
+
+def test_create_allows_recovery_when_only_one_superseded_predecessor(worker_env):
+    """Control: a single SUPERSEDED predecessor is not enough to trip the
+    stop — the threshold is >=2."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_beefdead"
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn, title="recovery attempt 0",
+            body=f"recovering root {root_ref} after failure",
+            assignee="peer", created_by="test-worker",
+        )
+        kb.claim_task(conn, tid)
+        assert kb.block_task(conn, tid, reason="SUPERSEDED: recovery-loop stop")
+        assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "second recovery attempt",
+        "body": f"still trying to fix {root_ref}",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+
+def test_recovery_marker_regex_matches_retry_inflections():
+    """Fix 3a (cross-family review, 2026-07-17 pass 3): the previous
+    ``retr(?:y|ies|ied)`` inner group missed "retrying" — \\b immediately
+    after matching "retry" failed between "y" and "i" (both word chars).
+    ``retr(?:y\\w*|ies|ied)`` must catch every retry inflection."""
+    from tools import kanban_tools as kt
+
+    for word in ("retry", "retries", "retried", "retrying"):
+        assert kt._RECOVERY_MARKER_RE.search(word), word
+    for word in ("re-dispatch", "redispatch", "recovery", "recovering"):
+        assert kt._RECOVERY_MARKER_RE.search(word), word
+
+
+def test_create_serial_recovery_ignores_non_recovery_predecessors(worker_env):
+    """Fix 3b: the predecessor card itself must read as a recovery attempt —
+    two superseded AUDIT-style predecessors that merely CITE the root id (an
+    incident writeup, not a recovery attempt) must NOT count toward the
+    threshold and must not block the first genuine recovery card."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_ab00cd11"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"audit follow-up {i}",
+                body=f"documenting the incident around {root_ref} for the record",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "first genuine recovery attempt",
+        "body": f"retrying {root_ref} after another failure",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+
+
+def test_create_serial_recovery_stops_when_predecessors_are_genuine_recoveries(
+    worker_env,
+):
+    """Fix 3b control: two superseded predecessors that DO read as recovery
+    attempts still trip the stop (unchanged behaviour, guards against an
+    over-broad fix that never counts anything)."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_00aa11bb"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"retrying {root_ref} attempt {i}",
+                body=f"retrying {root_ref} once more",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "third recovery attempt",
+        "body": f"retrying {root_ref} yet again",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d.get("error"), d
+    assert "serial-recovery stop" in d["error"]
+
+
 def test_create_project_passthrough(worker_env):
     """Regression for the v0.18 upstream merge (413638a28) dropping
     kanban_create's ``project`` arg: kb.create_task has taken ``project_id``
