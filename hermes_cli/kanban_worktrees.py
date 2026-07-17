@@ -3830,10 +3830,12 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
         source = Path(f)
         rel_dir = str(source.parent)
         candidate = Path("tests") / rel_dir / f"test_{name}"
-        if (repo_root / candidate).is_file():
+        one_to_one_exists = (repo_root / candidate).is_file()
+        if one_to_one_exists:
             modules.add(str(candidate))
-        modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
-        if not (repo_root / candidate).is_file():
+        siblings = _feature_named_sibling_tests(repo_root, rel_dir, source)
+        modules.update(siblings)
+        if not one_to_one_exists and not siblings:
             pkg_test_dir = Path("tests") / rel_dir
             if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
                 # Cap: if the directory has too many test files, downgrade to
