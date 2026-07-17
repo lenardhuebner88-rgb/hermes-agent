@@ -14464,9 +14464,11 @@ def release_uireal_root(
 ) -> bool:
     """Release a ui-real PlanSpec root held in scheduled state into todo.
 
-    The root still waits on its child parents; this only records explicit
-    operator intent and lets child-release paths proceed without recompute_ready
-    auto-releasing ui-real roots.
+    Mirrors :func:`release_freigabe_hold`: flips the root ``scheduled`` ->
+    ``todo`` and then promotes the held chain members (``scheduled`` ->
+    ``ready``/``todo`` via :func:`unblock_task` + :func:`recompute_ready`) so
+    the chain actually dispatches, instead of only recording operator intent
+    on the root while its children stay parked in ``scheduled`` forever.
     """
     with write_txn(conn):
         row = conn.execute(
@@ -14479,17 +14481,35 @@ def release_uireal_root(
             _append_event(
                 conn, task_id, "uireal_released", {"author": author, "idempotent": True}
             )
-            return True
-        if row["status"] != "scheduled":
+            released = True
+        elif row["status"] != "scheduled":
             return False
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
-            return False
-        _append_event(conn, task_id, "uireal_released", {"author": author})
-        return True
+        else:
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
+                (task_id,),
+            )
+            if cur.rowcount != 1:
+                return False
+            _append_event(conn, task_id, "uireal_released", {"author": author})
+            released = True
+    if not released:
+        return False
+    # Release the held chain members OUTSIDE the root write_txn — unblock_task and
+    # recompute_ready open their own write_txns (nested write_txn is a documented
+    # pitfall). Same pattern as release_freigabe_hold: walk the full chain, not
+    # just the root's direct parents.
+    chain_member_ids = [
+        tid for tid in _chain_member_ids_from_sink(conn, task_id) if tid != task_id
+    ]
+    for child_id in chain_member_ids:
+        child = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (child_id,)
+        ).fetchone()
+        if child is not None and child["status"] == "scheduled":
+            unblock_task(conn, child_id)
+    recompute_ready(conn)
+    return True
 
 
 def _release_freigabe_hold_root_in_txn(

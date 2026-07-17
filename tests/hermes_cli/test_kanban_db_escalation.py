@@ -646,6 +646,34 @@ def test_release_freigabe_hold_releases_transitive_chain_members(kanban_home):
         assert kb.get_task(conn, review).status == "todo"
 
 
+def test_release_uireal_root_promotes_scheduled_chain_members(kanban_home):
+    # S1 regression: release_uireal_root only flipped the root scheduled->todo
+    # and left the chain's scheduled children stranded forever (recompute_ready
+    # never auto-releases ui-real roots' children by design). Must mirror
+    # release_freigabe_hold: promote held children via unblock_task +
+    # recompute_ready too, so the chain actually dispatches after release.
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="ui-real root", triage=True)
+        build = kb.create_task(conn, title="build", assignee="premium")
+        review = kb.create_task(conn, title="review", assignee="reviewer", parents=[build])
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (review, root))
+            conn.execute(
+                "UPDATE tasks SET live_test_depth='ui-real', status='scheduled' WHERE id = ?",
+                (root,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='scheduled' WHERE id IN (?, ?)",
+                (build, review),
+            )
+
+        assert kb.release_uireal_root(conn, root, author="pytest") is True
+
+        assert kb.get_task(conn, root).status == "todo"
+        assert kb.get_task(conn, build).status == "ready"
+        assert kb.get_task(conn, review).status == "todo"
+
+
 def test_decompose_failure_is_transient_pure_rule():
     # HEILER-DECOMPOSE-FALLBACK-S1: pure classifier that tells a transient/infra
     # decompose failure (aux client down, LLM error, benign race) from a genuine
