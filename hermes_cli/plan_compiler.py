@@ -612,6 +612,10 @@ def taskgraph_hints_to_children(
                 "Scope files (allowed edit paths):\n"
                 + "\n".join(task.scope_files)
             )
+            body_parts.append(
+                "Tests und Schemas der genannten Komponenten sind implizit im "
+                "Scope (additiv)."
+            )
         if task.instructions.strip():
             body_parts.append("Instructions:\n" + task.instructions.strip())
         # Thread AC bullets into the body for backwards-readable task bodies,

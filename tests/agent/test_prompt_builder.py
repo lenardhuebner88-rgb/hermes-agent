@@ -54,6 +54,25 @@ class TestGuidanceConstants:
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
 
+    def test_kanban_guidance_covers_implicit_test_schema_scope(self):
+        """S9a — workers must not `kanban_block(needs_input)` over additive
+        test/schema edits to components already in their scope list."""
+        from agent.prompt_builder import KANBAN_GUIDANCE
+
+        assert "IMPLICITLY in scope" in KANBAN_GUIDANCE
+        assert "TEST files and SCHEMA/type files" in KANBAN_GUIDANCE
+        assert "needs_input" in KANBAN_GUIDANCE
+
+    def test_kanban_guidance_defers_ui_screenshots_to_chain_end(self):
+        """Live incident t_099b42d4 — a worker with no authenticated dashboard
+        access must complete (code gates green) instead of blocking with
+        block_kind='capability' over a per-slice screenshot AC."""
+        from agent.prompt_builder import KANBAN_GUIDANCE
+
+        assert "UI screenshots or visual acceptance" in KANBAN_GUIDANCE
+        assert "don't block either" in KANBAN_GUIDANCE
+        assert "ui-real" in KANBAN_GUIDANCE
+
 
 # =========================================================================
 # Context injection scanning

@@ -1741,6 +1741,30 @@ def test_default_scope_contract_anti_scope_includes_parent_negation_line():
     assert "no unrelated cleanup" in rendered
 
 
+def test_rendered_scope_contract_carries_implicit_test_schema_scope_when_allowed_paths_present():
+    """S9a — the rendered contract text must tell the worker that tests/schemas
+    of the allowed components are implicitly in scope too, next to allowed_paths,
+    but only when there actually are allowed_paths to speak of."""
+    parent = _task_stub(
+        "t_parent",
+        "Read /home/piet/.hermes/config.yaml for context.",
+    )
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    assert contract["scope_contract"]["allowed_paths"]
+    rendered = decomp._render_scope_contract_yaml(contract)
+    assert "implizit im Scope (additiv)" in rendered
+
+
+def test_rendered_scope_contract_omits_implicit_scope_line_without_allowed_paths():
+    parent = _task_stub("t_parent", "Build the thing.")
+    child = {"title": "build", "body": "", "assignee": "coder"}
+    contract = decomp._default_worker_scope_contract(child, parent_task=parent)
+    assert contract["scope_contract"]["allowed_paths"] == []
+    rendered = decomp._render_scope_contract_yaml(contract)
+    assert "implizit im Scope (additiv)" not in rendered
+
+
 # ---------------------------------------------------------------------------
 # Codex review of ad9cbe8f1 — negation-only paths must not leak into
 # allowed_paths; LLM-authored contracts must get anti_scope backfilled.
