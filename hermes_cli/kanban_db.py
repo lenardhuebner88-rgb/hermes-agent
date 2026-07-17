@@ -26433,15 +26433,13 @@ def _launch_worker_process(spec: _worker_runtime.WorkerLaunchSpec) -> int:
     _rotate_worker_log(spec.log_path, rotate_bytes, backup_count)
     log_f = open(spec.log_path, "ab")
     try:
-        argv = [_sanitize_spawn_text(arg) for arg in spec.argv]
-        env = {key: _sanitize_spawn_text(value) for key, value in spec.env.items()}
         proc = subprocess.Popen(  # noqa: S603 -- argv is a resolved fixed list
-            _maybe_scope_worker_cmd(argv),
+            _maybe_scope_worker_cmd(list(spec.argv)),
             cwd=spec.cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_f,
             stderr=subprocess.STDOUT,
-            env=env,
+            env=dict(spec.env),
             start_new_session=True,
             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
         )

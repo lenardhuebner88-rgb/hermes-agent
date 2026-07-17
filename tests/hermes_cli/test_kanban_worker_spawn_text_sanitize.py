@@ -76,68 +76,6 @@ class TestSanitizeSpawnText:
 
 
 # ---------------------------------------------------------------------------
-# Integration: the sole Popen choke point sanitizes argv and env values
-# ---------------------------------------------------------------------------
-
-
-def test_launch_worker_process_sanitizes_argv_and_env_values(tmp_path, monkeypatch):
-    import subprocess
-
-    kb = _import_kanban_db()
-    corrupted_env = {
-        "HERMES_KANBAN_BRANCH": "worker/t_\x00fc-fix",
-        "HERMES_HOME": str(tmp_path / ".hermes"),
-        "HERMES_KANBAN_WORKSPACE": "worktree/\tkeep\nline\r/ü-€",
-    }
-
-    # Regression proof: this is the exact ValueError raised by real Popen
-    # when a live-format worker env value contains an embedded NUL.
-    with pytest.raises(ValueError, match="embedded null byte"):
-        subprocess.Popen(
-            ["/bin/true"],
-            env=corrupted_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-    captured = {}
-
-    def _popen_spy(cmd, **kwargs):
-        env = kwargs["env"]
-        if any("\x00" in arg for arg in cmd) or any(
-            "\x00" in value for value in env.values()
-        ):
-            raise ValueError("embedded null byte")
-        captured["argv"] = cmd
-        captured["env"] = env
-
-        class _FakeProc:
-            pid = 9912
-
-        return _FakeProc()
-
-    monkeypatch.setattr("subprocess.Popen", _popen_spy)
-    monkeypatch.setattr(kb, "_maybe_scope_worker_cmd", lambda cmd: cmd)
-    spec = kb._worker_runtime.WorkerLaunchSpec(
-        argv=("/bin/true", "--branch", "worker/t_\x00fc-fix"),
-        env=corrupted_env,
-        cwd=None,
-        log_path=tmp_path / "worker.log",
-        missing_executable_message="/bin/true missing",
-    )
-
-    assert kb._launch_worker_process(spec) == 9912
-    assert all("\x00" not in arg for arg in captured["argv"])
-    assert all("\x00" not in value for value in captured["env"].values())
-    assert captured["argv"][-1] == "worker/t_fc-fix"
-    assert captured["env"]["HERMES_KANBAN_BRANCH"] == "worker/t_fc-fix"
-    assert (
-        captured["env"]["HERMES_KANBAN_WORKSPACE"]
-        == "worktree/\tkeep\nline\r/ü-€"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Integration: a NUL-carrying task body must not fail the claude-cli spawn
 # ---------------------------------------------------------------------------
 
