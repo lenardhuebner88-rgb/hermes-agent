@@ -802,6 +802,28 @@ export const de = {
     detailAgents: "Agents",
     detailNoAgents: "Keine Agents an diesem Projekt.",
     detailOpenAria: (name: string) => `Projekt ${name} öffnen`,
+    // Sessions sichtbar & killbar (2026-07-17)
+    summaryLive: (n: number) => `${n} live`,
+    summaryCheckins: (n: number) => `${n} ${n === 1 ? "Check-in" : "Check-ins"}`,
+    summaryBlocked: (n: number) => `${n} blockiert`,
+    summaryNeedsInput: (n: number) => `${n} Input`,
+    sessionsSection: "Sessions",
+    checkinsSection: "Check-ins",
+    liveCount: (n: number) => `${n} live`,
+    claimTag: "Check-in",
+    claimKind: "Claim, kein Prozess",
+    tmuxWindow: "tmux-Fenster",
+    runsFor: "läuft seit",
+    killSessionAria: (label: string) => `Session ${label} beenden`,
+    killSheetEyebrow: "Sessions",
+    killSheetTitle: "Session beenden?",
+    killSheetWarning:
+      "Das tmux-Fenster wird geschlossen — der Prozess endet sofort. Ungespeicherte Arbeit geht verloren.",
+    killSheetCancel: "Abbrechen",
+    killSheetConfirm: "Session beenden",
+    killSheetBusy: "Beende …",
+    killSheetError: "Session konnte nicht beendet werden.",
+    killSheetHint: "Check-ins (Vault-Claims) lassen sich nicht killen — nur echte tmux-Prozesse.",
     // Stufe 7 — Attention-Ampel (Karte: Dot + aria/title)
     attentionLabel: {
       alert: "Aufmerksamkeit: blockiert",

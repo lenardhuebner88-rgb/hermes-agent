@@ -7,9 +7,11 @@ import {
   groupAgentsByKind,
   groupAgentsByProject,
   kanbanTaskTone,
+  killTarget,
   loopOutcomeTone,
   parentDisplayName,
   sortProjectsByAttention,
+  splitAgentsBySource,
   type ProjectAttention,
 } from "./derive";
 import type { ProjectEntry } from "../../lib/schemas";
@@ -344,5 +346,77 @@ describe("attentionTone", () => {
     for (const [attention, tone] of cases) {
       expect(attentionTone(attention)).toBe(tone);
     }
+  });
+});
+
+// ── Sessions sichtbar & killbar (2026-07-17) ───────────────────────────────
+
+describe("killTarget", () => {
+  it("returns (session, window) from the structured fields on tmux rows", () => {
+    const parsed = parseOrThrow(ProjectsAgentsResponseSchema, {
+      generated_at: 1,
+      errors: [],
+      agents: [
+        {
+          kind: "kimi",
+          label: "work:2 kimi",
+          task: null,
+          project: "hermes-infra",
+          since: 1,
+          source: "tmux",
+          tmux_session: "work",
+          tmux_window: "2",
+        },
+      ],
+    }, "test");
+    expect(killTarget(parsed.agents[0])).toEqual({ session: "work", window: "2" });
+  });
+
+  it("refuses coordination claims even if someone smuggles fields in", () => {
+    expect(
+      killTarget({ source: "coordination", tmux_session: "work", tmux_window: "2" }),
+    ).toBeNull();
+  });
+
+  it("refuses tmux rows without structured fields (old backend payload)", () => {
+    // The REAL_AGENTS_PAYLOAD fixture predates the fields → all null after parse.
+    const parsed = parseOrThrow(ProjectsAgentsResponseSchema, REAL_AGENTS_PAYLOAD, "test");
+    for (const agent of parsed.agents) {
+      expect(killTarget(agent)).toBeNull();
+    }
+  });
+
+  it("refuses blank/whitespace-only session or window", () => {
+    expect(killTarget({ source: "tmux", tmux_session: "  ", tmux_window: "2" })).toBeNull();
+    expect(killTarget({ source: "tmux", tmux_session: "work", tmux_window: "" })).toBeNull();
+  });
+});
+
+describe("splitAgentsBySource", () => {
+  it("separates real tmux processes from vault claims, preserving order", () => {
+    const parsed = parseOrThrow(ProjectsAgentsResponseSchema, REAL_AGENTS_PAYLOAD, "test");
+    const { live, claims } = splitAgentsBySource(parsed.agents);
+    expect(live.map((a) => a.label)).toEqual(["work:2 kimi", "review:1 claude", "odd pane"]);
+    // The fixture has no coordination row; kanban/loop are excluded by design.
+    expect(claims).toEqual([]);
+  });
+
+  it("keeps coordination claims and only those as check-ins", () => {
+    const parsed = parseOrThrow(ProjectsAgentsResponseSchema, {
+      generated_at: 1,
+      errors: [],
+      agents: [
+        { kind: "claude", label: "2026-07-17_x_claude_claim", task: "A", project: "p", since: 1, source: "coordination" },
+        { kind: "kanban", label: "t_1", task: "B", project: "p", since: 1, source: "kanban" },
+        { kind: "loop", label: "pack", task: null, project: null, since: 1, source: "loop" },
+      ],
+    }, "test");
+    const { live, claims } = splitAgentsBySource(parsed.agents);
+    expect(live).toEqual([]);
+    expect(claims.map((a) => a.label)).toEqual(["2026-07-17_x_claude_claim"]);
+  });
+
+  it("handles an empty list", () => {
+    expect(splitAgentsBySource([])).toEqual({ live: [], claims: [] });
   });
 });
