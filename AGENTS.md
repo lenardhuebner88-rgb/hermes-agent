@@ -114,7 +114,9 @@ scripts/gate-frontend.sh
 ```
 
 Run targeted/affected checks interactively; the full suite is the nightly path.
-Use repository wrappers rather than bare pytest. Frontend proof requires
+Use repository wrappers rather than bare pytest. In worktrees NEVER bare
+`python`/`pytest` — there is no venv there; the wrappers resolve the
+interpreter (this is the #1 first-stumble for new workers). Frontend proof requires
 `tsc -b` through the gate; do not trust bare `tsc --noEmit`, no-op typecheck
 scripts, or pipe chains that swallow the producer's exit status. Prefer behavior
 and invariants over snapshots or counts of expected-to-change catalogs.
