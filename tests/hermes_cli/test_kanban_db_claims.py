@@ -495,6 +495,105 @@ def test_stale_claim_deferred_when_live_worker_survives_termination(
         assert "reclaimed" not in kinds
 
 
+def test_manual_reclaim_deferred_when_live_worker_survives_termination(
+    kanban_home, monkeypatch,
+):
+    """Manual ``reclaim_task`` must NOT free a task whose worker survives.
+
+    If the SIGTERM/SIGKILL flow cannot confirm the process group is gone
+    (D-state throttle, kill error), releasing the claim would let a
+    replacement worker claim the task beside the still-alive survivor.
+    Ownership (claim_lock, worker_pid, pending-exit marker) must be held
+    and the run must stay open for later safe reaping.
+    """
+    import hermes_cli.kanban_db as _kb
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="wedged", assignee="a")
+        host = _kb._claimer_id().split(":", 1)[0]
+        claimed = kb.claim_task(conn, t, claimer=f"{host}:worker")
+        assert claimed is not None
+        run_id = claimed.current_run_id
+        kb._set_worker_pid(conn, t, 12345)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET continuation_pending_exit_run_id = ? "
+                "WHERE id = ?",
+                (run_id, t),
+            )
+
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
+        monkeypatch.setattr(
+            _kb, "_terminate_reclaimed_worker",
+            lambda *a, **k: {
+                "termination_attempted": True,
+                "host_local": True,
+                "terminated": False,
+            },
+        )
+
+        assert kb.reclaim_task(conn, t, reason="operator abort") is False
+
+        task = kb.get_task(conn, t)
+        assert task.status == "running"
+        assert task.worker_pid == 12345
+        assert task.claim_lock == f"{host}:worker"
+        assert task.continuation_pending_exit_run_id == run_id
+
+        # The run must not be closed as reclaimed while the worker lives.
+        run_row = conn.execute(
+            "SELECT status, ended_at FROM task_runs WHERE id = ?", (run_id,),
+        ).fetchone()
+        assert run_row["ended_at"] is None
+        assert run_row["status"] == "running"
+
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (t,),
+            ).fetchall()
+        ]
+        assert "reclaim_deferred" in kinds
+        assert "reclaimed" not in kinds
+
+        # A replacement worker must not be able to claim the task.
+        assert kb.claim_task(conn, t, claimer=f"{host}:replacement") is None
+
+
+def test_manual_reclaim_still_releases_confirmed_dead_worker(
+    kanban_home, monkeypatch,
+):
+    """Confirmed-dead termination keeps the normal manual reclaim path."""
+    import hermes_cli.kanban_db as _kb
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="dead worker", assignee="a")
+        host = _kb._claimer_id().split(":", 1)[0]
+        assert kb.claim_task(conn, t, claimer=f"{host}:worker") is not None
+        kb._set_worker_pid(conn, t, 12345)
+        monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+        monkeypatch.setattr(
+            _kb, "_terminate_reclaimed_worker",
+            lambda *a, **k: {
+                "termination_attempted": True,
+                "host_local": True,
+                "terminated": True,
+            },
+        )
+
+        assert kb.reclaim_task(conn, t, reason="operator abort") is True
+
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.worker_pid is None
+        kinds = [
+            r["kind"] for r in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?", (t,),
+            ).fetchall()
+        ]
+        assert "reclaimed" in kinds
+
+
 def test_stale_claim_reclaimed_when_termination_succeeds(
     kanban_home, monkeypatch,
 ):

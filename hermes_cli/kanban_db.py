@@ -10099,7 +10099,10 @@ def reclaim_task(
     for the TTL to expire (e.g. after seeing a hallucination warning).
 
     Returns True if a reclaim happened, False if the task isn't in a
-    reclaimable state (not running, or doesn't exist).
+    reclaimable state (not running, or doesn't exist) or the worker's
+    process group survived termination — in that case the claim is held
+    (``reclaim_deferred`` event) so no replacement worker can spawn
+    beside the survivor.
     """
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
@@ -10116,6 +10119,21 @@ def reclaim_task(
         prev_lock,
         signal_fn=signal_fn,
     )
+    # Never release a claim whose worker group is not confirmed absent:
+    # setting 'ready' here would let a replacement worker claim the task
+    # beside the still-alive survivor. Hold ownership (claim_lock,
+    # worker_pid, pending-exit marker) and record the deferral instead;
+    # the operator can retry once the group is actually gone.
+    if _worker_survived_termination(termination):
+        _defer_reclaim_for_live_worker(
+            conn,
+            task_id,
+            prev_lock,
+            int(time.time()),
+            termination,
+            reason="manual_reclaim_worker_alive",
+        )
+        return False
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'ready', claim_lock = NULL, "

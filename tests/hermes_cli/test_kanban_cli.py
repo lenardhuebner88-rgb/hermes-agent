@@ -900,11 +900,18 @@ def test_kanban_not_gateway_only():
 # reclaim + reassign CLI smoke tests
 # ---------------------------------------------------------------------------
 
-def test_run_slash_reclaim_running_task(kanban_home):
+def test_run_slash_reclaim_running_task(kanban_home, monkeypatch):
     import re
     import time
     import secrets
     from hermes_cli import kanban_db as kb
+
+    # Bare hex lock is not host-local, so the real termination probe cannot
+    # confirm the fake worker died; stub the canonical confirmed-dead shape.
+    monkeypatch.setattr(
+        kb, "_terminate_reclaimed_worker",
+        lambda *a, **k: {"terminated": True},
+    )
 
     out1 = kc.run_slash("create 'stuck worker task' --assignee broken-model")
     m = re.search(r"(t_[a-f0-9]+)", out1)
@@ -938,11 +945,18 @@ def test_run_slash_reclaim_running_task(kanban_home):
     assert "ready" in out2.lower()
 
 
-def test_run_slash_reassign_with_reclaim_flag(kanban_home):
+def test_run_slash_reassign_with_reclaim_flag(kanban_home, monkeypatch):
     import re
     import time
     import secrets
     from hermes_cli import kanban_db as kb
+
+    # Same as test_run_slash_reclaim_running_task: fake worker must read as
+    # confirmed dead or the survivor fence now refuses the reclaim.
+    monkeypatch.setattr(
+        kb, "_terminate_reclaimed_worker",
+        lambda *a, **k: {"terminated": True},
+    )
 
     out1 = kc.run_slash("create 'switch model' --assignee orig")
     m = re.search(r"(t_[a-f0-9]+)", out1)

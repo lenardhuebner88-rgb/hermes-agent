@@ -436,11 +436,21 @@ def test_reassign_task_refuses_running_without_reclaim_first(kanban_home):
         conn.close()
 
 
-def test_reassign_task_with_reclaim_first_switches_profile(kanban_home):
+def test_reassign_task_with_reclaim_first_switches_profile(
+    kanban_home, monkeypatch,
+):
     """With ``reclaim_first=True``, a running task is reclaimed and
     reassigned in one operation."""
     import time
     import secrets
+    # The fabricated claim uses a bare hex lock (not host-local), so the
+    # real termination probe cannot confirm the fake worker is gone; stub
+    # the canonical confirmed-dead shape — termination itself is not what
+    # this test exercises.
+    monkeypatch.setattr(
+        kb, "_terminate_reclaimed_worker",
+        lambda *a, **k: {"terminated": True},
+    )
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="switch me", assignee="orig")
@@ -882,10 +892,16 @@ def test_detect_crashed_workers_nonzero_exit_uses_default_limit(kanban_home):
         conn.close()
 
 
-def test_reclaim_task_clears_failure_counter(kanban_home):
+def test_reclaim_task_clears_failure_counter(kanban_home, monkeypatch):
     """Operator reclaim wipes the counter so the next retry gets a fresh
     budget."""
     import secrets
+    # Bare hex lock is not host-local — stub the canonical confirmed-dead
+    # termination shape so the reclaim path under test can proceed.
+    monkeypatch.setattr(
+        kb, "_terminate_reclaimed_worker",
+        lambda *a, **k: {"terminated": True},
+    )
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="stuck", assignee="worker")
