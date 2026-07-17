@@ -40,8 +40,10 @@ describe("SystemHealthStrip", () => {
     const errorHtml = renderToStaticMarkup(
       <OfflineStaleBanner health={{ data: baseHealth, error: "network down", lastUpdated: 99, pollIntervalMs: 10000 }} />,
     );
+    // lastUpdated must be AGE_ALARM_S (300s) behind the mocked clock.now=100:
+    // sub-alarm age-stale is silent since 2026-07-17 (Operator-Entscheid).
     const ageStaleHtml = renderToStaticMarkup(
-      <OfflineStaleBanner health={{ data: baseHealth, error: null, lastUpdated: 0, pollIntervalMs: 10000 }} />,
+      <OfflineStaleBanner health={{ data: baseHealth, error: null, lastUpdated: -300, pollIntervalMs: 10000 }} />,
     );
 
     expect(errorHtml).toContain(de.staleBanner.fetchError);

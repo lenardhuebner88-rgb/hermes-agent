@@ -8,6 +8,17 @@ import { ATTEMPT_DEADLINE_MS, getAttemptState } from "../hooks/pollingStore";
 /** Seconds the tab must stay visible before age-stale alone shows the banner. */
 export const REFOCUS_GRACE_S = 12;
 
+/**
+ * Age-only staleness (no fetch error, no in-flight attempt) is a soft signal:
+ * on mobile, Android throttles WebView timers even while the page looks
+ * visible, so a 15s poll routinely drifts past the freshness threshold with
+ * nothing actually broken — the store self-heals on the next tick/resume
+ * (Operator-Entscheid 2026-07-17: dieser Fall soll nicht mehr alarmieren).
+ * Only a genuinely dead poll — minutes without success — earns the banner.
+ * Fetch errors and explicit isStale remain immediate below.
+ */
+export const AGE_ALARM_S = 300;
+
 /** Poll key used by useSystemHealth — attempt state is read non-notifying. */
 const HEALTH_POLL_KEY = "health-status";
 
@@ -43,6 +54,8 @@ export function OfflineStaleBanner({ health }: {
   const ageStaleVisible =
     ageStale &&
     !legalPendingRefresh &&
+    health.lastUpdated != null &&
+    clientNow - health.lastUpdated >= AGE_ALARM_S &&
     visibleSince != null &&
     clientNow - visibleSince >= REFOCUS_GRACE_S;
   const visible = Boolean(health.error || health.isStale || ageStaleVisible);

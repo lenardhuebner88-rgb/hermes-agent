@@ -3,7 +3,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SystemHealthResponse } from "../lib/types";
 import { de } from "../i18n/de";
-import { OfflineStaleBanner, REFOCUS_GRACE_S } from "./OfflineStaleBanner";
+import { AGE_ALARM_S, OfflineStaleBanner, REFOCUS_GRACE_S } from "./OfflineStaleBanner";
 import { ATTEMPT_DEADLINE_MS, subscribe, _resetPollingStore } from "../hooks/pollingStore";
 
 const clock = vi.hoisted(() => ({ now: 100, visibleSince: 0 as number | null }));
@@ -70,10 +70,31 @@ describe("OfflineStaleBanner refocus grace", () => {
     expect(screen.queryByText(de.staleBanner.pausedOrStale)).toBeNull();
   });
 
-  it("renders age-stale with pausedOrStale once visible for at least the refocus grace", () => {
+  it("renders age-stale with pausedOrStale only once age reaches the alarm threshold", () => {
+    clock.now = 1_700_000_100;
     clock.visibleSince = clock.now - REFOCUS_GRACE_S;
-    render(<OfflineStaleBanner health={ageStaleHealth()} />);
+    vi.setSystemTime(new Date(clock.now * 1000));
+    render(
+      <OfflineStaleBanner
+        health={ageStaleHealth({ lastUpdated: clock.now - AGE_ALARM_S })}
+      />,
+    );
     expect(screen.getByText(de.staleBanner.pausedOrStale)).toBeTruthy();
+  });
+
+  it("stays silent for sub-alarm age-stale (mobile timer drift, e.g. 54s)", () => {
+    // Operator-Entscheid 2026-07-17: Android throttles WebView timers even on
+    // a visible page, so ~1min drift is normal life, not an incident.
+    clock.now = 1_700_000_100;
+    clock.visibleSince = clock.now - REFOCUS_GRACE_S - 60; // grace long elapsed
+    vi.setSystemTime(new Date(clock.now * 1000));
+    const { container } = render(
+      <OfflineStaleBanner
+        health={ageStaleHealth({ lastUpdated: clock.now - 54 })}
+      />,
+    );
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(de.staleBanner.pausedOrStale)).toBeNull();
   });
 
   it("renders fetch-error immediately even within the refocus grace", () => {
@@ -104,12 +125,12 @@ describe("OfflineStaleBanner refocus grace", () => {
     expect(screen.getByText(de.staleBanner.stale)).toBeTruthy();
   });
 
-  it("keeps the 65s-hidden / 12s-grace path green (no in-flight attempt)", () => {
+  it("mobile return with 65s age stays silent (below alarm threshold)", () => {
     // Simulated mobile return: last success 65s ago, visible for exactly the grace.
     clock.now = 1_700_000_100;
     clock.visibleSince = clock.now - REFOCUS_GRACE_S;
     vi.setSystemTime(new Date(clock.now * 1000));
-    render(
+    const { container } = render(
       <OfflineStaleBanner
         health={ageStaleHealth({
           lastUpdated: clock.now - 65,
@@ -117,7 +138,7 @@ describe("OfflineStaleBanner refocus grace", () => {
         })}
       />,
     );
-    expect(screen.getByText(de.staleBanner.pausedOrStale)).toBeTruthy();
+    expect(container.firstChild).toBeNull();
   });
 });
 
@@ -148,7 +169,7 @@ describe("OfflineStaleBanner legal pending refresh", () => {
     expect(screen.queryByText(de.staleBanner.pausedOrStale)).toBeNull();
   });
 
-  it("shows age-stale when grace elapsed and no in-flight attempt", () => {
+  it("shows age-stale when the poll is truly dead (alarm age, no in-flight attempt)", () => {
     clock.now = 1_700_000_100;
     clock.visibleSince = clock.now - REFOCUS_GRACE_S;
     vi.setSystemTime(new Date(clock.now * 1000));
@@ -156,7 +177,7 @@ describe("OfflineStaleBanner legal pending refresh", () => {
     render(
       <OfflineStaleBanner
         health={ageStaleHealth({
-          lastUpdated: clock.now - 65,
+          lastUpdated: clock.now - AGE_ALARM_S - 5,
           pollIntervalMs: POLL_MS,
         })}
       />,
@@ -218,10 +239,11 @@ describe("OfflineStaleBanner legal pending refresh", () => {
     clock.now += deadlineS;
     vi.setSystemTime(new Date(clock.now * 1000));
     // Attempt still "in flight" in the store, but past deadline → not legal.
+    // Age must also be past the alarm threshold for the banner to show at all.
     render(
       <OfflineStaleBanner
         health={ageStaleHealth({
-          lastUpdated: clock.now - 65 - deadlineS,
+          lastUpdated: clock.now - AGE_ALARM_S - 5,
           pollIntervalMs: POLL_MS,
         })}
       />,
