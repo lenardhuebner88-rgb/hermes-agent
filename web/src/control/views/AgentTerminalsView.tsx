@@ -1314,7 +1314,9 @@ export function AgentTerminalsView() {
   }, [sessionSheetOpen, selectedWindow]);
 
   const fetchOverview = useCallback(async () => {
-    setOverviewLoading(true);
+    // "lädt…" nur beim Erstladen zeigen: der 5s-Hintergrund-Refresh würde die
+    // Kopfzeile sonst im Sekundentakt flackern lassen (2 Renders pro Tick).
+    if (overviewJsonRef.current === "") setOverviewLoading(true);
     try {
       const response = await api.getAgentTerminalOverview();
       // Skip setOverview when payload is unchanged (pollingStore payloadJson pattern).
