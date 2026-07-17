@@ -418,4 +418,32 @@ test.describe("Frage-Assistent Antwort-Sheet", () => {
     expect(post.postDataJSON()).toEqual({ answer: "1", answered_by: "operator" });
     expect(mocks.posts.map((p) => p.id)).toEqual([201]);
   });
+
+  test("E: deep-link ?question=<id> opens AnswerSheet on that event (I3)", async ({
+    page,
+  }) => {
+    await installBaseMocks(page);
+    await installQuestionMocks(page, [Q101, Q102]);
+
+    // Direct navigation with query param (push URL used by web-push).
+    const response = await page.goto("/control/agent-terminals?question=102", {
+      waitUntil: "domcontentloaded",
+    });
+    if (response && response.status() >= 400) {
+      await page.goto("/", { waitUntil: "domcontentloaded" });
+      await page.evaluate(() => {
+        window.history.pushState({}, "", "/control/agent-terminals?question=102");
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+    }
+
+    const sheet = page.getByTestId("answer-sheet");
+    await expect(sheet).toBeVisible({ timeout: 20_000 });
+    // Focused id=102 is head even though list is newest-first (101, 102).
+    await expect(sheet.getByText("E2E Frage B: Continue? (y/n)")).toBeVisible();
+    // Param consumed so reload does not re-open.
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("question"))
+      .toBeNull();
+  });
 });

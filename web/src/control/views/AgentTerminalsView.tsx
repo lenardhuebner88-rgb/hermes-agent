@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import type { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
@@ -313,7 +313,52 @@ export function AgentTerminalsView() {
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
   const agentQuestions = useAgentQuestions();
   const [answerSheetOpen, setAnswerSheetOpen] = useState(false);
+  const [answerFocusId, setAnswerFocusId] = useState<number | null>(null);
+  const [answerClosedHint, setAnswerClosedHint] = useState<string | null>(null);
   const openQuestions = agentQuestions.data?.questions ?? [];
+  /** Oldest open question ts for store-pill live age (I3). */
+  const oldestOpenTs = useMemo(() => {
+    if (openQuestions.length === 0) return null;
+    let best: string | null = null;
+    let bestMs = Infinity;
+    for (const q of openQuestions) {
+      const ms = Date.parse(q.ts);
+      if (!Number.isFinite(ms)) continue;
+      if (ms < bestMs) {
+        bestMs = ms;
+        best = q.ts;
+      }
+    }
+    return best ?? openQuestions[openQuestions.length - 1]?.ts ?? null;
+  }, [openQuestions]);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkConsumedRef = useRef(false);
+  // Deep-link ?question=<id> → open AnswerSheet focused on that event (I3).
+  useEffect(() => {
+    if (deepLinkConsumedRef.current) return;
+    const raw = searchParams.get("question");
+    if (raw == null || raw === "") return;
+    // Wait for first poll result so we know open vs closed.
+    if (agentQuestions.loading && agentQuestions.data == null) return;
+    deepLinkConsumedRef.current = true;
+    const id = Number(raw);
+    const next = new URLSearchParams(searchParams);
+    next.delete("question");
+    setSearchParams(next, { replace: true });
+    if (!Number.isFinite(id) || id <= 0) return;
+    const found = openQuestions.some((q) => q.id === id);
+    setAnswerFocusId(id);
+    setAnswerSheetOpen(true);
+    setAnswerClosedHint(
+      found ? null : "bereits beantwortet/abgelaufen",
+    );
+  }, [
+    searchParams,
+    setSearchParams,
+    agentQuestions.loading,
+    agentQuestions.data,
+    openQuestions,
+  ]);
   const visiblePaneCount: DesktopTerminalLayout = compactLayout ? 1 : desktopLayout;
   const paneTargets = useMemo<Array<PaneTarget | null>>(() => [target, ...extraTargets], [extraTargets, target]);
   const activeTarget = paneTargets[Math.min(activePane, visiblePaneCount - 1)] ?? target;
@@ -1485,24 +1530,6 @@ export function AgentTerminalsView() {
   }, [overview]);
   const selectedOverview = activeTarget ? overviewByKey.get(`${activeTarget.session}:${activeTarget.window}`) ?? null : null;
 
-  /** Windows currently in overview state "frage" — drives the strip summary pill. */
-  const frageWindows = useMemo(() => {
-    return orderedWindows.filter((win) => {
-      const entry = overviewByKey.get(`${win.session}:${win.window}`);
-      const state: AgentTerminalOverviewState = entry?.state ?? (isDeadWindow(win) ? "dead" : "idle");
-      return state === "frage";
-    });
-  }, [orderedWindows, overviewByKey]);
-
-  const jumpToNextFrage = useCallback(() => {
-    if (frageWindows.length === 0) return;
-    const activeKey = activeTarget ? `${activeTarget.session}:${activeTarget.window}` : null;
-    const currentIdx = frageWindows.findIndex((win) => `${win.session}:${win.window}` === activeKey);
-    // Not on a frage window → first; already on one → cycle to the next.
-    const next = frageWindows[(currentIdx + 1) % frageWindows.length];
-    if (next) selectPaneTarget(activePane, targetFromWindow(next));
-  }, [activePane, activeTarget, frageWindows, selectPaneTarget]);
-
   const sessionList = (
     <div className="flex h-full flex-col gap-3">
       <div className="flex items-center justify-between border-b border-line-soft pb-3">
@@ -1952,23 +1979,15 @@ export function AgentTerminalsView() {
         <ChevronLeft className="h-4 w-4" />
       </button>
       <div className="flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto px-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <QuestionPill count={openQuestions.length} onClick={() => setAnswerSheetOpen(true)} />
-        {frageWindows.length > 0 && (
-          <button
-            type="button"
-            data-testid="frage-summary-pill"
-            aria-label={frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
-            title={frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
-            onClick={jumpToNextFrage}
-            className="inline-flex shrink-0 items-center gap-1 self-center rounded-full border border-status-warn/40 bg-status-warn/10 px-2.5 py-1 text-[11px] font-medium text-status-warn"
-          >
-            <span className="relative grid h-1.5 w-1.5 shrink-0 place-items-center" aria-hidden>
-              <span className="absolute h-1.5 w-1.5 animate-ping rounded-full bg-status-warn/50" />
-              <span className="h-1.5 w-1.5 rounded-full bg-status-warn" />
-            </span>
-            {frageWindows.length === 1 ? "1 Frage" : `${frageWindows.length} Fragen`}
-          </button>
-        )}
+        <QuestionPill
+          count={openQuestions.length}
+          standingSinceTs={oldestOpenTs}
+          onClick={() => {
+            setAnswerFocusId(null);
+            setAnswerClosedHint(null);
+            setAnswerSheetOpen(true);
+          }}
+        />
         {orderedWindows.map((win) => {
           const active = activeTarget?.session === win.session && activeTarget.window === win.window;
           const dead = isDeadWindow(win);
@@ -2460,7 +2479,15 @@ export function AgentTerminalsView() {
             <div className="mt-1 flex flex-wrap items-center gap-2"><TerminalStatusChip state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <QuestionPill count={openQuestions.length} onClick={() => setAnswerSheetOpen(true)} />
+            <QuestionPill
+              count={openQuestions.length}
+              standingSinceTs={oldestOpenTs}
+              onClick={() => {
+                setAnswerFocusId(null);
+                setAnswerClosedHint(null);
+                setAnswerSheetOpen(true);
+              }}
+            />
             <button
               type="button"
               onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
@@ -2704,7 +2731,13 @@ export function AgentTerminalsView() {
       {answerSheetOpen && (
         <AnswerSheet
           questions={openQuestions}
-          onClose={() => setAnswerSheetOpen(false)}
+          focusId={answerFocusId}
+          closedHint={answerClosedHint}
+          onClose={() => {
+            setAnswerSheetOpen(false);
+            setAnswerFocusId(null);
+            setAnswerClosedHint(null);
+          }}
           reload={agentQuestions.reload}
           updateData={agentQuestions.updateData}
         />

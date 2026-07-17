@@ -101,6 +101,31 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
     window.localStorage.setItem(STORAGE_KEY, String(enabled));
   }, [enabled]);
 
+  // I3 visibility heartbeat: tell the agent-questions store that a /control
+  // tab is visible so open-question web-push is suppressed. Shared across all
+  // control surfaces (this component mounts in ControlShell).
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    let cancelled = false;
+    const postVisibility = () => {
+      if (cancelled || document.hidden) return;
+      void fetchJSON("/api/agent-questions/visibility", { method: "POST" }, { timeoutMs: 0 }).catch(
+        () => undefined,
+      );
+    };
+    postVisibility();
+    const intervalId = window.setInterval(postVisibility, 15_000);
+    const onVisibility = () => {
+      if (!document.hidden) postVisibility();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
   useEffect(() => {
     if (!seededRef.current || !enabled || permission !== "granted" || !canNotify()) return;
     if (canPush() && pushStatus === "on") return;
