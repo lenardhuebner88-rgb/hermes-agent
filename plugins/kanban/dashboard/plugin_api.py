@@ -689,6 +689,17 @@ def get_board(
             "alone is well over half the poll payload."
         ),
     ),
+    done_limit: Optional[int] = Query(
+        None,
+        ge=1,
+        le=200,
+        description="Optionally page the done column (other columns remain complete)",
+    ),
+    done_cursor: Optional[str] = Query(
+        None,
+        max_length=200,
+        description="Opaque cursor returned by a previous done-column page",
+    ),
 ):
     """Return the full board grouped by status column.
 
@@ -724,6 +735,8 @@ def get_board(
                 current_step_key,
                 card_diagnostics,
                 card_body,
+                done_limit,
+                done_cursor,
             )
             with _board_cache_lock:
                 entry = _board_cache.get(cache_key)
@@ -749,6 +762,46 @@ def get_board(
             workflow_template_id=workflow_template_id,
             current_step_key=current_step_key,
         )
+        done_page: Optional[dict[str, Any]] = None
+        if done_cursor is not None and done_limit is None:
+            raise HTTPException(status_code=400, detail="done_cursor requires done_limit")
+        if done_limit is not None:
+            # Mirror the archive endpoint's keyset walk, but use the live
+            # board's stable order: priority DESC, created_at ASC, id ASC.
+            # Opt-in parameters leave the legacy full-board response unchanged.
+            done_tasks = sorted(
+                (task for task in tasks if task.status == "done"),
+                key=lambda task: (-task.priority, task.created_at, task.id),
+            )
+            cursor_key: Optional[tuple[int, int, str]] = None
+            if done_cursor is not None:
+                parts = done_cursor.split(":", 2)
+                if len(parts) != 3 or not parts[2].startswith("t_"):
+                    raise HTTPException(status_code=400, detail="invalid done cursor")
+                try:
+                    cursor_key = (-int(parts[0]), int(parts[1]), parts[2])
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="invalid done cursor") from exc
+            eligible = [
+                task for task in done_tasks
+                if cursor_key is None
+                or (-task.priority, task.created_at, task.id) > cursor_key
+            ]
+            page_with_sentinel = eligible[: done_limit + 1]
+            has_more = len(page_with_sentinel) > done_limit
+            page_tasks = page_with_sentinel[:done_limit]
+            next_cursor = None
+            if has_more and page_tasks:
+                last = page_tasks[-1]
+                next_cursor = f"{last.priority}:{last.created_at}:{last.id}"
+            done_page = {
+                "total_count": len(done_tasks),
+                "loaded_count": len(page_tasks),
+                "limit": done_limit,
+                "has_more": has_more,
+                "next_cursor": next_cursor,
+            }
+            tasks = [task for task in tasks if task.status != "done"] + page_tasks
         # Pre-fetch link counts per task (cheap: one query). The same pass
         # collects the dependents adjacency (parent → children) used to
         # resolve each card's chain root below.
@@ -946,6 +999,8 @@ def get_board(
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
         }
+        if done_page is not None:
+            payload["done_page"] = done_page
         if source_errors:
             payload["source_errors"] = source_errors
         # Conditional GET: a weak ETag over the content WITHOUT the volatile

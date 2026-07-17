@@ -14,12 +14,19 @@ import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
 import { inspectEpochSeconds, validateChronology } from "../../lib/derive";
 import { taskStatusLabel } from "../../lib/tones";
 import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
+import {
+  loadDoneBoardPage,
+  type DoneBoardPage,
+  type DonePageLoader,
+  type PaginatedBoardResponse,
+} from "../../hooks/workersBoard";
 import { type ChainNode } from "./shared";
 
 interface BoardTabProps {
-  board: BoardResponse | null;
+  board: PaginatedBoardResponse | BoardResponse | null;
   boardSlug?: string | null;
   loadArchivePage?: ArchivePageLoader;
+  loadDonePage?: DonePageLoader;
   /** Foreign boards are visibility-only in Stufe 3. */
   readOnly?: boolean;
   /** Callback: öffnet den Karten-Detail-Drawer. */
@@ -119,6 +126,7 @@ export function BoardTab({
   board,
   boardSlug = null,
   loadArchivePage = fetchArchivePage,
+  loadDonePage = loadDoneBoardPage,
   readOnly = false,
   onOpenNodeDetail,
   selectedNodeId = null,
@@ -134,6 +142,62 @@ export function BoardTab({
   const archiveRequestRef = useRef<{ serial: number; controller: AbortController } | null>(null);
   const archiveSerialRef = useRef(0);
   const isArchive = statusFilter === "archived";
+  const [doneTasks, setDoneTasks] = useState<BoardTask[]>([]);
+  const [donePage, setDonePage] = useState<DoneBoardPage | null>(null);
+  const [doneLoading, setDoneLoading] = useState(true);
+  const [doneError, setDoneError] = useState<string | null>(null);
+  const doneRequestRef = useRef<{ serial: number; controller: AbortController } | null>(null);
+  const doneSerialRef = useRef(0);
+
+  const runDoneLoad = useCallback(async (cursor: string | null, append: boolean) => {
+    doneRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const serial = ++doneSerialRef.current;
+    doneRequestRef.current = { serial, controller };
+    setDoneLoading(true);
+    setDoneError(null);
+    if (!append) {
+      setDonePage(null);
+      setDoneTasks([]);
+    }
+    try {
+      const result = await loadDonePage({ board: boardSlug, cursor }, controller.signal);
+      if (controller.signal.aborted || doneSerialRef.current !== serial) return;
+      const page = result.done_page;
+      if (!page) throw new Error("Board-Antwort enthält keine done_page");
+      const tasks = result.columns.find((column) => column.name === "done")?.tasks ?? [];
+      setDonePage(page);
+      setDoneTasks((current) => {
+        if (!append) return tasks;
+        const byId = new Map(current.map((task) => [task.id, task]));
+        for (const task of tasks) byId.set(task.id, task);
+        return Array.from(byId.values());
+      });
+    } catch (error) {
+      if (controller.signal.aborted || doneSerialRef.current !== serial) return;
+      setDoneError(error instanceof Error ? error.message : String(error));
+      if (!append) {
+        setDonePage(null);
+        setDoneTasks([]);
+      }
+    } finally {
+      if (!controller.signal.aborted && doneSerialRef.current === serial) setDoneLoading(false);
+    }
+  }, [boardSlug, loadDonePage]);
+
+  useEffect(() => {
+    if (!board) {
+      setDoneTasks([]);
+      setDonePage(null);
+      setDoneLoading(false);
+      return;
+    }
+    const timer = window.setTimeout(() => void runDoneLoad(null, false), 0);
+    return () => {
+      window.clearTimeout(timer);
+      doneRequestRef.current?.controller.abort();
+    };
+  }, [board?.latest_event_id, boardSlug, runDoneLoad]);
 
   const runArchiveLoad = useCallback(async (cursor: string | null, append: boolean) => {
     archiveRequestRef.current?.controller.abort();
@@ -198,7 +262,9 @@ export function BoardTab({
   // Alle Tasks flach, dann filtern.
   const allTasks = useMemo(() => {
     if (isArchive) return archiveTasks;
-    const flat: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
+    const flat: BoardTask[] = (board?.columns ?? []).flatMap((column) =>
+      column.name === "done" ? doneTasks : column.tasks
+    );
     const ql = q.trim().toLowerCase();
     return flat.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
@@ -209,7 +275,7 @@ export function BoardTab({
       }
       return true;
     });
-  }, [archiveTasks, assigneeFilter, board, isArchive, q, statusFilter]);
+  }, [archiveTasks, assigneeFilter, board, doneTasks, isArchive, q, statusFilter]);
 
   // Filtergebnis nach Status gruppieren (nur Status mit sichtbaren Tasks).
   const grouped = useMemo(() => {
@@ -226,7 +292,10 @@ export function BoardTab({
 
   const totalCount = isArchive
     ? (archivePage?.filtered_count ?? 0)
-    : (board?.columns ?? []).reduce((n, c) => n + c.tasks.length, 0);
+    : (board?.columns ?? []).reduce(
+      (n, column) => n + (column.name === "done" ? (donePage?.total_count ?? 0) : column.tasks.length),
+      0,
+    );
 
   return (
     <div className="fleet-boardtab">
@@ -278,12 +347,22 @@ export function BoardTab({
           <span>{archiveError}</span>
         </div>
       ) : null}
+      {!isArchive && doneError ? (
+        <div className="fleet-boardtab-archive-error" role="alert">
+          <strong>Fertige Tasks konnten nicht geladen werden.</strong>
+          <span>{doneError}</span>
+        </div>
+      ) : null}
 
       {/* Status-Gruppen */}
       {isArchive && archiveLoading && archiveTasks.length === 0 ? (
         <div className="fleet-empty" aria-live="polite">
           <div className="fleet-empty-title">Archiv wird geladen …</div>
           <div className="fleet-empty-sub">Die aktive Board-Abfrage bleibt dabei klein.</div>
+        </div>
+      ) : !isArchive && doneLoading && grouped.length === 0 ? (
+        <div className="fleet-empty" aria-live="polite">
+          <div className="fleet-empty-title">Board wird geladen …</div>
         </div>
       ) : grouped.length === 0 ? (
         <div className="fleet-empty">
@@ -382,6 +461,17 @@ export function BoardTab({
           aria-label="Weitere Archivkarten laden"
         >
           {archiveLoading ? "Lädt …" : "Mehr laden"}
+        </button>
+      ) : null}
+      {!isArchive && donePage?.has_more && (statusFilter === "all" || statusFilter === "done") ? (
+        <button
+          type="button"
+          className="fleet-boardtab-load-more"
+          disabled={doneLoading || !donePage.next_cursor}
+          onClick={() => void runDoneLoad(donePage.next_cursor, true)}
+          aria-label="Weitere fertige Tasks laden"
+        >
+          {doneLoading ? "Lädt …" : "Mehr laden"}
         </button>
       ) : null}
     </div>
