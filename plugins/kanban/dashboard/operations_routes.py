@@ -250,6 +250,63 @@ def create_fix_task_from_disposition(item_id: str, board: Optional[str] = Query(
 # ---------------------------------------------------------------------------
 
 
+# Matches both comment formats the stratege-gutachter harness writes: the
+# current ``## Urteil: SCHÄRFEN`` markdown heading and the older
+# ``**🔎 Stratege-Gutachter — Urteil: <X>**`` inline form. Case-insensitive;
+# trailing text on the verdict's own line (e.g. ``VETO (fehlgegroundet)``) is
+# tolerated since the alternation only needs to match the leading word.
+_GUTACHTER_VERDICT_RE = re.compile(
+    r"Urteil:\s*(GO|SCHÄRFEN|SCHAERFEN|VETO)", re.IGNORECASE
+)
+
+
+def _parse_gutachter_verdict(body: str) -> tuple[Optional[str], Optional[str]]:
+    """Extract ``(verdict, excerpt)`` from a stratege-gutachter comment body.
+
+    ``verdict`` is normalized to ``GO``/``SCHÄRFEN``/``VETO``, or ``None`` when
+    the body doesn't contain a recognizable ``Urteil:`` line. ``excerpt`` is
+    the first ~200 chars of the text following the verdict's own line (the
+    rationale), or ``None`` when nothing follows. Never raises — malformed or
+    empty bodies just yield ``(None, None)``.
+    """
+    if not body:
+        return None, None
+    match = _GUTACHTER_VERDICT_RE.search(body)
+    if not match:
+        return None, None
+    verdict = match.group(1).upper()
+    if verdict == "SCHAERFEN":
+        verdict = "SCHÄRFEN"
+    rest = body[match.end():]
+    newline_idx = rest.find("\n")
+    if newline_idx != -1:
+        rest = rest[newline_idx + 1:]
+    excerpt = rest.strip()[:200] or None
+    return verdict, excerpt
+
+
+def _attach_gutachter_verdicts(conn, proposals: list[dict[str, Any]]) -> None:
+    """Annotate each proposal in-place with the latest ``stratege-gutachter``
+    verdict on its task (one query per proposal — the held queue is small).
+    Absent/malformed comments degrade to all-null fields, never a crash."""
+    for proposal in proposals:
+        row = conn.execute(
+            "SELECT body, created_at FROM task_comments "
+            "WHERE task_id = ? AND author = 'stratege-gutachter' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (proposal["id"],),
+        ).fetchone()
+        if row is None:
+            proposal["gutachter_verdict"] = None
+            proposal["gutachter_excerpt"] = None
+            proposal["gutachter_at"] = None
+            continue
+        verdict, excerpt = _parse_gutachter_verdict(row["body"])
+        proposal["gutachter_verdict"] = verdict
+        proposal["gutachter_excerpt"] = excerpt
+        proposal["gutachter_at"] = row["created_at"]
+
+
 @control_routes.get("/strategist/proposals")
 def get_strategist_proposals(request: Request, board: Optional[str] = Query(None)):
     """List held ``freigabe: operator`` proposals + the current metric snapshot.
@@ -263,12 +320,17 @@ def get_strategist_proposals(request: Request, board: Optional[str] = Query(None
     the list is empty. ``metrics`` is the distilled Vision snapshot (H1,
     ``vision-metrics.json``) as triage context, or ``None`` when no snapshot has
     been written yet. A weak ETag lets the SPA's poll revalidate to a 304 while
-    nothing changed — consistent with the board tab.
+    nothing changed — consistent with the board tab. Each proposal also carries
+    the latest independent ``stratege-gutachter`` verdict for that task
+    (``gutachter_verdict``/``gutachter_excerpt``/``gutachter_at``, all ``None``
+    when the Gutachter hasn't commented yet) so the operator sees the judge's
+    call before deciding.
     """
     board = _resolve_board(board)
     conn = _conn(board=board)
     try:
         proposals = strategist_surface.held_operator_proposals(conn)
+        _attach_gutachter_verdicts(conn, proposals)
     finally:
         conn.close()
     metrics = strategist_surface.read_vision_metrics()

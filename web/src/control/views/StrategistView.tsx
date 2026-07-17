@@ -9,6 +9,8 @@ import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/strategis
 import type { LeverOutcome } from "../lib/schemas";
 import {
   formatSignedDelta,
+  gutachterVerdictLabel,
+  gutachterVerdictTone,
   metricSnapshotRows,
   outcomeDeltaValue,
   outcomeStatusLabel,
@@ -350,7 +352,17 @@ export function ProposalList({
               </span>
               <span className="font-data tabular-nums shrink-0 text-micro text-ink-3">{fmtClock(p.created_at)}</span>
               {isStaleHold(p.age_seconds) ? <SignalChip tone="warn" label={t.heldFor(fmtAge(p.held_since))} /> : <span className="shrink-0 text-sec text-ink-3">{t.heldFor(fmtAge(p.held_since))}</span>}
+              {p.gutachter_verdict ? (
+                <SignalChip
+                  tone={gutachterVerdictTone(p.gutachter_verdict)}
+                  label={gutachterVerdictLabel(p.gutachter_verdict)}
+                  title={p.gutachter_excerpt ?? undefined}
+                />
+              ) : null}
             </div>
+            {p.gutachter_verdict && p.gutachter_excerpt ? (
+              <p className="mt-1 truncate text-micro text-ink-3" title={p.gutachter_excerpt}>{p.gutachter_excerpt}</p>
+            ) : null}
 
             {isManual ? null : (
               <>

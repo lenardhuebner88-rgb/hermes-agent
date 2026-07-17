@@ -115,6 +115,33 @@ describe("ProposalList", () => {
     expect(html).toContain("Verwerfen");
   });
 
+  it("renders the gutachter verdict chip when present", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[proposal({ gutachter_verdict: "SCHÄRFEN", gutachter_excerpt: "Fit — echter Autonomie-Hebel." })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html).toContain("Gutachter: SCHÄRFEN");
+    expect(html).toContain("Fit — echter Autonomie-Hebel.");
+  });
+
+  it("omits the gutachter chip when no verdict was parsed", () => {
+    const html = renderToStaticMarkup(
+      <ProposalList
+        proposals={[proposal({ gutachter_verdict: null, gutachter_excerpt: null })]}
+        pending={null}
+        busy={false}
+        onAct={() => {}}
+        onPending={() => {}}
+      />,
+    );
+    expect(html).not.toContain("Gutachter:");
+  });
+
   it("renders proposals oldest-held-first regardless of input order", () => {
     const html = renderToStaticMarkup(
       <ProposalList

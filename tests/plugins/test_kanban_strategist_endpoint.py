@@ -107,6 +107,71 @@ def test_list_returns_held_proposals_with_annotations(client):
     assert "metrics" in data and data["metrics"] is None
 
 
+# Real comment body shapes harvested from the live kanban.db's
+# stratege-gutachter rows (2026-07): the current ``## Urteil: X`` markdown
+# heading, including the observed ``VETO (fehlgegroundet)`` trailing-text
+# case on the verdict's own line.
+_REAL_SCHAERFEN_BODY = (
+    "## Urteil: SCHÄRFEN\n\n"
+    "**Vision:** Fit — ein deterministischer Struktur-Fehler wird als Flake "
+    "fehlbehandelt und erzeugt echten Operator-/Selbstheil-Churn (Park nach "
+    "failure_limit nutzlosen Spawns). Weniger unnötige Parks = mehr belegte "
+    "Autonomie; Piets Geschmack (vgl. approved 06-22 ARTIFACT-ALLOWLIST). Kein Meta.\n\n"
+    "**Live-Code — VERIFIZIERT WAHR:** `prepare_worker_base()` "
+    "(`kanban_worktrees.py:984-9xx`) ..."
+)
+
+_REAL_VETO_BODY = (
+    "## Urteil: VETO (fehlgegroundet)\n\n"
+    "**Live-Code widerlegt alle drei:**\n"
+    "- **I-1** (\"Phase→Prompt-Bindung fehlt\", `:73-90`) steht bereits fail-closed: "
+    "Load-Enforcer vergleicht `actual_contract={phase:(engine,model,prompt)}` gegen "
+    "`AUTOLAND_PHASE_CONTRACT` (`:254-262`) + Manifest-SHA256 (`:263-267`)."
+)
+
+
+def test_list_includes_gutachter_verdict_when_commented(client):
+    root_id, _ = _make_held_chain(annotate=True)
+    with kb.connect() as conn:
+        kb.add_comment(conn, root_id, "stratege-gutachter", _REAL_SCHAERFEN_BODY)
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    assert r.status_code == 200, r.text
+    p = r.json()["proposals"][0]
+    assert p["gutachter_verdict"] == "SCHÄRFEN"
+    assert p["gutachter_excerpt"]
+    assert "Vision:" in p["gutachter_excerpt"]
+    assert isinstance(p["gutachter_at"], int)
+
+
+def test_list_parses_veto_with_trailing_text_on_verdict_line(client):
+    root_id, _ = _make_held_chain()
+    with kb.connect() as conn:
+        kb.add_comment(conn, root_id, "stratege-gutachter", _REAL_VETO_BODY)
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    p = r.json()["proposals"][0]
+    assert p["gutachter_verdict"] == "VETO"
+    assert p["gutachter_excerpt"]
+
+
+def test_list_gutachter_verdict_is_null_without_a_comment(client):
+    _make_held_chain()
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    p = r.json()["proposals"][0]
+    assert p["gutachter_verdict"] is None
+    assert p["gutachter_excerpt"] is None
+    assert p["gutachter_at"] is None
+
+
+def test_list_gutachter_verdict_is_null_on_malformed_comment(client):
+    root_id, _ = _make_held_chain()
+    with kb.connect() as conn:
+        kb.add_comment(conn, root_id, "stratege-gutachter", "kein Urteil hier, nur Prosa.")
+    r = client.get(f"{PREFIX}/strategist/proposals")
+    p = r.json()["proposals"][0]
+    assert p["gutachter_verdict"] is None
+    assert p["gutachter_excerpt"] is None
+
+
 def test_list_includes_metric_snapshot_when_present(client):
     _make_held_chain()
     path = ss.vision_metrics_path()

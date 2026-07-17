@@ -6,6 +6,7 @@
 // helpers are pure so they can be unit-tested without the polling/render path.
 
 import type { LeverOutcome } from "./schemas";
+import type { SignalTone } from "../components/leitstand";
 
 /** One held strategist proposal (a `freigabe:operator` root awaiting triage). */
 export interface StrategistProposal {
@@ -35,6 +36,15 @@ export interface StrategistProposal {
   source?: string | null;
   /** For receipt-keyed proposals: the title of the origin task. */
   origin?: string | null;
+  /** Latest independent stratege-gutachter verdict on this proposal's task
+   *  comment thread — "GO" | "SCHÄRFEN" | "VETO", or null when the Gutachter
+   *  hasn't commented (or the comment didn't parse). */
+  gutachter_verdict?: "GO" | "SCHÄRFEN" | "VETO" | null;
+  /** Short rationale excerpt from the Gutachter's comment (~200 chars), or
+   *  null when there's no verdict to explain. */
+  gutachter_excerpt?: string | null;
+  /** Unix-Epoch of the Gutachter's comment, or null when absent. */
+  gutachter_at?: number | null;
 }
 
 export interface StrategistProposalsResponse {
@@ -147,6 +157,20 @@ export function runSummaryText(
   }
   const i = run.ingested ?? 0;
   return `${i} ${i === 1 ? "Vorschlag" : "Vorschläge"}`;
+}
+
+/** Chip tone for the independent stratege-gutachter verdict — GO reads as a
+ *  green go-ahead, SCHÄRFEN as an amber "sharpen this", VETO as a red block. */
+export function gutachterVerdictTone(verdict: string | null | undefined): SignalTone {
+  if (verdict === "GO") return "ok";
+  if (verdict === "SCHÄRFEN") return "warn";
+  if (verdict === "VETO") return "alert";
+  return "neutral";
+}
+
+/** Chip label for the independent stratege-gutachter verdict. */
+export function gutachterVerdictLabel(verdict: string | null | undefined): string {
+  return `Gutachter: ${verdict}`;
 }
 
 /** Human label for the provenance `source` field. */
