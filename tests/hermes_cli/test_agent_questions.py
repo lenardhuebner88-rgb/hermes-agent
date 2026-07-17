@@ -382,6 +382,8 @@ class _StubService:
     ``windows`` entries are plain dicts (same shape as TmuxWindow.to_dict())
     with an extra ``tail`` field used as the capture_pane return value.
     Optional ``capture_errors`` pane_ids raise on capture (per-pane skip).
+    ``extra_captures`` / ``capture_raises`` cover cross-session pane ids that
+    are not listed in list_windows (I2 hook expiry).
     """
 
     def __init__(
@@ -390,10 +392,14 @@ class _StubService:
         now: float | None = None,
         *,
         capture_errors: set[str] | None = None,
+        extra_captures: dict[str, str] | None = None,
+        capture_raises: dict[str, BaseException] | None = None,
     ) -> None:
         self._windows = windows
         self._now = now if now is not None else time.time()
         self._capture_errors = set(capture_errors or ())
+        self._extra_captures = dict(extra_captures or {})
+        self._capture_raises = dict(capture_raises or {})
         self.capture_starts: list[int] = []
 
     def list_windows(self, session: str | None = None) -> list[dict[str, Any]]:
@@ -404,8 +410,12 @@ class _StubService:
 
     def capture_pane(self, pane_id: str, *, start: int = -25) -> str:
         self.capture_starts.append(int(start))
+        if pane_id in self._capture_raises:
+            raise self._capture_raises[pane_id]
         if pane_id in self._capture_errors:
             raise RuntimeError(f"capture failed for {pane_id}")
+        if pane_id in self._extra_captures:
+            return str(self._extra_captures[pane_id])
         for w in self._windows:
             if str(w.get("pane_id")) == pane_id:
                 return str(w.get("tail") or "")
@@ -1327,3 +1337,480 @@ def test_real_tmux_e2e_answer_chosen(
     assert answered[0]["answer"] == "1"
     assert answered[0]["answer_verified"] == 1
     assert answered[0]["latency_s"] is not None
+
+
+# ---------------------------------------------------------------------------
+# I2 — Hook-source ingest / resolve / merge / expiry
+# ---------------------------------------------------------------------------
+
+# VERBATIM PreToolUse payload (measured live 2026-07-17 session frage-i2).
+_REAL_PRETOOLUSE_PAYLOAD: dict[str, Any] = {
+    "session_id": "cb26fba6-6802-4569-8bf9-3443b914f3bd",
+    "transcript_path": (
+        "/home/piet/.claude/projects/-home-piet--hermes-hermes-agent/"
+        "cb26fba6-6802-4569-8bf9-3443b914f3bd.jsonl"
+    ),
+    "cwd": "/home/piet/.hermes/hermes-agent",
+    "prompt_id": "f31b5f64-2a2e-48a0-8c57-421bad03d8d6",
+    "permission_mode": "bypassPermissions",
+    "effort": {"level": "medium"},
+    "hook_event_name": "PreToolUse",
+    "tool_name": "AskUserQuestion",
+    "tool_input": {
+        "questions": [
+            {
+                "question": "Which deployment strategy should we use?",
+                "header": "Strategy",
+                "options": [
+                    {
+                        "label": "Rolling update (Recommended)",
+                        "description": "Zero downtime",
+                    },
+                    {"label": "Blue-green", "description": "Instant rollback"},
+                    {"label": "Canary", "description": "Gradual rollout"},
+                ],
+                "multiSelect": False,
+            }
+        ]
+    },
+    "tool_use_id": "toolu_01E5FVqcuqBPvRCWXLgrn3Sw",
+}
+
+# Store-near shape the hook script POSTs (labels stripped of "(Recommended)",
+# recommended flag set; nr 1..3). Built from the real payload above.
+_HOOK_STORE_OPTIONS: list[dict[str, Any]] = [
+    {"nr": 1, "label": "Rolling update", "recommended": True},
+    {"nr": 2, "label": "Blue-green", "recommended": False},
+    {"nr": 3, "label": "Canary", "recommended": False},
+]
+
+_HOOK_QUESTION_TEXT = _REAL_PRETOOLUSE_PAYLOAD["tool_input"]["questions"][0]["question"]
+_HOOK_KEY = _REAL_PRETOOLUSE_PAYLOAD["tool_use_id"]
+_HOOK_ACTION_CONTEXT = "AskUserQuestion: Strategy"
+
+
+def _hook_store_event(
+    *,
+    pane_id: str = "%80",
+    session: str = "work",
+    window: str = "claude",
+    hook_key: str | None = _HOOK_KEY,
+) -> dict[str, Any]:
+    return {
+        "pane_id": pane_id,
+        "session": session,
+        "window": window,
+        "kind": "claude",
+        "cwd": _REAL_PRETOOLUSE_PAYLOAD["cwd"],
+        "question_text": _HOOK_QUESTION_TEXT,
+        "options": list(_HOOK_STORE_OPTIONS),
+        "action_context": _HOOK_ACTION_CONTEXT,
+        "hook_key": hook_key,
+    }
+
+
+# P0 schema without I2 columns — migration fixture.
+_P0_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS question_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    updated_ts    TEXT NOT NULL,
+    source        TEXT NOT NULL DEFAULT 'scrape',
+    session       TEXT NOT NULL,
+    window        TEXT NOT NULL,
+    pane_id       TEXT NOT NULL,
+    fingerprint   TEXT NOT NULL,
+    kind          TEXT,
+    cwd           TEXT,
+    question_text TEXT NOT NULL,
+    options_json  TEXT NOT NULL DEFAULT '[]',
+    class         TEXT NOT NULL DEFAULT 'unknown',
+    status        TEXT NOT NULL DEFAULT 'open',
+    answered_by   TEXT,
+    answer        TEXT,
+    latency_s     REAL,
+    answer_verified INTEGER,
+    override      INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
+def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
+    """DB with P0 schema (no action_context/hook_key) → connect migrates; old rows readable."""
+    import sqlite3
+
+    qdb = tmp_path / "legacy_q.db"
+    conn = sqlite3.connect(str(qdb))
+    conn.executescript(_P0_SCHEMA_SQL)
+    conn.execute(
+        "INSERT INTO question_events ("
+        "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+        "question_text, options_json, class, status, override"
+        ") VALUES ("
+        "'2026-07-17T00:00:00.000000Z', '2026-07-17T00:00:00.000000Z', "
+        "'scrape', 'work', 'claude', '%legacy', 'fp-legacy', "
+        "'Legacy open?', '[]', 'unknown', 'open', 0"
+        ")"
+    )
+    conn.commit()
+    conn.close()
+
+    aq._INITIALIZED_PATHS.discard(str(qdb.resolve()))
+    with aq.connect_closing(db_path=qdb) as c2:
+        cols = {str(r[1]) for r in c2.execute("PRAGMA table_info(question_events)")}
+    assert "action_context" in cols
+    assert "hook_key" in cols
+
+    rows = aq.list_question_events(status="open", db_path=qdb)
+    assert len(rows) == 1
+    assert rows[0]["question_text"] == "Legacy open?"
+    assert rows[0]["fingerprint"] == "fp-legacy"
+    assert rows[0].get("action_context") is None
+    assert rows[0].get("hook_key") is None
+
+
+def test_i2_ingest_hook_happy_path_real_options(qdb: Path) -> None:
+    result = aq.ingest_hook_event(_hook_store_event(), db_path=qdb)
+    assert result["ok"] is True
+    assert isinstance(result["id"], int)
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    ev = opens[0]
+    assert ev["id"] == result["id"]
+    assert ev["source"] == "hook"
+    assert ev["question_text"] == _HOOK_QUESTION_TEXT
+    assert ev["options"] == _HOOK_STORE_OPTIONS
+    assert ev["options"][0]["label"] == "Rolling update"
+    assert ev["options"][0]["recommended"] is True
+    assert "(Recommended)" not in ev["options"][0]["label"]
+    assert ev["action_context"] == _HOOK_ACTION_CONTEXT
+    assert ev["hook_key"] == _HOOK_KEY
+    assert ev["kind"] == "claude"
+    assert ev["pane_id"] == "%80"
+    assert str(ev["fingerprint"]).startswith("hook:")
+
+
+def test_i2_ingest_invalid_payload_writes_nothing(qdb: Path) -> None:
+    bad = _hook_store_event(pane_id="not-a-pane")
+    assert aq.ingest_hook_event(bad, db_path=qdb) == {
+        "ok": False,
+        "reason": "invalid-payload",
+    }
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+
+    bad2 = _hook_store_event()
+    bad2["question_text"] = "   "
+    assert aq.ingest_hook_event(bad2, db_path=qdb)["ok"] is False
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+
+    bad3 = _hook_store_event()
+    bad3["options"] = "not-a-list"  # type: ignore[assignment]
+    assert aq.ingest_hook_event(bad3, db_path=qdb)["reason"] == "invalid-payload"
+
+
+def test_i2_merge_scrape_then_hook_supersedes(qdb: Path) -> None:
+    """Open scrape event on pane → hook ingest same pane → exactly one open, source=hook."""
+    now = 1_700_001_000.0
+    win = _frage_window(pane_id="%80", now=now, activity=now - 10)
+    service = _StubService([win], now=now)
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb, service_factory=lambda: service, now=lambda: now
+    )
+    ing.poll_once()
+    ing.poll_once()
+    scrape_opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(scrape_opens) == 1
+    assert scrape_opens[0]["source"] == "scrape"
+    scrape_id = scrape_opens[0]["id"]
+
+    result = aq.ingest_hook_event(_hook_store_event(pane_id="%80"), db_path=qdb)
+    assert result["ok"] is True
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["source"] == "hook"
+    assert opens[0]["id"] == result["id"]
+    supers = aq.list_question_events(status="superseded", db_path=qdb)
+    assert any(r["id"] == scrape_id for r in supers)
+
+
+def test_i2_skip_hook_authoritative_blocks_scrape_insert(qdb: Path) -> None:
+    """Open hook event → scrape ingestor with parseable prompt same pane → no second event."""
+    result = aq.ingest_hook_event(_hook_store_event(pane_id="%1"), db_path=qdb)
+    assert result["ok"] is True
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+    now = 1_700_001_100.0
+    # Capture still contains the hook question_text (so hook stays standing)
+    # PLUS a parseable select block that would otherwise create a scrape event.
+    dual_tail = (
+        f"  {_HOOK_QUESTION_TEXT}\n"
+        f"{_FIXTURE_CLAUDE_SELECT}"
+    )
+    win = _frage_window(
+        pane_id="%1",
+        tail=dual_tail,
+        now=now,
+        activity=now - 10,
+    )
+    service = _StubService([win], now=now)
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb, service_factory=lambda: service, now=lambda: now
+    )
+    s1 = ing.poll_once()
+    s2 = ing.poll_once()
+    assert s1["skipped_hook_authoritative"] >= 1
+    assert s2["skipped_hook_authoritative"] >= 1
+    assert s1["created"] == 0
+    assert s2["created"] == 0
+    opens = aq.list_question_events(status="open", db_path=qdb)
+    assert len(opens) == 1
+    assert opens[0]["source"] == "hook"
+    assert opens[0]["id"] == result["id"]
+    assert opens[0]["question_text"] == _HOOK_QUESTION_TEXT
+
+
+def test_i2_ingest_idempotent_same_hook_key(qdb: Path) -> None:
+    r1 = aq.ingest_hook_event(_hook_store_event(), db_path=qdb)
+    r2 = aq.ingest_hook_event(_hook_store_event(), db_path=qdb)
+    assert r1["ok"] is True and "id" in r1
+    assert r2 == {"ok": True, "deduped": True, "id": r1["id"]}
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+
+def test_i2_ingest_dedup_survives_closed_event(qdb: Path) -> None:
+    """A re-POST of the same hook_key must NOT resurrect a closed event.
+
+    tool_use_ids are globally unique — after the dashboard (or resolve)
+    closed the event, a duplicate PreToolUse POST is a dedup no-op, not a
+    fresh open event (Kimi-Lens I2 #1).
+    """
+    r1 = aq.ingest_hook_event(_hook_store_event(), db_path=qdb)
+    eid = int(r1["id"])
+    resolved = aq.resolve_hook_event(
+        str(_hook_store_event()["hook_key"]), "Rolling update", db_path=qdb
+    )
+    assert resolved["resolved"] is True
+    r2 = aq.ingest_hook_event(_hook_store_event(), db_path=qdb)
+    assert r2 == {"ok": True, "deduped": True, "id": eid}
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+
+
+def test_i2_answer_recheck_requires_option_labels(qdb: Path) -> None:
+    """Same question re-asked with DIFFERENT options → answer refused.
+
+    The recheck needle (first 80 chars) matches, but the old event's option
+    labels are gone from the capture — sending a digit would map to the
+    wrong option (Kimi-Lens I2 #2). Claim must roll to superseded, nothing sent.
+    """
+    result = aq.ingest_hook_event(_hook_store_event(pane_id="%43"), db_path=qdb)
+    eid = int(result["id"])
+    # Pane now shows the SAME question with different options.
+    reasked = (
+        f"  {_HOOK_QUESTION_TEXT}\n"
+        "  1. Big-bang cutover\n"
+        "  2. Shadow traffic\n"
+    )
+    svc = _RecordingService([reasked, reasked])
+    r = aq.answer_question(
+        eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r == {"ok": False, "reason": "superseded"}
+    assert svc.sent == []
+
+
+def test_i2_resolve_hook_event_and_noop(qdb: Path) -> None:
+    ing = aq.ingest_hook_event(_hook_store_event(), db_path=qdb, now=1_700_001_200.0)
+    assert ing["ok"] is True
+    eid = int(ing["id"])
+
+    r1 = aq.resolve_hook_event(
+        _HOOK_KEY, "Rolling update", db_path=qdb, now=1_700_001_210.0
+    )
+    assert r1["ok"] is True
+    assert r1["resolved"] is True
+    assert r1["id"] == eid
+    assert r1["latency_s"] >= 0
+
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answered_by"] == "terminal"
+    assert answered[0]["answer"] == "Rolling update"
+    assert answered[0]["latency_s"] is not None
+    assert answered[0]["status"] == "answered"
+
+    # Double resolve → resolved:False no-op
+    r2 = aq.resolve_hook_event(_HOOK_KEY, "x", db_path=qdb)
+    assert r2 == {"ok": True, "resolved": False}
+
+    # Resolve after dashboard answer path: fresh hook, claim via answer, then resolve no-op
+    aq.ingest_hook_event(
+        _hook_store_event(pane_id="%81", hook_key="toolu_other"),
+        db_path=qdb,
+    )
+    opens = [e for e in aq.list_question_events(status="open", db_path=qdb)]
+    assert len(opens) == 1
+    dash_id = int(opens[0]["id"])
+    # claim open→answered as dashboard would
+    assert aq._claim_event(
+        dash_id, answer="1", answered_by="operator", db_path=qdb
+    )
+    r3 = aq.resolve_hook_event("toolu_other", "1", db_path=qdb)
+    assert r3 == {"ok": True, "resolved": False}
+
+
+def test_i2_expiry_cross_session_hook_three_cases(qdb: Path) -> None:
+    """Open hook event, pane NOT in work scan; capture (a) present (b) gone (c) transient."""
+    # --- (a) question text present → stays open over 2 polls ---
+    aq.ingest_hook_event(_hook_store_event(pane_id="%90"), db_path=qdb)
+    now = 1_700_001_300.0
+    # Non-empty list_windows so empty-snapshot guard does not skip expiry,
+    # but the hook pane is NOT in the work scan.
+    other = _frage_window(
+        pane_id="%other",
+        tail=_FIXTURE_NOT_QUESTION,
+        now=now,
+        activity=now - 10,
+        session="work",
+        window="idle",
+    )
+    service = _StubService(
+        [other],
+        now=now,
+        extra_captures={
+            "%90": (
+                "Some noise\n"
+                f"  {_HOOK_QUESTION_TEXT}\n"
+                "  1. Rolling update\n"
+                "  2. Blue-green\n"
+            )
+        },
+    )
+    ing = aq.QuestionScrapeIngestor(
+        db_path=qdb, service_factory=lambda: service, now=lambda: now
+    )
+    s1 = ing.poll_once()
+    s2 = ing.poll_once()
+    assert s1["cross_session_checked"] >= 1
+    assert s2["cross_session_checked"] >= 1
+    assert s1["expired"] == 0
+    assert s2["expired"] == 0
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+
+    # --- (b) text gone → after TWO polls expired ---
+    service._extra_captures["%90"] = "Working… no question here\n"
+    s3 = ing.poll_once()
+    assert s3["expired"] == 0
+    assert len(aq.list_question_events(status="open", db_path=qdb)) == 1
+    s4 = ing.poll_once()
+    assert s4["expired"] >= 1
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+    assert len(aq.list_question_events(status="expired", db_path=qdb)) == 1
+
+    # --- (c) capture throws transient → no strike ---
+    aq.ingest_hook_event(
+        _hook_store_event(pane_id="%91", hook_key="toolu_transient"),
+        db_path=qdb,
+    )
+    service2 = _StubService(
+        [other],
+        now=now,
+        capture_raises={"%91": RuntimeError("transient socket busy")},
+    )
+    ing2 = aq.QuestionScrapeIngestor(
+        db_path=qdb, service_factory=lambda: service2, now=lambda: now
+    )
+    t1 = ing2.poll_once()
+    t2 = ing2.poll_once()
+    t3 = ing2.poll_once()
+    assert t1["expired"] == 0
+    assert t2["expired"] == 0
+    assert t3["expired"] == 0
+    opens = [
+        e
+        for e in aq.list_question_events(status="open", db_path=qdb)
+        if e["pane_id"] == "%91"
+    ]
+    assert len(opens) == 1
+
+    # Gone error DOES strike (and two-poll expires)
+    service2._capture_raises["%91"] = RuntimeError("can't find pane %91")
+    g1 = ing2.poll_once()
+    assert g1["expired"] == 0
+    g2 = ing2.poll_once()
+    assert g2["expired"] >= 1
+    assert not any(
+        e["pane_id"] == "%91"
+        for e in aq.list_question_events(status="open", db_path=qdb)
+    )
+
+
+def test_i2_endpoint_ingest_and_resolve(
+    qdb: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import hermes_cli.web_server as web_server
+
+    monkeypatch.setattr(aq, "question_events_db_path", lambda: qdb)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    ok = client.post(
+        "/api/agent-questions/ingest",
+        json=_hook_store_event(),
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    body = ok.json()
+    assert body["ok"] is True
+    assert isinstance(body["id"], int)
+
+    bad = client.post(
+        "/api/agent-questions/ingest",
+        json=_hook_store_event(pane_id="bad"),
+        headers=headers,
+    )
+    assert bad.status_code == 400, bad.text
+
+    resolved = client.post(
+        "/api/agent-questions/resolve",
+        json={"hook_key": _HOOK_KEY, "answer": "1"},
+        headers=headers,
+    )
+    assert resolved.status_code == 200, resolved.text
+    rbody = resolved.json()
+    assert rbody["ok"] is True
+    assert rbody["resolved"] is True
+
+    noop = client.post(
+        "/api/agent-questions/resolve",
+        json={"hook_key": _HOOK_KEY, "answer": "1"},
+        headers=headers,
+    )
+    assert noop.status_code == 200
+    assert noop.json() == {"ok": True, "resolved": False}
+
+
+def test_i2_answer_question_on_hook_event_option_indices(qdb: Path) -> None:
+    """answer_question works on a hook event (option nr indices)."""
+    result = aq.ingest_hook_event(_hook_store_event(pane_id="%42"), db_path=qdb)
+    assert result["ok"] is True
+    eid = int(result["id"])
+    # Capture still contains the question text (hook recheck path).
+    present = (
+        f"  {_HOOK_QUESTION_TEXT}\n"
+        "  1. Rolling update\n"
+        "  2. Blue-green\n"
+        "  3. Canary\n"
+    )
+    svc = _RecordingService([present, ""])
+    r = aq.answer_question(
+        eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r["ok"] is True
+    assert r["verified"] is True
+    assert svc.sent == [{"pane_id": "%42", "text": "1", "enter": False}]
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answer"] == "1"
+    assert answered[0]["source"] == "hook"
