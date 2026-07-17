@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { configure } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseOrThrow, ProjectDetailResponseSchema } from "../../lib/schemas";
@@ -73,6 +73,28 @@ const REAL_DETAIL_PAYLOAD = {
       source: "tmux",
     },
   ],
+  // Stage 12: neueste Receipts dieses Projekts (≤5, gleiche Zeilenform wie
+  // der Cross-Agent-Feed).
+  receipts: [
+    {
+      agent: "Codex",
+      filename: "2026-07-17-b3-parser-receipt.md",
+      title: "B3 coordination parser drift receipt",
+      mtime: "2026-07-17T21:04:11+00:00",
+      age_seconds: 12600,
+      project: "hermes-infra",
+      excerpt: "status: blocked",
+    },
+    {
+      agent: "Claude-Code",
+      filename: "2026-07-17-projekte-feed-receipt.md",
+      title: "Projekte receipts feed frontend",
+      mtime: "2026-07-17T20:34:11+00:00",
+      age_seconds: 14400,
+      project: "hermes-infra",
+      excerpt: null,
+    },
+  ],
   errors: ["git: sample isolation"],
 };
 
@@ -114,6 +136,17 @@ vi.mock("../../hooks/useControlData", () => ({
     lastUpdated: null,
     reload: vi.fn(),
   })),
+  // ReceiptSheet (öffnet sich aus der Receipts-Sektion) holt den Inhalt über
+  // denselben Barrel — Skeleton-Zustand genügt für den Öffnen-Test.
+  useProjectReceipt: vi.fn(() => ({
+    data: null,
+    loading: true,
+    error: null,
+    errorObj: null,
+    isStale: false,
+    lastUpdated: null,
+    reload: vi.fn(),
+  })),
 }));
 
 import { ProjectDetailBody, ProjectDetailDrawer } from "./ProjectDetailDrawer";
@@ -130,6 +163,9 @@ describe("ProjectDetailResponseSchema (real detail fixture)", () => {
     const parsed = parseOrThrow(ProjectDetailResponseSchema, REAL_DETAIL_PAYLOAD, "detail");
     expect(parsed.slug).toBe("hermes-infra");
     expect(parsed.recent_commits).toHaveLength(2);
+    expect(parsed.receipts).toHaveLength(2);
+    expect(parsed.receipts[0].agent).toBe("Codex");
+    expect(parsed.receipts[1].excerpt).toBeNull();
     expect(parsed.kanban_tasks?.[0].block_kind).toBe("needs_input");
     expect(parsed.loops[0].last_outcome?.verdict).toBe("landed");
     expect(parsed.agents[0].kind).toBe("kimi");
@@ -183,6 +219,18 @@ describe("ProjectDetailBody (loaded fixture)", () => {
     expect(chip.getAttribute("title")).toBe("t_b1frontend");
   });
 
+  it("renders the receipts section with the shared row shape, no project chip", () => {
+    const data = parseOrThrow(ProjectDetailResponseSchema, REAL_DETAIL_PAYLOAD, "detail");
+    render(<ProjectDetailBody data={data} now={1784240000} />);
+    expect(screen.getByText("Receipts")).toBeTruthy();
+    expect(screen.getByText("B3 coordination parser drift receipt")).toBeTruthy();
+    expect(screen.getByText("Projekte receipts feed frontend")).toBeTruthy();
+    expect(screen.getByText("Codex")).toBeTruthy();
+    // Drawer-Zeilen sind schon slug-scoped → kein Projekt-Chip, kein Projekt-
+    // name irgendwo im Body.
+    expect(screen.queryByText("Hermes Infra")).toBeNull();
+  });
+
   it("shows honest empty states when lists are empty", () => {
     const data = parseOrThrow(
       ProjectDetailResponseSchema,
@@ -206,6 +254,8 @@ describe("ProjectDetailBody (loaded fixture)", () => {
     expect(screen.getByText(deEmpty("detailNoKanban"))).toBeTruthy();
     expect(screen.getByText(deEmpty("detailNoLoops"))).toBeTruthy();
     expect(screen.getByText(deEmpty("detailNoAgents"))).toBeTruthy();
+    // Stage 12: fehlende Receipts bleiben ein ruhiger Leerzustand.
+    expect(screen.getByText("Keine Receipts für dieses Projekt.")).toBeTruthy();
   });
 });
 
@@ -248,5 +298,21 @@ describe("ProjectDetailDrawer (loading / error / loaded)", () => {
     expect(screen.getByRole("dialog")).toBeTruthy();
     expect(screen.getByText("Hermes Infra")).toBeTruthy();
     expect(screen.getByText("projekte-tab: Stufe 6 — drilldown")).toBeTruthy();
+  });
+
+  it("opens the shared receipt reader sheet from the receipts section", () => {
+    hookState.loading = false;
+    hookState.error = null;
+    hookState.data = parseOrThrow(ProjectDetailResponseSchema, REAL_DETAIL_PAYLOAD, "detail");
+    render(<ProjectDetailDrawer slug="hermes-infra" onClose={() => undefined} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Receipt B3 coordination parser drift receipt öffnen" }),
+    );
+    // Drawer + Lese-Sheet liegen als zwei gestapelte Dialoge übereinander;
+    // das Sheet zeigt sofort Titel + Agent aus der Zeile (Body lädt).
+    const dialogs = screen.getAllByRole("dialog");
+    expect(dialogs).toHaveLength(2);
+    expect(dialogs[1].textContent).toContain("B3 coordination parser drift receipt");
+    expect(dialogs[1].textContent).toContain("Codex");
   });
 });

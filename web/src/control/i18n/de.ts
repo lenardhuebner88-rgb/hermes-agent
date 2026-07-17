@@ -879,6 +879,21 @@ export const de = {
     // Mobile (<tab): Feed hinter Disclosure (default zu), Desktop zeigt direkt.
     commitsShow: "Commits anzeigen",
     commitsHide: "Commits ausblenden",
+    // Stage 12 — Agent-Receipts (Ergebnisse-Feed + Lese-Sheet)
+    receiptsEyebrow: "Receipts",
+    receiptsTitle: "Ergebnisse",
+    receiptsEmpty: "Noch keine Receipts — Agents legen sie nach abgeschlossener Arbeit im Vault ab.",
+    receiptsError: "Receipts konnten nicht geladen werden.",
+    receiptsShowAll: (n: number) => `Alle ${n} anzeigen`,
+    receiptsShowLess: "Weniger anzeigen",
+    receiptOpenAria: (title: string) => `Receipt ${title} öffnen`,
+    receiptSheetClose: "Receipt schließen",
+    receiptSheetError: "Receipt konnte nicht geladen werden.",
+    receiptTruncated: "Gekürzt — das vollständige Receipt liegt im Vault.",
+    detailReceipts: "Receipts",
+    detailNoReceipts: "Keine Receipts für dieses Projekt.",
+    // Terminal-Deep-Link (/control/agent-terminals?session=&window=)
+    terminalOpenAria: (label: string) => `Terminal öffnen: ${label}`,
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

@@ -108,6 +108,45 @@ export const ProjectsAgentsResponseSchema = z.object({
 }).passthrough().catch({ generated_at: invalidEpochSeconds, errors: [], agents: [] });
 export type ProjectsAgentsResponse = z.infer<typeof ProjectsAgentsResponseSchema>;
 
+// ─── Projekte-Tab Stage 12 — GET /api/projects/receipts ────────────────────
+// Cross-Agent Receipt-Feed (neueste zuerst, Backend-Cap 30) aus den Vault-
+// Receipt-Verzeichnissen (hermes_cli/projects_overview.build_receipts_payload).
+// Steht bewusst VOR dem Detail-Schema: detail.receipts bettet dieselbe
+// Zeilenform ein (≤5, projekt-gefiltert), und ein const darf seine
+// Abhängigkeit nicht nach sich selbst definieren (TDZ).
+// mtime ist laut Vertrag ein ISO-String (kein Epoch) — die UI rechnet die
+// Epoch für fmtRelativeTime selbst (receiptEpoch in views/projekte/derive).
+
+const ProjectReceiptEntrySchema = z.object({
+  agent: z.string().catch(""),
+  filename: z.string().catch(""),
+  title: z.string().catch(""),
+  mtime: z.string().catch(""),
+  age_seconds: z.coerce.number().catch(0),
+  project: nullableString,
+  excerpt: nullableString,
+}).passthrough();
+export type ProjectReceiptEntry = z.infer<typeof ProjectReceiptEntrySchema>;
+
+export const ProjectsReceiptsResponseSchema = z.object({
+  generated_at: epochSeconds,
+  receipts: z.array(ProjectReceiptEntrySchema).catch([]),
+}).passthrough().catch({ generated_at: invalidEpochSeconds, receipts: [] });
+export type ProjectsReceiptsResponse = z.infer<typeof ProjectsReceiptsResponseSchema>;
+
+// Einzel-Receipt-Inhalt (GET /api/projects/receipts/{agent}/{filename}):
+// unbekanntes/ungültiges Receipt antwortet 404 — fetchJSON wirft, der Hook
+// zeigt den Fehlerzustand; das Schema modelliert nur den Erfolgsbody.
+export const ProjectReceiptContentSchema = z.object({
+  agent: z.string().catch(""),
+  filename: z.string().catch(""),
+  title: z.string().catch(""),
+  mtime: z.string().catch(""),
+  truncated: z.boolean().catch(false),
+  markdown: z.string().catch(""),
+}).passthrough();
+export type ProjectReceiptContent = z.infer<typeof ProjectReceiptContentSchema>;
+
 // ─── Projekte-Tab Stage 6 — GET /api/projects/{slug} detail drilldown ──────
 // Frozen shape from hermes_cli/projects_overview.build_project_detail. Unknown
 // slug answers 404 with {error, slug}; the schema still accepts that body so
@@ -172,6 +211,9 @@ export const ProjectDetailResponseSchema = z.object({
   parent: nullableString,
   links: z.array(ProjectLinkSchema).catch([]),
   recent_commits: z.array(ProjectDetailCommitSchema).catch([]),
+  // Stage 12: neueste Receipts dieses Projekts (≤5, gleiche Zeilenform wie
+  // der Feed). Ältere Backends ohne das Feld → leere Liste.
+  receipts: z.array(ProjectReceiptEntrySchema).catch([]),
   kanban_tasks: z.array(ProjectDetailKanbanTaskSchema).nullable().catch(null),
   loops: z.array(ProjectDetailLoopSchema).catch([]),
   agents: z.array(ProjectDetailAgentSchema).catch([]),
@@ -216,6 +258,12 @@ const ProjectSessionSchema = z.object({
   spawn_kind: ProjectSessionSpawnKindSchema,
   spawned_by_id: nullableString,
   spawned_by_label: nullableString,
+  // Terminal-Deep-Link (additive-ready): das Backend annotiert Session-Zeilen
+  // aktuell NICHT mit tmux-Herkunft — optional statt nullableString, damit
+  // alte Fixtures/Payloads ohne die Schlüssel unverändert parsen. Gesetzt →
+  // die Zeile bekommt die "Terminal öffnen"-Affordance.
+  tmux_session: z.string().nullable().optional().catch(null),
+  tmux_window: z.string().nullable().optional().catch(null),
 }).passthrough();
 export type ProjectSession = z.infer<typeof ProjectSessionSchema>;
 

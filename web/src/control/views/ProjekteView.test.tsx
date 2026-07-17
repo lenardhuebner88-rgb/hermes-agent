@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectEntry, ProjectAgent, ProjectSession } from "../lib/schemas";
 
@@ -7,6 +8,7 @@ const hooks = vi.hoisted(() => ({
   useProjectAgents: vi.fn(),
   useProjectSessions: vi.fn(),
   useProjectCommits: vi.fn(),
+  useProjectReceipts: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => ({
@@ -14,9 +16,23 @@ vi.mock("../hooks/useControlData", () => ({
   useProjectAgents: hooks.useProjectAgents,
   useProjectSessions: hooks.useProjectSessions,
   useProjectCommits: hooks.useProjectCommits,
+  useProjectReceipts: hooks.useProjectReceipts,
+  // Transitiv über ReceiptsFeed → ReceiptSheet importiert; das Sheet öffnet
+  // sich erst per Klick und wird in dieser Datei nie gerendert.
+  useProjectReceipt: vi.fn(),
 }));
 
 import { ProjekteView } from "./ProjekteView";
+
+/** MemoryRouter: LiveBoard/SessionsSection rendern seit Stage 12 react-router
+ *  Links (Terminal-Deep-Link) — die brauchen Router-Kontext. */
+function renderView() {
+  return renderToStaticMarkup(
+    <MemoryRouter>
+      <ProjekteView />
+    </MemoryRouter>,
+  );
+}
 
 // Real /api/projects card shape (hermes-infra, single top-level project).
 const REAL_PROJECT: ProjectEntry = {
@@ -141,23 +157,38 @@ function mockCommits(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function mockReceipts(overrides: Record<string, unknown> = {}) {
+  hooks.useProjectReceipts.mockReturnValue({
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: true,
+    lastUpdated: null,
+    isStale: false,
+    reload: vi.fn(),
+    updateData: vi.fn(),
+    ...overrides,
+  });
+}
+
 describe("ProjekteView", () => {
   beforeEach(() => {
     mockProjects();
     mockAgents();
     mockSessions();
     mockCommits();
+    mockReceipts();
   });
 
   it("shows the loading state before the first successful poll", () => {
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Lade Projekte");
   });
 
   it("shows a calm empty state when the registry has no projects (no error)", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Keine Projekte registriert.");
     expect(html).toContain("projects.yaml");
   });
@@ -165,7 +196,7 @@ describe("ProjekteView", () => {
   it("renders a project card with blocked-warned kanban, commit, loop and agent chip", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Hermes Infra");
     expect(html).toContain("9d8fa62d8");
     expect(html).toContain("projekte-tab: Stufe 1");
@@ -193,7 +224,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Check-ins");
     expect(html).toContain("Frage-Assistent I1 — Antwort-Sheet (P0c) + Klick-Regression");
     expect(html).toContain("Claim, kein Prozess");
@@ -212,7 +243,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Wer arbeitet gerade");
     expect(html).toContain("Projekte-Tab: Live-Board bauen");
     expect(html).toContain("Lane premium");
@@ -240,7 +271,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     // Live row renders (label + section), but without tmux_session/tmux_window
     // there is no kill affordance — never label-parsing for a destructive call.
     expect(html).toContain("work:1 codex");
@@ -265,7 +296,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("builder-reviewer");
     expect(html).toContain("Unzugeordnet");
     expect(html).toContain("Loop");
@@ -278,7 +309,7 @@ describe("ProjekteView", () => {
       lastUpdated: 1,
     });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Registry-Fehler");
     expect(html).toContain("projects.yaml: invalid YAML");
   });
@@ -286,7 +317,7 @@ describe("ProjekteView", () => {
   it("surfaces the projects-endpoint error banner distinctly from the agents-endpoint one", () => {
     mockProjects({ error: "network down" });
     mockAgents({ error: "agents timeout" });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Projekt-Übersicht konnte nicht geladen werden.");
     expect(html).toContain("Agent-Belegung konnte nicht geladen werden.");
   });
@@ -323,7 +354,7 @@ describe("ProjekteView", () => {
     // No agents/sessions/commits: project names appear ONLY on their cards,
     // so the markup order is the grid order.
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     const posAlert = html.indexOf("Hermes Infra");
     const posActive = html.indexOf("Health Track");
     const posQuiet = html.indexOf("Oma-Galerie");
@@ -344,7 +375,7 @@ describe("ProjekteView", () => {
       lastUpdated: 1,
     });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     // needs_input > 0 (even with blocked == 0) → alert; the dot carries the label.
     expect(html).toContain('data-attention="alert"');
     // Stufe 8: the attention accent bar (absolute child, not a border utility)
@@ -389,7 +420,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Offene Sessions");
     expect(html).toContain("2 offene Sessions");
     expect(html).toContain("Hauptsession CLI");
@@ -422,18 +453,73 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Alle Commits");
     expect(html).toContain("projekte-tab: Live-Board");
     expect(html).toContain("abc123def");
     expect(html).toContain("kimi");
   });
 
+  it("mounts the receipts feed between the card grid and the sessions section", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockSessions({ data: { generated_at: 1, errors: [], sessions: [] }, loading: false, lastUpdated: 1 });
+    mockReceipts({
+      data: {
+        generated_at: 1784322251,
+        receipts: [
+          {
+            agent: "Codex",
+            filename: "2026-07-17-b3-parser-receipt.md",
+            title: "B3 coordination parser drift receipt",
+            mtime: "2026-07-17T21:04:11+00:00",
+            age_seconds: 12600,
+            project: "hermes-infra",
+            excerpt: "status: blocked",
+          },
+          {
+            agent: "Kimi",
+            filename: "2026-07-17-scratch-receipt.md",
+            title: "Scratch receipt ohne Projekt",
+            mtime: "2026-07-17T20:04:11+00:00",
+            age_seconds: 16200,
+            project: null,
+            excerpt: null,
+          },
+        ],
+      },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderView();
+    expect(html).toContain("Ergebnisse");
+    expect(html).toContain("B3 coordination parser drift receipt");
+    expect(html).toContain("Codex");
+    // Projekt-Chip wird über projectNames aufgelöst; project:null-Zeile ohne Chip.
+    expect(html).toContain("Scratch receipt ohne Projekt");
+    // Mount-Reihenfolge: Karten-Grid (data-attention-Marker) → Ergebnisse → Sessions.
+    const posCard = html.indexOf("data-attention=");
+    const posFeed = html.indexOf("Ergebnisse");
+    const posSessions = html.indexOf("Offene Sessions");
+    expect(posCard).toBeGreaterThanOrEqual(0);
+    expect(posCard).toBeLessThan(posFeed);
+    expect(posFeed).toBeLessThan(posSessions);
+  });
+
+  it("surfaces the receipts-endpoint error banner without breaking the rest", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockReceipts({ error: "scan failed" });
+    const html = renderView();
+    expect(html).toContain("Receipts konnten nicht geladen werden.");
+    expect(html).toContain("Hermes Infra");
+  });
+
   it("surfaces the sessions-endpoint error banner without breaking the rest", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
     mockSessions({ error: "state.db locked" });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     expect(html).toContain("Sessions konnten nicht geladen werden.");
     expect(html).toContain("Hermes Infra");
   });
@@ -460,7 +546,7 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     // Mobile (<tab): default zugeklappt — Toggle mit aria-expanded="false",
     // 44px-Ziel (min-h-11), nur unterhalb tab sichtbar (tab:hidden).
     const toggle = /<button type="button" aria-expanded="([^"]*)" aria-controls="projekte-commits-feed" class="([^"]*)">/.exec(html);
@@ -508,7 +594,7 @@ describe("ProjekteView", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [project] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
     mockSessions({ data: { generated_at: 1, errors: [], sessions: [openSession] }, loading: false, lastUpdated: 1 });
-    const html = renderToStaticMarkup(<ProjekteView />);
+    const html = renderView();
     // Alle fünf Chips (live/Check-ins/offene Sessions/blockiert/Input) trotz
     // Sticky-Umbau weiter gerendert.
     expect(html).toContain("1 live");

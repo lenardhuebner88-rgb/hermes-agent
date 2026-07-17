@@ -3,7 +3,7 @@ import { AlertTriangle, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Eyebrow } from "../components/primitives";
 import { FleetEmptyState } from "../components/leitstand";
-import { useProjectAgents, useProjectCommits, useProjectSessions, useProjects } from "../hooks/useControlData";
+import { useProjectAgents, useProjectCommits, useProjectReceipts, useProjectSessions, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
 import type { ProjectAgent } from "../lib/schemas";
@@ -22,15 +22,17 @@ import { SessionKillSheet } from "./projekte/SessionKillSheet";
 import { LiveBoard } from "./projekte/LiveBoard";
 import { SessionsSection } from "./projekte/SessionsSection";
 import { CommitsFeed } from "./projekte/CommitsFeed";
+import { ReceiptsFeed } from "./projekte/ReceiptsFeed";
 
 const t = de.projekte;
 
 /** Projekte-Tab — der Operator-Blick auf "wer arbeitet gerade wirklich woran":
  *  Summary-Strip (live/Check-ins/offene Sessions/blockiert) → LiveBoard
  *  (Agents nach Projekt gruppiert, mit Lane/Operator, tmux killbar) →
- *  Karten-Grid (Attention-sortiert, Klick = Drilldown) → Offene Sessions
+ *  Karten-Grid (Attention-sortiert, Klick = Drilldown) → Ergebnisse (Cross-
+ *  Agent Receipt-Feed, Zeilenklick = Lese-Sheet) → Offene Sessions
  *  (Spawn-Baum aus state.db) → Alle Commits (projektübergreifender Feed).
- *  Daten: GET /api/projects + /agents + /sessions + /commits.
+ *  Daten: GET /api/projects + /agents + /sessions + /commits + /receipts.
  *  Mobile (<tab 600px, sessions-first): der Strip wird zur sticky,
  *  horizontal scrollbaren Zeile direkt unter dem App-Header; die Reihenfolge
  *  Strip → LiveBoard → Karten → Sessions → Commits bleibt (CSS-only, kein
@@ -41,6 +43,7 @@ export function ProjekteView() {
   const agents = useProjectAgents();
   const sessions = useProjectSessions();
   const commits = useProjectCommits();
+  const receipts = useProjectReceipts();
   const now = nowSec();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [killAgent, setKillAgent] = useState<ProjectAgent | null>(null);
@@ -53,6 +56,7 @@ export function ProjekteView() {
   const agentList = agents.data?.agents ?? [];
   const sessionList = sessions.data?.sessions ?? [];
   const commitList = commits.data?.commits ?? [];
+  const receiptList = receipts.data?.receipts ?? [];
   const agentsByProject = groupAgentsByProject(agentList);
   const agentCountBySlug = countAgentsByProject(agentList);
   const sortedList = sortProjectsByAttention(list, agentCountBySlug);
@@ -137,6 +141,13 @@ export function ProjekteView() {
         </div>
       ) : null}
 
+      {receipts.error ? (
+        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
+          {t.receiptsError}
+        </div>
+      ) : null}
+
       {registryErrors.length > 0 ? (
         <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
           <p className="font-semibold">{t.registryErrors}</p>
@@ -179,6 +190,10 @@ export function ProjekteView() {
             );
           })}
         </div>
+      ) : null}
+
+      {receipts.data !== null ? (
+        <ReceiptsFeed receipts={receiptList} projectNames={projectNames} now={now} />
       ) : null}
 
       {sessions.data !== null ? (

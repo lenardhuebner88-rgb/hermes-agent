@@ -334,3 +334,24 @@ export function attentionTone(a: ProjectAttention): SignalTone {
   if (a === "active") return "warn";
   return "neutral";
 }
+
+// ── Stage 12 — Receipts + Terminal-Deep-Link (2026-07-18) ──────────────────
+
+/** ISO-mtime des Receipt-Vertrags → Epoch-Sekunden für fmtRelativeTime/
+ *  fmtAge. Ein ungültiger String wird NaN → die Formatter sagen ehrlich
+ *  "Zeit ungültig" statt eine erfundene Zeit zu zeigen. */
+export function receiptEpoch(mtime: string): number {
+  return Date.parse(mtime) / 1000;
+}
+
+/** In-SPA-Ziel für /control/agent-terminals (?session=&window=). Nur die
+ *  strukturierten tmux-Felder — wie killTarget wird nie aus dem Anzeige-
+ *  Label geparst. Das Fenster ist optional: der Deep-Link löst sonst
+ *  irgendein Fenster der Session auf (pickDeepLinkedTarget); null/leer →
+ *  der window-Parameter entfällt komplett. */
+export function terminalDeepLink(session: string, window: string | null | undefined): string {
+  const params = new URLSearchParams({ session: session.trim() });
+  const trimmedWindow = window?.trim();
+  if (trimmedWindow) params.set("window", trimmedWindow);
+  return `/control/agent-terminals?${params.toString()}`;
+}

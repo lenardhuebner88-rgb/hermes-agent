@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectAgent } from "../../lib/schemas";
 
@@ -85,8 +86,12 @@ const CORRELATED_TMUX_AGENT: ProjectAgent = {
 const NAMES = { "hermes-infra": "Hermes Infra", "family-organizer": "Family Organizer" };
 
 function renderBoard(agents: ProjectAgent[]) {
+  // MemoryRouter: tmux-Zeilen rendern seit Stage 12 einen react-router Link
+  // (Terminal-Deep-Link) — Link braucht einen Router-Kontext.
   return renderToStaticMarkup(
-    <LiveBoard agents={agents} projectNames={NAMES} now={1784240000} onKillSession={vi.fn()} />,
+    <MemoryRouter>
+      <LiveBoard agents={agents} projectNames={NAMES} now={1784240000} onKillSession={vi.fn()} />
+    </MemoryRouter>,
   );
 }
 
@@ -114,6 +119,29 @@ describe("LiveBoard", () => {
 
   it("keeps the kill affordance exclusive to tmux rows with structured targets", () => {
     const html = renderBoard([TMUX_AGENT, KANBAN_AGENT, CLAIM_AGENT]);
+    const kills = html.match(/aria-label="Session [^"]* beenden"/g) ?? [];
+    expect(kills).toHaveLength(1);
+  });
+
+  it("links rows with tmux_session to the terminal deep link, window optional", () => {
+    // Fensterlose tmux-Zeile: Deep-Link trägt nur die Session (der Terminal-
+    // Tab löst dann irgendein Fenster auf) und ist nicht killbar.
+    const noWindow: ProjectAgent = {
+      ...TMUX_AGENT,
+      label: "work:5 kimi",
+      since: 1784238500,
+      tmux_window: null,
+    };
+    const html = renderBoard([TMUX_AGENT, noWindow, KANBAN_AGENT, CLAIM_AGENT]);
+    // Mit Fenster (HTML-escaped &amp; im statischen Markup).
+    expect(html).toContain('href="/control/agent-terminals?session=work&amp;window=2"');
+    // Ohne Fenster: window-Parameter entfällt komplett.
+    expect(html).toContain('href="/control/agent-terminals?session=work"');
+    // Nur die zwei tmux-Zeilen bekommen die Affordance — Kanban/Check-in nie.
+    const links = html.match(/aria-label="Terminal öffnen: [^"]*"/g) ?? [];
+    expect(links).toHaveLength(2);
+    expect(html).toContain('aria-label="Terminal öffnen: work:2 kimi"');
+    // Kill-Fluss unverändert: nur die Zeile mit session+window ist killbar.
     const kills = html.match(/aria-label="Session [^"]* beenden"/g) ?? [];
     expect(kills).toHaveLength(1);
   });

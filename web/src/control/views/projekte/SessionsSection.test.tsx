@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import type { ProjectSession } from "../../lib/schemas";
 
 import { SessionsSection } from "./SessionsSection";
@@ -25,6 +26,19 @@ function makeSession(overrides: Partial<ProjectSession> & { id: string }): Proje
     spawned_by_label: null,
     ...overrides,
   };
+}
+
+/** MemoryRouter: Zeilen mit tmux-Adresse rendern seit Stage 12 einen
+ *  react-router Link (Terminal-Deep-Link) — der braucht Router-Kontext. */
+function renderSection(
+  sessions: ProjectSession[],
+  projectNames: Readonly<Record<string, string>> = {},
+) {
+  return render(
+    <MemoryRouter>
+      <SessionsSection sessions={sessions} projectNames={projectNames} now={1784240000} />
+    </MemoryRouter>,
+  );
 }
 
 const ROOT = makeSession({
@@ -52,13 +66,7 @@ afterEach(() => cleanup());
 
 describe("SessionsSection", () => {
   it("nests the spawned child under its parent with the spawn label", () => {
-    const { container } = render(
-      <SessionsSection
-        sessions={[CHILD, ROOT]}
-        projectNames={{ "hermes-infra": "Hermes Infra" }}
-        now={1784240000}
-      />,
-    );
+    const { container } = renderSection([CHILD, ROOT], { "hermes-infra": "Hermes Infra" });
     const html = container.innerHTML;
     expect(html).toContain("Hauptsession");
     expect(html).toContain("Subagent Lauf");
@@ -72,9 +80,7 @@ describe("SessionsSection", () => {
   });
 
   it("defaults to the open filter and hides ended sessions until Alle is picked", () => {
-    render(
-      <SessionsSection sessions={[ROOT, ENDED]} projectNames={{}} now={1784240000} />,
-    );
+    renderSection([ROOT, ENDED]);
     expect(screen.getByText("Hauptsession")).toBeTruthy();
     expect(screen.queryByText("Alte Session")).toBeNull();
 
@@ -84,20 +90,39 @@ describe("SessionsSection", () => {
   });
 
   it("shows only live sessions under Aktiv", () => {
-    render(
-      <SessionsSection
-        sessions={[ROOT, makeSession({ id: "idle", label: "Idle Session", is_active: false })]}
-        projectNames={{}}
-        now={1784240000}
-      />,
-    );
+    renderSection([ROOT, makeSession({ id: "idle", label: "Idle Session", is_active: false })]);
     fireEvent.click(screen.getByRole("button", { name: /Aktiv/ }));
     expect(screen.getByText("Hauptsession")).toBeTruthy();
     expect(screen.queryByText("Idle Session")).toBeNull();
   });
 
   it("renders the doctrine-shaped empty state per filter", () => {
-    render(<SessionsSection sessions={[]} projectNames={{}} now={1784240000} />);
+    renderSection([]);
     expect(screen.getByText("Keine offenen Sessions.")).toBeTruthy();
+  });
+
+  it("links sessions carrying a tmux address to the terminal deep link, window optional", () => {
+    const withTmux = makeSession({
+      id: "tmux1",
+      label: "Kimi Work",
+      is_active: true,
+      tmux_session: "work",
+      tmux_window: "3",
+    });
+    const noWindow = makeSession({
+      id: "tmux2",
+      label: "Nur Session",
+      tmux_session: "scratch",
+      tmux_window: null,
+    });
+    renderSection([ROOT, withTmux, noWindow]);
+
+    const withWindowLink = screen.getByRole("link", { name: "Terminal öffnen: Kimi Work" });
+    expect(withWindowLink.getAttribute("href")).toBe("/control/agent-terminals?session=work&window=3");
+    // Fensterlos: der window-Parameter entfällt komplett.
+    const noWindowLink = screen.getByRole("link", { name: "Terminal öffnen: Nur Session" });
+    expect(noWindowLink.getAttribute("href")).toBe("/control/agent-terminals?session=scratch");
+    // Zeilen ohne tmux-Adresse bekommen die Affordance nie.
+    expect(screen.queryByRole("link", { name: "Terminal öffnen: Hauptsession" })).toBeNull();
   });
 });

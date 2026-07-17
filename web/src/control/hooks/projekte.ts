@@ -2,17 +2,21 @@ import { fetchJSON } from "@/lib/api";
 
 import {
   ProjectDetailResponseSchema,
+  ProjectReceiptContentSchema,
   ProjectsAgentsResponseSchema,
   ProjectSessionsResponseSchema,
   ProjectsCommitsResponseSchema,
+  ProjectsReceiptsResponseSchema,
   ProjectsResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type {
   ProjectDetail,
+  ProjectReceiptContent,
   ProjectSessionsResponse,
   ProjectsAgentsResponse,
   ProjectsCommitsResponse,
+  ProjectsReceiptsResponse,
   ProjectsResponse,
 } from "../lib/schemas";
 import { usePolling } from "./internal";
@@ -77,6 +81,40 @@ export function useProjectCommits() {
         ProjectsCommitsResponseSchema,
         await fetchJSON<unknown>("/api/projects/commits"),
         "projects/commits",
+      ),
+    30000,
+  );
+}
+
+/** Cross-Agent Receipt-Feed (Stage 12): was haben die Agents zuletzt
+ *  abgeschlossen. Datei-basiert, ändert sich im Commit-Takt — 30s wie der
+ *  Commit-Feed (das Backend cached den Scan selbst mit 30s TTL). */
+export function useProjectReceipts() {
+  return usePolling<ProjectsReceiptsResponse>(
+    "projects/receipts",
+    async () =>
+      parseOrThrow(
+        ProjectsReceiptsResponseSchema,
+        await fetchJSON<unknown>("/api/projects/receipts"),
+        "projects/receipts",
+      ),
+    30000,
+  );
+}
+
+/** Einzel-Receipt-Inhalt (Stage 12). Gemountet nur solange das Lese-Sheet
+ *  offen ist — mounted-only-Doktrin wie useProjectDetail; 30s Takt wie der
+ *  Feed, weil eine Receipt-Datei mit neuer mtime überschrieben werden kann. */
+export function useProjectReceipt(agent: string, filename: string) {
+  return usePolling<ProjectReceiptContent>(
+    `projects/receipt/${agent}/${filename}`,
+    async () =>
+      parseOrThrow(
+        ProjectReceiptContentSchema,
+        await fetchJSON<unknown>(
+          `/api/projects/receipts/${encodeURIComponent(agent)}/${encodeURIComponent(filename)}`,
+        ),
+        `projects/receipt/${agent}/${filename}`,
       ),
     30000,
   );

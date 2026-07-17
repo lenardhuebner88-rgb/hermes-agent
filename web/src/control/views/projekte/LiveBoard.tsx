@@ -1,4 +1,5 @@
-import { X } from "lucide-react";
+import { SquareTerminal, X } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Eyebrow } from "../../components/primitives";
 import { SectionHeader } from "../../components/leitstand";
@@ -7,7 +8,7 @@ import { fmtAge } from "../../lib/derive";
 import type { ProjectAgent } from "../../lib/schemas";
 import { de } from "../../i18n/de";
 import { AGENT_KIND_STYLES } from "./agentKinds";
-import { killTarget, liveBoardGroups } from "./derive";
+import { killTarget, liveBoardGroups, terminalDeepLink } from "./derive";
 
 const t = de.projekte;
 
@@ -24,7 +25,8 @@ export interface LiveBoardProps {
  *  question: grouped by PROJECT (not by engine like the old rail), every row
  *  shows who (kind), on what (task/label), from which source (process, kanban
  *  task, loop, check-in), for whom (assignee/operator) and for how long.
- *  tmux rows stay killable through the structured target only. */
+ *  tmux rows stay killable through the structured target only; Zeilen mit
+ *  tmux_session verlinken per Deep-Link aufs Terminal (Stage 12). */
 export function LiveBoard({ agents, projectNames, now, onKillSession }: LiveBoardProps) {
   const groups = liveBoardGroups(agents);
 
@@ -140,6 +142,19 @@ function LiveBoardRow({
         <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">
           {fmtAge(agent.since, now)}
         </span>
+      ) : null}
+      {agent.tmux_session?.trim() ? (
+        // Terminal-Deep-Link (Stage 12): in-SPA auf /control/agent-terminals
+        // mit der strukturierten tmux-Adresse; Fenster optional. Gleiches
+        // 44px-mobil/tab:size-7-Idiom wie der Kill-Button.
+        <Link
+          to={terminalDeepLink(agent.tmux_session, agent.tmux_window)}
+          aria-label={t.terminalOpenAria(headline)}
+          title={t.terminalOpenAria(headline)}
+          className="grid size-11 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-bronze/40 hover:bg-bronze/10 hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-bronze tab:size-7"
+        >
+          <SquareTerminal className="h-3.5 w-3.5" aria-hidden />
+        </Link>
       ) : null}
       {target ? (
         <button

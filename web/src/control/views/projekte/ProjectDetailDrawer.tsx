@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { AlertTriangle, ExternalLink, FolderGit2 } from "lucide-react";
 import { DrawerShell, SectionHeader, SignalChip } from "../../components/leitstand";
 import { Led } from "../../components/atoms";
@@ -5,9 +6,11 @@ import { SkeletonCard } from "../../components/primitives";
 import { useProjectDetail } from "../../hooks/useControlData";
 import { de } from "../../i18n/de";
 import { fmtRelativeTime, nowSec } from "../../lib/derive";
-import type { ProjectDetail } from "../../lib/schemas";
+import type { ProjectDetail, ProjectReceiptEntry } from "../../lib/schemas";
 import { AGENT_KIND_STYLES, agentChipText } from "./agentKinds";
 import { kanbanTaskTone, loopOutcomeTone } from "./derive";
+import { ReceiptRow } from "./ReceiptsFeed";
+import { ReceiptSheet } from "./ReceiptSheet";
 import { cn } from "@/lib/utils";
 
 const t = de.projekte;
@@ -71,6 +74,8 @@ export function ProjectDetailDrawer({
 }
 
 export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: number }) {
+  const [openReceipt, setOpenReceipt] = useState<ProjectReceiptEntry | null>(null);
+
   return (
     <div className="min-w-0 space-y-5">
       {data.errors.length > 0 ? (
@@ -129,6 +134,26 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
                   <span>{fmtRelativeTime(commit.committed_at, now)}</span>
                 </p>
               </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="min-w-0 space-y-2">
+        <SectionHeader label={t.detailReceipts} meta={data.receipts.length || undefined} />
+        {data.receipts.length === 0 ? (
+          <p className="text-micro text-ink-3">{t.detailNoReceipts}</p>
+        ) : (
+          <ul className="min-w-0 space-y-1">
+            {data.receipts.map((receipt) => (
+              <ReceiptRow
+                key={`${receipt.agent}:${receipt.filename}`}
+                receipt={receipt}
+                projectNames={{}}
+                now={now}
+                showProject={false}
+                onOpen={setOpenReceipt}
+              />
             ))}
           </ul>
         )}
@@ -279,6 +304,10 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
           </ul>
         )}
       </section>
+
+      {openReceipt ? (
+        <ReceiptSheet receipt={openReceipt} onClose={() => setOpenReceipt(null)} />
+      ) : null}
     </div>
   );
 }

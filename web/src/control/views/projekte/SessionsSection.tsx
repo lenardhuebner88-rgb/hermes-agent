@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { SquareTerminal } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Eyebrow } from "../../components/primitives";
 import { SubtabChips } from "../../components/leitstand";
@@ -6,7 +8,7 @@ import { Led } from "../../components/atoms";
 import { fmtRelativeTime, fmtTokens } from "../../lib/derive";
 import type { ProjectSession } from "../../lib/schemas";
 import { de } from "../../i18n/de";
-import { buildSessionRows, countOpenSessions, filterSessions, type SessionsFilter } from "./derive";
+import { buildSessionRows, countOpenSessions, filterSessions, terminalDeepLink, type SessionsFilter } from "./derive";
 
 const t = de.projekte;
 
@@ -167,6 +169,19 @@ function SessionRow({
           ) : null}
         </p>
       </div>
+      {session.tmux_session?.trim() ? (
+        // Terminal-Deep-Link (Stage 12): nur Zeilen mit strukturierter tmux-
+        // Adresse (additive Backend-Annotation); Fenster optional. 44px mobil,
+        // kompakt ab tab — dasselbe Idiom wie die LiveBoard-Affordance.
+        <Link
+          to={terminalDeepLink(session.tmux_session, session.tmux_window)}
+          aria-label={t.terminalOpenAria(session.label || session.id)}
+          title={t.terminalOpenAria(session.label || session.id)}
+          className="grid size-11 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-bronze/40 hover:bg-bronze/10 hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-bronze tab:size-7"
+        >
+          <SquareTerminal className="h-3.5 w-3.5" aria-hidden />
+        </Link>
+      ) : null}
     </li>
   );
 }
