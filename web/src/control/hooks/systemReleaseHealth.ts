@@ -33,7 +33,11 @@ export function useDictateStatus() {
 export function useSystemHealth() {
   return usePolling<SystemHealthResponse>(
     "health-status",
-    async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
+    async (signal) => parseOrThrow(
+      SystemHealthResponseSchema,
+      await fetchJSON<unknown>("/api/health-status", { signal }),
+      "health-status",
+    ),
     // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
     HEALTH_POLL_INTERVAL_MS,
   );
