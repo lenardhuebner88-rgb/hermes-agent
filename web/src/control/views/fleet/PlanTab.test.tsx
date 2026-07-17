@@ -31,6 +31,28 @@ describe("PlanTab profile approvals", () => {
   });
 });
 
+describe("PlanTab composer collapse", () => {
+  afterEach(() => {
+    cleanup();
+    window.localStorage.clear();
+  });
+
+  it("starts collapsed and remembers the expanded state", () => {
+    const first = renderPlanTab();
+    const toggle = screen.getByRole("button", { name: "Plan-Composer aufklappen" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByLabelText("Plan-Text")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Plan-Composer einklappen" }).getAttribute("aria-expanded")).toBe("true");
+    expect(window.localStorage.getItem("fleet-plan-composer-expanded")).toBe("true");
+    first.unmount();
+
+    renderPlanTab();
+    expect(screen.getByRole("button", { name: "Plan-Composer einklappen" }).getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
 describe("PlanTab ingest wiring (source pins)", () => {
   it("posts to the ingest route with the spec path", () => {
     expect(src).toContain('"/api/plugins/kanban/planspecs/ingest"');

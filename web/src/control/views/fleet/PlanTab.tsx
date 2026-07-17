@@ -27,6 +27,8 @@ import { ExpandableText } from "./HeuteTab";
 import type { PlanSpecRecord } from "./shared";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
+const PLAN_COMPOSER_EXPANDED_KEY = "fleet-plan-composer-expanded";
+
 // Antwort der /planspecs/ingest-Route (plugin_api.ingest_planspec →
 // planspecs.ingest_planspec): root_task_id der neu erzeugten, gehaltenen Kette.
 interface PlanSpecIngestResponse {
@@ -56,13 +58,40 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
   // fällt der gespeicherte Pfad nach Approve/Reload aus pendingPaths heraus,
   // springt die Auswahl automatisch auf den nächsten wartenden Eintrag.
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [composerExpanded, setComposerExpanded] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(PLAN_COMPOSER_EXPANDED_KEY) === "true";
+  });
   const effectivePath = deriveEffectivePlanPath(selectedPath, pendingPaths);
   const selectedSpec = pendingSpecs.find((ps) => ps.path === effectivePath) ?? null;
+
+  const composerSection = readOnly ? null : (
+    <section className="fleet-plan-composer-collapse">
+      <button
+        type="button"
+        className="fleet-plan-composer-header"
+        aria-expanded={composerExpanded}
+        aria-controls="fleet-plan-composer-body"
+        aria-label={`Plan-Composer ${composerExpanded ? "einklappen" : "aufklappen"}`}
+        onClick={() => {
+          setComposerExpanded((expanded) => {
+            const next = !expanded;
+            window.localStorage.setItem(PLAN_COMPOSER_EXPANDED_KEY, String(next));
+            return next;
+          });
+        }}
+      >
+        <span>Plan-Composer</span>
+        <span aria-hidden="true">{composerExpanded ? "▲" : "▼"}</span>
+      </button>
+      {composerExpanded ? <div id="fleet-plan-composer-body"><PlanComposer onIngestSuccess={onApproveSuccess} /></div> : null}
+    </section>
+  );
 
   if (pendingSpecs.length === 0) {
     return (
       <>
-        {readOnly ? null : <PlanComposer onIngestSuccess={onApproveSuccess} />}
+        {composerSection}
         {readOnly ? null : <AutoReleaseTile />}
         <div className="fleet-empty">
           <p className="fleet-empty-title">{de.fleet.planLeer}</p>
@@ -74,7 +103,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
 
   return (
     <>
-      {readOnly ? null : <PlanComposer onIngestSuccess={onApproveSuccess} />}
+      {composerSection}
       {readOnly ? null : <AutoReleaseTile />}
 
       {/* Liste wartender PlanSpecs — wenn mehr als eine, als auswählbare Chips */}

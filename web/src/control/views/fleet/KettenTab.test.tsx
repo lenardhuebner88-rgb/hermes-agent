@@ -86,6 +86,13 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(src).toContain("chain-expander");
   });
 
+  it("caps upcoming and expanded done lists at 20 with separate expanders", () => {
+    expect(src).toContain("upcomingNodes.slice(0, showAllUpcoming ? undefined : 20)");
+    expect(src).toContain("doneNodes.slice(0, showAllDone ? undefined : 20)");
+    expect(src).toContain("Weitere Upcoming anzeigen");
+    expect(src).toContain("Weitere fertige Schritte anzeigen");
+  });
+
   it("FIX-3: pipeline label is the role (not stripped/sliced), model only as sub when different", () => {
     expect(src).not.toMatch(/\.replace\(\/\^\(coder/);
     expect(src).toContain('node.assignee ?? node.latest_run?.profile ?? "—"');

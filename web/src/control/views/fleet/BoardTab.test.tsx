@@ -45,6 +45,25 @@ function board(tasks: BoardTask[]): BoardResponse {
 }
 
 describe("BoardTab operator information", () => {
+  it("shows every active filter in a resettable chip even when no tasks match", () => {
+    render(<BoardTab board={board([task()])} onOpenNodeDetail={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText("Tasks durchsuchen"), { target: { value: "keine-treffer" } });
+    fireEvent.change(screen.getByLabelText("Nach Status filtern"), { target: { value: "ready" } });
+    fireEvent.change(screen.getByLabelText("Nach Assignee filtern"), { target: { value: "premium-reviewer" } });
+
+    const chip = screen.getByRole("status", { name: "Aktive Board-Filter" });
+    expect(within(chip).getByText(/Status: Startklar/)).toBeTruthy();
+    expect(within(chip).getByText(/Assignee: premium-reviewer/)).toBeTruthy();
+    expect(within(chip).getByText(/Suche: keine-treffer/)).toBeTruthy();
+
+    fireEvent.click(within(chip).getByRole("button", { name: "Alle Filter zurücksetzen" }));
+    expect(screen.queryByRole("status", { name: "Aktive Board-Filter" })).toBeNull();
+    expect((screen.getByLabelText("Tasks durchsuchen") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Nach Status filtern") as HTMLSelectElement).value).toBe("all");
+    expect((screen.getByLabelText("Nach Assignee filtern") as HTMLSelectElement).value).toBe("all");
+  });
+
   it("loads the archive separately, reports counts, and follows the cursor", async () => {
     const archivedOne = task({ id: "t_archive1", title: "Archive one", status: "archived", archived_at: 1_783_900_003 });
     const archivedTwo = task({ id: "t_archive2", title: "Archive two", status: "archived", archived_at: 1_783_900_002 });
