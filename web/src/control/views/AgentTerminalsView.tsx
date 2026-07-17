@@ -74,6 +74,9 @@ import {
   TerminalSelectOverlay,
 } from "./agent-terminals/TerminalSelectOverlay";
 import { TerminalUsageDock } from "./agent-terminals/TerminalUsageDock";
+import { AnswerSheet } from "./agent-terminals/AnswerSheet";
+import { QuestionPill } from "./agent-terminals/QuestionPill";
+import { useAgentQuestions } from "../hooks/agentQuestions";
 import {
   normalizeDesktopLayout,
   resolvePaneTargets,
@@ -308,6 +311,9 @@ export function AgentTerminalsView() {
   const [broadcastConfirming, setBroadcastConfirming] = useState(false);
   const [broadcastBusy, setBroadcastBusy] = useState(false);
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
+  const agentQuestions = useAgentQuestions();
+  const [answerSheetOpen, setAnswerSheetOpen] = useState(false);
+  const openQuestions = agentQuestions.data?.questions ?? [];
   const visiblePaneCount: DesktopTerminalLayout = compactLayout ? 1 : desktopLayout;
   const paneTargets = useMemo<Array<PaneTarget | null>>(() => [target, ...extraTargets], [extraTargets, target]);
   const activeTarget = paneTargets[Math.min(activePane, visiblePaneCount - 1)] ?? target;
@@ -1946,6 +1952,7 @@ export function AgentTerminalsView() {
         <ChevronLeft className="h-4 w-4" />
       </button>
       <div className="flex min-w-0 flex-1 items-stretch gap-1.5 overflow-x-auto px-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <QuestionPill count={openQuestions.length} onClick={() => setAnswerSheetOpen(true)} />
         {frageWindows.length > 0 && (
           <button
             type="button"
@@ -2453,6 +2460,7 @@ export function AgentTerminalsView() {
             <div className="mt-1 flex flex-wrap items-center gap-2"><TerminalStatusChip state={state} />{loading && <span className="text-xs text-ink-3">lädt…</span>}{error && <span className="inline-flex items-center gap-1 text-xs text-status-alert"><AlertTriangle className="h-3 w-3" />{error}</span>}</div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <QuestionPill count={openQuestions.length} onClick={() => setAnswerSheetOpen(true)} />
             <button
               type="button"
               onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
@@ -2691,6 +2699,15 @@ export function AgentTerminalsView() {
 
       {selectSnapshot !== null && (
         <TerminalSelectOverlay text={selectSnapshot} onClose={closeSelectOverlay} />
+      )}
+
+      {answerSheetOpen && (
+        <AnswerSheet
+          questions={openQuestions}
+          onClose={() => setAnswerSheetOpen(false)}
+          reload={agentQuestions.reload}
+          updateData={agentQuestions.updateData}
+        />
       )}
     </div>
   );

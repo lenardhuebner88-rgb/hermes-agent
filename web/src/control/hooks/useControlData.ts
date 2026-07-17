@@ -25,3 +25,4 @@ export * from "./taskBodyOnDemand";
 export { extractDetail } from "./internal";
 export * from "./projekte";
 export * from "./operatorDigest";
+export * from "./agentQuestions";

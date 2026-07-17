@@ -542,6 +542,40 @@ export interface ControlOverviewDecisionQueueResponse {
   decisions?: Array<{ task_id?: string; task_title?: string; kind?: string }>;
 }
 
+/** Single option on an open agent-question (scrape store /api/agent-questions). */
+export interface AgentQuestionOption {
+  nr: number | string;
+  label: string;
+  recommended: boolean;
+}
+
+/**
+ * Flat event dict from GET /api/agent-questions (hermes_cli agent_questions schema).
+ * `options[].nr` may be int ("1") or y/n string ("y"/"n"). Newest-first.
+ */
+export interface AgentQuestionEvent {
+  id: number;
+  ts: string;
+  updated_ts: string | null;
+  source: string;
+  session: string;
+  window: string;
+  pane_id: string;
+  fingerprint: string;
+  kind: string | null;
+  cwd: string | null;
+  question_text: string;
+  options: AgentQuestionOption[];
+  class: string | null;
+  status: string;
+  answered_by: string | null;
+  answer: string | null;
+  latency_s: number | null;
+  /** SQLite INTEGER 0/1 — serialized as number, NOT boolean (POST result `verified` IS boolean). */
+  answer_verified: number | null;
+  override: number;
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -572,6 +606,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window }),
     }),
+  listAgentQuestions: () =>
+    fetchJSON<{ questions: AgentQuestionEvent[] }>(
+      "/api/agent-questions?status=open&limit=50",
+    ),
+  answerAgentQuestion: (id: number, answer: string) =>
+    fetchJSON<{ ok: boolean; verified: boolean; latency_s: number }>(
+      `/api/agent-questions/${id}/answer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answer, answered_by: "operator" }),
+      },
+    ),
   ensureAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/ensure", {
       method: "POST",

@@ -251,4 +251,88 @@ else
   npm run build
 fi
 
+# Opt-in E2E stage (Frage-Assistent Klick-Regression). Off by default so the
+# gate stays byte-identical for normal iteration; needs a fresh build + free
+# preview port. Enable with GATE_E2E=1 (e.g. before land/deploy of answer-sheet).
+if [[ "${GATE_E2E:-0}" == "1" ]]; then
+  if [[ $skip_build -eq 1 ]]; then
+    {
+      echo "FAIL (gate-e2e): GATE_E2E=1 requires a fresh build (do not pass --skip-build)."
+    } >&2
+    exit 1
+  fi
+  step "playwright e2e/agent-questions (GATE_E2E=1, vite preview)"
+  preview_port=4173
+  playwright_bin=""
+  if [[ -x "$repo_root/node_modules/.bin/playwright" ]]; then
+    playwright_bin="$repo_root/node_modules/.bin/playwright"
+  elif [[ -x "$repo_root/web/node_modules/.bin/playwright" ]]; then
+    playwright_bin="$repo_root/web/node_modules/.bin/playwright"
+  else
+    echo "FAIL (gate-e2e): playwright binary not found under node_modules/.bin/" >&2
+    exit 1
+  fi
+  vite_bin=""
+  if [[ -x "$repo_root/node_modules/.bin/vite" ]]; then
+    vite_bin="$repo_root/node_modules/.bin/vite"
+  elif [[ -x "$repo_root/web/node_modules/.bin/vite" ]]; then
+    vite_bin="$repo_root/web/node_modules/.bin/vite"
+  else
+    echo "FAIL (gate-e2e): vite binary not found under node_modules/.bin/" >&2
+    exit 1
+  fi
+  # Port MUSS frei sein BEVOR wir starten: die Readiness-curl unten kann sonst
+  # einen fremden Server auf :4173 treffen, bevor vite am --strictPort stirbt —
+  # Playwright testet dann einen fremden Build (false-green, Codex-Lens I1 #3).
+  if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${preview_port}/"; then
+    echo "FAIL (gate-e2e): port ${preview_port} ist bereits belegt — Abbruch statt fremden Server zu testen." >&2
+    exit 1
+  fi
+  preview_log="$(mktemp -t gate-e2e-preview.XXXXXX.log)"
+  preview_pid=""
+  _gate_e2e_cleanup() {
+    if [[ -n "${preview_pid:-}" ]] && kill -0 "$preview_pid" 2>/dev/null; then
+      kill "$preview_pid" 2>/dev/null || true
+      wait "$preview_pid" 2>/dev/null || true
+    fi
+    rm -f "$preview_log"
+  }
+  trap _gate_e2e_cleanup EXIT
+  # Serve the dist just built (web/ dist → hermes_cli/web_dist or vite outDir).
+  # --strictPort so a foreign process on 4173 fails loudly instead of drifting.
+  ( cd "$repo_root/web" && "$vite_bin" preview --host 127.0.0.1 --strictPort --port "$preview_port" ) \
+    >"$preview_log" 2>&1 &
+  preview_pid=$!
+  # Wait until preview answers (max ~20s).
+  ready=0
+  for _ in $(seq 1 40); do
+    if ! kill -0 "$preview_pid" 2>/dev/null; then
+      echo "FAIL (gate-e2e): vite preview exited early. log:" >&2
+      cat "$preview_log" >&2 || true
+      exit 1
+    fi
+    if curl -sf -o /dev/null "http://127.0.0.1:${preview_port}/"; then
+      ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    echo "FAIL (gate-e2e): vite preview did not become ready on :${preview_port}" >&2
+    cat "$preview_log" >&2 || true
+    exit 1
+  fi
+  (
+    cd "$repo_root/web"
+    PLAYWRIGHT_BASE_URL="http://127.0.0.1:${preview_port}" \
+      "$playwright_bin" test e2e/agent-questions.spec.ts
+  )
+  e2e_rc=$?
+  _gate_e2e_cleanup
+  trap - EXIT
+  if [[ "$e2e_rc" -ne 0 ]]; then
+    exit "$e2e_rc"
+  fi
+fi
+
 printf '\n=== FRONTEND-GATE GRÜN (exit 0) ===\n'
