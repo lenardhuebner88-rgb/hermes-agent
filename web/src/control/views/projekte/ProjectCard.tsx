@@ -59,6 +59,10 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
   const attentionLabel = t.attentionLabel[attention];
 
   const onKeyDown = (event: KeyboardEvent) => {
+    // Only the card itself opens the drawer: Enter/Space on a NESTED control
+    // (the kill button) must not bubble up and open the drawer alongside the
+    // sheet (Fable review 2026-07-17, obs. 1).
+    if (event.target !== event.currentTarget) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       onOpen();

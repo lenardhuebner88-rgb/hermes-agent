@@ -61,7 +61,12 @@ export function SessionKillSheet({ agent, projectName, now, onClose, onKilled }:
     <DrawerShell
       eyebrow={t.killSheetEyebrow}
       title={t.killSheetTitle}
-      onClose={onClose}
+      onClose={() => {
+        // While the terminate request is in flight the sheet stays open:
+        // closing now would lose the error feedback and leave the outcome
+        // invisible (Fable review 2026-07-17, obs. 3).
+        if (!busy) onClose();
+      }}
       ariaLabel={t.killSheetTitle}
       footer={
         <div className="flex gap-2.5">

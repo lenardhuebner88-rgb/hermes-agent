@@ -90,6 +90,21 @@ describe("SessionKillSheet", () => {
     expect((screen.getByRole("button", { name: "Session beenden" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("ignores Escape/backdrop-close while the terminate request is in flight (Fable obs. 3)", async () => {
+    let resolveTerminate: ((value: { ok: boolean }) => void) | undefined;
+    apiMock.terminateAgentTerminalWindow.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveTerminate = resolve; }),
+    );
+    const props = renderSheet();
+    fireEvent.click(screen.getByRole("button", { name: "Session beenden" }));
+    // In flight: Escape must NOT close (error feedback would be lost).
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(props.onClose).not.toHaveBeenCalled();
+    resolveTerminate?.({ ok: true });
+    await waitFor(() => expect(props.onKilled).toHaveBeenCalledTimes(1));
+    expect(props.onClose).toHaveBeenCalledTimes(1); // success-path close
+  });
+
   it("renders nothing for a row without a structured kill target", () => {
     const { container } = render(
       <SessionKillSheet
