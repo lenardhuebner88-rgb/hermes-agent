@@ -8,6 +8,7 @@ beyond a temp file board. The PlanSpec quality judge is disabled by the autouse
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -466,6 +467,78 @@ def test_vetoed_lever_is_suppressed_on_next_propose(board_home, monkeypatch, tmp
     result = strategist.propose(board=None, out_dir=out_dir, notes_dir=notes_dir)
     # suppressed → not proposed
     assert all(item["key"] != "HEILER-TRANSIENT" for item in result["ingested"])
+
+
+# --------------------------------------------------------------------------- #
+# 5b. Reflect rolling window — no calendar-midnight blind gap for late vetoes
+# --------------------------------------------------------------------------- #
+def test_reflect_rolling_window_catches_previous_evening_veto(board_home, tmp_path):
+    """A freigabe_vetoed after last_reflect_run_ts but on the previous calendar
+    evening must still count when reflect() is called with no explicit since.
+
+    Calendar-midnight default left a nightly blind window: timer at 20:00, event
+    scan open-ended upward, so a veto between 20:00–midnight was seen by no run.
+    """
+    # Freeze "now" to a deterministic local afternoon so midnight fallback would
+    # clearly exclude a previous-evening event if the rolling stamp were ignored.
+    now = datetime(2026, 7, 17, 20, 0, 0).timestamp()
+    prev_evening_20 = datetime(2026, 7, 16, 20, 0, 0).timestamp()
+    prev_evening_21 = datetime(2026, 7, 16, 21, 30, 0).timestamp()
+
+    stamp_path = strategist.default_reflect_last_run_path()
+    stamp_path.parent.mkdir(parents=True, exist_ok=True)
+    stamp_path.write_text(
+        json.dumps({"last_reflect_run_ts": int(prev_evening_20)}),
+        encoding="utf-8",
+    )
+
+    with kb.connect() as conn:
+        vetoed_root = _make_held_proposal(conn, "LATE-EVENING-VETO", "vetoed after 20:00")
+        assert kb.dismiss_freigabe_hold(conn, vetoed_root, author="operator") is True
+        # Backdate the freigabe_vetoed event into the previous calendar evening,
+        # after the prior reflect stamp but before today's midnight.
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'freigabe_vetoed'",
+            (int(prev_evening_21), vetoed_root),
+        )
+        conn.commit()
+
+    notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
+    with kb.connect() as conn:
+        result = strategist.reflect(conn, notes_path=notes_path, now=now)
+
+    assert result["note"]["vetoed"] >= 1
+    assert "LATE-EVENING-VETO" in result["note"]["vetoed_levers"]
+    assert result["note"]["since"] == int(prev_evening_20)
+    vetoed_set = json.loads((notes_path.parent / "vetoed_levers.json").read_text(encoding="utf-8"))
+    assert "LATE-EVENING-VETO" in vetoed_set
+    # Successful run advances the stamp to this run's now.
+    stamped = json.loads(stamp_path.read_text(encoding="utf-8"))
+    assert stamped["last_reflect_run_ts"] == int(now)
+
+
+def test_reflect_first_run_falls_back_to_midnight_and_writes_stamp(board_home, tmp_path):
+    """No reflect_last_run.json → midnight fallback, then stamp is written."""
+    now = datetime(2026, 7, 17, 20, 0, 0).timestamp()
+    expected_midnight = strategist._local_midnight_epoch(now)
+    stamp_path = strategist.default_reflect_last_run_path()
+    assert not stamp_path.exists()
+
+    with kb.connect() as conn:
+        # Seed a same-day veto so the window is non-empty under midnight fallback.
+        vetoed_root = _make_held_proposal(conn, "FIRST-RUN-VETO", "first run")
+        assert kb.dismiss_freigabe_hold(conn, vetoed_root, author="operator") is True
+
+    notes_path = tmp_path / "state" / "strategist" / "reflections.jsonl"
+    with kb.connect() as conn:
+        result = strategist.reflect(conn, notes_path=notes_path, now=now)
+
+    assert result["note"]["since"] == expected_midnight
+    assert result["note"]["vetoed"] == 1
+    assert stamp_path.exists()
+    stamped = json.loads(stamp_path.read_text(encoding="utf-8"))
+    assert stamped["last_reflect_run_ts"] == int(now)
 
 
 # --------------------------------------------------------------------------- #

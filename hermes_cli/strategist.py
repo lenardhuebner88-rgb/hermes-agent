@@ -26,8 +26,9 @@ Two modes, both self-contained, deterministic and side-effect-bounded:
        judge) and land *held* on the G1 strategist surface for operator triage.
 
 ``reflect`` (``hermes vision strategist --mode reflect``)
-    Scores the strategist's own proposals approved-vs-vetoed since local
-    midnight (plus shipped ROI = approved chains that completed) and updates the
+    Scores the strategist's own proposals approved-vs-vetoed since the last
+    successful reflect run (rolling window; first-run falls back to local
+    midnight) plus shipped ROI = approved chains that completed, and updates the
     learning notes. Vetoed levers feed the reflection: their keys are recorded
     and *suppressed* on subsequent propose runs — the operator's veto teaches
     the strategist what not to re-raise. That closed loop is the self-improvement.
@@ -756,6 +757,44 @@ def _local_midnight_epoch(now: Optional[float] = None) -> int:
     local = datetime.fromtimestamp(ts)
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(midnight.timestamp())
+
+
+def default_reflect_last_run_path() -> Path:
+    """Canonical path for the last successful reflect stamp under HERMES_HOME."""
+    return default_state_dir() / "reflect_last_run.json"
+
+
+def _read_last_reflect_run_ts(path: Optional[Path] = None) -> Optional[int]:
+    """Return last successful reflect epoch, or None when missing/unreadable."""
+    target = Path(path) if path is not None else default_reflect_last_run_path()
+    try:
+        raw = target.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    ts = data.get("last_reflect_run_ts")
+    if ts is None:
+        return None
+    try:
+        return int(ts)
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_last_reflect_run_ts(ts: int, path: Optional[Path] = None) -> None:
+    """Persist the last successful reflect epoch (best-effort)."""
+    target = Path(path) if path is not None else default_reflect_last_run_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"last_reflect_run_ts": int(ts)}
+        target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        logger.warning("write reflect_last_run stamp failed at %s", target, exc_info=True)
 
 
 def _read_suppressed(notes_dir: Optional[Path]) -> set[str]:
@@ -2466,7 +2505,10 @@ def reflect(
 ) -> dict[str, Any]:
     """Score the strategist's own proposals approved-vs-vetoed since *since*.
 
-    ``since`` defaults to local midnight today. Approved = a ``freigabe_released``
+    ``since`` defaults to a rolling window anchored on the last successful
+    reflect run (``reflect_last_run.json`` under the strategist state dir). On
+    first run — no stamp yet — it falls back to local midnight today. An
+    explicit ``since=`` always overrides. Approved = a ``freigabe_released``
     event in window; vetoed = a ``freigabe_vetoed`` event in window; shipped =
     approved whose root reached ``done``. Vetoed lever keys are recorded and
     merged into the suppression set so the next propose run does not re-raise
@@ -2481,7 +2523,8 @@ def reflect(
     ``metrics`` may be injected (tests); otherwise read from the H1 file.
     """
     if since is None:
-        since = _local_midnight_epoch(now)
+        last_run = _read_last_reflect_run_ts()
+        since = last_run if last_run is not None else _local_midnight_epoch(now)
 
     rows = conn.execute(
         "SELECT id, title, status FROM tasks WHERE created_by = ?",
@@ -2684,6 +2727,12 @@ def reflect(
         notes_path = Path(notes_path)
         _append_jsonl(notes_path, note)
         suppressed_now = _update_vetoed_set(notes_path.parent / "vetoed_levers.json", vetoed_keys)
+
+    # Rolling-window stamp: after a successful reflect, advance the lower bound
+    # so the next default run covers [last_run, now) including late-evening
+    # vetoes that calendar-midnight windows used to drop.
+    run_ts = int(time.time() if now is None else now)
+    _write_last_reflect_run_ts(run_ts)
 
     return {
         "mode": "reflect",
