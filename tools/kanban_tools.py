@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import time
 from typing import Any, Optional
 
 from agent.redact import redact_sensitive_text
@@ -1000,6 +1002,46 @@ def _handle_comment(args: dict, **kw) -> str:
         return tool_error(f"kanban_comment: {e}")
 
 
+_RECOVERY_ROOT_REF_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
+_SERIAL_RECOVERY_STOP_THRESHOLD = 2
+_SERIAL_RECOVERY_STOP_WINDOW_SECONDS = 2 * 3600
+
+
+def _serial_recovery_stop_reason(
+    conn: Any, *, title: str, body: Optional[str], created_by: str,
+) -> Optional[str]:
+    """Refuse a new recovery card when >=2 SUPERSEDED-archived predecessors for
+    the same root already exist within the last 2h — a bounded stop against
+    an agent looping on 'create a fresh recovery card' after each supersede
+    instead of escalating. Root references are ``t_<8-hex>`` task ids found
+    in the NEW card's own title/body (the recovery card names the root it is
+    recovering); matched against the same created_by's archived cards from the
+    same window whose title/body mention the same id and that were actually
+    archived via the SUPERSEDED path (kanban_db.reason_should_archive_as_superseded,
+    the same classifier ``block_task`` uses to emit ``superseded_archived``).
+    Returns the deterministic error string, or ``None`` when creation may proceed.
+    """
+    text = f"{title}\n{body or ''}"
+    root_refs = set(_RECOVERY_ROOT_REF_RE.findall(text))
+    if not root_refs:
+        return None
+    cutoff = int(time.time()) - _SERIAL_RECOVERY_STOP_WINDOW_SECONDS
+    for root_ref in root_refs:
+        rows = conn.execute(
+            "SELECT DISTINCT t.id FROM tasks t "
+            "JOIN task_events e ON e.task_id = t.id AND e.kind = 'superseded_archived' "
+            "WHERE t.status = 'archived' AND t.created_by = ? AND t.created_at >= ? "
+            "AND (t.title LIKE ? OR t.body LIKE ?)",
+            (created_by, cutoff, f"%{root_ref}%", f"%{root_ref}%"),
+        ).fetchall()
+        if len(rows) >= _SERIAL_RECOVERY_STOP_THRESHOLD:
+            return (
+                "serial-recovery stop: >=2 superseded Vorgaenger fuer dieselbe "
+                "Wurzel — eskaliere an den Operator statt neue Karten zu bauen"
+            )
+    return None
+
+
 def _handle_create(args: dict, **kw) -> str:
     """Create a child task. Orchestrator workers use this to fan out.
 
@@ -1111,6 +1153,12 @@ def _handle_create(args: dict, **kw) -> str:
                     if _self_task is not None and _self_task.workspace_kind:
                         workspace_kind = _self_task.workspace_kind
                         workspace_path = _self_task.workspace_path
+            _created_by = os.environ.get("HERMES_PROFILE") or "worker"
+            _stop_reason = _serial_recovery_stop_reason(
+                conn, title=str(title).strip(), body=body, created_by=_created_by,
+            )
+            if _stop_reason:
+                return tool_error(_stop_reason)
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -1140,10 +1188,23 @@ def _handle_create(args: dict, **kw) -> str:
                     int(goal_max_turns) if goal_max_turns is not None else None
                 ),
                 initial_status=str(initial_status),
-                created_by=os.environ.get("HERMES_PROFILE") or "worker",
+                created_by=_created_by,
                 session_id=session_id,
                 kind=str(kind).strip().lower() if kind is not None else None,
             )
+            # (a) planspec_source-Vererbung: a child of a PlanSpec-ingested
+            # parent inherits the parent's planspec_source, so downstream
+            # provenance (e.g. project_strategist_outcomes) still resolves the
+            # lever for cards spawned mid-chain, not just the ingested ones.
+            for _parent_id in parents:
+                _parent_source = kb.planspec_source_for_task(conn, _parent_id)
+                if _parent_source:
+                    with kb.write_txn(conn):
+                        conn.execute(
+                            "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                            (_parent_source, new_tid),
+                        )
+                    break
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
             payload = {
