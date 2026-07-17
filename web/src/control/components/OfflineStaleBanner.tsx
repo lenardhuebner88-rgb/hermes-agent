@@ -1,8 +1,11 @@
 import { WifiOff } from "lucide-react";
 import type { SystemHealthResponse } from "../lib/types";
-import { useClientNowSeconds } from "../lib/clock";
+import { useClientNowSeconds, useVisibleSinceSeconds } from "../lib/clock";
 import { freshness } from "../lib/derive";
 import { de } from "../i18n/de";
+
+/** Seconds the tab must stay visible before age-stale alone shows the banner. */
+export const REFOCUS_GRACE_S = 12;
 
 export function OfflineStaleBanner({ health }: {
   health: {
@@ -16,9 +19,17 @@ export function OfflineStaleBanner({ health }: {
   // Geteilte 10s-Uhr statt eigenem 1s-forceTick: Date.now() im Render ist
   // impure (react-hooks/purity), und der Banner braucht keine Sekunden-Auflösung.
   const clientNow = useClientNowSeconds();
+  const visibleSince = useVisibleSinceSeconds();
   const ageFreshness = freshness(health.lastUpdated, health.pollIntervalMs ?? 5000, clientNow);
   const ageStale = ageFreshness.stale && health.lastUpdated != null;
-  const visible = Boolean(health.error || health.isStale || ageStale);
+  // Mobile app-switch freezes timers; on return age is already past threshold.
+  // Suppress age-stale only until refocus grace elapses so the next poll can land.
+  // Fetch errors and explicit isStale stay immediate (not grace-gated).
+  const ageStaleVisible =
+    ageStale &&
+    visibleSince != null &&
+    clientNow - visibleSince >= REFOCUS_GRACE_S;
+  const visible = Boolean(health.error || health.isStale || ageStaleVisible);
 
   if (!visible) return null;
   const age = health.lastUpdated == null ? "noch nie" : `vor ${Math.max(0, clientNow - health.lastUpdated)}s`;

@@ -11,7 +11,7 @@ import { useHermesWorkers } from "./hooks/workersBoard";
 import { useLibraryUnread } from "./hooks/libraryKnowledge";
 import { useProposals } from "./hooks/proposalsDeepAudit";
 import { useStrategistCount } from "./hooks/strategist";
-import { useSystemHealth } from "./hooks/systemReleaseHealth";
+import { HEALTH_POLL_INTERVAL_MS, useSystemHealth } from "./hooks/systemReleaseHealth";
 import { useLiveEvents } from "./hooks/useLiveEvents";
 import { costDisplayValue } from "./lib/fleetHub";
 import { ControlShell, type ControlTab } from "./components/ControlShell";
@@ -267,7 +267,7 @@ export default function ControlPage() {
   return (
     <LazyMotion features={domAnimation} strict>
       <div data-control>
-        <OfflineStaleBanner health={health} />
+        <OfflineStaleBanner health={{ ...health, pollIntervalMs: HEALTH_POLL_INTERVAL_MS }} />
         <ControlShell
           active={active}
           density={density.density}

@@ -5,10 +5,12 @@ import type { SystemHealthResponse } from "../lib/types";
 import { de } from "../i18n/de";
 import { OfflineStaleBanner } from "./OfflineStaleBanner";
 
-const clock = vi.hoisted(() => ({ now: 100 }));
+const clock = vi.hoisted(() => ({ now: 100, visibleSince: 0 as number | null }));
 
 vi.mock("../lib/clock", () => ({
   useClientNowSeconds: () => clock.now,
+  // Past grace so existing age-stale assertions stay meaningful.
+  useVisibleSinceSeconds: () => clock.visibleSince,
 }));
 
 const baseHealth: SystemHealthResponse = {

@@ -14,6 +14,9 @@ import type { DictateStatusResponse, ReleaseStatusResponse, ReleaseModeResponse 
 import type { MetricsLiteResponse, PressureStatusResponse, SystemHealthResponse, VaultProvenanceResponse } from "../lib/types";
 import { usePolling, extractDetail } from "./internal";
 
+/** Health chrome poll cadence. Keep in sync with OfflineStaleBanner freshness. */
+export const HEALTH_POLL_INTERVAL_MS = 15_000;
+
 export function useDictateStatus() {
   return usePolling<DictateStatusResponse>(
     "dictate-status",
@@ -32,7 +35,7 @@ export function useSystemHealth() {
     "health-status",
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
     // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
-    15000,
+    HEALTH_POLL_INTERVAL_MS,
   );
 }
 

@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 // Sekunden-Uhr als externer Store: `Date.now()` direkt im Render verletzt die
 // react-hooks-Purity-Regel (Komponenten müssen idempotent rendern). Der Store
@@ -42,4 +42,34 @@ export function getClockNowSeconds(): number {
 /** Aktuelle Client-Zeit in Epoch-Sekunden, render-pure (10s-Auflösung). */
 export function useClientNowSeconds(): number {
   return useSyncExternalStore(subscribeClock, getClockNowSeconds);
+}
+
+/**
+ * Epoch seconds when the document last became visible.
+ * null when hidden / SSR / no document. Used by OfflineStaleBanner for a short
+ * post-refocus grace so mobile app-switch + timer thaw does not flash age-stale.
+ */
+function initialVisibleSinceSeconds(): number | null {
+  if (typeof document === "undefined") return null;
+  if (document.visibilityState === "visible") {
+    return Math.floor(Date.now() / 1000);
+  }
+  return null;
+}
+
+export function useVisibleSinceSeconds(): number | null {
+  const [visibleSince, setVisibleSince] = useState<number | null>(initialVisibleSinceSeconds);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        setVisibleSince(Math.floor(Date.now() / 1000));
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
+  return visibleSince;
 }
