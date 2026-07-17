@@ -4,8 +4,9 @@
 import type { ProjectAgent, ProjectEntry, ProjectSession } from "../../lib/schemas";
 import type { SignalTone } from "../../components/leitstand";
 
-/** Agents grouped by project slug. Agents without a resolved project
- *  (`project: null`) are omitted — they still appear in the kind rail. */
+/** Agents grouped by project slug (Karten-Grid). Agents ohne zugeordnetes
+ *  Projekt (`project: null`) werden hier weggelassen — auf dem LiveBoard
+ *  erscheinen sie in der "Unzugeordnet"-Gruppe (liveBoardGroups). */
 export function groupAgentsByProject(
   agents: ReadonlyArray<ProjectAgent>,
 ): Record<string, ProjectAgent[]> {

@@ -437,4 +437,92 @@ describe("ProjekteView", () => {
     expect(html).toContain("Sessions konnten nicht geladen werden.");
     expect(html).toContain("Hermes Infra");
   });
+
+  it("collapses the commit feed behind a mobile-only disclosure, expandable via its toggle", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockCommits({
+      data: {
+        generated_at: 1,
+        errors: [],
+        commits: [
+          {
+            project: "hermes-infra",
+            project_name: "Hermes Infra",
+            hash: "abc123def",
+            message: "projekte-tab: Live-Board",
+            author: "kimi",
+            committed_at: 1784239000,
+            age_seconds: 900,
+          },
+        ],
+      },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    // Mobile (<tab): default zugeklappt — Toggle mit aria-expanded="false",
+    // 44px-Ziel (min-h-11), nur unterhalb tab sichtbar (tab:hidden).
+    const toggle = /<button type="button" aria-expanded="([^"]*)" aria-controls="projekte-commits-feed" class="([^"]*)">/.exec(html);
+    expect(toggle).not.toBeNull();
+    expect(toggle?.[1]).toBe("false");
+    expect(toggle?.[2]).toContain("min-h-11");
+    expect(toggle?.[2]).toContain("tab:hidden");
+    expect(html).toContain("Commits anzeigen");
+    // Aufklappbar: aria-controls zeigt auf den Feed-Wrapper; der trägt mobil
+    // `hidden` und ab tab `tab:block` — Desktop sieht den Feed wie bisher,
+    // derselbe DOM-Baum (kein matchMedia/Conditional Render).
+    const wrapper = /<div id="projekte-commits-feed" class="([^"]*)">/.exec(html);
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.[1]).toContain("hidden");
+    expect(wrapper?.[1]).toContain("tab:block");
+    // Inhalt bleibt im Markup — nur CSS-disclosed, Daten-/ARIA-Baum intakt.
+    expect(html).toContain("Alle Commits");
+    expect(html).toContain("abc123def");
+  });
+
+  it("renders the summary strip with all chips as one sticky scrollable row on mobile", () => {
+    const project: ProjectEntry = {
+      ...REAL_PROJECT,
+      kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 0, needs_input: 2 },
+    };
+    const openSession: ProjectSession = {
+      id: "s1",
+      label: "Hauptsession CLI",
+      source: "cli",
+      model: "kimi-k2",
+      started_at: 1784230000,
+      ended_at: null,
+      end_reason: null,
+      is_open: true,
+      is_active: true,
+      stale_open: false,
+      last_active: 1784239900,
+      message_count: 3,
+      tokens: 1200,
+      project: "hermes-infra",
+      spawn_kind: null,
+      spawned_by_id: null,
+      spawned_by_label: null,
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [project] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
+    mockSessions({ data: { generated_at: 1, errors: [], sessions: [openSession] }, loading: false, lastUpdated: 1 });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    // Alle fünf Chips (live/Check-ins/offene Sessions/blockiert/Input) trotz
+    // Sticky-Umbau weiter gerendert.
+    expect(html).toContain("1 live");
+    expect(html).toContain("0 Check-ins");
+    expect(html).toContain("1 offene Session");
+    expect(html).toContain("1 blockiert");
+    expect(html).toContain("2 Input");
+    // Strip-Geometrie: sticky unter dem App-Header, eine horizontal scrollbare
+    // Zeile <tab; ab tab die bisherige Umbruch-Zeile (Desktop unverändert).
+    const strip = /<div class="([^"]*sticky[^"]*)">/.exec(html)?.[1] ?? "";
+    expect(strip).toContain("top-0");
+    expect(strip).toContain("flex-nowrap");
+    expect(strip).toContain("overflow-x-auto");
+    expect(strip).toContain("tab:static");
+    expect(strip).toContain("tab:flex-wrap");
+  });
 });

@@ -876,6 +876,9 @@ export const de = {
     commitsEyebrow: "Git",
     commitsTitle: "Alle Commits",
     commitsEmpty: "Keine Commits in den registrierten Projekten gefunden.",
+    // Mobile (<tab): Feed hinter Disclosure (default zu), Desktop zeigt direkt.
+    commitsShow: "Commits anzeigen",
+    commitsHide: "Commits ausblenden",
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

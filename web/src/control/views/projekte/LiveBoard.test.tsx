@@ -137,4 +137,17 @@ describe("LiveBoard", () => {
     // Row without markers renders exactly as before — no chip.
     expect(legacy).not.toContain("t_b1frontend");
   });
+
+  it("gives rows and the kill button ≥44px touch targets below tab, desktop density above", () => {
+    const html = renderBoard([TMUX_AGENT]);
+    // Kill-Button: size-11 (44px) mobil; tab:size-7 stellt die bisherige
+    // Desktop-Dichte wieder her.
+    const button = /<button type="button" aria-label="Session work:2 kimi beenden"[^>]*class="([^"]*)">/.exec(html)?.[1] ?? "";
+    expect(button).toContain("size-11");
+    expect(button).toContain("tab:size-7");
+    // Zeile: min-h-11 mobil; tab:min-h-0 zurück zur kompakten Dichte.
+    const row = /<li class="([^"]*)">/.exec(html)?.[1] ?? "";
+    expect(row).toContain("min-h-11");
+    expect(row).toContain("tab:min-h-0");
+  });
 });

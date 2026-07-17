@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ChevronRight } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Eyebrow } from "../components/primitives";
 import { FleetEmptyState } from "../components/leitstand";
 import { useProjectAgents, useProjectCommits, useProjectSessions, useProjects } from "../hooks/useControlData";
@@ -29,7 +30,12 @@ const t = de.projekte;
  *  (Agents nach Projekt gruppiert, mit Lane/Operator, tmux killbar) →
  *  Karten-Grid (Attention-sortiert, Klick = Drilldown) → Offene Sessions
  *  (Spawn-Baum aus state.db) → Alle Commits (projektübergreifender Feed).
- *  Daten: GET /api/projects + /agents + /sessions + /commits. */
+ *  Daten: GET /api/projects + /agents + /sessions + /commits.
+ *  Mobile (<tab 600px, sessions-first): der Strip wird zur sticky,
+ *  horizontal scrollbaren Zeile direkt unter dem App-Header; die Reihenfolge
+ *  Strip → LiveBoard → Karten → Sessions → Commits bleibt (CSS-only, kein
+ *  matchMedia); der Commit-Feed steckt hinter einer "Commits anzeigen"-
+ *  Disclosure (default zu). Ab tab: exakt das Desktop-Layout von jeher. */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
@@ -38,6 +44,9 @@ export function ProjekteView() {
   const now = nowSec();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [killAgent, setKillAgent] = useState<ProjectAgent | null>(null);
+  // Commits-Disclosure ist nur <tab sichtbar/bedienbar (Button tab:hidden,
+  // Feed tab:block); der State beeinflusst das Desktop-Layout nie.
+  const [commitsOpen, setCommitsOpen] = useState(false);
 
   const list = projects.data?.projects ?? [];
   const registryErrors = projects.data?.registry_errors ?? [];
@@ -76,26 +85,30 @@ export function ProjekteView() {
         <Eyebrow>{t.eyebrow}</Eyebrow>
         <h2 className="mt-1 font-display text-h2 font-semibold text-ink">{t.title}</h2>
         <p className="mt-1 text-sec text-ink-2">{t.subtitle}</p>
+        {/* Mobile (<tab): kompakter Sticky-Strip direkt unter dem App-Header —
+            volle Breite (-mx-4/px-4 über den main-Gutter), eine horizontal
+            scrollbare Chip-Zeile auf der Page-Canvas (surface-0/95 + Blur,
+            FleetCard-Sticky-Idiom). Ab tab: exakt die bisherige Header-Zeile. */}
         {agents.data !== null ? (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-micro">
-            <span className="inline-flex items-center gap-1.5 rounded-card border border-bronze/40 bg-bronze/10 px-2 py-0.5 font-data text-bronze-hi">
+          <div className="sticky top-0 z-10 -mx-4 mt-2 flex flex-nowrap items-center gap-1.5 overflow-x-auto border-b border-line-soft bg-surface-0/95 px-4 py-2 text-micro backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden tab:static tab:z-auto tab:mx-0 tab:flex-wrap tab:overflow-visible tab:border-b-0 tab:bg-transparent tab:px-0 tab:py-0 tab:backdrop-blur-none">
+            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-card border border-bronze/40 bg-bronze/10 px-2 py-0.5 font-data text-bronze-hi">
               {t.summaryLive(liveTotal)}
             </span>
-            <span className="inline-flex items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+            <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
               {t.summaryCheckins(claimsTotal)}
             </span>
             {sessions.data !== null ? (
-              <span className="inline-flex items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+              <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
                 {t.summaryOpenSessions(openSessionsTotal)}
               </span>
             ) : null}
             {blockedTotal > 0 ? (
-              <span className="inline-flex items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
+              <span className="inline-flex shrink-0 items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
                 {t.summaryBlocked(blockedTotal)}
               </span>
             ) : null}
             {needsInputTotal > 0 ? (
-              <span className="inline-flex items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
+              <span className="inline-flex shrink-0 items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
                 {t.summaryNeedsInput(needsInputTotal)}
               </span>
             ) : null}
@@ -172,7 +185,35 @@ export function ProjekteView() {
         <SessionsSection sessions={sessionList} projectNames={projectNames} now={now} />
       ) : null}
 
-      {commits.data !== null ? <CommitsFeed commits={commitList} now={now} /> : null}
+      {commits.data !== null ? (
+        <>
+          {/* Mobile (<tab): Feed hinter einer Disclosure (default zu); der
+              Toggle ist ein 44px-Ziel und verschwindet ab tab. Desktop sieht
+              den Feed wie bisher direkt (tab:block) — derselbe DOM-Baum. */}
+          <button
+            type="button"
+            aria-expanded={commitsOpen}
+            aria-controls="projekte-commits-feed"
+            onClick={() => setCommitsOpen((open) => !open)}
+            className="flex min-h-11 w-full items-center gap-2 rounded-card border border-line bg-surface-1 px-3 py-2 text-left text-sec text-ink-2 hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-bronze tab:hidden"
+          >
+            <ChevronRight
+              aria-hidden
+              className={cn(
+                "h-4 w-4 shrink-0 text-ink-3 transition-transform duration-150 ease-out motion-reduce:transition-none",
+                commitsOpen ? "rotate-90" : "",
+              )}
+            />
+            {commitsOpen ? t.commitsHide : t.commitsShow}
+          </button>
+          <div
+            id="projekte-commits-feed"
+            className={cn("tab:block", commitsOpen ? "block" : "hidden")}
+          >
+            <CommitsFeed commits={commitList} now={now} />
+          </div>
+        </>
+      ) : null}
 
       {selectedSlug ? (
         <ProjectDetailDrawer
