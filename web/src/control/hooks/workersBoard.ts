@@ -20,7 +20,8 @@ export function useHermesWorkers() {
   return usePolling<WorkersResponse>(
     "workers/active",
     async () => parseOrThrow(WorkersResponseSchema, await fetchJSON<unknown>("/api/plugins/kanban/workers/active"), "workers/active"),
-    5000,
+    // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
+    15000,
   );
 }
 

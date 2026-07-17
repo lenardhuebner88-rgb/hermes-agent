@@ -189,6 +189,10 @@ export function AgentTerminalsView() {
   // close must never overwrite a newer post-close list (stale tab flash).
   const windowsSeqRef = useRef(0);
   const windowsAppliedSeqRef = useRef(0);
+  /** Skip setWindows when inventory payload is deep-equal (pollingStore payloadJson pattern). */
+  const windowsJsonRef = useRef<string>("");
+  /** Skip setOverview when fleet overview payload is deep-equal. */
+  const overviewJsonRef = useRef<string>("");
   const [capability, setCapability] = useState<AgentTerminalCapabilityState | null>(null);
   const [windows, setWindows] = useState<AgentTerminalWindow[]>([]);
   const [selectedKind, setSelectedKind] = useState<AgentTerminalKind>("hermes");
@@ -378,6 +382,8 @@ export function AgentTerminalsView() {
       if (seq > windowsAppliedSeqRef.current) {
         windowsAppliedSeqRef.current = seq;
         setCapability(cap);
+        // Keep windowsJsonRef in sync so the background inventory poll can skip no-ops.
+        windowsJsonRef.current = JSON.stringify(win.windows);
         setWindows(win.windows);
         setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
       }
@@ -393,8 +399,14 @@ export function AgentTerminalsView() {
     const win = await api.getAgentTerminalWindows();
     if (seq > windowsAppliedSeqRef.current) {
       windowsAppliedSeqRef.current = seq;
-      setWindows(win.windows);
-      setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+      const nextJson = JSON.stringify(win.windows);
+      // Same payloadJson-style guard as fetchOverview — avoid fleet/session
+      // re-renders when the tmux inventory poll returns an identical list.
+      if (nextJson !== windowsJsonRef.current) {
+        windowsJsonRef.current = nextJson;
+        setWindows(win.windows);
+        setTarget((previous) => pickInitialTarget(win.windows, selectedKind, previous));
+      }
     }
   }, [selectedKind]);
 
@@ -1305,7 +1317,13 @@ export function AgentTerminalsView() {
     setOverviewLoading(true);
     try {
       const response = await api.getAgentTerminalOverview();
-      setOverview(response.windows);
+      // Skip setOverview when payload is unchanged (pollingStore payloadJson pattern).
+      // Fresh array refs every 5s were invalidating orderedOverview and re-rendering the fleet strip.
+      const nextJson = JSON.stringify(response.windows);
+      if (nextJson !== overviewJsonRef.current) {
+        overviewJsonRef.current = nextJson;
+        setOverview(response.windows);
+      }
       setOverviewNow(response.now);
       setOverviewError(null);
     } catch (err) {

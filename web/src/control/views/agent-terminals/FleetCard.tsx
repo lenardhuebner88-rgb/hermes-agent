@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import {
   Check,
   CheckCircle2,
@@ -171,7 +171,7 @@ export function StatTile({
  *  pane (desktop only). Distinct from FleetCard: compact, one line of tail,
  *  no respawn/kill actions (those stay in the full "Flotte" overlay).
  *  Clicking selects that terminal. */
-export function FleetStripCard({
+export const FleetStripCard = memo(function FleetStripCard({
   win,
   now,
   isCurrent,
@@ -201,9 +201,9 @@ export function FleetStripCard({
       <div className="mt-1.5 truncate text-[10px] text-ink-3">{tailLine || formatActivityAge(now, win.activity ?? null)}</div>
     </button>
   );
-}
+});
 
-export function FleetCard({
+export const FleetCard = memo(function FleetCard({
   win,
   now,
   selected,
@@ -370,4 +370,4 @@ export function FleetCard({
       )}
     </div>
   );
-}
+});

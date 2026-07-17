@@ -31,7 +31,8 @@ export function useSystemHealth() {
   return usePolling<SystemHealthResponse>(
     "health-status",
     async () => parseOrThrow(SystemHealthResponseSchema, await fetchJSON<unknown>("/api/health-status"), "health-status"),
-    5000,
+    // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
+    15000,
   );
 }
 

@@ -13,7 +13,8 @@ export function useStrategistCount() {
   return usePolling(
     "strategist/count",
     async () => parseOrThrow(StrategistCountSchema, await fetchJSON<unknown>("/api/plugins/kanban/strategist/proposals"), "strategist-count"),
-    5000,
+    // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
+    15000,
   );
 }
 

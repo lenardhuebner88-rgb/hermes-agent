@@ -160,7 +160,8 @@ export function useProposals() {
   const state = usePolling<ProposalsResponse>(
     "autoresearch/proposals",
     async () => parseOrThrow(ProposalsResponseSchema, await fetchJSON<unknown>("/api/autoresearch/proposals"), "autoresearch/proposals"),
-    6000,
+    // chrome-badge cadence, 15s staleness accepted (perf plan 2026-07-17)
+    15000,
   );
 
   const proposals = useMemo(() => state.data?.proposals ?? [], [state.data]);
