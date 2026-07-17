@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Clock3 } from "lucide-react";
-import { Badge } from "@nous-research/ui/ui/components/badge";
+import { Badge } from "@/components/Badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { diffStats, withLineNumbers } from "../lib/diff";
