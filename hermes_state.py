@@ -2184,6 +2184,80 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def close_stale_sessions(
+        self,
+        *,
+        older_than_seconds: int,
+        now: float | None = None,
+        dry_run: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Administratively close open sessions with no recent activity.
+
+        Candidates: ``ended_at IS NULL`` and last activity (MAX message
+        timestamp, else ``started_at``) is older than ``older_than_seconds``.
+        Never deletes rows. On apply, sets ``ended_at`` to the session's
+        last activity (honest end time, not wall-clock ``now``) and
+        ``end_reason='stale_sweep'`` via the same guarded UPDATE as
+        :meth:`end_session` (``WHERE ended_at IS NULL``). Idempotent: a
+        second apply finds zero candidates.
+
+        Returns one dict per candidate: id, title, display_name,
+        last_active, age_days.
+        """
+        if older_than_seconds < 0:
+            raise ValueError("older_than_seconds must be >= 0")
+        wall = time.time() if now is None else float(now)
+        cutoff = wall - float(older_than_seconds)
+        last_active_expr = (
+            "COALESCE("
+            "(SELECT MAX(m.timestamp) FROM messages m "
+            "WHERE m.session_id = sessions.id), "
+            "sessions.started_at)"
+        )
+        rows = self._conn.execute(
+            f"""
+            SELECT id, title, display_name,
+                   {last_active_expr} AS last_active
+            FROM sessions
+            WHERE ended_at IS NULL
+              AND {last_active_expr} < ?
+            ORDER BY last_active ASC
+            """,
+            (cutoff,),
+        ).fetchall()
+
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            last_active = float(row["last_active"])
+            age_days = (wall - last_active) / 86400.0
+            candidates.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "display_name": row["display_name"],
+                    "last_active": last_active,
+                    "age_days": age_days,
+                }
+            )
+
+        if dry_run or not candidates:
+            return candidates
+
+        for cand in candidates:
+            sid = cand["id"]
+            last_active = cand["last_active"]
+
+            def _do(conn, session_id=sid, ended_at=last_active):
+                conn.execute(
+                    "UPDATE sessions SET ended_at = ?, end_reason = ? "
+                    "WHERE id = ? AND ended_at IS NULL",
+                    (ended_at, "stale_sweep", session_id),
+                )
+
+            self._execute_write(_do)
+
+        return candidates
+
     def reopen_session(self, session_id: str) -> None:
         """Clear ended_at/end_reason so a session can be resumed."""
         def _do(conn):
