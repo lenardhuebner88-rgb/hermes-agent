@@ -66,6 +66,12 @@ export interface FetchJSONOptions {
 
 const GET_TIMEOUT_MS = 20_000;
 
+export interface FetchJSONWithMetaResult<T> {
+  data: T | undefined;
+  status: number;
+  headers: Headers;
+}
+
 // ── Global management-profile scope ──────────────────────────────────
 // The dashboard is a machine-level management surface: one header switcher
 // (ProfileProvider in App.tsx) decides which profile the management pages
@@ -115,11 +121,12 @@ function withManagementProfile(url: string): string {
   return `${url}${sep}profile=${encodeURIComponent(_managementProfile)}`;
 }
 
-export async function fetchJSON<T>(
+async function fetchJSONResponse(
   url: string,
   init?: RequestInit,
   opts?: FetchJSONOptions,
-): Promise<T> {
+  allowNotModified = false,
+): Promise<Response> {
   url = withManagementProfile(url);
   // Inject the session token into all /api/ requests.
   const headers = new Headers(init?.headers);
@@ -193,7 +200,7 @@ export async function fetchJSON<T>(
       }
       window.location.assign(body.login_url);
       // Never resolve — the page is about to unload.
-      return new Promise<T>(() => {});
+      return new Promise<Response>(() => {});
     }
     // Loopback mode: ``_SESSION_TOKEN`` rotates on every server restart
     // (``hermes update``, ``hermes gateway restart``, etc.). A tab kept
@@ -219,7 +226,7 @@ export async function fetchJSON<T>(
           /* SSR / privacy mode — best effort */
         }
         window.location.reload();
-        return new Promise<T>(() => {});
+        return new Promise<Response>(() => {});
       }
     }
   }
@@ -233,11 +240,35 @@ export async function fetchJSON<T>(
       /* SSR / privacy mode — ignore */
     }
   }
+  if (allowNotModified && res.status === 304) return res;
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`${res.status}: ${text}`);
   }
+  return res;
+}
+
+export async function fetchJSON<T>(
+  url: string,
+  init?: RequestInit,
+  opts?: FetchJSONOptions,
+): Promise<T> {
+  const res = await fetchJSONResponse(url, init, opts);
   return res.json();
+}
+
+/** JSON fetch with response metadata, including conditional-GET 304 support. */
+export async function fetchJSONWithMeta<T>(
+  url: string,
+  init?: RequestInit,
+  opts?: FetchJSONOptions,
+): Promise<FetchJSONWithMetaResult<T>> {
+  const res = await fetchJSONResponse(url, init, opts, true);
+  return {
+    data: res.status === 304 ? undefined : await res.json(),
+    status: res.status,
+    headers: res.headers,
+  };
 }
 
 /** Encode a plugin registry key for URL paths (preserves `/` segment separators). */
