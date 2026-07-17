@@ -4931,17 +4931,18 @@ def test_reclaim_endpoint_releases_running_claim(client):
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="x")
-        lock = secrets.token_hex(8)
+        lock = f"{kb._claimer_id().split(':', 1)[0]}:{secrets.token_hex(8)}"
+        worker_pid = 99_999_999
         future = int(time.time()) + 3600
         conn.execute(
             "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
             "worker_pid=? WHERE id=?",
-            (lock, future, 99999, t),
+            (lock, future, worker_pid, t),
         )
         conn.execute(
             "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
             "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, future, 99999, int(time.time())),
+            (t, lock, future, worker_pid, int(time.time())),
         )
         run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run_id, t))
@@ -5199,16 +5200,17 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
-        lock = secrets.token_hex(4)
+        lock = f"{kb._claimer_id().split(':', 1)[0]}:{secrets.token_hex(4)}"
+        worker_pid = 99_999_999
         conn.execute(
             "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
             "worker_pid=? WHERE id=?",
-            (lock, int(time.time()) + 3600, 1234, t),
+            (lock, int(time.time()) + 3600, worker_pid, t),
         )
         conn.execute(
             "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
             "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, int(time.time()) + 3600, 1234, int(time.time())),
+            (t, lock, int(time.time()) + 3600, worker_pid, int(time.time())),
         )
         rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (rid, t))
