@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Projekte · Variante A — Projektkarten mit Session-Reihen + Bottom-Sheet-Kill</title>
+<style>
+  /* Leitstand tokens 1:1 aus web/src/control/theme.css ("Bronze auf Graphit") */
+  :root {
+    --surface-0:#0e100f; --surface-1:#141715; --surface-2:#1a1e1b; --surface-3:#232824;
+    --line:#2a302b; --line-soft:#1e2420;
+    --bronze:#c9884a; --bronze-hi:#dda05f;
+    --ok:#86b97e; --warn:#d9b23a; --alert:#e0604f;
+    --data-1:#a8ad6a; --data-2:#7ba89d; --data-3:#8fa3bd; --data-4:#9d8bc4; --data-5:#c47d92; --data-6:#96938a;
+    --ink:#ebe7de; --ink-2:#a9a59b; --ink-3:#757166;
+    --r-panel:10px; --r-card:7px;
+    --font-display:'Archivo Variable','Arial Narrow',sans-serif;
+    --font-data:'IBM Plex Mono',ui-monospace,'Courier New',monospace;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#080908; }
+  body {
+    width:390px; margin:0 auto; color:var(--ink);
+    font-family:var(--font-display); font-size:14px; line-height:1.45;
+    padding:18px 0 22px; display:flex; flex-direction:column; gap:8px;
+  }
+  .mono { font-family:var(--font-data); font-variant-numeric:tabular-nums; }
+
+  .caption { color:var(--ink-3); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; padding:0 4px; display:flex; gap:8px; align-items:center; }
+  .caption b { color:var(--bronze-hi); font-weight:600; letter-spacing:.1em; }
+  .caption .rule { flex:1; height:1px; background:#1c201d; }
+
+  .frame { background:var(--surface-0); border:1px solid #20251f; border-radius:18px; overflow:hidden; position:relative; }
+
+  /* ── Top bar (Shell-Replik) ─────────────────────────────── */
+  .topbar { display:flex; align-items:center; gap:8px; padding:10px 14px; border-bottom:1px solid var(--line-soft); background:var(--surface-1); }
+  .wordmark { font-weight:700; letter-spacing:.14em; font-size:12px; }
+  .topbar .spacer { flex:1; }
+  .livechip { display:inline-flex; align-items:center; gap:6px; padding:3px 8px; border:1px solid var(--line); border-radius:99px; color:var(--ink-2); font-size:11px; }
+  .livedot { width:6px; height:6px; border-radius:50%; background:var(--ok); box-shadow:0 0 0 2px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .kbd { border:1px solid var(--line); border-radius:5px; padding:3px 7px; color:var(--ink-3); font-size:11px; }
+
+  main { padding:13px 12px 16px; display:flex; flex-direction:column; gap:12px; }
+
+  /* ── Header ─────────────────────────────────────────────── */
+  .eyebrow { color:var(--ink-3); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; }
+  h2 { font-size:21px; font-weight:650; margin-top:2px; display:flex; align-items:center; gap:8px; }
+  .livepill { font-family:var(--font-data); font-size:11px; color:var(--bronze-hi); border:1px solid color-mix(in srgb, var(--bronze) 45%, transparent); background:color-mix(in srgb, var(--bronze) 12%, transparent); padding:2px 8px; border-radius:99px; }
+  .summary { display:flex; gap:6px; margin-top:8px; }
+  .sumchip { font-size:11px; color:var(--ink-2); border:1px solid var(--line-soft); background:var(--surface-1); border-radius:99px; padding:3px 9px; display:inline-flex; align-items:center; gap:6px; }
+  .sumchip b { color:var(--ink); font-weight:600; font-family:var(--font-data); }
+  .sumchip.alert { color:var(--alert); border-color:color-mix(in srgb,var(--alert) 35%,transparent); background:color-mix(in srgb,var(--alert) 9%,transparent); }
+  .sumchip.alert b { color:var(--alert); }
+  .sumchip.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 30%,transparent); background:color-mix(in srgb,var(--warn) 8%,transparent); }
+  .sumchip.warn b { color:var(--warn); }
+
+  /* ── Projektkarte ───────────────────────────────────────── */
+  .card { position:relative; background:var(--surface-2); border:1px solid var(--line-soft); border-radius:var(--r-card); padding:12px 12px 10px 14px; overflow:hidden; }
+  .card .edge { position:absolute; left:0; top:0; bottom:0; width:2.5px; }
+  .edge.alert { background:var(--alert); } .edge.active { background:var(--warn); } .edge.quiet { background:var(--line); }
+  .cardhead { display:flex; align-items:center; gap:8px; }
+  .attdot { width:7px; height:7px; border-radius:50%; flex:none; }
+  .attdot.alert { background:var(--alert); box-shadow:0 0 0 2.5px color-mix(in srgb,var(--alert) 22%,transparent); }
+  .attdot.active { background:var(--warn); box-shadow:0 0 0 2.5px color-mix(in srgb,var(--warn) 20%,transparent); }
+  .attdot.quiet { background:var(--ink-3); }
+  .cardhead h3 { font-size:14.5px; font-weight:650; }
+  .cardhead .sub { color:var(--ink-3); font-size:11px; font-weight:400; }
+  .badges { margin-left:auto; display:flex; gap:5px; }
+  .badge { font-size:10.5px; font-family:var(--font-data); padding:2px 7px; border-radius:99px; border:1px solid var(--line); color:var(--ink-2); }
+  .badge.alert { color:var(--alert); border-color:color-mix(in srgb,var(--alert) 40%,transparent); background:color-mix(in srgb,var(--alert) 10%,transparent); }
+  .badge.warn { color:var(--warn); border-color:color-mix(in srgb,var(--warn) 35%,transparent); background:color-mix(in srgb,var(--warn) 9%,transparent); }
+  .badge.ok { color:var(--ok); border-color:color-mix(in srgb,var(--ok) 35%,transparent); background:color-mix(in srgb,var(--ok) 8%,transparent); }
+  .kline { color:var(--ink-2); font-size:11.5px; margin-top:5px; display:flex; gap:10px; flex-wrap:wrap; }
+  .kline .mono { color:var(--ink); }
+
+  /* ── Sessions-Sektion ───────────────────────────────────── */
+  .sect { display:flex; align-items:center; gap:7px; margin:11px 0 6px; color:var(--ink-3); font-size:10.5px; letter-spacing:.13em; text-transform:uppercase; }
+  .sect::after { content:""; flex:1; height:1px; background:var(--line-soft); }
+  .sect .n { font-family:var(--font-data); color:var(--ink-2); letter-spacing:0; }
+  .pulse { width:7px; height:7px; border-radius:50%; background:var(--bronze); box-shadow:0 0 0 2.5px color-mix(in srgb,var(--bronze) 25%,transparent), 0 0 8px color-mix(in srgb,var(--bronze) 55%,transparent); }
+
+  .srow { display:flex; align-items:center; gap:9px; padding:7px 6px; border-radius:6px; border:1px solid transparent; }
+  .srow + .srow { margin-top:2px; }
+  .srow.arm { background:color-mix(in srgb,var(--alert) 6%,transparent); border-color:color-mix(in srgb,var(--alert) 28%,transparent); }
+  .kicon { width:26px; height:26px; border-radius:6px; display:grid; place-items:center; flex:none; }
+  .kicon svg { width:14px; height:14px; }
+  .ki-claude { color:var(--data-1); background:color-mix(in srgb,var(--data-1) 13%,transparent); }
+  .ki-codex  { color:var(--data-4); background:color-mix(in srgb,var(--data-4) 13%,transparent); }
+  .ki-kimi   { color:var(--data-5); background:color-mix(in srgb,var(--data-5) 13%,transparent); }
+  .ki-grok   { color:var(--data-3); background:color-mix(in srgb,var(--data-3) 13%,transparent); }
+  .slabel { min-width:0; }
+  .slabel .l { font-family:var(--font-data); font-size:12px; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; gap:7px; }
+  .slabel .k { font-size:10.5px; color:var(--ink-3); }
+  .slabel .k.arm { color:var(--alert); }
+  .sdur { margin-left:auto; font-family:var(--font-data); font-size:11px; color:var(--ink-2); display:flex; align-items:center; gap:6px; flex:none; }
+  .sdur svg { width:11px; height:11px; color:var(--ink-3); }
+  .kill { width:30px; height:30px; border-radius:6px; border:1px solid var(--line); background:transparent; color:var(--ink-3); display:grid; place-items:center; cursor:pointer; flex:none; }
+  .kill svg { width:13px; height:13px; }
+  .kill.arm { color:var(--alert); border-color:color-mix(in srgb,var(--alert) 50%,transparent); background:color-mix(in srgb,var(--alert) 12%,transparent); }
+
+  /* Check-in-Reihen */
+  .crow { display:flex; align-items:center; gap:9px; padding:6px 6px; }
+  .crow + .crow { margin-top:2px; }
+  .claimdot { width:7px; height:7px; border-radius:50%; border:1.5px dashed var(--ink-3); flex:none; margin:0 9.5px; }
+  .crow .txt { min-width:0; flex:1; }
+  .crow .t1 { font-size:12px; color:var(--ink-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .crow .t2 { font-size:10.5px; color:var(--ink-3); }
+  .claimtag { font-size:10px; font-family:var(--font-data); color:var(--ink-3); border:1px dashed var(--line); border-radius:99px; padding:1.5px 7px; flex:none; }
+  .crow .dur { font-family:var(--font-data); font-size:11px; color:var(--ink-3); flex:none; }
+
+  .commit { display:flex; align-items:center; gap:7px; margin-top:10px; padding-top:9px; border-top:1px solid var(--line-soft); color:var(--ink-3); font-size:11px; min-width:0; }
+  .commit svg { width:12px; height:12px; flex:none; }
+  .commit .hash { font-family:var(--font-data); color:var(--ink-2); }
+  .commit .msg { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .idle { color:var(--ink-3); font-size:11.5px; margin-top:8px; }
+
+  /* ── Frame 2: Kill-Sheet ────────────────────────────────── */
+  .dim { position:absolute; inset:0; background:rgba(7,8,7,.66); z-index:5; }
+  .sheet { position:absolute; left:0; right:0; bottom:0; z-index:6; background:var(--surface-1); border-top:1px solid var(--line); border-radius:14px 14px 0 0; padding:8px 16px 16px; box-shadow:0 -12px 40px rgba(0,0,0,.55); }
+  .grab { width:36px; height:4px; border-radius:99px; background:var(--line); margin:2px auto 12px; }
+  .sheet h4 { font-size:12px; color:var(--ink-3); font-weight:500; letter-spacing:.1em; text-transform:uppercase; }
+  .victim { display:flex; align-items:center; gap:11px; margin-top:10px; background:var(--surface-2); border:1px solid var(--line); border-radius:var(--r-card); padding:11px 12px; }
+  .victim .kicon { width:34px; height:34px; border-radius:8px; }
+  .victim .kicon svg { width:18px; height:18px; }
+  .victim .vl { font-family:var(--font-data); font-size:14px; color:var(--ink); }
+  .victim .vm { font-size:11.5px; color:var(--ink-2); margin-top:2px; display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
+  .victim .vm .ptag { color:var(--ink-3); border:1px solid var(--line); border-radius:99px; padding:1px 7px; font-size:10.5px; }
+  .warnline { display:flex; gap:8px; align-items:flex-start; margin-top:11px; font-size:12px; line-height:1.4; }
+  .warnline svg { width:14px; height:14px; flex:none; margin-top:1px; color:var(--alert); }
+  .warnline span { color:color-mix(in srgb, var(--alert) 80%, var(--ink)); }
+  .sheetbtns { display:flex; gap:9px; margin-top:14px; }
+  .btn { flex:1; border-radius:8px; padding:11px 0; font-size:13.5px; font-weight:600; font-family:var(--font-display); cursor:pointer; border:1px solid transparent; }
+  .btn-danger { background:var(--alert); color:#14100e; }
+  .btn-ghost { background:transparent; color:var(--ink-2); border-color:var(--line); }
+  .sheet .hint { text-align:center; color:var(--ink-3); font-size:10.5px; margin-top:9px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <g id="i-sparkles"><path d="M12 4l1.7 4.6L18.5 10l-4.8 1.4L12 16l-1.7-4.6L5.5 10l4.8-1.4z" fill="currentColor" stroke="none"/><path d="M18.6 15.2l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7z" fill="currentColor" stroke="none"/></g>
+    <g id="i-terminal" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></g>
+    <g id="i-bot" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="9" width="14" height="10" rx="2"/><line x1="12" y1="5" x2="12" y2="9"/><circle cx="12" cy="4" r="1"/><circle cx="9.3" cy="14" r=".4" fill="currentColor"/><circle cx="14.7" cy="14" r=".4" fill="currentColor"/></g>
+    <g id="i-zap" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></g>
+    <g id="i-x" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="17" y1="7" x2="7" y2="17"/><line x1="7" y1="7" x2="17" y2="17"/></g>
+    <g id="i-alert" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></g>
+    <g id="i-commit" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="9" y2="12"/><line x1="15" y1="12" x2="21" y2="12"/></g>
+    <g id="i-clock" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></g>
+  </defs>
+</svg>
+
+<div class="caption"><b>Variante A</b> Zustand 1 — Überblick <span class="rule"></span></div>
+
+<!-- ═══ FRAME 1: Überblick ═══ -->
+<div class="frame">
+  <header class="topbar">
+    <span class="wordmark">PROJEKTE</span>
+    <span class="spacer"></span>
+    <span class="livechip"><span class="livedot"></span>Live: verbunden</span>
+    <span class="kbd mono">⌘K</span>
+  </header>
+
+  <main>
+    <div>
+      <div class="eyebrow">Leitstand</div>
+      <h2>Projekte <span class="livepill">● 6 live</span></h2>
+      <div class="summary">
+        <span class="sumchip"><b>6</b> live</span>
+        <span class="sumchip"><b>7</b> Check-ins</span>
+        <span class="sumchip alert"><b>1</b> blockiert</span>
+        <span class="sumchip warn"><b>1</b> Input</span>
+      </div>
+    </div>
+
+    <!-- Karte 1: Hermes Infra (alert) -->
+    <section class="card">
+      <span class="edge alert"></span>
+      <div class="cardhead">
+        <span class="attdot alert"></span>
+        <h3>Hermes Infra</h3>
+        <div class="badges">
+          <span class="badge alert">Blockiert 1</span>
+          <span class="badge warn">Input 1</span>
+        </div>
+      </div>
+      <div class="kline">
+        <span>Offen <span class="mono">13</span></span>
+        <span>Review <span class="mono">0</span></span>
+        <span>Erledigt 7T <span class="mono">189</span></span>
+      </div>
+
+      <div class="sect"><span class="pulse"></span>Sessions <span class="n">· 3 live</span></div>
+
+      <div class="srow">
+        <span class="kicon ki-claude"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></span>
+        <div class="slabel"><div class="l">frage-i1:0 · claude</div><div class="k">tmux-Fenster · live</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>10 min</span>
+        <button class="kill" aria-label="Session beenden"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="srow">
+        <span class="kicon ki-kimi"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg></span>
+        <div class="slabel"><div class="l">work:2 · kimi</div><div class="k">tmux-Fenster · live</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>35 h</span>
+        <button class="kill" aria-label="Session beenden"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="srow arm">
+        <span class="kicon ki-claude"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></span>
+        <div class="slabel"><div class="l">work:5 · claude-agent-2</div><div class="k arm">✕ getippt → Sheet (Zustand 2)</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>35 h</span>
+        <button class="kill arm" aria-label="Session beenden"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+
+      <div class="sect">Check-ins <span class="n">· 2</span></div>
+      <div class="crow">
+        <span class="claimdot"></span>
+        <div class="txt"><div class="t1">Frage-Assistent I1 — Antwort-Sheet (P0c) + Klick-Regression</div><div class="t2">claude · Claim, kein Prozess</div></div>
+        <span class="claimtag">Check-in</span><span class="dur">4 h</span>
+      </div>
+      <div class="crow">
+        <span class="claimdot"></span>
+        <div class="txt"><div class="t1">Dashboard Performance-Analyse (Bundle / Render / Polling)</div><div class="t2">claude · Claim, kein Prozess</div></div>
+        <span class="claimtag">Check-in</span><span class="dur">1 min</span>
+      </div>
+
+      <div class="commit"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg><span class="hash">0baf51165</span><span class="msg">refactor(control): extract AgentTerminalsView helpers + FleetCard</span><span class="mono" style="flex:none">· 15 min</span></div>
+    </section>
+
+    <!-- Karte 2: Health Track (active) -->
+    <section class="card">
+      <span class="edge active"></span>
+      <div class="cardhead">
+        <span class="attdot active"></span>
+        <h3>Health Track</h3>
+        <div class="badges"><span class="badge ok">Kanban ✓ leer</span></div>
+      </div>
+      <div class="sect">Sessions <span class="n">· 0 live</span></div>
+      <div class="crow">
+        <span class="claimdot"></span>
+        <div class="txt"><div class="t1">HT vision error-path — 16-item fix brief (BUILD-ONLY)</div><div class="t2">grok · Claim, kein Prozess</div></div>
+        <span class="claimtag">Check-in</span><span class="dur">3 h</span>
+      </div>
+      <div class="commit"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg><span class="hash">c9d024461</span><span class="msg">feat(auth): Reset-Flow mit Supabase-Default-Mail-Template</span><span class="mono" style="flex:none">· 27 min</span></div>
+    </section>
+
+    <!-- Karte 3: Diktat (quiet) -->
+    <section class="card">
+      <span class="edge quiet"></span>
+      <div class="cardhead">
+        <span class="attdot quiet"></span>
+        <h3>Diktat <span class="sub">· Teil von Hermes Infra</span></h3>
+      </div>
+      <div class="idle">Keine Sessions, keine Check-ins</div>
+      <div class="commit"><svg viewBox="0 0 24 24"><use href="#i-commit"/></svg><span class="hash">e9157cd29</span><span class="msg">claude: dictate — fix mobile APK download</span><span class="mono" style="flex:none">· 11 h</span></div>
+    </section>
+  </main>
+</div>
+
+<div class="caption" style="margin-top:10px;"><b>Variante A</b> Zustand 2 — Kill per Bottom Sheet <span class="rule"></span></div>
+
+<!-- ═══ FRAME 2: Kill-Sheet ═══ -->
+<div class="frame" style="height:600px;">
+  <header class="topbar">
+    <span class="wordmark">PROJEKTE</span>
+    <span class="spacer"></span>
+    <span class="livechip"><span class="livedot"></span>Live: verbunden</span>
+    <span class="kbd mono">⌘K</span>
+  </header>
+  <main>
+    <section class="card">
+      <span class="edge alert"></span>
+      <div class="cardhead">
+        <span class="attdot alert"></span>
+        <h3>Hermes Infra</h3>
+        <div class="badges"><span class="badge alert">Blockiert 1</span><span class="badge warn">Input 1</span></div>
+      </div>
+      <div class="sect"><span class="pulse"></span>Sessions <span class="n">· 3 live</span></div>
+      <div class="srow">
+        <span class="kicon ki-claude"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></span>
+        <div class="slabel"><div class="l">frage-i1:0 · claude</div><div class="k">tmux-Fenster · live</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>10 min</span>
+        <button class="kill"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="srow">
+        <span class="kicon ki-kimi"><svg viewBox="0 0 24 24"><use href="#i-bot"/></svg></span>
+        <div class="slabel"><div class="l">work:2 · kimi</div><div class="k">tmux-Fenster · live</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>35 h</span>
+        <button class="kill"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="srow arm">
+        <span class="kicon ki-claude"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></span>
+        <div class="slabel"><div class="l">work:5 · claude-agent-2</div><div class="k arm">ausgewählt …</div></div>
+        <span class="sdur"><svg viewBox="0 0 24 24"><use href="#i-clock"/></svg>35 h</span>
+        <button class="kill arm"><svg viewBox="0 0 24 24"><use href="#i-x"/></svg></button>
+      </div>
+    </section>
+  </main>
+
+  <div class="dim"></div>
+  <div class="sheet">
+    <div class="grab"></div>
+    <h4>Session beenden?</h4>
+    <div class="victim">
+      <span class="kicon ki-claude"><svg viewBox="0 0 24 24"><use href="#i-sparkles"/></svg></span>
+      <div>
+        <div class="vl">work:5 · claude-agent-2</div>
+        <div class="vm"><span class="ptag">Hermes Infra</span><span class="mono">tmux work:5</span><span>·</span><span class="mono">läuft seit 35 h</span></div>
+      </div>
+    </div>
+    <div class="warnline"><svg viewBox="0 0 24 24"><use href="#i-alert"/></svg><span>Das tmux-Fenster wird geschlossen — der Prozess endet sofort. Ungespeicherte Arbeit geht verloren.</span></div>
+    <div class="sheetbtns">
+      <button class="btn btn-ghost">Abbrechen</button>
+      <button class="btn btn-danger">Session beenden</button>
+    </div>
+    <div class="hint">Check-ins (Vault-Claims) lassen sich nicht killen — nur echte tmux-Prozesse.</div>
+  </div>
+</div>
+
+</body>
+</html>
