@@ -710,6 +710,11 @@ def _tmux_agents(
                 "project": _attribute_project([pane_path], registry),
                 "since": session_created.get(session_name),
                 "source": "tmux",
+                # Structured kill target for the Projekte-Tab session rows:
+                # POST /api/agent-terminals/terminate takes (session, window).
+                # Frontend must NEVER re-parse these out of the display label.
+                "tmux_session": session_name,
+                "tmux_window": window_index,
             }
         )
     return agents, []

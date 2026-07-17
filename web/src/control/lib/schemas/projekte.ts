@@ -82,6 +82,10 @@ const ProjectAgentSchema = z.object({
   project: nullableString,
   since: nullableEpochSeconds,
   source: z.string().catch(""),
+  // Structured kill target, present only on source==="tmux" rows (backend
+  // additive 2026-07-17); coordination/kanban/loop rows omit them → null.
+  tmux_session: nullableString,
+  tmux_window: nullableString,
 }).passthrough();
 export type ProjectAgent = z.infer<typeof ProjectAgentSchema>;
 

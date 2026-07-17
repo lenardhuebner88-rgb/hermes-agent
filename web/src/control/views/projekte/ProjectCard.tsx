@@ -1,14 +1,14 @@
 import type { KeyboardEvent } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "../../components/primitives";
 import { Led } from "../../components/atoms";
-import { SignalLabel } from "../../components/leitstand";
-import { fmtRelativeTime } from "../../lib/derive";
+import { SectionHeader, SignalLabel } from "../../components/leitstand";
+import { fmtAge, fmtRelativeTime } from "../../lib/derive";
 import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
 import { de } from "../../i18n/de";
-import { AGENT_KIND_STYLES, AGENTS_CHIP_MAX_VISIBLE, agentChipText } from "./agentKinds";
-import { attentionTone, type ProjectAttention } from "./derive";
+import { AGENT_KIND_STYLES } from "./agentKinds";
+import { attentionTone, killTarget, splitAgentsBySource, type ProjectAttention } from "./derive";
 
 const t = de.projekte;
 
@@ -39,19 +39,22 @@ export interface ProjectCardProps {
   now: number;
   /** Opens the project detail drawer (Stufe 6). */
   onOpen: () => void;
+  /** Opens the kill-confirmation sheet for one live (tmux) session row. */
+  onKillSession: (agent: ProjectAgent) => void;
 }
 
-/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5/6/7).
- *  Klick / Enter / Space öffnet den Detail-Drawer; Agent-Chip-Tooltips bleiben
- *  erhalten (title auf den Chips, kein stopPropagation nötig). */
-export function ProjectCard({ project, agents, parentName, attention, now, onOpen }: ProjectCardProps) {
+/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs.
+ *  Klick / Enter / Space öffnet den Detail-Drawer. Der frühere Footer mit
+ *  anonymen Agent-Chips ist seit 2026-07-17 in zwei Sektionen aufgeteilt:
+ *  SESSIONS (echte laufende tmux-Prozesse, mit Laufzeit + ✕-Kill) und
+ *  CHECK-INS (Vault-Claims mit Task-Text, bewusst NICHT killbar). Der Kill-
+ *  Button stoppt die Propagation, damit nicht der Drawer aufgeht. */
+export function ProjectCard({ project, agents, parentName, attention, now, onOpen, onKillSession }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
   const loopsActive = project.loops?.active ?? 0;
   const hasErrors = project.errors.length > 0;
-  const agentCount = agents.length;
-  const visibleAgents = agents.slice(0, AGENTS_CHIP_MAX_VISIBLE);
-  const overflow = agentCount - visibleAgents.length;
+  const { live, claims } = splitAgentsBySource(agents);
   const tone = attentionTone(attention);
   const attentionLabel = t.attentionLabel[attention];
 
@@ -129,49 +132,128 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
         </div>
       ) : null}
 
-      <footer className="mt-auto flex items-center justify-between gap-2 border-t border-line pt-2.5">
-        <div
-          className={cn(
-            "flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-micro",
-            agentCount > 0 ? "text-ink" : "text-ink-3",
-          )}
-        >
-          <Led kind={agentCount > 0 ? "live" : "idle"} size={7} />
-          {agentCount === 0 ? (
-            <span>{t.agentsCount(0)}</span>
-          ) : (
-            <>
-              {visibleAgents.map((agent, index) => {
-                const style = AGENT_KIND_STYLES[agent.kind] ?? AGENT_KIND_STYLES.unknown;
-                const Icon = style.icon;
-                const text = agentChipText(agent);
-                return (
-                  <span
-                    key={`${agent.kind}:${agent.label}:${index}`}
-                    className={cn(
-                      "inline-flex max-w-[7.5rem] items-center gap-1 rounded-card border border-line bg-surface-2 px-1.5 py-0.5",
-                      style.tone,
-                    )}
-                    title={agent.task ? `${text} — ${agent.task}` : text}
-                  >
-                    <Icon className="h-3 w-3 shrink-0" aria-hidden />
-                    <span className="truncate">{text}</span>
-                  </span>
-                );
-              })}
-              {overflow > 0 ? (
-                <span className="shrink-0 font-data text-ink-3">{t.agentsOverflow(overflow)}</span>
-              ) : null}
-            </>
-          )}
-        </div>
-        {loopsActive > 0 ? (
+      {live.length === 0 && claims.length === 0 ? (
+        <p className="text-micro text-ink-3">{t.agentsCount(0)}</p>
+      ) : null}
+
+      {live.length > 0 ? (
+        <section aria-label={t.sessionsSection} className="min-w-0 space-y-1.5">
+          <SectionHeader
+            label={
+              <span className="inline-flex items-center gap-1.5">
+                <Led kind="live" size={7} />
+                {t.sessionsSection}
+              </span>
+            }
+            meta={t.liveCount(live.length)}
+            rule={false}
+          />
+          <ul className="space-y-1">
+            {live.map((agent, index) => (
+              <LiveSessionRow
+                key={`${agent.tmux_session ?? ""}:${agent.tmux_window ?? ""}:${agent.label}:${index}`}
+                agent={agent}
+                now={now}
+                onKillSession={onKillSession}
+              />
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {claims.length > 0 ? (
+        <section aria-label={t.checkinsSection} className="min-w-0 space-y-1.5">
+          <SectionHeader label={t.checkinsSection} meta={claims.length} rule={false} />
+          <ul className="space-y-1">
+            {claims.map((agent, index) => (
+              <ClaimRow key={`${agent.kind}:${agent.label}:${index}`} agent={agent} now={now} />
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {loopsActive > 0 ? (
+        <footer className="mt-auto flex items-center justify-end gap-2 border-t border-line pt-2.5">
           <span className="inline-flex shrink-0 items-center gap-1.5 text-micro text-ink-2">
             <RefreshCw className="h-3.5 w-3.5" aria-hidden />
             {t.loopsActive(loopsActive)}
           </span>
-        ) : null}
-      </footer>
+        </footer>
+      ) : null}
     </Card>
+  );
+}
+
+/** Eine laufende tmux-Session: Kind-Icon, Label, Live-LED, Laufzeit und —
+ *  nur mit strukturiertem Kill-Ziel (siehe killTarget) — der ✕-Button. */
+function LiveSessionRow({
+  agent,
+  now,
+  onKillSession,
+}: {
+  agent: ProjectAgent;
+  now: number;
+  onKillSession: (agent: ProjectAgent) => void;
+}) {
+  const style = AGENT_KIND_STYLES[agent.kind] ?? AGENT_KIND_STYLES.unknown;
+  const Icon = style.icon;
+  const target = killTarget(agent);
+  const label = agent.label || `${agent.tmux_session ?? "?"}:${agent.tmux_window ?? "?"}`;
+
+  return (
+    <li className="flex min-w-0 items-center gap-2 rounded-card border border-line-soft bg-surface-2 px-2 py-1.5">
+      <Icon className={cn("h-3.5 w-3.5 shrink-0", style.tone)} aria-hidden />
+      <span className="min-w-0 flex-1 truncate font-data text-micro text-ink" title={label}>
+        {label}
+      </span>
+      <Led kind="live" size={7} />
+      {agent.since != null && Number.isFinite(agent.since) ? (
+        <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">
+          {fmtAge(agent.since, now)}
+        </span>
+      ) : null}
+      {target ? (
+        <button
+          type="button"
+          aria-label={t.killSessionAria(label)}
+          title={t.killSessionAria(label)}
+          onClick={(event) => {
+            event.stopPropagation();
+            onKillSession(agent);
+          }}
+          className="grid size-7 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-status-alert/40 hover:bg-status-alert/10 hover:text-status-alert focus-visible:outline-2 focus-visible:outline-bronze"
+        >
+          <X className="h-3.5 w-3.5" aria-hidden />
+        </button>
+      ) : null}
+    </li>
+  );
+}
+
+/** Ein Vault-Check-in (Claim): Task-Text + Art + Alter — bewusst ohne Kill-
+ *  Button, denn ein Claim ist kein killbarer Prozess (siehe Sheet-Hinweis). */
+function ClaimRow({ agent, now }: { agent: ProjectAgent; now: number }) {
+  const style = AGENT_KIND_STYLES[agent.kind] ?? AGENT_KIND_STYLES.unknown;
+
+  return (
+    <li className="flex min-w-0 items-center gap-2 px-2 py-1">
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full border border-dashed border-ink-3" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-micro text-ink-2" title={agent.task ?? agent.label}>
+          {agent.task ?? agent.label}
+        </p>
+        <p className="text-micro text-ink-3">
+          {style.label} · {t.claimKind}
+        </p>
+      </div>
+      <span className="shrink-0 rounded-card border border-dashed border-line px-1.5 py-0.5 font-data text-micro text-ink-3">
+        {t.claimTag}
+      </span>
+      {agent.since != null && Number.isFinite(agent.since) ? (
+        <span className="shrink-0 font-data text-micro tabular-nums text-ink-3">
+          {fmtAge(agent.since, now)}
+        </span>
+      ) : null}
+    </li>
   );
 }

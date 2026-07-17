@@ -784,6 +784,9 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
     assert fable_pane["kind"] == "claude"
     assert fable_pane["project"] is None  # /home/piet does not match the repo
     assert fable_pane["since"] == 1784229852
+    # Structured kill target for the Projekte-Tab (never parse the label).
+    assert fable_pane["tmux_session"] == "fable-babysit-3"
+    assert fable_pane["tmux_window"] == "0"
 
     work_claude = by_label["work:0 claude"]
     assert work_claude["kind"] == "claude"
@@ -798,6 +801,8 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
     assert work_kimi["kind"] == "kimi"
     # Path is exactly the shared repo_path; hermes-infra (no parent) wins over diktat.
     assert work_kimi["project"] == "hermes-infra"
+    assert work_kimi["tmux_session"] == "work"
+    assert work_kimi["tmux_window"] == "2"
 
     work_grok = by_label["work:3 grok"]
     assert work_grok["kind"] == "grok"  # window_name "grok" wins over command "node"
@@ -958,6 +963,12 @@ touching:
     second = coordination_agents[0]
     assert second["kind"] == "codex"
     assert second["project"] == "hermes-infra"
+
+    # Kill targets exist only on the tmux source — coordination notes are
+    # claims, not processes, and must never become killable rows.
+    for note_agent in coordination_agents:
+        assert note_agent.get("tmux_session") is None
+        assert note_agent.get("tmux_window") is None
 
 
 def test_parse_coordination_note_open_closed_garbage(tmp_path: Path) -> None:

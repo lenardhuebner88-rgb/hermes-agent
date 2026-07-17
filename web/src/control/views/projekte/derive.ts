@@ -52,6 +52,45 @@ export function groupAgentsByKind(
   return ordered;
 }
 
+// ── Sessions sichtbar & killbar (2026-07-17) ───────────────────────────────
+
+/** Kill target for POST /api/agent-terminals/terminate — taken ONLY from the
+ *  structured backend fields (`tmux_session`/`tmux_window`, tmux-source rows
+ *  exclusively). The display `label` ("work:2 kimi") is never re-parsed:
+ *  a destructive action must not depend on a presentation string. Anything
+ *  without both fields (coordination claims, kanban/loop rows, malformed
+ *  payloads) is NOT killable → null. */
+export function killTarget(
+  agent: Pick<ProjectAgent, "source" | "tmux_session" | "tmux_window">,
+): { session: string; window: string } | null {
+  if (agent.source !== "tmux") return null;
+  const session = agent.tmux_session?.trim();
+  const window = agent.tmux_window?.trim();
+  if (!session || !window) return null;
+  return { session, window };
+}
+
+/** Split one project's agent list into actually-running processes (live =
+ *  tmux panes) and check-ins (coordination claims from the vault). This is the
+ *  card's central answer to "welche Session läuft tatsächlich gerade" — the
+ *  old chip row mixed both into indistinguishable icons.
+ *  kanban/loop agents are deliberately NOT shown on the card: their state is
+ *  already covered by the kanban counts line ("Läuft N") and the loops footer,
+ *  and mixing them into the check-in rows would mislabel a running kanban
+ *  task as "Claim, kein Prozess". They stay visible in the kind rail below.
+ *  Order is preserved. */
+export function splitAgentsBySource(
+  agents: ReadonlyArray<ProjectAgent>,
+): { live: ProjectAgent[]; claims: ProjectAgent[] } {
+  const live: ProjectAgent[] = [];
+  const claims: ProjectAgent[] = [];
+  for (const agent of agents) {
+    if (agent.source === "tmux") live.push(agent);
+    else if (agent.source === "coordination") claims.push(agent);
+  }
+  return { live, claims };
+}
+
 /** Anzeigename des Elternprojekts für ein Unterprojekt ("Teil von X"). Fällt
  *  auf den rohen Parent-Slug zurück, wenn die Registry das Elternprojekt aus
  *  irgendeinem Grund nicht (mehr) enthält — nie eine leere/kaputte Zeile. */

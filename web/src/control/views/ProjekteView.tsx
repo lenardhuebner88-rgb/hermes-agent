@@ -5,15 +5,18 @@ import { FleetEmptyState } from "../components/leitstand";
 import { useProjectAgents, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
+import type { ProjectAgent } from "../lib/schemas";
 import {
   computeAttention,
   countAgentsByProject,
   groupAgentsByProject,
   parentDisplayName,
   sortProjectsByAttention,
+  splitAgentsBySource,
 } from "./projekte/derive";
 import { ProjectCard } from "./projekte/ProjectCard";
 import { ProjectDetailDrawer } from "./projekte/ProjectDetailDrawer";
+import { SessionKillSheet } from "./projekte/SessionKillSheet";
 import { AgentsRail } from "./projekte/AgentsRail";
 
 const t = de.projekte;
@@ -22,12 +25,15 @@ const t = de.projekte;
  *  eine Karte pro registriertem Projekt (`~/.hermes/projects.yaml`), gespeist
  *  aus GET /api/projects + GET /api/projects/agents; Klick öffnet den
  *  read-only Drilldown (GET /api/projects/{slug}). Karten sind nach
- *  Attention (alert → active → quiet) sortiert. */
+ *  Attention (alert → active → quiet) sortiert.
+ *  Seit 2026-07-17: Summary-Strip (live/Check-ins/blockiert) unter dem Header
+ *  und Kill-Bottom-Sheet für echte tmux-Sessions (✕ auf den Session-Reihen). */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
   const now = nowSec();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [killAgent, setKillAgent] = useState<ProjectAgent | null>(null);
 
   const list = projects.data?.projects ?? [];
   const registryErrors = projects.data?.registry_errors ?? [];
@@ -44,12 +50,44 @@ export function ProjekteView() {
       ? null
       : parentDisplayName(list.find((p) => p.slug === selectedSlug)?.parent ?? null, list);
 
+  // Summary-Strip: echte Prozesse vs. Vault-Claims + offene Arbeit über alle
+  // Karten. Gleiche live/claims-Definition wie die Karten-Sektionen.
+  const { live: liveAgents, claims: claimAgents } = splitAgentsBySource(agentList);
+  const liveTotal = liveAgents.length;
+  const claimsTotal = claimAgents.length;
+  let blockedTotal = 0;
+  let needsInputTotal = 0;
+  for (const project of list) {
+    blockedTotal += project.kanban?.blocked ?? 0;
+    needsInputTotal += project.kanban?.needs_input ?? 0;
+  }
+
   return (
     <section aria-label={t.title} className="space-y-5">
       <header>
         <Eyebrow>{t.eyebrow}</Eyebrow>
         <h2 className="mt-1 font-display text-h2 font-semibold text-ink">{t.title}</h2>
         <p className="mt-1 text-sec text-ink-2">{t.subtitle}</p>
+        {agents.data !== null ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-micro">
+            <span className="inline-flex items-center gap-1.5 rounded-card border border-bronze/40 bg-bronze/10 px-2 py-0.5 font-data text-bronze-hi">
+              {t.summaryLive(liveTotal)}
+            </span>
+            <span className="inline-flex items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+              {t.summaryCheckins(claimsTotal)}
+            </span>
+            {blockedTotal > 0 ? (
+              <span className="inline-flex items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
+                {t.summaryBlocked(blockedTotal)}
+              </span>
+            ) : null}
+            {needsInputTotal > 0 ? (
+              <span className="inline-flex items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
+                {t.summaryNeedsInput(needsInputTotal)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </header>
 
       {projects.error ? (
@@ -94,6 +132,7 @@ export function ProjekteView() {
                 attention={computeAttention(project, agentCount)}
                 now={now}
                 onOpen={() => setSelectedSlug(project.slug)}
+                onKillSession={setKillAgent}
               />
             );
           })}
@@ -109,6 +148,18 @@ export function ProjekteView() {
           slug={selectedSlug}
           parentName={selectedParentName}
           onClose={() => setSelectedSlug(null)}
+        />
+      ) : null}
+
+      {killAgent ? (
+        <SessionKillSheet
+          agent={killAgent}
+          projectName={killAgent.project ? (projectNames[killAgent.project] ?? killAgent.project) : null}
+          now={now}
+          onClose={() => setKillAgent(null)}
+          onKilled={() => {
+            void agents.reload();
+          }}
         />
       ) : null}
     </section>

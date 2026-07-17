@@ -39,6 +39,21 @@ const REAL_AGENT: ProjectAgent = {
   project: "hermes-infra",
   since: 1784238000,
   source: "tmux",
+  tmux_session: "work",
+  tmux_window: "2",
+};
+
+// Coordination claim (source="coordination"): has a task text, is NOT a
+// process and must never grow a kill button.
+const CLAIM_AGENT: ProjectAgent = {
+  kind: "claude",
+  label: "2026-07-17_0310_claude_frage-assistent-i1",
+  task: "Frage-Assistent I1 — Antwort-Sheet (P0c) + Klick-Regression",
+  project: "hermes-infra",
+  since: 1784238000,
+  source: "coordination",
+  tmux_session: null,
+  tmux_window: null,
 };
 
 function mockProjects(overrides: Record<string, unknown> = {}) {
@@ -97,12 +112,60 @@ describe("ProjekteView", () => {
     expect(html).toContain("projekte-tab: Stufe 1");
     expect(html).toContain("Blockiert 1");
     expect(html).toContain("1 Loop aktiv");
-    // Stufe 5: kind chip (Kimi) on the card instead of a plain "1 Agent" count.
+    // Stufe 5: kind chip (Kimi) in the rail; the card shows the session row.
     expect(html).toContain("Kimi");
     expect(html).toContain("Alle Agents");
     expect(html).toContain("work:2 kimi");
+    // Summary strip: 1 tmux process live, 0 claims; 1 blocked across kanban.
+    expect(html).toContain("1 live");
+    expect(html).toContain("0 Check-ins");
+    expect(html).toContain("1 blockiert");
+    // Sessions section on the card: live row with structured kill target.
+    expect(html).toContain("Sessions");
+    expect(html).toContain('aria-label="Session work:2 kimi beenden"');
     // No "Teil von" hint for a top-level project.
     expect(html).not.toContain("Teil von");
+  });
+
+  it("renders coordination agents as quiet check-in rows with task text, never killable", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({
+      data: { generated_at: 1, errors: [], agents: [REAL_AGENT, CLAIM_AGENT] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("Check-ins");
+    expect(html).toContain("Frage-Assistent I1 — Antwort-Sheet (P0c) + Klick-Regression");
+    expect(html).toContain("Claim, kein Prozess");
+    expect(html).toContain("1 Check-in");
+    // Only the tmux row carries a kill button; the claim row must not.
+    expect(html.match(/aria-label="Session [^"]* beenden"/g) ?? []).toHaveLength(1);
+  });
+
+  it("shows no kill button for tmux rows missing the structured fields (old backend)", () => {
+    const legacyAgent: ProjectAgent = {
+      kind: "codex",
+      label: "work:1 codex",
+      task: null,
+      project: "hermes-infra",
+      since: 1784238000,
+      source: "tmux",
+      tmux_session: null,
+      tmux_window: null,
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({
+      data: { generated_at: 1, errors: [], agents: [legacyAgent] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    // Live row renders (label + section), but without tmux_session/tmux_window
+    // there is no kill affordance — never label-parsing for a destructive call.
+    expect(html).toContain("work:1 codex");
+    expect(html).toContain("Sessions");
+    expect(html).not.toContain("beenden");
   });
 
   it("shows unassigned agents in the kind rail with Unzugeordnet, not as a separate group", () => {
@@ -113,6 +176,8 @@ describe("ProjekteView", () => {
       project: null,
       since: null,
       source: "loop",
+      tmux_session: null,
+      tmux_window: null,
     };
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({
