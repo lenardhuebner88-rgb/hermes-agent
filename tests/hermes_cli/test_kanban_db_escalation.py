@@ -674,6 +674,94 @@ def test_release_uireal_root_promotes_scheduled_chain_members(kanban_home):
         assert kb.get_task(conn, review).status == "todo"
 
 
+def test_release_uireal_root_keeps_children_held_while_freigabe_hold_active(
+    kanban_home,
+):
+    # Cross-family review finding 1 (2026-07-17): ui-real and freigabe:operator
+    # are ADDITIVE holds — a root can carry BOTH. Releasing only the ui-real
+    # side must NOT unblock the chain's children while the freigabe:operator
+    # hold is still outstanding (that would dispatch work before the operator
+    # actually freigabe'd it). The root's own ui-real ack is still recorded.
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="dual-held root", triage=True)
+        build = kb.create_task(conn, title="build", assignee="premium")
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (build, root))
+            conn.execute(
+                "UPDATE tasks SET live_test_depth='ui-real', freigabe='operator', "
+                "status='scheduled' WHERE id = ?",
+                (root,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='scheduled' WHERE id = ?", (build,),
+            )
+
+        assert kb.release_uireal_root(conn, root, author="pytest") is True
+
+        root_task = kb.get_task(conn, root)
+        build_task = kb.get_task(conn, build)
+        events = [e.kind for e in kb.list_events(conn, root)]
+
+    # Root acknowledges the ui-real release...
+    assert "uireal_released" in events
+    # ...but the freigabe hold is untouched: no freigabe_released fired, and
+    # the child stays held in 'scheduled' — no premature dispatch.
+    assert "freigabe_released" not in events
+    assert build_task.status == "scheduled"
+    # Root itself may still record its own ack (single status column shared
+    # by both holds); the load-bearing guarantee is the child stays parked.
+    assert root_task.status in ("todo", "scheduled")
+
+    # Now the operator ALSO releases the freigabe hold — the child unblocks.
+    with kb.connect_closing() as conn:
+        assert kb.release_freigabe_hold(conn, root) is True
+        assert kb.get_task(conn, build).status == "ready"
+
+
+def test_release_uireal_root_couples_critical_scout_when_last_hold_clears(
+    kanban_home, monkeypatch,
+):
+    # Cross-family review finding 7: release_uireal_root must mirror
+    # release_freigabe_hold's deferred critical-scout recoupling — a
+    # ui-real-ONLY chain (no other additive hold) that goes fully live also
+    # wakes a released critical child's scout.
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "auto_tier": False,
+            "auto_scout_on_critical": True,
+        },
+    )
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="ui-real critical root", triage=True)
+        build = kb.create_task(
+            conn, title="build", assignee="coder", review_tier="critical",
+        )
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (build, root))
+            conn.execute(
+                "UPDATE tasks SET live_test_depth='ui-real', status='scheduled' "
+                "WHERE id = ?",
+                (root,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='scheduled' WHERE id = ?", (build,),
+            )
+
+        assert kb.release_uireal_root(conn, root, author="pytest") is True
+
+        scout_id = kb.scout_predecessor_id(conn, build)
+
+    assert scout_id is not None
+    with kb.connect_closing() as conn:
+        scout = kb.get_task(conn, scout_id)
+    assert scout.assignee == "scout"
+
+
 def test_decompose_failure_is_transient_pure_rule():
     # HEILER-DECOMPOSE-FALLBACK-S1: pure classifier that tells a transient/infra
     # decompose failure (aux client down, LLM error, benign race) from a genuine

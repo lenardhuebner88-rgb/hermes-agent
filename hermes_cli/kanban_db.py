@@ -14459,6 +14459,31 @@ def planspec_chain_running_subtasks(
     return [str(row[0]) for row in rows]
 
 
+def _freigabe_operator_hold_still_active(
+    conn: sqlite3.Connection, task_id: str,
+) -> bool:
+    """True when *task_id* carries an unreleased ``freigabe: operator`` hold.
+
+    ``release_freigabe_hold``/``_release_freigabe_hold_root_in_txn`` never
+    clear the ``freigabe`` column on release (see ``_is_operator_held``'s
+    note) — the only durable "this hold was resolved" signal is the
+    ``freigabe_released`` event. Used by :func:`release_uireal_root` to avoid
+    unblocking a chain's children while the OTHER additive operator hold
+    (decompose-time: ui-real AND freigabe:operator both park a root in
+    ``scheduled``, see ``decompose_triage_task``) is still outstanding."""
+    row = conn.execute(
+        "SELECT freigabe FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None or str(row["freigabe"] or "").strip().lower() != "operator":
+        return False
+    released = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'freigabe_released' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return released is None
+
+
 def release_uireal_root(
     conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
 ) -> bool:
@@ -14469,6 +14494,14 @@ def release_uireal_root(
     ``ready``/``todo`` via :func:`unblock_task` + :func:`recompute_ready`) so
     the chain actually dispatches, instead of only recording operator intent
     on the root while its children stay parked in ``scheduled`` forever.
+
+    ui-real and ``freigabe: operator`` are ADDITIVE holds (both can park the
+    same root in ``scheduled`` at once, see ``decompose_triage_task``). This
+    only clears the ui-real side: the root's own ``uireal_released`` intent is
+    always recorded, but if the ``freigabe: operator`` hold is still
+    unreleased, the chain's children stay held in ``scheduled`` (no
+    unblock/recompute_ready/critical-scout coupling) — dispatch must wait for
+    the explicit ``release_freigabe_hold`` too.
     """
     with write_txn(conn):
         row = conn.execute(
@@ -14495,6 +14528,11 @@ def release_uireal_root(
             released = True
     if not released:
         return False
+    if _freigabe_operator_hold_still_active(conn, task_id):
+        # The other additive hold is still outstanding — record the ui-real
+        # ack (done above) but leave the chain's children held; unblocking
+        # them now would dispatch work the operator has not yet freigabe'd.
+        return True
     # Release the held chain members OUTSIDE the root write_txn — unblock_task and
     # recompute_ready open their own write_txns (nested write_txn is a documented
     # pitfall). Same pattern as release_freigabe_hold: walk the full chain, not
@@ -14509,6 +14547,14 @@ def release_uireal_root(
         if child is not None and child["status"] == "scheduled":
             unblock_task(conn, child_id)
     recompute_ready(conn)
+    # Phase-C-followup (a): mirror release_freigabe_hold's deferred
+    # critical-scout recoupling — a ui-real-only chain that just went fully
+    # live (no other hold left) also wakes any released critical child's
+    # scout, not just the freigabe-release path.
+    _rg_cfg = _review_gate_config()
+    if _rg_cfg.get("auto_scout_on_critical", False):
+        for child_id in chain_member_ids:
+            _maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
     return True
 
 
