@@ -3219,13 +3219,21 @@ def _terminal_status(status: str) -> bool:
     return status in {"done", "archived", "failed", "cancelled"}
 
 
-# Statuses that mean "left the chain without doing the work" — the set the
-# no-real-completion guard below refuses to accept as delivery evidence.
-_NO_REAL_WORK_STATUSES = {"archived", "cancelled", "failed"}
-
-
 def _is_real_completion_status(status: Optional[str]) -> bool:
-    return str(status or "").strip() not in _NO_REAL_WORK_STATUSES
+    """Fail CLOSED: a status counts as real completion evidence only if it is
+    a currently-valid task status OTHER than ``archived`` (the only status in
+    ``kanban_db.VALID_STATUSES`` that actually means "left the chain without
+    doing the work" — see ``reason_should_archive_as_superseded``). A
+    missing row (``None``), blank, or unrecognized status is NOT real —
+    cross-family review finding 2 (2026-07-17): the previous blacklist
+    (``not in {archived, cancelled, failed}``) failed OPEN for a missing row
+    or any in-flight/unknown status string, silently treating it as
+    completion evidence. Better to defensively park a root than complete it
+    on absent evidence."""
+    from hermes_cli import kanban_db as kb
+
+    text = str(status or "").strip()
+    return bool(text) and text in kb.VALID_STATUSES and text != "archived"
 
 
 def _decompose_root_has_real_child_completion(
@@ -3246,9 +3254,9 @@ def _decompose_root_has_real_child_completion(
     (``completed_task_id`` — the task whose completion drove this call) and
     ``_direct_complete_decompose_root`` (``children`` — the terminal-status
     list the caller already gathered) against exactly that: refuse when the
-    only evidence on hand is an archived/cancelled/failed status, accept a
-    genuine ``done`` (or any non-terminal-bad status, e.g. a still-running
-    completion in flight) as real."""
+    only evidence on hand is an ``archived`` status, a missing row, or an
+    unrecognized status; accept a genuine ``done`` (or any other currently
+    valid in-flight status, e.g. a still-running completion) as real."""
     if completed_task_id is not None:
         row = conn.execute(
             "SELECT status FROM tasks WHERE id = ?", (completed_task_id,),
@@ -3257,7 +3265,7 @@ def _decompose_root_has_real_child_completion(
         return _is_real_completion_status(status)
     if children is not None:
         return any(_is_real_completion_status(status) for _cid, status in children)
-    return True
+    return False
 
 
 def _block_decompose_root_no_real_completion(

@@ -408,6 +408,33 @@ def test_auto_complete_decompose_root_proceeds_when_one_child_really_done(
     assert auto_done and auto_done[-1]["completed_by"] == child_a
 
 
+def test_auto_complete_decompose_root_refuses_when_completed_task_row_missing(
+    kanban_home,
+):
+    """Cross-family review finding 2 (2026-07-17): the no-real-completion
+    guard must fail CLOSED, not open, when ``completed_task_id`` doesn't
+    resolve to a row at all (deleted / never existed / wrong id) — the
+    previous blacklist-based check treated a missing row (status=None) as
+    "not archived" and silently accepted it as real completion evidence."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="missing-completer root", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready' WHERE id = ?", (root,),
+            )
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id="t_doesnotexist", outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status != "done"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+
+
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> real activation -> success event, no fixer,
     child done."""
