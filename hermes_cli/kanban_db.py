@@ -20582,6 +20582,101 @@ def _create_conflict_park_fixer_subtask(
     return child_id
 
 
+# BASE-PREP-CONFLICT-FIXER-ROUTE-S10: prepare_worker_base (kanban_worktrees.py)
+# fails closed with this exact literal when a clean stale re-dispatch worktree
+# cannot rebase its chain branch onto a freshly-merged target -- a REAL,
+# deterministic merge conflict, not infra flakiness. Before S10 that error
+# funneled straight into the plain spawn-failure breaker (_record_spawn_failure
+# -> _record_task_failure), which burned the retry ladder on something no
+# retry could ever fix and escalated to the operator on the first trip. The
+# marker is anchored to the one place that phrase is emitted (kanban_worktrees.
+# prepare_worker_base's ``except WorktreeError`` re-raise) so this never
+# catches an unrelated dirty-worktree/provisioning WorktreeError.
+_BASE_PREP_REBASE_CONFLICT_MARKER = "could not rebase onto"
+
+
+def _is_base_prep_rebase_conflict(error: str) -> bool:
+    """True when *error* carries ``prepare_worker_base``'s exact rebase-
+    conflict literal -- a precise, source-anchored match (see
+    BASE-PREP-CONFLICT-FIXER-ROUTE-S10 above), never a loose git/rebase
+    substring that could catch a different WorktreeError."""
+    return _BASE_PREP_REBASE_CONFLICT_MARKER in (error or "")
+
+
+def _route_base_prep_conflict_fixer(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reason: str,
+    now: int,
+) -> bool:
+    """S10: route a deterministic ``prepare_worker_base`` rebase-conflict
+    ``WorktreeError`` to the SAME bounded conflict-park fixer used for
+    integration parks, instead of burning the plain spawn-failure breaker
+    straight to an operator escalation.
+
+    The conflict is infrastructure a fixer can resolve inside the chain's own
+    worktree, not a task defect, so ``consecutive_failures`` (the breaker
+    ladder) is left untouched here -- mirroring how ``_park_integration``
+    never trips it either. The task is parked ``blocked`` / block_kind
+    ``integration`` (release claim, close the open run as ``spawn_failed`` --
+    the same outcome the existing ``worker_base_rejected`` path already used,
+    so ``prepare_reused_task_worktree``'s WIP-adoption walk keeps skipping
+    it), then handed to :func:`_maybe_route_conflict_park_fixer` for the
+    bounded dispatch/backoff/in-flight/exhaustion decision: the SAME
+    ``CONFLICT_FIXER_MAX_ATTEMPTS`` budget, in-flight guard, and byte-
+    identical operator escalation on exhaustion apply.
+
+    Returns ``True`` once the task is fixer-owned (parked; a fixer dispatched,
+    already in flight, or escalated on budget exhaustion) -- the caller must
+    then SKIP the normal ``_record_spawn_failure`` breaker path, since any
+    escalation already happened here. Returns ``False`` only when the task
+    could not even be parked (raced out from under us, e.g. already
+    completed/archived by the time this runs), so the caller falls back to
+    the normal path.
+    """
+    with write_txn(conn):
+        rowcount = _system_park_set_blocked(
+            conn,
+            task_id,
+            kind="integration",
+            where_sql="status IN ('running', 'ready', 'blocked')",
+        )
+        if rowcount != 1:
+            return False
+        run_id = _end_run(
+            conn,
+            task_id,
+            outcome="spawn_failed",
+            status="blocked",
+            summary=reason,
+        )
+        _append_event(
+            conn,
+            task_id,
+            "blocked",
+            _system_blocked_event_payload(reason, "integration"),
+            run_id=run_id,
+        )
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if row is None:
+        return False
+    try:
+        retry_count = int(row["integration_retry_count"] or 0)
+    except (IndexError, KeyError, TypeError):
+        retry_count = 0
+    fixer_summary: dict = {"parked": [], "conflict_fixer_dispatched": []}
+    _maybe_route_conflict_park_fixer(
+        conn,
+        row,
+        reason=reason,
+        retry_count=retry_count,
+        now=now,
+        summary=fixer_summary,
+    )
+    return True
+
+
 def _maybe_route_conflict_park_fixer(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -25303,6 +25398,17 @@ def _dispatch_once_locked(
                     {"reason": str(exc)},
                     run_id=_current_run_id(conn, claimed.id),
                 )
+            # S10: a deterministic base-prep rebase conflict (chain branch vs
+            # a freshly-merged target) is routed to the SAME bounded conflict
+            # fixer used for integration parks instead of the plain spawn-
+            # failure breaker, which would burn the retry ladder on something
+            # no retry could fix. Falls through to the normal breaker path
+            # when the fixer budget is spent or there is nothing left to park
+            # (see _route_base_prep_conflict_fixer).
+            if _is_base_prep_rebase_conflict(str(exc)) and _route_base_prep_conflict_fixer(
+                conn, claimed.id, reason=reason, now=int(time.time()),
+            ):
+                continue
             auto = _record_spawn_failure(
                 conn,
                 claimed.id,
