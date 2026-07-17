@@ -1,40 +1,47 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
 import type { Locale, Translations } from "./types";
 import { en } from "./en";
-import { zh } from "./zh";
-import { zhHant } from "./zh-hant";
-import { ja } from "./ja";
-import { de } from "./de";
-import { es } from "./es";
-import { fr } from "./fr";
-import { tr } from "./tr";
-import { uk } from "./uk";
-import { af } from "./af";
-import { ko } from "./ko";
-import { it } from "./it";
-import { ga } from "./ga";
-import { pt } from "./pt";
-import { ru } from "./ru";
-import { hu } from "./hu";
 
-const TRANSLATIONS: Record<Locale, Translations> = {
-  en,
-  zh,
-  "zh-hant": zhHant,
-  ja,
-  de,
-  es,
-  fr,
-  tr,
-  uk,
-  af,
-  ko,
-  it,
-  ga,
-  pt,
-  ru,
-  hu,
-};
+// `en` is the only eager dictionary (fallback + default). Every other locale is
+// loaded on demand so the entry chunk does not ship all ~16 locale files.
+const LOCALE_LOADERS = {
+  en: () => Promise.resolve(en),
+  zh: () => import("./zh").then((m) => m.zh),
+  "zh-hant": () => import("./zh-hant").then((m) => m.zhHant),
+  ja: () => import("./ja").then((m) => m.ja),
+  de: () => import("./de").then((m) => m.de),
+  es: () => import("./es").then((m) => m.es),
+  fr: () => import("./fr").then((m) => m.fr),
+  tr: () => import("./tr").then((m) => m.tr),
+  uk: () => import("./uk").then((m) => m.uk),
+  af: () => import("./af").then((m) => m.af),
+  ko: () => import("./ko").then((m) => m.ko),
+  it: () => import("./it").then((m) => m.it),
+  ga: () => import("./ga").then((m) => m.ga),
+  pt: () => import("./pt").then((m) => m.pt),
+  ru: () => import("./ru").then((m) => m.ru),
+  hu: () => import("./hu").then((m) => m.hu),
+} satisfies Record<Locale, () => Promise<Translations>>;
+
+/** Session-level cache: each locale is fetched at most once. */
+const translationsCache = new Map<Locale, Translations>([["en", en]]);
+const loadWarnOnce = new Set<Locale>();
+
+async function loadLocale(locale: Locale): Promise<Translations> {
+  const cached = translationsCache.get(locale);
+  if (cached) return cached;
+  try {
+    const dict = await LOCALE_LOADERS[locale]();
+    translationsCache.set(locale, dict);
+    return dict;
+  } catch (err) {
+    if (!loadWarnOnce.has(locale)) {
+      loadWarnOnce.add(locale);
+      console.warn(`[i18n] failed to load locale "${locale}", falling back to en`, err);
+    }
+    return en;
+  }
+}
 
 // Display metadata for the language picker — endonym (native name) so users
 // recognize their language even if they don't speak the current UI language.
@@ -64,7 +71,7 @@ export const LOCALE_META: Record<Locale, { name: string }> = {
   hu: { name: "Magyar" },
 };
 
-const SUPPORTED_LOCALES = Object.keys(TRANSLATIONS) as Locale[];
+const SUPPORTED_LOCALES = Object.keys(LOCALE_LOADERS) as Locale[];
 const STORAGE_KEY = "hermes-locale";
 
 function isLocale(value: string): value is Locale {
@@ -95,6 +102,28 @@ const I18nContext = createContext<I18nContextValue>({
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(getInitialLocale);
+  // Until a non-en dictionary resolves, expose `en` so components never see
+  // missing keys / undefined strings during the first paint after switch/boot.
+  const [translations, setTranslations] = useState<Translations>(() => {
+    const initial = getInitialLocale();
+    return translationsCache.get(initial) ?? en;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = translationsCache.get(locale);
+    if (cached) {
+      setTranslations(cached);
+      return;
+    }
+    setTranslations(en);
+    void loadLocale(locale).then((dict) => {
+      if (!cancelled) setTranslations(dict);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [locale]);
 
   const setLocale = useCallback((l: Locale) => {
     setLocaleState(l);
@@ -108,7 +137,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   const value: I18nContextValue = {
     locale,
     setLocale,
-    t: TRANSLATIONS[locale],
+    t: translations,
   };
 
   return (
