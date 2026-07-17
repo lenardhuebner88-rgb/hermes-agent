@@ -99,12 +99,15 @@ describe("BoardTab operator information", () => {
     ["rtl", "مرحبا بالعالم ".repeat(30)],
     ["combining", "e\u0301".repeat(200)],
     ["emoji", "👩🏽‍💻🚀".repeat(80)],
-  ])("keeps the complete %s title recoverable", (_kind, title) => {
+  ])("expands the complete %s title on tap", (_kind, title) => {
     render(<BoardTab board={board([task({ title })])} onOpenNodeDetail={vi.fn()} />);
 
     const titleNode = document.querySelector(".fleet-boardtab-title");
     expect(titleNode?.textContent).toBe(title);
-    expect(titleNode?.getAttribute("title")).toBe(title);
+    expect(titleNode?.getAttribute("title")).toBeNull();
+    expect(titleNode?.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(titleNode as HTMLElement);
+    expect(titleNode?.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("keeps all material card fields discoverable on a read-only board", () => {

@@ -21,6 +21,7 @@ import {
   type PaginatedBoardResponse,
 } from "../../hooks/workersBoard";
 import { type ChainNode } from "./shared";
+import { ExpandableText } from "./HeuteTab";
 
 interface BoardTabProps {
   board: PaginatedBoardResponse | BoardResponse | null;
@@ -408,7 +409,7 @@ export function BoardTab({
                   {t.assignee ? profileInitial(t.assignee) : "?"}
                 </span>
                 <span className="fleet-boardtab-row-main">
-                  <span className="fleet-boardtab-title" title={t.title || t.id}>{t.title || t.id}</span>
+                  <ExpandableText className="fleet-boardtab-title" text={t.title || t.id} />
                   <span className="fleet-boardtab-meta" title={metaTitle}>
                     <span className="fleet-boardtab-id">{t.id.slice(0, 8)}</span>
                     {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}

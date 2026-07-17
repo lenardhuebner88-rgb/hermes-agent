@@ -23,6 +23,7 @@ import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON } from "@/lib/api";
+import { ExpandableText } from "./HeuteTab";
 import type { PlanSpecRecord } from "./shared";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 
@@ -87,9 +88,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
               onClick={() => setSelectedPath(ps.path)}
               aria-pressed={effectivePath === ps.path}
             >
-              {(ps.topic || ps.filename).length > 22
-                ? (ps.topic || ps.filename).slice(0, 22) + "…"
-                : (ps.topic || ps.filename)}
+              <ExpandableText className="fleet-kchip-label" text={ps.topic || ps.filename} />
             </button>
           ))}
         </div>
@@ -331,7 +330,7 @@ function PlanSpecCockpit({ ps, costs, lanesCatalog, accountUsage, onApproveSucce
             return (
               <div key={lane} className="fleet-lane-row">
                 <span className="fleet-lane-ln">{lane}</span>
-                <span className="fleet-lane-ld" title={description}>{description.length > 30 ? description.slice(0, 30) + "…" : description}</span>
+                <ExpandableText className="fleet-lane-ld" text={description} />
                 <ProfileSelect
                   lane={lane}
                   value={currentAssignee}

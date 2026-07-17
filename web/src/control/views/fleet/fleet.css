@@ -869,6 +869,22 @@ body:has([data-fleet-theme]) [data-control] {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.fleet-expandable-text {
+  min-width: 0;
+  cursor: pointer;
+}
+.fleet-expandable-text:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+.fleet-expandable-text-expanded {
+  display: block !important;
+  overflow: visible !important;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: unset !important;
+}
 .fleet-wk-note::before {
   content: "› ";
 }
@@ -1296,6 +1312,14 @@ body:has([data-fleet-theme]) [data-control] {
   cursor: pointer;
   transition: border-color 0.1s, color 0.1s;
   min-height: 40px;
+  max-width: 100%;
+}
+.fleet-kchip-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .fleet-kchip:hover { border-color: var(--fleet-linie-stark); color: var(--fleet-t1); }
 .fleet-kchip-on {

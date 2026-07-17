@@ -28,6 +28,7 @@ import { formatEffectiveCost } from "../../lib/derive";
 import { de } from "../../i18n/de";
 import { useChainGraph } from "../../hooks/chainFlow";
 import { useHermesChainCosts } from "../../hooks/costsUsage";
+import { ExpandableText } from "./HeuteTab";
 import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
 import { useHermesWorkers } from "../../hooks/workersBoard";
 import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
@@ -171,7 +172,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
               </span>
               <div className="chain-content">
                 <div className="chain-title-row">
-                  <span className="chain-title" title={chip.label}>{chip.label}</span>
+                  <ExpandableText className="chain-title" text={chip.label} />
                   <span className={`chain-badge ${isActive ? "badge-running" : isDone ? "badge-done" : "badge-waiting"}`}>
                     {stateLabel}
                   </span>

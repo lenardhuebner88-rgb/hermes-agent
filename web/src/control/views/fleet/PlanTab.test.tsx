@@ -206,4 +206,19 @@ describe("PlanTab ingest behaviour", () => {
     // Reine Anzeige (kein Klick) darf die Ingest-Route nie berühren.
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/planspecs/ingest"))).toBe(false);
   });
+
+  it("uses CSS ellipsis for long PlanSpec labels and expands the complete text on tap", () => {
+    const topic = "Ein vollständiger PlanSpec-Name, der deutlich länger als zweiundzwanzig Zeichen ist";
+    renderPlanTab([
+      { ...notIngestedSpec, topic },
+      { ...ingestedSpec, path: "/tmp/second-plan.md", topic: "Zweiter Plan" },
+    ]);
+
+    const label = screen.getByText(topic, { selector: ".fleet-kchip-label" });
+    expect(label.className).toContain("fleet-kchip-label");
+    expect(label.textContent).toBe(topic);
+    expect(label.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(label);
+    expect(label.getAttribute("aria-expanded")).toBe("true");
+  });
 });
