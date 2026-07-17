@@ -749,6 +749,39 @@ def test_provision_for_task_in_linked_worktree_uses_main_repo_root(
     assert (wt / ".git").exists()
 
 
+def test_provision_for_task_in_linked_worktree_subdir_preserves_subdir(
+    kanban_home, repo,
+):
+    """Cross-family review finding 3 (2026-07-17): when the task's
+    workspace_path is a SUBDIRECTORY inside a linked worktree (e.g.
+    ``<linked-wt>/web``), the new provisioned worktree must preserve that
+    subdir — ``<new-worktree>/web`` — not silently collapse to the new
+    worktree's ROOT. The old code computed the relative part against the
+    freshly-derived MAIN repo_root, but *resolved* lives under the linked
+    worktree's own (different) absolute path, so relative_to(repo_root)
+    always raised and fell back to '.' — dropping 'web' every time."""
+    linked = repo.parent / "linked-wt-subdir"
+    _git(repo, "worktree", "add", str(linked), "-b", "some-other-branch-2")
+    subdir = linked / "web"
+    subdir.mkdir(exist_ok=True)
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="task in linked worktree subdir", assignee="coder",
+            workspace_kind="dir", workspace_path=str(subdir),
+        )
+        task = kb.claim_task(conn, tid)
+        ws = kwt.provision_for_task(conn, task, str(subdir))
+
+    assert kwt.is_provisioned_path(ws)
+    repo_root, root_id, wt = kwt.split_provisioned_path(ws)
+    assert repo_root == repo
+    assert root_id == tid
+    # The subdir survives — this is the load-bearing assertion.
+    assert ws == wt / "web"
+    assert ws.name == "web"
+
+
 def test_dispatch_once_provisions_when_flag_on(
     kanban_home, repo, all_assignees_spawnable, monkeypatch
 ):

@@ -3753,9 +3753,17 @@ def provision_for_task(
     root_id = chain_root_id(conn, task.id)
     info = ensure_worktree(repo_root, root_id)
     # A workspace pointing at a SUBDIRECTORY of the repo keeps its relative
-    # part inside the worktree (e.g. <repo>/web → <worktree>/web).
+    # part inside the worktree (e.g. <repo>/web → <worktree>/web). Compute
+    # that relative part against *resolved*'s OWN containing checkout root
+    # (repo_root_for / --show-toplevel — main checkout OR a linked worktree,
+    # whichever directly contains *resolved*), NOT against the new provisioned
+    # repo_root above: a linked worktree lives at a different absolute path
+    # than the main repo, so relative_to(repo_root) raises for a subdir
+    # inside it and silently collapses to the new worktree's ROOT instead of
+    # <new-worktree>/<subdir> (cross-family review finding 3, 2026-07-17).
+    original_root = repo_root_for(resolved) or repo_root
     try:
-        rel = resolved.resolve().relative_to(Path(repo_root).resolve())
+        rel = resolved.resolve().relative_to(Path(original_root).resolve())
     except ValueError:
         rel = Path(".")
     workspace = info["path"] / rel if str(rel) != "." else info["path"]
