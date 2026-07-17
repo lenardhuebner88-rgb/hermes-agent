@@ -14,7 +14,7 @@
  */
 import { useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { AnimatePresence, m, useReducedMotion } from "motion/react";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SignalTone } from "./leitstand";
@@ -104,7 +104,7 @@ export function Card({ surface = "card", interactive, className, onClick, role, 
     );
   }
   return (
-    <motion.div
+    <m.div
       className={classes}
       onClick={onClick}
       role={role}
@@ -116,7 +116,7 @@ export function Card({ surface = "card", interactive, className, onClick, role, 
       transition={chevronTransition}
     >
       {children}
-    </motion.div>
+    </m.div>
   );
 }
 
@@ -298,19 +298,19 @@ export function Disclosure({ summary, children, defaultOpen = false, open, onTog
         aria-controls={panelId}
         className="flex w-full items-center gap-2 text-left"
       >
-        <motion.span
+        <m.span
           aria-hidden
           className="shrink-0 text-ink-3"
           animate={{ rotate: isOpen ? 90 : 0 }}
           transition={reduce ? { duration: 0 } : chevronTransition}
         >
           <ChevronRight className="h-4 w-4" />
-        </motion.span>
+        </m.span>
         <span className="min-w-0 flex-1">{summary}</span>
       </button>
       <AnimatePresence initial={false}>
         {isOpen ? (
-          <motion.div
+          <m.div
             key="panel"
             id={panelId}
             className="overflow-hidden"
@@ -320,7 +320,7 @@ export function Disclosure({ summary, children, defaultOpen = false, open, onTog
             variants={variants}
           >
             <div className="pt-2">{children}</div>
-          </motion.div>
+          </m.div>
         ) : null}
       </AnimatePresence>
     </div>
@@ -335,9 +335,9 @@ export function RouteTransition({ pathname, children }: { pathname: string; chil
   const variants = reduce ? routeVariantsReduced : routeVariants;
   return (
     <AnimatePresence mode="wait" initial={false}>
-      <motion.div key={pathname} variants={variants} initial="initial" animate="animate" exit="exit">
+      <m.div key={pathname} variants={variants} initial="initial" animate="animate" exit="exit">
         {children}
-      </motion.div>
+      </m.div>
     </AnimatePresence>
   );
 }
@@ -347,22 +347,22 @@ export function RouteTransition({ pathname, children }: { pathname: string; chil
 export function Stagger({ className, children }: { className?: string; children: ReactNode }) {
   const reduce = useReducedMotion();
   return (
-    <motion.div
+    <m.div
       className={className}
       variants={reduce ? staggerVariantsReduced : staggerVariants}
       initial="hidden"
       animate="show"
     >
       {children}
-    </motion.div>
+    </m.div>
   );
 }
 
 export function StaggerItem({ className, children }: { className?: string; children: ReactNode }) {
   const reduce = useReducedMotion();
   return (
-    <motion.div className={className} variants={reduce ? staggerItemVariantsReduced : staggerItemVariants}>
+    <m.div className={className} variants={reduce ? staggerItemVariantsReduced : staggerItemVariants}>
       {children}
-    </motion.div>
+    </m.div>
   );
 }

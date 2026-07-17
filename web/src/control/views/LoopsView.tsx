@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { motion, useReducedMotion } from "motion/react";
+import { m, useReducedMotion } from "motion/react";
 import {
   Anchor,
   AlertTriangle,
@@ -305,7 +305,7 @@ function LoopRing({
       data-state={state}
     >
       {glow ? (
-        <motion.span
+        <m.span
           aria-hidden
           className="pointer-events-none absolute rounded-full blur-md"
           style={{ inset: "-30%", background: "radial-gradient(circle, var(--ln-sodium) 0%, transparent 70%)" }}

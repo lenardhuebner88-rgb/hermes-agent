@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ClipboardCopy, ExternalLink, TriangleAlert, X } from "lucide-react";
-import { motion, useReducedMotion } from "motion/react";
+import { m, useReducedMotion } from "motion/react";
 import { cn } from "@/lib/utils";
 import { DUR, EASE_OUT, EASE_RISE } from "../lib/motion";
 import { Eyebrow } from "./primitives";
@@ -103,7 +103,7 @@ export function BacklogDetailDrawer({
 
   return (
     <div className="fixed inset-0 z-50">
-      <motion.button
+      <m.button
         type="button"
         className="absolute inset-0 bg-surface-0/80"
         aria-label={de.orchestrator.drawerClose}
@@ -113,7 +113,7 @@ export function BacklogDetailDrawer({
         exit={backdrop.exit}
         transition={backdrop.transition}
       />
-      <motion.aside
+      <m.aside
         role="dialog"
         aria-modal="true"
         aria-labelledby="backlog-detail-title"
@@ -286,7 +286,7 @@ export function BacklogDetailDrawer({
             </section>
           )}
         </div>
-      </motion.aside>
+      </m.aside>
     </div>
   );
 }
