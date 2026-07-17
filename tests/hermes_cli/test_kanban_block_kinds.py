@@ -92,8 +92,8 @@ def test_same_cause_reblock_routes_to_triage(kanban_home: Path) -> None:
         assert t.block_recurrences == 2
 
 
-def test_untyped_block_loop_also_protected(kanban_home: Path) -> None:
-    """Legacy un-typed blocks (kind=None) still trip the breaker."""
+def test_default_typed_block_loop_also_protected(kanban_home: Path) -> None:
+    """Omitted kinds are classified and still trip the recurrence breaker."""
     with kb.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="a")
@@ -193,14 +193,14 @@ def test_invalid_kind_rejected(kanban_home: Path) -> None:
             kb.block_task(conn, tid, reason="x", kind="bogus")
 
 
-def test_block_without_kind_is_backward_compatible(kanban_home: Path) -> None:
-    """Existing callers that pass no kind keep the old single-block behaviour."""
+def test_block_without_kind_classifies_retryable_reason(kanban_home: Path) -> None:
+    """Existing callers that omit kind still create a triageable block."""
     with kb.connect_closing() as conn:
         tid = _running_task(conn)
         assert kb.block_task(conn, tid, reason="legacy")
         t = kb.get_task(conn, tid)
         assert t.status == "blocked"
-        assert t.block_kind is None
+        assert t.block_kind == "transient"
 
 
 def test_transient_is_a_valid_kind(kanban_home: Path) -> None:

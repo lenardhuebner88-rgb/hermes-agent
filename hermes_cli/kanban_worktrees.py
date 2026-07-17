@@ -2679,15 +2679,32 @@ def _finish_release_gate_green(
             with kb.write_txn(conn):
                 # Only promote a still-open gate child — never resurrect a
                 # concurrently archived/failed task.
-                conn.execute(
-                    "UPDATE tasks SET status = 'done' WHERE id = ? "
-                    "AND status IN ('blocked', 'ready', 'todo', 'running')",
-                    (task_id,),
+                now = int(time.time())
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'done', result = ?, completed_at = ?, "
+                    "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+                    "block_kind = NULL, block_recurrences = 0 "
+                    "WHERE id = ? AND status IN ('blocked', 'ready', 'todo', 'running')",
+                    ("release-gate green", now, task_id),
                 )
-                kb._append_event(
-                    conn, task_id, "release_gate_green",
-                    {"root_id": root_id, "fixer_attempts": fixer_attempts},
-                )
+                if cur.rowcount == 1:
+                    run_id = kb._end_run(
+                        conn,
+                        task_id,
+                        outcome="completed",
+                        status="done",
+                        summary=(
+                            "release gate green after "
+                            f"{fixer_attempts} fixer attempt(s)"
+                        ),
+                    )
+                    kb._append_event(
+                        conn,
+                        task_id,
+                        "release_gate_green",
+                        {"root_id": root_id, "fixer_attempts": fixer_attempts},
+                        run_id=run_id,
+                    )
         except Exception:
             _log.warning("could not mark release-gate child %s done",
                          task_id, exc_info=True)
@@ -3409,21 +3426,22 @@ def _block_decompose_root_no_real_completion(
     )
     try:
         with kb.write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
-                (root_id,),
+            changed = kb._system_park_set_blocked(
+                conn,
+                root_id,
+                kind="needs_input",
+                where_sql="status IN ('todo', 'ready', 'running', 'blocked')",
             )
-            if cur.rowcount == 1:
+            if changed == 1:
                 kb._append_event(
                     conn,
                     root_id,
                     "blocked",
-                    {
-                        "reason": reason,
-                        "source": "decompose_root_finalizer",
-                    },
+                    kb._system_blocked_event_payload(
+                        reason,
+                        "needs_input",
+                        source="decompose_root_finalizer",
+                    ),
                 )
     except Exception:
         _log.warning(
@@ -3690,22 +3708,23 @@ def _block_decompose_root(
 
     try:
         with kb.write_txn(conn):
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status IN ('todo', 'ready', 'running')",
-                (root_id,),
+            changed = kb._system_park_set_blocked(
+                conn,
+                root_id,
+                kind="integration",
+                where_sql="status IN ('todo', 'ready', 'running')",
             )
-            if cur.rowcount == 1:
+            if changed == 1:
                 kb._append_event(
                     conn,
                     root_id,
                     "blocked",
-                    {
-                        "reason": f"decompose-root finalize: {reason}",
-                        "source": "decompose_root_finalizer",
-                        "integration_action": (outcome or {}).get("action"),
-                    },
+                    kb._system_blocked_event_payload(
+                        f"decompose-root finalize: {reason}",
+                        "integration",
+                        source="decompose_root_finalizer",
+                        integration_action=(outcome or {}).get("action"),
+                    ),
                 )
     except Exception:
         _log.warning(
