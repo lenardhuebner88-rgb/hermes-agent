@@ -1005,6 +1005,20 @@ def _handle_comment(args: dict, **kw) -> str:
 _RECOVERY_ROOT_REF_RE = re.compile(r"\bt_[0-9a-f]{8}\b")
 _SERIAL_RECOVERY_STOP_THRESHOLD = 2
 _SERIAL_RECOVERY_STOP_WINDOW_SECONDS = 2 * 3600
+# The new card must itself read as a RECOVERY attempt — not merely mention a
+# task id in passing (an audit/doc/report card citing a t_<id> is not a
+# recovery card). Cross-family review finding 4 (2026-07-17): the original
+# guard fired on ANY t_<id> mention, false-positiving on legitimate follow-ups
+# that happen to cite an id with superseded history.
+_RECOVERY_MARKER_RE = re.compile(
+    r"(?i)\b(recover(?:y|ing|ed)?|retr(?:y|ies|ied)|re-?dispatch|supersed(?:ed|es)?|"
+    r"erneut|nochmal|wiederhol\w*|failure|fehlgeschlagen)\b"
+)
+
+
+def _escape_like(text: str) -> str:
+    """Escape ``%``/``_``/``\\`` for a SQL ``LIKE ... ESCAPE '\\'`` pattern."""
+    return text.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
 def _serial_recovery_stop_reason(
@@ -1013,26 +1027,35 @@ def _serial_recovery_stop_reason(
     """Refuse a new recovery card when >=2 SUPERSEDED-archived predecessors for
     the same root already exist within the last 2h — a bounded stop against
     an agent looping on 'create a fresh recovery card' after each supersede
-    instead of escalating. Root references are ``t_<8-hex>`` task ids found
-    in the NEW card's own title/body (the recovery card names the root it is
-    recovering); matched against the same created_by's archived cards from the
-    same window whose title/body mention the same id and that were actually
-    archived via the SUPERSEDED path (kanban_db.reason_should_archive_as_superseded,
-    the same classifier ``block_task`` uses to emit ``superseded_archived``).
+    instead of escalating.
+
+    Two gates before this ever queries the DB: (a) the NEW card must itself
+    read as a recovery attempt (``_RECOVERY_MARKER_RE``), not merely mention a
+    task id — an audit/doc card citing a ``t_<id>`` with superseded history is
+    not a recovery loop; (b) root references are ``t_<8-hex>`` task ids found
+    in the new card's own title/body, matched via an ESCAPEd LIKE (a bare
+    ``%t_deadbeef%`` would also match ``tXdeadbeef`` — SQL LIKE's ``_`` is a
+    single-char wildcard) against the same created_by's archived cards from
+    the same window that were actually archived via the SUPERSEDED path
+    (kanban_db.reason_should_archive_as_superseded, the same classifier
+    ``block_task`` uses to emit ``superseded_archived``).
     Returns the deterministic error string, or ``None`` when creation may proceed.
     """
     text = f"{title}\n{body or ''}"
+    if not _RECOVERY_MARKER_RE.search(text):
+        return None
     root_refs = set(_RECOVERY_ROOT_REF_RE.findall(text))
     if not root_refs:
         return None
     cutoff = int(time.time()) - _SERIAL_RECOVERY_STOP_WINDOW_SECONDS
     for root_ref in root_refs:
+        like_pattern = f"%{_escape_like(root_ref)}%"
         rows = conn.execute(
             "SELECT DISTINCT t.id FROM tasks t "
             "JOIN task_events e ON e.task_id = t.id AND e.kind = 'superseded_archived' "
             "WHERE t.status = 'archived' AND t.created_by = ? AND t.created_at >= ? "
-            "AND (t.title LIKE ? OR t.body LIKE ?)",
-            (created_by, cutoff, f"%{root_ref}%", f"%{root_ref}%"),
+            "AND (t.title LIKE ? ESCAPE '\\' OR t.body LIKE ? ESCAPE '\\')",
+            (created_by, cutoff, like_pattern, like_pattern),
         ).fetchall()
         if len(rows) >= _SERIAL_RECOVERY_STOP_THRESHOLD:
             return (
@@ -1154,11 +1177,54 @@ def _handle_create(args: dict, **kw) -> str:
                         workspace_kind = _self_task.workspace_kind
                         workspace_path = _self_task.workspace_path
             _created_by = os.environ.get("HERMES_PROFILE") or "worker"
-            _stop_reason = _serial_recovery_stop_reason(
-                conn, title=str(title).strip(), body=body, created_by=_created_by,
-            )
+            # Cross-family review finding 5 (2026-07-17): re-check as the LAST
+            # thing before create_task (not earlier in this handler) and under
+            # an explicit IMMEDIATE write lock (kb.write_txn), so a second
+            # concurrent _handle_create for the same root can't observe the
+            # same stale "not yet stopped" snapshot this one just saw — SQLite
+            # serializes IMMEDIATE writers. This does NOT make check+insert
+            # fully atomic: create_task() opens its OWN write_txn immediately
+            # after (nesting write_txn here would raise — "BEGIN within a
+            # transaction" is a documented anti-pattern in this codebase), so
+            # a sub-millisecond gap between the two transactions remains.
+            # Accepted: this is a bounded-economy guard against a looping
+            # agent, not a hard security boundary — full atomicity would need
+            # an in-txn create_task variant, out of scope here.
+            with kb.write_txn(conn):
+                _stop_reason = _serial_recovery_stop_reason(
+                    conn, title=str(title).strip(), body=body, created_by=_created_by,
+                )
             if _stop_reason:
                 return tool_error(_stop_reason)
+            # (a) planspec_source-Vererbung: resolve BEFORE create_task so a
+            # racing idempotent hit can never see a half-applied source, and
+            # so conflicting parent sources are decided deterministically
+            # up front rather than "silently take the first" (cross-family
+            # review finding 6). A child of a PlanSpec-ingested parent
+            # inherits the parent's planspec_source, so downstream provenance
+            # (e.g. project_strategist_outcomes) still resolves the lever for
+            # cards spawned mid-chain, not just the ingested ones. If parents
+            # disagree on the source, inherit nothing rather than guess.
+            _parent_sources = {
+                src
+                for _pid in parents
+                if (src := kb.planspec_source_for_task(conn, _pid))
+            }
+            _planspec_source_to_inherit = (
+                next(iter(_parent_sources)) if len(_parent_sources) == 1 else None
+            )
+            # An idempotency_key that already resolves to an existing,
+            # non-archived task means create_task() below will return that
+            # EXISTING task's id, not create a new one (see create_task's own
+            # "Idempotency check" fast path). Never touch a pre-existing
+            # task's planspec_source on a retry — that would corrupt an
+            # unrelated task's provenance every time this is called again
+            # with different parents.
+            _is_idempotent_hit = bool(idempotency_key) and conn.execute(
+                "SELECT 1 FROM tasks WHERE idempotency_key = ? "
+                "AND status != 'archived' LIMIT 1",
+                (idempotency_key,),
+            ).fetchone() is not None
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -1192,19 +1258,12 @@ def _handle_create(args: dict, **kw) -> str:
                 session_id=session_id,
                 kind=str(kind).strip().lower() if kind is not None else None,
             )
-            # (a) planspec_source-Vererbung: a child of a PlanSpec-ingested
-            # parent inherits the parent's planspec_source, so downstream
-            # provenance (e.g. project_strategist_outcomes) still resolves the
-            # lever for cards spawned mid-chain, not just the ingested ones.
-            for _parent_id in parents:
-                _parent_source = kb.planspec_source_for_task(conn, _parent_id)
-                if _parent_source:
-                    with kb.write_txn(conn):
-                        conn.execute(
-                            "UPDATE tasks SET planspec_source = ? WHERE id = ?",
-                            (_parent_source, new_tid),
-                        )
-                    break
+            if _planspec_source_to_inherit and not _is_idempotent_hit:
+                with kb.write_txn(conn):
+                    conn.execute(
+                        "UPDATE tasks SET planspec_source = ? WHERE id = ?",
+                        (_planspec_source_to_inherit, new_tid),
+                    )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
             payload = {
