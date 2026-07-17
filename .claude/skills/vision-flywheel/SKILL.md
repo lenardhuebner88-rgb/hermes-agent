@@ -24,7 +24,7 @@ Design/history (don't duplicate here): vault `2026-06-18-vision-flywheel-phase2-
 | See held proposals (API) | `GET /api/plugins/kanban/strategist/proposals` (token-gated; bare loopback curl = 401) |
 | Dashboard | `/control/stratege` tab (under the **"Mehr"** dropdown, not the primary rail) |
 | **Approve** | `hermes kanban release-freigabe <root> [--author <name>]` · dashboard · `POST …/strategist/proposals/<id>/approve` |
-| **Veto** | dashboard · `POST …/strategist/proposals/<id>/veto` (**no CLI** — `kanban archive` does NOT veto) |
+| **Veto** | `hermes kanban veto-freigabe <root> [--author <name>]` · dashboard · `POST …/strategist/proposals/<id>/veto` (NOT `kanban archive` — that does not write `freigabe_vetoed`) |
 | Cron status (is it armed?) | `systemctl --user list-timers \| grep strateg` (absent = not armed) |
 | **Arm autonomy** | `systemctl --user enable --now strategist-harvest.timer strategist-propose.timer strategist-reflect.timer stratege-gutachter.timer` |
 | **Kill-switch (stop)** | `systemctl --user disable --now strategist-harvest.timer strategist-propose.timer strategist-reflect.timer stratege-gutachter.timer` |
@@ -33,7 +33,7 @@ Design/history (don't duplicate here): vault `2026-06-18-vision-flywheel-phase2-
 Live schedule — **four units, all ARMED/enabled (live-verified 2026-07-06;** the old "disabled by default" state ended with the operator's arming act): harvest **05:30** (Sonnet — reaps follow-ups from done-receipts into held proposals; state `harvest_candidates.json`, `disposition_digest.json`) · propose **06:00** · **stratege-gutachter 06:30** (`~/agents/stratege-gutachter/iterate.sh` — judges held proposals GO/SHARPEN/VETO, posts task comment + Discord + logs to its `memory/calibration.jsonl`; **shadow mode: advisory only, gates nothing**) · reflect **20:00**. Check with `systemctl --user list-timers | grep strateg`. Prompts: `~/.hermes/vision-flywheel/strategist-{propose,reflect}-prompt.md`. `--author` defaults to the active profile name, not a fixed user.
 
 ## Gotchas (the non-obvious)
-- **Veto has NO CLI** (asymmetry: approve = `release-freigabe` CLI+UI; veto = dashboard/API only). `kanban archive` does NOT write `freigabe_vetoed` → reflect won't count it and the lever won't be suppressed. Veto via dashboard/API for correct learning.
+- **Veto CLI** = `hermes kanban veto-freigabe <root>` (added 2026-07-17, ca1a33008 — wraps `dismiss_freigabe_hold`, writes `freigabe_vetoed` so reflect suppresses+counts the lever). Symmetric with `release-freigabe`. Do NOT veto via `kanban archive` — it does NOT write `freigabe_vetoed`, so reflect won't count it and the lever won't be suppressed.
 - **Dispatcher/sweep code is loaded at gateway process start.** A fix to `kanban_db.py`/the sweep/dispatcher goes live only after `systemctl --user restart hermes-gateway.service`. `deploy_dashboard.sh` restarts ONLY the dashboard (API/frontend reads), NOT the dispatcher.
 - **`freigabe` is required** in every binding PlanSpec; `operator` = held, other values build normally. Validate before ingest: `hermes plan validate <spec>`.
 - **Härter blocks residue markers** (`TODO`/`<…>`/`...`) unless in backtick/code spans. Write spec markers in backticks, or `hermes plan ingest <spec> --force` (operator escape hatch).
