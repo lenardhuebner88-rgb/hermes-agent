@@ -797,6 +797,23 @@ def _extract_frontmatter(text: str) -> str | None:
     return None
 
 
+_COORDINATION_KEY_LINE = re.compile(r"^[A-Za-z_][\w-]*:")
+
+
+def _extract_lenient_frontmatter(text: str) -> str | None:
+    """Extract the canonical leading block from a fence-less session note."""
+    lines = text.splitlines()
+    if not lines or not _COORDINATION_KEY_LINE.match(lines[0]):
+        return None
+    block: list[str] = []
+    for line in lines:
+        if _COORDINATION_KEY_LINE.match(line) or line.startswith("  - "):
+            block.append(line)
+            continue
+        break
+    return "\n".join(block) if block else None
+
+
 def _parse_coordination_timestamp(value: Any) -> int | None:
     """Parses a frontmatter ``started``/``ended`` value.
 
@@ -850,6 +867,8 @@ def _parse_coordination_note(
 
     text = raw.decode("utf-8", errors="replace")
     frontmatter_text = _extract_frontmatter(text)
+    if frontmatter_text is None:
+        frontmatter_text = _extract_lenient_frontmatter(text)
     if frontmatter_text is None:
         return None
     try:

@@ -944,6 +944,18 @@ agent: claude
 started: not-even-close-to-yaml: [
 """
 
+_FENCELESS_COORDINATION_NOTE = """\
+agent: codex
+started: 2026-07-17T08:15:00+02:00
+ended: null
+task: "Fence-less worker note."
+touching:
+  - /home/piet/.hermes/hermes-agent/hermes_cli/projects_overview.py
+operator: Piet
+
+# Fence-less check-in
+"""
+
 
 def test_coordination_source_open_note_parsed_closed_and_garbage_skipped(
     tmp_path: Path,
@@ -1068,6 +1080,36 @@ touching:
     assert parsed is not None
     assert parsed["session_id"] == "session-123"
     assert parsed["task_id"] == "task-456"
+
+
+def test_coordination_source_fenceless_note_appears_in_agents_payload(tmp_path: Path) -> None:
+    coordination_dir = tmp_path / "_coordination"
+    coordination_dir.mkdir()
+    (coordination_dir / "fenceless-open.md").write_text(
+        _FENCELESS_COORDINATION_NOTE, encoding="utf-8"
+    )
+
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        coordination_dir=coordination_dir,
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "missing-projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+
+    coordination_agents = [
+        agent for agent in payload["agents"] if agent["source"] == "coordination"
+    ]
+    assert payload["errors"] == []
+    assert [agent["label"] for agent in coordination_agents] == ["fenceless-open"]
+    assert coordination_agents[0]["kind"] == "codex"
+    assert coordination_agents[0]["project"] == "hermes-infra"
 
 
 def test_coordination_source_broken_dir_is_isolated_error(tmp_path: Path) -> None:
