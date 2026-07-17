@@ -1,10 +1,11 @@
 # retention_reap.py — operator wiring
 
-`scripts/retention_reap.py` plans cleanup for three bounded roots:
+`scripts/retention_reap.py` plans cleanup for bounded roots:
 
 - regular files strictly older than 14×24 hours below `~/.hermes/playwright-mcp-output`;
 - browser revision directories in `~/.cache/ms-playwright` that are not referenced by dynamically discovered Playwright `package.json` + `browsers.json` metadata;
-- `~/.hermes/kanban.db.bak*` sets, grouping each primary backup with `-wal`/`-shm` sidecars and retaining the three newest sets.
+- `~/.hermes/kanban.db.bak*` sets, grouping each primary backup with `-wal`/`-shm` sidecars and retaining the three newest sets;
+- top-level regular files in `~/.hermes/backups`, independently retaining its three newest sets and ignoring directories and symlinks.
 
 The default is dry-run. Every candidate is journalled as `WOULD-DELETE` with path and byte size. `--apply` is the only deletion mode. Browser metadata is discovered dynamically below the user's home in every
 `node_modules`, `site-packages`, and `dist-packages` tree, including Python's
@@ -35,4 +36,4 @@ Inspect dry-run decisions with:
 journalctl --user -u agent-retention-reap.service
 ```
 
-Only after the journal has been reviewed, add `--apply` to the installed service's `ExecStart` and reload the user manager. The repo template intentionally remains dry-run-first.
+Only after the operator has manually reviewed and approved the dry-run journal, add `--apply` to the installed service's `ExecStart` and reload the user manager. The repo template intentionally remains dry-run-first.

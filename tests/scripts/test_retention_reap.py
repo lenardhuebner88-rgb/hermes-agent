@@ -173,6 +173,69 @@ def test_backup_sidecars_are_grouped_and_three_newest_sets_remain(tmp_path):
     assert {action.path for action in actions} == {path for group in sets[3:] for path in group}
 
 
+def test_backup_directory_keeps_three_newest_regular_file_sets(tmp_path):
+    base = tmp_path / "kanban.db"
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    backups = []
+    for index in range(5):
+        primary = backup_root / f"snapshot-{index}.db"
+        wal = backup_root / f"snapshot-{index}.db-wal"
+        for path in (primary, wal):
+            path.write_text(str(index))
+            os.utime(path, (NOW - index, NOW - index))
+        backups.append((primary, wal))
+    ignored_directory = backup_root / "directory-backup"
+    ignored_directory.mkdir()
+    ignored_symlink = backup_root / "symlink-backup"
+    ignored_symlink.symlink_to(backups[-1][0])
+
+    actions = rr.plan_backup_actions(base, backups_root=backup_root, keep_sets=3)
+
+    assert {action.path for action in actions} == {path for group in backups[3:] for path in group}
+    assert {action.category for action in actions} == {"hermes-backup"}
+    assert ignored_directory not in {action.path for action in actions}
+    assert ignored_symlink not in {action.path for action in actions}
+
+
+def test_main_dry_run_includes_default_backups_directory_without_deleting(
+    tmp_path, capsys, monkeypatch
+):
+    hermes_home = tmp_path / ".hermes"
+    backups_root = hermes_home / "backups"
+    backups_root.mkdir(parents=True)
+    backups = []
+    for index in range(5):
+        path = backups_root / f"backup-{index}.zip"
+        path.write_bytes(str(index).encode())
+        os.utime(path, (NOW - index, NOW - index))
+        backups.append(path)
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+
+    monkeypatch.setattr(rr, "active_worktree_paths", lambda _db: (set(), "ok"))
+    monkeypatch.setattr(rr, "DEFAULT_WORKTREE_ROOTS", (worktree_root,))
+    rc = rr.main(
+        [
+            "--outputs-root", str(tmp_path / "outputs"),
+            "--browser-cache", str(tmp_path / "browser"),
+            "--package-root", str(tmp_path / "packages"),
+            "--kanban-db", str(hermes_home / "kanban.db"),
+            "--lock-file", str(tmp_path / "retention.lock"),
+            "--worktree-root", str(worktree_root),
+            "--now", str(NOW),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert all(path.exists() for path in backups)
+    assert {line.split(" path=")[1].split(" size=")[0] for line in captured.out.splitlines()} == {
+        str(path) for path in backups[3:]
+    }
+    assert all("category=hermes-backup" in line for line in captured.out.splitlines())
+
+
 def test_dry_run_logs_path_and_size_without_deleting_then_apply_is_idempotent(tmp_path):
     victim = tmp_path / "victim"
     victim.write_bytes(b"12345")
@@ -276,6 +339,39 @@ def test_worktree_dependency_cache_plan_fails_closed_when_active_discovery_is_am
 
     assert active == set()
     assert active_status.startswith("fail-closed")
+
+
+@pytest.mark.parametrize("process_name", ["gpg-agent", "ssh-agent", "gnome-keyring-d"])
+def test_active_worktree_scan_skips_only_known_non_worker_daemons_with_unreadable_cwd(
+    tmp_path, process_name
+):
+    db = tmp_path / "kanban.db"
+    _kanban_db_with_active_workspace(db, tmp_path / "active")
+    proc = tmp_path / "proc"
+    process = proc / "123"
+    process.mkdir(parents=True)
+    (process / "cwd").write_text("not a symlink")
+    (process / "comm").write_text(process_name)
+
+    active, status = rr.active_worktree_paths(db, proc_root=proc)
+
+    assert status == "ok"
+    assert active == {(tmp_path / "active").resolve()}
+
+
+def test_active_worktree_scan_still_fails_closed_for_unknown_process_with_unreadable_cwd(tmp_path):
+    db = tmp_path / "kanban.db"
+    _kanban_db_with_active_workspace(db, tmp_path / "active")
+    proc = tmp_path / "proc"
+    process = proc / "123"
+    process.mkdir(parents=True)
+    (process / "cwd").write_text("not a symlink")
+    (process / "comm").write_text("unknown-worker")
+
+    active, status = rr.active_worktree_paths(db, proc_root=proc)
+
+    assert active == set()
+    assert status.startswith("fail-closed: process cwd discovery failed")
 
 
 def test_main_worktree_cache_dry_run_reports_exact_bytes_without_deleting(tmp_path, capsys, monkeypatch):

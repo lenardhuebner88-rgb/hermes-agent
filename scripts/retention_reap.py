@@ -38,6 +38,13 @@ DEFAULT_WORKTREE_ROOTS = (
 )
 _BROWSER_DIR = re.compile(r"^(?P<name>[A-Za-z][A-Za-z0-9_-]*)-(?P<revision>[0-9]+)$")
 _PLAYWRIGHT_PACKAGES = {"@playwright/mcp", "playwright", "playwright-core"}
+# These long-lived per-user daemons are non-dumpable under common Linux session
+# configurations, so /proc/<pid>/cwd can be unreadable to the same UID. Their
+# exact comm values are narrowly allowlisted because none runs worktree
+# workloads from its cwd; every unknown same-user process remains fail-closed.
+_UNREADABLE_CWD_NON_WORKER_PROCESSES = frozenset(
+    {"systemd", "(sd-pam)", "gpg-agent", "ssh-agent", "gnome-keyring-d"}
+)
 
 
 @dataclass(frozen=True)
@@ -239,14 +246,22 @@ def _backup_set_key(base: Path, path: Path) -> str | None:
     return name
 
 
-def plan_backup_actions(base: Path, *, keep_sets: int) -> list[DeleteAction]:
+def _backup_file_set_key(path: Path) -> str:
+    name = path.name
+    for suffix in ("-wal", "-shm"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _plan_backup_file_sets(
+    paths: Iterator[Path], *, keep_sets: int, category: str, key_for: Callable[[Path], str | None]
+) -> list[DeleteAction]:
     groups: dict[str, list[Path]] = {}
-    if not base.parent.is_dir():
-        return []
-    for path in base.parent.glob(base.name + ".bak*"):
-        if not path.is_file() or path.is_symlink():
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
             continue
-        key = _backup_set_key(base, path)
+        key = key_for(path)
         if key is not None:
             groups.setdefault(key, []).append(path)
     ordered = sorted(
@@ -255,10 +270,43 @@ def plan_backup_actions(base: Path, *, keep_sets: int) -> list[DeleteAction]:
         reverse=True,
     )
     return [
-        DeleteAction(path, path.stat().st_size, "kanban-backup")
+        DeleteAction(path, path.stat().st_size, category)
         for members in ordered[max(keep_sets, 0) :]
         for path in sorted(members)
     ]
+
+
+def plan_backup_actions(
+    base: Path, *, keep_sets: int, backups_root: Path | None = None
+) -> list[DeleteAction]:
+    """Keep the newest backup sets in each bounded Hermes backup location.
+
+    The sibling ``kanban.db.bak*`` files and top-level regular files under
+    ``~/.hermes/backups`` are independent retention pools, so activity in one
+    cannot evict every recovery point from the other. Directories and symlinks
+    in the general backup root are deliberately outside this file-only policy.
+    """
+    backups_root = base.parent / "backups" if backups_root is None else backups_root
+    actions: list[DeleteAction] = []
+    if base.parent.is_dir():
+        actions.extend(
+            _plan_backup_file_sets(
+                base.parent.glob(base.name + ".bak*"),
+                keep_sets=keep_sets,
+                category="kanban-backup",
+                key_for=lambda path: _backup_set_key(base, path),
+            )
+        )
+    if backups_root.is_dir():
+        actions.extend(
+            _plan_backup_file_sets(
+                backups_root.iterdir(),
+                keep_sets=keep_sets,
+                category="hermes-backup",
+                key_for=_backup_file_set_key,
+            )
+        )
+    return actions
 
 
 def _normal_path(path: Path) -> Path:
@@ -320,14 +368,14 @@ def active_worktree_paths(kanban_db: Path, *, proc_root: Path = Path("/proc")) -
         except FileNotFoundError:
             continue  # Process exited between directory listing and readlink.
         except OSError as exc:
-            # The per-user systemd manager can hide its cwd even from its own
-            # UID under ptrace restrictions. It cannot be a worktree worker;
-            # every other unreadable same-user cwd remains a fail-closed stop.
+            # Specific per-user session daemons can hide their cwd even from
+            # their own UID under ptrace restrictions. They do not run worktree
+            # workloads; every unknown unreadable same-user cwd still fails closed.
             try:
                 process_name = (process_dir / "comm").read_text().strip()
             except OSError:
                 process_name = ""
-            if process_name in {"systemd", "(sd-pam)"}:
+            if process_name in _UNREADABLE_CWD_NON_WORKER_PROCESSES:
                 continue
             return set(), f"fail-closed: process cwd discovery failed: {exc}"
         active.add(_normal_path(cwd))
