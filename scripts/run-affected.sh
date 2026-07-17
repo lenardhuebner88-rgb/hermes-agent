@@ -17,6 +17,7 @@
 # (e.g. HEAD~1, main...HEAD).
 # Frontend gates stay separate as before — this wrapper covers only the pytest part.
 set -euo pipefail
+"$(dirname "$0")/check-branch-age.sh" || exit 1
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES=$("$DIR/affected-tests.sh" "$@")
 if [ -z "${FILES// /}" ]; then
