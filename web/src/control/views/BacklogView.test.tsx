@@ -5,7 +5,9 @@ import { BacklogHeroPanel } from "./backlog/BacklogSections";
 import { ControlsBar } from "./backlog/ControlsBar";
 import { FoDetailContent, FoDetailDrawer } from "./backlog/FoDetailDrawer";
 import type { BacklogItem, BacklogContractHealth } from "../lib/schemas";
-import type { CommissionState, DispatchFoState, FoBoardStatus } from "../hooks/useControlData";
+import type { DispatchFoState } from "../hooks/chainFlow";
+import type { CommissionState } from "../hooks/commissionCapture";
+import type { FoBoardStatus } from "../hooks/foBoard";
 
 function item(overrides: Partial<BacklogItem> & { id: string }): BacklogItem {
   return {

@@ -5,7 +5,7 @@ import { fetchJSON } from "@/lib/api";
 import { FleetEmptyState, SignalLabel, TwoPane } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";
 import { fmtAge, nowSec } from "../../lib/derive";
-import { useKnowledgeCatalog } from "../../hooks/useControlData";
+import { useKnowledgeCatalog } from "../../hooks/libraryKnowledge";
 import {
   filterCatalog,
   knowledgeType,

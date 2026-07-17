@@ -1,7 +1,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { buildWsUrl } from "@/lib/api";
 import { getSnapshot, refresh, setIntervalScale } from "./pollingStore";
-import { boardLoader } from "./useControlData";
+import { boardLoader } from "./workersBoard";
 import type { BoardResponse } from "../lib/types";
 
 export interface KanbanLiveEvent {

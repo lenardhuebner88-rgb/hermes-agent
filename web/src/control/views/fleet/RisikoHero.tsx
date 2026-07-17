@@ -23,7 +23,7 @@
  * serverseitig nicht. Gebaut gegen den echten Enum statt die Fantasie-Stufe zu
  * übernehmen.
  */
-import { useReleaseConcurrencyWrite, useReleaseModeWrite } from "../../hooks/useControlData";
+import { useReleaseConcurrencyWrite, useReleaseModeWrite } from "../../hooks/systemReleaseHealth";
 import { de } from "../../i18n/de";
 import type { ReleaseModeResponse, ReleaseTier } from "../../lib/schemas";
 

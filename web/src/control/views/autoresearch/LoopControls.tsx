@@ -3,7 +3,7 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { AUTORESEARCH_AREAS, type describeLoopStatus } from "../../lib/autoresearch";
 import type { getResearchLoopGuidance, getResearchLoopStartChecklist, getResearchLoopStartControl, getResearchLoopStartSummary, ResearchLoopPresetId } from "../../lib/autoresearchRunGuidance";
-import type { useAutoresearchStatus } from "../../hooks/useControlData";
+import type { useAutoresearchStatus } from "../../hooks/autoresearch";
 import type { AutoresearchRun } from "../../lib/types";
 import { de } from "../../i18n/de";
 import { SignalLabel, signalToneFromLegacy } from "../../components/leitstand";

@@ -6,8 +6,8 @@ import type { AccountUsageProvider, AccountUsageResponse } from "../../lib/types
 
 const useAccountUsageMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../../hooks/useControlData", async () => {
-  const actual = await vi.importActual<typeof import("../../hooks/useControlData")>("../../hooks/useControlData");
+vi.mock("../../hooks/costsUsage", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/costsUsage")>("../../hooks/costsUsage");
   return { ...actual, useAccountUsage: useAccountUsageMock };
 });
 

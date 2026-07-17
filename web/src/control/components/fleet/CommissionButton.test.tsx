@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState } from "../../hooks/commissionCapture";
 import { CommissionButton } from "./CommissionButton";
 
 function renderButton(state?: CommissionState, variant: "pill" | "full" = "pill") {

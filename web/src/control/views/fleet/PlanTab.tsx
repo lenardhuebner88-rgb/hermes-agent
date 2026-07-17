@@ -17,7 +17,7 @@ import {
   extractIngestError,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
-import { usePlanSpecDetail } from "../../hooks/useControlData";
+import { usePlanSpecDetail } from "../../hooks/planSpecsLanes";
 import type { RunsCostsResponse, LanesCatalogResponse } from "../../lib/schemas";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";

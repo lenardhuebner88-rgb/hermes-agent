@@ -6,7 +6,7 @@ import { DrawerShell } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";
 import { nextActionForFoItem } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState } from "../../hooks/commissionCapture";
 import { CopyButton } from "./CopyButton";
 import { operatorBrief, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 

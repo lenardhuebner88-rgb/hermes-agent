@@ -5,7 +5,7 @@ import { Skeleton, SkeletonRow } from "../../components/primitives";
 import { de } from "../../i18n/de";
 import { ageLabel, nextActionForItem } from "../../lib/orchestration";
 import type { OrchestrationItem } from "../../lib/schemas";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState } from "../../hooks/commissionCapture";
 import { ownerLabel, priorityTone, proofLabel, sourceLabel, statusTone } from "./shared";
 
 export function OrchestratorQueueTable({

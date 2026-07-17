@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import type { useReleaseGateExecute } from "../hooks/useControlData";
+import type { useReleaseGateExecute } from "../hooks/taskActions";
 
 /** Release-Gate: confirm-gated execution for a parked post-merge child.
  *  Zwei-Klick-Muster: erster Klick scharfschalten, zweiter Klick feuert

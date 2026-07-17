@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
 import type { Density } from "../hooks/useDensity";
-import type { DecisionInboxData } from "../hooks/useControlData";
+import type { DecisionInboxData } from "../hooks/decisionInbox";
 import type { HealthStatus, SystemHealthResponse, ToneName } from "../lib/types";
 import { healthLed, healthLabel } from "../lib/health";
 import { NotificationBridge } from "./NotificationBridge";

@@ -3,7 +3,10 @@ import { useSearchParams } from "react-router-dom";
 import { TriangleAlert } from "lucide-react";
 
 import { de } from "../i18n/de";
-import { useBacklog, useBacklogDetail, useCommissionToFleet, useDispatchFoTask, useFoBoardStatus, type CommissionPayload } from "../hooks/useControlData";
+import { useBacklog, useBacklogDetail } from "../hooks/backlogOrchestration";
+import { useDispatchFoTask } from "../hooks/chainFlow";
+import { useCommissionToFleet, type CommissionPayload } from "../hooks/commissionCapture";
+import { useFoBoardStatus } from "../hooks/foBoard";
 import { StaleBadge } from "../components/atoms";
 import {
   buildFoAuditPrompt,

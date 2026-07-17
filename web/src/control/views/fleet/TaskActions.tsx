@@ -15,7 +15,8 @@
 import { useCallback, useState } from "react";
 import { manageActions, stageActions } from "../../lib/fleet";
 import type { TaskStatus } from "../../lib/types";
-import { useChainActions, useFixRedispatch, useTaskAction } from "../../hooks/useControlData";
+import { useChainActions } from "../../hooks/chainFlow";
+import { useFixRedispatch, useTaskAction } from "../../hooks/taskActions";
 import { de } from "../../i18n/de";
 
 interface UiAction {

@@ -8,7 +8,7 @@ import { KpiTile, SignalChip } from "../../components/leitstand";
 import { de } from "../../i18n/de";
 import { deriveQueueSignals, isKnownStatus } from "../../lib/orchestration";
 import type { OrchestrationBacklogResponse, OrchestrationItem } from "../../lib/schemas";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState } from "../../hooks/commissionCapture";
 import { OrchestratorQueueSkeleton, OrchestratorQueueTable } from "./OrchestratorQueueTable";
 import { ACTIVE_COLUMNS, clockLabel } from "./shared";
 

@@ -3,7 +3,7 @@ import { Bell, BellOff } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
-import type { DecisionInboxData } from "../hooks/useControlData";
+import type { DecisionInboxData } from "../hooks/decisionInbox";
 
 const STORAGE_KEY = "hermes.control.notifications.enabled";
 const DEFAULT_TITLE = "Hermes Control";

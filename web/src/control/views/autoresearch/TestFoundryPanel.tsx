@@ -1,7 +1,7 @@
 import { FlaskConical, TriangleAlert } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-import type { useTestFoundry } from "../../hooks/useControlData";
+import type { useTestFoundry } from "../../hooks/proposalsDeepAudit";
 import type { getAdvancedRunChecklist, getTestFoundryGuidance } from "../../lib/autoresearchRunGuidance";
 import type { TestFoundryResultSummary } from "../../lib/autoresearchTestFoundrySummary";
 import { SignalLabel, signalToneFromLegacy } from "../../components/leitstand";

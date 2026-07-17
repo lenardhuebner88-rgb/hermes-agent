@@ -25,7 +25,7 @@ import type { Density } from "../hooks/useDensity";
 import type { Worker, WorkerHealth } from "../lib/types";
 import { SignalChip, signalToneFromLegacy } from "./leitstand";
 import { Stat, Text } from "./primitives";
-import { useWorkerActivity } from "../hooks/useControlData";
+import { useWorkerActivity } from "../hooks/workersBoard";
 import { ModelRouteBadge } from "./fleet/ModelRouteBadge";
 import { withBoardParam } from "../lib/multiBoard";
 

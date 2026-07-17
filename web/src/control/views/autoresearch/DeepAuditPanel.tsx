@@ -1,7 +1,7 @@
 import { SearchCode, TriangleAlert } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-import type { useDeepAudit } from "../../hooks/useControlData";
+import type { useDeepAudit } from "../../hooks/proposalsDeepAudit";
 import type { getAdvancedRunChecklist, getDeepAuditGuidance } from "../../lib/autoresearchRunGuidance";
 import { SignalLabel, signalToneFromLegacy } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";

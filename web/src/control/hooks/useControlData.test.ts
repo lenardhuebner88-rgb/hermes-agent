@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
-import {
-  countLibraryUnread,
-  HERMES_RECENT_RESULTS_URL,
-  HERMES_REVIEW_VERDICTS_URL,
-  testFoundryStatusPollIntervalMs,
-  type TestFoundryStatus,
-} from "./useControlData";
+import { countLibraryUnread } from "./libraryKnowledge";
+import { testFoundryStatusPollIntervalMs, type TestFoundryStatus } from "./proposalsDeepAudit";
+import { HERMES_REVIEW_VERDICTS_URL } from "./reviewVerdicts";
+import { HERMES_RECENT_RESULTS_URL } from "./runsDigestRollup";
 
 function status(state: TestFoundryStatus["state"]): TestFoundryStatus {
   return {

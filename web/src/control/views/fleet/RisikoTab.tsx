@@ -27,7 +27,7 @@ import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
 import { TriageStrip } from "../../components/TriageStrip";
 import { ReleaseGateButton } from "../../components/ReleaseGateButton";
-import { useReleaseGateExecute } from "../../hooks/useControlData";
+import { useReleaseGateExecute } from "../../hooks/taskActions";
 import type { ReleaseStatusResponse, ReleaseModeResponse } from "../../lib/schemas";
 import { RisikoHero } from "./RisikoHero";
 import { RisikoActivity } from "./RisikoActivity";

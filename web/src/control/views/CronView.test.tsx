@@ -7,7 +7,7 @@ const hooks = vi.hoisted(() => ({
   useCronOutput: vi.fn(),
 }));
 
-vi.mock("../hooks/useControlData", () => ({
+vi.mock("../hooks/cron", () => ({
   useCronObservability: hooks.useCronObservability,
   useCronOutput: hooks.useCronOutput,
 }));

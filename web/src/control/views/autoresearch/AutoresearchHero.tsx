@@ -6,7 +6,7 @@ import type { getAutoresearchRecommendation } from "../../lib/autoresearchRecomm
 import type { getProposalOperatorBrief } from "../../lib/autoresearchProposalBrief";
 import type { describeLoopStatus } from "../../lib/autoresearch";
 import type { describeTopCardMode } from "../../lib/autoresearchDecisionGuide";
-import type { useAutoresearchStatus } from "../../hooks/useControlData";
+import type { useAutoresearchStatus } from "../../hooks/autoresearch";
 import type { AutoresearchSectionNavItem } from "../../lib/autoresearchNavigation";
 import type { AutoresearchReadinessSummary } from "../../lib/autoresearchReadiness";
 import type { Proposal, ToneName } from "../../lib/types";

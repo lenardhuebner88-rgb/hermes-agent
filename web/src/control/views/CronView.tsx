@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Clock, FileText, Pause, Play, TriangleAlert, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
-import { useCronObservability, useCronOutput } from "../hooks/useControlData";
+import { useCronObservability, useCronOutput } from "../hooks/cron";
 import { de } from "../i18n/de";
 import { StaleBadge } from "../components/atoms";
 import { Disclosure, Eyebrow } from "../components/primitives";

@@ -38,7 +38,63 @@ const hooks = vi.hoisted(() => ({
   useCronObservability: vi.fn(),
 }));
 
-vi.mock("../hooks/useControlData", () => hooks);
+vi.mock("../hooks/chainFlow", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useChainGraph: hooks.useChainGraph,
+}));
+vi.mock("../hooks/costsUsage", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useHermesRunsCosts: hooks.useHermesRunsCosts,
+  useAccountUsage: hooks.useAccountUsage,
+  useHermesChainCosts: hooks.useHermesChainCosts,
+}));
+vi.mock("../hooks/cron", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useCronObservability: hooks.useCronObservability,
+}));
+vi.mock("../hooks/decisionInbox", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useKanbanDecisionQueue: hooks.useKanbanDecisionQueue,
+}));
+vi.mock("../hooks/planSpecsLanes", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  usePlanSpecs: hooks.usePlanSpecs,
+  useLanesCatalog: hooks.useLanesCatalog,
+  usePlanSpecDetail: hooks.usePlanSpecDetail,
+}));
+vi.mock("../hooks/reviewVerdicts", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useHermesReviewVerdicts: hooks.useHermesReviewVerdicts,
+}));
+vi.mock("../hooks/runsDigestRollup", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useHermesRunsDaily: hooks.useHermesRunsDaily,
+  useHermesReliability: hooks.useHermesReliability,
+  useHermesRecentResults: hooks.useHermesRecentResults,
+}));
+vi.mock("../hooks/systemReleaseHealth", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useSystemHealth: hooks.useSystemHealth,
+  usePressureStatus: hooks.usePressureStatus,
+  useReleaseStatus: hooks.useReleaseStatus,
+  useReleaseMode: hooks.useReleaseMode,
+  useReleaseModeWrite: hooks.useReleaseModeWrite,
+  useReleaseConcurrencyWrite: hooks.useReleaseConcurrencyWrite,
+}));
+vi.mock("../hooks/taskActions", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useReleaseGateExecute: hooks.useReleaseGateExecute,
+  useWorkerLifecycle: hooks.useWorkerLifecycle,
+}));
+vi.mock("../hooks/workersBoard", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useHermesWorkers: hooks.useHermesWorkers,
+  useAllBoardWorkers: hooks.useAllBoardWorkers,
+  useBoardCatalog: hooks.useBoardCatalog,
+  useBoard: hooks.useBoard,
+  useRunLiveEvents: hooks.useRunLiveEvents,
+  useWorkerActivity: hooks.useWorkerActivity,
+}));
 
 const api = vi.hoisted(() => ({ fetchJSON: vi.fn() }));
 vi.mock("@/lib/api", () => api);

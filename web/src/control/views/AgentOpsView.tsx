@@ -9,15 +9,11 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 
 import { cn } from "@/lib/utils";
-import {
-  useHermesRecentResults,
-  useHermesWorkers,
-  useMetricsLite,
-  useOrchestrationBacklog,
-  useOrchestrationBacklogDetail,
-  useProposals,
-  useSystemHealth,
-} from "../hooks/useControlData";
+import { useOrchestrationBacklog, useOrchestrationBacklogDetail } from "../hooks/backlogOrchestration";
+import { useProposals } from "../hooks/proposalsDeepAudit";
+import { useHermesRecentResults } from "../hooks/runsDigestRollup";
+import { useMetricsLite, useSystemHealth } from "../hooks/systemReleaseHealth";
+import { useHermesWorkers } from "../hooks/workersBoard";
 import type { Density } from "../hooks/useDensity";
 import {
   buildAgentOpsDispatchPrompt,

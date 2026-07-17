@@ -22,7 +22,7 @@ import { LastRun } from "./autoresearch/panels";
 import { OutcomePanel } from "./autoresearch/OutcomePanel";
 import { de } from "../i18n/de";
 import type { AutoresearchRun, Proposal } from "../lib/types";
-import type { DeepAuditFinding } from "../hooks/useControlData";
+import type { DeepAuditFinding } from "../hooks/proposalsDeepAudit";
 
 function proposal(overrides: Partial<Proposal> = {}): Proposal {
   return {

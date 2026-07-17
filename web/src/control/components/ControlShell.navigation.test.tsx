@@ -4,7 +4,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlShell, type ControlTab } from "./ControlShell";
-import type { DecisionInboxData } from "../hooks/useControlData";
+import type { DecisionInboxData } from "../hooks/decisionInbox";
 import type { SystemHealthResponse } from "../lib/types";
 
 const notificationBridgeSpy = vi.fn((_props: unknown) => <div data-testid="notification-bridge-mock" />);

@@ -6,7 +6,7 @@ import { FleetEmptyState, FleetPanel, SignalChip, SignalLabel } from "../compone
 import { Eyebrow } from "../components/primitives";
 import { ModelPicker } from "../components/ModelPicker";
 import { ProseMarkdown } from "../components/ProseMarkdown";
-import { useHermesWorkers } from "../hooks/useControlData";
+import { useHermesWorkers } from "../hooks/workersBoard";
 import { fmtClock, fmtDur, nowSec } from "../lib/derive";
 import { taskStatusLabel } from "../lib/tones";
 import type { Density } from "../hooks/useDensity";

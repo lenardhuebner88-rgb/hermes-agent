@@ -15,7 +15,7 @@ import { AlertTriangle, Check, Loader2, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fetchJSON } from "@/lib/api";
 import { de } from "../../i18n/de";
-import { useCaptureTask } from "../../hooks/useControlData";
+import { useCaptureTask } from "../../hooks/commissionCapture";
 import { usesFlowCaptureEndpoint, type CaptureMethod, type CaptureLevers } from "../../lib/fleet";
 import type { ReviewTier } from "../../lib/types";
 import { Overlay } from "../Overlay";

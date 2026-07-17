@@ -1,7 +1,7 @@
 import { RefreshCw, X } from "lucide-react";
 
 import type { AccountUsageProvider } from "../../lib/types";
-import { useAccountUsage } from "../../hooks/useControlData";
+import { useAccountUsage } from "../../hooks/costsUsage";
 import { Eyebrow } from "../../components/primitives";
 
 import { providerUsageSummary, sortTerminalUsageProviders, TERMINAL_USAGE_PROVIDER_ORDER } from "./usageModel";

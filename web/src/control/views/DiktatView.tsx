@@ -6,7 +6,7 @@ import { DictateStatusTile } from "../components/DictateStatusTile";
 import { DictateTrend } from "../components/DictateTrend";
 import { FleetEmptyState, FleetPanel } from "../components/leitstand";
 import { Eyebrow } from "../components/primitives";
-import { useDictateStatus } from "../hooks/useControlData";
+import { useDictateStatus } from "../hooks/systemReleaseHealth";
 import { fmtRelativeTime, nowSec } from "../lib/derive";
 import {
   DictatePersonalizationSchema,

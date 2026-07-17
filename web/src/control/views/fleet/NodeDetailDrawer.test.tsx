@@ -47,14 +47,32 @@ vi.mock("@/lib/api", async () => {
   return { ...actual, fetchJSON: fetchJSONMock };
 });
 
-vi.mock("../../hooks/useControlData", async () => {
-  const actual = await vi.importActual<typeof import("../../hooks/useControlData")>("../../hooks/useControlData");
+vi.mock("../../hooks/taskBodyOnDemand", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/taskBodyOnDemand")>("../../hooks/taskBodyOnDemand");
   return {
     ...actual,
     useTaskBodyOnDemand: vi.fn(() => hookState.taskBody),
     useTaskDeliverablesOnDemand: vi.fn(() => ({ data: { deliverables: [] }, loading: false, error: null })),
+  };
+});
+vi.mock("../../hooks/workersBoard", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/workersBoard")>("../../hooks/workersBoard");
+  return {
+    ...actual,
     useWorkerActivity: vi.fn(() => ({ data: { events: [] }, loading: false, error: null })),
+  };
+});
+vi.mock("../../hooks/reviewVerdicts", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/reviewVerdicts")>("../../hooks/reviewVerdicts");
+  return {
+    ...actual,
     useHermesReviewVerdicts: vi.fn(() => ({ data: { reviews: [] }, loading: false, error: null })),
+  };
+});
+vi.mock("../../hooks/planSpecsLanes", async () => {
+  const actual = await vi.importActual<typeof import("../../hooks/planSpecsLanes")>("../../hooks/planSpecsLanes");
+  return {
+    ...actual,
     useLanesCatalog: vi.fn(() => hookState.lanesCatalog),
   };
 });

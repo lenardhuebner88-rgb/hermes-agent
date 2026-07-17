@@ -26,20 +26,9 @@ import { ChevronRight, TriangleAlert } from "lucide-react";
 import { de } from "../i18n/de";
 import { fmtClock, fmtClockTime, fmtDur, fmtTokens, nowSec, formatEffectiveCost } from "../lib/derive";
 import { profileLabel } from "../lib/tones";
-import {
-  useAccountUsage,
-  useBoardStats,
-  useChainCompletion,
-  useHermesReliability,
-  useHermesRunsCosts,
-  useHermesRunsCostSeries,
-  useHermesRunsDaily,
-  useHermesRunsIssues,
-  useHermesRunSummary,
-  useHermesWindowedRollup,
-  useHermesSubscriptionBurn,
-  useStatsConfig,
-} from "../hooks/useControlData";
+import { useAccountUsage, useHermesRunsCosts, useHermesRunsCostSeries, useHermesSubscriptionBurn } from "../hooks/costsUsage";
+import { useChainCompletion, useHermesReliability, useHermesRunsDaily, useHermesRunsIssues, useHermesRunSummary, useHermesWindowedRollup } from "../hooks/runsDigestRollup";
+import { useBoardStats, useStatsConfig } from "../hooks/stats";
 import type {
   AccountUsageProvider,
   CostProfileRow,

@@ -3,7 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { TriangleAlert } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
-import { useAutoresearchRuns, useAutoresearchStatus, useDeepAudit, useTestFoundry, type useProposals } from "../hooks/useControlData";
+import { useAutoresearchRuns, useAutoresearchStatus } from "../hooks/autoresearch";
+import { useDeepAudit, useTestFoundry, type useProposals } from "../hooks/proposalsDeepAudit";
 import { getAutoresearchActionPlan } from "../lib/autoresearchActionPlan";
 import { getAutoresearchActivityCard } from "../lib/autoresearchActivity";
 

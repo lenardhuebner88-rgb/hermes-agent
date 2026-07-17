@@ -5,7 +5,7 @@ import { refreshKeysForLiveEvent, setLivePollingMode, useLiveEvents } from "./us
 import { subscribe, _resetPollingStore } from "./pollingStore";
 
 vi.mock("@/lib/api", () => ({ buildWsUrl: vi.fn().mockResolvedValue("ws://example.test/kanban-events") }));
-vi.mock("./useControlData", () => ({ boardLoader: vi.fn().mockResolvedValue({ latest_event_id: 1 }) }));
+vi.mock("./workersBoard", () => ({ boardLoader: vi.fn().mockResolvedValue({ latest_event_id: 1 }) }));
 
 let sockets: FakeWebSocket[] = [];
 

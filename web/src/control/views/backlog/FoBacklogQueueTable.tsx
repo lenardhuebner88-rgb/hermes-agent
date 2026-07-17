@@ -10,7 +10,9 @@ import {
   staleSignalForFoItem,
 } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
-import type { CommissionState, DispatchFoState, FoBoardStatus } from "../../hooks/useControlData";
+import type { DispatchFoState } from "../../hooks/chainFlow";
+import type { CommissionState } from "../../hooks/commissionCapture";
+import type { FoBoardStatus } from "../../hooks/foBoard";
 import { de } from "../../i18n/de";
 import { relLabel, RISK_TONE, sourceRef, STATUS_TONE } from "./shared";
 

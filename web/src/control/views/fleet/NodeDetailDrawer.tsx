@@ -17,7 +17,11 @@ import {
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import { runStatusLabel } from "../../lib/tones";
-import { useWorkerActivity, useHermesReviewVerdicts, useTaskBodyOnDemand, useTaskDeliverablesOnDemand, useLanesCatalog, extractDetail } from "../../hooks/useControlData";
+import { extractDetail } from "../../hooks/internal";
+import { useLanesCatalog } from "../../hooks/planSpecsLanes";
+import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
+import { useTaskBodyOnDemand, useTaskDeliverablesOnDemand } from "../../hooks/taskBodyOnDemand";
+import { useWorkerActivity } from "../../hooks/workersBoard";
 import { DrawerShell } from "../../components/leitstand";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { Eyebrow } from "../../components/primitives";

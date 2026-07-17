@@ -57,20 +57,32 @@ const controlDataMock = vi.hoisted(() => ({
   board: null as ControlHookState | null,
 }));
 
-vi.mock("../hooks/useControlData", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../hooks/useControlData")>();
+vi.mock("../hooks/costsUsage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/costsUsage")>();
   return {
     ...actual,
     useAccountUsage: () => controlDataMock.accountUsage,
+    useHermesRunsCosts: () => controlDataMock.costs,
+    useHermesRunsCostSeries: () => controlDataMock.costSeries,
+    useHermesSubscriptionBurn: () => controlDataMock.subscriptionBurn,
+  };
+});
+vi.mock("../hooks/stats", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/stats")>();
+  return {
+    ...actual,
     useBoardStats: () => controlDataMock.board,
+  };
+});
+vi.mock("../hooks/runsDigestRollup", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/runsDigestRollup")>();
+  return {
+    ...actual,
     useChainCompletion: () => controlDataMock.chain,
     useHermesReliability: () => controlDataMock.reliability,
     useHermesRunSummary: () => controlDataMock.summary,
-    useHermesRunsCosts: () => controlDataMock.costs,
-    useHermesRunsCostSeries: () => controlDataMock.costSeries,
     useHermesRunsDaily: () => controlDataMock.daily,
     useHermesRunsIssues: () => controlDataMock.issues,
-    useHermesSubscriptionBurn: () => controlDataMock.subscriptionBurn,
     useHermesWindowedRollup: () => windowedRollupMock.state!,
   };
 });

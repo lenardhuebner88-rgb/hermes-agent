@@ -1,4 +1,4 @@
-import type { useDeepAudit, useTestFoundry } from "../../hooks/useControlData";
+import type { useDeepAudit, useTestFoundry } from "../../hooks/proposalsDeepAudit";
 import { AUTORESEARCH_ADVANCED_GUIDE } from "../../lib/autoresearchAdvanced";
 import type { getAdvancedRunChecklist, getDeepAuditGuidance, getTestFoundryGuidance } from "../../lib/autoresearchRunGuidance";
 import type { TestFoundryResultSummary } from "../../lib/autoresearchTestFoundrySummary";

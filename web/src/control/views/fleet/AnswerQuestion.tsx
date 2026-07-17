@@ -9,7 +9,7 @@
  */
 import { useState, type FormEvent } from "react";
 import { de } from "../../i18n/de";
-import { useAnswerQuestion } from "../../hooks/useControlData";
+import { useAnswerQuestion } from "../../hooks/taskActions";
 
 interface AnswerQuestionProps {
   taskId: string;

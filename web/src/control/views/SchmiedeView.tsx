@@ -1,4 +1,4 @@
-import { usePromptForgeCatalog } from "../hooks/useControlData";
+import { usePromptForgeCatalog } from "../hooks/promptForge";
 import type { Density } from "../hooks/useDensity";
 import { TriangleAlert } from "lucide-react";
 import { FleetEmptyState, FleetPanel } from "../components/leitstand";

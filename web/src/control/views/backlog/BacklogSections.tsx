@@ -12,7 +12,9 @@ import {
 } from "../../lib/foBacklog";
 import type { FoOwnerLoad, FoQuickView, FoRankedCandidate } from "../../lib/foBacklog";
 import type { BacklogDetail, BacklogItem } from "../../lib/schemas";
-import type { CommissionState, DispatchFoState, FoBoardStatus } from "../../hooks/useControlData";
+import type { DispatchFoState } from "../../hooks/chainFlow";
+import type { CommissionState } from "../../hooks/commissionCapture";
+import type { FoBoardStatus } from "../../hooks/foBoard";
 import { CopyButton } from "./CopyButton";
 import { FoBacklogQueueTable, FoBacklogQueueSkeleton } from "./FoBacklogQueueTable";
 import { ReasonChips } from "./ReasonChips";

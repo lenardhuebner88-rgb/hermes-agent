@@ -8,7 +8,7 @@ import { SignalChip, type SignalTone } from "./leitstand";
 import { CommissionButton } from "./fleet/CommissionButton";
 import { Markdown } from "./Markdown";
 import { de } from "../i18n/de";
-import type { CommissionState } from "../hooks/useControlData";
+import type { CommissionState } from "../hooks/commissionCapture";
 
 interface BacklogDetailDrawerProps {
   title: string;

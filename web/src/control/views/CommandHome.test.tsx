@@ -3,11 +3,7 @@ import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import type { InboxItem } from "../lib/decisionInbox";
-import type {
-  useFixRedispatch,
-  useRepairDeliverable,
-  useVetoEscalation,
-} from "../hooks/useControlData";
+import type { useFixRedispatch, useRepairDeliverable, useVetoEscalation } from "../hooks/taskActions";
 
 const noopMutation = {
   busyId: null,

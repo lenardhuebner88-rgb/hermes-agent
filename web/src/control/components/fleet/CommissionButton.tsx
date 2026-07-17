@@ -7,7 +7,7 @@
 import { ArrowRight, Check, Loader2, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { de } from "../../i18n/de";
-import type { CommissionState } from "../../hooks/useControlData";
+import type { CommissionState } from "../../hooks/commissionCapture";
 
 export function CommissionButton({
   state,

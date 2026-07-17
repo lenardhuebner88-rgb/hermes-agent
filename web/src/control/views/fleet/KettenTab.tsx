@@ -26,12 +26,10 @@ import {
 } from "../../lib/fleetHub";
 import { formatEffectiveCost } from "../../lib/derive";
 import { de } from "../../i18n/de";
-import {
-  useChainGraph,
-  useHermesChainCosts,
-  useHermesReviewVerdicts,
-  useHermesWorkers,
-} from "../../hooks/useControlData";
+import { useChainGraph } from "../../hooks/chainFlow";
+import { useHermesChainCosts } from "../../hooks/costsUsage";
+import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
+import { useHermesWorkers } from "../../hooks/workersBoard";
 import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 import type { ChainCostsResponse } from "../../lib/schemas";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";

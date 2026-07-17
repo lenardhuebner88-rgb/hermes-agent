@@ -5,7 +5,7 @@ import { Hero } from "../components/Hero";
 import { FleetEmptyState, FleetPanel, KpiTile, SignalChip, SignalLabel, signalToneFromLegacy } from "../components/leitstand";
 import { fmtAge, fmtClock } from "../lib/derive";
 import type { Density } from "../hooks/useDensity";
-import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/useControlData";
+import { useStrategistLastRuns, useStrategistOutcomes } from "../hooks/strategist";
 import type { LeverOutcome } from "../lib/schemas";
 import {
   formatSignedDelta,

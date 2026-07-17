@@ -19,20 +19,8 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
-import {
-  duplicateLoop,
-  extractDetail,
-  landLoop,
-  saveLoopFile,
-  setLoopTimerSchedule,
-  startLoop,
-  stopLoop,
-  toggleLoopTimer,
-  useLoopDetail,
-  useLoopFiles,
-  useLoopModels,
-  useLoops,
-} from "../hooks/useControlData";
+import { extractDetail } from "../hooks/internal";
+import { duplicateLoop, landLoop, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoops } from "../hooks/loops";
 import { de } from "../i18n/de";
 import { SignalLabel, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractFoIdFromIdempotencyKey } from "./useControlData";
+import { extractFoIdFromIdempotencyKey } from "./foBoard";
 
 describe("extractFoIdFromIdempotencyKey", () => {
   it("extracts the FO item id from a well-formed fo-backlog: key", () => {

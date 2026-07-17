@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AlertTriangle, Check, Layers, Loader2, X } from "lucide-react";
 import { de } from "../../i18n/de";
-import { useEpicActions } from "../../hooks/useControlData";
+import { useEpicActions } from "../../hooks/epics";
 import { Overlay } from "../Overlay";
 import { hasFinePointer } from "../../lib/pointer";
 
