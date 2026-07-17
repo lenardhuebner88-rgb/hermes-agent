@@ -89,36 +89,40 @@ export function ProjekteView() {
         <Eyebrow>{t.eyebrow}</Eyebrow>
         <h2 className="mt-1 font-display text-h2 font-semibold text-ink">{t.title}</h2>
         <p className="mt-1 text-sec text-ink-2">{t.subtitle}</p>
-        {/* Mobile (<tab): kompakter Sticky-Strip direkt unter dem App-Header —
-            volle Breite (-mx-4/px-4 über den main-Gutter), eine horizontal
-            scrollbare Chip-Zeile auf der Page-Canvas (surface-0/95 + Blur,
-            FleetCard-Sticky-Idiom). Ab tab: exakt die bisherige Header-Zeile. */}
-        {agents.data !== null ? (
-          <div className="sticky top-0 z-10 -mx-4 mt-2 flex flex-nowrap items-center gap-1.5 overflow-x-auto border-b border-line-soft bg-surface-0/95 px-4 py-2 text-micro backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden tab:static tab:z-auto tab:mx-0 tab:flex-wrap tab:overflow-visible tab:border-b-0 tab:bg-transparent tab:px-0 tab:py-0 tab:backdrop-blur-none">
-            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-card border border-bronze/40 bg-bronze/10 px-2 py-0.5 font-data text-bronze-hi">
-              {t.summaryLive(liveTotal)}
-            </span>
-            <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
-              {t.summaryCheckins(claimsTotal)}
-            </span>
-            {sessions.data !== null ? (
-              <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
-                {t.summaryOpenSessions(openSessionsTotal)}
-              </span>
-            ) : null}
-            {blockedTotal > 0 ? (
-              <span className="inline-flex shrink-0 items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
-                {t.summaryBlocked(blockedTotal)}
-              </span>
-            ) : null}
-            {needsInputTotal > 0 ? (
-              <span className="inline-flex shrink-0 items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
-                {t.summaryNeedsInput(needsInputTotal)}
-              </span>
-            ) : null}
-          </div>
-        ) : null}
       </header>
+
+      {/* Mobile (<tab): kompakter Sticky-Strip direkt unter dem App-Header —
+          volle Breite (-mx-4/px-4 über den main-Gutter), eine horizontal
+          scrollbare Chip-Zeile auf der Page-Canvas (surface-0/95 + Blur,
+          FleetCard-Sticky-Idiom). Ab tab: die bisherige Header-Chip-Zeile.
+          MUSS direktes Kind der Root-Section sein: position:sticky pinnt nur
+          innerhalb des Eltern-Blocks — im <header> (nur so hoch wie der Strip
+          selbst) war der Pin-Bereich null (ui-verify-Fund 2026-07-18). */}
+      {agents.data !== null ? (
+        <div className="sticky top-0 z-10 -mx-4 flex flex-nowrap items-center gap-1.5 overflow-x-auto border-b border-line-soft bg-surface-0/95 px-4 py-2 text-micro backdrop-blur [scrollbar-width:none] [&::-webkit-scrollbar]:hidden tab:static tab:z-auto tab:mx-0 tab:flex-wrap tab:overflow-visible tab:border-b-0 tab:bg-transparent tab:px-0 tab:py-0 tab:backdrop-blur-none">
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-card border border-bronze/40 bg-bronze/10 px-2 py-0.5 font-data text-bronze-hi">
+            {t.summaryLive(liveTotal)}
+          </span>
+          <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+            {t.summaryCheckins(claimsTotal)}
+          </span>
+          {sessions.data !== null ? (
+            <span className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+              {t.summaryOpenSessions(openSessionsTotal)}
+            </span>
+          ) : null}
+          {blockedTotal > 0 ? (
+            <span className="inline-flex shrink-0 items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
+              {t.summaryBlocked(blockedTotal)}
+            </span>
+          ) : null}
+          {needsInputTotal > 0 ? (
+            <span className="inline-flex shrink-0 items-center rounded-card border border-status-warn/40 bg-status-warn/10 px-2 py-0.5 font-data text-status-warn">
+              {t.summaryNeedsInput(needsInputTotal)}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
 
       {projects.error ? (
         <div className="flex items-start gap-2 rounded-card border border-status-alert/30 bg-status-alert/10 px-3 py-2 text-sec text-status-alert">

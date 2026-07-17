@@ -148,7 +148,7 @@ function LiveBoardRow({
         // mit der strukturierten tmux-Adresse; Fenster optional. Gleiches
         // 44px-mobil/tab:size-7-Idiom wie der Kill-Button.
         <Link
-          to={terminalDeepLink(agent.tmux_session, agent.tmux_window)}
+          to={terminalDeepLink(agent.tmux_session, agent.tmux_window_name ?? agent.tmux_window)}
           aria-label={t.terminalOpenAria(headline)}
           title={t.terminalOpenAria(headline)}
           className="grid size-11 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-bronze/40 hover:bg-bronze/10 hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-bronze tab:size-7"

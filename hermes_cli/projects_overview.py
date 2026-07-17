@@ -762,6 +762,10 @@ def _tmux_agents(
                 # Frontend must NEVER re-parse these out of the display label.
                 "tmux_session": session_name,
                 "tmux_window": window_index,
+                # Terminal deep-link target: /control/agent-terminals keys its
+                # window list by #{window_name}, NOT by index — the index-based
+                # tmux_window stays reserved for the terminate API.
+                "tmux_window_name": window_name,
             }
         )
 

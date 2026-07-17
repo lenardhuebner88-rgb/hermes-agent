@@ -87,6 +87,10 @@ const ProjectAgentSchema = z.object({
   // additive 2026-07-17); coordination/kanban/loop rows omit them → null.
   tmux_session: nullableString,
   tmux_window: nullableString,
+  // Terminal-Deep-Link-Ziel (backend additive 2026-07-18): agent-terminals
+  // adressiert Fenster über den NAMEN, tmux_window (Index) bleibt fürs
+  // Terminate-API. Ältere Backends ohne das Feld → null.
+  tmux_window_name: z.string().nullable().optional().catch(null),
   // Lane/assignee of a running kanban task; only source==="kanban" rows carry
   // it (backend additive 2026-07-17). Operator of a coordination claim; only
   // source==="coordination" rows can carry it. Both absent → null.
@@ -264,6 +268,7 @@ const ProjectSessionSchema = z.object({
   // die Zeile bekommt die "Terminal öffnen"-Affordance.
   tmux_session: z.string().nullable().optional().catch(null),
   tmux_window: z.string().nullable().optional().catch(null),
+  tmux_window_name: z.string().nullable().optional().catch(null),
 }).passthrough();
 export type ProjectSession = z.infer<typeof ProjectSessionSchema>;
 

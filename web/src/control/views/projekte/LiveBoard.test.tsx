@@ -132,18 +132,30 @@ describe("LiveBoard", () => {
       since: 1784238500,
       tmux_window: null,
     };
-    const html = renderBoard([TMUX_AGENT, noWindow, KANBAN_AGENT, CLAIM_AGENT]);
+    // Mit Fenster-NAME (backend additive 2026-07-18): der Deep-Link bevorzugt
+    // tmux_window_name — agent-terminals adressiert Fenster über den Namen,
+    // der Index (tmux_window) bleibt fürs Terminate-API.
+    const namedWindow: ProjectAgent = {
+      ...TMUX_AGENT,
+      label: "work:6 codex",
+      since: 1784238600,
+      tmux_window: "6",
+      tmux_window_name: "codex",
+    };
+    const html = renderBoard([TMUX_AGENT, noWindow, namedWindow, KANBAN_AGENT, CLAIM_AGENT]);
     // Mit Fenster (HTML-escaped &amp; im statischen Markup).
     expect(html).toContain('href="/control/agent-terminals?session=work&amp;window=2"');
     // Ohne Fenster: window-Parameter entfällt komplett.
     expect(html).toContain('href="/control/agent-terminals?session=work"');
-    // Nur die zwei tmux-Zeilen bekommen die Affordance — Kanban/Check-in nie.
+    // Name schlägt Index.
+    expect(html).toContain('href="/control/agent-terminals?session=work&amp;window=codex"');
+    // Nur die drei tmux-Zeilen bekommen die Affordance — Kanban/Check-in nie.
     const links = html.match(/aria-label="Terminal öffnen: [^"]*"/g) ?? [];
-    expect(links).toHaveLength(2);
+    expect(links).toHaveLength(3);
     expect(html).toContain('aria-label="Terminal öffnen: work:2 kimi"');
-    // Kill-Fluss unverändert: nur die Zeile mit session+window ist killbar.
+    // Kill-Fluss unverändert: nur Zeilen mit session+window sind killbar.
     const kills = html.match(/aria-label="Session [^"]* beenden"/g) ?? [];
-    expect(kills).toHaveLength(1);
+    expect(kills).toHaveLength(2);
   });
 
   it("renders a calm empty state when nobody is working", () => {

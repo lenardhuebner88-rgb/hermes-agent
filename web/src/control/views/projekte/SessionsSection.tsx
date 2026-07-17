@@ -174,7 +174,7 @@ function SessionRow({
         // Adresse (additive Backend-Annotation); Fenster optional. 44px mobil,
         // kompakt ab tab — dasselbe Idiom wie die LiveBoard-Affordance.
         <Link
-          to={terminalDeepLink(session.tmux_session, session.tmux_window)}
+          to={terminalDeepLink(session.tmux_session, session.tmux_window_name ?? session.tmux_window)}
           aria-label={t.terminalOpenAria(session.label || session.id)}
           title={t.terminalOpenAria(session.label || session.id)}
           className="grid size-11 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-bronze/40 hover:bg-bronze/10 hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-bronze tab:size-7"

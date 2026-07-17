@@ -798,6 +798,8 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
     # Structured kill target for the Projekte-Tab (never parse the label).
     assert fable_pane["tmux_session"] == "fable-babysit-3"
     assert fable_pane["tmux_window"] == "0"
+    # Deep-link target: agent-terminals keys windows by NAME, not index.
+    assert fable_pane["tmux_window_name"] == "claude"
 
     work_claude = by_label["work:0 claude"]
     assert work_claude["kind"] == "claude"
@@ -814,6 +816,7 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
     assert work_kimi["project"] == "hermes-infra"
     assert work_kimi["tmux_session"] == "work"
     assert work_kimi["tmux_window"] == "2"
+    assert work_kimi["tmux_window_name"] == "kimi"
 
     work_grok = by_label["work:3 grok"]
     assert work_grok["kind"] == "grok"  # window_name "grok" wins over command "node"
