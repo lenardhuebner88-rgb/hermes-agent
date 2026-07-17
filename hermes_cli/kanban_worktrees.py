@@ -3219,6 +3219,67 @@ def _terminal_status(status: str) -> bool:
     return status in {"done", "archived", "failed", "cancelled"}
 
 
+def _decompose_root_has_real_child_completion(
+    conn: sqlite3.Connection, root_id: str,
+) -> bool:
+    """True iff at least one of *root_id*'s decompose-chain subtasks actually
+    reached ``status='done'``.
+
+    Decompose links point from every subtask to the root
+    (``task_links.parent_id = subtask``, ``child_id = root``, see
+    :func:`_direct_decompose_root_for_child`). ``archive_task`` DELETES a
+    task's outgoing ``task_links`` rows on archive, so an archived/cancelled/
+    failed subtask's link to the root is already gone here — only subtasks
+    that reached a real, link-preserving terminal state (``done``) show up.
+    Guards ``_auto_complete_decompose_root``/``_direct_complete_decompose_root``
+    against completing a root whose entire chain was superseded-archived
+    with zero real work landed (live incident t_ecd5cf42, 2026-07-17)."""
+    row = conn.execute(
+        "SELECT 1 FROM task_links l JOIN tasks t ON t.id = l.parent_id "
+        "WHERE l.child_id = ? AND t.status = 'done' LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _block_decompose_root_no_real_completion(
+    conn: sqlite3.Connection, *, root_id: str,
+) -> None:
+    """Park a decompose root instead of auto-completing it when none of its
+    chain's subtasks ever reached a real ``done`` (the whole chain is
+    archived/cancelled/failed) — mirrors :func:`_block_decompose_root`'s
+    shape, distinct reason so the operator sees exactly why."""
+    from hermes_cli import kanban_db as kb
+
+    reason = (
+        "auto-complete verweigert: kein Kind erfolgreich (alle archived/failed) "
+        "— Operator pruefen"
+    )
+    try:
+        with kb.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+                (root_id,),
+            )
+            if cur.rowcount == 1:
+                kb._append_event(
+                    conn,
+                    root_id,
+                    "blocked",
+                    {
+                        "reason": reason,
+                        "source": "decompose_root_finalizer",
+                    },
+                )
+    except Exception:
+        _log.warning(
+            "could not block decompose root %s after no-real-completion guard",
+            root_id, exc_info=True,
+        )
+
+
 def _pending_root_finalizer_id(
     conn: sqlite3.Connection,
     *,
@@ -3296,6 +3357,10 @@ def _auto_complete_decompose_root(
     outcome: dict,
 ) -> None:
     from hermes_cli import kanban_db as kb
+
+    if not _decompose_root_has_real_child_completion(conn, root_id):
+        _block_decompose_root_no_real_completion(conn, root_id=root_id)
+        return
 
     now = int(time.time())
     summary = (
@@ -3382,6 +3447,10 @@ def _direct_complete_decompose_root(
     the children as evidence.
     """
     from hermes_cli import kanban_db as kb
+
+    if not _decompose_root_has_real_child_completion(conn, root_id):
+        _block_decompose_root_no_real_completion(conn, root_id=root_id)
+        return
 
     now = int(time.time())
     branch = chain_branch(root_id)

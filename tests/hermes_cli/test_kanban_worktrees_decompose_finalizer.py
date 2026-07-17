@@ -331,6 +331,83 @@ def test_decompose_root_with_open_child_not_finalized(
     assert _git(repo, "log", "--merges", "--oneline") == ""
 
 
+def test_auto_complete_decompose_root_refuses_when_all_children_archived(
+    kanban_home,
+):
+    """S3 regression (t_ecd5cf42, 2026-07-17): a decompose root must not be
+    marked ``done`` when EVERY chain child was only superseded-archived (via
+    ``block_task`` + a SUPERSEDED reason, which auto-archives and DELETES the
+    child's task_links row to the root) — zero real work landed. Instead of
+    completing, the root is parked ``blocked`` with an operator-facing reason."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="all-archived decompose root", triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "child A", "assignee": "coder", "parents": []},
+                {"title": "child B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        for child in (child_a, child_b):
+            kb.claim_task(conn, child)
+            assert kb.block_task(
+                conn, child, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, child).status == "archived"
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=child_b, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status == "blocked"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+    assert "Operator pruefen" in blocked_events[-1]["reason"]
+
+
+def test_auto_complete_decompose_root_proceeds_when_one_child_really_done(
+    kanban_home,
+):
+    """Gegentest: as long as at least one chain child reached a REAL
+    ``done`` (its task_links row to the root survives), the root may still
+    auto-complete even if a sibling was superseded-archived."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="partial-done decompose root", triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn, root, root_assignee=None,
+            children=[
+                {"title": "child A", "assignee": "coder", "parents": []},
+                {"title": "child B", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        kb.claim_task(conn, child_a)
+        assert kb.complete_task(conn, child_a, result="child A done")
+        kb.claim_task(conn, child_b)
+        assert kb.block_task(
+            conn, child_b, reason="SUPERSEDED: recovery-loop stop",
+        )
+        assert kb.get_task(conn, child_b).status == "archived"
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=child_a, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        auto_done = _events(conn, root, "decompose_root_auto_completed")
+
+    assert root_task.status == "done"
+    assert auto_done and auto_done[-1]["completed_by"] == child_a
+
+
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> real activation -> success event, no fixer,
     child done."""
