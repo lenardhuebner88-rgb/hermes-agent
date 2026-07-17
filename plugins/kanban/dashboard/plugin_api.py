@@ -399,6 +399,9 @@ def _send_web_push_payload(
                     vapid_private_key=vapid["private_key"],
                     vapid_claims=vapid["claims"],
                     ttl=300,
+                    # pywebpush defaults timeout=None → a hung push endpoint
+                    # would block the calling thread indefinitely (I3 review).
+                    timeout=10,
                 )
                 kanban_db.record_push_success(conn, endpoint=endpoint)
                 sent += 1

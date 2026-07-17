@@ -195,3 +195,68 @@ describe("AnswerSheet (real agent-question event format)", () => {
     expect(screen.getByRole("button", { name: "Aktualisieren" })).toBeTruthy();
   });
 });
+
+  it("renders live standing age from event.ts", () => {
+    const q = fixtureEvent({ ts: new Date(Date.now() - 5 * 60_000).toISOString() });
+    render(
+      <AnswerSheet questions={[q]} onClose={() => {}} reload={vi.fn()} />,
+    );
+    const age = screen.getByTestId("answer-sheet-age");
+    expect(age.textContent).toMatch(/steht seit/);
+  });
+
+  it("focusId promotes that question to head", () => {
+    const q1 = fixtureEvent({ id: 1, question_text: "First open?" });
+    const q2 = fixtureEvent({
+      id: 2,
+      question_text: "Deep-link target?",
+      options: [
+        { nr: 1, label: "A", recommended: false },
+        { nr: 2, label: "B", recommended: false },
+      ],
+    });
+    render(
+      <AnswerSheet
+        questions={[q1, q2]}
+        focusId={2}
+        onClose={() => {}}
+        reload={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Deep-link target?")).toBeTruthy();
+    expect(screen.queryByText("First open?")).toBeNull();
+  });
+
+  it("closedHint shows when no open questions (deep-link already answered)", () => {
+    render(
+      <AnswerSheet
+        questions={[]}
+        focusId={999}
+        closedHint="bereits beantwortet/abgelaufen"
+        onClose={() => {}}
+        reload={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("answer-sheet-closed-hint").textContent).toMatch(
+      /bereits beantwortet/,
+    );
+  });
+
+  it("deep-link target closed but another question open shows warn banner", () => {
+    const other = fixtureEvent({ id: 7, question_text: "Other open?" });
+    render(
+      <AnswerSheet
+        questions={[other]}
+        focusId={999}
+        closedHint="bereits beantwortet/abgelaufen"
+        onClose={() => {}}
+        reload={vi.fn()}
+      />,
+    );
+    // The other question renders…
+    expect(screen.getByText("Other open?")).toBeTruthy();
+    // …but never silently: the banner names the deep-link outcome (Codex I3).
+    expect(screen.getByTestId("answer-sheet-deeplink-hint").textContent).toMatch(
+      /bereits beantwortet/,
+    );
+  });

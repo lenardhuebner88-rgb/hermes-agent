@@ -17648,6 +17648,24 @@ def agent_questions_resolve(req: AgentQuestionResolveRequest) -> Dict[str, objec
     return result
 
 
+@app.post("/api/agent-questions/visibility")
+def agent_questions_visibility() -> Dict[str, object]:
+    """Heartbeat: a /control tab is currently visible (I3 push visibility gate).
+
+    Frontend POSTs every ~15s while ``!document.hidden`` and immediately on
+    visibilitychange→visible. Shared via question_meta so the poller process
+    can skip pushes when the operator is looking.
+    """
+    from hermes_cli.agent_question_push import set_last_visible_ts
+
+    try:
+        set_last_visible_ts()
+    except Exception as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+    return {"ok": True}
+
+
 @app.post("/api/agent-questions/{event_id}/answer")
 def agent_questions_answer(
     event_id: int,

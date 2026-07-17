@@ -32,6 +32,8 @@ const apiMock = {
   getControlOverviewKanbanBoard: vi.fn(),
   getControlOverviewDecisionQueue: vi.fn(),
   getAccountUsage: vi.fn(),
+  listAgentQuestions: vi.fn(),
+  answerAgentQuestion: vi.fn(),
 };
 const fitFitMock = vi.fn();
 const terminalScrollLinesMock = vi.fn();
@@ -301,6 +303,8 @@ beforeEach(() => {
   apiMock.ensureAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
   apiMock.createAgentTerminalWindow.mockImplementation(async (kind: string) => ({ window: windows.find((w) => w.window === kind) ?? windows[0] }));
   apiMock.getAgentTerminalOverview.mockResolvedValue(overviewFixture);
+  apiMock.listAgentQuestions.mockResolvedValue({ questions: [] });
+  apiMock.answerAgentQuestion.mockResolvedValue({ ok: true, verified: true, latency_s: 1 });
   apiMock.sendAgentTerminalKeys.mockResolvedValue({ ok: true });
   apiMock.renameAgentTerminalWindow.mockResolvedValue({ window: windows[0] });
   apiMock.terminateAgentTerminalWindow.mockResolvedValue({ ok: true });
@@ -1257,26 +1261,49 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     await waitFor(() => expect(apiMock.getAgentTerminalWindows).toHaveBeenCalledTimes(2));
   });
 
-  it("exposes overview state on chips and a Wer-wartet pill that jumps to the frage window (S10)", async () => {
-    // overviewFixture marks codex as "frage" — chip accessible name + summary pill.
+  it("exposes overview state on chips and store QuestionPill opens AnswerSheet (I3)", async () => {
+    // overviewFixture marks codex as "frage" — chip accessible name still shows state.
+    // Heuristic frage-summary-pill is gone; store QuestionPill is the sole surface.
     installDom(true);
+    apiMock.listAgentQuestions.mockResolvedValue({
+      questions: [
+        {
+          id: 501,
+          ts: "2026-07-17T10:00:00Z",
+          updated_ts: null,
+          source: "scrape",
+          session: "hermes-agents",
+          window: "codex",
+          pane_id: "%2",
+          fingerprint: "fp-501",
+          kind: "codex",
+          cwd: "/home/piet/.hermes/hermes-agent",
+          question_text: "Allow this action? (y/n)",
+          options: [
+            { nr: "y", label: "Yes", recommended: true },
+            { nr: "n", label: "No", recommended: false },
+          ],
+          class: null,
+          status: "open",
+          answered_by: null,
+          answer: null,
+          latency_s: null,
+          answer_verified: null,
+          override: 0,
+        },
+      ],
+    });
     await renderView();
 
     const codexChip = await screen.findByRole("button", { name: /hermes-agents:codex — frage/i });
     expect(codexChip.getAttribute("title")).toMatch(/frage/i);
-    expect(await screen.findByRole("button", { name: "1 Frage" })).toBeTruthy();
-    expect(screen.getByTestId("frage-summary-pill").textContent).toMatch(/1 Frage/);
+    expect(screen.queryByTestId("frage-summary-pill")).toBeNull();
 
-    // Pill jumps to the first non-active frage window (codex); cwd chip proves target switch.
-    fireEvent.click(screen.getByTestId("frage-summary-pill"));
-    await waitFor(() =>
-      expect(screen.getByTestId("mobile-cwd-chip").getAttribute("title")).toBe(
-        "/home/piet/.hermes/hermes-agent",
-      ),
-    );
-    // Second tap on the now-active codex chip opens the session sheet (same contract as chip switch).
-    fireEvent.click(codexChip);
-    expect(await screen.findByRole("button", { name: "Sitzung schließen" })).toBeTruthy();
+    const pill = await screen.findByTestId("frage-pill");
+    expect(pill.textContent).toMatch(/1 Frage/);
+    fireEvent.click(pill);
+    expect(await screen.findByTestId("answer-sheet")).toBeTruthy();
+    expect(screen.getByText("Allow this action? (y/n)")).toBeTruthy();
   });
 
   it("polls agent-terminal overview while on mobile terminal view without opening Flotte (S10)", async () => {

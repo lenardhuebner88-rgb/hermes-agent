@@ -12,10 +12,10 @@ import { Overlay } from "../../components/Overlay";
 import { Eyebrow } from "../../components/primitives";
 import { extractDetail } from "../../hooks/internal";
 
-function formatStandingAge(ts: string): string {
+function formatStandingAge(ts: string, nowMs: number = Date.now()): string {
   const ms = Date.parse(ts);
   if (!Number.isFinite(ms)) return "steht seit kurzem";
-  const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  const sec = Math.max(0, Math.round((nowMs - ms) / 1000));
   if (sec < 60) return `steht seit ${sec}s`;
   const min = Math.round(sec / 60);
   if (min < 60) return `steht seit ${min} min`;
@@ -47,11 +47,29 @@ export type AnswerSheetProps = {
       questions: AgentQuestionEvent[];
     } | null,
   ) => void;
+  /** Deep-link focus: show this open event first when present. */
+  focusId?: number | null;
+  /** Deep-link hit a closed/missing event — show hint instead of options. */
+  closedHint?: string | null;
 };
 
-export function AnswerSheet({ questions, onClose, reload, updateData }: AnswerSheetProps) {
-  const current = questions[0] ?? null;
+export function AnswerSheet({
+  questions,
+  onClose,
+  reload,
+  updateData,
+  focusId = null,
+  closedHint = null,
+}: AnswerSheetProps) {
+  const ordered = useMemo(() => {
+    if (focusId == null) return questions;
+    const idx = questions.findIndex((q) => q.id === focusId);
+    if (idx < 0) return questions;
+    return [questions[idx], ...questions.filter((_, i) => i !== idx)];
+  }, [questions, focusId]);
+  const current = ordered[0] ?? null;
   const [sending, setSending] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   // Error state carries the question id it belongs to: the 5s poll can swap
   // the head question WHILE a POST is in flight (backend claims at POST start,
   // verify-sleep makes the request take 2-4s), and a stale failure must never
@@ -73,9 +91,15 @@ export function AnswerSheet({ questions, onClose, reload, updateData }: AnswerSh
     setErrorState(null);
   }, [current?.id]);
 
+  // Live-ticking age ("steht seit X min") — recompute every 15s.
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 15_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   const standingAge = useMemo(
-    () => (current ? formatStandingAge(current.ts) : ""),
-    [current],
+    () => (current ? formatStandingAge(current.ts, nowMs) : ""),
+    [current, nowMs],
   );
 
   const removeQuestion = useCallback(
@@ -169,10 +193,12 @@ export function AnswerSheet({ questions, onClose, reload, updateData }: AnswerSh
                   {shortCwd(current.cwd)}
                 </span>
                 {" · "}
-                <span>{standingAge}</span>
+                <span data-testid="answer-sheet-age">{standingAge}</span>
               </p>
             ) : (
-              <h2 className="text-sm font-semibold text-ink">Keine offenen Fragen</h2>
+              <h2 className="text-sm font-semibold text-ink">
+                {closedHint ? "Frage nicht mehr offen" : "Keine offenen Fragen"}
+              </h2>
             )}
           </div>
           <button
@@ -187,8 +213,21 @@ export function AnswerSheet({ questions, onClose, reload, updateData }: AnswerSh
         </div>
 
         {!current && (
-          <p className="text-sm text-ink-3">
-            Keine offenen Fragen. Das Sheet kann geschlossen werden.
+          <p className="text-sm text-ink-3" data-testid="answer-sheet-closed-hint">
+            {closedHint
+              || "Keine offenen Fragen. Das Sheet kann geschlossen werden."}
+          </p>
+        )}
+
+        {current && closedHint && focusId != null && current.id !== focusId && (
+          // Deep-link target is gone but OTHER questions are open: without this
+          // banner the sheet would silently show a different question and the
+          // operator could answer the wrong one (Codex review, I3).
+          <p
+            className="rounded-card border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-[12px] text-status-warn"
+            data-testid="answer-sheet-deeplink-hint"
+          >
+            {`Die verlinkte Frage ist ${closedHint} — unten steht die nächste offene Frage.`}
           </p>
         )}
 

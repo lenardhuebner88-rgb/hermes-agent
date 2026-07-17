@@ -93,6 +93,15 @@ CREATE INDEX IF NOT EXISTS idx_question_events_pane_status
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_question_events_open_pane_fp
     ON question_events(pane_id, fingerprint) WHERE status = 'open';
+
+-- Small shared key/value store (visibility heartbeat, push debounce queue).
+-- Lives in the same DB so web process and poller process share state without
+-- a second DB file (I3).
+CREATE TABLE IF NOT EXISTS question_meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_ts  TEXT NOT NULL
+);
 """
 
 # Live DBs may predate I2 additive columns — migrate on connect.
@@ -396,6 +405,37 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
         options = []
     d["options"] = options
     return d
+
+
+def get_meta(key: str, *, db_path: Optional[Path] = None) -> str | None:
+    """Read a value from the shared ``question_meta`` table."""
+    with connect_closing(db_path=db_path) as conn:
+        row = conn.execute(
+            "SELECT value FROM question_meta WHERE key = ?",
+            (str(key),),
+        ).fetchone()
+    if row is None:
+        return None
+    return str(row["value"]) if row["value"] is not None else None
+
+
+def set_meta(
+    key: str,
+    value: str,
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> None:
+    """Upsert a value into the shared ``question_meta`` table."""
+    ts = _iso_now(now)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            conn.execute(
+                "INSERT INTO question_meta (key, value, updated_ts) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_ts = excluded.updated_ts",
+                (str(key), str(value), ts),
+            )
 
 
 def find_open_event(
@@ -792,7 +832,16 @@ def ingest_hook_event(
                 ),
             )
             new_id = int(cur.lastrowid)
-            return {"ok": True, "id": new_id}
+    # Push outside the write txn (sender may touch kanban DB).
+    try:
+        from hermes_cli.agent_question_push import maybe_push_question
+
+        maybe_push_question(new_id, db_path=db_path, now=now)
+    except Exception:
+        logger.warning(
+            "ingest_hook_event push hook failed event_id=%s", new_id, exc_info=True
+        )
+    return {"ok": True, "id": new_id}
 
 
 def resolve_hook_event(
@@ -830,11 +879,18 @@ def resolve_hook_event(
                 latency_s = max(0.0, now_ts - _parse_iso_ts(str(row["ts"] or "")))
             except (TypeError, ValueError):
                 latency_s = 0.0
+            # Resolve-signal (PostToolUse) is authoritative verification for
+            # hook-source events — CC often still echoes the question text, so
+            # a text-disappear check would false-negative (I3 Mini #3).
+            # But only with a real answer: PostToolUse can fire with an empty
+            # answers payload (Esc-Abbruch, versionsabhängig) — closing is
+            # correct then, a verified-stamp is not (Kimi review m5).
+            verified_flag = 1 if answer_s else 0
             cur = conn.execute(
                 "UPDATE question_events SET status = 'answered', "
                 "answered_by = 'terminal', answer = ?, latency_s = ?, "
-                "updated_ts = ? WHERE id = ? AND status = 'open'",
-                (answer_s, float(latency_s), ts, event_id),
+                "answer_verified = ?, updated_ts = ? WHERE id = ? AND status = 'open'",
+                (answer_s, float(latency_s), verified_flag, ts, event_id),
             )
             if int(cur.rowcount or 0) != 1:
                 return {"ok": True, "resolved": False}
@@ -843,6 +899,7 @@ def resolve_hook_event(
                 "resolved": True,
                 "id": event_id,
                 "latency_s": float(latency_s),
+                "verified": bool(verified_flag),
             }
 
 
@@ -1100,8 +1157,17 @@ def answer_question(
     sleep(float(verify_delay_s))
     verified = False
     try:
-        fp2 = _recheck_event_standing(svc, event)
-        verified = fp2 is None or fp2 != expected_fp
+        if str(event.get("source") or "") == "hook":
+            # Hook-source: successful send is treated as verified. The
+            # resolve-signal path also stamps verified=True. Text-disappear
+            # is a false-negative under CC echo (question still on screen).
+            verified = True
+        else:
+            # Scrape: fingerprint gone/changed. One capture only — options are
+            # part of the semantic select region, so options-list disappearance
+            # already flips the fingerprint (no second capture_pane).
+            fp2 = _recheck_event_standing(svc, event)
+            verified = fp2 is None or fp2 != expected_fp
         _set_verify_fields(
             event_id,
             answer_verified=verified,
@@ -1308,6 +1374,18 @@ class QuestionScrapeIngestor:
                     summary["idempotent"] += 1
                 else:
                     summary["created"] += 1
+                    try:
+                        from hermes_cli.agent_question_push import maybe_push_question
+
+                        maybe_push_question(
+                            int(new_id), db_path=self.db_path, now=now
+                        )
+                    except Exception:
+                        logger.warning(
+                            "scrape insert push hook failed event_id=%s",
+                            new_id,
+                            exc_info=True,
+                        )
                 next_pending[pane_id] = fp
                 standing_panes.add(pane_id)
             else:
@@ -1384,6 +1462,90 @@ class QuestionScrapeIngestor:
 
 
 # ---------------------------------------------------------------------------
+# Housekeeping / GC (I3 Mini #4)
+# ---------------------------------------------------------------------------
+
+# Closed events older than this (by updated_ts) are deleted.
+PRUNE_MAX_AGE_DAYS = 14
+# Prune at most once per hour from the poller loop.
+PRUNE_INTERVAL_S = 3600.0
+
+
+def prune_old_events(
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+    max_age_days: float = PRUNE_MAX_AGE_DAYS,
+) -> int:
+    """DELETE expired/superseded/answered events with ``updated_ts`` older than max_age_days.
+
+    Returns the number of deleted rows.
+    """
+    now_ts = time.time() if now is None else float(now)
+    cutoff = _iso_now(now_ts - float(max_age_days) * 86400.0)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            cur = conn.execute(
+                "DELETE FROM question_events WHERE status IN "
+                "('expired', 'superseded', 'answered') AND updated_ts < ?",
+                (cutoff,),
+            )
+            return int(cur.rowcount or 0)
+
+
+def prune_bak_files(
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+    max_age_days: float = PRUNE_MAX_AGE_DAYS,
+) -> int:
+    """Delete ``question_events.db.bak-*`` files older than max_age_days.
+
+    Only this exact name pattern next to the DB — nothing else.
+    Returns the number of files removed.
+    """
+    path = db_path if db_path is not None else question_events_db_path()
+    parent = path.parent
+    now_ts = time.time() if now is None else float(now)
+    max_age_s = float(max_age_days) * 86400.0
+    removed = 0
+    try:
+        candidates = sorted(parent.glob("question_events.db.bak-*"))
+    except Exception:
+        return 0
+    for bak in candidates:
+        # Strict prefix: basename must start with the bak pattern stem.
+        name = bak.name
+        if not name.startswith("question_events.db.bak-"):
+            continue
+        if not bak.is_file():
+            continue
+        try:
+            age_s = now_ts - bak.stat().st_mtime
+        except OSError:
+            continue
+        if age_s <= max_age_s:
+            continue
+        try:
+            bak.unlink()
+            removed += 1
+        except OSError:
+            logger.warning("failed to remove bak file %s", bak, exc_info=True)
+    return removed
+
+
+def run_housekeeping(
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> dict[str, int]:
+    """Prune old events + bak files. Safe to call from the poller."""
+    deleted = prune_old_events(db_path=db_path, now=now)
+    bak_removed = prune_bak_files(db_path=db_path, now=now)
+    return {"deleted": deleted, "bak_removed": bak_removed}
+
+
+# ---------------------------------------------------------------------------
 # Background poller (web_server startup only)
 # ---------------------------------------------------------------------------
 
@@ -1392,6 +1554,7 @@ _poller_thread: threading.Thread | None = None
 _poller_stop = threading.Event()
 _default_ingestor: QuestionScrapeIngestor | None = None
 _last_warn_mono: float = 0.0
+_last_prune_mono: float = 0.0
 
 
 def start_poller(interval_s: float = 5.0, *, db_path: Optional[Path] = None) -> bool:
@@ -1429,7 +1592,7 @@ def start_poller(interval_s: float = 5.0, *, db_path: Optional[Path] = None) -> 
         interval = max(0.5, float(interval_s))
 
         def _loop() -> None:
-            global _last_warn_mono
+            global _last_warn_mono, _last_prune_mono
             while not _poller_stop.is_set():
                 try:
                     ingestor.poll_once()
@@ -1441,6 +1604,17 @@ def start_poller(interval_s: float = 5.0, *, db_path: Optional[Path] = None) -> 
                             exc_info=True,
                         )
                         _last_warn_mono = mono
+                # Housekeeping at most once per hour (no separate cron).
+                try:
+                    mono = time.monotonic()
+                    if mono - _last_prune_mono >= PRUNE_INTERVAL_S:
+                        run_housekeeping(db_path=resolved_db_path)
+                        _last_prune_mono = mono
+                except Exception:
+                    logger.warning(
+                        "agent_questions housekeeping failed",
+                        exc_info=True,
+                    )
                 if _poller_stop.wait(interval):
                     break
 
@@ -1451,6 +1625,14 @@ def start_poller(interval_s: float = 5.0, *, db_path: Optional[Path] = None) -> 
         )
         _poller_thread = thread
         thread.start()
+        # Re-arm a bundled push stranded by a restart inside the debounce
+        # window (pending ids are persistent, the timer is not — Kimi m2).
+        try:
+            from hermes_cli.agent_question_push import drain_pending_on_start
+
+            drain_pending_on_start(db_path=db_path)
+        except Exception:
+            logger.warning("agent_questions push drain-on-start failed", exc_info=True)
         logger.info("agent_questions poller started (interval_s=%s)", interval)
         return True
 
