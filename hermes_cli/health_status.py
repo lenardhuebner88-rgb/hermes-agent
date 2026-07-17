@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import json
 import logging
 import sqlite3
@@ -19,6 +21,21 @@ _SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db", "kanban_dispatcher")
 _KANBAN_DISPATCHER_STALE_AFTER_SECONDS = 180
 PROBE_TIMEOUT_S = 3.0
 _log = logging.getLogger(__name__)
+
+# Probes must not share default executor with PTY pumps (starvation)
+_PROBE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="health-probe"
+)
+
+
+async def _run_probe(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Run a sync probe on the private pool (not the default asyncio executor)."""
+    loop = asyncio.get_running_loop()
+    if args or kwargs:
+        return await loop.run_in_executor(
+            _PROBE_EXECUTOR, functools.partial(fn, *args, **kwargs)
+        )
+    return await loop.run_in_executor(_PROBE_EXECUTOR, fn)
 
 
 
@@ -57,10 +74,10 @@ async def _probe_gateway_status() -> dict[str, Any]:
     try:
         from hermes_cli.web_server import _probe_gateway_health, get_running_pid
 
-        pid = await asyncio.to_thread(get_running_pid)
+        pid = await _run_probe(get_running_pid)
         if pid is not None:
             return _status_dict("healthy", "gateway running", latency_ms=_latency_ms(start))
-        alive, body = await asyncio.to_thread(_probe_gateway_health)
+        alive, body = await _run_probe(_probe_gateway_health)
         latency = _latency_ms(start)
     except Exception as exc:
         _log.exception("gateway health probe failed")
@@ -90,7 +107,7 @@ async def _probe_autoresearch_status() -> dict[str, Any]:
     try:
         from hermes_cli.autoresearch_view import read_runner_status
 
-        runner_status = await asyncio.to_thread(read_runner_status)
+        runner_status = await _run_probe(read_runner_status)
     except Exception as exc:
         _log.exception("autoresearch health probe failed")
         return _status_dict(
@@ -161,7 +178,7 @@ def _probe_kanban_db_sync() -> dict[str, Any]:
 
 
 async def _probe_kanban_db_status() -> dict[str, Any]:
-    return await asyncio.to_thread(_probe_kanban_db_sync)
+    return await _run_probe(_probe_kanban_db_sync)
 
 
 def _probe_kanban_dispatcher_sync() -> dict[str, Any]:
@@ -221,7 +238,7 @@ def _probe_kanban_dispatcher_sync() -> dict[str, Any]:
 
 
 async def _probe_kanban_dispatcher_status() -> dict[str, Any]:
-    return await asyncio.to_thread(_probe_kanban_dispatcher_sync)
+    return await _run_probe(_probe_kanban_dispatcher_sync)
 
 
 def _offline_from_exception(name: str, exc: BaseException) -> dict[str, Any]:
