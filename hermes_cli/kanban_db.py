@@ -19444,25 +19444,90 @@ def _record_spawn_retry(conn: sqlite3.Connection, task_id: str, reason: str) -> 
     )
 
 
-def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
-    """Record the spawned child's pid + emit a ``spawned`` event.
+def _set_worker_pid(
+    conn: sqlite3.Connection,
+    task_id: str,
+    pid: int,
+    *,
+    expected_run_id: Optional[int] = None,
+    expected_claim_lock: Optional[str] = None,
+) -> bool:
+    """Record the spawned child's pid only for the owning run generation.
 
     The event's payload carries the pid so a human reading ``hermes kanban
     tail`` can correlate log lines with OS-level traces without opening
-    the drawer.
+    the drawer.  Dispatch callers pass the run id and claim lock captured before
+    spawn; an operator completion/reclaim or a newer claim therefore makes this
+    write lose its CAS instead of attaching a stale pid to the new task state.
     """
     with write_txn(conn):
-        conn.execute(
-            "UPDATE tasks SET worker_pid = ? WHERE id = ?",
-            (int(pid), task_id),
+        predicates = [
+            "id = ?",
+            "status = 'running'",
+            "current_run_id IS NOT NULL",
+        ]
+        params: list[Any] = [int(pid), task_id]
+        if expected_run_id is not None:
+            predicates.append("current_run_id = ?")
+            params.append(int(expected_run_id))
+        if expected_claim_lock is not None:
+            predicates.append("claim_lock IS ?")
+            params.append(expected_claim_lock)
+        cur = conn.execute(
+            "UPDATE tasks SET worker_pid = ? WHERE " + " AND ".join(predicates),
+            params,
         )
-        run_id = _current_run_id(conn, task_id)
-        if run_id is not None:
-            conn.execute(
-                "UPDATE task_runs SET worker_pid = ? WHERE id = ?",
-                (int(pid), run_id),
+        if cur.rowcount != 1:
+            return False
+        run_id = (
+            int(expected_run_id)
+            if expected_run_id is not None
+            else _current_run_id(conn, task_id)
+        )
+        run_cur = conn.execute(
+            "UPDATE task_runs SET worker_pid = ? "
+            "WHERE id = ? AND task_id = ? AND status = 'running' "
+            "AND ended_at IS NULL",
+            (int(pid), run_id, task_id),
+        )
+        if run_cur.rowcount != 1:
+            raise RuntimeError(
+                f"active run {run_id} disappeared while attaching worker pid for {task_id}"
             )
         _append_event(conn, task_id, "spawned", {"pid": int(pid)}, run_id=run_id)
+        return True
+
+
+def _attach_or_reap_spawned_worker(
+    conn: sqlite3.Connection,
+    task: Task,
+    pid: int,
+) -> bool:
+    """Fence a child whose claim generation changed while it was spawning."""
+    if _set_worker_pid(
+        conn,
+        task.id,
+        int(pid),
+        expected_run_id=task.current_run_id,
+        expected_claim_lock=task.claim_lock,
+    ):
+        return True
+
+    termination = _terminate_reclaimed_worker(int(pid), task.claim_lock)
+    with write_txn(conn):
+        _append_event(
+            conn,
+            task.id,
+            "spawn_rejected_stale_claim",
+            {
+                "pid": int(pid),
+                "expected_run_id": task.current_run_id,
+                "expected_claim_lock": task.claim_lock,
+                "termination": termination,
+            },
+            run_id=task.current_run_id,
+        )
+    return False
 
 
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
@@ -25501,8 +25566,8 @@ def _dispatch_once_locked(
                     pid = _spawn(claimed, str(workspace))
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
-            if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+            if pid and not _attach_or_reap_spawned_worker(conn, claimed, int(pid)):
+                continue
             # PlanSpec B: stamp the expanded scope-contract trace onto the run
             # so it is permanently auditable WHAT contract the worker saw. Only
             # the in-process worker path reads it (via build_worker_context);
@@ -25748,8 +25813,8 @@ def _dispatch_once_locked(
                     pid = _spawn(claimed, str(workspace))
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
-            if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+            if pid and not _attach_or_reap_spawned_worker(conn, claimed, int(pid)):
+                continue
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
             # Befund 4 same-tick race: occupy the chain slot so a
