@@ -226,16 +226,23 @@ describe("HeuteTab PlanSpec status chips", () => {
 });
 
 describe("HeuteTab action block + idle state", () => {
-  it("keeps clipped worker task and heartbeat text recoverable", () => {
+  it("expands clipped worker task and heartbeat text by tap or keyboard", () => {
     const active = worker("long", "premium");
     active.task_title = "T".repeat(400);
     active.last_heartbeat_note = "Heartbeat ".repeat(80);
     renderHeute({ activeWorkers: [active] });
 
-    expect(screen.getByText(active.task_title).getAttribute("title")).toBe(active.task_title);
+    const taskTitle = screen.getByText(active.task_title);
+    expect(taskTitle.getAttribute("title")).toBeNull();
+    expect(taskTitle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(taskTitle);
+    expect(taskTitle.getAttribute("aria-expanded")).toBe("true");
+    expect(taskTitle.className).toContain("fleet-expandable-text-expanded");
     const note = document.querySelector(".fleet-wk-note");
     expect(note?.textContent).toBe(active.last_heartbeat_note);
-    expect(note?.getAttribute("title")).toBe(active.last_heartbeat_note);
+    expect(note?.getAttribute("title")).toBeNull();
+    fireEvent.keyDown(note as HTMLElement, { key: "Enter" });
+    expect(note?.getAttribute("aria-expanded")).toBe("true");
   });
 
   it("shows a tappable action row for a waiting approval that navigates to Plan", () => {

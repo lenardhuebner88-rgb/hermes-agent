@@ -37,6 +37,33 @@ import { elapsedSeconds } from "../../lib/derive";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
 import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 
+export function ExpandableText({ text, className }: { text: string; className: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const toggle = () => setExpanded((value) => !value);
+
+  return (
+    <span
+      className={`${className} fleet-expandable-text${expanded ? " fleet-expandable-text-expanded" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toggle();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        toggle();
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
 /** Ziel-Subtabs, zu denen der Heute-Handlungsblock und Karten navigieren. */
 type HeuteNavTarget = "worker" | "plan" | "risiko";
 
@@ -552,11 +579,11 @@ function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; 
       </div>
 
       {/* Task-Titel */}
-      <div className="fleet-wk-task" title={w.task_title}>{w.task_title}</div>
+      <ExpandableText className="fleet-wk-task" text={w.task_title} />
 
       {/* Heartbeat-Notiz */}
       {w.last_heartbeat_note ? (
-        <div className="fleet-wk-note" title={w.last_heartbeat_note}>{w.last_heartbeat_note}</div>
+        <ExpandableText className="fleet-wk-note" text={w.last_heartbeat_note} />
       ) : null}
 
       {/* Progress-Rail — S2: run_progress wenn vorhanden, sonst ETA-Heuristik (~) */}
@@ -614,7 +641,7 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   return (
     <button type="button" className="fleet-ps" onClick={onClick}>
       <div className="fleet-ps-top">
-        <span className="fleet-ps-name" title={ps.topic || ps.filename}>{ps.topic || ps.filename}</span>
+        <ExpandableText className="fleet-ps-name" text={ps.topic || ps.filename} />
         <SignalChip
           tone={badgeTone}
           label={badgeLabel}

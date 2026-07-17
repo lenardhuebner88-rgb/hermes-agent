@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const src = readFileSync(path.resolve(import.meta.dirname, "KettenTab.tsx"), "utf8");
 const kettenCss = readFileSync(path.resolve(import.meta.dirname, "ketten-v4.css"), "utf8");
@@ -259,13 +259,16 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(container.querySelector(".glyph-active")).toBeNull();
   });
 
-  it("keeps clipped chain and node titles recoverable", async () => {
+  it("expands clipped chain titles on tap while retaining other title fallbacks", async () => {
     render(
       <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
     );
 
     const chainTitle = await screen.findByText("Ketten v4 Fixes", { selector: ".chain-title" });
-    expect(chainTitle.getAttribute("title")).toBe("Ketten v4 Fixes");
+    expect(chainTitle.getAttribute("title")).toBeNull();
+    expect(chainTitle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(chainTitle);
+    expect(chainTitle.getAttribute("aria-expanded")).toBe("true");
     const focusTitle = await screen.findByText("Slice B — running", { selector: ".detail-title" });
     expect(focusTitle.getAttribute("title")).toBe("Slice B — running");
   });
