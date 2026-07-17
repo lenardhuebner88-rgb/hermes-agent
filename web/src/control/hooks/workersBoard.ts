@@ -16,6 +16,61 @@ import type { LiveEvent } from "../lib/types";
 import type { BoardResponse, WorkersResponse } from "../lib/types";
 import { usePolling } from "./internal";
 
+export const DONE_PAGE_LIMIT = 30;
+
+export interface DoneBoardPage {
+  total_count: number;
+  loaded_count: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+export type PaginatedBoardResponse = BoardResponse & { done_page?: DoneBoardPage };
+
+function parsePaginatedBoardResponse(raw: unknown, source: string): PaginatedBoardResponse {
+  const board = parseOrThrow(BoardResponseSchema, raw, source);
+  if (typeof raw !== "object" || raw === null || !("done_page" in raw)) return board;
+  const page = (raw as { done_page?: unknown }).done_page;
+  if (typeof page !== "object" || page === null) throw new Error(`${source}: invalid done_page`);
+  const value = page as Record<string, unknown>;
+  const nextCursor = value.next_cursor;
+  if (
+    !Number.isInteger(value.total_count)
+    || !Number.isInteger(value.loaded_count)
+    || !Number.isInteger(value.limit)
+    || typeof value.has_more !== "boolean"
+    || !(nextCursor === null || typeof nextCursor === "string")
+  ) {
+    throw new Error(`${source}: invalid done_page`);
+  }
+  return { ...board, done_page: page as DoneBoardPage };
+}
+
+export interface DonePageQuery {
+  board: string | null;
+  cursor: string | null;
+}
+
+export type DonePageLoader = (
+  query: DonePageQuery,
+  signal: AbortSignal,
+) => Promise<PaginatedBoardResponse>;
+
+export const loadDoneBoardPage: DonePageLoader = async ({ board, cursor }, signal) => {
+  const params = new URLSearchParams({
+    card_diagnostics: "summary",
+    card_body: "none",
+    done_limit: String(DONE_PAGE_LIMIT),
+  });
+  if (cursor) params.set("done_cursor", cursor);
+  const url = withBoardParam(`/api/plugins/kanban/board?${params.toString()}`, board);
+  return parsePaginatedBoardResponse(
+    await fetchJSON<unknown>(url, { signal }),
+    board ? `kanban/board:${board}:done` : "kanban/board:done",
+  );
+};
+
 export function useHermesWorkers() {
   return usePolling<WorkersResponse>(
     "workers/active",
