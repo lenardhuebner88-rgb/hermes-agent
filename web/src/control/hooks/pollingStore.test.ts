@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { subscribe, refresh, parseStructuredError, setIntervalScale, _resetPollingStore } from "./pollingStore";
+import {
+  subscribe,
+  refresh,
+  parseStructuredError,
+  setIntervalScale,
+  getAttemptState,
+  getSnapshot,
+  ATTEMPT_DEADLINE_MS,
+  _resetPollingStore,
+} from "./pollingStore";
 
 beforeEach(() => {
   _resetPollingStore();
@@ -10,6 +19,7 @@ afterEach(() => {
   vi.useRealTimers();
   _resetPollingStore();
   delete (globalThis as { document?: unknown }).document;
+  delete (globalThis as { window?: unknown }).window;
 });
 
 describe("parseStructuredError", () => {
@@ -274,6 +284,160 @@ describe("pollingStore", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(loader).toHaveBeenCalledTimes(2);
     expect(cb).toHaveBeenCalledTimes(2);
+  });
+
+  it("exposes non-notifying attempt state during a slow 16s success path", async () => {
+    let resolveLoad: ((value: number) => void) | undefined;
+    const loader = vi.fn(
+      () =>
+        new Promise<number>((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+    const cb = vi.fn();
+    subscribe("slow-ok", loader, 60_000, cb);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    const during = getAttemptState("slow-ok");
+    expect(during.refreshing).toBe(true);
+    expect(during.attemptStartedAt).not.toBeNull();
+    expect(during.lastSuccessAt).toBeNull();
+    // attempt-state must not drive extra snapshot notifies
+    expect(cb).toHaveBeenCalledTimes(1); // only the sync initial loading snapshot so far
+
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(getAttemptState("slow-ok").refreshing).toBe(true);
+    expect(cb).toHaveBeenCalledTimes(1); // still no notify until settle
+
+    resolveLoad?.(42);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getAttemptState("slow-ok")).toEqual({
+      refreshing: false,
+      attemptStartedAt: null,
+      lastSuccessAt: expect.any(Number),
+    });
+    expect(cb).toHaveBeenLastCalledWith(expect.objectContaining({ data: 42, loading: false }));
+  });
+
+  it("aborts a wedged inFlight past ATTEMPT_DEADLINE_MS and starts a fresh attempt", async () => {
+    let resolveSecond: ((value: string) => void) | undefined;
+    const loader = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>(() => { /* never settles — wedge */ }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    subscribe("wedge", loader, 1_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(getAttemptState("wedge").refreshing).toBe(true);
+
+    // Within the deadline a concurrent tick must not start a second fetch.
+    await vi.advanceTimersByTimeAsync(ATTEMPT_DEADLINE_MS - 1_000);
+    await refresh("wedge");
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    // Past the deadline: next tick heals the wedge and starts a fresh attempt.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await refresh("wedge");
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(getAttemptState("wedge").refreshing).toBe(true);
+
+    resolveSecond?.("healed");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSnapshot("wedge")).toEqual(expect.objectContaining({ data: "healed", loading: false }));
+    expect(getAttemptState("wedge").refreshing).toBe(false);
+  });
+
+  it("does not let a stale-generation completion overwrite a newer snapshot", async () => {
+    let resolveFirst: ((value: string) => void) | undefined;
+    const loader = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockResolvedValueOnce("newer");
+
+    const cb = vi.fn();
+    subscribe("gen", loader, 1_000, cb);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    // Expire the first attempt and start a second via deadline heal on refresh.
+    await vi.advanceTimersByTimeAsync(ATTEMPT_DEADLINE_MS + 1_500);
+    await refresh("gen");
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(getSnapshot("gen")?.data).toBe("newer");
+    const notifiesAfterNewer = cb.mock.calls.length;
+
+    // Late first-attempt settle must be ignored (stale generation).
+    resolveFirst?.("stale-old");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getSnapshot("gen")?.data).toBe("newer");
+    expect(cb.mock.calls.length).toBe(notifiesAfterNewer);
+  });
+
+  it("dedupes a burst of visibilitychange/pageshow/focus/online into one refresh cycle", async () => {
+    const listeners: Record<string, Array<() => void>> = {
+      visibilitychange: [],
+      pageshow: [],
+      focus: [],
+      online: [],
+    };
+    (globalThis as { document?: unknown }).document = {
+      hidden: false,
+      addEventListener: (type: string, fn: () => void) => {
+        if (type === "visibilitychange") listeners.visibilitychange.push(fn);
+      },
+    };
+    (globalThis as { window?: unknown }).window = {
+      addEventListener: (type: string, fn: () => void) => {
+        if (type in listeners) listeners[type].push(fn);
+      },
+    };
+
+    const loader = vi.fn().mockResolvedValue(1);
+    subscribe("burst", loader, 60_000, vi.fn());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+    loader.mockClear();
+
+    // Fire all four resume signals inside the 1s dedupe window.
+    for (const fn of listeners.visibilitychange) fn();
+    for (const fn of listeners.pageshow) fn();
+    for (const fn of listeners.focus) fn();
+    for (const fn of listeners.online) fn();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(loader).toHaveBeenCalledTimes(1);
+
+    // After the dedupe window, a fresh resume is allowed again.
+    await vi.advanceTimersByTimeAsync(1_001);
+    for (const fn of listeners.visibilitychange) fn();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loader).toHaveBeenCalledTimes(2);
+  });
+
+  it("unchanged-payload polls still do not notify (invariant holds with attempt tracking)", async () => {
+    const loader = vi.fn().mockResolvedValue({ count: 1, items: ["a"] });
+    const cb = vi.fn();
+    subscribe("dedupe-payload", loader, 1000, cb);
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFirst = cb.mock.calls.length;
+    expect(afterFirst).toBe(2); // sync loading + first data
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loader).toHaveBeenCalledTimes(2);
+    expect(cb).toHaveBeenCalledTimes(afterFirst); // no extra notify
+    expect(getAttemptState("dedupe-payload").refreshing).toBe(false);
   });
 });
 

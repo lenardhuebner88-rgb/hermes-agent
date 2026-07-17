@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { subscribe, refresh, getSnapshot, type StoreSnapshot, type StructuredError } from "./pollingStore";
+import {
+  subscribe,
+  refresh,
+  getSnapshot,
+  type PollLoader,
+  type StoreSnapshot,
+  type StructuredError,
+} from "./pollingStore";
 
 type LoadState<T> = {
   data: T | null;
@@ -25,7 +32,7 @@ function emptyPollingSnapshot<T>(): StoreSnapshot<T> {
 }
 
 
-export function usePolling<T>(key: string, loader: () => Promise<T>, intervalMs: number): LoadState<T> {
+export function usePolling<T>(key: string, loader: PollLoader<T>, intervalMs: number): LoadState<T> {
   const [state, setState] = useState<{ key: string; snap: StoreSnapshot<T> }>(() => ({
     key,
     snap: getSnapshot<T>(key) ?? emptyPollingSnapshot<T>(),
@@ -43,7 +50,7 @@ export function usePolling<T>(key: string, loader: () => Promise<T>, intervalMs:
   }, [loader]);
 
   useEffect(() => {
-    return subscribe<T>(key, () => loaderRef.current(), intervalMs, (next) => {
+    return subscribe<T>(key, (signal) => loaderRef.current(signal), intervalMs, (next) => {
       setState({ key, snap: next });
     });
   }, [key, intervalMs]);

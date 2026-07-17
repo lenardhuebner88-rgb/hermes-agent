@@ -35,6 +35,20 @@ const MAX_BACKGROUND_INTERVAL_MS = 30_000;
 const FOREGROUND_STAGGER_MS = 150;
 const FOREGROUND_STAGGER_CAP_MS = 2_500;
 
+/**
+ * Upper bound for a single in-flight poll attempt. Must sit above the GET
+ * timeout in lib/api.ts (GET_TIMEOUT_MS = 20_000): a legitimate slow health
+ * fetch (~16s) is still legal; a wedged attempt past this deadline is aborted
+ * so the next tick can start a fresh request. Backgrounded setTimeout timers
+ * freeze on mobile, so the 20s abort may not fire until resume — this is the
+ * store-side escape hatch for that wedge.
+ */
+export const ATTEMPT_DEADLINE_MS = 25_000;
+
+/** Burst of resume events (visibility/pageshow/focus/online) within this
+ * window collapses to a single staggered refresh cycle. */
+const RESUME_DEDUPE_MS = 1_000;
+
 export interface StructuredError {
   /** HTTP status ("500"), or "network" / "contract" for non-HTTP failures. */
   code: string;
@@ -53,10 +67,12 @@ export interface StoreSnapshot<T> {
   isStale: boolean;
 }
 
+export type PollLoader<T> = (signal?: AbortSignal) => Promise<T>;
+
 type Listener<T> = (snapshot: StoreSnapshot<T>) => void;
 
 interface Entry<T> {
-  loader: () => Promise<T>;
+  loader: PollLoader<T>;
   intervalMs: number;
   snapshot: StoreSnapshot<T>;
   lastPayloadJson: string | null;
@@ -65,6 +81,12 @@ interface Entry<T> {
   failCount: number;
   nextDelayMs: number;
   inFlight: boolean;
+  /** Epoch seconds when the current attempt began; null when idle. Non-notifying. */
+  attemptStartedAt: number | null;
+  /** Aborts a wedged attempt so a fresh tick can proceed. */
+  abortController: AbortController | null;
+  /** Monotonic; completions only patch when their captured gen still matches. */
+  generation: number;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -104,15 +126,23 @@ interface StoreGlobal {
   visibilityBound: boolean;
   /** Per-key Intervall-Multiplikator (adaptives Polling, s. setIntervalScale). */
   intervalScales: Map<string, number>;
+  /** Epoch ms of the last resume refresh cycle (dedupe visibility/pageshow/…). */
+  lastResumeAtMs: number;
 }
 
 function getStore(): StoreGlobal {
   const g = globalThis as unknown as { __hermesPollingStore?: StoreGlobal };
   if (!g.__hermesPollingStore) {
-    g.__hermesPollingStore = { entries: new Map(), visibilityBound: false, intervalScales: new Map() };
+    g.__hermesPollingStore = {
+      entries: new Map(),
+      visibilityBound: false,
+      intervalScales: new Map(),
+      lastResumeAtMs: 0,
+    };
   }
-  // HMR-Altbestand vor Einführung der Scales tolerieren.
+  // HMR-Altbestand vor Einführung der Scales/Resume-Dedupe tolerieren.
   if (!g.__hermesPollingStore.intervalScales) g.__hermesPollingStore.intervalScales = new Map();
+  if (typeof g.__hermesPollingStore.lastResumeAtMs !== "number") g.__hermesPollingStore.lastResumeAtMs = 0;
   const store = g.__hermesPollingStore;
   if (!store.visibilityBound && typeof document !== "undefined") {
     store.visibilityBound = true;
@@ -132,24 +162,51 @@ function getStore(): StoreGlobal {
         }
         return;
       }
-      // Tab refocused: refresh everything and reset backoff so a recovered
-      // endpoint snaps back to its normal cadence — staggered rather than
-      // all at once (thundering herd, see FOREGROUND_STAGGER_MS).
-      let i = 0;
-      for (const [key, entry] of store.entries) {
-        if (entry.timer) {
-          clearTimeout(entry.timer);
-          entry.timer = null;
-        }
-        entry.nextDelayMs = normalIntervalMs(key, entry);
-        const delay = Math.min(i * FOREGROUND_STAGGER_MS, FOREGROUND_STAGGER_CAP_MS);
-        if (delay === 0) void refresh(key);
-        else setTimeout(() => void refresh(key), delay);
-        i += 1;
-      }
+      triggerForegroundResume(store);
     });
+    // Same resume path as visibilitychange→visible: pageshow (bfcache), focus
+    // (some mobile browsers), online (network back). Deduped so a burst within
+    // RESUME_DEDUPE_MS is one stagger cycle, not four.
+    // Prefer `window` when present; fall back to globalThis.window so node tests
+    // can attach mocks without a real DOM Window binding.
+    const resume = () => triggerForegroundResume(store);
+    const resumeTarget =
+      (typeof window !== "undefined" ? window : null) ??
+      (globalThis as { window?: { addEventListener?: (type: string, fn: () => void) => void } }).window;
+    if (resumeTarget && typeof resumeTarget.addEventListener === "function") {
+      resumeTarget.addEventListener("pageshow", resume);
+      resumeTarget.addEventListener("focus", resume);
+      resumeTarget.addEventListener("online", resume);
+    }
   }
   return store;
+}
+
+/**
+ * Staggered full refresh of all keys. Coalesces bursts of resume signals
+ * (visibility + pageshow + focus + online) into one cycle per ~1s.
+ */
+function triggerForegroundResume(store: StoreGlobal): void {
+  if (typeof document !== "undefined" && document.hidden) return;
+  const now = Date.now();
+  if (now - store.lastResumeAtMs < RESUME_DEDUPE_MS) return;
+  store.lastResumeAtMs = now;
+
+  // Tab refocused / network back: refresh everything and reset backoff so a
+  // recovered endpoint snaps back to its normal cadence — staggered rather
+  // than all at once (thundering herd, see FOREGROUND_STAGGER_MS).
+  let i = 0;
+  for (const [key, entry] of store.entries) {
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    entry.nextDelayMs = normalIntervalMs(key, entry);
+    const delay = Math.min(i * FOREGROUND_STAGGER_MS, FOREGROUND_STAGGER_CAP_MS);
+    if (delay === 0) void refresh(key);
+    else setTimeout(() => void refresh(key), delay);
+    i += 1;
+  }
 }
 
 function notify<T>(entry: Entry<T>): void {
@@ -175,6 +232,26 @@ function scheduleNext(key: string): void {
   entry.timer = setTimeout(() => void tick(key), entry.nextDelayMs);
 }
 
+/**
+ * Non-notifying attempt observability for chrome that re-renders on its own
+ * clock (OfflineStaleBanner). Changing attempt state must NEVER call notify().
+ */
+export function getAttemptState(key: string): {
+  refreshing: boolean;
+  attemptStartedAt: number | null;
+  lastSuccessAt: number | null;
+} {
+  const entry = getStore().entries.get(key) as Entry<unknown> | undefined;
+  if (!entry) {
+    return { refreshing: false, attemptStartedAt: null, lastSuccessAt: null };
+  }
+  return {
+    refreshing: entry.inFlight && entry.attemptStartedAt != null,
+    attemptStartedAt: entry.attemptStartedAt,
+    lastSuccessAt: entry.snapshot.lastUpdated,
+  };
+}
+
 async function tick(key: string): Promise<void> {
   const entry = getStore().entries.get(key) as Entry<unknown> | undefined;
   if (!entry) return;
@@ -194,10 +271,31 @@ async function tick(key: string): Promise<void> {
     return;
   }
 
+  // Heal a wedged in-flight attempt (mobile background freezes the 20s GET
+  // abort timer; until it fires, inFlight blocks every new fetch).
+  if (entry.inFlight && entry.attemptStartedAt != null) {
+    const ageMs = Date.now() - entry.attemptStartedAt * 1000;
+    if (ageMs > ATTEMPT_DEADLINE_MS) {
+      entry.abortController?.abort();
+      entry.abortController = null;
+      entry.inFlight = false;
+      entry.attemptStartedAt = null;
+      // Fall through to start a fresh attempt. The aborted generation will
+      // not patch: we bump generation when the new attempt begins.
+    }
+  }
+
   if (!entry.inFlight) {
     entry.inFlight = true;
+    entry.generation += 1;
+    const generation = entry.generation;
+    entry.attemptStartedAt = nowSec();
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    entry.abortController = controller;
     try {
-      const data = await entry.loader();
+      const data = await entry.loader(controller?.signal);
+      // Stale completion: do not patch and do not steal the live generation's timer.
+      if (generation !== entry.generation) return;
       entry.failCount = 0;
       entry.nextDelayMs = normalIntervalMs(key, entry);
       const nextPayloadJson = payloadJson(data);
@@ -213,17 +311,36 @@ async function tick(key: string): Promise<void> {
         patch(entry, { data, error: null, errorObj: null, loading: false, lastUpdated: nowSec(), isStale: false });
       }
     } catch (e) {
-      const errObj = parseStructuredError(e);
-      entry.failCount += 1;
-      entry.nextDelayMs = isServerError(errObj)
-        ? Math.min(normalIntervalMs(key, entry) * 2 ** entry.failCount, MAX_BACKOFF_MS)
-        : normalIntervalMs(key, entry);
-      // stale-while-error: keep the last good `data`, flag it stale.
-      patch(entry, { error: errObj.message, errorObj: errObj, loading: false, isStale: entry.snapshot.data != null });
+      if (generation !== entry.generation) return;
+      // Aborted wedge heal / supersession — do not surface as a user-facing error.
+      if (controller?.signal.aborted) {
+        // Still the live generation but aborted mid-heal race: reschedule below.
+      } else {
+        const errObj = parseStructuredError(e);
+        entry.failCount += 1;
+        entry.nextDelayMs = isServerError(errObj)
+          ? Math.min(normalIntervalMs(key, entry) * 2 ** entry.failCount, MAX_BACKOFF_MS)
+          : normalIntervalMs(key, entry);
+        // stale-while-error: keep the last good `data`, flag it stale.
+        patch(entry, { error: errObj.message, errorObj: errObj, loading: false, isStale: entry.snapshot.data != null });
+      }
     } finally {
-      entry.inFlight = false;
+      if (generation === entry.generation) {
+        entry.inFlight = false;
+        entry.attemptStartedAt = null;
+        entry.abortController = null;
+      }
     }
+    // Only the live generation reschedules after its attempt settles. A stale
+    // completion returned early above and must not clear a newer timer.
+    if (generation === entry.generation) {
+      scheduleNext(key);
+    }
+    return;
   }
+
+  // Legitimately still in flight (within deadline): keep the cadence so a later
+  // tick can deadline-heal without waiting solely on an external resume.
   scheduleNext(key);
 }
 
@@ -265,7 +382,7 @@ export function getSnapshot<T>(key: string): StoreSnapshot<T> | null {
  */
 export function subscribe<T>(
   key: string,
-  loader: () => Promise<T>,
+  loader: PollLoader<T>,
   intervalMs: number,
   listener: Listener<T>,
 ): () => void {
@@ -282,6 +399,9 @@ export function subscribe<T>(
       failCount: 0,
       nextDelayMs: intervalMs,
       inFlight: false,
+      attemptStartedAt: null,
+      abortController: null,
+      generation: 0,
     };
     store.entries.set(key, entry as Entry<unknown>);
   } else {
@@ -315,8 +435,10 @@ export function _resetPollingStore(): void {
   const store = getStore();
   for (const entry of store.entries.values()) {
     if (entry.timer) clearTimeout(entry.timer);
+    entry.abortController?.abort();
   }
   store.entries.clear();
   store.intervalScales.clear();
   store.visibilityBound = false;
+  store.lastResumeAtMs = 0;
 }

@@ -3,9 +3,13 @@ import type { SystemHealthResponse } from "../lib/types";
 import { useClientNowSeconds, useVisibleSinceSeconds } from "../lib/clock";
 import { freshness } from "../lib/derive";
 import { de } from "../i18n/de";
+import { ATTEMPT_DEADLINE_MS, getAttemptState } from "../hooks/pollingStore";
 
 /** Seconds the tab must stay visible before age-stale alone shows the banner. */
 export const REFOCUS_GRACE_S = 12;
+
+/** Poll key used by useSystemHealth — attempt state is read non-notifying. */
+const HEALTH_POLL_KEY = "health-status";
 
 export function OfflineStaleBanner({ health }: {
   health: {
@@ -22,11 +26,23 @@ export function OfflineStaleBanner({ health }: {
   const visibleSince = useVisibleSinceSeconds();
   const ageFreshness = freshness(health.lastUpdated, health.pollIntervalMs ?? 5000, clientNow);
   const ageStale = ageFreshness.stale && health.lastUpdated != null;
+
+  // Legal in-flight refresh: store is actively fetching and still inside the
+  // attempt deadline. Suppress age-stale only for that window so mobile resume
+  // (stagger + slow health GET) does not flash "pausiert oder veraltet".
+  // Read on the banner's own clock tick — getAttemptState never notifies.
+  const attempt = getAttemptState(HEALTH_POLL_KEY);
+  const legalPendingRefresh =
+    attempt.refreshing &&
+    attempt.attemptStartedAt != null &&
+    (clientNow - attempt.attemptStartedAt) * 1000 < ATTEMPT_DEADLINE_MS;
+
   // Mobile app-switch freezes timers; on return age is already past threshold.
   // Suppress age-stale only until refocus grace elapses so the next poll can land.
   // Fetch errors and explicit isStale stay immediate (not grace-gated).
   const ageStaleVisible =
     ageStale &&
+    !legalPendingRefresh &&
     visibleSince != null &&
     clientNow - visibleSince >= REFOCUS_GRACE_S;
   const visible = Boolean(health.error || health.isStale || ageStaleVisible);

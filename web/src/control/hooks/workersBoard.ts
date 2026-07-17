@@ -281,12 +281,16 @@ export function useWorkerActivity(taskId: string | null, board: string | null = 
 // fetches detail via /tasks/:id. The kanban plugin dashboard keeps the
 // defaults (full). The server also sends an ETag, so an unchanged board
 // revalidates as a 304 instead of re-transferring.
-export const boardLoader = async (board: string | null = null) =>
-  parseOrThrow(
+// First arg is the board name when called from useBoard. pollingStore may also
+// invoke shared loaders with an AbortSignal — only accept real board strings.
+export const boardLoader = async (board?: string | null | AbortSignal) => {
+  const boardName = typeof board === "string" ? board : null;
+  return parseOrThrow(
     BoardResponseSchema,
-    await fetchJSON<unknown>(withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", board)),
-    board ? `kanban/board:${board}` : "kanban/board",
+    await fetchJSON<unknown>(withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", boardName)),
+    boardName ? `kanban/board:${boardName}` : "kanban/board",
   );
+};
 
 
 // Full kanban board grouped by status column — the Fleet pipeline (stage
