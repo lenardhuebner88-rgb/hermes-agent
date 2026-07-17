@@ -3219,27 +3219,45 @@ def _terminal_status(status: str) -> bool:
     return status in {"done", "archived", "failed", "cancelled"}
 
 
-def _decompose_root_has_real_child_completion(
-    conn: sqlite3.Connection, root_id: str,
-) -> bool:
-    """True iff at least one of *root_id*'s decompose-chain subtasks actually
-    reached ``status='done'``.
+# Statuses that mean "left the chain without doing the work" — the set the
+# no-real-completion guard below refuses to accept as delivery evidence.
+_NO_REAL_WORK_STATUSES = {"archived", "cancelled", "failed"}
 
-    Decompose links point from every subtask to the root
-    (``task_links.parent_id = subtask``, ``child_id = root``, see
-    :func:`_direct_decompose_root_for_child`). ``archive_task`` DELETES a
-    task's outgoing ``task_links`` rows on archive, so an archived/cancelled/
-    failed subtask's link to the root is already gone here — only subtasks
-    that reached a real, link-preserving terminal state (``done``) show up.
-    Guards ``_auto_complete_decompose_root``/``_direct_complete_decompose_root``
-    against completing a root whose entire chain was superseded-archived
-    with zero real work landed (live incident t_ecd5cf42, 2026-07-17)."""
-    row = conn.execute(
-        "SELECT 1 FROM task_links l JOIN tasks t ON t.id = l.parent_id "
-        "WHERE l.child_id = ? AND t.status = 'done' LIMIT 1",
-        (root_id,),
-    ).fetchone()
-    return row is not None
+
+def _is_real_completion_status(status: Optional[str]) -> bool:
+    return str(status or "").strip() not in _NO_REAL_WORK_STATUSES
+
+
+def _decompose_root_has_real_child_completion(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    completed_task_id: Optional[str] = None,
+    children: Optional[list[tuple[str, str]]] = None,
+) -> bool:
+    """True iff there is real evidence that a child actually did the work,
+    rather than the chain simply running out of open (non-terminal) members.
+
+    ``archive_task`` (a SUPERSEDED block) removes a child from ``task_links``
+    and from every open/pending-sibling check, so a chain whose every child
+    was only superseded-archived can otherwise look "no siblings left open"
+    and get auto-completed with zero real work landed (live incident
+    t_ecd5cf42, 2026-07-17). Guards ``_auto_complete_decompose_root``
+    (``completed_task_id`` — the task whose completion drove this call) and
+    ``_direct_complete_decompose_root`` (``children`` — the terminal-status
+    list the caller already gathered) against exactly that: refuse when the
+    only evidence on hand is an archived/cancelled/failed status, accept a
+    genuine ``done`` (or any non-terminal-bad status, e.g. a still-running
+    completion in flight) as real."""
+    if completed_task_id is not None:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (completed_task_id,),
+        ).fetchone()
+        status = row["status"] if row is not None else None
+        return _is_real_completion_status(status)
+    if children is not None:
+        return any(_is_real_completion_status(status) for _cid, status in children)
+    return True
 
 
 def _block_decompose_root_no_real_completion(
@@ -3358,7 +3376,9 @@ def _auto_complete_decompose_root(
 ) -> None:
     from hermes_cli import kanban_db as kb
 
-    if not _decompose_root_has_real_child_completion(conn, root_id):
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, completed_task_id=completed_task_id,
+    ):
         _block_decompose_root_no_real_completion(conn, root_id=root_id)
         return
 
@@ -3448,7 +3468,9 @@ def _direct_complete_decompose_root(
     """
     from hermes_cli import kanban_db as kb
 
-    if not _decompose_root_has_real_child_completion(conn, root_id):
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, children=children,
+    ):
         _block_decompose_root_no_real_completion(conn, root_id=root_id)
         return
 
