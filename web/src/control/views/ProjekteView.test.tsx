@@ -145,4 +145,66 @@ describe("ProjekteView", () => {
     expect(html).toContain("Projekt-Übersicht konnte nicht geladen werden.");
     expect(html).toContain("Agent-Belegung konnte nicht geladen werden.");
   });
+
+  it("renders the card grid in attention order (alert → active → quiet), not registry order", () => {
+    // Registry order deliberately quiet-first; the grid must reorder so the
+    // blocked project (alert) leads and the idle one trails. Stufe 7 sort.
+    const quiet: ProjectEntry = {
+      ...REAL_PROJECT,
+      slug: "oma-galerie",
+      name: "Oma-Galerie",
+      kanban: null,
+      loops: { active: 0, packs: [] },
+    };
+    const active: ProjectEntry = {
+      ...REAL_PROJECT,
+      slug: "health-track",
+      name: "Health Track",
+      kanban: { open: 2, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 1, packs: [] },
+    };
+    const alert: ProjectEntry = {
+      ...REAL_PROJECT,
+      slug: "hermes-infra",
+      name: "Hermes Infra",
+      kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 0, packs: [] },
+    };
+    mockProjects({
+      data: { generated_at: 1, registry_errors: [], projects: [quiet, active, alert] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    // The "Alle Agents" rail also mentions names, so restrict to the grid slice
+    // before the rail heading to assert card order specifically.
+    const grid = html.slice(0, html.indexOf("Alle Agents"));
+    const posAlert = grid.indexOf("Hermes Infra");
+    const posActive = grid.indexOf("Health Track");
+    const posQuiet = grid.indexOf("Oma-Galerie");
+    expect(posAlert).toBeGreaterThanOrEqual(0);
+    expect(posAlert).toBeLessThan(posActive);
+    expect(posActive).toBeLessThan(posQuiet);
+  });
+
+  it("marks the attention state on each card (aria-label on the status dot)", () => {
+    const alert: ProjectEntry = {
+      ...REAL_PROJECT,
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 2 },
+      loops: { active: 0, packs: [] },
+    };
+    mockProjects({
+      data: { generated_at: 1, registry_errors: [], projects: [alert] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    // needs_input > 0 (even with blocked == 0) → alert; the dot carries the label.
+    expect(html).toContain('data-attention="alert"');
+    // Stufe 8: the attention accent bar (absolute child, not a border utility)
+    // is tinted status-alert for an alert card.
+    expect(html).toContain("bg-status-alert");
+  });
 });
