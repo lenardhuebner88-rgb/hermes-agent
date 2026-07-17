@@ -588,7 +588,8 @@ _TMUX_LIST_PANES_CMD = [
     "list-panes",
     "-a",
     "-F",
-    "#{session_name}|#{window_index}|#{window_name}|#{pane_current_command}|#{pane_current_path}",
+    "#{session_name}|#{window_index}|#{window_name}|#{pane_current_command}|#{pane_current_path}"
+    "|#{@hermes_kind}|#{@hermes_workdir}|#{@hermes_task_id}|#{@hermes_session_id}",
 ]
 _TMUX_LIST_SESSIONS_CMD = ["tmux", "list-sessions", "-F", "#{session_name}|#{session_created}"]
 _TMUX_SHELL_COMMANDS = frozenset({"bash", "zsh", "sh", "fish", "dash"})
@@ -688,6 +689,7 @@ def _tmux_agents(
     tmux_panes_text: str | None,
     tmux_sessions_text: str | None,
     registry: ProjectsRegistry,
+    kanban_db_path: Path | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if tmux_panes_text is not None:
         panes_text, panes_error = tmux_panes_text, None
@@ -717,18 +719,36 @@ def _tmux_agents(
             continue
 
     agents: list[dict[str, Any]] = []
+    task_ids: set[str] = set()
     for line in panes_text.splitlines():
         parts = line.split("|")
-        if len(parts) != 5:
+        if len(parts) != 9:
             continue
-        session_name, window_index, window_name, pane_command, pane_path = parts
+        (
+            session_name,
+            window_index,
+            window_name,
+            pane_command,
+            pane_path,
+            hermes_kind,
+            _hermes_workdir,
+            hermes_task_id,
+            hermes_session_id,
+        ) = parts
         if pane_command.strip().lower() in _TMUX_SHELL_COMMANDS:
             continue
+        kind = hermes_kind.strip() or _classify_tmux_kind(window_name, pane_command)
+        task_id = hermes_task_id.strip() or None
+        session_id = hermes_session_id.strip() or None
+        if task_id is not None:
+            task_ids.add(task_id)
         agents.append(
             {
-                "kind": _classify_tmux_kind(window_name, pane_command),
+                "kind": kind,
                 "label": f"{session_name}:{window_index} {window_name}",
                 "task": None,
+                "session_id": session_id,
+                "task_id": task_id,
                 "project": _attribute_project([pane_path], registry),
                 "since": session_created.get(session_name),
                 "source": "tmux",
@@ -739,6 +759,30 @@ def _tmux_agents(
                 "tmux_window": window_index,
             }
         )
+
+    if not task_ids or kanban_db_path is None:
+        return agents, []
+
+    try:
+        conn = _open_sqlite_ro(kanban_db_path)
+    except sqlite3.DatabaseError as exc:
+        return agents, [f"kanban: could not open kanban.db: {exc}"]
+    try:
+        placeholders = ",".join("?" for _task_id in task_ids)
+        rows = conn.execute(
+            f"SELECT id, title FROM tasks WHERE id IN ({placeholders})",
+            sorted(task_ids),
+        ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        return agents, [f"kanban: {exc}"]
+    finally:
+        conn.close()
+
+    titles = {row["id"]: row["title"] for row in rows}
+    for agent in agents:
+        task_id = agent["task_id"]
+        if task_id in titles:
+            agent["task"] = titles[task_id]
     return agents, []
 
 
@@ -840,6 +884,15 @@ def _parse_coordination_note(
     operator_raw = data.get("operator")
     operator = operator_raw.strip() if isinstance(operator_raw, str) and operator_raw.strip() else None
 
+    session_raw = data.get("session")
+    session_id = session_raw.strip() if isinstance(session_raw, str) and session_raw.strip() else None
+    task_id_raw = data.get("task_id")
+    task_id = (
+        task_id_raw.strip()
+        if isinstance(task_id_raw, str) and task_id_raw.strip()
+        else None
+    )
+
     touching_raw = data.get("touching")
     touching_paths: list[str] = []
     if isinstance(touching_raw, list):
@@ -855,6 +908,8 @@ def _parse_coordination_note(
         "since": _parse_coordination_timestamp(started_raw),
         "source": "coordination",
         "operator": operator,
+        "session_id": session_id,
+        "task_id": task_id,
     }
 
 
@@ -1060,6 +1115,7 @@ def build_agents_payload(
             tmux_panes_text=tmux_panes_text,
             tmux_sessions_text=tmux_sessions_text,
             registry=registry,
+            kanban_db_path=resolved_kanban_db_path,
         )
     except Exception as exc:
         tmux_result = [], [f"tmux: {exc}"]
@@ -1375,6 +1431,8 @@ def build_project_detail(
                 "source": agent["source"],
                 "assignee": agent.get("assignee"),
                 "operator": agent.get("operator"),
+                "session_id": agent.get("session_id"),
+                "task_id": agent.get("task_id"),
             }
             for agent in source_payload.get("agents", [])
             if agent.get("project") == entry.slug
