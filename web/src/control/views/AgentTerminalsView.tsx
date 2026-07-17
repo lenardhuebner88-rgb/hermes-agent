@@ -584,7 +584,10 @@ export function AgentTerminalsView() {
     });
   }, []);
 
+  const readOnlyContextActive = rightRail === "tools" || composerText.length > 0;
+
   useEffect(() => {
+    if (!readOnlyContextActive) return;
     let disposed = false;
     let timer: number | null = null;
 
@@ -627,7 +630,7 @@ export function AgentTerminalsView() {
       clearTimer();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [refreshReadOnlyContext]);
+  }, [readOnlyContextActive, refreshReadOnlyContext]);
 
   useEffect(() => {
     const host = hostRef.current;
