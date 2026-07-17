@@ -51,10 +51,6 @@ def _event_payloads(conn, task_id: str, kind: str) -> list[dict]:
     return [json.loads(row["payload"] or "{}") for row in rows]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I1 broken: default worker and born-blocked states persist NULL block_kind",
-)
 def test_i1_worker_and_born_blocked_tasks_are_typed(kanban_home):
     """I1: every persisted ``blocked`` state carries a machine-readable kind."""
     with kb.connect_closing() as conn:

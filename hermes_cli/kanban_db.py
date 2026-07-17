@@ -4886,8 +4886,8 @@ def create_task(
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
                         scope_contract, model_override, freigabe, live_test_depth, review_tier,
-                        ui_impact
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ui_impact, block_kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -4927,6 +4927,7 @@ def create_task(
                         live_test_depth,
                         review_tier_value,
                         ui_impact_value,
+                        "needs_input" if task_status == "blocked" else None,
                     ),
                 )
                 for pid in parents:
@@ -14172,8 +14173,17 @@ def block_task(
                 run_id=expected_run_id,
             )
             return False
-        if block_kind is None and run_is_review:
-            block_kind = "review_revision"
+        if block_kind is None:
+            if run_is_review:
+                block_kind = "review_revision"
+            else:
+                inferred_kind = _blocked_kind_for_auto_retry(reason)
+                if inferred_kind == "retryable":
+                    block_kind = "transient"
+                elif inferred_kind == "capacity":
+                    block_kind = "capacity"
+                else:
+                    block_kind = "needs_input"
         existing = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
             (task_id,),
