@@ -3637,9 +3637,19 @@ def provision_for_task(
             ensure_worktree(repo_root, root_id)
         return resolved
 
-    repo_root = repo_root_for(resolved)
-    if repo_root is None:
+    # Don't trust repo_root_for (git rev-parse --show-toplevel) here: if
+    # *resolved* is itself inside an existing LINKED worktree (e.g. a chain
+    # branch checkout, or an ad-hoc ``.worktrees/<task.id>`` path that
+    # split_provisioned_path didn't recognize above), --show-toplevel returns
+    # that worktree's own path, not the main repo — ensure_worktree would then
+    # nest a new provisioned worktree INSIDE the linked worktree and fail with
+    # "branch already used" (live incident t_87143651). Derive the real main
+    # repo root via --git-common-dir, which resolves to the main repo's .git
+    # in both a plain checkout and a linked worktree.
+    common_dir = kb._git_common_dir(resolved)
+    if common_dir is None:
         return resolved  # non-repo dir task: today's behavior, untouched
+    repo_root = common_dir.parent
 
     root_id = chain_root_id(conn, task.id)
     info = ensure_worktree(repo_root, root_id)

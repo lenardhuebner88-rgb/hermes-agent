@@ -714,6 +714,41 @@ def test_provision_recreates_vanished_worktree(kanban_home, repo):
         assert (ws2 / ".git").exists()
 
 
+def test_provision_for_task_in_linked_worktree_uses_main_repo_root(
+    kanban_home, repo
+):
+    """S2 regression (t_87143651): a task whose workspace_path points at an
+    AD-HOC path inside an already-existing LINKED worktree (no
+    ``.worktrees/kanban/<root_id>`` segment, so split_provisioned_path can't
+    recognize it) must not derive repo_root as that linked worktree itself
+    (git rev-parse --show-toplevel would return the worktree, not main).
+    Falling for that nests a NEW provisioned worktree INSIDE the linked
+    worktree and ensure_worktree fails with 'branch already used'. The real
+    main repo root (derived via --git-common-dir) must be used instead."""
+    # A pre-existing linked worktree, unrelated to kanban provisioning —
+    # simulates the chain-worker checkout the task's workspace_path points at.
+    linked = repo.parent / "linked-wt"
+    _git(repo, "worktree", "add", str(linked), "-b", "some-other-branch")
+    assert (linked / ".git").exists()
+
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn, title="task in linked worktree", assignee="coder",
+            workspace_kind="dir", workspace_path=str(linked),
+        )
+        task = kb.claim_task(conn, tid)
+        ws = kwt.provision_for_task(conn, task, str(linked))
+
+    # No nested provisioned worktree inside the linked checkout.
+    assert not (linked / ".worktrees").exists()
+    # The provisioned worktree lives under the MAIN repo, not the linked one.
+    assert kwt.is_provisioned_path(ws)
+    repo_root, root_id, wt = kwt.split_provisioned_path(ws)
+    assert repo_root == repo
+    assert root_id == tid
+    assert (wt / ".git").exists()
+
+
 def test_dispatch_once_provisions_when_flag_on(
     kanban_home, repo, all_assignees_spawnable, monkeypatch
 ):
