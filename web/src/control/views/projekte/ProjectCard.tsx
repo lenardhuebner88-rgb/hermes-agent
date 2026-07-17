@@ -8,8 +8,22 @@ import { fmtRelativeTime } from "../../lib/derive";
 import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
 import { de } from "../../i18n/de";
 import { AGENT_KIND_STYLES, AGENTS_CHIP_MAX_VISIBLE, agentChipText } from "./agentKinds";
+import { attentionTone, type ProjectAttention } from "./derive";
 
 const t = de.projekte;
+
+/** Left-border accent for the attention ampel (tokens only — no hardcoded colors). */
+const ATTENTION_BORDER: Record<ProjectAttention, string> = {
+  alert: "border-l-2 border-l-status-alert",
+  active: "border-l-2 border-l-status-warn",
+  quiet: "border-l-2 border-l-ink-3/40",
+};
+
+const ATTENTION_DOT: Record<ProjectAttention, string> = {
+  alert: "bg-status-alert",
+  active: "bg-status-warn",
+  quiet: "bg-ink-3",
+};
 
 export interface ProjectCardProps {
   project: ProjectEntry;
@@ -17,15 +31,17 @@ export interface ProjectCardProps {
   agents: ReadonlyArray<ProjectAgent>;
   /** Anzeigename des Elternprojekts, falls `project.parent` gesetzt ist. */
   parentName: string | null;
+  /** Stufe 7 attention state (alert / active / quiet). */
+  attention: ProjectAttention;
   now: number;
   /** Opens the project detail drawer (Stufe 6). */
   onOpen: () => void;
 }
 
-/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5/6).
+/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5/6/7).
  *  Klick / Enter / Space öffnet den Detail-Drawer; Agent-Chip-Tooltips bleiben
  *  erhalten (title auf den Chips, kein stopPropagation nötig). */
-export function ProjectCard({ project, agents, parentName, now, onOpen }: ProjectCardProps) {
+export function ProjectCard({ project, agents, parentName, attention, now, onOpen }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
   const loopsActive = project.loops?.active ?? 0;
@@ -33,6 +49,8 @@ export function ProjectCard({ project, agents, parentName, now, onOpen }: Projec
   const agentCount = agents.length;
   const visibleAgents = agents.slice(0, AGENTS_CHIP_MAX_VISIBLE);
   const overflow = agentCount - visibleAgents.length;
+  const tone = attentionTone(attention);
+  const attentionLabel = t.attentionLabel[attention];
 
   const onKeyDown = (event: KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -45,7 +63,10 @@ export function ProjectCard({ project, agents, parentName, now, onOpen }: Projec
     <Card
       surface="card"
       interactive
-      className="flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze"
+      className={cn(
+        "flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
+        ATTENTION_BORDER[attention],
+      )}
       ariaLabel={t.detailOpenAria(project.name)}
       role="button"
       tabIndex={0}
@@ -54,7 +75,16 @@ export function ProjectCard({ project, agents, parentName, now, onOpen }: Projec
     >
       <header className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <h3 className="truncate text-sec font-semibold text-ink">{project.name}</h3>
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              aria-label={attentionLabel}
+              title={attentionLabel}
+              data-attention={attention}
+              data-tone={tone}
+              className={cn("size-1.5 shrink-0 rounded-full", ATTENTION_DOT[attention])}
+            />
+            <h3 className="truncate text-sec font-semibold text-ink">{project.name}</h3>
+          </div>
           {parentName ? <p className="mt-0.5 truncate text-micro text-ink-3">{t.partOf(parentName)}</p> : null}
         </div>
         {hasErrors ? (

@@ -394,7 +394,87 @@ def test_kanban_source_default_board_buckets_and_done_7d_boundary(tmp_path: Path
     )
 
     kanban = payload["projects"][0]["kanban"]
-    assert kanban == {"open": 1, "running": 1, "blocked": 1, "review": 1, "done_7d": 1}
+    assert kanban == {
+        "open": 1,
+        "running": 1,
+        "blocked": 1,
+        "review": 1,
+        "done_7d": 1,
+        "needs_input": 0,
+    }
+
+
+def test_kanban_source_needs_input_counts_by_block_kind(tmp_path: Path) -> None:
+    """needs_input = tasks with block_kind='needs_input' (any status), board-scoped."""
+    kdb = tmp_path / "kanban.db"
+    pdb = tmp_path / "projects.db"
+    _make_kanban_db(kdb)
+    pid = _make_projects_db(pdb, name="Hermes Infra", board_slug="default")
+
+    now = 1_700_100_000
+    # Two needs_input tasks on this board (one blocked, one scheduled).
+    _insert_task_full(
+        kdb,
+        task_id="ni1",
+        title="wait on operator",
+        status="blocked",
+        project_id=pid,
+        created_at=now - 100,
+        block_kind="needs_input",
+    )
+    _insert_task_full(
+        kdb,
+        task_id="ni2",
+        title="also waiting",
+        status="scheduled",
+        project_id=None,  # default-board legacy NULL project_id
+        created_at=now - 90,
+        block_kind="needs_input",
+    )
+    # Same board, other block_kind — must NOT count as needs_input.
+    _insert_task_full(
+        kdb,
+        task_id="dep1",
+        title="dependency park",
+        status="blocked",
+        project_id=pid,
+        created_at=now - 80,
+        block_kind="dependency",
+    )
+    # Different project_id — must not leak into default board scope.
+    _insert_task_full(
+        kdb,
+        task_id="ni-other",
+        title="other board",
+        status="blocked",
+        project_id="other-project",
+        created_at=now - 70,
+        block_kind="needs_input",
+    )
+    # Terminal task keeps its historic block_kind — must NOT count as a live
+    # operator-waiting task (else archived rows inflate the attention ampel).
+    _insert_task_full(
+        kdb,
+        task_id="ni-archived",
+        title="resolved long ago",
+        status="archived",
+        project_id=pid,
+        created_at=now - 500,
+        block_kind="needs_input",
+    )
+
+    entry = _entry(kanban_project="default")
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    payload = build_projects_payload(
+        registry, kanban_db_path=kdb, projects_db_path=pdb, now=now
+    )
+
+    kanban = payload["projects"][0]["kanban"]
+    assert kanban is not None
+    # ni1 (blocked) + ni2 (scheduled); the archived one is excluded.
+    assert kanban["needs_input"] == 2
+    # blocked still only status='blocked' (ni1 + dep1); ni2 is scheduled.
+    assert kanban["blocked"] == 2
 
 
 def test_kanban_source_named_board_scopes_by_project_id_only(tmp_path: Path) -> None:

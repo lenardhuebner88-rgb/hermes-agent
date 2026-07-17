@@ -5,18 +5,24 @@ import { FleetEmptyState } from "../components/leitstand";
 import { useProjectAgents, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
-import { groupAgentsByProject, parentDisplayName } from "./projekte/derive";
+import {
+  computeAttention,
+  countAgentsByProject,
+  groupAgentsByProject,
+  parentDisplayName,
+  sortProjectsByAttention,
+} from "./projekte/derive";
 import { ProjectCard } from "./projekte/ProjectCard";
 import { ProjectDetailDrawer } from "./projekte/ProjectDetailDrawer";
 import { AgentsRail } from "./projekte/AgentsRail";
 
 const t = de.projekte;
 
-/** Projekte-Tab (Stufe 5/6) — Karten-Grid + Agents-Rail + Detail-Drawer:
+/** Projekte-Tab (Stufe 5/6/7) — Karten-Grid + Agents-Rail + Detail-Drawer:
  *  eine Karte pro registriertem Projekt (`~/.hermes/projects.yaml`), gespeist
  *  aus GET /api/projects + GET /api/projects/agents; Klick öffnet den
- *  read-only Drilldown (GET /api/projects/{slug}). Attention-Sortierung
- *  kommt in Stufe 7. */
+ *  read-only Drilldown (GET /api/projects/{slug}). Karten sind nach
+ *  Attention (alert → active → quiet) sortiert. */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
@@ -27,6 +33,8 @@ export function ProjekteView() {
   const registryErrors = projects.data?.registry_errors ?? [];
   const agentList = agents.data?.agents ?? [];
   const agentsByProject = groupAgentsByProject(agentList);
+  const agentCountBySlug = countAgentsByProject(agentList);
+  const sortedList = sortProjectsByAttention(list, agentCountBySlug);
   const projectNames: Record<string, string> = {};
   for (const project of list) {
     projectNames[project.slug] = project.name;
@@ -73,18 +81,22 @@ export function ProjekteView() {
 
       {projects.data !== null && list.length === 0 ? <FleetEmptyState title={t.empty} desc={t.emptyDesc} /> : null}
 
-      {list.length > 0 ? (
+      {sortedList.length > 0 ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {list.map((project) => (
-            <ProjectCard
-              key={project.slug}
-              project={project}
-              agents={agentsByProject[project.slug] ?? []}
-              parentName={parentDisplayName(project.parent, list)}
-              now={now}
-              onOpen={() => setSelectedSlug(project.slug)}
-            />
-          ))}
+          {sortedList.map((project) => {
+            const agentCount = agentCountBySlug[project.slug] ?? 0;
+            return (
+              <ProjectCard
+                key={project.slug}
+                project={project}
+                agents={agentsByProject[project.slug] ?? []}
+                parentName={parentDisplayName(project.parent, list)}
+                attention={computeAttention(project, agentCount)}
+                now={now}
+                onOpen={() => setSelectedSlug(project.slug)}
+              />
+            );
+          })}
         </div>
       ) : null}
 

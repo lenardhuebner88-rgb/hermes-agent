@@ -2328,6 +2328,7 @@ const ProjectKanbanCountsSchema = z.object({
   blocked: z.coerce.number().catch(0),
   review: z.coerce.number().catch(0),
   done_7d: z.coerce.number().catch(0),
+  needs_input: z.coerce.number().catch(0),
 }).passthrough().nullable().catch(null);
 
 const ProjectLoopPackStatusSchema = z.object({

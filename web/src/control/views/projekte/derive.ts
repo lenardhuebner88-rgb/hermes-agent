@@ -83,3 +83,57 @@ export function kanbanTaskTone(
   if (status === "running") return "ok";
   return "neutral";
 }
+
+// ── Stufe 7 — Attention (Ampel) ────────────────────────────────────────────
+
+/** Per-card attention state for the Projekte grid (operator "where does it hang"). */
+export type ProjectAttention = "alert" | "active" | "quiet";
+
+const ATTENTION_RANK: Record<ProjectAttention, number> = {
+  alert: 0,
+  active: 1,
+  quiet: 2,
+};
+
+/**
+ * Derive attention for one project card.
+ * - alert: blocked tasks or operator-waiting (needs_input)
+ * - active: agents running or loops active
+ * - quiet: neither
+ */
+export function computeAttention(
+  project: Pick<ProjectEntry, "kanban" | "loops">,
+  agentCount: number,
+): ProjectAttention {
+  const kanban = project.kanban;
+  if (kanban && (kanban.blocked > 0 || kanban.needs_input > 0)) return "alert";
+  if (agentCount > 0 || (project.loops?.active ?? 0) > 0) return "active";
+  return "quiet";
+}
+
+/**
+ * Stable sort: alert → active → quiet; within a bucket keep registry order
+ * (Array.prototype.sort is stable; equal ranks preserve input index).
+ */
+export function sortProjectsByAttention(
+  projects: ReadonlyArray<ProjectEntry>,
+  agentCountBySlug: Readonly<Record<string, number>>,
+): ProjectEntry[] {
+  return projects
+    .map((project, index) => ({
+      project,
+      index,
+      rank: ATTENTION_RANK[
+        computeAttention(project, agentCountBySlug[project.slug] ?? 0)
+      ],
+    }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ project }) => project);
+}
+
+/** Map attention to an existing Leitstand SignalTone (alert is loudest). */
+export function attentionTone(a: ProjectAttention): SignalTone {
+  if (a === "alert") return "alert";
+  if (a === "active") return "warn";
+  return "neutral";
+}

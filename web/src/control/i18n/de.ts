@@ -802,6 +802,12 @@ export const de = {
     detailAgents: "Agents",
     detailNoAgents: "Keine Agents an diesem Projekt.",
     detailOpenAria: (name: string) => `Projekt ${name} öffnen`,
+    // Stufe 7 — Attention-Ampel (Karte: Dot + aria/title)
+    attentionLabel: {
+      alert: "Aufmerksamkeit: blockiert",
+      active: "Aufmerksamkeit: aktiv",
+      quiet: "Aufmerksamkeit: ruhig",
+    },
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

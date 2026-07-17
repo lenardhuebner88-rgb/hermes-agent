@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { parseOrThrow, ProjectsAgentsResponseSchema, ProjectsResponseSchema } from "../../lib/schemas";
 import {
+  attentionTone,
+  computeAttention,
   countAgentsByProject,
   groupAgentsByKind,
   groupAgentsByProject,
   kanbanTaskTone,
   loopOutcomeTone,
   parentDisplayName,
+  sortProjectsByAttention,
+  type ProjectAttention,
 } from "./derive";
+import type { ProjectEntry } from "../../lib/schemas";
 
 // Real /api/projects payload (single-project registry, live checkout) — the
 // exact shape hermes_cli/projects_overview.py.build_projects_payload() emits.
@@ -27,7 +32,7 @@ const REAL_PROJECTS_PAYLOAD = {
         committed_at: 1784237915,
         age_seconds: 626,
       },
-      kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 189 },
+      kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 189, needs_input: 0 },
       loops: {
         active: 1,
         packs: [{ name: "builder-reviewer", running: false, last_heartbeat_at: 1784228339 }],
@@ -189,5 +194,155 @@ describe("kanbanTaskTone", () => {
     expect(kanbanTaskTone("running", null)).toBe("ok");
     expect(kanbanTaskTone("todo", null)).toBe("neutral");
     expect(kanbanTaskTone("ready", null)).toBe("neutral");
+  });
+});
+
+// ── Stufe 7 — Attention ampel ──────────────────────────────────────────────
+
+function projectFixture(
+  slug: string,
+  overrides: Partial<ProjectEntry> & {
+    kanban?: ProjectEntry["kanban"];
+    loops?: ProjectEntry["loops"];
+  } = {},
+): ProjectEntry {
+  return parseOrThrow(
+    ProjectsResponseSchema,
+    {
+      generated_at: 1,
+      registry_errors: [],
+      projects: [
+        {
+          slug,
+          name: slug,
+          repo_path: `/tmp/${slug}`,
+          parent: null,
+          links: [],
+          last_commit: null,
+          kanban: overrides.kanban ?? {
+            open: 0,
+            running: 0,
+            blocked: 0,
+            review: 0,
+            done_7d: 0,
+            needs_input: 0,
+          },
+          loops: overrides.loops ?? { active: 0, packs: [] },
+          errors: [],
+          ...overrides,
+        },
+      ],
+    },
+    "attention-fixture",
+  ).projects[0];
+}
+
+describe("computeAttention", () => {
+  it("returns alert when blocked > 0", () => {
+    const p = projectFixture("blocked-only", {
+      kanban: { open: 0, running: 0, blocked: 2, review: 0, done_7d: 0, needs_input: 0 },
+    });
+    expect(computeAttention(p, 0)).toBe("alert");
+  });
+
+  it("returns alert when needs_input > 0 even if blocked == 0", () => {
+    const p = projectFixture("needs-input-only", {
+      kanban: { open: 1, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 1 },
+    });
+    expect(computeAttention(p, 0)).toBe("alert");
+  });
+
+  it("returns active when agents > 0 and no alert signals", () => {
+    const p = projectFixture("agents-only", {
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 0, packs: [] },
+    });
+    expect(computeAttention(p, 3)).toBe("active");
+  });
+
+  it("returns active when loops.active > 0 and no alert signals", () => {
+    const p = projectFixture("loops-only", {
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 1, packs: [{ name: "builder-reviewer", running: true, last_heartbeat_at: null }] },
+    });
+    expect(computeAttention(p, 0)).toBe("active");
+  });
+
+  it("returns quiet when nothing is happening", () => {
+    const p = projectFixture("idle", {
+      kanban: { open: 2, running: 0, blocked: 0, review: 0, done_7d: 5, needs_input: 0 },
+      loops: { active: 0, packs: [] },
+    });
+    expect(computeAttention(p, 0)).toBe("quiet");
+  });
+
+  it("returns quiet when kanban is null and no agents/loops", () => {
+    const p = projectFixture("no-board", { kanban: null, loops: null });
+    expect(computeAttention(p, 0)).toBe("quiet");
+  });
+
+  it("prefers alert over active when both blocked and agents present", () => {
+    const p = projectFixture("both", {
+      kanban: { open: 0, running: 1, blocked: 1, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 1, packs: [] },
+    });
+    expect(computeAttention(p, 2)).toBe("alert");
+  });
+});
+
+describe("sortProjectsByAttention", () => {
+  it("orders alert → active → quiet and is stable within a bucket", () => {
+    // Registry order: quiet-a, alert-b, active-c, quiet-d, alert-e, active-f
+    const projects = [
+      projectFixture("quiet-a"),
+      projectFixture("alert-b", {
+        kanban: { open: 0, running: 0, blocked: 1, review: 0, done_7d: 0, needs_input: 0 },
+      }),
+      projectFixture("active-c", { loops: { active: 1, packs: [] } }),
+      projectFixture("quiet-d"),
+      projectFixture("alert-e", {
+        kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 2 },
+      }),
+      projectFixture("active-f"), // agents via count map
+    ];
+    const counts = {
+      "quiet-a": 0,
+      "alert-b": 0,
+      "active-c": 0,
+      "quiet-d": 0,
+      "alert-e": 5, // agents present but alert still wins
+      "active-f": 1,
+    };
+    const sorted = sortProjectsByAttention(projects, counts);
+    expect(sorted.map((p) => p.slug)).toEqual([
+      "alert-b",
+      "alert-e",
+      "active-c",
+      "active-f",
+      "quiet-a",
+      "quiet-d",
+    ]);
+    // Does not mutate input.
+    expect(projects.map((p) => p.slug)).toEqual([
+      "quiet-a",
+      "alert-b",
+      "active-c",
+      "quiet-d",
+      "alert-e",
+      "active-f",
+    ]);
+  });
+});
+
+describe("attentionTone", () => {
+  it("maps alert/active/quiet onto existing SignalTones", () => {
+    const cases: Array<[ProjectAttention, string]> = [
+      ["alert", "alert"],
+      ["active", "warn"],
+      ["quiet", "neutral"],
+    ];
+    for (const [attention, tone] of cases) {
+      expect(attentionTone(attention)).toBe(tone);
+    }
   });
 });

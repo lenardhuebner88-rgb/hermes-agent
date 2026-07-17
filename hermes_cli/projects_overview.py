@@ -375,6 +375,13 @@ def _kanban_counts(
                 "completed_at IS NOT NULL AND completed_at >= ?",
                 (now - _KANBAN_DONE_WINDOW_SECONDS,),
             ),
+            # Live operator-waiting tasks: block_kind across any non-terminal
+            # status bucket. Terminal tasks (done/archived) keep their historic
+            # block_kind, so they must be excluded — else stale archived rows
+            # inflate the attention ampel to false-red.
+            "needs_input": _count(
+                "block_kind = 'needs_input' AND status NOT IN ('done', 'archived')"
+            ),
         }
     except sqlite3.DatabaseError as exc:
         return None, f"kanban: {exc}"

@@ -27,7 +27,7 @@ const REAL_PROJECT: ProjectEntry = {
     committed_at: 1784237915,
     age_seconds: 626,
   },
-  kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 189 },
+  kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 189, needs_input: 0 },
   loops: { active: 1, packs: [{ name: "builder-reviewer", running: false, last_heartbeat_at: 1784228339 }] },
   errors: [],
 };
