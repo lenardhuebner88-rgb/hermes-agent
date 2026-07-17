@@ -122,6 +122,8 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
               >
                 <p className="truncate text-sec text-ink">{commit.message || t.noCommitMessage}</p>
                 <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 font-data text-micro text-ink-3">
+                  {commit.author ? <span className="truncate text-ink-2">{commit.author}</span> : null}
+                  {commit.author ? <span aria-hidden>·</span> : null}
                   <span>{commit.hash}</span>
                   <span aria-hidden>·</span>
                   <span>{fmtRelativeTime(commit.committed_at, now)}</span>
@@ -245,6 +247,18 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
                       <span className="truncate">{agent.label}</span>
                       <span aria-hidden>·</span>
                       <span>{agent.source}</span>
+                      {agent.assignee ? (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span>{t.assigneeLabel(agent.assignee)}</span>
+                        </>
+                      ) : null}
+                      {agent.operator ? (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span>{t.operatorLabel(agent.operator)}</span>
+                        </>
+                      ) : null}
                       {agent.since != null && Number.isFinite(agent.since) ? (
                         <>
                           <span aria-hidden>·</span>

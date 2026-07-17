@@ -26,6 +26,8 @@ const LIVE_AGENT: ProjectAgent = {
   source: "tmux",
   tmux_session: "work",
   tmux_window: "2",
+  assignee: null,
+  operator: null,
 };
 
 function renderCard(overrides: Partial<Parameters<typeof ProjectCard>[0]> = {}) {

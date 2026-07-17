@@ -17,6 +17,7 @@ const ProjectLinkSchema = z.object({
 const ProjectLastCommitSchema = z.object({
   hash: z.string().catch(""),
   message: z.string().catch(""),
+  author: z.string().catch(""),
   committed_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
 }).passthrough().nullable().catch(null);
@@ -86,6 +87,11 @@ const ProjectAgentSchema = z.object({
   // additive 2026-07-17); coordination/kanban/loop rows omit them → null.
   tmux_session: nullableString,
   tmux_window: nullableString,
+  // Lane/assignee of a running kanban task; only source==="kanban" rows carry
+  // it (backend additive 2026-07-17). Operator of a coordination claim; only
+  // source==="coordination" rows can carry it. Both absent → null.
+  assignee: nullableString,
+  operator: nullableString,
 }).passthrough();
 export type ProjectAgent = z.infer<typeof ProjectAgentSchema>;
 
@@ -105,6 +111,7 @@ export type ProjectsAgentsResponse = z.infer<typeof ProjectsAgentsResponseSchema
 const ProjectDetailCommitSchema = z.object({
   hash: z.string().catch(""),
   message: z.string().catch(""),
+  author: z.string().catch(""),
   committed_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
 }).passthrough();
@@ -141,6 +148,8 @@ const ProjectDetailAgentSchema = z.object({
   task: nullableString,
   since: nullableEpochSeconds,
   source: z.string().catch(""),
+  assignee: nullableString,
+  operator: nullableString,
 }).passthrough();
 
 export const ProjectDetailResponseSchema = z.object({
@@ -159,3 +168,71 @@ export const ProjectDetailResponseSchema = z.object({
   errors: z.array(z.string()).catch([]),
 }).passthrough();
 export type ProjectDetail = z.infer<typeof ProjectDetailResponseSchema>;
+
+// ─── Projekte-Tab Stage 10 — GET /api/projects/sessions ────────────────────
+// Offene Sessions + Spawn-Baum aus state.db (hermes_state sessions table).
+// spawn_kind: delegate (Subagent via _delegate_from), branch (/branch),
+// compression (Fortsetzung derselben Konversation), child (generischer Kind-
+// Link), null (Wurzel). Unbekannte künftige Werte degradieren zu "child" —
+// nie die ganze Zeile reißen (gleiche Narrowing-Doktrin wie ProjectAgentKind).
+
+const KNOWN_SESSION_SPAWN_KINDS = new Set(["delegate", "branch", "compression", "child"]);
+export type ProjectSessionSpawnKind = "delegate" | "branch" | "compression" | "child";
+const ProjectSessionSpawnKindSchema: z.ZodType<ProjectSessionSpawnKind | null> = z
+  .string()
+  .nullable()
+  .catch(null)
+  .transform((value): ProjectSessionSpawnKind | null =>
+    value != null && KNOWN_SESSION_SPAWN_KINDS.has(value) ? (value as ProjectSessionSpawnKind) : null,
+  );
+
+const ProjectSessionSchema = z.object({
+  id: z.string().catch(""),
+  label: z.string().catch(""),
+  source: z.string().catch(""),
+  model: nullableString,
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
+  end_reason: nullableString,
+  is_open: z.boolean().catch(false),
+  is_active: z.boolean().catch(false),
+  // Open but inactive for ≥24h — the never-closed graveyard bucket (backend
+  // additive 2026-07-17). Older payloads omit it → false (= "fresh open").
+  stale_open: z.boolean().catch(false),
+  last_active: nullableEpochSeconds,
+  message_count: z.coerce.number().catch(0),
+  tokens: z.coerce.number().catch(0),
+  project: nullableString,
+  spawn_kind: ProjectSessionSpawnKindSchema,
+  spawned_by_id: nullableString,
+  spawned_by_label: nullableString,
+}).passthrough();
+export type ProjectSession = z.infer<typeof ProjectSessionSchema>;
+
+export const ProjectSessionsResponseSchema = z.object({
+  generated_at: epochSeconds,
+  errors: z.array(z.string()).catch([]),
+  sessions: z.array(ProjectSessionSchema).catch([]),
+}).passthrough().catch({ generated_at: invalidEpochSeconds, errors: [], sessions: [] });
+export type ProjectSessionsResponse = z.infer<typeof ProjectSessionsResponseSchema>;
+
+// ─── Projekte-Tab Stage 11 — GET /api/projects/commits ─────────────────────
+// Projektübergreifender Commit-Feed (neueste zuerst, Backend-Cap 30).
+
+const ProjectCommitFeedEntrySchema = z.object({
+  project: z.string().catch(""),
+  project_name: z.string().catch(""),
+  hash: z.string().catch(""),
+  message: z.string().catch(""),
+  author: z.string().catch(""),
+  committed_at: epochSeconds,
+  age_seconds: z.coerce.number().catch(0),
+}).passthrough();
+export type ProjectCommitFeedEntry = z.infer<typeof ProjectCommitFeedEntrySchema>;
+
+export const ProjectsCommitsResponseSchema = z.object({
+  generated_at: epochSeconds,
+  errors: z.array(z.string()).catch([]),
+  commits: z.array(ProjectCommitFeedEntrySchema).catch([]),
+}).passthrough().catch({ generated_at: invalidEpochSeconds, errors: [], commits: [] });
+export type ProjectsCommitsResponse = z.infer<typeof ProjectsCommitsResponseSchema>;

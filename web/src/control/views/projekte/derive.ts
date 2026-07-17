@@ -1,9 +1,8 @@
-// Pure derivation logic for the Projekte-Tab card grid + agents rail +
-// detail drawer (Stufe 4/5/6). No React/no fetch — unit-tested in
-// derive.test.ts against the real /api/projects payload shapes.
-import type { ProjectAgent, ProjectAgentKind, ProjectEntry } from "../../lib/schemas";
+// Pure derivation logic for the Projekte-Tab card grid + live board +
+// sessions/commits sections + detail drawer. No React/no fetch — unit-tested
+// in derive.test.ts against the real /api/projects payload shapes.
+import type { ProjectAgent, ProjectEntry, ProjectSession } from "../../lib/schemas";
 import type { SignalTone } from "../../components/leitstand";
-import { PROJECT_AGENT_KIND_ORDER } from "./agentKinds";
 
 /** Agents grouped by project slug. Agents without a resolved project
  *  (`project: null`) are omitted — they still appear in the kind rail. */
@@ -33,23 +32,181 @@ export function countAgentsByProject(
   return counts;
 }
 
-/** Agents grouped by kind in rail display order. Only non-empty groups are
- *  returned. Unassigned agents (project null) stay in their kind group. */
-export function groupAgentsByKind(
-  agents: ReadonlyArray<ProjectAgent>,
-): Array<[ProjectAgentKind, ProjectAgent[]]> {
-  const buckets = new Map<ProjectAgentKind, ProjectAgent[]>();
+// ── LiveBoard ("Wer arbeitet gerade", 2026-07-17) ──────────────────────────
+//
+// Der LiveBoard ersetzt die alte Kind-Rail: gruppiert wird nach PROJEKT (die
+// Operator-Frage ist "wer arbeitet woran", nicht "welche Engine läuft"), mit
+// einer "Unzugeordnet"-Gruppe zuletzt. Innerhalb einer Gruppe: echte Prozesse
+// (tmux) zuerst, dann Kanban-Tasks, Loops, Check-ins; gleiche Quelle = älteste
+// zuerst (am längsten laufend = relevantestes Signal).
+
+/** Display rank of an agent source: real processes first, claims last. */
+export function agentSourceRank(source: string): number {
+  switch (source) {
+    case "tmux":
+      return 0;
+    case "kanban":
+      return 1;
+    case "loop":
+      return 2;
+    case "coordination":
+      return 3;
+    default:
+      return 4;
+  }
+}
+
+function compareAgentsForBoard(a: ProjectAgent, b: ProjectAgent): number {
+  const rankDelta = agentSourceRank(a.source) - agentSourceRank(b.source);
+  if (rankDelta !== 0) return rankDelta;
+  // Oldest first within one source; unknown start times sort last.
+  const aSince = a.since != null && Number.isFinite(a.since) ? a.since : Number.POSITIVE_INFINITY;
+  const bSince = b.since != null && Number.isFinite(b.since) ? b.since : Number.POSITIVE_INFINITY;
+  if (aSince !== bSince) return aSince - bSince;
+  return a.label.localeCompare(b.label);
+}
+
+export interface LiveBoardGroup {
+  /** Project slug, or null for the trailing "Unzugeordnet" group. */
+  slug: string | null;
+  agents: ProjectAgent[];
+}
+
+/** Agents grouped by project for the live board. Groups order by their most
+ *  "alive" agent (a group with a running process outranks a claims-only one);
+ *  unassigned agents always trail as one "Unzugeordnet" group. */
+export function liveBoardGroups(agents: ReadonlyArray<ProjectAgent>): LiveBoardGroup[] {
+  const byProject = new Map<string, ProjectAgent[]>();
+  const unassigned: ProjectAgent[] = [];
   for (const agent of agents) {
-    const list = buckets.get(agent.kind);
+    if (agent.project == null) {
+      unassigned.push(agent);
+      continue;
+    }
+    const list = byProject.get(agent.project);
     if (list) list.push(agent);
-    else buckets.set(agent.kind, [agent]);
+    else byProject.set(agent.project, [agent]);
   }
-  const ordered: Array<[ProjectAgentKind, ProjectAgent[]]> = [];
-  for (const kind of PROJECT_AGENT_KIND_ORDER) {
-    const list = buckets.get(kind);
-    if (list && list.length > 0) ordered.push([kind, list]);
+
+  const groups: LiveBoardGroup[] = [];
+  for (const [slug, list] of byProject) {
+    groups.push({ slug, agents: [...list].sort(compareAgentsForBoard) });
   }
-  return ordered;
+  groups.sort((a, b) => {
+    const rankA = agentSourceRank(a.agents[0]?.source ?? "");
+    const rankB = agentSourceRank(b.agents[0]?.source ?? "");
+    if (rankA !== rankB) return rankA - rankB;
+    return (a.slug ?? "").localeCompare(b.slug ?? "");
+  });
+  if (unassigned.length > 0) {
+    groups.push({ slug: null, agents: [...unassigned].sort(compareAgentsForBoard) });
+  }
+  return groups;
+}
+
+// ── Offene Sessions + Spawn-Baum (2026-07-17) ──────────────────────────────
+
+export type SessionsFilter = "open" | "active" | "stale" | "all";
+
+/** Filter the sessions list. Default "open" answers "welche Sessions sind
+ *  noch nicht geschlossen" — but HONESTLY: the never-closed zombie rows
+ *  (open + ≥24h inactive, a real live-host pattern) are split into their own
+ *  "stale" bucket instead of flooding the default view. "active" narrows to
+ *  the 300s liveness window, "all" shows the full 36h backend window.
+ *  Order is preserved. */
+export function filterSessions(
+  sessions: ReadonlyArray<ProjectSession>,
+  filter: SessionsFilter,
+): ProjectSession[] {
+  if (filter === "all") return [...sessions];
+  if (filter === "active") return sessions.filter((session) => session.is_active);
+  if (filter === "stale") return sessions.filter((session) => session.is_open && session.stale_open);
+  return sessions.filter((session) => session.is_open && !session.stale_open);
+}
+
+/** Count of not-yet-closed sessions for the summary strip. `includeStale`
+ *  controls whether the never-closed zombie rows count too — the strip uses
+ *  the fresh-open number (the operator-relevant one), the filter chips show
+ *  both buckets separately. */
+export function countOpenSessions(
+  sessions: ReadonlyArray<Pick<ProjectSession, "is_open" | "stale_open">>,
+  { includeStale = false }: { includeStale?: boolean } = {},
+): number {
+  let count = 0;
+  for (const session of sessions) {
+    if (!session.is_open) continue;
+    if (!includeStale && session.stale_open) continue;
+    count += 1;
+  }
+  return count;
+}
+
+export interface SessionRow {
+  session: ProjectSession;
+  /** 0 = root, 1 = spawned child, 2 = grandchild (deeper nesting is rare). */
+  depth: number;
+  /** Direct spawned children — the "wer hat wen gespawnt" answer per row. */
+  childCount: number;
+}
+
+function sessionActivityKey(session: ProjectSession): number {
+  const candidate = session.last_active ?? session.started_at;
+  return candidate != null && Number.isFinite(candidate) ? candidate : 0;
+}
+
+function compareSessionRoots(a: ProjectSession, b: ProjectSession): number {
+  // Active sessions first, then open ones, then recently ended; within a
+  // bucket the most recent activity leads.
+  const bucketA = a.is_active ? 0 : a.is_open ? 1 : 2;
+  const bucketB = b.is_active ? 0 : b.is_open ? 1 : 2;
+  if (bucketA !== bucketB) return bucketA - bucketB;
+  return sessionActivityKey(b) - sessionActivityKey(a);
+}
+
+/** Flatten the spawn tree into display rows (depth-first). A row whose
+ *  `spawned_by_id` is not part of the list (parent outside the 36h window or
+ *  already purged) becomes a root but keeps its `spawned_by_label` for the
+ *  "gespawnt von …" line. Children sort by start time (oldest spawn first);
+ *  roots sort active → open → ended, then by latest activity. Cycle-safe:
+ *  a corrupt parent link never loops the walk. */
+export function buildSessionRows(sessions: ReadonlyArray<ProjectSession>): SessionRow[] {
+  const byId = new Map<string, ProjectSession>();
+  for (const session of sessions) byId.set(session.id, session);
+
+  const childrenByParent = new Map<string, ProjectSession[]>();
+  const roots: ProjectSession[] = [];
+  for (const session of sessions) {
+    const parentId = session.spawned_by_id;
+    const parent = parentId != null ? byId.get(parentId) : undefined;
+    if (parentId != null && parent !== undefined && parent.id !== session.id) {
+      const list = childrenByParent.get(parentId);
+      if (list) list.push(session);
+      else childrenByParent.set(parentId, [session]);
+    } else {
+      roots.push(session);
+    }
+  }
+
+  const startedKey = (session: ProjectSession): number =>
+    session.started_at != null && Number.isFinite(session.started_at)
+      ? session.started_at
+      : Number.POSITIVE_INFINITY;
+  for (const children of childrenByParent.values()) {
+    children.sort((a, b) => startedKey(a) - startedKey(b));
+  }
+  roots.sort(compareSessionRoots);
+
+  const rows: SessionRow[] = [];
+  const visited = new Set<string>();
+  const walk = (session: ProjectSession, depth: number) => {
+    if (visited.has(session.id)) return;
+    visited.add(session.id);
+    const children = childrenByParent.get(session.id) ?? [];
+    rows.push({ session, depth, childCount: children.length });
+    for (const child of children) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  return rows;
 }
 
 // ── Sessions sichtbar & killbar (2026-07-17) ───────────────────────────────
