@@ -22,6 +22,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 # ---------------------------------------------------------------------------
 # Hook path resolution
@@ -560,3 +561,83 @@ class TestWorkerMcpIsolation(_BaseSpawnTest):
                 f"--strict-mcp-config must not be paired with --mcp-config for "
                 f"{assignee} (that would re-enable external servers), got: {cmd}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Per-profile claude-cli --effort and fast-mode --settings pass-through.
+# ---------------------------------------------------------------------------
+
+
+class TestClaudeProfileEffortAndFastMode(_BaseSpawnTest):
+    """Optional root-level profile config keys ``claude_effort`` and
+    ``claude_fast_mode`` (config.yaml — same shape as
+    /home/piet/.hermes/profiles/reviewer/config.yaml) feed --effort and the
+    --settings JSON for claude-cli kanban worker spawns, on BOTH the verdict
+    allowlist path and the denylist+bypass path."""
+
+    def _write_profile_config(self, tmp_path, extra: dict) -> None:
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        cfg = {
+            "worker_runtime": "claude-cli",
+            "claude_model": "claude-opus-4-8",
+            **extra,
+        }
+        (home / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    def test_claude_effort_valid_appends_flag_verdict_lane(
+        self, tmp_path, monkeypatch
+    ):
+        self._write_profile_config(tmp_path, {"claude_effort": "high"})
+        cmd = self._spawn_and_capture_cmd(
+            tmp_path, monkeypatch, assignee="reviewer"
+        )
+        assert "--effort" in cmd, f"expected --effort in verdict-lane argv: {cmd}"
+        idx = cmd.index("--effort")
+        assert cmd[idx + 1] == "high"
+
+    def test_claude_effort_valid_appends_flag_non_verdict_lane(
+        self, tmp_path, monkeypatch
+    ):
+        self._write_profile_config(tmp_path, {"claude_effort": "high"})
+        cmd = self._spawn_and_capture_cmd(tmp_path, monkeypatch, assignee="coder")
+        assert "--effort" in cmd, f"expected --effort in non-verdict argv: {cmd}"
+        idx = cmd.index("--effort")
+        assert cmd[idx + 1] == "high"
+
+    def test_claude_effort_invalid_omits_flag_and_logs_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Invalid claude_effort must never fail the spawn — omit the flag
+        and log a warning instead."""
+        import logging
+
+        self._write_profile_config(tmp_path, {"claude_effort": "turbo"})
+        with caplog.at_level(logging.WARNING):
+            cmd = self._spawn_and_capture_cmd(
+                tmp_path, monkeypatch, assignee="coder"
+            )
+        assert "--effort" not in cmd, f"invalid claude_effort must be omitted: {cmd}"
+        assert any(
+            "claude_effort" in rec.getMessage() and "turbo" in rec.getMessage()
+            for rec in caplog.records
+        ), "expected a warning naming the invalid claude_effort value"
+
+    def test_claude_fast_mode_true_adds_settings_key(self, tmp_path, monkeypatch):
+        self._write_profile_config(tmp_path, {"claude_fast_mode": True})
+        cmd = self._spawn_and_capture_cmd(tmp_path, monkeypatch, assignee="coder")
+        assert "--settings" in cmd
+        settings = json.loads(cmd[cmd.index("--settings") + 1])
+        assert settings["enabledPlugins"] == {"memsearch@memsearch-plugins": False}
+        assert settings["fastMode"] is True
+
+    def test_absent_keys_argv_identical_to_pre_change(self, tmp_path, monkeypatch):
+        """No claude_effort / claude_fast_mode configured (no config.yaml at
+        all) => argv is byte-identical to the pre-change behavior: no
+        --effort, and --settings carries only the memsearch-disable literal."""
+        cmd = self._spawn_and_capture_cmd(tmp_path, monkeypatch, assignee="coder")
+        assert "--effort" not in cmd
+        settings_value = cmd[cmd.index("--settings") + 1]
+        assert settings_value == (
+            '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}'
+        )

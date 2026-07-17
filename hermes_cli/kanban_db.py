@@ -25532,6 +25532,8 @@ def _maybe_scope_worker_cmd(cmd: list[str]) -> list[str]:
 _claude_worker_bin = _worker_runtime.claude_worker_bin
 _is_claude_cli_profile = _worker_runtime.is_claude_cli_profile
 _claude_profile_model = _worker_runtime.claude_profile_model
+_claude_profile_effort = _worker_runtime.claude_profile_effort
+_claude_profile_fast_mode = _worker_runtime.claude_profile_fast_mode
 _claude_profile_instructions = _worker_runtime.claude_profile_instructions
 _WORKER_ENV_PREFIXES = _worker_runtime.WORKER_ENV_PREFIXES
 _WORKER_ENV_PASSTHROUGH = _worker_runtime.WORKER_ENV_PASSTHROUGH
@@ -25817,6 +25819,14 @@ def _build_claude_worker_launch_spec(
     if read_only_verdict_lane:
         denied_tools.extend(_CLAUDE_CLI_VERDICT_READ_ONLY_DENIED_TOOLS)
 
+    # memsearch disable is always-on (see comment above); fast mode is an
+    # optional per-profile opt-in (claude_fast_mode: true in the profile's
+    # config.yaml) layered onto the same --settings JSON.
+    _worker_settings: dict = {"enabledPlugins": {"memsearch@memsearch-plugins": False}}
+    if _claude_profile_fast_mode(env.get("HERMES_HOME")):
+        _worker_settings["fastMode"] = True
+    worker_settings_json = json.dumps(_worker_settings)
+
     # AC-1 (Verdict-Cage Phase 2): verdict lanes use allowlist fail-closed.
     # Instead of --dangerously-skip-permissions + --disallowedTools (denylist),
     # verdict lanes use --allowedTools with a minimal read-only set enforced
@@ -25862,7 +25872,7 @@ def _build_claude_worker_launch_spec(
             "--output-format",
             "json",
             "--settings",
-            '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+            worker_settings_json,
         ]
     else:
         cmd = [
@@ -25881,7 +25891,7 @@ def _build_claude_worker_launch_spec(
             "--output-format",
             "json",
             "--settings",
-            '{"enabledPlugins": {"memsearch@memsearch-plugins": false}}',
+            worker_settings_json,
         ]
     # Worker MCP isolation (idle-hang fix, disposition-di_109b5a17-S1): never
     # load external MCP servers for a claude-cli kanban worker. Without this the
@@ -25911,6 +25921,13 @@ def _build_claude_worker_launch_spec(
     )
     if worker_model:
         cmd.extend(["--model", worker_model])
+
+    # Per-profile reasoning-effort override (optional). Invalid values are
+    # already filtered out by _claude_profile_effort (logs a warning and
+    # returns None) — the spawn is never blocked by a bad claude_effort.
+    worker_effort = _claude_profile_effort(env.get("HERMES_HOME"))
+    if worker_effort:
+        cmd.extend(["--effort", worker_effort])
 
     # Per-task log under <board-root>/logs/; the canonical launcher owns
     # rotation and descriptor lifetime for every runtime.

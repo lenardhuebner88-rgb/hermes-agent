@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
+
+_log = logging.getLogger(__name__)
+
+CLAUDE_CLI_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 @dataclass(frozen=True)
@@ -73,6 +78,55 @@ def claude_profile_model(hermes_home: Optional[str]) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def claude_profile_effort(hermes_home: Optional[str]) -> Optional[str]:
+    """Return the profile-scoped default claude-cli ``--effort`` level, if
+    configured and valid. Invalid values are logged and treated as absent
+    (fail-soft — never blocks the spawn)."""
+    try:
+        if not hermes_home:
+            return None
+        import yaml
+        cfg_path = os.path.join(hermes_home, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            return None
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if isinstance(cfg, dict):
+            effort = cfg.get("claude_effort")
+            if isinstance(effort, str) and effort.strip():
+                effort = effort.strip()
+                if effort in CLAUDE_CLI_EFFORT_LEVELS:
+                    return effort
+                _log.warning(
+                    "claude_profile_effort: invalid claude_effort=%r in %s "
+                    "(must be one of %s) — omitting --effort",
+                    effort,
+                    cfg_path,
+                    CLAUDE_CLI_EFFORT_LEVELS,
+                )
+        return None
+    except Exception:
+        return None
+
+
+def claude_profile_fast_mode(hermes_home: Optional[str]) -> bool:
+    """Return whether the profile config requests claude-cli fast mode."""
+    try:
+        if not hermes_home:
+            return False
+        import yaml
+        cfg_path = os.path.join(hermes_home, "config.yaml")
+        if not os.path.isfile(cfg_path):
+            return False
+        with open(cfg_path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+        if isinstance(cfg, dict):
+            return bool(cfg.get("claude_fast_mode"))
+        return False
+    except Exception:
+        return False
 
 
 def claude_profile_instructions(
