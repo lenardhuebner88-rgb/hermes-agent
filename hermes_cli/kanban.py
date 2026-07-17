@@ -1372,6 +1372,28 @@ def _register_release_operator_parsers(sub: argparse._SubParsersAction) -> None:
         "--json", action="store_true", help="Emit JSON result"
     )
 
+    p_veto_freigabe = sub.add_parser(
+        "veto-freigabe",
+        help="Explicit operator VETO: archive a freigabe:operator PlanSpec chain "
+             "root held in 'scheduled' (records a freigabe_vetoed event, archives "
+             "the held root and its held children — nothing builds). Idempotent-"
+             "safe: returns non-zero if the id is not a held operator root. This "
+             "is the CLI sibling of the dashboard veto route, so a vetoed lever is "
+             "correctly suppressed and counted by strategist reflect.",
+    )
+    p_veto_freigabe.add_argument(
+        "task_id", help="freigabe:operator PlanSpec root task id"
+    )
+    p_veto_freigabe.add_argument(
+        "--author",
+        default=None,
+        help="Operator identity recorded on the veto event "
+             "(default: active profile name)",
+    )
+    p_veto_freigabe.add_argument(
+        "--json", action="store_true", help="Emit JSON result"
+    )
+
 def _register_release_parsers(sub: argparse._SubParsersAction) -> None:
     """Register closeout and release-*/complete-freigabe subcommands."""
     _register_closeout_parser(sub)
@@ -2013,6 +2035,35 @@ def _cmd_complete_freigabe(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     return 0 if completed else 1
+
+def _cmd_veto_freigabe(args: argparse.Namespace) -> int:
+    """Veto a held freigabe:operator PlanSpec chain root — the CLI sibling of the
+    dashboard veto route (:func:`kb.dismiss_freigabe_hold`). Records a
+    ``freigabe_vetoed`` event and archives the held root plus its held children so
+    nothing builds. Unlike ``kanban archive``, this writes the ``freigabe_vetoed``
+    learning event, so the lever is suppressed and counted by strategist reflect.
+
+    Exit codes: 0 vetoed; 1 the task is not a vetoable freigabe:operator root (not
+    operator, not held in scheduled, or unknown — touching nothing)."""
+    author = getattr(args, "author", None) or _profile_author()
+    with kb.connect_closing() as conn:
+        vetoed = kb.dismiss_freigabe_hold(conn, args.task_id, author=author)
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "task_id": args.task_id, "vetoed": vetoed, "author": author,
+        }))
+    elif vetoed:
+        print(
+            f"freigabe:operator root {args.task_id} vetoed by {author} "
+            "(held root and children archived; nothing builds)."
+        )
+    else:
+        print(
+            f"veto-freigabe: {args.task_id} is not a held freigabe:operator root "
+            "(not operator, not held in scheduled, or unknown) — nothing vetoed.",
+            file=sys.stderr,
+        )
+    return 0 if vetoed else 1
 
 def _cmd_assignees(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -4403,6 +4454,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "release-uireal": _cmd_release_uireal,
     "release-freigabe": _cmd_release_freigabe,
     "complete-freigabe": _cmd_complete_freigabe,
+    "veto-freigabe": _cmd_veto_freigabe,
 }
 
 def run_slash(rest: str) -> str:

@@ -1207,6 +1207,63 @@ def _release_gate_args(task_id, *, inline=False, **extra):
     return parser.parse_args(argv)
 
 
+def _kanban_action_args(action, *tokens):
+    """Parse ``hermes kanban <action> <tokens...>`` into a dispatchable Namespace."""
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    kc.build_parser(sub)
+    return parser.parse_args(["kanban", action, *tokens])
+
+
+def _make_held_operator_root(conn, *, with_child=True):
+    """A freigabe:operator PlanSpec root held in 'scheduled', optionally with a
+    still-held child linked the decompose way (task_links.child_id=root)."""
+    root = kb.create_task(conn, title="PlanSpec VETO-CLI: held one",
+                          body="held", assignee=None, created_by="strategist-cron")
+    conn.execute("UPDATE tasks SET status='scheduled', freigabe='operator' WHERE id=?", (root,))
+    child = None
+    if with_child:
+        child = kb.create_task(conn, title="build child", body="b", assignee=None,
+                               created_by="strategist-cron")
+        conn.execute("UPDATE tasks SET status='scheduled' WHERE id=?", (child,))
+        conn.execute("INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)", (child, root))
+    conn.commit()
+    return root, child
+
+
+def test_cli_veto_freigabe_archives_and_records_event(kanban_home, capsys):
+    """veto-freigabe archives the held operator root + children and writes the
+    freigabe_vetoed learning event (exit 0)."""
+    with kb.connect() as conn:
+        root, child = _make_held_operator_root(conn, with_child=True)
+
+    rc = kc.kanban_command(_kanban_action_args("veto-freigabe", root, "--author", "operator"))
+    assert rc == 0
+
+    with kb.connect() as conn:
+        assert kb.get_task(conn, root).status == "archived"
+        assert kb.get_task(conn, child).status == "archived"
+        kinds = {ev.kind for ev in kb.list_events(conn, root)}
+        assert "freigabe_vetoed" in kinds
+
+
+def test_cli_veto_freigabe_rejects_non_operator_root(kanban_home, capsys):
+    """veto-freigabe returns exit 1 (touching nothing) for an unknown id."""
+    rc = kc.kanban_command(_kanban_action_args("veto-freigabe", "t_does_not_exist"))
+    assert rc == 1
+    assert "nothing vetoed" in capsys.readouterr().err
+
+
+def test_cli_veto_freigabe_json_output(kanban_home, capsys):
+    with kb.connect() as conn:
+        root, _ = _make_held_operator_root(conn, with_child=False)
+    rc = kc.kanban_command(_kanban_action_args("veto-freigabe", root, "--json"))
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"task_id": root, "vetoed": True, "author": payload["author"]}
+    assert payload["vetoed"] is True
+
+
 def test_cli_release_gate_green_exit_zero(kanban_home, monkeypatch, capsys):
     from hermes_cli import kanban_worktrees as kwt
 
