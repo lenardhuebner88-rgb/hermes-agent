@@ -4,17 +4,16 @@ import { FleetEmptyState } from "../components/leitstand";
 import { useProjectAgents, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
-import { countAgentsByProject, parentDisplayName } from "./projekte/derive";
+import { groupAgentsByProject, parentDisplayName } from "./projekte/derive";
 import { ProjectCard } from "./projekte/ProjectCard";
+import { AgentsRail } from "./projekte/AgentsRail";
 
 const t = de.projekte;
 
-/** Projekte-Tab (Stufe 4) — erste sichtbare Slice: eine Karte pro registriertem
- *  Projekt (`~/.hermes/projects.yaml`), gespeist aus GET /api/projects (Karten-
- *  Daten) + GET /api/projects/agents (Aktiv-Indikator). Bewusst noch ohne
- *  Drilldown/Klick (Stufe 6), ohne Agents-Rail (Stufe 5) und ohne Attention-
- *  Sortierung (Stufe 7) — die Karte selbst (`projekte/ProjectCard.tsx`) ist so
- *  strukturiert, dass diese Stufen hier andocken können. */
+/** Projekte-Tab (Stufe 5) — Karten-Grid + Agents-Rail: eine Karte pro
+ *  registriertem Projekt (`~/.hermes/projects.yaml`), gespeist aus
+ *  GET /api/projects + GET /api/projects/agents. Bewusst noch ohne
+ *  Drilldown/Klick (Stufe 6) und ohne Attention-Sortierung (Stufe 7). */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
@@ -22,7 +21,12 @@ export function ProjekteView() {
 
   const list = projects.data?.projects ?? [];
   const registryErrors = projects.data?.registry_errors ?? [];
-  const agentCounts = countAgentsByProject(agents.data?.agents ?? []);
+  const agentList = agents.data?.agents ?? [];
+  const agentsByProject = groupAgentsByProject(agentList);
+  const projectNames: Record<string, string> = {};
+  for (const project of list) {
+    projectNames[project.slug] = project.name;
+  }
 
   return (
     <section aria-label={t.title} className="space-y-5">
@@ -67,12 +71,16 @@ export function ProjekteView() {
             <ProjectCard
               key={project.slug}
               project={project}
-              agentCount={agentCounts[project.slug] ?? 0}
+              agents={agentsByProject[project.slug] ?? []}
               parentName={parentDisplayName(project.parent, list)}
               now={now}
             />
           ))}
         </div>
+      ) : null}
+
+      {agents.data !== null || agentList.length > 0 ? (
+        <AgentsRail agents={agentList} projectNames={projectNames} now={now} />
       ) : null}
     </section>
   );

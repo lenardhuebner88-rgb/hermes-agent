@@ -4,30 +4,33 @@ import { Card } from "../../components/primitives";
 import { Led } from "../../components/atoms";
 import { SignalLabel } from "../../components/leitstand";
 import { fmtRelativeTime } from "../../lib/derive";
-import type { ProjectEntry } from "../../lib/schemas";
+import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
 import { de } from "../../i18n/de";
+import { AGENT_KIND_STYLES, AGENTS_CHIP_MAX_VISIBLE, agentChipText } from "./agentKinds";
 
 const t = de.projekte;
 
 export interface ProjectCardProps {
   project: ProjectEntry;
-  /** Aus der Agents-Liste vorab aggregiert (derive.ts) — 0 ist ein gültiger,
-   *  ruhiger Zustand, kein Fehler. */
-  agentCount: number;
+  /** Agents assigned to this project (from groupAgentsByProject). Empty = idle. */
+  agents: ReadonlyArray<ProjectAgent>;
   /** Anzeigename des Elternprojekts, falls `project.parent` gesetzt ist. */
   parentName: string | null;
   now: number;
 }
 
-/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4).
+/** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs (Stufe 4/5).
  *  Bewusst ohne Klick-/Drilldown-Verhalten (kommt in Stufe 6); die Struktur
- *  hält sich an die Leitstand-Bausteine, damit spätere Stufen (Agents-Rail,
- *  Attention-Sortierung) hier andocken können, ohne die Karte neu zu bauen. */
-export function ProjectCard({ project, agentCount, parentName, now }: ProjectCardProps) {
+ *  hält sich an die Leitstand-Bausteine, damit spätere Stufen (Attention-
+ *  Sortierung) hier andocken können, ohne die Karte neu zu bauen. */
+export function ProjectCard({ project, agents, parentName, now }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
   const loopsActive = project.loops?.active ?? 0;
   const hasErrors = project.errors.length > 0;
+  const agentCount = agents.length;
+  const visibleAgents = agents.slice(0, AGENTS_CHIP_MAX_VISIBLE);
+  const overflow = agentCount - visibleAgents.length;
 
   return (
     <Card surface="card" className="flex h-full flex-col gap-3 p-4" ariaLabel={project.name}>
@@ -75,12 +78,43 @@ export function ProjectCard({ project, agentCount, parentName, now }: ProjectCar
       ) : null}
 
       <footer className="mt-auto flex items-center justify-between gap-2 border-t border-line pt-2.5">
-        <span className={cn("inline-flex items-center gap-1.5 text-micro", agentCount > 0 ? "text-ink" : "text-ink-3")}>
+        <div
+          className={cn(
+            "flex min-w-0 flex-1 flex-wrap items-center gap-1.5 text-micro",
+            agentCount > 0 ? "text-ink" : "text-ink-3",
+          )}
+        >
           <Led kind={agentCount > 0 ? "live" : "idle"} size={7} />
-          {t.agentsCount(agentCount)}
-        </span>
+          {agentCount === 0 ? (
+            <span>{t.agentsCount(0)}</span>
+          ) : (
+            <>
+              {visibleAgents.map((agent, index) => {
+                const style = AGENT_KIND_STYLES[agent.kind] ?? AGENT_KIND_STYLES.unknown;
+                const Icon = style.icon;
+                const text = agentChipText(agent);
+                return (
+                  <span
+                    key={`${agent.kind}:${agent.label}:${index}`}
+                    className={cn(
+                      "inline-flex max-w-[7.5rem] items-center gap-1 rounded-card border border-line bg-surface-2 px-1.5 py-0.5",
+                      style.tone,
+                    )}
+                    title={agent.task ? `${text} — ${agent.task}` : text}
+                  >
+                    <Icon className="h-3 w-3 shrink-0" aria-hidden />
+                    <span className="truncate">{text}</span>
+                  </span>
+                );
+              })}
+              {overflow > 0 ? (
+                <span className="shrink-0 font-data text-ink-3">{t.agentsOverflow(overflow)}</span>
+              ) : null}
+            </>
+          )}
+        </div>
         {loopsActive > 0 ? (
-          <span className="inline-flex items-center gap-1.5 text-micro text-ink-2">
+          <span className="inline-flex shrink-0 items-center gap-1.5 text-micro text-ink-2">
             <RefreshCw className="h-3.5 w-3.5" aria-hidden />
             {t.loopsActive(loopsActive)}
           </span>

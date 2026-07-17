@@ -764,6 +764,22 @@ export const de = {
     loopsActive: (n: number) => `${n} ${n === 1 ? "Loop aktiv" : "Loops aktiv"}`,
     agentsCount: (n: number) => (n === 0 ? "Keine Agents" : `${n} ${n === 1 ? "Agent" : "Agents"}`),
     cardErrorsTooltip: (n: number) => `${n} ${n === 1 ? "Fehler" : "Fehler"} bei dieser Karte`,
+    // Stufe 5 — Agent-Chips + Alle-Agents-Rail
+    agentsRailEyebrow: "Belegung",
+    agentsRail: "Alle Agents",
+    agentsRailEmpty: "Keine Agents aktiv.",
+    unassigned: "Unzugeordnet",
+    agentsOverflow: (n: number) => `+${n}`,
+    agentKinds: {
+      claude: "Claude",
+      codex: "Codex",
+      kimi: "Kimi",
+      grok: "Grok",
+      hermes: "Hermes",
+      kanban: "Kanban",
+      loop: "Loop",
+      unknown: "Unbekannt",
+    },
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

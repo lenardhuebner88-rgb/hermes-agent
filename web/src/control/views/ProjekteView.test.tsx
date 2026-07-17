@@ -88,7 +88,7 @@ describe("ProjekteView", () => {
     expect(html).toContain("projects.yaml");
   });
 
-  it("renders a project card with blocked-warned kanban, commit, loop and agent count", () => {
+  it("renders a project card with blocked-warned kanban, commit, loop and agent chip", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
     const html = renderToStaticMarkup(<ProjekteView />);
@@ -97,9 +97,33 @@ describe("ProjekteView", () => {
     expect(html).toContain("projekte-tab: Stufe 1");
     expect(html).toContain("Blockiert 1");
     expect(html).toContain("1 Loop aktiv");
-    expect(html).toContain("1 Agent");
+    // Stufe 5: kind chip (Kimi) on the card instead of a plain "1 Agent" count.
+    expect(html).toContain("Kimi");
+    expect(html).toContain("Alle Agents");
+    expect(html).toContain("work:2 kimi");
     // No "Teil von" hint for a top-level project.
     expect(html).not.toContain("Teil von");
+  });
+
+  it("shows unassigned agents in the kind rail with Unzugeordnet, not as a separate group", () => {
+    const unassignedLoop = {
+      kind: "loop" as const,
+      label: "builder-reviewer",
+      task: null,
+      project: null,
+      since: null,
+      source: "loop",
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({
+      data: { generated_at: 1, errors: [], agents: [REAL_AGENT, unassignedLoop] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("builder-reviewer");
+    expect(html).toContain("Unzugeordnet");
+    expect(html).toContain("Loop");
   });
 
   it("surfaces registry_errors as an honest notice instead of an empty tab", () => {
