@@ -19185,10 +19185,11 @@ def _record_task_failure(
                 # toward, and eventually trip, the same breaker.
                 cur = conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
+                    "block_kind = ?, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('ready', 'review') "
                     "AND claim_lock IS NULL",
-                    (failures, error[:500], task_id),
+                    (failure_block_kind, failures, error[:500], task_id),
                 )
                 if cur.rowcount == 0:
                     # A fresh claim raced in — the task is running a new

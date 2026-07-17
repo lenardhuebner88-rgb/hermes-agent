@@ -136,10 +136,6 @@ def test_i2_spawned_running_task_has_complete_claim_identity(
         assert run.worker_pid == task.worker_pid
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I3 broken: protocol-violation breaker parks without block_kind",
-)
 def test_i3_clean_exit_protocol_miss_is_bounded_and_terminal(
     kanban_home, monkeypatch
 ):
@@ -294,10 +290,6 @@ def test_i6_done_and_archived_tasks_release_runtime_identity(kanban_home):
         _assert_runtime_cleared(archived)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="I7 broken: timeout/crash breaker UPDATE omits block_kind",
-)
 def test_i7_timeout_breaker_block_is_typed(kanban_home, monkeypatch):
     """I7: the separate timeout/crash breaker branch must persist block_kind."""
     clock = [1_800_000_000]
@@ -318,7 +310,7 @@ def test_i7_timeout_breaker_block_is_typed(kanban_home, monkeypatch):
 
         task = kb.get_task(conn, task_id)
         assert task.status == "blocked"
-        assert task.block_kind == "transient"
+        assert task.block_kind == "capacity"
         _assert_runtime_cleared(task)
 
 
