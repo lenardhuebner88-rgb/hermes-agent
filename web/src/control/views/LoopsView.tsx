@@ -971,7 +971,7 @@ function LoopWorkstationFileEditor({
       {file.editable ? (
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            size="xs"
+            size="sm"
             disabled={saveBusy || draft === file.content}
             onClick={() => onSave(file.name, draft)}
             className={cn("border-0", NIGHT_ACTION_CLASS)}
@@ -1061,7 +1061,7 @@ function LoopWorkstationPanel({
             style={nightFieldStyle}
           />
           <Button
-            size="xs"
+            size="sm"
             disabled={duplicateBusy || !dupName.trim()}
             onClick={() => onDuplicate(dupName.trim())}
             className={cn("border-0", NIGHT_ACTION_CLASS)}
@@ -1595,7 +1595,7 @@ function LoopsHero({
                 <span className="inline-flex flex-wrap items-center gap-2">
                   <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
                   <Button
-                    size="xs"
+                    size="sm"
                     disabled={busyPack === hero.name}
                     onClick={() => onStop(hero.name)}
                     className={NIGHT_ACTION_CLASS}
@@ -1603,10 +1603,10 @@ function LoopsHero({
                   >
                     {busyPack === hero.name ? "…" : t.confirmYes}
                   </Button>
-                  <Button size="xs" ghost onClick={() => onSetPendingStop(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
+                  <Button size="sm" ghost onClick={() => onSetPendingStop(null)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-ink-soft)" }}>{t.confirmNo}</Button>
                 </span>
               ) : (
-                <Button size="xs" ghost onClick={() => onSetPendingStop(hero.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-fail)" }}>
+                <Button size="sm" ghost onClick={() => onSetPendingStop(hero.name)} className={NIGHT_ACTION_CLASS} style={{ color: "var(--ln-fail)" }}>
                   <Square className="h-3.5 w-3.5" />{t.actions.stop}
                 </Button>
               )}

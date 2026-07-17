@@ -114,4 +114,30 @@ describe("CronView", () => {
     expect(html).not.toContain("hc-fleet-empty ok");
     expect(html).not.toContain("status-ok");
   });
+
+  it("renders text action buttons, not the upstream aspect-square icon variant", () => {
+    // Upstream Button size="xs" became icon-only (p-1 aspect-square grid-cols-1):
+    // with a text label it renders as a huge square with letter-wrapped text.
+    // Text actions (Jetzt auslösen / Pausieren / Fortsetzen) must use a text size.
+    hooks.useCronObservability.mockReturnValue({
+      data: { jobs: [baseJob], gateway: { running: true, pid: 42 } },
+      error: null,
+      errorObj: null,
+      loading: false,
+      lastUpdated: 1,
+      isStale: false,
+      busyJob: null,
+      actionError: null,
+      reload: vi.fn(),
+      updateData: vi.fn(),
+      trigger: vi.fn(),
+      pause: vi.fn(),
+      resume: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(<CronView density="airy" />);
+
+    expect(html).toContain("Jetzt auslösen");
+    expect(html).not.toContain("aspect-square");
+  });
 });

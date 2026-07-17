@@ -97,7 +97,7 @@ function CronJobCard({ job, controls, output }: {
           pending === "pause" ? (
             confirmRow(t.confirmPause, t.actions.pause, <Pause className="h-3.5 w-3.5" />, () => void controls.pause(ref))
           ) : (
-            <Button size="xs" ghost className="min-h-12" disabled={busy} onClick={() => setPending("pause")}>
+            <Button size="sm" ghost className="min-h-12" disabled={busy} onClick={() => setPending("pause")}>
               <Pause className="h-3.5 w-3.5" />{t.actions.pause}
             </Button>
           )
@@ -105,7 +105,7 @@ function CronJobCard({ job, controls, output }: {
           pending === "resume" ? (
             confirmRow(t.confirmResume, t.actions.resume, <Play className="h-3.5 w-3.5" />, () => void controls.resume(ref))
           ) : (
-            <Button size="xs" ghost className="min-h-12" disabled={busy} onClick={() => setPending("resume")}>
+            <Button size="sm" ghost className="min-h-12" disabled={busy} onClick={() => setPending("resume")}>
               <Play className="h-3.5 w-3.5" />{t.actions.resume}
             </Button>
           )
@@ -113,7 +113,7 @@ function CronJobCard({ job, controls, output }: {
         {pending === "trigger" ? (
           confirmRow(t.confirmTrigger, t.actions.trigger, null, () => void controls.trigger(ref))
         ) : (
-          <Button size="xs" className="min-h-12" disabled={busy} onClick={() => setPending("trigger")}>
+          <Button size="sm" className="min-h-12" disabled={busy} onClick={() => setPending("trigger")}>
             {t.actions.trigger}
           </Button>
         )}
