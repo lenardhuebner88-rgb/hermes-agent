@@ -17,6 +17,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
+from hermes_cli import outcome_verification as outcomes
 from hermes_cli import strategist
 
 
@@ -336,6 +337,178 @@ def test_auto_complete_decompose_root_without_commit_evidence_is_not_shipped(boa
     assert rec["current"] is None
     assert rec["delta"] is None
     assert rec["verdict"] is None
+
+
+def test_auto_complete_decompose_root_appends_root_integration_evidence(board_home):
+    """Merged + real 40-hex SHA mirrors child integration events onto root_id."""
+    merge_sha = "a" * 40
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: merged root evidence",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="child", assignee="coder")
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=completed_child,
+            outcome={
+                "action": "merged",
+                "merge_commit": merge_sha,
+                "gate": "post-merge-gate",
+                "state": "clean",
+                "branch": "kanban/test-root",
+            },
+        )
+        rows = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (root,),
+        ).fetchall()
+
+    kinds = [row["kind"] for row in rows]
+    assert "integration_merged" in kinds
+    assert "INTEGRATOR_VERIFIED" in kinds
+    by_kind = {row["kind"]: json.loads(row["payload"] or "{}") for row in rows}
+    assert by_kind["integration_merged"]["merge_commit"] == merge_sha
+    assert by_kind["INTEGRATOR_VERIFIED"]["merge_commit"] == merge_sha
+    assert by_kind["INTEGRATOR_VERIFIED"]["gate"] == "post-merge-gate"
+    assert by_kind["INTEGRATOR_VERIFIED"]["state"] == "clean"
+    # Placeholder / non-SHA merge_commit must not invent delivery witnesses.
+    with kb.connect() as conn:
+        root2 = kb.create_task(
+            conn,
+            title="PlanSpec TEST-LEVER: placeholder sha root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        child2 = kb.create_task(conn, title="child2", assignee="coder")
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root2,
+            completed_task_id=child2,
+            outcome={
+                "action": "merged",
+                "merge_commit": "not-a-real-sha",
+                "gate": "x",
+                "state": "y",
+            },
+        )
+        kinds2 = [
+            row["kind"]
+            for row in conn.execute(
+                "SELECT kind FROM task_events WHERE task_id = ?",
+                (root2,),
+            ).fetchall()
+        ]
+    assert "integration_merged" not in kinds2
+    assert "INTEGRATOR_VERIFIED" not in kinds2
+
+
+def test_project_strategist_outcomes_ships_from_root_integration_events(board_home):
+    """Real-shaped lever record + root delivery witnesses project to shipped."""
+    merge_sha = "b" * 40
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec classification coverage lever",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        completed_child = kb.create_task(conn, title="integrator child", assignee="coder")
+        kwt._auto_complete_decompose_root(
+            conn,
+            root_id=root,
+            completed_task_id=completed_child,
+            outcome={
+                "action": "merged",
+                "merge_commit": merge_sha,
+                "gate": "x",
+                "state": "y",
+                "branch": "kanban/test-root",
+            },
+        )
+        # Shape cloned from ~/.hermes/state/strategist/lever-outcomes.json
+        # (proposed row before ship-stamp; metric_key from live samples).
+        rec = {
+            "schema_version": 1,
+            "lever_key": "receipt-test-root-evidence",
+            "root_task_id": root,
+            "proposed_at": 1_700_000_000,
+            "baseline": {
+                "classification_coverage.unclassified_share": 18.8,
+                "classification_coverage.coverage_pct": 100.0,
+                "autonomy.autonomy_pct": 81.0,
+            },
+            "metric_key": "classification_coverage.unclassified_share",
+            "shipped_at": None,
+            "measured_at": None,
+            "current": None,
+            "delta": None,
+            "verdict": None,
+            "status": "proposed",
+            "outcome_applicability": "applicable",
+            "measurement_status": "not_started",
+            "outcome_verdict": None,
+            "evidence_grade": "legacy_observational",
+            "calibration_eligible": False,
+            "outcome_schema_version": 1,
+            "outcome_source": "strategist",
+            "source": "strategist",
+            "subject_type": "strategist_lever",
+            "subject_id": root,
+            "legacy_provenance": "lever-outcomes.json/v1",
+        }
+        [projected] = outcomes.project_strategist_outcomes([rec], conn=conn)
+
+    assert projected["status"] == "shipped"
+    assert projected["outcome_delivery_sha"] == merge_sha
+    assert projected["outcome_applicability"] == "applicable"
+    assert projected["status"] != "archived"
+
+
+def test_project_strategist_outcomes_preserves_shipped_without_delivery_events(
+    board_home,
+):
+    """Already-shipped records stay shipped even when root is terminal without events."""
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="PlanSpec already-shipped root",
+            assignee=None,
+            created_by=strategist.STRATEGIST_AUTHOR,
+        )
+        conn.execute(
+            "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+            (1_700_000_100, root),
+        )
+        conn.commit()
+        rec = {
+            "schema_version": 1,
+            "lever_key": "already-shipped-monotonic",
+            "root_task_id": root,
+            "proposed_at": 1_700_000_000,
+            "baseline": {"classification_coverage.unclassified_share": 18.8},
+            "metric_key": "classification_coverage.unclassified_share",
+            "shipped_at": 1_700_000_050,
+            "measured_at": None,
+            "current": None,
+            "delta": None,
+            "verdict": None,
+            "status": "shipped",
+            "outcome_applicability": "applicable",
+            "measurement_status": "pending",
+            "source": "strategist",
+            "subject_type": "strategist_lever",
+            "subject_id": root,
+            "legacy_provenance": "lever-outcomes.json/v1",
+        }
+        [projected] = outcomes.project_strategist_outcomes([rec], conn=conn)
+
+    assert projected["status"] == "shipped"
+    assert projected["shipped_at"] == 1_700_000_050
+    assert projected.get("outcome_applicability") != "not_applicable"
 
 
 def test_auto_complete_decompose_root_does_not_stamp_when_db_txn_rolls_back(
