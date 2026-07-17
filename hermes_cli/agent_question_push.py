@@ -235,14 +235,19 @@ def flush_pending_pushes(
         if payload is None:
             return {"sent": False, "reason": "no-payload"}
 
-        result = _send_payload(payload)
+        # Stamp BEFORE the network send so the debounce window holds even
+        # while a send is slow — and release the lock for the send itself:
+        # holding _lock across network I/O would stall hook ingest and the
+        # scrape poller behind one hung push endpoint (Kimi review M1).
         _set_last_push_ts(now_ts, db_path=db_path)
-        return {
-            "sent": True,
-            "n": len(events),
-            "payload": payload,
-            "result": result,
-        }
+
+    result = _send_payload(payload)
+    return {
+        "sent": True,
+        "n": len(events),
+        "payload": payload,
+        "result": result,
+    }
 
 
 def _schedule_flush(delay_s: float, *, db_path: Optional[Path]) -> None:
@@ -265,12 +270,36 @@ def _schedule_flush(delay_s: float, *, db_path: Optional[Path]) -> None:
                 logger.warning("agent_question_push delayed flush failed", exc_info=True)
             finally:
                 with _lock:
-                    _flush_timer = None
+                    # Only clear our own reference — a flush can schedule a NEW
+                    # timer while we run; clobbering it would orphan that timer
+                    # (Kimi review m3).
+                    if _flush_timer is timer:
+                        _flush_timer = None
 
         timer = threading.Timer(max(0.05, float(delay_s)), _fire)
         timer.daemon = True
         _flush_timer = timer
         timer.start()
+
+
+def drain_pending_on_start(*, db_path: Optional[Path] = None) -> bool:
+    """Re-arm a flush for pending ids left behind by a restart (Kimi m2).
+
+    ``push_pending_ids`` is persistent but the debounce timer is not — after a
+    restart inside the debounce window the bundle would otherwise only go out
+    when the NEXT new question arrives. Called once from the poller startup.
+    Returns True when a flush was scheduled.
+    """
+    try:
+        with _lock:
+            pending = _load_pending(db_path=db_path)
+        if not pending:
+            return False
+        _schedule_flush(1.0, db_path=db_path)
+        return True
+    except Exception:
+        logger.warning("drain_pending_on_start failed", exc_info=True)
+        return False
 
 
 def maybe_push_question(
@@ -351,11 +380,10 @@ def reset_push_state_for_tests(*, db_path: Optional[Path] = None) -> None:
                 pass
             _flush_timer = None
         _send_fn = None
-    if db_path is not None or True:
-        now_ts = time.time()
-        try:
-            aq.set_meta(_META_PENDING_IDS, "[]", db_path=db_path, now=now_ts)
-            aq.set_meta(_META_LAST_PUSH, "0", db_path=db_path, now=now_ts)
-            # leave last_visible for explicit tests
-        except Exception:
-            pass
+    now_ts = time.time()
+    try:
+        aq.set_meta(_META_PENDING_IDS, "[]", db_path=db_path, now=now_ts)
+        aq.set_meta(_META_LAST_PUSH, "0", db_path=db_path, now=now_ts)
+        # leave last_visible for explicit tests
+    except Exception:
+        pass

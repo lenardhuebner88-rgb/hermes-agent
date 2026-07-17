@@ -187,3 +187,33 @@ def test_visibility_gate_skips_when_heartbeat_fresh(
     r2 = aqp.maybe_push_question(eid, db_path=qdb, now=t0 + 40.0)
     assert r2.get("queued") is True
     assert len(sent) == 1
+
+
+def test_drain_pending_on_start_rearms_stranded_bundle(
+    qdb: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pending ids survive a restart, the debounce timer does not — the startup
+    drain must re-arm the flush so the bundle is not stranded (review m2)."""
+    eid = _insert_open(qdb, source="hook")
+    # Simulate restart inside the debounce window: pending persisted, no timer.
+    aq.set_meta("push_pending_ids", f"[{eid}]", db_path=qdb)
+    aq.set_meta("push_last_ts", "0", db_path=qdb)
+
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(aqp, "_send_fn", lambda payload: sent.append(payload) or {"sent": 1})
+
+    scheduled: list[float] = []
+    monkeypatch.setattr(
+        aqp,
+        "_schedule_flush",
+        lambda delay_s, *, db_path: scheduled.append(delay_s)
+        or aqp.flush_pending_pushes(db_path=db_path),
+    )
+    assert aqp.drain_pending_on_start(db_path=qdb) is True
+    assert scheduled == [1.0]
+    assert len(sent) == 1
+    assert f"question={eid}" in sent[0]["url"]
+
+    # Empty pending → no re-arm.
+    assert aqp.drain_pending_on_start(db_path=qdb) is False
+    assert scheduled == [1.0]

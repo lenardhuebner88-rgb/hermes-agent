@@ -349,8 +349,11 @@ export function AgentTerminalsView() {
     const found = openQuestions.some((q) => q.id === id);
     setAnswerFocusId(id);
     setAnswerSheetOpen(true);
+    // Only claim "closed" when the questions fetch actually succeeded — after
+    // a failed first poll (data == null) the question may well still be open
+    // (Kimi review m7).
     setAnswerClosedHint(
-      found ? null : "bereits beantwortet/abgelaufen",
+      found || agentQuestions.data == null ? null : "bereits beantwortet/abgelaufen",
     );
   }, [
     searchParams,

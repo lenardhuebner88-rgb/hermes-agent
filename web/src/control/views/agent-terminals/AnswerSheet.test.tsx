@@ -241,3 +241,22 @@ describe("AnswerSheet (real agent-question event format)", () => {
       /bereits beantwortet/,
     );
   });
+
+  it("deep-link target closed but another question open shows warn banner", () => {
+    const other = fixtureEvent({ id: 7, question_text: "Other open?" });
+    render(
+      <AnswerSheet
+        questions={[other]}
+        focusId={999}
+        closedHint="bereits beantwortet/abgelaufen"
+        onClose={() => {}}
+        reload={vi.fn()}
+      />,
+    );
+    // The other question renders…
+    expect(screen.getByText("Other open?")).toBeTruthy();
+    // …but never silently: the banner names the deep-link outcome (Codex I3).
+    expect(screen.getByTestId("answer-sheet-deeplink-hint").textContent).toMatch(
+      /bereits beantwortet/,
+    );
+  });

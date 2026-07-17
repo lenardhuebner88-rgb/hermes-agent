@@ -882,11 +882,15 @@ def resolve_hook_event(
             # Resolve-signal (PostToolUse) is authoritative verification for
             # hook-source events — CC often still echoes the question text, so
             # a text-disappear check would false-negative (I3 Mini #3).
+            # But only with a real answer: PostToolUse can fire with an empty
+            # answers payload (Esc-Abbruch, versionsabhängig) — closing is
+            # correct then, a verified-stamp is not (Kimi review m5).
+            verified_flag = 1 if answer_s else 0
             cur = conn.execute(
                 "UPDATE question_events SET status = 'answered', "
                 "answered_by = 'terminal', answer = ?, latency_s = ?, "
-                "answer_verified = 1, updated_ts = ? WHERE id = ? AND status = 'open'",
-                (answer_s, float(latency_s), ts, event_id),
+                "answer_verified = ?, updated_ts = ? WHERE id = ? AND status = 'open'",
+                (answer_s, float(latency_s), verified_flag, ts, event_id),
             )
             if int(cur.rowcount or 0) != 1:
                 return {"ok": True, "resolved": False}
@@ -895,7 +899,7 @@ def resolve_hook_event(
                 "resolved": True,
                 "id": event_id,
                 "latency_s": float(latency_s),
-                "verified": True,
+                "verified": bool(verified_flag),
             }
 
 
@@ -1465,7 +1469,6 @@ class QuestionScrapeIngestor:
 PRUNE_MAX_AGE_DAYS = 14
 # Prune at most once per hour from the poller loop.
 PRUNE_INTERVAL_S = 3600.0
-_BAK_GLOB = "question_events.db.bak-*"
 
 
 def prune_old_events(
@@ -1622,6 +1625,14 @@ def start_poller(interval_s: float = 5.0, *, db_path: Optional[Path] = None) -> 
         )
         _poller_thread = thread
         thread.start()
+        # Re-arm a bundled push stranded by a restart inside the debounce
+        # window (pending ids are persistent, the timer is not — Kimi m2).
+        try:
+            from hermes_cli.agent_question_push import drain_pending_on_start
+
+            drain_pending_on_start(db_path=db_path)
+        except Exception:
+            logger.warning("agent_questions push drain-on-start failed", exc_info=True)
         logger.info("agent_questions poller started (interval_s=%s)", interval)
         return True
 

@@ -1973,3 +1973,18 @@ def test_i3_prune_bak_files(tmp_path: Path) -> None:
     assert not old_bak.exists()
     assert new_bak.exists()
     assert other.exists()
+
+
+def test_i3_resolve_hook_event_empty_answer_not_verified(qdb: Path) -> None:
+    """PostToolUse with empty answers (Esc-Abbruch) closes but must NOT stamp
+    verified — closing is correct, the verification claim is not (review m5)."""
+    ing = aq.ingest_hook_event(_hook_store_event(), db_path=qdb, now=1_700_001_200.0)
+    eid = int(ing["id"])
+
+    r = aq.resolve_hook_event(_HOOK_KEY, "", db_path=qdb, now=1_700_001_210.0)
+    assert r["ok"] is True and r["resolved"] is True and r["id"] == eid
+    assert r["verified"] is False
+
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert not answered[0]["answer_verified"]

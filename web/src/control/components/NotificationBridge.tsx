@@ -109,7 +109,9 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
     let cancelled = false;
     const postVisibility = () => {
       if (cancelled || document.hidden) return;
-      void fetchJSON("/api/agent-questions/visibility", { method: "POST" }, { timeoutMs: 0 }).catch(
+      // 5s timeout: a hanging server must not queue up fire-and-forget
+      // heartbeats behind each other (Kimi review m8).
+      void fetchJSON("/api/agent-questions/visibility", { method: "POST" }, { timeoutMs: 5000 }).catch(
         () => undefined,
       );
     };

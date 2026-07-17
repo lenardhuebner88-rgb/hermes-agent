@@ -219,6 +219,18 @@ export function AnswerSheet({
           </p>
         )}
 
+        {current && closedHint && focusId != null && current.id !== focusId && (
+          // Deep-link target is gone but OTHER questions are open: without this
+          // banner the sheet would silently show a different question and the
+          // operator could answer the wrong one (Codex review, I3).
+          <p
+            className="rounded-card border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-[12px] text-status-warn"
+            data-testid="answer-sheet-deeplink-hint"
+          >
+            {`Die verlinkte Frage ist ${closedHint} — unten steht die nächste offene Frage.`}
+          </p>
+        )}
+
         {current && (
           <>
             <div className="max-h-[min(40dvh,18rem)] overflow-y-auto overscroll-contain rounded-card border border-line bg-surface-2 p-3">
