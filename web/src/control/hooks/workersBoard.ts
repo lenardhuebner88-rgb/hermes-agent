@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchJSON } from "@/lib/api";
+import { fetchJSON, fetchJSONWithMeta } from "@/lib/api";
 import {
   WorkersResponseSchema,
   BoardsResponseSchema,
@@ -17,6 +17,8 @@ import type { BoardResponse, WorkersResponse } from "../lib/types";
 import { usePolling } from "./internal";
 
 export const DONE_PAGE_LIMIT = 30;
+
+const boardRevalidationCache = new Map<string | null, { etag: string; data: BoardResponse }>();
 
 export interface DoneBoardPage {
   total_count: number;
@@ -285,11 +287,29 @@ export function useWorkerActivity(taskId: string | null, board: string | null = 
 // invoke shared loaders with an AbortSignal — only accept real board strings.
 export const boardLoader = async (board?: string | null | AbortSignal) => {
   const boardName = typeof board === "string" ? board : null;
-  return parseOrThrow(
+  const signal = board instanceof AbortSignal ? board : undefined;
+  const cached = boardRevalidationCache.get(boardName);
+  const headers = new Headers();
+  if (cached) headers.set("If-None-Match", cached.etag);
+  const response = await fetchJSONWithMeta<unknown>(
+    withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", boardName),
+    { headers, signal },
+  );
+  if (response.status === 304) {
+    if (!cached) throw new Error("kanban/board: received 304 without cached data");
+    // Keep the exact parsed object: pollingStore's unchangedPayload JSON check
+    // stays cheap and produces zero listener notifications for unchanged polls.
+    return cached.data;
+  }
+  const data = parseOrThrow(
     BoardResponseSchema,
-    await fetchJSON<unknown>(withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", boardName)),
+    response.data,
     boardName ? `kanban/board:${boardName}` : "kanban/board",
   );
+  const etag = response.headers.get("ETag");
+  if (etag) boardRevalidationCache.set(boardName, { etag, data });
+  else boardRevalidationCache.delete(boardName);
+  return data;
 };
 
 

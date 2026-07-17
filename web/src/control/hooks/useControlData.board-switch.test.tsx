@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetPollingStore } from "./pollingStore";
 import { useBoard } from "./workersBoard";
 
-const api = vi.hoisted(() => ({ fetchJSON: vi.fn() }));
+const api = vi.hoisted(() => ({ fetchJSON: vi.fn(), fetchJSONWithMeta: vi.fn() }));
 vi.mock("@/lib/api", () => api);
 
 function boardPayload(id: string, title: string) {
@@ -49,6 +49,7 @@ describe("useBoard board-key isolation", () => {
   beforeEach(() => {
     _resetPollingStore();
     api.fetchJSON.mockReset();
+    api.fetchJSONWithMeta.mockReset();
   });
 
   afterEach(() => {
@@ -63,9 +64,11 @@ describe("useBoard board-key isolation", () => {
     });
     const defaultPayload = boardPayload("t_default_root", "Default root");
     const healthPayload = boardPayload("t_health_root", "Health root");
-    api.fetchJSON.mockImplementation((url: string) =>
-      url.includes("board=health-track") ? healthPending : Promise.resolve(defaultPayload),
-    );
+    api.fetchJSONWithMeta.mockImplementation(async (url: string) => ({
+      data: await (url.includes("board=health-track") ? healthPending : Promise.resolve(defaultPayload)),
+      status: 200,
+      headers: new Headers(),
+    }));
 
     const renderSnapshots: Array<{ board: string | null; taskId: string | null }> = [];
     const { result, rerender } = renderHook(

@@ -272,6 +272,72 @@ def test_probe_exception_becomes_offline(
     assert isinstance(gateway["latency_ms"], int)
 
 
+def test_probe_timeout_degrades_only_slow_subsystem(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def healthy() -> dict[str, Any]:
+        return {"status": "healthy", "detail": "ok", "error": None}
+
+    async def slow_autoresearch() -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {"status": "healthy", "detail": "idle", "error": None}
+
+    monkeypatch.setattr(hs, "PROBE_TIMEOUT_S", 0.01)
+    monkeypatch.setattr(hs, "_probe_gateway_status", healthy)
+    monkeypatch.setattr(hs, "_probe_autoresearch_status", slow_autoresearch)
+    monkeypatch.setattr(hs, "_probe_kanban_db_status", healthy)
+    monkeypatch.setattr(hs, "_probe_kanban_dispatcher_status", healthy)
+
+    response = client.get("/api/health-status")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["overall"] == "degraded"
+    assert data["subsystems"]["autoresearch"] == {
+        "status": "degraded",
+        "detail": "probe timeout after 0.0s",
+        "heartbeat_age_s": None,
+        "error": "timeout",
+    }
+    assert {
+        name: subsystem["status"]
+        for name, subsystem in data["subsystems"].items()
+        if name != "autoresearch"
+    } == {"gateway": "healthy", "kanban_db": "healthy", "kanban_dispatcher": "healthy"}
+
+
+def test_health_endpoint_is_bounded_by_per_probe_timeout(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def healthy() -> dict[str, Any]:
+        return {"status": "healthy", "detail": "ok", "error": None}
+
+    async def hung_gateway() -> dict[str, Any]:
+        await asyncio.sleep(10)
+        return {"status": "healthy", "detail": "gateway running", "error": None}
+
+    monkeypatch.setattr(hs, "_probe_gateway_status", hung_gateway)
+    monkeypatch.setattr(hs, "_probe_autoresearch_status", healthy)
+    monkeypatch.setattr(hs, "_probe_kanban_db_status", healthy)
+    monkeypatch.setattr(hs, "_probe_kanban_dispatcher_status", healthy)
+
+    started = time.perf_counter()
+    response = client.get("/api/health-status")
+    elapsed = time.perf_counter() - started
+
+    assert response.status_code == 200
+    assert elapsed < 5.0
+    gateway = response.json()["subsystems"]["gateway"]
+    assert gateway == {
+        "status": "degraded",
+        "detail": "probe timeout after 3.0s",
+        "latency_ms": 3000,
+        "error": "timeout",
+    }
+
+
 def test_autoresearch_crashed_state(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
