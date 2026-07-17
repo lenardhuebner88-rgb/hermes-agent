@@ -12,11 +12,14 @@ import { attentionTone, type ProjectAttention } from "./derive";
 
 const t = de.projekte;
 
-/** Left-border accent for the attention ampel (tokens only — no hardcoded colors). */
-const ATTENTION_BORDER: Record<ProjectAttention, string> = {
-  alert: "border-l-2 border-l-status-alert",
-  active: "border-l-2 border-l-status-warn",
-  quiet: "border-l-2 border-l-ink-3/40",
+/** Left-edge accent bar for the attention ampel. Rendered as an absolute child
+ *  rather than a `border-l-*` utility: the Card's own `.hc-surface-card` border
+ *  shorthand outranks Tailwind border utilities in the cascade, so a utility
+ *  border silently loses. Tokens only — no hardcoded colors. */
+const ATTENTION_ACCENT: Record<ProjectAttention, string> = {
+  alert: "bg-status-alert",
+  active: "bg-status-warn",
+  quiet: "bg-ink-3/40",
 };
 
 const ATTENTION_DOT: Record<ProjectAttention, string> = {
@@ -63,16 +66,17 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
     <Card
       surface="card"
       interactive
-      className={cn(
-        "flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
-        ATTENTION_BORDER[attention],
-      )}
+      className="relative overflow-hidden flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze"
       ariaLabel={t.detailOpenAria(project.name)}
       role="button"
       tabIndex={0}
       onClick={onOpen}
       onKeyDown={onKeyDown}
     >
+      <span
+        aria-hidden
+        className={cn("pointer-events-none absolute inset-y-0 left-0 w-0.5", ATTENTION_ACCENT[attention])}
+      />
       <header className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
