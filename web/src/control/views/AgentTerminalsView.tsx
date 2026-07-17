@@ -167,6 +167,17 @@ export {
 } from "./agent-terminals/terminalHelpers";
 export type { TerminalUiState } from "./agent-terminals/terminalHelpers";
 
+export function pickDeepLinkedTarget(
+  windows: AgentTerminalWindow[],
+  session: string,
+  window?: string | null,
+): { session: string; window: string } | null {
+  const match = window
+    ? windows.find((candidate) => candidate.session === session && candidate.window === window)
+    : windows.find((candidate) => candidate.session === session);
+  return match ? targetFromWindow(match) : null;
+}
+
 export function AgentTerminalsView() {
   const navigate = useNavigate();
   const mobile = useIsMobile();
@@ -362,6 +373,22 @@ export function AgentTerminalsView() {
     agentQuestions.data,
     openQuestions,
   ]);
+  // A question deep-link wins when both contracts are present; the effect above consumes it first.
+  useEffect(() => {
+    if (deepLinkConsumedRef.current) return;
+    const session = searchParams.get("session");
+    if (session == null || session === "") return;
+    if (searchParams.get("question")) return;
+    if (loading) return;
+    deepLinkConsumedRef.current = true;
+    const window = searchParams.get("window");
+    const next = new URLSearchParams(searchParams);
+    next.delete("session");
+    next.delete("window");
+    setSearchParams(next, { replace: true });
+    const deepLinkedTarget = pickDeepLinkedTarget(windows, session, window);
+    if (deepLinkedTarget) setTarget(deepLinkedTarget);
+  }, [loading, searchParams, setSearchParams, windows]);
   const visiblePaneCount: DesktopTerminalLayout = compactLayout ? 1 : desktopLayout;
   const paneTargets = useMemo<Array<PaneTarget | null>>(() => [target, ...extraTargets], [extraTargets, target]);
   const activeTarget = paneTargets[Math.min(activePane, visiblePaneCount - 1)] ?? target;

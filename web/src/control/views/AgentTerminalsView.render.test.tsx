@@ -269,10 +269,10 @@ function installDom(matches = false) {
 }
 
 /** Renders the view under a MemoryRouter — the "Zurück"-chip needs useNavigate() context. */
-async function renderView() {
+async function renderView(initialEntry = "/control/agent-terminals") {
   const AgentTerminalsView = await loadView();
   return render(
-    <MemoryRouter initialEntries={["/control/agent-terminals"]}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <AgentTerminalsView />
     </MemoryRouter>,
   );
@@ -344,6 +344,44 @@ afterEach(() => {
 });
 
 describe("AgentTerminalsView desktop rendering", () => {
+  it("seeds the terminal target from session and window params", async () => {
+    await renderView("/control/agent-terminals?session=hermes-agents&window=codex");
+
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]).toMatchObject({ session: "hermes-agents", window: "codex" });
+    });
+  });
+
+  it("falls back to the default terminal for an unknown deep-linked session", async () => {
+    await renderView("/control/agent-terminals?session=missing&window=codex");
+
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]).toMatchObject({ session: "hermes-agents", window: "hermes" });
+    });
+    expect(await screen.findByTestId("terminal-pane-host-0")).toBeTruthy();
+  });
+
+  it("selects the session's first window when the window param is omitted", async () => {
+    const workWindows: AgentTerminalWindow[] = [
+      ...windows,
+      { session: "work", window: "claude", active: true, pane_id: "%4", pid: 444, command: "claude", cwd: "/home/piet" },
+      { session: "work", window: "codex", active: false, pane_id: "%5", pid: 555, command: "node", cwd: "/home/piet" },
+    ];
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: workWindows });
+
+    await renderView("/control/agent-terminals?session=work");
+
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]).toMatchObject({ session: "work", window: "claude" });
+    });
+  });
+
   it("uses Leitstand panels and 45px targets for every rendered desktop toolbar control", async () => {
     await renderView();
 

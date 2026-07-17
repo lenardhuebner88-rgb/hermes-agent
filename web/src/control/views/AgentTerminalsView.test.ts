@@ -12,6 +12,7 @@ import {
   isTerminalCopyShortcut,
   orderOverviewForFleet,
   orderWindowsForStrip,
+  pickDeepLinkedTarget,
   pickInitialTarget,
   readStoredWorkdir,
   reconnectDelayMs,
@@ -161,6 +162,20 @@ describe("AgentTerminalsView state helpers", () => {
     expect(pickInitialTarget(windows, "codex", { session: "hermes-agents", window: "hermes" })).toEqual({ session: "hermes-agents", window: "hermes" });
     expect(pickInitialTarget(windows, "codex", null)).toEqual({ session: "hermes-agents", window: "codex" });
     expect(pickInitialTarget([], "hermes", null)).toBeNull();
+  });
+});
+
+describe("pickDeepLinkedTarget", () => {
+  it("selects the requested session and window when both exist", () => {
+    expect(pickDeepLinkedTarget(LIVE_WINDOWS, "work", "codex")).toEqual({ session: "work", window: "codex" });
+  });
+
+  it("returns null for an unknown session so the default selection remains", () => {
+    expect(pickDeepLinkedTarget(LIVE_WINDOWS, "missing", "codex")).toBeNull();
+  });
+
+  it("selects the session's first window when no window is requested", () => {
+    expect(pickDeepLinkedTarget(LIVE_WINDOWS, "work")).toEqual({ session: "work", window: "claude" });
   });
 });
 
