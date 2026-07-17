@@ -44,6 +44,7 @@
 #   GATE_FRONTEND_PREFLIGHT_ONLY=1 Nur den Preflight ausführen (Selbsttest), dann exit.
 #   GATE_FRONTEND_MAX_WORKERS=4     Vitest-Forks begrenzen; überschreibbar für CI/starke Hosts.
 set -euo pipefail
+"$(dirname "$0")/check-branch-age.sh" || exit 1
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
