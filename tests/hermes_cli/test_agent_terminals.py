@@ -952,6 +952,31 @@ def test_identity_for_prefers_window_options_over_name_parsing(
     assert service.identity_for("work", "claude") == ("claude", "home")
 
 
+def test_set_window_identity_optionally_stamps_correlation_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = TmuxAgentSessionService(socket_path=tmp_path / "tmux.sock", hermes_home=tmp_path)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(service, "_run", lambda *args, **_kwargs: calls.append(args))
+
+    service._set_window_identity(
+        "work",
+        "claude",
+        kind="claude",
+        workdir_key="home",
+        session_id="session-123",
+        task_id="task-456",
+    )
+
+    target = "work:=claude"
+    assert calls == [
+        ("set-option", "-w", "-t", target, "@hermes_kind", "claude"),
+        ("set-option", "-w", "-t", target, "@hermes_workdir", "home"),
+        ("set-option", "-w", "-t", target, "@hermes_session_id", "session-123"),
+        ("set-option", "-w", "-t", target, "@hermes_task_id", "task-456"),
+    ]
+
+
 def test_identity_for_falls_back_to_name_parsing_without_window_options(
     tmp_path: Path, tmux_service: TmuxAgentSessionService
 ) -> None:

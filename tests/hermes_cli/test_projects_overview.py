@@ -721,18 +721,17 @@ def test_isolation_one_broken_project_does_not_affect_others(tmp_path: Path) -> 
 # Stage 3 — /api/projects/agents (tmux / coordination / kanban / loops)
 # ---------------------------------------------------------------------------
 
-# Real `tmux list-panes -a -F '#{session_name}|#{window_index}|#{window_name}|
-# #{pane_current_command}|#{pane_current_path}'` output captured on this
-# machine 2026-07-16, used verbatim.
+# Real tmux pane fields in the current nine-column format. These panes predate
+# correlation options, so the final four option fields are empty.
 _REAL_TMUX_PANES_TEXT = """\
-fable-babysit-3|0|claude|claude|/home/piet
-work|0|claude|claude|/home/piet
-work|1|codex|codex|/home/piet
-work|2|kimi|kimi-code|/home/piet/.hermes/hermes-agent
-work|3|grok|node|/home/piet
-work|4|claude-agent|2.1.211|/home/piet/.hermes/hermes-agent
-work|5|claude-agent-2|2.1.211|/home/piet/.hermes/hermes-agent
-work|6|claude-agent-3|2.1.211|/home/piet/.hermes/hermes-agent
+fable-babysit-3|0|claude|claude|/home/piet||||
+work|0|claude|claude|/home/piet||||
+work|1|codex|codex|/home/piet||||
+work|2|kimi|kimi-code|/home/piet/.hermes/hermes-agent||||
+work|3|grok|node|/home/piet||||
+work|4|claude-agent|2.1.211|/home/piet/.hermes/hermes-agent||||
+work|5|claude-agent-2|2.1.211|/home/piet/.hermes/hermes-agent||||
+work|6|claude-agent-3|2.1.211|/home/piet/.hermes/hermes-agent||||
 """
 
 # Real `tmux list-sessions -F '#{session_name}|#{session_created}'` output,
@@ -782,6 +781,13 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
 
     by_label = {a["label"]: a for a in tmux_agents}
 
+    # Frozen legacy shape: heuristic kind remains intact; only the additive
+    # correlation fields appear, both null, and task remains null.
+    for pane in tmux_agents:
+        assert pane["task"] is None
+        assert pane["session_id"] is None
+        assert pane["task_id"] is None
+
     fable_pane = by_label["fable-babysit-3:0 claude"]
     assert fable_pane["kind"] == "claude"
     assert fable_pane["project"] is None  # /home/piet does not match the repo
@@ -815,6 +821,50 @@ def test_tmux_source_real_capture_kinds_labels_project_since(tmp_path: Path) -> 
         assert pane["kind"] == "claude"  # window name wins over command "2.1.211"
         assert pane["project"] == "hermes-infra"
         assert pane["since"] == 1784140154
+
+
+def test_tmux_source_options_override_kind_and_join_task_title(tmp_path: Path) -> None:
+    registry = _hermes_infra_registry()
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    _insert_task(
+        kdb,
+        task_id="corr-task",
+        status="todo",
+        project_id=None,
+        created_at=1_700_000_000,
+    )
+    panes = (
+        "work|7|claude-looking-name|claude|/home/piet/.hermes/hermes-agent"
+        "|grok|agent|corr-task|session-123\n"
+        "work|8|codex|codex|/home/piet/.hermes/hermes-agent"
+        "|codex|agent|missing-task|session-456\n"
+    )
+
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text=panes,
+        tmux_sessions_text="work|1784140154\n",
+        coordination_dir=tmp_path / "no-coordination-here",
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_000,
+    )
+
+    assert payload["errors"] == []
+    by_label = {a["label"]: a for a in payload["agents"] if a["source"] == "tmux"}
+    pane = by_label["work:7 claude-looking-name"]
+    assert pane["kind"] == "grok"
+    assert pane["session_id"] == "session-123"
+    assert pane["task_id"] == "corr-task"
+    assert pane["task"] == "task corr-task"
+
+    missing = by_label["work:8 codex"]
+    assert missing["task_id"] == "missing-task"
+    assert missing["session_id"] == "session-456"
+    assert missing["task"] is None
 
 
 def test_tmux_source_no_server_running_yields_zero_agents_no_error(tmp_path: Path) -> None:
@@ -989,9 +1039,35 @@ def test_parse_coordination_note_open_closed_garbage(tmp_path: Path) -> None:
     assert parsed["label"] == "open"
     assert parsed["source"] == "coordination"
     assert parsed["project"] == "hermes-infra"
+    assert parsed["session_id"] is None
+    assert parsed["task_id"] is None
 
     assert _parse_coordination_note(closed_path, registry) is None
     assert _parse_coordination_note(garbage_path, registry) is None
+
+
+def test_parse_coordination_note_correlation_keys_are_stripped(tmp_path: Path) -> None:
+    note_path = tmp_path / "correlated.md"
+    note_path.write_text(
+        """\
+---
+agent: codex
+started: 2026-07-17T22:00:00+02:00
+ended: null
+task: "B1"
+session: "  session-123  "
+task_id: "  task-456  "
+touching:
+  - /home/piet/.hermes/hermes-agent/hermes_cli/projects_overview.py
+---
+""",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_coordination_note(note_path, _hermes_infra_registry())
+    assert parsed is not None
+    assert parsed["session_id"] == "session-123"
+    assert parsed["task_id"] == "task-456"
 
 
 def test_coordination_source_broken_dir_is_isolated_error(tmp_path: Path) -> None:
@@ -1774,6 +1850,9 @@ def test_detail_reuses_prebuilt_agents_payload_no_coordination_scan(
         now=1_700_000_000,
     )
     assert any(a["source"] == "coordination" for a in prebuilt["agents"])
+    correlated = next(a for a in prebuilt["agents"] if a["source"] == "coordination")
+    correlated["session_id"] = "session-detail"
+    correlated["task_id"] = "task-detail"
 
     parse_calls = {"n": 0}
     real_parse = _parse_coordination_note
@@ -1802,7 +1881,9 @@ def test_detail_reuses_prebuilt_agents_payload_no_coordination_scan(
     assert parse_calls["n"] == 0  # coordination source not hit
     # Filtered to hermes-infra; project field dropped.
     assert all("project" not in a for a in detail["agents"])
-    assert any(a["source"] == "coordination" for a in detail["agents"])
+    detail_coordination = next(a for a in detail["agents"] if a["source"] == "coordination")
+    assert detail_coordination["session_id"] == "session-detail"
+    assert detail_coordination["task_id"] == "task-detail"
 
 
 def test_agents_cache_mutation_does_not_bleed(

@@ -732,12 +732,23 @@ class TmuxAgentSessionService:
                 self._log_event("ensure_session_options_error", session=str(session))
 
     def _set_window_identity(
-        self, session: str, window: str, *, kind: str, workdir_key: str
+        self,
+        session: str,
+        window: str,
+        *,
+        kind: str,
+        workdir_key: str,
+        session_id: str | None = None,
+        task_id: str | None = None,
     ) -> None:
         """Persist managed identity without touching the pane process."""
         target = self._cmd_target(session, window)
         self._run("set-option", "-w", "-t", target, "@hermes_kind", kind)
         self._run("set-option", "-w", "-t", target, "@hermes_workdir", workdir_key)
+        if session_id:
+            self._run("set-option", "-w", "-t", target, "@hermes_session_id", session_id)
+        if task_id:
+            self._run("set-option", "-w", "-t", target, "@hermes_task_id", task_id)
 
     def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
         """Create a tmux window from a resolved definition and return it."""
