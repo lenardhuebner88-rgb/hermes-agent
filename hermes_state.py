@@ -78,6 +78,83 @@ _COMPRESSION_CHILD_SQL = (
 # compression continuations stay hidden).
 _LISTABLE_CHILD_SQL = f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')})"
 
+# Presentational session label derived from first user message (not UNIQUE).
+# Consumers prefer display_name → title → id (see projects_overview._session_label_fields).
+_SESSION_LABEL_MAX_LEN = 80
+
+
+def derive_session_label(content: Any) -> Optional[str]:
+    """Derive a presentational session label from message content.
+
+    Used for ``sessions.display_name`` (NOT ``title`` — title is app-unique).
+    Rules: flatten multimodal text parts, take the first non-empty line,
+    collapse whitespace, drop empty/symbol-only strings, truncate to 80
+    characters with a Unicode ellipsis.
+    """
+    text = _content_as_label_text(content)
+    if text is None:
+        return None
+
+    # First non-empty line (pre-collapse so newlines still define "lines").
+    first_line = ""
+    for line in text.splitlines() or [text]:
+        collapsed = " ".join(line.split())
+        if collapsed:
+            first_line = collapsed
+            break
+    if not first_line:
+        return None
+
+    # Reject pure punctuation/symbols — no letters or digits → no useful label.
+    if not any(ch.isalnum() for ch in first_line):
+        return None
+
+    if len(first_line) > _SESSION_LABEL_MAX_LEN:
+        # Include the ellipsis inside the max length budget.
+        return first_line[: _SESSION_LABEL_MAX_LEN - 1] + "…"
+    return first_line
+
+
+def _content_as_label_text(content: Any) -> Optional[str]:
+    """Normalize message content to a plain string for label derivation."""
+    if content is None:
+        return None
+    if isinstance(content, bytes):
+        try:
+            content = content.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+    if isinstance(content, list):
+        parts: List[str] = []
+        for part in content:
+            if isinstance(part, str):
+                if part.strip():
+                    parts.append(part)
+            elif isinstance(part, dict) and part.get("type") == "text":
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    parts.append(t)
+        if not parts:
+            return None
+        return "\n".join(parts)
+    if isinstance(content, dict):
+        # Rare single-part object; only use explicit text.
+        if content.get("type") == "text" and isinstance(content.get("text"), str):
+            return content["text"]
+        return None
+    if isinstance(content, str):
+        # Encoded multimodal blob from the DB (\\x00json:...).
+        if content.startswith("\x00json:"):
+            try:
+                decoded = json.loads(content[len("\x00json:"):])
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return content
+            return _content_as_label_text(decoded)
+        return content
+    # Numbers / other scalars — stringify only if non-empty.
+    s = str(content).strip()
+    return s or None
+
 
 def _ephemeral_child_sql(alias: str = "s") -> str:
     """Subagent runs (cascade-delete targets), not branches or compression tips."""
@@ -3899,6 +3976,29 @@ class SessionDB:
                     "UPDATE sessions SET message_count = message_count + 1 WHERE id = ?",
                     (session_id,),
                 )
+
+            # Write-time presentational label: first user message only, when
+            # the session still has neither display_name nor title. Uses
+            # COALESCE so concurrent writers never overwrite; EXISTS on
+            # idx_messages_session (session_id, timestamp) is a cheap
+            # "is this the first user message?" check (excludes this row).
+            if role == "user":
+                label = derive_session_label(content)
+                if label is not None:
+                    conn.execute(
+                        """UPDATE sessions
+                           SET display_name = COALESCE(display_name, ?)
+                           WHERE id = ?
+                             AND title IS NULL
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM messages
+                                 WHERE session_id = ?
+                                   AND role = 'user'
+                                   AND id != ?
+                                 LIMIT 1
+                             )""",
+                        (label, session_id, session_id, msg_id),
+                    )
             return msg_id
 
         return self._execute_write(_do)
