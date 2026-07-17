@@ -38,7 +38,7 @@ import {
   clamp01,
   type ChainChipState,
 } from "./fleetHub";
-import type { Worker, ChainGraphResponse } from "./types";
+import type { Worker, ChainGraphResponse, ChainSummary } from "./types";
 
 // ─── Worker-Fixtures (echtes Response-Shape von WorkerSchema) ────────────────
 
@@ -571,6 +571,45 @@ describe("buildChainChips", () => {
     ];
     const chip = buildChainChips(tasks).find((c) => c.rootId === "rc");
     expect(chip!.state).toBe<ChainChipState>("completed");
+  });
+
+  it("summary path keeps an omitted completed chain with authoritative progress", () => {
+    const chips = buildChainChips([], [{
+      root_id: "r-omitted",
+      root_title: "Vollständig ausgelagerte Kette",
+      total: 42,
+      done: 42,
+      status_counts: { done: 42 },
+      latest_completed_at: NOW - 5,
+    }]);
+
+    expect(chips).toEqual([{
+      rootId: "r-omitted",
+      label: "Vollständig ausgelagerte Kette",
+      progress: 1,
+      done: 42,
+      total: 42,
+      state: "completed",
+      completedAt: NOW - 5,
+    }]);
+  });
+
+  it("summary and full-list paths produce identical chips and sort order", () => {
+    const tasks = [
+      makeBoardTask({ id: "rA", title: "Fertig", status: "done", root_id: null, completed_at: NOW - 100 }),
+      makeBoardTask({ id: "a1", status: "done", root_id: "rA", completed_at: NOW - 90 }),
+      makeBoardTask({ id: "rB", title: "Aktiv", status: "done", root_id: null, completed_at: NOW - 80 }),
+      makeBoardTask({ id: "b1", status: "running", root_id: "rB" }),
+      makeBoardTask({ id: "rC", title: "Gehalten", status: "scheduled", root_id: null }),
+      makeBoardTask({ id: "c1", status: "ready", root_id: "rC" }),
+    ];
+    const summaries: ChainSummary[] = [
+      { root_id: "rA", root_title: "Fertig", total: 2, done: 2, status_counts: { done: 2 }, latest_completed_at: NOW - 90 },
+      { root_id: "rB", root_title: "Aktiv", total: 2, done: 1, status_counts: { done: 1, running: 1 }, latest_completed_at: NOW - 80 },
+      { root_id: "rC", root_title: "Gehalten", total: 2, done: 0, status_counts: { scheduled: 1, ready: 1 }, latest_completed_at: null },
+    ];
+
+    expect(buildChainChips(tasks, summaries)).toEqual(buildChainChips(tasks));
   });
 });
 

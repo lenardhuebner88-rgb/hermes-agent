@@ -44,6 +44,47 @@ describe("Fleet source response contracts", () => {
 });
 
 describe("BoardResponseSchema", () => {
+  it("parses compact chain summaries and done-page metadata defensively", () => {
+    const base = {
+      columns: [],
+      tenants: [],
+      assignees: [],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    };
+    const legacy = parseOrThrow(BoardResponseSchema, base, "legacy board");
+    expect(legacy.chain_summaries).toBeUndefined();
+    expect(legacy.done_page).toBeUndefined();
+
+    const compact = parseOrThrow(BoardResponseSchema, {
+      ...base,
+      chain_summaries: [{
+        root_id: "t_root",
+        root_title: "Compact root",
+        total: "40",
+        done: "39",
+        status_counts: { done: 39, running: 1 },
+        latest_completed_at: 1_783_800_200,
+      }],
+      done_page: {
+        total_count: 363,
+        loaded_count: 30,
+        limit: 30,
+        has_more: true,
+        next_cursor: "0:123:t_cursor",
+      },
+    }, "compact board");
+    expect(compact.chain_summaries?.[0]).toMatchObject({ total: 40, done: 39 });
+    expect(compact.done_page?.total_count).toBe(363);
+
+    const malformed = parseOrThrow(BoardResponseSchema, {
+      ...base,
+      chain_summaries: "not-an-array",
+    }, "malformed compact board");
+    expect(malformed.chain_summaries).toEqual([]);
+  });
+
   it("preserves malformed timestamp contamination as invalid instead of absent/zero", () => {
     const parsed = parseOrThrow(BoardResponseSchema, {
       columns: [{

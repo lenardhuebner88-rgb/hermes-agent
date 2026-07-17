@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 const src = readFileSync(path.resolve(import.meta.dirname, "KettenTab.tsx"), "utf8");
 const kettenCss = readFileSync(path.resolve(import.meta.dirname, "ketten-v4.css"), "utf8");
@@ -119,6 +119,7 @@ vi.mock("@/lib/api", async () => {
 
 import { KettenTab } from "./KettenTab";
 import type { BoardResponse, BoardTask } from "../../lib/types";
+import { de } from "../../i18n/de";
 
 const ROOT_ID = "t_231b62fc";
 const DONE_ID = "t_2fad4004";
@@ -264,6 +265,37 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(container.querySelector(".chain-badge")?.textContent).not.toContain("läuft");
     expect(container.querySelector(".glyph-waiting")).toBeTruthy();
     expect(container.querySelector(".glyph-active")).toBeNull();
+  });
+
+  it("renders authoritative totals for a completed chain omitted from compact columns", () => {
+    const compactBoard: BoardResponse = {
+      ...BOARD,
+      columns: [{ name: "done", tasks: [] }],
+      chain_summaries: [{
+        root_id: "t_compact_done",
+        root_title: "Kompakte fertige Kette",
+        total: 37,
+        done: 37,
+        status_counts: { done: 37 },
+        latest_completed_at: 1999,
+      }],
+      done_page: {
+        total_count: 100,
+        loaded_count: 30,
+        limit: 30,
+        has_more: true,
+        next_cursor: "0:1:t_cursor",
+      },
+    };
+
+    render(
+      <KettenTab board={compactBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+
+    const item = screen.getByText("Kompakte fertige Kette").closest(".chain-item");
+    expect(item).not.toBeNull();
+    expect(within(item as HTMLElement).getByText("37/37")).toBeTruthy();
+    expect(within(item as HTMLElement).getByText(de.fleet.kettenStateCompleted)).toBeTruthy();
   });
 
   it("expands clipped chain titles on tap while retaining other title fallbacks", async () => {

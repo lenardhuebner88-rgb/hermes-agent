@@ -12,21 +12,15 @@ import type { WorkerActivityResponse } from "../lib/schemas";
 import { nowSec } from "../lib/derive";
 import { mergeLiveEvents } from "../lib/fleetHub";
 import { mergeBoardWorkers, withBoardParam, type BoardsResponse } from "../lib/multiBoard";
-import type { LiveEvent } from "../lib/types";
+import type { DoneBoardPage, LiveEvent } from "../lib/types";
 import type { BoardResponse, WorkersResponse } from "../lib/types";
 import { usePolling } from "./internal";
+
+export type { DoneBoardPage } from "../lib/types";
 
 export const DONE_PAGE_LIMIT = 30;
 
 const boardRevalidationCache = new Map<string | null, { etag: string; data: BoardResponse }>();
-
-export interface DoneBoardPage {
-  total_count: number;
-  loaded_count: number;
-  limit: number;
-  has_more: boolean;
-  next_cursor: string | null;
-}
 
 export type PaginatedBoardResponse = BoardResponse & { done_page?: DoneBoardPage };
 
@@ -292,7 +286,10 @@ export const boardLoader = async (board?: string | null | AbortSignal) => {
   const headers = new Headers();
   if (cached) headers.set("If-None-Match", cached.etag);
   const response = await fetchJSONWithMeta<unknown>(
-    withBoardParam("/api/plugins/kanban/board?card_diagnostics=summary&card_body=none", boardName),
+    withBoardParam(
+      `/api/plugins/kanban/board?card_diagnostics=summary&card_body=none&done_limit=${DONE_PAGE_LIMIT}`,
+      boardName,
+    ),
     { headers, signal },
   );
   if (response.status === 304) {

@@ -643,12 +643,31 @@ export interface BoardSourceError {
   retry_count: number;
 }
 
+export interface ChainSummary {
+  root_id: string;
+  root_title: string;
+  total: number;
+  done: number;
+  status_counts: Record<string, number>;
+  latest_completed_at: number | null;
+}
+
+export interface DoneBoardPage {
+  total_count: number;
+  loaded_count: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
 export interface BoardResponse {
   columns: BoardColumn[];
   tenants: string[];
   assignees: string[];
   latest_event_id: number;
   source_errors: BoardSourceError[];
+  chain_summaries?: ChainSummary[];
+  done_page?: DoneBoardPage;
   now: number;
 }
 
