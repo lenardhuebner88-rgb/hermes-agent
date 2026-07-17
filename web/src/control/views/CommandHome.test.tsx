@@ -26,6 +26,7 @@ const hooks = vi.hoisted(() => {
     useDictateStatus: vi.fn(),
     useHermesWorkers: vi.fn(),
     useHermesTodayDigest: vi.fn(),
+    useOperatorDigest: vi.fn(),
     useBoard: vi.fn(),
     useHermesRunsDaily: vi.fn(),
     useStrategistCount: vi.fn(),
@@ -41,6 +42,9 @@ vi.mock("../hooks/costsUsage", () => ({
 }));
 vi.mock("../hooks/decisionInbox", () => ({
   useDecisionInbox: hooks.useDecisionInbox,
+}));
+vi.mock("../hooks/operatorDigest", () => ({
+  useOperatorDigest: hooks.useOperatorDigest,
 }));
 vi.mock("../hooks/runsDigestRollup", () => ({
   useHermesRunsDaily: hooks.useHermesRunsDaily,
@@ -154,6 +158,7 @@ function installCommandHomeFixtures() {
   }));
   hooks.useHermesWorkers.mockReturnValue(hooks.poll({ workers: [], count: 0, cap: 3, checked_at: 1 }));
   hooks.useHermesTodayDigest.mockReturnValue(hooks.poll({ schema: "kanban-today-digest-v1", generated_at: "2026-07-05T12:00:00Z", shipped_today: 3, lead_time_p50_seconds: null, by_assignee: [] }));
+  hooks.useOperatorDigest.mockReturnValue(hooks.poll({ generated_at: 1, decisions: [], alerts: [], degraded: [] }));
   hooks.useBoard.mockReturnValue(hooks.poll({ columns: [{ name: "held", tasks: [{ id: "t_held", title: "Held", status: "held" }] }], generated_at: 1 }));
   hooks.useHermesRunsDaily.mockReturnValue(hooks.poll({ days: 14, series: [] }));
   hooks.useStrategistCount.mockReturnValue(hooks.poll({ count: 0 }));
@@ -300,5 +305,70 @@ describe("CommandHome", () => {
     );
 
     expect(html).toMatch(/class="[^"]*\bmin-h-12\b[^"]*"[^>]*>Stratege öffnen/);
+  });
+
+  it("renders the Operator-Digest card with 3 decisions from the real open-decisions.json shape", () => {
+    installCommandHomeFixtures();
+    // Real shape harvested 2026-07-17 from ~/.hermes/state/open-decisions.json
+    // via the /api/operator/digest response (id/title/action/source/opened_at/age_days).
+    hooks.useOperatorDigest.mockReturnValue(hooks.poll({
+      generated_at: 1,
+      decisions: [
+        {
+          id: "statedb-retention",
+          title: "state.db über Schwelle — Retention/Archiv alter Sessions",
+          action: "Preflight: `~/.hermes/scripts/state-db-retention-preflight.py --retention-days 14`, dann Retention ja/nein",
+          source: "cron-inventur",
+          opened_at: "2026-07-10T05:56:13+00:00",
+          age_days: 7,
+        },
+        {
+          id: "skill-promote-fate",
+          title: "Skill Promote Pipeline pausiert seit 06.07.",
+          action: "Reaktivieren (`hermes cron resume 836f32946e0a`) oder löschen (`hermes cron delete 836f32946e0a`)",
+          source: "cron-inventur",
+          opened_at: "2026-07-15T05:56:13+00:00",
+          age_days: 2,
+        },
+        {
+          id: "wm2026-jobs-fate",
+          title: "5 WM-2026-Jobs pausiert — Finale ~19.07.",
+          action: "Vor Finale reaktivieren (`hermes -p research cron resume <ids>`) oder nach Finale löschen",
+          source: "cron-inventur",
+          opened_at: "2026-07-16T05:56:13+00:00",
+          age_days: 1,
+        },
+      ],
+      alerts: [],
+      degraded: [],
+    }));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain("Operator-Digest");
+    expect(html).toContain("Offene Entscheidungen");
+    expect(html).toContain("state.db über Schwelle — Retention/Archiv alter Sessions");
+    expect(html).toContain("Skill Promote Pipeline pausiert seit 06.07.");
+    expect(html).toContain("5 WM-2026-Jobs pausiert — Finale ~19.07.");
+    expect(html).toContain("Erledigen: open-decision.py resolve");
+  });
+
+  it("renders NOTHING for the Operator-Digest section when there are no decisions and no alerts (calm = empty)", () => {
+    installCommandHomeFixtures();
+    hooks.useOperatorDigest.mockReturnValue(hooks.poll({ generated_at: 1, decisions: [], alerts: [], degraded: [] }));
+
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/control"]}>
+        <CommandHome density="compact" />
+      </MemoryRouter>,
+    );
+
+    expect(html).not.toContain('aria-label="Operator-Digest"');
+    expect(html).not.toContain("Offene Entscheidungen");
+    expect(html).not.toContain("Erledigen: open-decision.py resolve");
   });
 });

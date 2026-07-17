@@ -19,3 +19,4 @@ export * from "./schemas/strategist";
 export * from "./schemas/flowTriageDisposition";
 export * from "./schemas/loops";
 export * from "./schemas/projekte";
+export * from "./schemas/operatorDigest";

@@ -841,6 +841,29 @@ export interface OperatorInventoryResponse {
   errors: string[];
 }
 
+export interface OperatorDigestDecision {
+  id: string;
+  title: string;
+  action: string;
+  source: string;
+  opened_at: string | null;
+  age_days: number;
+}
+
+export interface OperatorDigestAlert {
+  id: string;
+  severity: "red" | "amber";
+  title: string;
+  detail: string;
+}
+
+export interface OperatorDigestResponse {
+  generated_at: number;
+  decisions: OperatorDigestDecision[];
+  alerts: OperatorDigestAlert[];
+  degraded: string[];
+}
+
 export type PressureOverall = "ok" | "busy" | "saturated" | "unknown";
 export type TailnetPressureState = "direct" | "relay" | "inactive" | "unknown";
 

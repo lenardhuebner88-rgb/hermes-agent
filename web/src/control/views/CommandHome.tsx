@@ -33,6 +33,7 @@ import { useStrategistCount } from "../hooks/strategist";
 import { useDictateStatus, useSystemHealth } from "../hooks/systemReleaseHealth";
 import { useFixRedispatch, useRepairDeliverable, useVetoEscalation } from "../hooks/taskActions";
 import { useBoard, useHermesWorkers } from "../hooks/workersBoard";
+import { useOperatorDigest } from "../hooks/operatorDigest";
 import type { Density } from "../hooks/useDensity";
 import type { AccountUsageResponse, BoardTask, ToneName, Worker } from "../lib/types";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
@@ -164,6 +165,12 @@ export function CommandHome({ density }: { density: Density }) {
         </div>
       </section>
 
+      {/* ── OPERATOR-DIGEST ─────────────────────────────────────────────────
+          Nur was der Operator entscheiden muss: offene Entscheidungen aus der
+          Registry + echte Alarme. Nichts, was ein Agent selbst entscheiden
+          könnte. Leer = nichts (ruhig = leer). */}
+      <OperatorDigestCard />
+
       {/* ── SYSTEM-/KOSTEN-PULS ─────────────────────────────────────────────── */}
       <section aria-label="System- und Kosten-Puls" className="space-y-3">
         <ChSection label="System-/Kosten-Puls" meta="kompakt" />
@@ -250,6 +257,56 @@ function AttentionCount({ label, value }: { label: string; value: number }) {
       <div className="font-data text-base font-semibold tabular-nums text-ink">{value}</div>
       <div className="mt-0.5 truncate text-[10px] font-semibold uppercase tracking-[.12em] text-ink-3">{label}</div>
     </div>
+  );
+}
+
+/** Operator-Digest: NUR was der Operator entscheiden muss — offene
+ *  Entscheidungen aus der Registry + echte Alarme. Nichts, was ein Agent
+ *  selbst lösen kann. Leer = nichts (ruhig = leer, s. Task-Brief). */
+function OperatorDigestCard() {
+  const digest = useOperatorDigest();
+  const decisions = digest.data?.decisions ?? [];
+  const alerts = digest.data?.alerts ?? [];
+  if (digest.loading || digest.error || (decisions.length === 0 && alerts.length === 0)) return null;
+  return (
+    <section aria-label="Operator-Digest" className="space-y-3">
+      {alerts.length ? (
+        <div className="space-y-2">
+          <Eyebrow>Alarme</Eyebrow>
+          <div className="space-y-2">
+            {alerts.map((a) => (
+              <div
+                key={a.id}
+                className={cn(
+                  "ch-decision flex min-h-11 flex-col justify-center gap-0.5 px-3.5 py-2.5",
+                  severitySpine[a.severity === "amber" ? "amber" : "red"],
+                )}
+              >
+                <span className="text-sm font-medium text-ink">{a.title}</span>
+                <span className="text-xs text-ink-2">{a.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {decisions.length ? (
+        <div className="space-y-2">
+          <Eyebrow>Offene Entscheidungen</Eyebrow>
+          <div className="space-y-2">
+            {decisions.map((d) => (
+              <div key={d.id} className="ch-card flex min-h-11 flex-col justify-center gap-1 px-3.5 py-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-data text-[10px] tabular-nums text-ink-3">{d.age_days}d</span>
+                  <span className="min-w-0 flex-1 text-sm font-medium text-ink">{d.title}</span>
+                </div>
+                <code className="break-words text-xs text-ink-2">{d.action}</code>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-ink-3">Erledigen: open-decision.py resolve &lt;id&gt;</p>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
