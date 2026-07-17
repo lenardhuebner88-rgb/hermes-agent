@@ -1,0 +1,14 @@
+# Hermes stale-session reaper timer — repo-tracked template; NOT auto-enabled.
+# Nightly 03:15 local. Persistent=true catches missed runs after downtime.
+
+[Unit]
+Description=Nightly Hermes stale-session reaper (state.db)
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/reap_stale_sessions.py
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=hermes-session-reaper.service
+
+[Install]
+WantedBy=timers.target

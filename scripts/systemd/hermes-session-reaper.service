@@ -1,0 +1,18 @@
+# Hermes stale-session reaper — repo-tracked template; NOT auto-installed.
+# Lander installs/enables explicitly after review of dry-run output.
+# Closes open state.db sessions with no activity >7d (end_reason=stale_sweep).
+# Never DELETEs rows. Backup taken before each apply.
+
+[Unit]
+Description=Hermes stale-session reaper (state.db administrative close)
+Documentation=file:/home/piet/.hermes/hermes-agent/scripts/reap_stale_sessions.py
+
+[Service]
+Type=oneshot
+# Login-shell loads user profile (venv/PATH), same pattern as orchestration-reaper.
+ExecStart=/bin/bash -lc 'cd /home/piet/.hermes/hermes-agent && venv/bin/python scripts/reap_stale_sessions.py --days 7 --apply --notify'
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
