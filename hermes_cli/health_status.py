@@ -17,6 +17,7 @@ _SCHEMA = "hermes-health-v1"
 _STATUS_RANK = {"healthy": 0, "degraded": 1, "offline": 2}
 _SUBSYSTEM_NAMES = ("gateway", "autoresearch", "kanban_db", "kanban_dispatcher")
 _KANBAN_DISPATCHER_STALE_AFTER_SECONDS = 180
+PROBE_TIMEOUT_S = 3.0
 _log = logging.getLogger(__name__)
 
 
@@ -241,6 +242,24 @@ def _offline_from_exception(name: str, exc: BaseException) -> dict[str, Any]:
     return _status_dict("offline", "probe failed", latency_ms=0, error=scrub_detail(str(exc)))
 
 
+def _degraded_from_timeout(name: str) -> dict[str, Any]:
+    detail = f"probe timeout after {PROBE_TIMEOUT_S:.1f}s"
+    if name in {"autoresearch", "kanban_dispatcher"}:
+        return _status_dict(
+            "degraded",
+            detail,
+            heartbeat_age_s=None,
+            include_heartbeat_age=True,
+            error="timeout",
+        )
+    return _status_dict(
+        "degraded",
+        detail,
+        latency_ms=int(PROBE_TIMEOUT_S * 1000),
+        error="timeout",
+    )
+
+
 def _overall(subsystems: dict[str, dict[str, Any]]) -> str:
     worst_rank = max(
         _STATUS_RANK.get(subsystems[name].get("status"), _STATUS_RANK["offline"])
@@ -254,16 +273,18 @@ def _overall(subsystems: dict[str, dict[str, Any]]) -> str:
 
 async def _get_health_status() -> dict[str, Any]:
     results = await asyncio.gather(
-        _probe_gateway_status(),
-        _probe_autoresearch_status(),
-        _probe_kanban_db_status(),
-        _probe_kanban_dispatcher_status(),
+        asyncio.wait_for(_probe_gateway_status(), timeout=PROBE_TIMEOUT_S),
+        asyncio.wait_for(_probe_autoresearch_status(), timeout=PROBE_TIMEOUT_S),
+        asyncio.wait_for(_probe_kanban_db_status(), timeout=PROBE_TIMEOUT_S),
+        asyncio.wait_for(_probe_kanban_dispatcher_status(), timeout=PROBE_TIMEOUT_S),
         return_exceptions=True,
     )
 
     subsystems: dict[str, dict[str, Any]] = {}
     for name, result in zip(_SUBSYSTEM_NAMES, results):
-        if isinstance(result, BaseException):
+        if isinstance(result, TimeoutError):
+            subsystems[name] = _degraded_from_timeout(name)
+        elif isinstance(result, BaseException):
             subsystems[name] = _offline_from_exception(name, result)
         else:
             subsystems[name] = result
