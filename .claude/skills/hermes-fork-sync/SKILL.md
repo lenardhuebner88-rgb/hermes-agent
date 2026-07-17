@@ -118,6 +118,15 @@ seconds wide, so **prepare first, land fast**:
    uncommitted `.py` edits sit in the live checkout — you would ship half-done foreign code
    (near-miss 2026-07-03: an in-flight auth middleware). Your merge can be safely on main
    while the RESTART/DEPLOY waits for its own clean window.
+6. **Post-merge cleanup (Regel, operator-approved 2026-07-17): merged ⇒ aufgeräumt.**
+   The landing session cleans up its OWN artifacts right after merge + verified push:
+   `git branch -d <branch>` (safe — refuses unmerged/checked-out) and, once nothing runs in
+   it, `git worktree remove <its worktree>`. Backstop only: the nightly janitor
+   (`~/.hermes/prune-stale-worktrees.sh`, timer `hermes-prune-worktrees`) sweeps leftover
+   merged branches + stale worktrees — don't plan on leaving your trash for it.
+   Before the NEXT landing: `git fetch piet-fork` first and reconcile ff-only, so local
+   `main` never silently diverges from `piet-fork/main` (seen 2026-07-17: 1/1 split from
+   two sessions landing without fetch).
 
 ## Plain-language reporting
 Piet is not a coder. Summarize in a small table (what changed · risk · reversible?), name the backup
