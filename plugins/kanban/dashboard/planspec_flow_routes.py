@@ -1099,12 +1099,38 @@ def _release_flow_gate(
             reason=f"Flow-Gate lane override before {release_level} release",
         ):
             raise HTTPException(status_code=409, detail=f"could not reassign {child_id}")
+
+    # Additive-hold invariant (cross-family review finding, 2026-07-17 pass 3):
+    # a PlanSpec root can be dual-held (``live_test_depth: ui-real`` AND
+    # ``freigabe: operator``, both set at decompose time — see
+    # ``decompose_triage_task``). This function itself OWNS and resolves the
+    # freigabe:operator side (the trailing ``release_freigabe_hold`` call
+    # below acks + flips it within this same request) — that side is not a
+    # "foreign" hold and must not gate this loop, or every first flow-release
+    # on a freigabe:operator-only root would wrongly skip its own release.
+    # The ui-real side is different: flow-release has no lever for it at all
+    # (only ``release_uireal_root`` acks it, a separate operator action). So
+    # only an outstanding ui-real hold on a still-'scheduled' root must block
+    # the child-unblock loop — releasing children here while ui-real is
+    # un-acked (as this function used to, unconditionally) is exactly the
+    # additive-hold bypass: children go live behind a hold this call cannot
+    # itself clear.
+    root_row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (root_id,),
+    ).fetchone()
+    chain_held = bool(
+        root_row is not None
+        and root_row["status"] == "scheduled"
+        and kanban_db._uireal_hold_still_active(conn, root_id)
+    )
+
     released: list[str] = []
-    for child_id in child_ids:
-        child = kanban_db.get_task(conn, child_id)
-        if child is not None and child.status == "scheduled":
-            if kanban_db.unblock_task(conn, child_id):
-                released.append(child_id)
+    if not chain_held:
+        for child_id in child_ids:
+            child = kanban_db.get_task(conn, child_id)
+            if child is not None and child.status == "scheduled":
+                if kanban_db.unblock_task(conn, child_id):
+                    released.append(child_id)
 
     # Phase C lever: a chain-wide review_tier is stamped on the children RELEASED
     # this call (chain-start) so the staged-review resolver (verifier→reviewer→
@@ -1166,6 +1192,11 @@ def _release_flow_gate(
         event_payload["review_tier"] = tier_value
     if scout_id is not None:
         event_payload["scout_id"] = scout_id
+    if chain_held:
+        # Truthfully record that this call found an outstanding co-hold and
+        # promoted nothing (released is empty), not just an idempotent
+        # "nothing was scheduled" no-op.
+        event_payload["chain_held"] = True
     _append_flow_gate_event(conn, root_id, "flow_gate_released", event_payload)
     # If this flow-capture root is ALSO a freigabe:operator hold, releasing its
     # children via the flow gate must clear the operator hold at the root too —
@@ -1216,6 +1247,8 @@ def _release_flow_gate(
         result["scout_id"] = scout_id
     if root_released:
         result["root_released"] = True
+    if chain_held:
+        result["chain_held"] = True
     return result
 
 
@@ -1887,7 +1920,31 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                 if kanban_db._set_task_model_override_in_txn(conn, tid, model_id):
                     overrides_applied += 1
 
-            if should_inject_scout and scout_entry_children:
+            # --- Release the freigabe hold (root flip only — see below) -----------
+            # Moved BEFORE scout injection (cross-family review finding, 2026-07-17
+            # pass 3): _release_freigabe_hold_root_in_txn does NOT guarantee the
+            # root was actually flipped — ui-real and freigabe:operator are
+            # ADDITIVE holds (see its docstring): if the root also carries an
+            # unreleased ui-real hold, the freigabe ack is recorded but the root
+            # stays 'scheduled'. Computing root_fully_released FIRST lets the
+            # scout-injection block below gate on it, so a dual-held root that is
+            # only half-released never gets a dispatchable scout ahead of the
+            # still-outstanding co-hold.
+            released = kanban_db._release_freigabe_hold_root_in_txn(conn, root_task_id, author="operator")
+            if not released:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
+                )
+            # Re-read the committed status to know whether promotion is due.
+            root_status_row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_task_id,),
+            ).fetchone()
+            root_fully_released = (
+                root_status_row is not None and root_status_row["status"] == "todo"
+            )
+
+            if should_inject_scout and scout_entry_children and root_fully_released:
                 # Blocker 2: dedup recheck immediately before creation, inside this
                 # same transaction — a second racing approve only reaches this
                 # point after the first one committed (BEGIN IMMEDIATE serializes
@@ -1903,7 +1960,10 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                     # body from _scout_recon_body, linked as parent of each entry
                     # child). Deterministic idempotency_key: a retried/duplicate
                     # approve call for this root re-finds the same scout instead of
-                    # creating a second one, even outside the write-lock race window.
+                    # creating a second one, even outside the write-lock race window
+                    # — including the case where the FIRST approve (dual-held root)
+                    # skipped the scout and a LATER approve (after the co-hold was
+                    # released) is the one that actually creates it.
                     entry_tasks = [kanban_db.get_task(conn, cid) for cid in scout_entry_children]
                     scout_id = kanban_db._create_scout_task_in_txn(
                         conn,
@@ -1918,25 +1978,6 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                     for cid in scout_entry_children:
                         kanban_db._link_tasks_in_txn(conn, scout_id, cid)
                     scout_injected = True
-
-            # --- Release the freigabe hold (root flip only — see below) -----------
-            released = kanban_db._release_freigabe_hold_root_in_txn(conn, root_task_id, author="operator")
-            if not released:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
-                )
-            # _release_freigabe_hold_root_in_txn does NOT guarantee the root was
-            # actually flipped — ui-real and freigabe:operator are ADDITIVE holds
-            # (see its docstring): if the root also carries an unreleased ui-real
-            # hold, the freigabe ack is recorded but the root stays 'scheduled'.
-            # Re-read the committed status to know whether promotion is due.
-            root_status_row = conn.execute(
-                "SELECT status FROM tasks WHERE id = ?", (root_task_id,),
-            ).fetchone()
-            root_fully_released = (
-                root_status_row is not None and root_status_row["status"] == "todo"
-            )
 
         # --- Post-commit follow-ups (children + auto-scout) ------------------------
         # release_freigabe_hold's own child-unblock/recompute_ready/auto-scout tail

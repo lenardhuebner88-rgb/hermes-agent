@@ -527,6 +527,107 @@ def test_inject_scout_no_duplicate_when_scout_deep_in_chain(client):
 
 
 # ---------------------------------------------------------------------------
+# Additive-hold invariant (cross-family review finding, 2026-07-17 pass 3):
+# a root can be dual-held (freigabe:operator AND live_test_depth:ui-real) —
+# the scout must not go dispatchable before BOTH holds are acked.
+# ---------------------------------------------------------------------------
+
+
+def _make_dual_held_chain(*, assignee: str = "coder") -> tuple[str, str]:
+    """Same shape as _make_held_chain, but the root ALSO carries the
+    additive ui-real hold (mirrors a dual-held PlanSpec root)."""
+    root_id, child_id = _make_held_chain(assignee=assignee)
+    with kb.connect() as conn, kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET live_test_depth='ui-real' WHERE id=?", (root_id,)
+        )
+    return root_id, child_id
+
+
+def test_approve_dual_held_root_defers_scout_and_promotion(client):
+    """approve(inject_scout=True) on a dual-held root must not create a
+    dispatchable scout, or promote the chain, while the ui-real co-hold is
+    still un-acked — only the freigabe ack is recorded."""
+    root_id, child_id = _make_dual_held_chain(assignee="coder")
+
+    resp = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={"root_task_id": root_id, "inject_scout": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["scout_injected"] is False
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root_id)
+        child_task = kb.get_task(conn, child_id)
+        events = [e.kind for e in kb.list_events(conn, root_id)]
+    # LOAD-BEARING: root stays 'scheduled' — the ui-real hold is still
+    # outstanding, so the freigabe flip must not go through either.
+    assert root_task.status == "scheduled"
+    assert child_task.status == "scheduled"
+    assert "freigabe_released" in events
+    assert "uireal_released" not in events
+    assert _scout_parent_id(child_id) is None
+
+    # Releasing the outstanding ui-real hold now sees no remaining co-hold
+    # (freigabe already acked above) and promotes the chain.
+    with kb.connect() as conn:
+        assert kb.release_uireal_root(conn, root_id, author="pytest") is True
+        root_after = kb.get_task(conn, root_id)
+        child_after = kb.get_task(conn, child_id)
+    assert root_after.status == "todo"
+    assert child_after.status == "ready"
+    # The scout intent from the deferred approve call is not retried by
+    # release_uireal_root (it only owns the ui-real ack, not inject_scout) —
+    # no scout exists on this chain.
+    assert _scout_parent_id(child_id) is None
+
+
+def test_approve_after_uireal_released_first_injects_scout(client):
+    """The reverse release order: ui-real acked FIRST (via
+    release_uireal_root, which itself defers to the still-outstanding
+    freigabe hold and leaves the root 'scheduled'), THEN a single approve
+    call — this is the release order under which approve's own root flip
+    completes and the deferred inject_scout intent actually lands. Also
+    proves the idempotency_key format is exercised on the promoted path (the
+    no-duplicate-scout guarantee for a re-approve is covered separately by
+    test_second_approve_after_success_is_clean_noop_no_second_scout — a
+    literal second approve is unreachable once the root is 'todo', the 409
+    guard tested by test_double_approve_returns_409_not_crash)."""
+    root_id, child_id = _make_dual_held_chain(assignee="coder")
+
+    with kb.connect() as conn:
+        assert kb.release_uireal_root(conn, root_id, author="pytest") is True
+        root_mid = kb.get_task(conn, root_id)
+        child_mid = kb.get_task(conn, child_id)
+    # Co-held by the still-outstanding freigabe:operator hold — unchanged.
+    assert root_mid.status == "scheduled"
+    assert child_mid.status == "scheduled"
+
+    resp = client.post(
+        f"{PREFIX}/planspecs/approve",
+        json={"root_task_id": root_id, "inject_scout": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["scout_injected"] is True
+    assert body["released"] is True
+
+    scout_id = _scout_parent_id(child_id)
+    assert scout_id is not None
+    with kb.connect() as conn:
+        scout_task = kb.get_task(conn, scout_id)
+        root_after = kb.get_task(conn, root_id)
+        child_after = kb.get_task(conn, child_id)
+    assert scout_task is not None
+    assert scout_task.assignee == "scout"
+    assert scout_task.idempotency_key == f"planspec-approve-scout:{root_id}"
+    assert root_after.status == "todo"
+    assert child_after.status == "todo"  # blocked on the fresh scout predecessor
+
+
+# ---------------------------------------------------------------------------
 # Blocker 1 (atomicity): a late release failure must roll back overrides + scout
 # ---------------------------------------------------------------------------
 
