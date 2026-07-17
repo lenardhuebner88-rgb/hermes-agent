@@ -92,6 +92,12 @@ const ProjectAgentSchema = z.object({
   // source==="coordination" rows can carry it. Both absent → null.
   assignee: nullableString,
   operator: nullableString,
+  // Task correlation (backend additive 2026-07-17): tmux rows resolve them
+  // from the tmux options @hermes_session_id/@hermes_task_id, coordination
+  // rows from optional claim frontmatter keys. Old unmarked processes omit
+  // them → null, and the row renders exactly as before.
+  session_id: nullableString,
+  task_id: nullableString,
 }).passthrough();
 export type ProjectAgent = z.infer<typeof ProjectAgentSchema>;
 
@@ -150,6 +156,10 @@ const ProjectDetailAgentSchema = z.object({
   source: z.string().catch(""),
   assignee: nullableString,
   operator: nullableString,
+  // Same task-correlation fields as ProjectAgent — the detail endpoint passes
+  // them through identically (backend additive 2026-07-17). Absent → null.
+  session_id: nullableString,
+  task_id: nullableString,
 }).passthrough();
 
 export const ProjectDetailResponseSchema = z.object({

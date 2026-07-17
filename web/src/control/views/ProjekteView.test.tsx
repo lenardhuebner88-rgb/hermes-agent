@@ -48,6 +48,8 @@ const REAL_AGENT: ProjectAgent = {
   tmux_window: "2",
   assignee: null,
   operator: null,
+  session_id: null,
+  task_id: null,
 };
 
 // Coordination claim (source="coordination"): has a task text, is NOT a
@@ -63,6 +65,8 @@ const CLAIM_AGENT: ProjectAgent = {
   tmux_window: null,
   assignee: null,
   operator: "Piet (Roadmap Punkt 8)",
+  session_id: null,
+  task_id: null,
 };
 
 // Kanban worker (source="kanban"): carries the lane as assignee.
@@ -77,6 +81,8 @@ const KANBAN_AGENT: ProjectAgent = {
   tmux_window: null,
   assignee: "premium",
   operator: null,
+  session_id: null,
+  task_id: null,
 };
 
 function mockProjects(overrides: Record<string, unknown> = {}) {
@@ -225,6 +231,8 @@ describe("ProjekteView", () => {
       tmux_window: null,
       assignee: null,
       operator: null,
+      session_id: null,
+      task_id: null,
     };
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({
