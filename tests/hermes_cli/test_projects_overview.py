@@ -23,8 +23,10 @@ from hermes_cli.projects_overview import (
     _parse_coordination_note,
     _reset_projects_cache,
     build_agents_payload,
+    build_commits_payload,
     build_project_detail,
     build_projects_payload,
+    build_sessions_payload,
     load_projects_registry,
     register_projects_routes,
 )
@@ -1899,3 +1901,530 @@ projects:
     assert build_calls["n"] == 1
     assert len(agents_again["agents"]) == len(agents_body["agents"])
     assert agents_again["agents"]  # still present
+
+
+
+# ---------------------------------------------------------------------------
+# Stage 10/11 — author on commits, assignee/operator on agents,
+# /api/projects/sessions + /api/projects/commits
+# ---------------------------------------------------------------------------
+
+
+def test_git_last_commit_includes_author(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    committed_at = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=committed_at, message="feat: author check")
+
+    entry = _entry(repo_path=str(repo))
+    payload = build_projects_payload(
+        ProjectsRegistry(projects=[entry], errors=[]), now=committed_at + 60
+    )
+
+    last_commit = payload["projects"][0]["last_commit"]
+    assert last_commit is not None
+    # _init_repo_with_commit sets `git config user.name "Test User"`.
+    assert last_commit["author"] == "Test User"
+
+
+def test_detail_recent_commits_include_author(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    base = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=base, message="c0: seed")
+    _add_commits(repo, [(base + 100, "c1: second", "b.txt")])
+
+    entry = _entry(slug="proj", repo_path=str(repo))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    detail = build_project_detail(
+        entry,
+        registry,
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        now=base + 200,
+        agents_payload={"generated_at": base, "errors": [], "agents": []},
+    )
+
+    assert detail["errors"] == []
+    assert [c["message"] for c in detail["recent_commits"]] == ["c1: second", "c0: seed"]
+    assert all(c["author"] == "Test User" for c in detail["recent_commits"])
+
+
+# --- commit feed (/api/projects/commits) ------------------------------------
+
+
+def test_commits_feed_merges_projects_newest_first(tmp_path: Path) -> None:
+    base = 1_700_000_000
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _init_repo_with_commit(repo_a, committed_at=base, message="a0")
+    _add_commits(repo_a, [(base + 300, "a1", "a.txt")])
+    _init_repo_with_commit(repo_b, committed_at=base + 100, message="b0")
+    _add_commits(repo_b, [(base + 200, "b1", "b.txt")])
+
+    entry_a = _entry(slug="alpha", name="Alpha", repo_path=str(repo_a))
+    entry_b = _entry(slug="beta", name="Beta", repo_path=str(repo_b))
+    registry = ProjectsRegistry(projects=[entry_a, entry_b], errors=[])
+
+    payload = build_commits_payload(registry, now=base + 400)
+
+    assert payload["errors"] == []
+    messages = [(c["project"], c["message"]) for c in payload["commits"]]
+    assert messages == [
+        ("alpha", "a1"),
+        ("beta", "b1"),
+        ("beta", "b0"),
+        ("alpha", "a0"),
+    ]
+    for commit in payload["commits"]:
+        assert commit["author"] == "Test User"
+        assert commit["project_name"] in ("Alpha", "Beta")
+        assert commit["age_seconds"] == base + 400 - commit["committed_at"]
+
+
+def test_commits_feed_broken_repo_isolated(tmp_path: Path) -> None:
+    base = 1_700_000_000
+    good_repo = tmp_path / "good"
+    _init_repo_with_commit(good_repo, committed_at=base, message="ok")
+
+    broken = _entry(slug="broken", repo_path=str(tmp_path / "missing"))
+    good = _entry(slug="good", name="Good", repo_path=str(good_repo))
+    registry = ProjectsRegistry(projects=[broken, good], errors=[])
+
+    payload = build_commits_payload(registry, now=base + 10)
+
+    assert [c["message"] for c in payload["commits"]] == ["ok"]
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0].startswith("git: project 'broken':")
+
+
+def test_commits_feed_cap_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    base = 1_700_000_000
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _init_repo_with_commit(repo_a, committed_at=base, message="a0")
+    _add_commits(repo_a, [(base + i, f"a{i}", f"a{i}.txt") for i in range(1, 5)])
+    _init_repo_with_commit(repo_b, committed_at=base, message="b0")
+    _add_commits(repo_b, [(base + i, f"b{i}", f"b{i}.txt") for i in range(1, 5)])
+
+    registry = ProjectsRegistry(
+        projects=[
+            _entry(slug="alpha", repo_path=str(repo_a)),
+            _entry(slug="beta", repo_path=str(repo_b)),
+        ],
+        errors=[],
+    )
+    monkeypatch.setattr("hermes_cli.projects_overview._FEED_COMMITS_LIMIT", 3)
+
+    payload = build_commits_payload(registry, now=base + 100)
+
+    assert len(payload["commits"]) == 3
+    # Newest three across both repos, still strictly newest-first.
+    committed = [c["committed_at"] for c in payload["commits"]]
+    assert committed == sorted(committed, reverse=True)
+
+
+# --- assignee / operator on agents ------------------------------------------
+
+
+def test_kanban_running_agent_surfaces_assignee(tmp_path: Path) -> None:
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    conn = kanban_db.connect(kdb)
+    try:
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, project_id, created_at, started_at, assignee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t_lane1", "lane task", "running", None, 1_700_000_000, 1_700_000_100, "premium"),
+        )
+        conn.execute(
+            "INSERT INTO tasks (id, title, status, project_id, created_at, started_at, assignee) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("t_lane2", "no lane task", "running", None, 1_700_000_000, 1_700_000_100, None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    registry = _hermes_infra_registry()
+    payload = build_agents_payload(
+        registry,
+        tmux_panes_text="",
+        tmux_sessions_text="",
+        coordination_dir=tmp_path / "no-coord",
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+        now=1_700_000_200,
+    )
+
+    by_label = {a["label"]: a for a in payload["agents"] if a["source"] == "kanban"}
+    assert by_label["t_lane1"]["assignee"] == "premium"
+    assert by_label["t_lane2"]["assignee"] is None
+
+
+def test_coordination_note_operator_parsed(tmp_path: Path) -> None:
+    coord = tmp_path / "coord"
+    coord.mkdir()
+    (coord / "with-operator.md").write_text(_REAL_COORDINATION_NOTE, encoding="utf-8")
+    note_without_operator = """\
+---
+agent: kimi
+started: 2026-07-17T10:00:00+02:00
+ended: null
+task: "ohne operator-Feld"
+touching:
+  - /home/piet/.hermes/hermes-agent/web/src/control/views/ProjekteView.tsx
+---
+"""
+    (coord / "without-operator.md").write_text(note_without_operator, encoding="utf-8")
+
+    registry = _hermes_infra_registry()
+    agents, errors = _coordination_agents(coord, registry=registry)
+
+    assert errors == []
+    by_label = {a["label"]: a for a in agents}
+    assert (
+        by_label["with-operator"]["operator"]
+        == "Piet (Grill-Session 16.07., Roadmap Punkt 8; /goal-Start 23:33)"
+    )
+    assert by_label["without-operator"]["operator"] is None
+
+
+def test_reserved_slugs_sessions_and_commits_are_rejected(tmp_path: Path) -> None:
+    yaml_text = """\
+projects:
+  - slug: sessions
+    name: Sessions
+    repo_path: /tmp/x
+  - slug: commits
+    name: Commits
+    repo_path: /tmp/y
+  - slug: fine
+    name: Fine
+    repo_path: /tmp/z
+"""
+    registry = load_projects_registry(path=_write(tmp_path, yaml_text))
+
+    assert [p.slug for p in registry.projects] == ["fine"]
+    assert any("reserved" in e for e in registry.errors)
+
+
+# --- sessions payload (/api/projects/sessions) -------------------------------
+
+_SESSIONS_SCHEMA_SQL = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    display_name TEXT,
+    title TEXT,
+    model TEXT,
+    model_config TEXT,
+    parent_session_id TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    end_reason TEXT,
+    message_count INTEGER DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    cwd TEXT,
+    git_repo_root TEXT
+);
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    timestamp REAL NOT NULL
+);
+"""
+
+
+def _make_state_db(path: Path) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(_SESSIONS_SCHEMA_SQL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_session(
+    db_path: Path,
+    *,
+    session_id: str,
+    started_at: float,
+    ended_at: float | None = None,
+    end_reason: str | None = None,
+    parent_session_id: str | None = None,
+    model_config: str | None = None,
+    display_name: str | None = None,
+    title: str | None = None,
+    source: str = "cli",
+    model: str | None = "kimi-k2",
+    cwd: str | None = None,
+    message_count: int = 3,
+    input_tokens: int = 100,
+    output_tokens: int = 50,
+    last_message_at: float | None = None,
+) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO sessions (id, source, display_name, title, model, model_config, "
+            "parent_session_id, started_at, ended_at, end_reason, message_count, "
+            "input_tokens, output_tokens, cwd) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                source,
+                display_name,
+                title,
+                model,
+                model_config,
+                parent_session_id,
+                started_at,
+                ended_at,
+                end_reason,
+                message_count,
+                input_tokens,
+                output_tokens,
+                cwd,
+            ),
+        )
+        if last_message_at is not None:
+            conn.execute(
+                "INSERT INTO messages (session_id, role, timestamp) VALUES (?, 'user', ?)",
+                (session_id, last_message_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_sessions_payload_open_active_and_spawn_tree(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    now = 1_700_000_000
+
+    # Open root session, recently active → is_open + is_active.
+    _insert_session(
+        db,
+        session_id="root1",
+        started_at=now - 3600,
+        display_name="Hauptsession",
+        cwd="/home/piet/.hermes/hermes-agent",
+        last_message_at=now - 60,
+    )
+    # Delegate child (spawned by root1 via marker).
+    _insert_session(
+        db,
+        session_id="child1",
+        started_at=now - 1800,
+        parent_session_id="root1",
+        model_config=json.dumps({"_delegate_from": "root1"}),
+        title="Subagent Lauf",
+        last_message_at=now - 900,
+    )
+    # Branch child.
+    _insert_session(
+        db,
+        session_id="branch1",
+        started_at=now - 1200,
+        parent_session_id="root1",
+        model_config=json.dumps({"_branched_from": "root1"}),
+        ended_at=now - 600,
+        end_reason="user_exit",
+    )
+    # Compression continuation of an ended root.
+    _insert_session(
+        db,
+        session_id="root2",
+        started_at=now - 7200,
+        ended_at=now - 5400,
+        end_reason="compression",
+        title="Alte Session",
+    )
+    _insert_session(
+        db,
+        session_id="root2-cont",
+        started_at=now - 5400,
+        parent_session_id="root2",
+        title="Alte Session (2)",
+        last_message_at=now - 4000,
+    )
+    # Ended long ago AND outside the window → excluded entirely.
+    _insert_session(
+        db,
+        session_id="ancient",
+        started_at=now - 10 * 24 * 3600,
+        ended_at=now - 9 * 24 * 3600,
+        end_reason="user_exit",
+    )
+    # Open but started long ago → kept (open beats window), not active.
+    _insert_session(
+        db,
+        session_id="old-open",
+        started_at=now - 5 * 24 * 3600,
+        title="Uralte offene Session",
+    )
+
+    registry = _hermes_infra_registry()
+    payload = build_sessions_payload(registry, state_db_path=db, now=now)
+
+    assert payload["errors"] == []
+    by_id = {s["id"]: s for s in payload["sessions"]}
+    assert set(by_id) == {"root1", "child1", "branch1", "root2", "root2-cont", "old-open"}
+
+    root = by_id["root1"]
+    assert root["is_open"] is True
+    assert root["is_active"] is True  # last message 60s ago
+    assert root["stale_open"] is False
+    assert root["label"] == "Hauptsession"
+    assert root["project"] == "hermes-infra"  # cwd attribution
+    assert root["spawn_kind"] is None
+    assert root["spawned_by_id"] is None
+    assert root["tokens"] == 150
+
+    child = by_id["child1"]
+    assert child["spawn_kind"] == "delegate"
+    assert child["spawned_by_id"] == "root1"
+    assert child["spawned_by_label"] == "Hauptsession"
+    assert child["is_open"] is True
+    assert child["is_active"] is False  # last message 900s ago > 300s window
+    assert child["stale_open"] is False  # but well inside the 24h horizon
+
+    branch = by_id["branch1"]
+    assert branch["spawn_kind"] == "branch"
+    assert branch["is_open"] is False  # ended
+    assert branch["is_active"] is False
+    assert branch["stale_open"] is False
+
+    cont = by_id["root2-cont"]
+    assert cont["spawn_kind"] == "compression"
+    assert cont["spawned_by_label"] == "Alte Session"
+
+    old_open = by_id["old-open"]
+    assert old_open["is_open"] is True
+    assert old_open["is_active"] is False
+    assert old_open["stale_open"] is True  # open for 5d with zero activity
+    assert old_open["project"] is None  # no cwd/git_repo_root
+
+    # Open-first ordering: unclosed sessions lead regardless of age (the row
+    # cap must never swallow an old-but-open session), then newest started_at.
+    ids_in_order = [s["id"] for s in payload["sessions"]]
+    opens_in_order = [sid for sid in ids_in_order if by_id[sid]["is_open"]]
+    assert opens_in_order == ["child1", "root1", "root2-cont", "old-open"]
+    first_ended_index = next(
+        index for index, sid in enumerate(ids_in_order) if not by_id[sid]["is_open"]
+    )
+    assert first_ended_index == len(opens_in_order)  # all opens lead the list
+    ended_started = [
+        s["started_at"] for s in payload["sessions"] if not s["is_open"]
+    ]
+    assert ended_started == sorted(ended_started, reverse=True)
+
+
+def test_sessions_payload_parent_outside_window_still_resolved(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    now = 1_700_000_000
+
+    # Parent ended 4 days ago: outside the 36h window and closed → not a row,
+    # but the child's spawned_by_label/end_reason must still resolve.
+    _insert_session(
+        db,
+        session_id="parent-old",
+        started_at=now - 5 * 24 * 3600,
+        ended_at=now - 4 * 24 * 3600,
+        end_reason="compression",
+        title="Vorzeit-Elter",
+    )
+    _insert_session(
+        db,
+        session_id="child-new",
+        started_at=now - 600,
+        parent_session_id="parent-old",
+        title="Frische Fortsetzung",
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(projects=[], errors=[]), state_db_path=db, now=now
+    )
+
+    assert payload["errors"] == []
+    assert [s["id"] for s in payload["sessions"]] == ["child-new"]
+    child = payload["sessions"][0]
+    assert child["spawn_kind"] == "compression"  # via parent's end_reason lookup
+    assert child["spawned_by_label"] == "Vorzeit-Elter"
+
+
+def test_sessions_payload_orphaned_delegate_has_no_parent_link(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    now = 1_700_000_000
+    _insert_session(
+        db,
+        session_id="orphan",
+        started_at=now - 100,
+        model_config=json.dumps({"_delegate_from": "__orphaned__"}),
+        title="Verwaister Subagent",
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(projects=[], errors=[]), state_db_path=db, now=now
+    )
+
+    orphan = payload["sessions"][0]
+    assert orphan["spawn_kind"] == "delegate"
+    assert orphan["spawned_by_id"] is None
+    assert orphan["spawned_by_label"] is None
+
+
+def test_sessions_payload_missing_state_db_is_empty_no_error(tmp_path: Path) -> None:
+    payload = build_sessions_payload(
+        ProjectsRegistry(projects=[], errors=[]),
+        state_db_path=tmp_path / "no-state-here.db",
+        now=1_700_000_000,
+    )
+    assert payload == {"generated_at": 1_700_000_000, "errors": [], "sessions": []}
+
+
+def test_sessions_and_commits_endpoints_return_200_frozen_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    _make_state_db(tmp_path / "state.db")
+    _insert_session(
+        tmp_path / "state.db",
+        session_id="s1",
+        started_at=1_700_000_000,
+        title="Endpunkt-Session",
+    )
+
+    app = FastAPI()
+    register_projects_routes(app)
+    client = TestClient(app)
+
+    sessions_resp = client.get("/api/projects/sessions")
+    assert sessions_resp.status_code == 200
+    sessions_body = sessions_resp.json()
+    assert isinstance(sessions_body["generated_at"], int)
+    assert sessions_body["errors"] == []
+    assert [s["id"] for s in sessions_body["sessions"]] == ["s1"]
+    assert sessions_body["sessions"][0]["label"] == "Endpunkt-Session"
+
+    commits_resp = client.get("/api/projects/commits")
+    assert commits_resp.status_code == 200
+    commits_body = commits_resp.json()
+    assert isinstance(commits_body["generated_at"], int)
+    assert commits_body["errors"] == []
+    assert commits_body["commits"] == []
+
+    # Static routes are registered before /{slug}: they must NOT be captured
+    # as project slugs (which would answer 404 unknown-project).
+    assert client.get("/api/projects/sessions").status_code == 200
+    assert client.get("/api/projects/commits").status_code == 200

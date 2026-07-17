@@ -1,20 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { parseOrThrow, ProjectsAgentsResponseSchema, ProjectsResponseSchema } from "../../lib/schemas";
 import {
+  parseOrThrow,
+  ProjectsAgentsResponseSchema,
+  ProjectSessionsResponseSchema,
+  ProjectsResponseSchema,
+} from "../../lib/schemas";
+import {
+  agentSourceRank,
   attentionTone,
+  buildSessionRows,
   computeAttention,
   countAgentsByProject,
-  groupAgentsByKind,
+  countOpenSessions,
+  filterSessions,
   groupAgentsByProject,
   kanbanTaskTone,
   killTarget,
+  liveBoardGroups,
   loopOutcomeTone,
   parentDisplayName,
   sortProjectsByAttention,
   splitAgentsBySource,
   type ProjectAttention,
 } from "./derive";
-import type { ProjectEntry } from "../../lib/schemas";
+import type { ProjectEntry, ProjectSession } from "../../lib/schemas";
 
 // Real /api/projects payload (single-project registry, live checkout) — the
 // exact shape hermes_cli/projects_overview.py.build_projects_payload() emits.
@@ -95,49 +104,191 @@ describe("groupAgentsByProject (real /api/projects/agents fixture)", () => {
   });
 });
 
-describe("groupAgentsByKind (real /api/projects/agents fixture)", () => {
-  it("orders non-empty kind groups and keeps project:null inside kind", () => {
+describe("liveBoardGroups (real /api/projects/agents fixture)", () => {
+  it("groups by project, processes first, unassigned trailing", () => {
     const parsed = parseOrThrow(ProjectsAgentsResponseSchema, REAL_AGENTS_PAYLOAD, "test");
     // mystery-cli must degrade to "unknown" via the schema transform.
     expect(parsed.agents.some((a) => a.kind === "unknown")).toBe(true);
 
-    const groups = groupAgentsByKind(parsed.agents);
-    expect(groups.map(([kind]) => kind)).toEqual(["claude", "kimi", "kanban", "loop", "unknown"]);
+    const groups = liveBoardGroups(parsed.agents);
+    // hermes-infra holds the tmux processes → outranks the kanban-only
+    // family-organizer group; the unassigned agents trail as one null group.
+    expect(groups.map((group) => group.slug)).toEqual(["hermes-infra", "family-organizer", null]);
 
-    const byKind = Object.fromEntries(groups);
-    expect(byKind.claude).toHaveLength(1);
-    expect(byKind.claude[0].task).toBe("PR-Review");
-    expect(byKind.kimi).toHaveLength(1);
-    expect(byKind.kanban[0].label).toBe("builder · fo-board");
-    // Unassigned loop is NOT a separate group — it sits under kind "loop".
-    expect(byKind.loop).toHaveLength(1);
-    expect(byKind.loop[0].project).toBeNull();
-    expect(byKind.unknown).toHaveLength(1);
-    expect(byKind.unknown[0].label).toBe("odd pane");
-    expect(byKind.unknown[0].project).toBeNull();
+    const infra = groups[0].agents;
+    expect(infra).toHaveLength(2);
+    expect(infra.map((a) => a.kind).sort()).toEqual(["claude", "kimi"]);
+    expect(groups[1].agents[0].label).toBe("builder · fo-board");
+
+    const unassigned = groups[2].agents;
+    expect(unassigned.map((a) => a.label)).toEqual(["odd pane", "builder-reviewer"]);
   });
 
-  it("omits empty kinds and returns [] for no agents", () => {
-    expect(groupAgentsByKind([])).toEqual([]);
-  });
-
-  it("preserves encounter order within a kind bucket", () => {
-    const agents = parseOrThrow(
-      ProjectsAgentsResponseSchema,
-      {
-        generated_at: 1,
-        errors: [],
-        agents: [
-          { kind: "codex", label: "a", task: null, project: "p", since: 1, source: "tmux" },
-          { kind: "codex", label: "b", task: null, project: null, since: 2, source: "coordination" },
-        ],
-      },
-      "test",
-    ).agents;
-    const groups = groupAgentsByKind(agents);
+  it("sorts within a group: tmux → kanban → loop → coordination, oldest first", () => {
+    const parsed = parseOrThrow(ProjectsAgentsResponseSchema, {
+      generated_at: 1,
+      errors: [],
+      agents: [
+        { kind: "claude", label: "claim", task: "A", project: "p", since: 10, source: "coordination" },
+        { kind: "kanban", label: "task", task: "B", project: "p", since: 20, source: "kanban" },
+        { kind: "kimi", label: "newer-pane", task: null, project: "p", since: 200, source: "tmux" },
+        { kind: "kimi", label: "older-pane", task: null, project: "p", since: 100, source: "tmux" },
+        { kind: "loop", label: "pack", task: null, project: "p", since: null, source: "loop" },
+      ],
+    }, "test");
+    const groups = liveBoardGroups(parsed.agents);
     expect(groups).toHaveLength(1);
-    expect(groups[0][0]).toBe("codex");
-    expect(groups[0][1].map((a) => a.label)).toEqual(["a", "b"]);
+    expect(groups[0].agents.map((a) => a.label)).toEqual([
+      "older-pane",
+      "newer-pane",
+      "task",
+      "pack",
+      "claim",
+    ]);
+  });
+
+  it("returns [] for no agents", () => {
+    expect(liveBoardGroups([])).toEqual([]);
+  });
+});
+
+describe("agentSourceRank", () => {
+  it("ranks processes before claims; unknown sources last", () => {
+    expect(agentSourceRank("tmux")).toBeLessThan(agentSourceRank("kanban"));
+    expect(agentSourceRank("kanban")).toBeLessThan(agentSourceRank("loop"));
+    expect(agentSourceRank("loop")).toBeLessThan(agentSourceRank("coordination"));
+    expect(agentSourceRank("coordination")).toBeLessThan(agentSourceRank("something-new"));
+  });
+});
+
+// ── Offene Sessions + Spawn-Baum (2026-07-17) ──────────────────────────────
+
+function sessionFixture(overrides: Partial<ProjectSession> & { id: string }): ProjectSession {
+  return parseOrThrow(
+    ProjectSessionsResponseSchema,
+    {
+      generated_at: 1,
+      errors: [],
+      sessions: [
+        {
+          label: overrides.id,
+          source: "cli",
+          model: "kimi-k2",
+          started_at: 1000,
+          ended_at: null,
+          end_reason: null,
+          is_open: true,
+          is_active: false,
+          stale_open: false,
+          last_active: 1000,
+          message_count: 3,
+          tokens: 150,
+          project: null,
+          spawn_kind: null,
+          spawned_by_id: null,
+          spawned_by_label: null,
+          ...overrides,
+        },
+      ],
+    },
+    "session-fixture",
+  ).sessions[0];
+}
+
+describe("filterSessions + countOpenSessions", () => {
+  const openIdle = sessionFixture({ id: "open-idle", is_open: true, is_active: false });
+  const openActive = sessionFixture({ id: "open-active", is_open: true, is_active: true });
+  const staleOpen = sessionFixture({ id: "stale-open", is_open: true, is_active: false, stale_open: true });
+  const ended = sessionFixture({ id: "ended", is_open: false, is_active: false, ended_at: 2000 });
+  const all = [openIdle, openActive, staleOpen, ended];
+
+  it("open keeps fresh unended sessions and splits out the zombie graveyard", () => {
+    expect(filterSessions(all, "open").map((s) => s.id)).toEqual(["open-idle", "open-active"]);
+    expect(filterSessions(all, "stale").map((s) => s.id)).toEqual(["stale-open"]);
+  });
+
+  it("active narrows to the 300s liveness window", () => {
+    expect(filterSessions(all, "active").map((s) => s.id)).toEqual(["open-active"]);
+  });
+
+  it("all keeps the full backend window", () => {
+    expect(filterSessions(all, "all")).toHaveLength(4);
+  });
+
+  it("counts open sessions for the summary strip, stale only on demand", () => {
+    expect(countOpenSessions(all)).toBe(2);
+    expect(countOpenSessions(all, { includeStale: true })).toBe(3);
+    expect(countOpenSessions([])).toBe(0);
+  });
+});
+
+describe("buildSessionRows (spawn tree)", () => {
+  it("nests spawned children under their parent, oldest spawn first", () => {
+    const root = sessionFixture({ id: "root", is_active: true, started_at: 100 });
+    const childB = sessionFixture({
+      id: "child-b",
+      spawn_kind: "delegate",
+      spawned_by_id: "root",
+      spawned_by_label: "root",
+      started_at: 300,
+    });
+    const childA = sessionFixture({
+      id: "child-a",
+      spawn_kind: "delegate",
+      spawned_by_id: "root",
+      spawned_by_label: "root",
+      started_at: 200,
+    });
+    const grandchild = sessionFixture({
+      id: "grand",
+      spawn_kind: "child",
+      spawned_by_id: "child-a",
+      spawned_by_label: "child-a",
+      started_at: 400,
+    });
+    // Deliberately scrambled input — the tree must rebuild order.
+    const rows = buildSessionRows([grandchild, childB, root, childA]);
+    expect(rows.map((row) => [row.session.id, row.depth])).toEqual([
+      ["root", 0],
+      ["child-a", 1],
+      ["grand", 2],
+      ["child-b", 1],
+    ]);
+    expect(rows[0].childCount).toBe(2);
+    expect(rows[1].childCount).toBe(1);
+    expect(rows[3].childCount).toBe(0);
+  });
+
+  it("treats a session with a missing parent as root but keeps spawned_by_label", () => {
+    const orphan = sessionFixture({
+      id: "orphan",
+      spawn_kind: "delegate",
+      spawned_by_id: "gone",
+      spawned_by_label: "Verschwundener Elter",
+    });
+    const rows = buildSessionRows([orphan]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].depth).toBe(0);
+    expect(rows[0].session.spawned_by_label).toBe("Verschwundener Elter");
+  });
+
+  it("orders roots: active first, then open, then ended — recent activity leads", () => {
+    const ended = sessionFixture({ id: "ended", is_open: false, ended_at: 5000, last_active: 4900 });
+    const openOld = sessionFixture({ id: "open-old", is_open: true, last_active: 1000 });
+    const active = sessionFixture({ id: "active", is_open: true, is_active: true, last_active: 6000 });
+    const rows = buildSessionRows([ended, openOld, active]);
+    expect(rows.map((row) => row.session.id)).toEqual(["active", "open-old", "ended"]);
+  });
+
+  it("survives a corrupt self-parent link without looping", () => {
+    const broken = sessionFixture({
+      id: "broken",
+      spawn_kind: "child",
+      spawned_by_id: "broken",
+    });
+    const rows = buildSessionRows([broken]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].depth).toBe(0);
   });
 });
 

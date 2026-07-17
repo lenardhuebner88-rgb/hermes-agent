@@ -1,15 +1,19 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ProjectEntry, ProjectAgent } from "../lib/schemas";
+import type { ProjectEntry, ProjectAgent, ProjectSession } from "../lib/schemas";
 
 const hooks = vi.hoisted(() => ({
   useProjects: vi.fn(),
   useProjectAgents: vi.fn(),
+  useProjectSessions: vi.fn(),
+  useProjectCommits: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => ({
   useProjects: hooks.useProjects,
   useProjectAgents: hooks.useProjectAgents,
+  useProjectSessions: hooks.useProjectSessions,
+  useProjectCommits: hooks.useProjectCommits,
 }));
 
 import { ProjekteView } from "./ProjekteView";
@@ -24,6 +28,7 @@ const REAL_PROJECT: ProjectEntry = {
   last_commit: {
     hash: "9d8fa62d8",
     message: "projekte-tab: Stufe 1 — ...",
+    author: "claude",
     committed_at: 1784237915,
     age_seconds: 626,
   },
@@ -41,6 +46,8 @@ const REAL_AGENT: ProjectAgent = {
   source: "tmux",
   tmux_session: "work",
   tmux_window: "2",
+  assignee: null,
+  operator: null,
 };
 
 // Coordination claim (source="coordination"): has a task text, is NOT a
@@ -54,6 +61,22 @@ const CLAIM_AGENT: ProjectAgent = {
   source: "coordination",
   tmux_session: null,
   tmux_window: null,
+  assignee: null,
+  operator: "Piet (Roadmap Punkt 8)",
+};
+
+// Kanban worker (source="kanban"): carries the lane as assignee.
+const KANBAN_AGENT: ProjectAgent = {
+  kind: "kanban",
+  label: "t_ab12cd34",
+  task: "Projekte-Tab: Live-Board bauen",
+  project: "hermes-infra",
+  since: 1784237000,
+  source: "kanban",
+  tmux_session: null,
+  tmux_window: null,
+  assignee: "premium",
+  operator: null,
 };
 
 function mockProjects(overrides: Record<string, unknown> = {}) {
@@ -84,10 +107,40 @@ function mockAgents(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function mockSessions(overrides: Record<string, unknown> = {}) {
+  hooks.useProjectSessions.mockReturnValue({
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: true,
+    lastUpdated: null,
+    isStale: false,
+    reload: vi.fn(),
+    updateData: vi.fn(),
+    ...overrides,
+  });
+}
+
+function mockCommits(overrides: Record<string, unknown> = {}) {
+  hooks.useProjectCommits.mockReturnValue({
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: true,
+    lastUpdated: null,
+    isStale: false,
+    reload: vi.fn(),
+    updateData: vi.fn(),
+    ...overrides,
+  });
+}
+
 describe("ProjekteView", () => {
   beforeEach(() => {
     mockProjects();
     mockAgents();
+    mockSessions();
+    mockCommits();
   });
 
   it("shows the loading state before the first successful poll", () => {
@@ -112,9 +165,9 @@ describe("ProjekteView", () => {
     expect(html).toContain("projekte-tab: Stufe 1");
     expect(html).toContain("Blockiert 1");
     expect(html).toContain("1 Loop aktiv");
-    // Stufe 5: kind chip (Kimi) in the rail; the card shows the session row.
+    // LiveBoard: kind chip (Kimi) in the board; the card shows the session row.
     expect(html).toContain("Kimi");
-    expect(html).toContain("Alle Agents");
+    expect(html).toContain("Wer arbeitet gerade");
     expect(html).toContain("work:2 kimi");
     // Summary strip: 1 tmux process live, 0 claims; 1 blocked across kanban.
     expect(html).toContain("1 live");
@@ -139,8 +192,25 @@ describe("ProjekteView", () => {
     expect(html).toContain("Frage-Assistent I1 — Antwort-Sheet (P0c) + Klick-Regression");
     expect(html).toContain("Claim, kein Prozess");
     expect(html).toContain("1 Check-in");
-    // Only the tmux row carries a kill button; the claim row must not.
-    expect(html.match(/aria-label="Session [^"]* beenden"/g) ?? []).toHaveLength(1);
+    // Claim rows carry the operator ("für …") on card and board.
+    expect(html).toContain("für Piet (Roadmap Punkt 8)");
+    // Only the tmux row carries a kill button — once on the card's SESSIONS
+    // section, once on the LiveBoard; the claim row must never grow one.
+    expect(html.match(/aria-label="Session [^"]* beenden"/g) ?? []).toHaveLength(2);
+  });
+
+  it("shows kanban workers with their lane on the live board, never killable", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({
+      data: { generated_at: 1, errors: [], agents: [KANBAN_AGENT] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("Wer arbeitet gerade");
+    expect(html).toContain("Projekte-Tab: Live-Board bauen");
+    expect(html).toContain("Lane premium");
+    expect(html).not.toContain("beenden");
   });
 
   it("shows no kill button for tmux rows missing the structured fields (old backend)", () => {
@@ -153,6 +223,8 @@ describe("ProjekteView", () => {
       source: "tmux",
       tmux_session: null,
       tmux_window: null,
+      assignee: null,
+      operator: null,
     };
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({
@@ -168,7 +240,7 @@ describe("ProjekteView", () => {
     expect(html).not.toContain("beenden");
   });
 
-  it("shows unassigned agents in the kind rail with Unzugeordnet, not as a separate group", () => {
+  it("shows unassigned agents on the live board under Unzugeordnet, not as a project group", () => {
     const unassignedLoop = {
       kind: "loop" as const,
       label: "builder-reviewer",
@@ -240,14 +312,13 @@ describe("ProjekteView", () => {
       loading: false,
       lastUpdated: 1,
     });
+    // No agents/sessions/commits: project names appear ONLY on their cards,
+    // so the markup order is the grid order.
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
     const html = renderToStaticMarkup(<ProjekteView />);
-    // The "Alle Agents" rail also mentions names, so restrict to the grid slice
-    // before the rail heading to assert card order specifically.
-    const grid = html.slice(0, html.indexOf("Alle Agents"));
-    const posAlert = grid.indexOf("Hermes Infra");
-    const posActive = grid.indexOf("Health Track");
-    const posQuiet = grid.indexOf("Oma-Galerie");
+    const posAlert = html.indexOf("Hermes Infra");
+    const posActive = html.indexOf("Health Track");
+    const posQuiet = html.indexOf("Oma-Galerie");
     expect(posAlert).toBeGreaterThanOrEqual(0);
     expect(posAlert).toBeLessThan(posActive);
     expect(posActive).toBeLessThan(posQuiet);
@@ -271,5 +342,91 @@ describe("ProjekteView", () => {
     // Stufe 8: the attention accent bar (absolute child, not a border utility)
     // is tinted status-alert for an alert card.
     expect(html).toContain("bg-status-alert");
+  });
+
+  it("renders the open-sessions spawn tree with parent labels and the summary chip", () => {
+    const rootSession: ProjectSession = {
+      id: "root1",
+      label: "Hauptsession CLI",
+      source: "cli",
+      model: "kimi-k2",
+      started_at: 1784230000,
+      ended_at: null,
+      end_reason: null,
+      is_open: true,
+      is_active: true,
+      stale_open: false,
+      last_active: 1784239900,
+      message_count: 42,
+      tokens: 12500,
+      project: "hermes-infra",
+      spawn_kind: null,
+      spawned_by_id: null,
+      spawned_by_label: null,
+    };
+    const childSession: ProjectSession = {
+      ...rootSession,
+      id: "child1",
+      label: "Recherche-Subagent",
+      is_active: false,
+      last_active: 1784235000,
+      spawn_kind: "delegate",
+      spawned_by_id: "root1",
+      spawned_by_label: "Hauptsession CLI",
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockSessions({
+      data: { generated_at: 1, errors: [], sessions: [childSession, rootSession] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("Offene Sessions");
+    expect(html).toContain("2 offene Sessions");
+    expect(html).toContain("Hauptsession CLI");
+    expect(html).toContain("Recherche-Subagent");
+    // Spawn answer: who spawned whom, with the kind label.
+    expect(html).toContain("von Hauptsession CLI · Subagent");
+    // Child renders indented under the parent (spawn-tree geometry).
+    expect(html.indexOf("Hauptsession CLI")).toBeLessThan(html.indexOf("Recherche-Subagent"));
+  });
+
+  it("renders the cross-project commit feed with author and project tag", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockCommits({
+      data: {
+        generated_at: 1,
+        errors: [],
+        commits: [
+          {
+            project: "hermes-infra",
+            project_name: "Hermes Infra",
+            hash: "abc123def",
+            message: "projekte-tab: Live-Board",
+            author: "kimi",
+            committed_at: 1784239000,
+            age_seconds: 900,
+          },
+        ],
+      },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("Alle Commits");
+    expect(html).toContain("projekte-tab: Live-Board");
+    expect(html).toContain("abc123def");
+    expect(html).toContain("kimi");
+  });
+
+  it("surfaces the sessions-endpoint error banner without breaking the rest", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockSessions({ error: "state.db locked" });
+    const html = renderToStaticMarkup(<ProjekteView />);
+    expect(html).toContain("Sessions konnten nicht geladen werden.");
+    expect(html).toContain("Hermes Infra");
   });
 });

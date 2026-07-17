@@ -23,6 +23,8 @@ const KILLABLE_AGENT: ProjectAgent = {
   source: "tmux",
   tmux_session: "work",
   tmux_window: "2",
+  assignee: null,
+  operator: null,
 };
 
 function renderSheet(overrides: Partial<Parameters<typeof SessionKillSheet>[0]> = {}) {

@@ -79,9 +79,11 @@ class ProjectsRegistry:
 
 
 # A slug becomes a URL path segment (GET /api/projects/{slug}) and a React key.
-# Keep it URL-safe and reject segments that collide with sibling static routes.
+# Keep it URL-safe and reject segments that collide with sibling static routes
+# (/api/projects/agents, /api/projects/sessions, /api/projects/commits — all
+# registered before /{slug}).
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-_RESERVED_SLUGS = frozenset({"agents"})
+_RESERVED_SLUGS = frozenset({"agents", "sessions", "commits"})
 
 
 def _default_registry_path(home: Path | None) -> Path:
@@ -138,8 +140,9 @@ def _parse_entry(index: int, raw: Any, errors: list[str]) -> ProjectEntry | None
         )
         return None
     if slug in _RESERVED_SLUGS:
-        # A project slugged 'agents' would collide with GET /api/projects/agents
-        # (registered before /{slug}), making its detail endpoint unreachable.
+        # A project slugged e.g. 'agents' would collide with the static route
+        # GET /api/projects/agents (registered before /{slug}), making its
+        # detail endpoint unreachable.
         errors.append(f"project at {label}: slug {slug!r} is reserved")
         return None
     label = f"'{slug}'"
@@ -257,23 +260,29 @@ _KANBAN_DONE_WINDOW_SECONDS = 7 * 24 * 3600
 _ISO_WITH_ZONE_RE = re.compile(r"(Z|[+-]\d{2}:\d{2})$")
 
 
-def _project_last_commit(
-    entry: ProjectEntry, *, now: int
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Runs ``git log -1`` for ``entry`` and returns ``(last_commit, error)``.
+def _git_log_commits(
+    entry: ProjectEntry, *, limit: int, now: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Runs ``git log -n <limit>`` for ``entry`` → ``(commits, error)``.
+
+    Shared by the card's last commit, the detail drilldown's recent commits
+    and the cross-project commit feed — one format string, one parser. Each
+    row carries ``hash``, ``message``, ``author`` (``%an``), ``committed_at``
+    and ``age_seconds``.
 
     ``path_filters`` (subproject slices of a parent repo) are appended as
-    pathspecs after ``--`` so the subproject's own last touching commit is
-    reported instead of the parent repo's overall HEAD.
+    pathspecs after ``--`` so the subproject's own touching commits are
+    reported instead of the parent repo's overall HEAD. An existing repo with
+    no matching commits yields ``([], None)`` — not an error.
     """
     cmd = [
         "git",
         "-C",
         entry.repo_path,
         "log",
-        "-1",
+        f"-n{limit}",
         "--abbrev=9",
-        "--format=%h\x1f%s\x1f%ct",
+        "--format=%h\x1f%s\x1f%ct\x1f%an",
     ]
     if entry.path_filters:
         cmd.append("--")
@@ -288,33 +297,46 @@ def _project_last_commit(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return None, f"git: {exc}"
+        return [], f"git: {exc}"
 
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "git log failed").strip()
-        return None, f"git: {detail or 'git log failed'}"
+        return [], f"git: {detail or 'git log failed'}"
 
-    line = result.stdout.strip()
-    if not line:
-        # Repo exists, just has no commits (yet) matching the filters — not
-        # an error, simply nothing to report.
-        return None, None
+    commits: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\x1f")
+        if len(parts) != 4:
+            return [], "git: unexpected `git log` output"
+        commit_hash, message, committed_at_raw, author = parts
+        try:
+            committed_at = int(committed_at_raw)
+        except ValueError:
+            return [], "git: unparsable commit timestamp"
+        commits.append(
+            {
+                "hash": commit_hash,
+                "message": message,
+                "author": author,
+                "committed_at": committed_at,
+                "age_seconds": max(0, now - committed_at),
+            }
+        )
+    return commits, None
 
-    parts = line.split("\x1f")
-    if len(parts) != 3:
-        return None, "git: unexpected `git log` output"
-    commit_hash, message, committed_at_raw = parts
-    try:
-        committed_at = int(committed_at_raw)
-    except ValueError:
-        return None, "git: unparsable commit timestamp"
 
-    return {
-        "hash": commit_hash,
-        "message": message,
-        "committed_at": committed_at,
-        "age_seconds": max(0, now - committed_at),
-    }, None
+def _project_last_commit(
+    entry: ProjectEntry, *, now: int
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Returns ``(last_commit, error)`` — the newest row of the shared log
+    helper, or ``(None, None)`` when the repo simply has no matching commits."""
+    commits, error = _git_log_commits(entry, limit=1, now=now)
+    if error is not None or not commits:
+        return None, error
+    return commits[0], None
 
 
 def _open_sqlite_ro(path: Path) -> sqlite3.Connection:
@@ -813,6 +835,11 @@ def _parse_coordination_note(
     task_raw = data.get("task")
     task = task_raw if isinstance(task_raw, str) else None
 
+    # Live coordination notes carry an ``operator:`` field (who the agent works
+    # for) — surface it so the tab can answer "für wen" beside "wer/woran".
+    operator_raw = data.get("operator")
+    operator = operator_raw.strip() if isinstance(operator_raw, str) and operator_raw.strip() else None
+
     touching_raw = data.get("touching")
     touching_paths: list[str] = []
     if isinstance(touching_raw, list):
@@ -827,6 +854,7 @@ def _parse_coordination_note(
         "project": _attribute_project(touching_paths, registry),
         "since": _parse_coordination_timestamp(started_raw),
         "source": "coordination",
+        "operator": operator,
     }
 
 
@@ -934,6 +962,10 @@ def _kanban_running_agents(
                 "project": project,
                 "since": row["started_at"],
                 "source": "kanban",
+                # Which lane/assignee the running task belongs to — the "wer"
+                # in "wer arbeitet woran" (selected since stage 3, but never
+                # surfaced until now).
+                "assignee": row["assignee"] or None,
             }
         )
     return agents, []
@@ -1090,60 +1122,10 @@ def _project_recent_commits(
 ) -> tuple[list[dict[str, Any]], str | None]:
     """``git log -n 10`` for ``entry`` → ``(commits, error)``.
 
-    Same field-splitting and ``path_filters`` pathspecs as
-    :func:`_project_last_commit`; empty repo / no matching commits → ``[]``
-    without an error.
+    Thin wrapper over :func:`_git_log_commits` (shared format/parser with the
+    card's last commit and the cross-project feed).
     """
-    cmd = [
-        "git",
-        "-C",
-        entry.repo_path,
-        "log",
-        f"-n{_RECENT_COMMITS_LIMIT}",
-        "--abbrev=9",
-        "--format=%h\x1f%s\x1f%ct",
-    ]
-    if entry.path_filters:
-        cmd.append("--")
-        cmd.extend(entry.path_filters)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=_GIT_LOG_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return [], f"git: {exc}"
-
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "git log failed").strip()
-        return [], f"git: {detail or 'git log failed'}"
-
-    commits: list[dict[str, Any]] = []
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split("\x1f")
-        if len(parts) != 3:
-            return [], "git: unexpected `git log` output"
-        commit_hash, message, committed_at_raw = parts
-        try:
-            committed_at = int(committed_at_raw)
-        except ValueError:
-            return [], "git: unparsable commit timestamp"
-        commits.append(
-            {
-                "hash": commit_hash,
-                "message": message,
-                "committed_at": committed_at,
-                "age_seconds": max(0, now - committed_at),
-            }
-        )
-    return commits, None
+    return _git_log_commits(entry, limit=_RECENT_COMMITS_LIMIT, now=now)
 
 
 def _kanban_tasks(
@@ -1391,6 +1373,8 @@ def build_project_detail(
                 "task": agent.get("task"),
                 "since": agent.get("since"),
                 "source": agent["source"],
+                "assignee": agent.get("assignee"),
+                "operator": agent.get("operator"),
             }
             for agent in source_payload.get("agents", [])
             if agent.get("project") == entry.slug
@@ -1414,6 +1398,275 @@ def build_project_detail(
         "agents": agents,
         "errors": errors,
     }
+
+
+# ---------------------------------------------------------------------------
+# Stage 10 — open sessions + spawn tree (/api/projects/sessions)
+# ---------------------------------------------------------------------------
+#
+# Answers two operator questions the agents payload cannot:
+#   * "welche Sessions sind noch nicht geschlossen?" — sessions.ended_at IS NULL
+#   * "welchen Agent hat wer gespawnt?" — sessions.parent_session_id plus the
+#     model_config markers ``_delegate_from`` (delegate subagents) and
+#     ``_branched_from`` (/branch children), written by delegate_tool/branch.
+# Read-only straight against state.db (same isolation contract as kanban.db
+# above): a missing file is the no-config default, a locked/broken DB degrades
+# to one ``errors[]`` entry — never a 500.
+
+_SESSIONS_WINDOW_SECONDS = 36 * 3600
+_SESSIONS_LIMIT = 150
+# Same "active" definition as web_server's /api/sessions: open AND a message
+# (or start) within the last 300s.
+_SESSION_ACTIVE_SECONDS = 300
+# Real-data lesson (2026-07-17): on a live host almost every session row keeps
+# ``ended_at IS NULL`` forever (gateway/cli rows are rarely closed), so plain
+# "open" buckets hundreds of zombie rows. ``stale_open`` marks the graveyard:
+# open but no activity for 24h — the UI splits those out of the default view.
+_SESSION_STALE_SECONDS = 24 * 3600
+_ORPHANED_MARKER = "__orphaned__"
+
+_SESSIONS_SQL = """
+SELECT s.id, s.source, s.model, s.title, s.display_name,
+       s.started_at, s.ended_at, s.end_reason,
+       s.message_count, s.input_tokens, s.output_tokens,
+       s.cwd, s.git_repo_root, s.parent_session_id,
+       json_extract(COALESCE(s.model_config, '{}'), '$._delegate_from') AS delegate_from,
+       json_extract(COALESCE(s.model_config, '{}'), '$._branched_from') AS branched_from,
+       (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id) AS last_active
+FROM sessions s
+WHERE s.started_at >= ? OR s.ended_at IS NULL
+ORDER BY (s.ended_at IS NULL) DESC, s.started_at DESC
+LIMIT ?
+"""
+
+_SESSION_PARENTS_SQL = (
+    "SELECT id, display_name, title, source, model, end_reason FROM sessions WHERE id IN ({})"
+)
+
+
+def _session_int(value: Any) -> int | None:
+    """REAL/TEXT/None epoch column → plain int seconds (or None)."""
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_label_fields(display_name: Any, title: Any, session_id: str) -> str:
+    for candidate in (display_name, title):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return session_id[:8]
+
+
+def build_sessions_payload(
+    registry: ProjectsRegistry,
+    *,
+    state_db_path: Path | None = None,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Assemble the frozen ``/api/projects/sessions`` payload.
+
+    Pure-ish: ``state_db_path``/``now`` are injectable so tests never touch the
+    real ``~/.hermes/state.db``. Rows are open-first (unclosed sessions lead,
+    then newest ``started_at``) so a long-open session can never fall victim
+    to the row cap — the frontend derives the spawn tree from
+    ``spawned_by_id`` regardless of flat order.
+    """
+    resolved_now = now if now is not None else int(time.time())
+    home = get_hermes_home()
+    resolved_state_db = state_db_path if state_db_path is not None else home / "state.db"
+
+    if not resolved_state_db.exists():
+        # No state.db yet (fresh profile / sandbox) — same no-config default
+        # as a missing registry file: empty list, no error.
+        return {"generated_at": resolved_now, "errors": [], "sessions": []}
+
+    try:
+        conn = _open_sqlite_ro(resolved_state_db)
+    except sqlite3.DatabaseError as exc:
+        return {
+            "generated_at": resolved_now,
+            "errors": [f"sessions: could not open state.db: {exc}"],
+            "sessions": [],
+        }
+
+    try:
+        rows = conn.execute(
+            _SESSIONS_SQL,
+            (resolved_now - _SESSIONS_WINDOW_SECONDS, _SESSIONS_LIMIT),
+        ).fetchall()
+
+        # Resolve spawn parents (labels + end_reason) in ONE extra query. The
+        # parent itself may sit outside the 36h window (long-open CLI sessions)
+        # and would otherwise render as a bare id.
+        listed_ids = {row["id"] for row in rows}
+        wanted_parent_ids: set[str] = set()
+        for row in rows:
+            for key in ("parent_session_id", "delegate_from", "branched_from"):
+                value = row[key]
+                if isinstance(value, str) and value and value != _ORPHANED_MARKER:
+                    wanted_parent_ids.add(value)
+        missing_parent_ids = sorted(wanted_parent_ids - listed_ids)
+        parents: dict[str, dict[str, Any]] = {}
+        if missing_parent_ids:
+            placeholders = ", ".join("?" for _ in missing_parent_ids)
+            for prow in conn.execute(
+                _SESSION_PARENTS_SQL.format(placeholders), missing_parent_ids
+            ).fetchall():
+                parents[prow["id"]] = dict(prow)
+    except sqlite3.DatabaseError as exc:
+        return {
+            "generated_at": resolved_now,
+            "errors": [f"sessions: {exc}"],
+            "sessions": [],
+        }
+    finally:
+        conn.close()
+
+    # Parent lookup across both result sets (window rows win — they carry the
+    # freshest state; the extra query is only a label/end_reason fallback).
+    row_by_id = {row["id"]: row for row in rows}
+
+    def _parent_info(parent_id: str) -> tuple[str | None, str | None]:
+        """``(label, end_reason)`` for a spawn parent, best effort."""
+        source_row = row_by_id.get(parent_id)
+        if source_row is not None:
+            return (
+                _session_label_fields(
+                    source_row["display_name"], source_row["title"], parent_id
+                ),
+                source_row["end_reason"] if isinstance(source_row["end_reason"], str) else None,
+            )
+        parent = parents.get(parent_id)
+        if parent is not None:
+            return (
+                _session_label_fields(parent.get("display_name"), parent.get("title"), parent_id),
+                parent.get("end_reason") if isinstance(parent.get("end_reason"), str) else None,
+            )
+        return None, None
+
+    sessions: list[dict[str, Any]] = []
+    for row in rows:
+        session_id = row["id"]
+        delegate_from = row["delegate_from"]
+        branched_from = row["branched_from"]
+        parent_session_id = row["parent_session_id"]
+
+        spawn_kind: str | None = None
+        spawned_by_id: str | None = None
+        if isinstance(delegate_from, str) and delegate_from:
+            spawn_kind = "delegate"
+            spawned_by_id = None if delegate_from == _ORPHANED_MARKER else delegate_from
+        elif isinstance(branched_from, str) and branched_from:
+            spawn_kind = "branch"
+            spawned_by_id = branched_from
+        elif isinstance(parent_session_id, str) and parent_session_id:
+            spawned_by_id = parent_session_id
+            _label, parent_end_reason = _parent_info(parent_session_id)
+            # A plain parent link with a compression-ended parent is a
+            # continuation of the same conversation, not a spawned agent.
+            spawn_kind = "compression" if parent_end_reason == "compression" else "child"
+
+        spawned_by_label: str | None = None
+        if spawned_by_id is not None:
+            spawned_by_label, _unused = _parent_info(spawned_by_id)
+
+        started_at = _session_int(row["started_at"])
+        ended_at = _session_int(row["ended_at"])
+        last_active = _session_int(row["last_active"])
+        is_open = ended_at is None
+        active_reference = last_active if last_active is not None else (started_at or 0)
+        is_active = is_open and (resolved_now - active_reference) < _SESSION_ACTIVE_SECONDS
+        stale_open = is_open and (resolved_now - active_reference) >= _SESSION_STALE_SECONDS
+
+        input_tokens = row["input_tokens"] or 0
+        output_tokens = row["output_tokens"] or 0
+
+        attribution_paths = [
+            value for value in (row["cwd"], row["git_repo_root"]) if isinstance(value, str)
+        ]
+
+        sessions.append(
+            {
+                "id": session_id,
+                "label": _session_label_fields(row["display_name"], row["title"], session_id),
+                "source": row["source"] if isinstance(row["source"], str) else "",
+                "model": row["model"] if isinstance(row["model"], str) else None,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "end_reason": row["end_reason"] if isinstance(row["end_reason"], str) else None,
+                "is_open": is_open,
+                "is_active": is_active,
+                "stale_open": stale_open,
+                "last_active": last_active,
+                "message_count": int(row["message_count"] or 0),
+                "tokens": int(input_tokens) + int(output_tokens),
+                "project": _attribute_project(attribution_paths, registry),
+                "spawn_kind": spawn_kind,
+                "spawned_by_id": spawned_by_id,
+                "spawned_by_label": spawned_by_label,
+            }
+        )
+
+    return {"generated_at": resolved_now, "errors": [], "sessions": sessions}
+
+
+# ---------------------------------------------------------------------------
+# Stage 11 — cross-project commit feed (/api/projects/commits)
+# ---------------------------------------------------------------------------
+#
+# One merged "Alle Commits" timeline across every registered project: N newest
+# commits per repo (path_filters respected via the shared log helper), merged
+# newest-first, capped. Each project's git read is isolated — one broken repo
+# degrades to an ``errors[]`` entry, the rest of the feed still delivers.
+
+_FEED_COMMITS_PER_PROJECT = 6
+_FEED_COMMITS_LIMIT = 30
+
+
+def build_commits_payload(
+    registry: ProjectsRegistry,
+    *,
+    now: int | None = None,
+) -> dict[str, Any]:
+    """Assemble the frozen ``/api/projects/commits`` payload (newest-first)."""
+    resolved_now = now if now is not None else int(time.time())
+
+    feed: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for entry in registry.projects:
+        try:
+            commits, git_error = _git_log_commits(
+                entry, limit=_FEED_COMMITS_PER_PROJECT, now=resolved_now
+            )
+        except Exception as exc:
+            commits, git_error = [], f"git: {exc}"
+        if git_error:
+            detail = git_error.removeprefix("git:").strip()
+            errors.append(f"git: project '{entry.slug}': {detail}")
+        for commit in commits:
+            feed.append(
+                {
+                    "project": entry.slug,
+                    "project_name": entry.name,
+                    "hash": commit["hash"],
+                    "message": commit["message"],
+                    "author": commit["author"],
+                    "committed_at": commit["committed_at"],
+                    "age_seconds": commit["age_seconds"],
+                    "_order": len(feed),  # stable tie-break: registry order
+                }
+            )
+
+    feed.sort(key=lambda commit: (-commit["committed_at"], commit["_order"]))
+    feed = feed[:_FEED_COMMITS_LIMIT]
+    for commit in feed:
+        del commit["_order"]
+
+    return {"generated_at": resolved_now, "errors": errors, "commits": feed}
 
 
 # ---------------------------------------------------------------------------
@@ -1508,8 +1761,30 @@ def _cached_agents_payload() -> dict[str, Any]:
     return _cache_view(payload)
 
 
+def _cached_sessions_payload() -> dict[str, Any]:
+    """Route accessor for ``GET /api/projects/sessions`` (key ``sessions``)."""
+    cached = _projects_cache.get("sessions")
+    if cached is not None:
+        return cached
+    registry = load_projects_registry()
+    payload = build_sessions_payload(registry)
+    _projects_cache.set("sessions", payload)
+    return _cache_view(payload)
+
+
+def _cached_commits_payload() -> dict[str, Any]:
+    """Route accessor for ``GET /api/projects/commits`` (key ``commits``)."""
+    cached = _projects_cache.get("commits")
+    if cached is not None:
+        return cached
+    registry = load_projects_registry()
+    payload = build_commits_payload(registry)
+    _projects_cache.set("commits", payload)
+    return _cache_view(payload)
+
+
 def register_projects_routes(app: FastAPI) -> None:
-    """Register read-only ``GET /api/projects`` (+ agents + ``{slug}`` detail).
+    """Register read-only ``GET /api/projects`` (+ agents/sessions/commits + ``{slug}`` detail).
 
     Auth comes automatically from the dashboard's ``/api/*`` middleware —
     nothing to do here as long as the path stays out of the public whitelist.
@@ -1519,12 +1794,15 @@ def register_projects_routes(app: FastAPI) -> None:
 
     Unknown slug on the detail route answers **404** with body
     ``{"error": "unknown project", "slug": <slug>}`` (JSON, never a 500).
-    Static ``/api/projects/agents`` is registered before ``/{slug}`` so the
-    path is never captured as a slug.
+    The static routes ``/api/projects/agents``, ``/api/projects/sessions`` and
+    ``/api/projects/commits`` are registered before ``/{slug}`` so they are
+    never captured as a slug (the matching names are also reserved in the
+    registry, see ``_RESERVED_SLUGS``).
 
-    ``get_projects`` / ``get_project_agents`` consult a short process-level
-    TTL cache (~5s). ``get_project_detail`` reuses the cached agents payload
-    (does not cache per-slug detail bodies).
+    ``get_projects`` / ``get_project_agents`` / ``get_project_sessions`` /
+    ``get_project_commits`` consult a short process-level TTL cache (~10s).
+    ``get_project_detail`` reuses the cached agents payload (does not cache
+    per-slug detail bodies).
     """
 
     @app.get("/api/projects")
@@ -1547,6 +1825,28 @@ def register_projects_routes(app: FastAPI) -> None:
                 "generated_at": int(time.time()),
                 "errors": [f"agents: unexpected error: {exc}"],
                 "agents": [],
+            }
+
+    @app.get("/api/projects/sessions")
+    def get_project_sessions() -> dict[str, Any]:
+        try:
+            return _cached_sessions_payload()
+        except Exception as exc:
+            return {
+                "generated_at": int(time.time()),
+                "errors": [f"sessions: unexpected error: {exc}"],
+                "sessions": [],
+            }
+
+    @app.get("/api/projects/commits")
+    def get_project_commits() -> dict[str, Any]:
+        try:
+            return _cached_commits_payload()
+        except Exception as exc:
+            return {
+                "generated_at": int(time.time()),
+                "errors": [f"commits: unexpected error: {exc}"],
+                "commits": [],
             }
 
     @app.get("/api/projects/{slug}")

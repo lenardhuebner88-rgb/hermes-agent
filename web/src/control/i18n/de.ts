@@ -746,7 +746,7 @@ export const de = {
   projekte: {
     eyebrow: "Leitstand",
     title: "Projekte",
-    subtitle: "Eine Karte pro Projekt — letzter Commit, Kanban-Stand, Loops, aktive Agents.",
+    subtitle: "Wer arbeitet gerade woran — Live-Belegung, offene Sessions, Kanban-Stand und Commits pro Projekt.",
     loading: "Lade Projekte …",
     error: "Projekt-Übersicht konnte nicht geladen werden.",
     agentsError: "Agent-Belegung konnte nicht geladen werden.",
@@ -764,12 +764,23 @@ export const de = {
     loopsActive: (n: number) => `${n} ${n === 1 ? "Loop aktiv" : "Loops aktiv"}`,
     agentsCount: (n: number) => (n === 0 ? "Keine Agents" : `${n} ${n === 1 ? "Agent" : "Agents"}`),
     cardErrorsTooltip: (n: number) => `${n} ${n === 1 ? "Fehler" : "Fehler"} bei dieser Karte`,
-    // Stufe 5 — Agent-Chips + Alle-Agents-Rail
-    agentsRailEyebrow: "Belegung",
-    agentsRail: "Alle Agents",
-    agentsRailEmpty: "Keine Agents aktiv.",
+    // LiveBoard ("Wer arbeitet gerade") — ersetzt die frühere Kind-Rail
+    liveBoardEyebrow: "Belegung",
+    liveBoard: "Wer arbeitet gerade",
+    liveBoardEmpty: "Gerade arbeitet niemand an diesen Projekten.",
     unassigned: "Unzugeordnet",
-    agentsOverflow: (n: number) => `+${n}`,
+    sourceLabel: (source: string) =>
+      source === "tmux"
+        ? "Prozess"
+        : source === "kanban"
+          ? "Kanban-Task"
+          : source === "loop"
+            ? "Loop"
+            : source === "coordination"
+              ? "Check-in"
+              : source || "Quelle",
+    assigneeLabel: (assignee: string) => `Lane ${assignee}`,
+    operatorLabel: (operator: string) => `für ${operator}`,
     agentKinds: {
       claude: "Claude",
       codex: "Codex",
@@ -830,6 +841,41 @@ export const de = {
       active: "Aufmerksamkeit: aktiv",
       quiet: "Aufmerksamkeit: ruhig",
     },
+    // Stage 10 — Offene Sessions + Spawn-Baum (state.db)
+    summaryOpenSessions: (n: number) => `${n} offene ${n === 1 ? "Session" : "Sessions"}`,
+    sessionsError: "Sessions konnten nicht geladen werden.",
+    sessionsEyebrow: "Konversationen",
+    sessionsTitle: "Offene Sessions",
+    sessionsFilterOpen: "Offen",
+    sessionsFilterActive: "Aktiv",
+    sessionsFilterStale: "Verwaist",
+    sessionsFilterAll: "Alle",
+    sessionsEmpty: (filter: string) =>
+      filter === "active"
+        ? "Keine aktiven Sessions."
+        : filter === "stale"
+          ? "Keine verwaist offenen Sessions — sauber."
+          : filter === "all"
+            ? "Keine Sessions im Zeitfenster (36 h)."
+            : "Keine offenen Sessions.",
+    spawnedBy: (label: string) => `von ${label}`,
+    spawnKindLabel: (kind: string) =>
+      kind === "delegate"
+        ? "Subagent"
+        : kind === "branch"
+          ? "Branch"
+          : kind === "compression"
+            ? "Fortsetzung"
+            : kind === "child"
+              ? "Kind"
+              : kind,
+    spawnedCount: (n: number) => `(${n}× gespawnt)`,
+    sessionsMeta: (messages: number, tokens: string) => `${messages} Nachr. · ${tokens} Tok.`,
+    sessionEnded: "beendet",
+    // Stage 11 — Projektübergreifender Commit-Feed
+    commitsEyebrow: "Git",
+    commitsTitle: "Alle Commits",
+    commitsEmpty: "Keine Commits in den registrierten Projekten gefunden.",
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

@@ -113,6 +113,8 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
         <div className="min-w-0 text-micro">
           <p className="truncate text-ink-2">{commit.message || t.noCommitMessage}</p>
           <p className="mt-0.5 flex items-center gap-1.5 font-data text-ink-3">
+            {commit.author ? <span className="truncate text-ink-2">{commit.author}</span> : null}
+            {commit.author ? <span aria-hidden>·</span> : null}
             <span>{commit.hash}</span>
             <span aria-hidden>·</span>
             <span>{fmtRelativeTime(commit.committed_at, now)}</span>
@@ -235,7 +237,8 @@ function LiveSessionRow({
 }
 
 /** Ein Vault-Check-in (Claim): Task-Text + Art + Alter — bewusst ohne Kill-
- *  Button, denn ein Claim ist kein killbarer Prozess (siehe Sheet-Hinweis). */
+ *  Button, denn ein Claim ist kein killbarer Prozess (siehe Sheet-Hinweis).
+ *  Trägt die Note ein `operator:`-Feld, steht das "für wen" dabei. */
 function ClaimRow({ agent, now }: { agent: ProjectAgent; now: number }) {
   const style = AGENT_KIND_STYLES[agent.kind] ?? AGENT_KIND_STYLES.unknown;
 
@@ -246,8 +249,9 @@ function ClaimRow({ agent, now }: { agent: ProjectAgent; now: number }) {
         <p className="truncate text-micro text-ink-2" title={agent.task ?? agent.label}>
           {agent.task ?? agent.label}
         </p>
-        <p className="text-micro text-ink-3">
+        <p className="truncate text-micro text-ink-3">
           {style.label} · {t.claimKind}
+          {agent.operator ? ` · ${t.operatorLabel(agent.operator)}` : ""}
         </p>
       </div>
       <span className="shrink-0 rounded-card border border-dashed border-line px-1.5 py-0.5 font-data text-micro text-ink-3">

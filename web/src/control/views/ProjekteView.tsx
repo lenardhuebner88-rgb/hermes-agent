@@ -2,13 +2,14 @@ import { useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Eyebrow } from "../components/primitives";
 import { FleetEmptyState } from "../components/leitstand";
-import { useProjectAgents, useProjects } from "../hooks/useControlData";
+import { useProjectAgents, useProjectCommits, useProjectSessions, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
 import type { ProjectAgent } from "../lib/schemas";
 import {
   computeAttention,
   countAgentsByProject,
+  countOpenSessions,
   groupAgentsByProject,
   parentDisplayName,
   sortProjectsByAttention,
@@ -17,20 +18,23 @@ import {
 import { ProjectCard } from "./projekte/ProjectCard";
 import { ProjectDetailDrawer } from "./projekte/ProjectDetailDrawer";
 import { SessionKillSheet } from "./projekte/SessionKillSheet";
-import { AgentsRail } from "./projekte/AgentsRail";
+import { LiveBoard } from "./projekte/LiveBoard";
+import { SessionsSection } from "./projekte/SessionsSection";
+import { CommitsFeed } from "./projekte/CommitsFeed";
 
 const t = de.projekte;
 
-/** Projekte-Tab (Stufe 5/6/7) — Karten-Grid + Agents-Rail + Detail-Drawer:
- *  eine Karte pro registriertem Projekt (`~/.hermes/projects.yaml`), gespeist
- *  aus GET /api/projects + GET /api/projects/agents; Klick öffnet den
- *  read-only Drilldown (GET /api/projects/{slug}). Karten sind nach
- *  Attention (alert → active → quiet) sortiert.
- *  Seit 2026-07-17: Summary-Strip (live/Check-ins/blockiert) unter dem Header
- *  und Kill-Bottom-Sheet für echte tmux-Sessions (✕ auf den Session-Reihen). */
+/** Projekte-Tab — der Operator-Blick auf "wer arbeitet gerade wirklich woran":
+ *  Summary-Strip (live/Check-ins/offene Sessions/blockiert) → LiveBoard
+ *  (Agents nach Projekt gruppiert, mit Lane/Operator, tmux killbar) →
+ *  Karten-Grid (Attention-sortiert, Klick = Drilldown) → Offene Sessions
+ *  (Spawn-Baum aus state.db) → Alle Commits (projektübergreifender Feed).
+ *  Daten: GET /api/projects + /agents + /sessions + /commits. */
 export function ProjekteView() {
   const projects = useProjects();
   const agents = useProjectAgents();
+  const sessions = useProjectSessions();
+  const commits = useProjectCommits();
   const now = nowSec();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [killAgent, setKillAgent] = useState<ProjectAgent | null>(null);
@@ -38,6 +42,8 @@ export function ProjekteView() {
   const list = projects.data?.projects ?? [];
   const registryErrors = projects.data?.registry_errors ?? [];
   const agentList = agents.data?.agents ?? [];
+  const sessionList = sessions.data?.sessions ?? [];
+  const commitList = commits.data?.commits ?? [];
   const agentsByProject = groupAgentsByProject(agentList);
   const agentCountBySlug = countAgentsByProject(agentList);
   const sortedList = sortProjectsByAttention(list, agentCountBySlug);
@@ -50,11 +56,13 @@ export function ProjekteView() {
       ? null
       : parentDisplayName(list.find((p) => p.slug === selectedSlug)?.parent ?? null, list);
 
-  // Summary-Strip: echte Prozesse vs. Vault-Claims + offene Arbeit über alle
-  // Karten. Gleiche live/claims-Definition wie die Karten-Sektionen.
+  // Summary-Strip: echte Prozesse vs. Vault-Claims + offene Sessions +
+  // offene Arbeit über alle Karten. Gleiche live/claims-Definition wie die
+  // Karten-Sektionen.
   const { live: liveAgents, claims: claimAgents } = splitAgentsBySource(agentList);
   const liveTotal = liveAgents.length;
   const claimsTotal = claimAgents.length;
+  const openSessionsTotal = countOpenSessions(sessionList);
   let blockedTotal = 0;
   let needsInputTotal = 0;
   for (const project of list) {
@@ -76,6 +84,11 @@ export function ProjekteView() {
             <span className="inline-flex items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
               {t.summaryCheckins(claimsTotal)}
             </span>
+            {sessions.data !== null ? (
+              <span className="inline-flex items-center rounded-card border border-line bg-surface-1 px-2 py-0.5 font-data text-ink-2">
+                {t.summaryOpenSessions(openSessionsTotal)}
+              </span>
+            ) : null}
             {blockedTotal > 0 ? (
               <span className="inline-flex items-center rounded-card border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 font-data text-status-alert">
                 {t.summaryBlocked(blockedTotal)}
@@ -104,6 +117,13 @@ export function ProjekteView() {
         </div>
       ) : null}
 
+      {sessions.error ? (
+        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
+          {t.sessionsError}
+        </div>
+      ) : null}
+
       {registryErrors.length > 0 ? (
         <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
           <p className="font-semibold">{t.registryErrors}</p>
@@ -118,6 +138,15 @@ export function ProjekteView() {
       {projects.data === null && !projects.error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
 
       {projects.data !== null && list.length === 0 ? <FleetEmptyState title={t.empty} desc={t.emptyDesc} /> : null}
+
+      {agents.data !== null ? (
+        <LiveBoard
+          agents={agentList}
+          projectNames={projectNames}
+          now={now}
+          onKillSession={setKillAgent}
+        />
+      ) : null}
 
       {sortedList.length > 0 ? (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -139,9 +168,11 @@ export function ProjekteView() {
         </div>
       ) : null}
 
-      {agents.data !== null || agentList.length > 0 ? (
-        <AgentsRail agents={agentList} projectNames={projectNames} now={now} />
+      {sessions.data !== null ? (
+        <SessionsSection sessions={sessionList} projectNames={projectNames} now={now} />
       ) : null}
+
+      {commits.data !== null ? <CommitsFeed commits={commitList} now={now} /> : null}
 
       {selectedSlug ? (
         <ProjectDetailDrawer
