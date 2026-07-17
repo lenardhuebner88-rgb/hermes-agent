@@ -144,18 +144,15 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
         source = Path(f)
         rel_dir = str(source.parent)
         candidate = Path("tests") / rel_dir / f"test_{name}"
-        one_to_one_exists = (repo_root / candidate).is_file()
-        if one_to_one_exists:
+        if (repo_root / candidate).is_file():
             modules.add(str(candidate))
-        siblings = _feature_named_sibling_tests(repo_root, rel_dir, source)
-        modules.update(siblings)
-        if not one_to_one_exists and not siblings:
-            # Fallback: no 1:1 test file and no feature-named siblings import
-            # the changed module. Monolith source files like gateway/run.py or
-            # hermes_cli/kanban_db.py have feature-named tests
-            # (test_shutdown_cache_cleanup.py, test_kanban_core*.py), not
-            # test_<module>.py. Select the entire package test directory so
-            # regressions are caught at the merge gate, not only nightly.
+        modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
+        if not (repo_root / candidate).is_file():
+            # Fallback: no 1:1 test file. Monolith source files like
+            # gateway/run.py or hermes_cli/kanban_db.py have feature-named
+            # tests (test_shutdown_cache_cleanup.py, test_kanban_core*.py),
+            # not test_<module>.py.  Select the entire package test directory
+            # so regressions are caught at the merge gate, not only nightly.
             # Cap: if the directory has too many test files, downgrade to no
             # selection — the nightly full suite remains the backstop. This
             # prevents a gate-tempo explosion (AC-2 counter-metric).

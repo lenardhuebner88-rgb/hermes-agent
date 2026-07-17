@@ -52,17 +52,14 @@ def test_stress_scripts_are_skipped():
     assert out == []
 
 
-def test_monolith_source_selects_siblings_not_package_dir():
+def test_monolith_source_falls_back_to_package_dir():
     """When a source file has no 1:1 test_<name>.py (e.g. gateway/run.py),
-    the import-based sibling scan selects concrete feature-named test files
-    instead of the entire tests/<pkg>/ directory — the directory fallback only
-    fires when zero siblings import the module."""
+    the entire tests/<pkg>/ directory is selected so feature-named tests
+    still run at the merge gate."""
     mod = _load_module()
-    # gateway/run.py has no tests/gateway/test_run.py; its feature-named
-    # siblings import it directly.
+    # gateway/run.py has no tests/gateway/test_run.py but tests/gateway/ exists.
     out = mod.affected_pytest_modules(REPO_ROOT, ["gateway/run.py"])
-    assert "tests/gateway/" not in out
-    assert any(f.startswith("tests/gateway/test_") for f in out)
+    assert "tests/gateway/" in out
 
 
 def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
@@ -149,11 +146,11 @@ def test_changed_module_selects_root_level_sibling_tests():
 
 
 def test_fallback_cap_covers_hermes_cli_package_dir():
-    """When a hermes_cli source has no 1:1 test AND no import-based siblings,
-    the directory fallback fires — tests/hermes_cli/ (592 files at calibration)
-    is under the raised cap so it is selected instead of silently downgrading
-    to no selection."""
+    """tests/hermes_cli/ (592 files at calibration) is under the raised cap,
+    so a hermes_cli source without a 1:1 test file selects the package
+    directory again instead of silently downgrading to no selection."""
     mod = _load_module()
-    # hermes_cli/nonexistent_module.py has no test file and no siblings.
-    out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/nonexistent_module.py"])
+    # tests/hermes_cli/test_design_board_store.py does not exist (the 1:1
+    # test lives at tests/ root), so the directory fallback applies.
+    out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
     assert "tests/hermes_cli/" in out
