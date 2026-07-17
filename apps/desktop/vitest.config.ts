@@ -8,7 +8,10 @@ const reactUi: TestProjectConfiguration = {
     environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.test.{ts,tsx}'],
-    globals: true
+    globals: true,
+    // Load-flake cap: heavy jsdom render tests exceed the 5s default under
+    // parallel full-suite load (2026-07-16/17: skills, then messaging).
+    testTimeout: 15000
   }
 }
 

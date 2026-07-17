@@ -35,6 +35,10 @@ vi.mock('@/store/notifications', () => ({
   notifyError: vi.fn()
 }))
 
+// Full-suite load-flake: renderSkills() + DOM queries under parallel load can exceed 5s timeout.
+// Raised from 5000ms default to 15000ms to accommodate queryClient/render contention.
+vi.setConfig({ testTimeout: 15000 });
+
 function toolset(overrides: Record<string, unknown> = {}) {
   return {
     name: 'web',

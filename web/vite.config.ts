@@ -174,5 +174,9 @@ export default defineConfig({
     // explizit unter den Deckel, sonst RangeError gegen das CPU-Default-Minimum.
     minWorkers: 1,
     maxWorkers: 4,
+    // Load-Flake-Deckel: unter maxWorkers=4-Contention reißen schwere
+    // jsdom-Render-Tests den 5s-Default (2026-07-16: AgentTerminalsView,
+    // danach Whack-a-Mole in weiteren Dateien). Suite-weit 15s statt pro Datei.
+    testTimeout: 15000,
   },
 } as ViteConfigWithVitest);

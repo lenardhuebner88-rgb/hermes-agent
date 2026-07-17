@@ -8,6 +8,10 @@ import { TERMINAL_MAIN_BACKGROUND, TERMINAL_PANE_BACKGROUND } from "@/lib/xtermS
 // Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
 // waitFor-Default-Timeout (1s) zurück — Timeout hochsetzen, um das Gate-Flake zu härten.
 configure({ asyncUtilTimeout: 5000 });
+// Full-suite load-flake: parallel tests contend for DOM/CPU (56 tests, maxWorkers=4);
+// individual tests can take >5s to render+query under load (47.9s total for file).
+// Per-test timeout raised from 5000ms default to 15000ms to accommodate.
+vi.setConfig({ testTimeout: 15000 });
 
 const apiMock = {
   getAgentTerminalCapabilities: vi.fn(),
