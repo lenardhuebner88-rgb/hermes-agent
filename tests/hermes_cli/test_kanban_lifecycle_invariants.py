@@ -94,10 +94,6 @@ def test_i1_worker_and_born_blocked_tasks_are_typed(kanban_home):
         ),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    reason="I1 broken: decompose finalizer bypasses typed system-park helper",
-)
 def test_i1_decompose_system_parks_are_typed(kanban_home, park, expected_kind):
     with kb.connect_closing() as conn:
         task_id = kb.create_task(conn, title="decompose root")
