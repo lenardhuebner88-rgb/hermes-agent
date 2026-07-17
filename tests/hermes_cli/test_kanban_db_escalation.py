@@ -677,11 +677,14 @@ def test_release_uireal_root_promotes_scheduled_chain_members(kanban_home):
 def test_release_uireal_root_keeps_children_held_while_freigabe_hold_active(
     kanban_home,
 ):
-    # Cross-family review finding 1 (2026-07-17): ui-real and freigabe:operator
-    # are ADDITIVE holds — a root can carry BOTH. Releasing only the ui-real
-    # side must NOT unblock the chain's children while the freigabe:operator
-    # hold is still outstanding (that would dispatch work before the operator
-    # actually freigabe'd it). The root's own ui-real ack is still recorded.
+    # Cross-family review finding 1 (2026-07-17, pass 3): ui-real and
+    # freigabe:operator are ADDITIVE holds — a root can carry BOTH (exactly how
+    # PlanSpec roots t_b8d779b3 / t_71d14ac9 are parked). Releasing only the
+    # ui-real side must NOT unblock the chain's children while the
+    # freigabe:operator hold is still outstanding (that would dispatch work
+    # before the operator actually freigabe'd it) — AND the invariant the whole
+    # system relies on (``_is_operator_held``: chain held <=> root 'scheduled')
+    # must hold: the root itself must STAY 'scheduled', not just its children.
     with kb.connect_closing() as conn:
         root = kb.create_task(conn, title="dual-held root", triage=True)
         build = kb.create_task(conn, title="build", assignee="premium")
@@ -708,13 +711,78 @@ def test_release_uireal_root_keeps_children_held_while_freigabe_hold_active(
     # the child stays held in 'scheduled' — no premature dispatch.
     assert "freigabe_released" not in events
     assert build_task.status == "scheduled"
-    # Root itself may still record its own ack (single status column shared
-    # by both holds); the load-bearing guarantee is the child stays parked.
-    assert root_task.status in ("todo", "scheduled")
+    # LOAD-BEARING: the root itself must stay 'scheduled' too — flipping it to
+    # 'todo' while the freigabe:operator hold remains breaks the
+    # _is_operator_held invariant (root not 'scheduled' anymore => the sweep
+    # below would treat the held child as a stall and unblock it).
+    assert root_task.status == "scheduled"
 
-    # Now the operator ALSO releases the freigabe hold — the child unblocks.
+    # (ii) no_silent_stall_sweep must NOT mistake this half-released chain for
+    # a stall and nudge the child live — the co-hold must still read as held.
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET created_at = ?, due_at = NULL WHERE id IN (?, ?)",
+                (now - 7200, root, build),
+            )
+        summary = kb.no_silent_stall_sweep(conn, now=now, min_age_seconds=3600)
+        root_after_sweep = kb.get_task(conn, root)
+        build_after_sweep = kb.get_task(conn, build)
+
+    assert root_after_sweep.status == "scheduled"
+    assert build_after_sweep.status == "scheduled"
+    assert root in summary.get("skipped_held", [])
+    assert build in summary.get("skipped_held", [])
+    assert summary["self_healed"] == []
+
+    # (iii) Now the operator ALSO releases the freigabe hold — root flips to
+    # 'todo' and the child unblocks.
     with kb.connect_closing() as conn:
         assert kb.release_freigabe_hold(conn, root) is True
+        assert kb.get_task(conn, root).status == "todo"
+        assert kb.get_task(conn, build).status == "ready"
+
+
+def test_release_freigabe_hold_keeps_children_held_while_uireal_hold_active(
+    kanban_home,
+):
+    # (iv) Symmetric to the test above, reverse release order: releasing the
+    # freigabe:operator side FIRST on a dual-held root must NOT flip the root
+    # or unblock children while the ui-real hold is still outstanding. THEN
+    # release_uireal_root (arriving second) sees no remaining hold and
+    # promotes the chain.
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="dual-held root reverse", triage=True)
+        build = kb.create_task(conn, title="build", assignee="premium")
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_links(parent_id, child_id) VALUES (?, ?)", (build, root))
+            conn.execute(
+                "UPDATE tasks SET live_test_depth='ui-real', freigabe='operator', "
+                "status='scheduled' WHERE id = ?",
+                (root,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='scheduled' WHERE id = ?", (build,),
+            )
+
+        assert kb.release_freigabe_hold(conn, root) is True
+
+        root_task = kb.get_task(conn, root)
+        build_task = kb.get_task(conn, build)
+        events = [e.kind for e in kb.list_events(conn, root)]
+
+    assert "freigabe_released" in events
+    assert "uireal_released" not in events
+    assert build_task.status == "scheduled"
+    # LOAD-BEARING: root stays 'scheduled' — the ui-real co-hold is untouched.
+    assert root_task.status == "scheduled"
+
+    # The second release (ui-real) sees no remaining hold — must NOT be
+    # swallowed by an idempotency fast-path; it flips the root and promotes.
+    with kb.connect_closing() as conn:
+        assert kb.release_uireal_root(conn, root, author="pytest") is True
+        assert kb.get_task(conn, root).status == "todo"
         assert kb.get_task(conn, build).status == "ready"
 
 

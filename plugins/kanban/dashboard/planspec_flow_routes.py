@@ -1926,6 +1926,17 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
                     status_code=409,
                     detail={"error": f"{root_task_id} konnte nicht freigegeben werden"},
                 )
+            # _release_freigabe_hold_root_in_txn does NOT guarantee the root was
+            # actually flipped — ui-real and freigabe:operator are ADDITIVE holds
+            # (see its docstring): if the root also carries an unreleased ui-real
+            # hold, the freigabe ack is recorded but the root stays 'scheduled'.
+            # Re-read the committed status to know whether promotion is due.
+            root_status_row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (root_task_id,),
+            ).fetchone()
+            root_fully_released = (
+                root_status_row is not None and root_status_row["status"] == "todo"
+            )
 
         # --- Post-commit follow-ups (children + auto-scout) ------------------------
         # release_freigabe_hold's own child-unblock/recompute_ready/auto-scout tail
@@ -1935,19 +1946,22 @@ def approve_planspec(body: PlanSpecApproveBody, board: Optional[str] = Query(Non
         # root flip already happened in our transaction above; calling the public
         # wrapper again would just re-stamp a redundant idempotent
         # 'freigabe_released' event for every approve. Mirrors
-        # release_freigabe_hold's tail exactly.
-        chain_child_ids = [tid for tid in chain_ids if tid != root_task_id]
-        for child_id in chain_child_ids:
-            child = conn.execute(
-                "SELECT status FROM tasks WHERE id = ?", (child_id,)
-            ).fetchone()
-            if child is not None and child["status"] == "scheduled":
-                kanban_db.unblock_task(conn, child_id)
-        kanban_db.recompute_ready(conn)
-        _rg_cfg = kanban_db._review_gate_config()
-        if _rg_cfg.get("auto_scout_on_critical", False):
+        # release_freigabe_hold's tail exactly — including its co-hold guard: if
+        # the ui-real hold is still active the root stayed 'scheduled', so the
+        # chain's children must stay held too (no unblock/recompute/scout).
+        if root_fully_released:
+            chain_child_ids = [tid for tid in chain_ids if tid != root_task_id]
             for child_id in chain_child_ids:
-                kanban_db._maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
+                child = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (child_id,)
+                ).fetchone()
+                if child is not None and child["status"] == "scheduled":
+                    kanban_db.unblock_task(conn, child_id)
+            kanban_db.recompute_ready(conn)
+            _rg_cfg = kanban_db._review_gate_config()
+            if _rg_cfg.get("auto_scout_on_critical", False):
+                for child_id in chain_child_ids:
+                    kanban_db._maybe_inject_critical_scout(conn, child_id, cfg=_rg_cfg)
 
         return {
             "released": True,

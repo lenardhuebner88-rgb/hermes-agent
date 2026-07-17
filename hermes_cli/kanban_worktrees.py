@@ -3219,21 +3219,32 @@ def _terminal_status(status: str) -> bool:
     return status in {"done", "archived", "failed", "cancelled"}
 
 
+_REAL_COMPLETION_STATUSES = frozenset({"done", "running", "ready", "blocked"})
+
+
 def _is_real_completion_status(status: Optional[str]) -> bool:
     """Fail CLOSED: a status counts as real completion evidence only if it is
-    a currently-valid task status OTHER than ``archived`` (the only status in
-    ``kanban_db.VALID_STATUSES`` that actually means "left the chain without
-    doing the work" — see ``reason_should_archive_as_superseded``). A
-    missing row (``None``), blank, or unrecognized status is NOT real —
-    cross-family review finding 2 (2026-07-17): the previous blacklist
-    (``not in {archived, cancelled, failed}``) failed OPEN for a missing row
-    or any in-flight/unknown status string, silently treating it as
-    completion evidence. Better to defensively park a root than complete it
-    on absent evidence."""
-    from hermes_cli import kanban_db as kb
+    one of the EXACT statuses that can legally reach this guard.
 
+    Narrowed (cross-family review finding, 2026-07-17 pass 3): this used to
+    accept every ``kanban_db.VALID_STATUSES`` member except ``archived`` — far
+    wider than what can actually appear here. The finalizer hook
+    (``maybe_integrate_on_complete`` -> ``_auto_complete_decompose_root``)
+    runs from INSIDE ``complete_task``, BEFORE the completing task's own
+    ``done`` write lands — so ``completed_task_id``'s row is read mid-flight.
+    ``complete_task``'s worker-isolation guard (``_wt_eligible``) only ever
+    invokes the hook for a task whose status is ``running``, ``ready``, or
+    ``blocked`` at that point; the commitless path
+    (``_direct_complete_decompose_root``) only ever passes already-``done``
+    siblings (``finalize_decompose_root_at_dispatch``'s ``children_pending``
+    guard requires every child to be ``done`` first). So exactly these four
+    statuses are real completion evidence — every other
+    ``kanban_db.VALID_STATUSES`` member (``triage``/``todo``/``scheduled``/
+    ``review``/``archived``), a missing row (``None``), or a blank/unknown
+    string means the root parks defensively instead of completing on
+    evidence that could never legitimately reach here."""
     text = str(status or "").strip()
-    return bool(text) and text in kb.VALID_STATUSES and text != "archived"
+    return text in _REAL_COMPLETION_STATUSES
 
 
 def _decompose_root_has_real_child_completion(

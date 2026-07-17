@@ -435,6 +435,51 @@ def test_auto_complete_decompose_root_refuses_when_completed_task_row_missing(
     assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
 
 
+def test_is_real_completion_status_narrow_whitelist():
+    """Fix 2 (cross-family review, 2026-07-17 pass 3): only the statuses that
+    can legally reach this guard mid-completion (see complete_task's
+    ``_wt_eligible`` guard: running/ready/blocked) plus the terminal ``done``
+    (already-finished siblings passed by ``_direct_complete_decompose_root``)
+    count as real completion evidence. Every other ``VALID_STATUSES`` member
+    — including ``scheduled``/``todo``/``triage``, which a root sink itself
+    can carry while parked, and ``review`` — must NOT count."""
+    for real in ("done", "running", "ready", "blocked"):
+        assert kwt._is_real_completion_status(real) is True, real
+    for not_real in (
+        "scheduled", "todo", "triage", "review", "archived",
+        None, "", "  ", "bogus",
+    ):
+        assert kwt._is_real_completion_status(not_real) is False, not_real
+
+
+def test_auto_complete_decompose_root_refuses_when_completed_task_status_scheduled(
+    kanban_home,
+):
+    """Fix 2 regression: a status like 'scheduled'/'todo'/'triage' can never
+    legitimately reach this guard mid-completion (see complete_task's
+    ``_wt_eligible`` guard), so it must NOT count as real completion evidence
+    — the root parks instead of completing on evidence that could not exist
+    on the real code path."""
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="scheduled-completer root", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (root,))
+        other = kb.create_task(conn, title="scheduled sibling", assignee="coder")
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status = 'scheduled' WHERE id = ?", (other,))
+
+        kwt._auto_complete_decompose_root(
+            conn, root_id=root, completed_task_id=other, outcome={},
+        )
+
+        root_task = kb.get_task(conn, root)
+        blocked_events = _events(conn, root, "blocked")
+
+    assert root_task.status != "done"
+    assert blocked_events
+    assert "kein Kind erfolgreich" in blocked_events[-1]["reason"]
+
+
 def test_release_gate_executor_green_path(kanban_home):
     """Gate green on first run -> real activation -> success event, no fixer,
     child done."""

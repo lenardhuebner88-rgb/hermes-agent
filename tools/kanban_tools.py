@@ -1010,8 +1010,14 @@ _SERIAL_RECOVERY_STOP_WINDOW_SECONDS = 2 * 3600
 # recovery card). Cross-family review finding 4 (2026-07-17): the original
 # guard fired on ANY t_<id> mention, false-positiving on legitimate follow-ups
 # that happen to cite an id with superseded history.
+# retr(?:y\w*|ies|ied) (not retr(?:y|ies|ied)): the previous inner group's
+# trailing \b was fine for "retry"/"retried"/"retries" but silently missed
+# "retrying" — "retr" + "y" matched, then \b failed between "y" and "i"
+# (both word chars), so the whole alternative was rejected (2026-07-17 pass 3
+# review finding). y\w* lets the inflection continue (retrying, retryable,
+# ...) while still requiring the overall \b...\b word-boundary wrap.
 _RECOVERY_MARKER_RE = re.compile(
-    r"(?i)\b(recover(?:y|ing|ed)?|retr(?:y|ies|ied)|re-?dispatch|supersed(?:ed|es)?|"
+    r"(?i)\b(recover(?:y|ing|ed)?|retr(?:y\w*|ies|ied)|re-?dispatch|supersed(?:ed|es)?|"
     r"erneut|nochmal|wiederhol\w*|failure|fehlgeschlagen)\b"
 )
 
@@ -1029,7 +1035,7 @@ def _serial_recovery_stop_reason(
     an agent looping on 'create a fresh recovery card' after each supersede
     instead of escalating.
 
-    Two gates before this ever queries the DB: (a) the NEW card must itself
+    Gates before this ever queries the DB: (a) the NEW card must itself
     read as a recovery attempt (``_RECOVERY_MARKER_RE``), not merely mention a
     task id — an audit/doc card citing a ``t_<id>`` with superseded history is
     not a recovery loop; (b) root references are ``t_<8-hex>`` task ids found
@@ -1039,6 +1045,15 @@ def _serial_recovery_stop_reason(
     the same window that were actually archived via the SUPERSEDED path
     (kanban_db.reason_should_archive_as_superseded, the same classifier
     ``block_task`` uses to emit ``superseded_archived``).
+
+    A THIRD gate applies to each candidate predecessor row: (c) the
+    predecessor's own title/body must ALSO read as a recovery attempt
+    (``_RECOVERY_MARKER_RE``) — cross-family review finding (2026-07-17 pass
+    3): the LIKE match alone only proves the predecessor MENTIONS the root id,
+    not that it WAS a recovery attempt. Two superseded AUDIT-style cards that
+    merely cite the root (e.g. an incident writeup) must not count toward the
+    threshold and block the first genuine recovery card.
+
     Returns the deterministic error string, or ``None`` when creation may proceed.
     """
     text = f"{title}\n{body or ''}"
@@ -1051,13 +1066,17 @@ def _serial_recovery_stop_reason(
     for root_ref in root_refs:
         like_pattern = f"%{_escape_like(root_ref)}%"
         rows = conn.execute(
-            "SELECT DISTINCT t.id FROM tasks t "
+            "SELECT DISTINCT t.id, t.title, t.body FROM tasks t "
             "JOIN task_events e ON e.task_id = t.id AND e.kind = 'superseded_archived' "
             "WHERE t.status = 'archived' AND t.created_by = ? AND t.created_at >= ? "
             "AND (t.title LIKE ? ESCAPE '\\' OR t.body LIKE ? ESCAPE '\\')",
             (created_by, cutoff, like_pattern, like_pattern),
         ).fetchall()
-        if len(rows) >= _SERIAL_RECOVERY_STOP_THRESHOLD:
+        recovery_rows = [
+            r for r in rows
+            if _RECOVERY_MARKER_RE.search(f"{r['title']}\n{r['body'] or ''}")
+        ]
+        if len(recovery_rows) >= _SERIAL_RECOVERY_STOP_THRESHOLD:
             return (
                 "serial-recovery stop: >=2 superseded Vorgaenger fuer dieselbe "
                 "Wurzel — eskaliere an den Operator statt neue Karten zu bauen"

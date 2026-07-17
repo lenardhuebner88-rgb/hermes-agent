@@ -14499,9 +14499,15 @@ def release_uireal_root(
     same root in ``scheduled`` at once, see ``decompose_triage_task``). This
     only clears the ui-real side: the root's own ``uireal_released`` intent is
     always recorded, but if the ``freigabe: operator`` hold is still
-    unreleased, the chain's children stay held in ``scheduled`` (no
-    unblock/recompute_ready/critical-scout coupling) — dispatch must wait for
-    the explicit ``release_freigabe_hold`` too.
+    unreleased, the root is NOT flipped to ``todo`` (invariant:
+    ``_is_operator_held`` treats "member still scheduled" as "still held" —
+    flipping the root while a co-hold remains would make
+    ``no_silent_stall_sweep`` unblock the children behind the operator's
+    back) and the chain's children stay held in ``scheduled`` — dispatch must
+    wait for the explicit ``release_freigabe_hold`` too. The co-hold check
+    runs INSIDE the write_txn, BEFORE any mutation (cross-family review
+    finding, 2026-07-17 pass 3): checking it only after an unconditional flip
+    left the root committed to ``todo`` even while still co-held.
     """
     with write_txn(conn):
         row = conn.execute(
@@ -14517,6 +14523,12 @@ def release_uireal_root(
             released = True
         elif row["status"] != "scheduled":
             return False
+        elif _freigabe_operator_hold_still_active(conn, task_id):
+            # The other additive hold is still outstanding — record the
+            # ui-real ack but do NOT flip the root; it must stay 'scheduled'
+            # so the chain (root + children) is still recognized as held.
+            _append_event(conn, task_id, "uireal_released", {"author": author})
+            released = True
         else:
             cur = conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
@@ -14526,12 +14538,20 @@ def release_uireal_root(
                 return False
             _append_event(conn, task_id, "uireal_released", {"author": author})
             released = True
+        # Read back the root's committed status while still inside the txn —
+        # 'todo' means the root was actually flipped (either just now, or on
+        # a prior idempotent call); 'scheduled' means the other hold blocked
+        # it. This is the single source of truth for whether to promote below
+        # (no separate post-txn hold re-check / race).
+        root_status = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()["status"]
     if not released:
         return False
-    if _freigabe_operator_hold_still_active(conn, task_id):
-        # The other additive hold is still outstanding — record the ui-real
-        # ack (done above) but leave the chain's children held; unblocking
-        # them now would dispatch work the operator has not yet freigabe'd.
+    if root_status != "todo":
+        # Root stayed 'scheduled' (co-hold still active) — leave the chain's
+        # children held; unblocking them now would dispatch work the
+        # operator has not yet freigabe'd.
         return True
     # Release the held chain members OUTSIDE the root write_txn — unblock_task and
     # recompute_ready open their own write_txns (nested write_txn is a documented
@@ -14558,6 +14578,30 @@ def release_uireal_root(
     return True
 
 
+def _uireal_hold_still_active(
+    conn: sqlite3.Connection, task_id: str,
+) -> bool:
+    """True when *task_id* carries an unreleased ``live_test_depth: ui-real``
+    hold. Mirror of :func:`_freigabe_operator_hold_still_active` — the ONLY
+    durable "this hold was resolved" signal is the ``uireal_released`` event
+    (``release_uireal_root`` never clears the ``live_test_depth`` column on
+    release). Used by :func:`_release_freigabe_hold_root_in_txn` to avoid
+    flipping the root while the OTHER additive operator hold (ui-real,
+    decompose-time co-hold, see ``decompose_triage_task``) is still
+    outstanding."""
+    row = conn.execute(
+        "SELECT live_test_depth FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    if row is None or str(row["live_test_depth"] or "").strip().lower() != "ui-real":
+        return False
+    released = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'uireal_released' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return released is None
+
+
 def _release_freigabe_hold_root_in_txn(
     conn: sqlite3.Connection, task_id: str, *, author: str = "operator"
 ) -> bool:
@@ -14568,14 +14612,28 @@ def _release_freigabe_hold_root_in_txn(
     Use this when the caller needs to combine the root-flip atomically with
     other writes (e.g. model-override updates) in a single transaction.
 
-    Returns ``True`` when the root was flipped (or was already ``todo``).
-    Returns ``False`` when ``task_id`` is unknown, not a ``freigabe: operator``
-    root, or its status is neither ``scheduled`` nor ``todo``.
+    ui-real and ``freigabe: operator`` are ADDITIVE holds (mirror of
+    :func:`release_uireal_root`'s co-hold guard, cross-family review finding,
+    2026-07-17 pass 3): when the ui-real hold is still outstanding, the
+    ``freigabe_released`` ack is recorded but the root is NOT flipped — it
+    must stay ``scheduled`` so the chain is still recognized as held
+    (``_is_operator_held``'s invariant). Callers MUST NOT assume a ``True``
+    return means the root was flipped: re-read the root's status after the
+    transaction commits (``== 'todo'``) to decide whether to promote the
+    chain's children — this function's return value only says "the freigabe
+    intent was recorded", not "the chain is now live".
+
+    Returns ``True`` when ``task_id`` is a ``freigabe: operator`` root whose
+    status was ``scheduled``/``todo`` and the ack was recorded (flip applied
+    only when no other hold remains). Returns ``False`` when ``task_id`` is
+    unknown, not a ``freigabe: operator`` root, or its status is neither
+    ``scheduled`` nor ``todo``.
 
     Child unblocking and ``recompute_ready`` are NOT done here — the caller
-    must trigger them after the transaction commits (same pattern as
-    :func:`release_freigabe_hold`, which calls :func:`unblock_task` outside
-    its own ``write_txn`` to avoid nested-transaction errors).
+    must trigger them after the transaction commits, and only when the root
+    actually reached ``todo`` (same pattern as :func:`release_freigabe_hold`,
+    which calls :func:`unblock_task` outside its own ``write_txn`` to avoid
+    nested-transaction errors).
     """
     row = conn.execute(
         "SELECT status, freigabe FROM tasks WHERE id = ?",
@@ -14592,6 +14650,11 @@ def _release_freigabe_hold_root_in_txn(
         )
     elif row["status"] != "scheduled":
         return False
+    elif _uireal_hold_still_active(conn, task_id):
+        # The other additive hold is still outstanding — record the freigabe
+        # ack but do NOT flip the root; it must stay 'scheduled' so the chain
+        # (root + children) is still recognized as held.
+        _append_event(conn, task_id, "freigabe_released", {"author": author})
     else:
         cur = conn.execute(
             "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'scheduled'",
@@ -14619,11 +14682,23 @@ def release_freigabe_hold(
     released — idempotent: an already-released root (``todo``) re-stamps the
     event and still returns ``True``, re-releasing any child that is still held.
     Returns ``False`` (touching nothing) for a non-operator root, an unknown id,
-    or a root that is neither ``scheduled`` nor ``todo``.
+    or a root that is neither ``scheduled`` nor ``todo``. ui-real and
+    ``freigabe: operator`` are ADDITIVE holds (see
+    ``_release_freigabe_hold_root_in_txn``'s co-hold guard): when the ui-real
+    hold is still outstanding, this records the freigabe ack but leaves the
+    root (and its children) held in ``scheduled`` — still returns ``True``
+    (the freigabe intent WAS recorded), just without promoting anything.
     """
     with write_txn(conn):
         if not _release_freigabe_hold_root_in_txn(conn, task_id, author=author):
             return False
+        root_status = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,),
+        ).fetchone()["status"]
+    if root_status != "todo":
+        # The other additive hold (ui-real) is still active — root stayed
+        # 'scheduled'; do not unblock children behind that outstanding hold.
+        return True
     # Release the held chain members OUTSIDE the root write_txn — unblock_task and
     # recompute_ready open their own write_txns (nested write_txn is a
     # documented pitfall). Do not look only at the root's direct parents: deeper

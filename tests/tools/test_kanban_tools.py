@@ -1619,6 +1619,93 @@ def test_create_allows_recovery_when_only_one_superseded_predecessor(worker_env)
     assert d["ok"] is True
 
 
+def test_recovery_marker_regex_matches_retry_inflections():
+    """Fix 3a (cross-family review, 2026-07-17 pass 3): the previous
+    ``retr(?:y|ies|ied)`` inner group missed "retrying" — \\b immediately
+    after matching "retry" failed between "y" and "i" (both word chars).
+    ``retr(?:y\\w*|ies|ied)`` must catch every retry inflection."""
+    from tools import kanban_tools as kt
+
+    for word in ("retry", "retries", "retried", "retrying"):
+        assert kt._RECOVERY_MARKER_RE.search(word), word
+    for word in ("re-dispatch", "redispatch", "recovery", "recovering"):
+        assert kt._RECOVERY_MARKER_RE.search(word), word
+
+
+def test_create_serial_recovery_ignores_non_recovery_predecessors(worker_env):
+    """Fix 3b: the predecessor card itself must read as a recovery attempt —
+    two superseded AUDIT-style predecessors that merely CITE the root id (an
+    incident writeup, not a recovery attempt) must NOT count toward the
+    threshold and must not block the first genuine recovery card."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_ab00cd11"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"audit follow-up {i}",
+                body=f"documenting the incident around {root_ref} for the record",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "first genuine recovery attempt",
+        "body": f"retrying {root_ref} after another failure",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, d
+
+
+def test_create_serial_recovery_stops_when_predecessors_are_genuine_recoveries(
+    worker_env,
+):
+    """Fix 3b control: two superseded predecessors that DO read as recovery
+    attempts still trip the stop (unchanged behaviour, guards against an
+    over-broad fix that never counts anything)."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    root_ref = "t_00aa11bb"
+    conn = kb.connect()
+    try:
+        for i in range(2):
+            tid = kb.create_task(
+                conn,
+                title=f"retrying {root_ref} attempt {i}",
+                body=f"retrying {root_ref} once more",
+                assignee="peer",
+                created_by="test-worker",
+            )
+            kb.claim_task(conn, tid)
+            assert kb.block_task(
+                conn, tid, reason="SUPERSEDED: recovery-loop stop",
+            )
+            assert kb.get_task(conn, tid).status == "archived"
+    finally:
+        conn.close()
+
+    out = kt._handle_create({
+        "title": "third recovery attempt",
+        "body": f"retrying {root_ref} yet again",
+        "assignee": "peer",
+    })
+    d = json.loads(out)
+    assert d.get("error"), d
+    assert "serial-recovery stop" in d["error"]
+
+
 def test_create_project_passthrough(worker_env):
     """Regression for the v0.18 upstream merge (413638a28) dropping
     kanban_create's ``project`` arg: kb.create_task has taken ``project_id``
