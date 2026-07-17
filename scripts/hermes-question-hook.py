@@ -31,6 +31,29 @@ DASHBOARD = os.environ.get("HERMES_QUESTION_HOOK_URL", "http://127.0.0.1:9119")
 _TOKEN_RE = re.compile(r'HERMES_SESSION_TOKEN__="([^"]+)"')
 _RECOMMENDED_RE = re.compile(r"\s*\((?:Recommended|Empfohlen)\)\s*$", re.IGNORECASE)
 _LOG = os.path.expanduser("~/.hermes/logs/question-hook.log")
+# Simple size cap (no logrotate): >5 MB → keep last 1 MB on start.
+_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_KEEP_BYTES = 1 * 1024 * 1024
+
+
+def _rotate_log_if_needed() -> None:
+    """Truncate question-hook.log when it grows past 5 MB (keep last 1 MB)."""
+    try:
+        if not os.path.isfile(_LOG):
+            return
+        size = os.path.getsize(_LOG)
+        if size <= _LOG_MAX_BYTES:
+            return
+        with open(_LOG, "rb") as fh:
+            fh.seek(max(0, size - _LOG_KEEP_BYTES))
+            # Drop partial first line after seek.
+            fh.readline()
+            tail = fh.read()
+        with open(_LOG, "wb") as fh:
+            fh.write(b"# truncated\n")
+            fh.write(tail)
+    except Exception:
+        pass
 
 
 def _log(line: str) -> None:
@@ -160,6 +183,7 @@ def main() -> int:
         os.setsid()
     except OSError:
         pass
+    _rotate_log_if_needed()
     try:
         _handle(event, pane)
     except Exception as exc:  # fail-silent, aber nachvollziehbar

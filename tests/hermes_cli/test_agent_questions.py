@@ -1814,3 +1814,162 @@ def test_i2_answer_question_on_hook_event_option_indices(qdb: Path) -> None:
     assert len(answered) == 1
     assert answered[0]["answer"] == "1"
     assert answered[0]["source"] == "hook"
+
+
+# ---------------------------------------------------------------------------
+# I3 Mini #3 — hook verify false-negative (CC echo)
+# ---------------------------------------------------------------------------
+
+
+def test_i3_hook_answer_verified_when_question_text_still_visible(qdb: Path) -> None:
+    """Hook event answered via dashboard; CC still echoes question text → verified True.
+
+    Pre-I3 the text-disappear check marked these false (false-negative).
+    """
+    result = aq.ingest_hook_event(_hook_store_event(pane_id="%77"), db_path=qdb)
+    assert result["ok"] is True
+    eid = int(result["id"])
+    # Both recheck (pre-send) and post-send verify still show the full prompt.
+    still_there = (
+        f"  {_HOOK_QUESTION_TEXT}\n"
+        "  1. Rolling update\n"
+        "  2. Blue-green\n"
+        "  3. Canary\n"
+    )
+    svc = _RecordingService([still_there, still_there])
+    r = aq.answer_question(
+        eid, "1", db_path=qdb, service=svc, verify_delay_s=0, sleep=lambda _s: None
+    )
+    assert r["ok"] is True
+    assert r["verified"] is True
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answer_verified"] == 1
+
+
+def test_i3_resolve_hook_event_sets_verified(qdb: Path) -> None:
+    """PostToolUse resolve-signal stamps answer_verified=1."""
+    result = aq.ingest_hook_event(
+        _hook_store_event(pane_id="%78", hook_key="hk-resolve-verified"),
+        db_path=qdb,
+    )
+    assert result["ok"] is True
+    r = aq.resolve_hook_event("hk-resolve-verified", "1", db_path=qdb)
+    assert r["ok"] is True
+    assert r["resolved"] is True
+    assert r.get("verified") is True
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert len(answered) == 1
+    assert answered[0]["answer_verified"] == 1
+
+
+# ---------------------------------------------------------------------------
+# I3 Mini #4 — GC / housekeeping
+# ---------------------------------------------------------------------------
+
+
+def test_i3_prune_old_closed_events(qdb: Path) -> None:
+    """expired/superseded/answered with updated_ts > 14d → DELETE; open kept."""
+    t_old = time.time() - (20 * 86400)
+    t_recent = time.time() - (2 * 86400)
+    t_now = time.time()
+
+    # Old answered → pruned
+    _, id_old_ans = aq.supersede_and_insert(
+        session="s",
+        window="w",
+        pane_id="%90",
+        fingerprint="fp-old-ans",
+        question_text="old answered?",
+        options=[{"nr": 1, "label": "y"}],
+        db_path=qdb,
+        now=t_old,
+    )
+    assert id_old_ans is not None
+    from hermes_cli.sqlite_util import write_txn
+
+    iso_old = aq._iso_now(t_old)
+    with aq.connect_closing(db_path=qdb) as conn:
+        with write_txn(conn):
+            conn.execute(
+                "UPDATE question_events SET status = 'answered', updated_ts = ? WHERE id = ?",
+                (iso_old, id_old_ans),
+            )
+            # Old expired
+            conn.execute(
+                "INSERT INTO question_events ("
+                "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+                "question_text, options_json, class, status, override"
+                ") VALUES (?, ?, 'scrape', 's', 'w', '%91', 'fp-old-exp', "
+                "'old expired?', '[]', 'unknown', 'expired', 0)",
+                (iso_old, iso_old),
+            )
+            # Old superseded
+            conn.execute(
+                "INSERT INTO question_events ("
+                "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+                "question_text, options_json, class, status, override"
+                ") VALUES (?, ?, 'scrape', 's', 'w', '%92', 'fp-old-sup', "
+                "'old super?', '[]', 'unknown', 'superseded', 0)",
+                (iso_old, iso_old),
+            )
+            # Recent answered — kept
+            iso_recent = aq._iso_now(t_recent)
+            conn.execute(
+                "INSERT INTO question_events ("
+                "ts, updated_ts, source, session, window, pane_id, fingerprint, "
+                "question_text, options_json, class, status, override"
+                ") VALUES (?, ?, 'scrape', 's', 'w', '%93', 'fp-recent', "
+                "'recent answered?', '[]', 'unknown', 'answered', 0)",
+                (iso_recent, iso_recent),
+            )
+
+    # Open event (must survive regardless of age)
+    _, id_open = aq.supersede_and_insert(
+        session="s",
+        window="w",
+        pane_id="%94",
+        fingerprint="fp-open",
+        question_text="still open?",
+        options=[{"nr": 1, "label": "y"}],
+        db_path=qdb,
+        now=t_old,
+    )
+    assert id_open is not None
+
+    deleted = aq.prune_old_events(db_path=qdb, now=t_now, max_age_days=14)
+    assert deleted == 3
+    remaining = aq.list_question_events(status="", limit=50, db_path=qdb)
+    statuses = {int(e["id"]): e["status"] for e in remaining}
+    assert id_open in statuses and statuses[id_open] == "open"
+    # recent answered still present
+    assert any(e["status"] == "answered" and "recent" in e["question_text"] for e in remaining)
+    assert not any("old answered" in e["question_text"] for e in remaining)
+    assert not any(e["status"] == "expired" for e in remaining)
+    assert not any(e["status"] == "superseded" for e in remaining)
+
+
+def test_i3_prune_bak_files(tmp_path: Path) -> None:
+    """Only question_events.db.bak-* older than 14d are removed."""
+    home = tmp_path / "h"
+    home.mkdir()
+    db = home / "question_events.db"
+    db.write_text("")
+    old_bak = home / "question_events.db.bak-20260101"
+    new_bak = home / "question_events.db.bak-20260701"
+    other = home / "other.db.bak-old"
+    old_bak.write_text("x")
+    new_bak.write_text("y")
+    other.write_text("z")
+    now = time.time()
+    import os
+
+    os.utime(old_bak, (now - 20 * 86400, now - 20 * 86400))
+    os.utime(new_bak, (now - 2 * 86400, now - 2 * 86400))
+    os.utime(other, (now - 20 * 86400, now - 20 * 86400))
+
+    removed = aq.prune_bak_files(db_path=db, now=now, max_age_days=14)
+    assert removed == 1
+    assert not old_bak.exists()
+    assert new_bak.exists()
+    assert other.exists()
