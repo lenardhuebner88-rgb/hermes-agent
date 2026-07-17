@@ -988,6 +988,7 @@ def prepare_worker_base(
     merge_target: str,
     task_id: str | None = None,
     adopt_wip_run_id: int | None = None,
+    skip_stale_rebase: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on reused-worktree drift, then update a clean stale base.
 
@@ -1006,6 +1007,13 @@ def prepare_worker_base(
     remaining non-artifact dirt is committed as adopted WIP instead of
     parking. This is intentionally narrow: it never fires for a fresh task or
     for dirt left by an unrelated predecessor.
+
+    ``skip_stale_rebase`` exempts a bounded conflict-park fixer (S10b) from
+    the stale-base rebase step: a fixer's job IS to resolve an already-
+    conflicting rebase in place inside its worktree, so re-running the same
+    rebase here would just reproduce the conflict as a ``WorktreeError`` and
+    cascade into a fixer-for-the-fixer. The identity-drift and dirty checks
+    above stay active for fixers — only the rebase itself is skipped.
     """
     wt = Path(worktree)
     actual_head = _git(wt, "rev-parse", "HEAD")
@@ -1063,6 +1071,17 @@ def prepare_worker_base(
         if adopted_wip_files is not None:
             result["adopted_wip_files"] = adopted_wip_files
         return result
+    if skip_stale_rebase:
+        result = {
+            "action": "skipped_stale_rebase",
+            "previous_head": actual_head,
+            "head": actual_head,
+            "merge_target": target,
+            "merge_target_head": target_head,
+        }
+        if adopted_wip_files is not None:
+            result["adopted_wip_files"] = adopted_wip_files
+        return result
     try:
         _git(wt, "rebase", target)
     except WorktreeError as exc:
@@ -1085,6 +1104,20 @@ def prepare_worker_base(
     if adopted_wip_files is not None:
         result["adopted_wip_files"] = adopted_wip_files
     return result
+
+
+def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when *task_id* carries a ``conflict_fixer_for`` event -- i.e. it
+    IS a bounded conflict-park fixer (see
+    kanban_db._create_conflict_park_fixer_subtask), not an ordinary chain
+    task. Used to exempt fixers from the stale-base rebase in
+    ``prepare_reused_task_worktree`` (S10b cascade guard)."""
+    row = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'conflict_fixer_for' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row is not None
 
 
 def prepare_reused_task_worktree(
@@ -1144,11 +1177,15 @@ def prepare_reused_task_worktree(
     # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
     # cycle after a worktree-prep rejection, not a worker attempt). The
     # first non-skipped run is the actual last worker attempt; only when
-    # THAT ended resumably (``blocked``, e.g. needs_input) is leftover dirt
-    # "our own WIP" rather than garbage from some other predecessor — a
-    # crashed/timed-out/completed run (or exhausting the bounded window
-    # without finding one) stays fail-closed.
+    # THAT ended resumably (``blocked``, e.g. needs_input, OR
+    # ``transient_retry`` — a worker externally terminated mid-edit, e.g. a
+    # gateway restart, whose WIP is legitimate continuation state by the
+    # same reasoning as ``blocked``, S8c) is leftover dirt "our own WIP"
+    # rather than garbage from some other predecessor — a crashed/timed-out/
+    # completed run (or exhausting the bounded window without finding one)
+    # stays fail-closed.
     _NON_WORKER_RETRY_OUTCOMES = ("spawn_failed", "gave_up")
+    _RESUMABLE_WIP_OUTCOMES = ("blocked", "transient_retry")
     candidate_runs = conn.execute(
         "SELECT id, outcome FROM task_runs "
         "WHERE task_id = ? AND id < ? "
@@ -1159,7 +1196,7 @@ def prepare_reused_task_worktree(
     for candidate in candidate_runs:
         if candidate["outcome"] in _NON_WORKER_RETRY_OUTCOMES:
             continue
-        if candidate["outcome"] == "blocked":
+        if candidate["outcome"] in _RESUMABLE_WIP_OUTCOMES:
             adopt_wip_run_id = int(candidate["id"])
         break
     result = prepare_worker_base(
@@ -1168,6 +1205,7 @@ def prepare_reused_task_worktree(
         merge_target=merge_target,
         task_id=task.id,
         adopt_wip_run_id=adopt_wip_run_id,
+        skip_stale_rebase=_is_conflict_fixer_task(conn, task.id),
     )
     from hermes_cli import kanban_db as kb
 

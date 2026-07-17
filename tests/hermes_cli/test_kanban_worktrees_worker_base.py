@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -328,6 +329,80 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
     assert len(reject_events) == 1
     assert not any(e["kind"] == "wip_adopted" for e in events)
     assert (expected / "leftover.py").read_text() == "half-written garbage\n"
+
+
+# ---------------------------------------------------------------------------
+# S8c: a worker externally terminated mid-edit (e.g. a gateway restart) is
+# requeued by the supervisor with run outcome 'transient_retry', not
+# 'blocked'. Its leftover WIP is equally legitimate continuation state and
+# must be adopted the same way as a 'blocked' predecessor's (t_2927a4ae
+# incident: the walk only recognized 'blocked' as resumable evidence, so a
+# transient_retry predecessor's dirt fell through to a hard refuse and the
+# task burned two spawn_failed rounds into gave_up).
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_adopts_wip_left_by_transient_retry_run(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """(a) dirty worktree whose last real (worker-touched) run ended
+    'transient_retry' -> the WIP is adopted exactly like a 'blocked'
+    predecessor's, and the spawn proceeds instead of parking."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="gateway-restart slice",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+
+        run1_id = kb.get_task(conn, tid).current_run_id
+        assert run1_id is not None
+
+        # Worker leaves a real, uncommitted source edit when a gateway
+        # restart externally terminates it mid-run; the supervisor requeues
+        # it with outcome/status 'transient_retry' (real literal,
+        # kb.TRANSIENT_RETRY_OUTCOME) -- never a worker-completed 'blocked'.
+        (expected / "app.py").write_text("half-written feature\n")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET outcome = ?, status = ? WHERE id = ?",
+                (kb.TRANSIENT_RETRY_OUTCOME, kb.TRANSIENT_RETRY_OUTCOME, run1_id),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+                (tid,),
+            )
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert not any(e["kind"] == "worker_base_rejected" for e in events)
+    assert kwt.dirty_files(expected) == []
+    adopted = [
+        json.loads(e["payload"]) for e in events if e["kind"] == "wip_adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0]["run_id"] == run1_id
+    assert adopted[0]["files"] == ["app.py"]
+    commit_msg = _git(expected, "log", "-1", "--format=%s")
+    assert commit_msg == f"wip({tid}): adopt uncommitted WIP from blocked run {run1_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -658,3 +733,286 @@ def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
     assert len(reject_events) == 1
     assert not any(e["kind"] == "wip_adopted" for e in events)
     assert (expected / "leftover.py").read_text() == "half-written garbage\n"
+
+
+# ---------------------------------------------------------------------------
+# S10b: the S10 fixer route itself cascaded into a runaway (t_b8d779b3 live
+# incident, 4 cards in 3 minutes): a conflict-park fixer's OWN dispatch
+# re-hit the same unresolved rebase, got routed to ANOTHER fixer, whose
+# dispatch hit the same conflict again, etc -- because (1) the fixer was
+# never exempted from the stale-base rebase it exists to resolve, and (2)
+# the fixer budget/in-flight guard was keyed to the single (per-cascade-step)
+# parent task_id instead of the chain root, resetting to zero at every step.
+# Three guards close this: (1) a fixer skips the stale-base rebase entirely,
+# (2) the budget/in-flight guard is root-keyed, (3) a fixer never gets a
+# fixer of its own (belt-and-braces).
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_worker_base_fixer_skips_stale_rebase_on_conflict(repo):
+    """Guard #1, low-level: with ``skip_stale_rebase=True`` a REAL conflicting
+    rebase is never attempted -- the worktree is left exactly as-is (branch
+    HEAD unmoved, conflict intact) instead of raising. Gegenprobe first:
+    without the flag, the identical setup really does raise (proves the test
+    fixture reproduces a genuine conflict, not a mock)."""
+    info = kwt.ensure_worktree(repo, "t_fixer")
+    worktree = info["path"]
+    # Diverge the chain branch and its merge target (main) on the SAME file
+    # so rebasing the branch onto main produces a REAL conflict.
+    (worktree / "a.txt").write_text("branch version\n")
+    _git(worktree, "commit", "-am", "branch edit")
+    (repo / "a.txt").write_text("main version\n")
+    _git(repo, "commit", "-am", "main edit")
+    branch_head = _git(worktree, "rev-parse", "HEAD")
+
+    # Gegenprobe: without the exemption this setup really conflicts.
+    with pytest.raises(kwt.WorktreeError, match="could not rebase onto"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=branch_head,
+            merge_target="main",
+            task_id="t_fixer",
+        )
+    # prepare_worker_base's own rebase --abort restores a clean worktree.
+    assert kwt.dirty_files(worktree) == []
+    assert _git(worktree, "rev-parse", "HEAD") == branch_head
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_head,
+        merge_target="main",
+        task_id="t_fixer",
+        skip_stale_rebase=True,
+    )
+
+    assert result["action"] == "skipped_stale_rebase"
+    assert result["head"] == branch_head
+    assert result["previous_head"] == branch_head
+    # The rebase truly never ran: HEAD unmoved, branch's own file content
+    # intact (no conflict markers, no merge of the main-side edit).
+    assert _git(worktree, "rev-parse", "HEAD") == branch_head
+    assert (worktree / "a.txt").read_text() == "branch version\n"
+
+
+def test_dispatch_fixer_task_proceeds_despite_real_rebase_conflict(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """(guard #1, end-to-end via dispatch_once) a real S10 fixer child task
+    (carries ``conflict_fixer_for``) dispatches successfully even though its
+    own chain worktree has a REAL, unresolved conflicting rebase pending --
+    prepare_reused_task_worktree exempts it from the stale-base rebase, so
+    the spawn PROCEEDS with the conflict left intact, and no second fixer is
+    created."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="parent slice",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(
+            kwt, "prepare_worker_base",
+            lambda *a, **k: (_ for _ in ()).throw(_rebase_conflict_error(expected)),
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        dispatched = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        assert len(dispatched) == 1
+        child_id = dispatched[0].payload["child_id"]
+        assert any(
+            e.kind == "conflict_fixer_for" for e in kb.list_events(conn, child_id)
+        )
+
+        # Construct a REAL conflicting rebase in the chain worktree for the
+        # fixer to inherit: the branch and its merge target (main) diverge
+        # on the same file.
+        (expected / "README.md").write_text("branch change\n")
+        _git(expected, "commit", "-am", "branch edit")
+        (repo / "README.md").write_text("main change\n")
+        _git(repo, "commit", "-am", "main edit")
+
+        fixer_dispatch = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+
+        fixer_task = kb.get_task(conn, child_id)
+        child_events = kb.list_events(conn, child_id)
+        prepared = [
+            e for e in child_events if e.kind == "worker_base_prepared"
+        ]
+        no_new_fixer = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    # The fixer spawned -- prepare_reused_task_worktree did NOT raise despite
+    # the real conflicting rebase pending in its worktree.
+    assert fixer_dispatch.spawned == [(child_id, "premium", str(expected))]
+    assert fixer_task.status != "blocked"
+    assert len(prepared) == 1
+    assert prepared[0].payload["action"] == "skipped_stale_rebase"
+    assert len(no_new_fixer) == 1  # unchanged -- no fixer-for-the-fixer
+    # The conflict is left intact: no rebase attempted, branch's own file
+    # content is untouched.
+    assert (expected / "README.md").read_text() == "branch change\n"
+
+
+def test_dispatch_fixer_own_conflict_never_gets_a_second_fixer(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Guard #3 (belt-and-braces) + recursion guard: if a conflict-park
+    fixer's OWN dispatch somehow still hits the base-prep rebase-conflict
+    WorktreeError (artificially forced here, since guard #1 should normally
+    prevent it from ever firing on a real fixer), the fixer is parked
+    plainly and NEVER routed into ``_maybe_route_conflict_park_fixer`` -- a
+    fixer never gets a fixer of its own (t_b8d779b3 runaway cascade: 4 cards
+    in 3 minutes)."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="parent slice",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned
+
+        assert kb.block_task(conn, tid, reason="operator: needs revision")
+        assert kb.unblock_task(conn, tid)
+
+        real_prepare_worker_base = kwt.prepare_worker_base
+        monkeypatch.setattr(
+            kwt, "prepare_worker_base",
+            lambda *a, **k: (_ for _ in ()).throw(_rebase_conflict_error(expected)),
+        )
+        # Round 1: parent's conflict -> a fixer is dispatched.
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        dispatched1 = [
+            e for e in kb.list_events(conn, tid)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        assert len(dispatched1) == 1
+        child_id = dispatched1[0].payload["child_id"]
+
+        # Round 2: the SAME conflict error forced on the FIXER's own
+        # dispatch (the mock is still active from round 1).
+        kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        monkeypatch.setattr(kwt, "prepare_worker_base", real_prepare_worker_base)
+
+        child_events = kb.list_events(conn, child_id)
+        child_task = kb.get_task(conn, child_id)
+        all_dispatched = [
+            e for e in kb.list_events(conn, tid) + child_events
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+        fixer_markers = [
+            e for e in child_events if e.kind == "conflict_fixer_for"
+        ]
+
+    # The fixer itself was parked, never escalated into a second fixer.
+    assert child_task.status == "blocked"
+    assert len(all_dispatched) == 1  # unchanged -- no fixer-for-the-fixer
+    # The only conflict_fixer_for marker on the fixer's own event stream is
+    # the ORIGINAL one stamped when IT was created -- no grandchild fixer
+    # was ever spawned for it.
+    assert len(fixer_markers) == 1
+
+
+def test_maybe_route_conflict_park_fixer_root_keyed_budget_across_chain_members(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Guard #2: the fixer budget/in-flight guard is keyed to the chain ROOT
+    (derived from the provisioned worktree path), not the single task_id --
+    a cascade parks a DIFFERENT task at every step, so task_id-keying reset
+    the budget to zero at every step and let a runaway spawn unboundedly.
+    Two DIFFERENT task rows whose workspace resolves into the SAME
+    provisioned root both hit a conflict; the second sees the first's
+    still-open (in-flight) fixer for that root and creates no second one."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+
+    def fake_spawn(task, workspace, board=None):
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="root member A",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned
+
+        # A second task row resolving into the SAME provisioned root --
+        # stands in for a different cascade step (e.g. a sibling chain
+        # member) hitting a conflict independently of task A.
+        tid_b = kb.create_task(
+            conn,
+            title="root member B",
+            assignee="sentinel",
+            workspace_kind="dir",
+            workspace_path=str(expected),
+        )
+
+        now = int(time.time())
+        row_a = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        summary_a: dict = {"parked": [], "conflict_fixer_dispatched": []}
+        kb._maybe_route_conflict_park_fixer(
+            conn, row_a,
+            reason="integration parked: conflict A",
+            retry_count=0, now=now, summary=summary_a,
+        )
+        assert len(summary_a["conflict_fixer_dispatched"]) == 1
+        child_id = summary_a["conflict_fixer_dispatched"][0]["child_id"]
+        child = kb.get_task(conn, child_id)
+        assert child.status not in ("done", "archived", "failed", "cancelled")
+
+        row_b = conn.execute("SELECT * FROM tasks WHERE id=?", (tid_b,)).fetchone()
+        summary_b: dict = {"parked": [], "conflict_fixer_dispatched": []}
+        kb._maybe_route_conflict_park_fixer(
+            conn, row_b,
+            reason="integration parked: conflict B",
+            retry_count=0, now=now, summary=summary_b,
+        )
+        dispatched_events = [
+            e for e in kb.list_events(conn, tid) + kb.list_events(conn, tid_b)
+            if e.kind == kb.CONFLICT_FIXER_DISPATCHED_EVENT
+        ]
+
+    # No second fixer for root member B while A's fixer is in flight for the
+    # same root -- and B was left parked (not further escalated), matching
+    # "leave the task parked and return" from the brief.
+    assert summary_b["conflict_fixer_dispatched"] == []
+    assert summary_b["parked"] == []
+    assert len(dispatched_events) == 1

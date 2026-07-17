@@ -20598,6 +20598,21 @@ def _create_conflict_park_fixer_subtask(
     return child_id
 
 
+def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
+    """True when *task_id* carries a ``conflict_fixer_for`` event -- i.e. it
+    IS a bounded conflict-park fixer created by
+    :func:`_create_conflict_park_fixer_subtask`, not an ordinary chain task.
+    A fixer never gets a fixer of its own (S10b cascade guard: routing a
+    fixer's own base-prep rebase conflict back into the fixer pipeline is
+    what produced the runaway 4-cards-in-3-minutes incident)."""
+    row = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'conflict_fixer_for' LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row is not None
+
+
 # BASE-PREP-CONFLICT-FIXER-ROUTE-S10: prepare_worker_base (kanban_worktrees.py)
 # fails closed with this exact literal when a clean stale re-dispatch worktree
 # cannot rebase its chain branch onto a freshly-merged target -- a REAL,
@@ -20677,6 +20692,13 @@ def _route_base_prep_conflict_fixer(
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     if row is None:
         return False
+    # Belt-and-braces (S10b): a conflict fixer never gets a fixer of its own.
+    # ``prepare_reused_task_worktree`` already exempts fixer tasks from the
+    # stale-base rebase (so this WorktreeError shouldn't fire for one in the
+    # first place), but if it ever does, park plainly here and skip routing
+    # -- never call ``_maybe_route_conflict_park_fixer`` on a fixer.
+    if _is_conflict_fixer_task(conn, task_id):
+        return True
     try:
         retry_count = int(row["integration_retry_count"] or 0)
     except (IndexError, KeyError, TypeError):
@@ -20746,9 +20768,18 @@ def _maybe_route_conflict_park_fixer(
         _escalate({"attempts": retry_count or 1, "missing_worktree": str(wt)})
         return
 
+    # Root-keyed, NOT task_id-keyed (S10b): a cascade parks a DIFFERENT task
+    # at every step (parent -> fixer -> fixer-for-the-fixer -> ...), so
+    # counting dispatched events on the single ``task_id`` reset the budget
+    # to zero on every step and let a runaway spawn unboundedly. Every
+    # ``conflict_fixer_dispatched`` payload already carries the chain
+    # ``root_id`` (see ``_create_conflict_park_fixer_subtask``), so the
+    # budget and in-flight checks below are scoped to the whole root instead.
     prior = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ? ORDER BY id",
-        (task_id, CONFLICT_FIXER_DISPATCHED_EVENT),
+        "SELECT id, created_at, payload FROM task_events "
+        "WHERE kind = ? AND json_extract(payload, '$.root_id') = ? "
+        "ORDER BY id",
+        (CONFLICT_FIXER_DISPATCHED_EVENT, root_id),
     ).fetchall()
     attempts = len(prior)
 
@@ -20757,26 +20788,30 @@ def _maybe_route_conflict_park_fixer(
         _escalate({"attempts": attempts, "fixer_exhausted": True})
         return
 
-    # Never stack a second fixer on one that is still working.
-    if prior:
+    # Never stack a second fixer anywhere in this root while one is still
+    # working (in-flight, root-keyed): a cascade step must not spawn its own
+    # fixer while an earlier step's fixer for the SAME root is still open.
+    child_ids: list[str] = []
+    for prior_row in prior:
         try:
-            last_child = json.loads(prior[-1]["payload"] or "{}").get("child_id")
+            cid = json.loads(prior_row["payload"] or "{}").get("child_id")
         except Exception:
-            last_child = None
-        if (
-            last_child
-            and conn.execute(
-                "SELECT 1 FROM tasks WHERE id = ? "
-                "AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
-                "LIMIT 1",
-                (last_child,),
-            ).fetchone()
-        ):
+            cid = None
+        if cid:
+            child_ids.append(cid)
+    if child_ids:
+        placeholders = ",".join("?" for _ in child_ids)
+        if conn.execute(
+            f"SELECT 1 FROM tasks WHERE id IN ({placeholders}) "
+            "AND status NOT IN ('done', 'archived', 'failed', 'cancelled') "
+            "LIMIT 1",
+            child_ids,
+        ).fetchone():
             return
 
     # Backoff floor so a tight sweep cadence can't redispatch the instant a
-    # fixer finishes.
-    last_at = _latest_event_at(conn, task_id, CONFLICT_FIXER_DISPATCHED_EVENT)
+    # fixer finishes (root-keyed, from the same prior rows above).
+    last_at = prior[-1]["created_at"] if prior else None
     if last_at is not None and int(last_at) + CONFLICT_FIXER_BACKOFF_SECONDS > now:
         return
 
