@@ -1,6 +1,11 @@
 import { app, BrowserWindow, net as electronNet, session } from 'electron'
 
-import { cookiesHaveLiveSession, cookiesHavePrivySession, cookiesHaveSession, normalizeRemoteBaseUrl } from './connection-config'
+import {
+  cookiesHaveLiveSession,
+  cookiesHavePrivySession,
+  cookiesHaveSession,
+  normalizeRemoteBaseUrl
+} from './connection-config'
 import { DEFAULT_FETCH_TIMEOUT_MS, resolveTimeoutMs } from './hardening'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 

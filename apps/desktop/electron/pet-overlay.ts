@@ -19,6 +19,7 @@ let getMainWindow: () => BrowserWindow | null = () => null
 let getDevServer: () => string | undefined = () => undefined
 let resolveRendererIndex: () => string = () => ''
 let preloadPath = ''
+
 let wireCommonWindowHandlers: (win: BrowserWindow, opts: { zoom?: boolean }) => void = () => {}
 
 /** One-time DI for main-window + renderer/window wiring anchors. */
@@ -55,6 +56,7 @@ export function petOverlayUrl() {
 
 export function spawnPetOverlayWindow(bounds) {
   const PRELOAD_PATH = preloadPath
+
   const win = new BrowserWindow({
     width: Math.max(80, Math.round(bounds?.width || 220)),
     height: Math.max(80, Math.round(bounds?.height || 220)),

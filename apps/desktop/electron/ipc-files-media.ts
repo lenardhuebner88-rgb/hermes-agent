@@ -4,13 +4,10 @@ import http from 'node:http'
 import https from 'node:https'
 import path from 'node:path'
 
-import { app, BrowserWindow, clipboard, dialog, nativeImage } from 'electron'
+import type { BrowserWindow } from 'electron'
+import { app, clipboard, dialog, nativeImage } from 'electron'
 
-import {
-  DATA_URL_READ_MAX_BYTES,
-  resolveReadableFileForIpc,
-  TEXT_PREVIEW_SOURCE_MAX_BYTES
-} from './hardening'
+import { DATA_URL_READ_MAX_BYTES, resolveReadableFileForIpc, TEXT_PREVIEW_SOURCE_MAX_BYTES } from './hardening'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath } from './wsl-path-bridge'
 

@@ -17,7 +17,11 @@ import {
   resolveAuthMode,
   tokenPreview
 } from './connection-config'
-import { DEFAULT_FETCH_TIMEOUT_MS, encryptDesktopSecret as encryptDesktopSecretStrict, resolveTimeoutMs } from './hardening'
+import {
+  DEFAULT_FETCH_TIMEOUT_MS,
+  encryptDesktopSecret as encryptDesktopSecretStrict,
+  resolveTimeoutMs
+} from './hardening'
 import { hasLiveOauthSession, mintGatewayWsTicket } from './hermes-cloud-auth'
 
 // Resolved lazily, NOT at module load: main.ts applies HERMES_DESKTOP_USER_DATA_DIR
@@ -634,8 +638,8 @@ export {
   coerceDesktopConnectionConfig,
   decryptDesktopSecret,
   fetchPublicJson,
-  PROFILE_NAME_RE,
   probeRemoteAuthMode,
+  PROFILE_NAME_RE,
   readActiveDesktopProfile,
   readDesktopConnectionConfig,
   resolveRemoteBackend,

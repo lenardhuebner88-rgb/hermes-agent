@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -34,8 +34,6 @@ import { waitForDashboardPortAnnouncement } from './backend-ready'
 import { detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment } from './bootstrap-platform'
 import { runBootstrap } from './bootstrap-runner'
 import {
-  authModeFromStatus,
-  buildGatewayWsUrl,
   buildGatewayWsUrlWithTicket,
   connectionScopeKey,
   modeIsRemoteLike,
@@ -43,16 +41,14 @@ import {
   normAuthMode,
   pathWithGlobalRemoteProfile,
   profileRemoteOverride,
-  resolveAuthMode,
-  resolveTestWsUrl,
-  tokenPreview
+  resolveTestWsUrl
 } from './connection-config'
 import {
   coerceDesktopConnectionConfig,
   decryptDesktopSecret,
   fetchPublicJson,
-  PROFILE_NAME_RE,
   probeRemoteAuthMode,
+  PROFILE_NAME_RE,
   readActiveDesktopProfile,
   readDesktopConnectionConfig,
   resolveRemoteBackend,
@@ -118,41 +114,6 @@ import {
   openPortalLoginWindow,
   resolvePortalBaseUrl
 } from './hermes-cloud-auth'
-import { fetchLinkTitle } from './link-title'
-import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
-import {
-  buildSessionWindowUrl,
-  chatWindowWebPreferences,
-  createSessionWindowRegistry,
-  SESSION_WINDOW_MIN_HEIGHT,
-  SESSION_WINDOW_MIN_WIDTH
-} from './session-windows'
-import { resolveTerminalSpawnSpec } from './terminal-target'
-import {
-  deleteTerminalSession,
-  disposeAllTerminalSessions,
-  disposeTerminalSession,
-  getTerminalSession,
-  initTerminalSessions,
-  readProcessCwd,
-  safeTerminalCwd,
-  setTerminalSession,
-  terminalChannel,
-  terminalShellCommand,
-  terminalShellEnv
-} from './terminal-sessions'
-import {
-  closePetOverlay,
-  getPetOverlayWindow,
-  initPetOverlay,
-  openPetOverlay
-} from './pet-overlay'
-import {
-  closePreviewWatchers,
-  initPreviewWatch,
-  stopPreviewFileWatch,
-  watchPreviewFile
-} from './preview-watch'
 import {
   copyImageFromUrl,
   initIpcFilesMedia,
@@ -166,6 +127,31 @@ import {
   selectPaths,
   writeClipboard
 } from './ipc-files-media'
+import { fetchLinkTitle } from './link-title'
+import { closePetOverlay, getPetOverlayWindow, initPetOverlay, openPetOverlay } from './pet-overlay'
+import { closePreviewWatchers, initPreviewWatch, stopPreviewFileWatch, watchPreviewFile } from './preview-watch'
+import { decideProfileDeleteAction, profileNameFromDeleteRequest, resolveRouteProfile } from './profile-delete-routing'
+import {
+  buildSessionWindowUrl,
+  chatWindowWebPreferences,
+  createSessionWindowRegistry,
+  SESSION_WINDOW_MIN_HEIGHT,
+  SESSION_WINDOW_MIN_WIDTH
+} from './session-windows'
+import {
+  deleteTerminalSession,
+  disposeAllTerminalSessions,
+  disposeTerminalSession,
+  getTerminalSession,
+  initTerminalSessions,
+  readProcessCwd,
+  safeTerminalCwd,
+  setTerminalSession,
+  terminalChannel,
+  terminalShellCommand,
+  terminalShellEnv
+} from './terminal-sessions'
+import { resolveTerminalSpawnSpec } from './terminal-target'
 import { nativeOverlayWidth as computeNativeOverlayWidth, macTitleBarOverlayHeight } from './titlebar-overlay-width'
 import { resolveBehindCount, shouldCountCommits } from './update-count'
 import { readLiveUpdateMarker, writeUpdateMarker } from './update-marker'
@@ -5473,7 +5459,6 @@ ipcMain.on('hermes:zoom:set-percent', (event, percent) => {
   setAndPersistZoomLevel(window, percentToZoomLevel(Number(percent)))
 })
 
-
 // Pet overlay DI: main window + renderer path + shared window wiring (no cycle).
 initPetOverlay({
   getMainWindow: () => mainWindow,
@@ -6035,7 +6020,6 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   return true
 })
 
-
 // Files/media IPC helpers DI: main window dialogs + platform/preview maps.
 initIpcFilesMedia({
   getMainWindow: () => mainWindow,
@@ -6062,7 +6046,6 @@ ipcMain.handle('hermes:saveClipboardImage', async () => saveClipboardImage())
 ipcMain.handle('hermes:normalizePreviewTarget', (_event, target, baseDir) =>
   normalizePreviewTarget(String(target || ''), baseDir ? String(baseDir) : '')
 )
-
 
 // Preview file-watch DI: main window send + fileExists (no cycle).
 initPreviewWatch({
@@ -6188,7 +6171,6 @@ ipcMain.handle('hermes:logs:reveal', async () => {
 })
 
 ipcMain.handle('hermes:logs:recent', async () => ({ path: DESKTOP_LOG_PATH, lines: hermesLog.slice(-200) }))
-
 
 ipcMain.handle('hermes:fs:readDir', async (_event, dirPath) => readDirForIpc(dirPath))
 
