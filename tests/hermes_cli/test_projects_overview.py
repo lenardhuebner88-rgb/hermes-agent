@@ -341,6 +341,19 @@ def test_git_source_real_repo_reports_hash_message_age(tmp_path: Path) -> None:
     assert last_commit["age_seconds"] == 120
 
 
+def test_projects_payload_emits_registry_kanban_project(tmp_path: Path) -> None:
+    """Karten-Chips deep-linken nur mit Board-Slug — das Feld muss additiv im Payload stehen."""
+    with_board = _entry(slug="ht", repo_path=str(tmp_path / "a"), kanban_project="health-track")
+    without_board = _entry(slug="fo", repo_path=str(tmp_path / "b"))
+    registry = ProjectsRegistry(projects=[with_board, without_board], errors=[])
+
+    payload = build_projects_payload(registry, now=int(time.time()))
+
+    by_slug = {project["slug"]: project for project in payload["projects"]}
+    assert by_slug["ht"]["kanban_project"] == "health-track"
+    assert by_slug["fo"]["kanban_project"] is None
+
+
 def test_git_source_missing_repo_path_is_isolated(tmp_path: Path) -> None:
     entry = _entry(repo_path=str(tmp_path / "does-not-exist"))
     registry = ProjectsRegistry(projects=[entry], errors=[])

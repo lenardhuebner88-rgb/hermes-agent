@@ -559,6 +559,9 @@ def build_projects_payload(
                 "name": entry.name,
                 "repo_path": entry.repo_path,
                 "parent": entry.parent,
+                # Board-Slug fürs Fleet-Deep-Link der Karten-Chips
+                # (?board=<slug> — Frontend linkt nur wenn gesetzt).
+                "kanban_project": entry.kanban_project,
                 "links": [{"label": link.label, "url": link.url} for link in entry.links],
                 "last_commit": last_commit,
                 "kanban": kanban,

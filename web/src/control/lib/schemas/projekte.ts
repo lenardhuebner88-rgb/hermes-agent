@@ -47,6 +47,9 @@ const ProjectEntrySchema = z.object({
   name: z.string().catch(""),
   repo_path: z.string().catch(""),
   parent: nullableString,
+  // Board-Slug aus der Registry (Fleet-Deep-Link der Chips); optional, weil
+  // ältere Backends das Feld noch nicht emittieren.
+  kanban_project: z.string().nullable().optional().catch(null),
   links: z.array(ProjectLinkSchema).catch([]),
   last_commit: ProjectLastCommitSchema,
   kanban: ProjectKanbanCountsSchema,

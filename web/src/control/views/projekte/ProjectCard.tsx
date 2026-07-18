@@ -14,12 +14,9 @@ import { attentionTone, killTarget, splitAgentsBySource, type ProjectAttention }
 
 const t = de.projekte;
 
-/**
- * Board slug from registry (`kanban_project`). Schema is passthrough-only for
- * this field today — read defensively without widening the shared type surface.
- */
+/** Board slug from registry (`kanban_project`), empty/whitespace → null. */
 function projectKanbanBoard(project: ProjectEntry): string | null {
-  const raw = (project as ProjectEntry & { kanban_project?: string | null }).kanban_project;
+  const raw = project.kanban_project;
   if (typeof raw !== "string") return null;
   const slug = raw.trim();
   return slug.length > 0 ? slug : null;
