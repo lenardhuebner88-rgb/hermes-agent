@@ -42,6 +42,16 @@ def _reset_projects_cache_between_tests() -> None:
     yield
     _reset_projects_cache()
 
+
+@pytest.fixture(autouse=True)
+def _isolate_detail_receipts_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prevent detail tests from scanning the real cross-agent receipts Vault."""
+    monkeypatch.setattr("hermes_cli.projects_overview._RECEIPTS_ROOT", tmp_path / "Agents")
+
+
 # Verbatim copy of the REAL ~/.hermes/projects.yaml content (2026-07-16) so the
 # "valid" test exercises the exact on-disk format, not a synthetic simplification.
 _REAL_PROJECTS_YAML = """\
