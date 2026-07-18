@@ -68,6 +68,8 @@ class ProjectEntry:
     links: list[ProjectLink] = field(default_factory=list)
     parent: str | None = None
     path_filters: list[str] = field(default_factory=list)
+    session_profiles: list[str] = field(default_factory=list)
+    session_sources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -180,6 +182,18 @@ def _parse_entry(index: int, raw: Any, errors: list[str]) -> ProjectEntry | None
     if path_filters is None:
         return None
 
+    session_profiles = _parse_str_list(
+        slug, "session_profiles", raw.get("session_profiles"), errors
+    )
+    if session_profiles is None:
+        return None
+
+    session_sources = _parse_str_list(
+        slug, "session_sources", raw.get("session_sources"), errors
+    )
+    if session_sources is None:
+        return None
+
     links = _parse_links(slug, raw.get("links"), errors)
     if links is None:
         return None
@@ -193,6 +207,8 @@ def _parse_entry(index: int, raw: Any, errors: list[str]) -> ProjectEntry | None
         links=links,
         parent=parent,
         path_filters=path_filters,
+        session_profiles=session_profiles,
+        session_sources=session_sources,
     )
 
 
@@ -1582,7 +1598,9 @@ _SESSIONS_SQL = """
 SELECT s.id, s.source, s.model, s.title, s.display_name,
        s.started_at, s.ended_at, s.end_reason,
        s.message_count, s.input_tokens, s.output_tokens,
-       s.cwd, s.git_repo_root, s.parent_session_id,
+       s.cwd, s.git_repo_root, s.parent_session_id, s.profile_name,
+       CASE WHEN json_valid(s.origin_json)
+            THEN json_extract(s.origin_json, '$.chat_name') END AS source_channel,
        json_extract(COALESCE(s.model_config, '{}'), '$._delegate_from') AS delegate_from,
        json_extract(COALESCE(s.model_config, '{}'), '$._branched_from') AS branched_from,
        (SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id) AS last_active
@@ -1612,6 +1630,39 @@ def _session_label_fields(display_name: Any, title: Any, session_id: str) -> str
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return session_id[:8]
+
+
+def _attribute_session_project(
+    paths: list[str],
+    profile_name: Any,
+    source: Any,
+    source_channel: Any,
+    registry: ProjectsRegistry,
+) -> str | None:
+    """Attribute a session by path, then profile, then source/channel mapping."""
+    project = _attribute_project(paths, registry)
+    if project is not None:
+        return project
+
+    if isinstance(profile_name, str):
+        for entry in registry.projects:
+            if profile_name in entry.session_profiles:
+                return entry.slug
+
+    if not isinstance(source, str):
+        return None
+
+    # Prefer the more specific channel mapping regardless of registry order;
+    # only fall back to a source-only mapping when no channel entry matched.
+    if isinstance(source_channel, str) and source_channel:
+        source_with_channel = f"{source}:{source_channel}"
+        for entry in registry.projects:
+            if source_with_channel in entry.session_sources:
+                return entry.slug
+    for entry in registry.projects:
+        if source in entry.session_sources:
+            return entry.slug
+    return None
 
 
 def build_sessions_payload(
@@ -1788,7 +1839,13 @@ def build_sessions_payload(
                 "last_active": last_active,
                 "message_count": int(row["message_count"] or 0),
                 "tokens": int(input_tokens) + int(output_tokens),
-                "project": _attribute_project(attribution_paths, registry),
+                "project": _attribute_session_project(
+                    attribution_paths,
+                    row["profile_name"],
+                    row["source"],
+                    row["source_channel"],
+                    registry,
+                ),
                 "spawn_kind": spawn_kind,
                 "spawned_by_id": spawned_by_id,
                 "spawned_by_label": spawned_by_label,

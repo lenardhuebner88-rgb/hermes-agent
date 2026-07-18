@@ -163,6 +163,31 @@ def test_valid_real_format_parses_all_entries(tmp_path: Path) -> None:
     assert health_track.kanban_project == "health-track"
 
 
+def test_session_mapping_fields_parse_and_default_to_empty_lists(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """\
+projects:
+  - slug: diktat
+    name: Diktat
+    repo_path: /tmp/diktat
+    session_profiles: [diktat, voice]
+    session_sources: [voice, discord:hermes-oc]
+  - slug: plain
+    name: Plain
+    repo_path: /tmp/plain
+""",
+    )
+
+    result = load_projects_registry(path)
+
+    assert result.errors == []
+    assert result.projects[0].session_profiles == ["diktat", "voice"]
+    assert result.projects[0].session_sources == ["voice", "discord:hermes-oc"]
+    assert result.projects[1].session_profiles == []
+    assert result.projects[1].session_sources == []
+
+
 def test_missing_file_returns_empty_no_error(tmp_path: Path) -> None:
     path = tmp_path / "does-not-exist.yaml"
 
@@ -294,6 +319,8 @@ def _entry(**overrides: object) -> ProjectEntry:
         links=[],
         parent=None,
         path_filters=[],
+        session_profiles=[],
+        session_sources=[],
     )
     defaults.update(overrides)
     return ProjectEntry(**defaults)  # type: ignore[arg-type]
@@ -2459,7 +2486,11 @@ CREATE TABLE sessions (
     input_tokens INTEGER DEFAULT 0,
     output_tokens INTEGER DEFAULT 0,
     cwd TEXT,
-    git_repo_root TEXT
+    git_repo_root TEXT,
+    profile_name TEXT,
+    chat_id TEXT,
+    chat_type TEXT,
+    origin_json TEXT
 );
 CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2495,6 +2526,11 @@ def _insert_session(
     source: str = "cli",
     model: str | None = "kimi-k2",
     cwd: str | None = None,
+    git_repo_root: str | None = None,
+    profile_name: str | None = None,
+    chat_id: str | None = None,
+    chat_type: str | None = None,
+    origin_json: str | None = None,
     message_count: int = 3,
     input_tokens: int = 100,
     output_tokens: int = 50,
@@ -2507,8 +2543,9 @@ def _insert_session(
         conn.execute(
             "INSERT INTO sessions (id, source, display_name, title, model, model_config, "
             "parent_session_id, started_at, ended_at, end_reason, message_count, "
-            "input_tokens, output_tokens, cwd) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "input_tokens, output_tokens, cwd, git_repo_root, profile_name, chat_id, "
+            "chat_type, origin_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 source,
@@ -2524,6 +2561,11 @@ def _insert_session(
                 input_tokens,
                 output_tokens,
                 cwd,
+                git_repo_root,
+                profile_name,
+                chat_id,
+                chat_type,
+                origin_json,
             ),
         )
         if last_message_at is not None:
@@ -2659,6 +2701,68 @@ def test_sessions_payload_open_active_and_spawn_tree(tmp_path: Path) -> None:
         s["started_at"] for s in payload["sessions"] if not s["is_open"]
     ]
     assert ended_started == sorted(ended_started, reverse=True)
+
+
+def test_sessions_payload_attributes_by_path_then_profile_then_source(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    now = 1_700_000_000
+    registry = ProjectsRegistry(
+        projects=[
+            _entry(slug="path", repo_path="/srv/path", session_sources=["discord"]),
+            _entry(slug="diktat", session_profiles=["diktat", "voice"]),
+            _entry(slug="discord-channel", session_sources=["discord:hermes-oc"]),
+            _entry(slug="discord-generic", session_sources=["discord"]),
+        ]
+    )
+    _insert_session(
+        db,
+        session_id="path-wins",
+        started_at=now - 10,
+        cwd="/srv/path/subdir",
+        profile_name="diktat",
+        source="discord",
+        origin_json=json.dumps({"chat_name": "hermes-oc"}),
+    )
+    _insert_session(
+        db,
+        session_id="diktat-profile",
+        started_at=now - 20,
+        profile_name="diktat",
+    )
+    _insert_session(
+        db,
+        session_id="voice-alias",
+        started_at=now - 30,
+        profile_name="voice",
+    )
+    _insert_session(
+        db,
+        session_id="discord-channel",
+        started_at=now - 40,
+        source="discord",
+        chat_id="1234567890",
+        chat_type="channel",
+        origin_json=json.dumps({"chat_id": "1234567890", "chat_name": "hermes-oc"}),
+    )
+    _insert_session(
+        db,
+        session_id="discord-generic",
+        started_at=now - 50,
+        source="discord",
+        origin_json=json.dumps({"chat_name": "other-channel"}),
+    )
+
+    payload = build_sessions_payload(
+        registry, state_db_path=db, tmux_panes_text="", now=now
+    )
+
+    by_id = {session["id"]: session for session in payload["sessions"]}
+    assert by_id["path-wins"]["project"] == "path"
+    assert by_id["diktat-profile"]["project"] == "diktat"
+    assert by_id["voice-alias"]["project"] == "diktat"
+    assert by_id["discord-channel"]["project"] == "discord-channel"
+    assert by_id["discord-generic"]["project"] == "path"
 
 
 def test_sessions_payload_annotates_matching_tmux_pane(tmp_path: Path) -> None:
