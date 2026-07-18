@@ -517,11 +517,11 @@ describe("computeAttention v2", () => {
     const p = projectFixture("all-sources", {
       kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 0, needs_input: 2 },
       loops: {
-        active: 1,
+        active: 0,
         packs: [
           {
             name: "builder-reviewer",
-            running: true,
+            running: false,
             last_heartbeat_at: 1,
             last_outcome: {
               verdict: "stopped",
@@ -543,6 +543,33 @@ describe("computeAttention v2", () => {
         { kind: "loop_red", count: 1 },
       ],
     });
+  });
+
+  it("does NOT flag loop_red for a RUNNING pack with an old fail verdict (retry in flight)", () => {
+    // Der Runner kann nach verdict:"fail" direkt die nächste Runde starten
+    // (Lock gehalten, running=true) — dann arbeitet die Automatik, kein
+    // Eingriffs-Signal. Rot erst, wenn der Pack liegen geblieben ist.
+    const p = projectFixture("retrying", {
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: {
+        active: 1,
+        packs: [
+          {
+            name: "builder-reviewer",
+            running: true,
+            last_heartbeat_at: 1784234000,
+            last_outcome: {
+              verdict: "fail",
+              phase: "verify",
+              reason: "gate red",
+              plan: "P1.md",
+              ts: 1784234000,
+            },
+          },
+        ],
+      },
+    });
+    expect(computeAttention(p, 0)).toEqual({ level: "active", reasons: [] });
   });
 
   it("returns active when agents > 0 and no alert signals", () => {
@@ -715,6 +742,24 @@ describe("sortProjectsByAttention", () => {
       "alert-e",
       "active-f",
     ]);
+  });
+
+  it("staleCountBySlug (3rd arg) lifts an otherwise-quiet project into the alert bucket", () => {
+    // Migrations-Wächter: würde ein Production-Callsite das dritte Argument
+    // weglassen (Default {}), bliebe "stale-x" quiet und dieser Test bewiese
+    // nichts — deshalb hier explizit die 3-Argument-Form mit Ordnungseffekt.
+    const projects = [
+      projectFixture("quiet-y"),
+      projectFixture("stale-x"),
+    ];
+    const withoutStale = sortProjectsByAttention(projects, { "quiet-y": 0, "stale-x": 0 });
+    expect(withoutStale.map((p) => p.slug)).toEqual(["quiet-y", "stale-x"]);
+    const withStale = sortProjectsByAttention(
+      projects,
+      { "quiet-y": 0, "stale-x": 0 },
+      { "stale-x": 2 },
+    );
+    expect(withStale.map((p) => p.slug)).toEqual(["stale-x", "quiet-y"]);
   });
 });
 

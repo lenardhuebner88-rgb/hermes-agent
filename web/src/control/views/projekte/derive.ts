@@ -368,6 +368,10 @@ export function computeAttention(
 
   let loopRed = 0;
   for (const pack of project.loops?.packs ?? []) {
+    // Ein LAUFENDER Pack mit altem fail-Verdict ist kein Eingriffs-Signal —
+    // die Automatik (Retry-Runde) ist gerade selbst dran. Rot zählt erst,
+    // wenn der Pack mit fail-Familie liegen geblieben ist (running=false).
+    if (pack.running) continue;
     if (isLoopOutcomeRed(pack.last_outcome?.verdict)) loopRed += 1;
   }
   if (loopRed > 0) reasons.push({ kind: "loop_red", count: loopRed });

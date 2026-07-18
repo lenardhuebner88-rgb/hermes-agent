@@ -373,6 +373,66 @@ describe("ProjekteView", () => {
     expect(posActive).toBeLessThan(posQuiet);
   });
 
+  it("stale-open session lifts its project to alert with a stale reason chip (end-to-end wiring)", () => {
+    // Migrations-Wächter für die 2.3-Signatur: würde ProjekteView staleBySlug
+    // NICHT an sort/computeAttention durchreichen (Default-Args schlucken das
+    // still), bliebe die Karte quiet und dieser Test rot.
+    const quietOther: ProjectEntry = {
+      ...REAL_PROJECT,
+      slug: "oma-galerie",
+      name: "Oma-Galerie",
+      kanban: null,
+      loops: { active: 0, packs: [] },
+    };
+    const withStale: ProjectEntry = {
+      ...REAL_PROJECT,
+      slug: "hermes-infra",
+      name: "Hermes Infra",
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: { active: 0, packs: [] },
+    };
+    const staleSession: ProjectSession = {
+      id: "zombie1",
+      label: "Verwaiste Session",
+      source: "cli",
+      model: null,
+      started_at: 1784100000,
+      ended_at: null,
+      end_reason: null,
+      is_open: true,
+      is_active: false,
+      stale_open: true,
+      last_active: 1784100100,
+      message_count: 3,
+      tokens: 100,
+      project: "hermes-infra",
+      spawn_kind: null,
+      spawned_by_id: null,
+      spawned_by_label: null,
+    };
+    mockProjects({
+      // Registry-Reihenfolge absichtlich quiet-first.
+      data: { generated_at: 1, registry_errors: [], projects: [quietOther, withStale] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    mockSessions({
+      data: { generated_at: 1, errors: [], sessions: [staleSession] },
+      loading: false,
+      lastUpdated: 1,
+    });
+    const html = renderView();
+    // Karte mit stale Session führt das Grid an …
+    const posStale = html.indexOf("Hermes Infra");
+    const posQuiet = html.indexOf("Oma-Galerie");
+    expect(posStale).toBeGreaterThanOrEqual(0);
+    expect(posStale).toBeLessThan(posQuiet);
+    // … trägt alert-Level und den stale-Reason-Chip.
+    expect(html).toContain('data-attention="alert"');
+    expect(html).toContain("1 stale");
+  });
+
   it("marks the attention state on each card (aria-label on the status dot)", () => {
     const alert: ProjectEntry = {
       ...REAL_PROJECT,
