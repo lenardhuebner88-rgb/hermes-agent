@@ -24378,13 +24378,17 @@ def auto_retry_blocked_tasks(
             blocked_run["error"] or ""
         ).strip()
         policy_block_kind = explicit_block_kind
-        if explicit_block_kind == "needs_input":
+        if (
+            explicit_block_kind in ("needs_input", "transient")
+            and str(blocked_run["verdict"] or "").strip().upper()
+            == "REQUEST_CHANGES"
+        ):
+            # Legacy/manual review fixtures can stamp the verdict after
+            # block_task inferred the kind from prose. The verdict remains
+            # authoritative for the unchanged-body review-retry guard.
+            policy_block_kind = "review_revision"
+        elif explicit_block_kind == "needs_input":
             if (
-                str(blocked_run["verdict"] or "").strip().upper()
-                == "REQUEST_CHANGES"
-            ):
-                policy_block_kind = "review_revision"
-            elif (
                 _deterministic_spawn_failure_marker(reason) is not None
                 or reason.lower() in _DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS
             ):
