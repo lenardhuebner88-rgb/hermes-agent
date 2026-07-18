@@ -9,6 +9,7 @@ import {
   agentSourceRank,
   attentionTone,
   buildSessionRows,
+  commitAttributionLabel,
   computeAttention,
   countAgentsByProject,
   countOpenSessions,
@@ -26,6 +27,59 @@ import {
   type ProjectAttention,
 } from "./derive";
 import type { ProjectEntry, ProjectSession } from "../../lib/schemas";
+
+describe("commitAttributionLabel", () => {
+  it("uses lane and model, then lane, then task id for task-backed commits", () => {
+    const base = {
+      kind: "kanban" as const,
+      pack: null,
+      task_id: "t_1a2b3c4d",
+      lane: "grok-builder",
+      model: "grok-4.5",
+      label: null,
+    };
+    expect(commitAttributionLabel(base)).toBe("grok-builder · grok-4.5");
+    expect(commitAttributionLabel({ ...base, kind: "wip", model: null })).toBe("grok-builder");
+    expect(commitAttributionLabel({ ...base, kind: "merge", lane: null, model: null })).toBe(
+      "t_1a2b3c4d",
+    );
+  });
+
+  it("labels loop and revert commits and delegates direct/missing attribution to author", () => {
+    expect(
+      commitAttributionLabel({
+        kind: "loop",
+        pack: "hermes-feature-forge",
+        task_id: null,
+        lane: null,
+        model: null,
+        label: "hermes-feature-forge",
+      }),
+    ).toBe("loop · hermes-feature-forge");
+    expect(
+      commitAttributionLabel({
+        kind: "revert",
+        pack: null,
+        task_id: null,
+        lane: null,
+        model: null,
+        label: null,
+      }),
+    ).toBe("revert");
+    expect(
+      commitAttributionLabel({
+        kind: "direct",
+        pack: null,
+        task_id: null,
+        lane: null,
+        model: null,
+        label: "Git Author",
+      }),
+    ).toBeNull();
+    expect(commitAttributionLabel(null)).toBeNull();
+    expect(commitAttributionLabel(undefined)).toBeNull();
+  });
+});
 
 // Real /api/projects payload (single-project registry, live checkout) — the
 // exact shape hermes_cli/projects_overview.py.build_projects_payload() emits.

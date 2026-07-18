@@ -14,12 +14,23 @@ const ProjectLinkSchema = z.object({
   url: z.string().catch(""),
 }).passthrough();
 
+export const ProjectCommitAttributionSchema = z.object({
+  kind: z.enum(["direct", "loop", "kanban", "wip", "merge", "revert"]).catch("direct"),
+  pack: nullableString,
+  task_id: nullableString,
+  lane: nullableString,
+  model: nullableString,
+  label: nullableString,
+}).passthrough().nullable().optional().catch(null);
+export type ProjectCommitAttribution = z.infer<typeof ProjectCommitAttributionSchema>;
+
 const ProjectLastCommitSchema = z.object({
   hash: z.string().catch(""),
   message: z.string().catch(""),
   author: z.string().catch(""),
   committed_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
+  attribution: ProjectCommitAttributionSchema,
 }).passthrough().nullable().catch(null);
 
 const ProjectKanbanCountsSchema = z.object({
@@ -181,6 +192,7 @@ const ProjectDetailCommitSchema = z.object({
   author: z.string().catch(""),
   committed_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
+  attribution: ProjectCommitAttributionSchema,
 }).passthrough();
 
 const ProjectDetailKanbanTaskSchema = z.object({
@@ -303,6 +315,7 @@ const ProjectCommitFeedEntrySchema = z.object({
   author: z.string().catch(""),
   committed_at: epochSeconds,
   age_seconds: z.coerce.number().catch(0),
+  attribution: ProjectCommitAttributionSchema,
 }).passthrough();
 export type ProjectCommitFeedEntry = z.infer<typeof ProjectCommitFeedEntrySchema>;
 
