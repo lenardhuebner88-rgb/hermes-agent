@@ -19,6 +19,7 @@ const t = de.loops;
 // überspringen"). Etabliertes Muster in diesem Repo, s. leitstand.test.tsx.
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   cleanup();
 });
 
@@ -694,6 +695,34 @@ describe("LoopsGrid — Nachtschicht-Redesign: Logbuch (Ledger-Timeline)", () =>
   it("renders per-round phase tokens in detail", () => {
     const html = renderGrid([runningPipeline], { selectedPack: "builder-reviewer", detail });
     expect(html).toContain("R1 · build · grok-4.5 · 270 Tokens · Abo · €0 gemessen");
+  });
+
+  it("loads a bounced queue file on expand and renders its body read-only", async () => {
+    const bouncedDetail: LoopDetailResponse = {
+      ...detail,
+      queue_entries: { "90-bounced": ["P2-reader-feedback.md"] },
+    };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      pack: "builder-reviewer",
+      stage: "90-bounced",
+      filename: "P2-reader-feedback.md",
+      content: "## Verifier-Evidence\nFAIL: bounce reason remains visible",
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderInteractiveGrid([runningPipeline], { selectedPack: "builder-reviewer", detail: bouncedDetail });
+    const fileTrigger = screen.getByRole("button", { name: /P2-reader-feedback\.md/ });
+    fireEvent.click(fileTrigger);
+
+    expect(await screen.findByText(/FAIL: bounce reason remains visible/)).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/loops/builder-reviewer/queue/90-bounced/P2-reader-feedback.md",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    const panel = document.getElementById(fileTrigger.getAttribute("aria-controls") ?? "");
+    expect(panel).not.toBeNull();
+    expect(within(panel as HTMLElement).queryByRole("textbox")).toBeNull();
+    expect(within(panel as HTMLElement).queryByRole("button", { name: /speichern|save/i })).toBeNull();
   });
 });
 

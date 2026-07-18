@@ -106,6 +106,13 @@ export const LoopDetailResponseSchema = LoopPackSummarySchema.extend({
   })).catch([]),
 });
 
+export const LoopQueueFileResponseSchema = z.object({
+  pack: z.string(),
+  stage: z.string(),
+  filename: z.string(),
+  content: z.string().catch(""),
+});
+
 // Werkstatt: Pack-Dateien lesen/schreiben + Pack duplizieren + landen.
 export const LoopFileSchema = z.object({
   name: z.string(),

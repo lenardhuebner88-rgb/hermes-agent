@@ -20,7 +20,7 @@ import type { LucideIcon } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { extractDetail } from "../hooks/internal";
-import { duplicateLoop, landLoop, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoops } from "../hooks/loops";
+import { duplicateLoop, landLoop, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
 import { de } from "../i18n/de";
 import { SignalLabel, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";
@@ -568,6 +568,30 @@ function LogbookFeed({ lines }: { lines: string[] }) {
   );
 }
 
+function LoopQueueFileDisclosure({ pack, stage, filename }: { pack: string; stage: string; filename: string }) {
+  const [open, setOpen] = useState(false);
+  const file = useLoopQueueFile(pack, stage, filename, open);
+  return (
+    <Disclosure
+      open={open}
+      onToggle={setOpen}
+      summary={<span className="block min-w-0 break-all py-1" style={{ color: "var(--ln-ink-soft)" }}>{filename}</span>}
+    >
+      {file.loading ? <p style={{ color: "var(--ln-ink-soft)" }}>{t.loading}</p> : null}
+      {file.error ? <p role="alert" style={{ color: "var(--ln-fail)" }}>Queue-Datei konnte nicht geladen werden: {file.error}</p> : null}
+      {file.data ? (
+        file.data.content ? (
+          <pre className="max-w-full overflow-x-auto whitespace-pre-wrap break-words rounded-lg border p-3 font-data text-xs" style={{ borderColor: "var(--ln-line)", background: "var(--ln-raised)", color: "var(--ln-ink)" }}>
+            {file.data.content}
+          </pre>
+        ) : (
+          <p style={{ color: "var(--ln-ink-soft)" }}>Die Queue-Datei ist leer.</p>
+        )
+      ) : null}
+    </Disclosure>
+  );
+}
+
 function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
   const caption: React.CSSProperties = { color: "var(--ln-ink-soft)" };
   return (
@@ -586,7 +610,16 @@ function LoopDetailPanel({ detail }: { detail: LoopDetailResponse }) {
           <ul className="mt-1 space-y-1 font-data">
             {Object.entries(detail.queue_entries).map(([stage, files]) => (
               <li key={stage} style={{ color: "var(--ln-ink-soft)" }}>
-                <span style={{ color: "var(--ln-ink)" }}>{stage}</span>: {files.length > 0 ? files.join(", ") : "—"}
+                <span style={{ color: "var(--ln-ink)" }}>{stage}</span>:
+                {files.length > 0 ? (
+                  <ul className="mt-0.5 space-y-0.5 pl-2">
+                    {files.map((filename) => (
+                      <li key={filename}>
+                        <LoopQueueFileDisclosure pack={detail.name} stage={stage} filename={filename} />
+                      </li>
+                    ))}
+                  </ul>
+                ) : " —"}
               </li>
             ))}
           </ul>
