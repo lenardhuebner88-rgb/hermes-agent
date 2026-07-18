@@ -28,6 +28,12 @@ import textwrap
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_module_after_fresh_import(restore_sys_modules):
+    """Keep forced bootstrap re-imports from leaking module identity."""
+    yield
+
+
 # Import the module under test via an import-time side-effect check path.
 # We need to be able to reset its state between tests, so we import it
 # fresh in each test that manipulates _IS_WINDOWS.
