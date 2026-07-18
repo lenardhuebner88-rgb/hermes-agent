@@ -148,23 +148,27 @@ function planSpec(status: string): PlanSpecRecord {
 }
 
 function renderHeute({
+  allWorkers,
   activeWorkers = [],
   costsData = null,
   plans = [],
   blockedCount = 2,
   pendingItems = [],
+  onWorkerClick = () => undefined,
   onNavigate = () => undefined,
 }: {
+  allWorkers?: Worker[];
   activeWorkers?: Worker[];
   costsData?: RunsCostsResponse | null;
   plans?: PlanSpecRecord[];
   blockedCount?: number;
   pendingItems?: PendingItem[];
+  onWorkerClick?: (worker: Worker) => void;
   onNavigate?: (target: "worker" | "plan" | "risiko") => void;
 } = {}) {
   return render(
     <HeuteTab
-      allWorkers={activeWorkers}
+      allWorkers={allWorkers ?? activeWorkers}
       activeWorkers={activeWorkers}
       blockedCount={blockedCount}
       pendingApprovals={0}
@@ -173,8 +177,7 @@ function renderHeute({
       daily={null}
       now={100}
       pendingItems={pendingItems}
-      onWorkerClick={() => undefined}
-      onPlanSpecClick={() => undefined}
+      onWorkerClick={onWorkerClick}
       onNavigate={onNavigate}
     />,
   );
@@ -226,7 +229,7 @@ describe("HeuteTab PlanSpec status chips", () => {
 });
 
 describe("HeuteTab action block + idle state", () => {
-  it("expands clipped worker task and heartbeat text by tap or keyboard", () => {
+  it("expands a clipped worker title by tap while keeping heartbeat detail off Heute", () => {
     const active = worker("long", "premium");
     active.task_title = "T".repeat(400);
     active.last_heartbeat_note = "Heartbeat ".repeat(80);
@@ -238,11 +241,7 @@ describe("HeuteTab action block + idle state", () => {
     fireEvent.click(taskTitle);
     expect(taskTitle.getAttribute("aria-expanded")).toBe("true");
     expect(taskTitle.className).toContain("fleet-expandable-text-expanded");
-    const note = document.querySelector(".fleet-wk-note");
-    expect(note?.textContent).toBe(active.last_heartbeat_note);
-    expect(note?.getAttribute("title")).toBeNull();
-    fireEvent.keyDown(note as HTMLElement, { key: "Enter" });
-    expect(note?.getAttribute("aria-expanded")).toBe("true");
+    expect(document.querySelector(".fleet-wk-note")).toBeNull();
   });
 
   it("shows a tappable action row for a waiting approval that navigates to Plan", () => {
@@ -306,13 +305,62 @@ describe("HeuteTab action block + idle state", () => {
   });
 });
 
+describe("HeuteTab compact worker rows", () => {
+  it("includes blocked workers from the operational worker set even when no run is active", () => {
+    const blocked = worker("blocked", "reviewer");
+    blocked.task_status = "blocked";
+    blocked.run_status = "blocked";
+
+    renderHeute({ allWorkers: [blocked] });
+
+    expect(screen.getByRole("button", { name: "Worker reviewer öffnen" }).textContent).toContain("Blockiert");
+    expect(screen.queryByText("Keine Worker aktiv — Board ruht.")).toBeNull();
+  });
+
+  it("shows status, full expandable title, progress and a compact model without card telemetry", () => {
+    const active = worker("compact", "coder");
+    active.task_title = "Vollständiger Task-Titel für den laufenden Worker";
+    active.task_status = "review";
+    active.run_progress = 0.42;
+    active.active_model = "openai/gpt-5.6-codex";
+    active.input_tokens = 1200;
+    active.output_tokens = 300;
+    active.last_heartbeat_note = "Interne Detail-Telemetrie";
+
+    const { container } = renderHeute({ activeWorkers: [active] });
+
+    expect(screen.getByText("Wartet auf Review")).toBeTruthy();
+    expect(screen.getByText("42 %")).toBeTruthy();
+    expect(screen.getByText("gpt-5.6-codex")).toBeTruthy();
+    expect(screen.getByText(active.task_title).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("Interne Detail-Telemetrie")).toBeNull();
+    expect(screen.queryByText(/1,2k.*0,3k tok/)).toBeNull();
+    expect(container.querySelector(".fleet-wk-row")).toBeTruthy();
+    expect(container.querySelector(".fleet-wk:not(.fleet-wk-row)")).toBeNull();
+  });
+
+  it("opens the worker drawer from the row and links explicitly to the Worker tab", () => {
+    const active = worker("open", "premium");
+    const onWorkerClick = vi.fn();
+    const onNavigate = vi.fn();
+    renderHeute({ activeWorkers: [active], onWorkerClick, onNavigate });
+
+    fireEvent.click(screen.getByRole("button", { name: "Worker premium öffnen" }));
+    expect(onWorkerClick).toHaveBeenCalledWith(active);
+
+    fireEvent.click(screen.getByRole("button", { name: "Zum Worker-Tab" }));
+    expect(onNavigate).toHaveBeenCalledWith("worker");
+    expect(onWorkerClick).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("HeuteTab PlanSpec relevance ordering", () => {
   function spec(topic: string, overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
     return { ...planSpec("open"), path: `/${topic}.md`, topic, ...overrides };
   }
 
   function renderedPlanTopics(container: HTMLElement): string[] {
-    return Array.from(container.querySelectorAll(".fleet-ps-name")).map((el) => el.textContent ?? "");
+    return Array.from(container.querySelectorAll(".fleet-ps-topic")).map((el) => el.textContent ?? "");
   }
 
   it("renders operator-waiting and running plans ahead of merely-open ones", () => {
@@ -330,6 +378,20 @@ describe("HeuteTab PlanSpec relevance ordering", () => {
 
     const { container } = renderHeute({ plans: [a, b] });
     expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta"]);
+  });
+
+  it("limits planning to three compact references that jump to the Plan tab", () => {
+    const onNavigate = vi.fn();
+    const plans = ["Alpha", "Beta", "Gamma", "Delta"].map((topic) => spec(topic, { open: true }));
+
+    const { container } = renderHeute({ plans, onNavigate });
+
+    expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta", "Gamma"]);
+    expect(container.querySelectorAll(".fleet-ps-ref")).toHaveLength(3);
+    expect(container.querySelector(".fleet-ps-meta")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /PlanSpec Alpha im Plan-Tab öffnen/ }));
+    expect(onNavigate).toHaveBeenCalledWith("plan");
   });
 });
 
@@ -351,7 +413,6 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
         now={100}
         pendingItems={[]}
         onWorkerClick={() => undefined}
-        onPlanSpecClick={() => undefined}
         onNavigate={() => undefined}
       />,
     );
@@ -380,7 +441,6 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
         now={200}
         pendingItems={[{ kind: "approval", topic: "Cockpit-Umbau", targetSubtab: "plan" }]}
         onWorkerClick={() => undefined}
-        onPlanSpecClick={() => undefined}
         onNavigate={() => undefined}
       />,
     );
