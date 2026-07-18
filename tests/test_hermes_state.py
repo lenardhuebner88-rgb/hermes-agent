@@ -4717,6 +4717,91 @@ class TestOptimizeFts:
         assert len(db.get_messages("s1")) == 1
 
 
+class TestFtsTrigramKillSwitch:
+    def _trigram_triggers(self, db):
+        return {
+            row[0]
+            for row in db._conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'trigger' AND name LIKE 'messages_fts_trigram_%'"
+            ).fetchall()
+        }
+
+    def test_env_set_fresh_db_has_no_trigram_schema(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            assert db._fts_table_exists("messages_fts") is True
+            assert db._fts_table_exists("messages_fts_trigram") is False
+            assert db._trigram_available is False
+            assert self._trigram_triggers(db) == set()
+        finally:
+            db.close()
+
+    def test_env_set_drops_existing_trigram_and_uses_like_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("HERMES_DISABLE_FTS_TRIGRAM", raising=False)
+        db_path = tmp_path / "state.db"
+        seeded = SessionDB(db_path=db_path)
+        try:
+            seeded.create_session(session_id="s1", source="cli")
+            seeded.append_message(
+                "s1", role="user", content="大别山项目计划书"
+            )
+            assert seeded._fts_table_exists("messages_fts_trigram") is True
+            assert len(self._trigram_triggers(seeded)) == 3
+        finally:
+            seeded.close()
+
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+        disabled = SessionDB(db_path=db_path)
+        try:
+            assert disabled._fts_table_exists("messages_fts_trigram") is False
+            assert disabled._trigram_available is False
+            assert self._trigram_triggers(disabled) == set()
+
+            # No dangling trigger may make a normal message insert fail.
+            disabled.append_message(
+                "s1", role="assistant", content="长江大桥设计方案"
+            )
+            matches = disabled.search_messages("大别山项目")
+            assert len(matches) == 1
+            assert matches[0]["session_id"] == "s1"
+        finally:
+            disabled.close()
+
+    def test_env_unset_rebuilds_and_backfills_trigram(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_DISABLE_FTS_TRIGRAM", "1")
+        db_path = tmp_path / "state.db"
+        disabled = SessionDB(db_path=db_path)
+        try:
+            disabled.create_session(session_id="s1", source="cli")
+            disabled.append_message(
+                "s1", role="user", content="大别山项目计划书"
+            )
+            assert disabled._fts_table_exists("messages_fts_trigram") is False
+        finally:
+            disabled.close()
+
+        monkeypatch.delenv("HERMES_DISABLE_FTS_TRIGRAM")
+        restored = SessionDB(db_path=db_path)
+        try:
+            assert restored._fts_table_exists("messages_fts_trigram") is True
+            assert restored._trigram_available is True
+            assert len(self._trigram_triggers(restored)) == 3
+            indexed = restored._conn.execute(
+                "SELECT COUNT(*) FROM messages_fts_trigram "
+                "WHERE messages_fts_trigram MATCH ?",
+                ('"大别山项目"',),
+            ).fetchone()[0]
+            assert indexed == 1
+            assert len(restored.search_messages("大别山项目")) == 1
+        finally:
+            restored.close()
+
+
 class TestAutoMaintenance:
     def _make_old_ended(self, db, sid: str, days_old: int = 100):
         """Create a session that is ended and was started `days_old` days ago."""

@@ -17,6 +17,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -261,14 +262,19 @@ _last_init_error_lock = threading.Lock()
 _wal_fallback_warned_paths: set[str] = set()
 _wal_fallback_warned_lock = threading.Lock()
 
-_FTS_TRIGGERS = (
+_BASE_FTS_TRIGGERS = (
     "messages_fts_insert",
     "messages_fts_delete",
     "messages_fts_update",
+)
+
+_TRIGRAM_FTS_TRIGGERS = (
     "messages_fts_trigram_insert",
     "messages_fts_trigram_delete",
     "messages_fts_trigram_update",
 )
+
+_FTS_TRIGGERS = _BASE_FTS_TRIGGERS + _TRIGRAM_FTS_TRIGGERS
 
 
 def _set_last_init_error(msg: Optional[str]) -> None:
@@ -1245,12 +1251,25 @@ class SessionDB:
                 pass
 
     @staticmethod
-    def _fts_trigger_count(cursor: sqlite3.Cursor) -> int:
-        placeholders = ",".join("?" for _ in _FTS_TRIGGERS)
+    def _drop_trigram_fts(cursor: sqlite3.Cursor) -> None:
+        for trigger in _TRIGRAM_FTS_TRIGGERS:
+            cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        cursor.execute("DROP TABLE IF EXISTS messages_fts_trigram")
+
+    @staticmethod
+    def _fts_trigger_count(
+        cursor: sqlite3.Cursor,
+        *,
+        include_trigram: bool = True,
+    ) -> int:
+        trigger_names = (
+            _FTS_TRIGGERS if include_trigram else _BASE_FTS_TRIGGERS
+        )
+        placeholders = ",".join("?" for _ in trigger_names)
         row = cursor.execute(
             f"SELECT COUNT(*) FROM sqlite_master "
             f"WHERE type = 'trigger' AND name IN ({placeholders})",
-            _FTS_TRIGGERS,
+            trigger_names,
         ).fetchone()
         return int(row[0] if not isinstance(row, sqlite3.Row) else row[0])
 
@@ -1586,6 +1605,7 @@ class SessionDB:
             pass
 
         fts5_available = self._sqlite_supports_fts5(cursor)
+        trigram_disabled = os.environ.get("HERMES_DISABLE_FTS_TRIGRAM") == "1"
         fts_migrations_complete = True
         if not fts5_available:
             # Existing FTS triggers can still fire on messages INSERT/UPDATE
@@ -1594,6 +1614,12 @@ class SessionDB:
             # continues; if a future runtime has FTS5, _ensure_fts_schema()
             # recreates them.
             self._drop_fts_triggers(cursor)
+        elif trigram_disabled:
+            # The optional trigram index can be large. The env kill switch is
+            # authoritative on every open: remove its write triggers before
+            # dropping the table, while leaving the base FTS index intact.
+            self._drop_trigram_fts(cursor)
+            self._trigram_available = False
 
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
@@ -1621,7 +1647,7 @@ class SessionDB:
                 # v11+ code drops and rebuilds both FTS tables below, so doing
                 # the v10-only trigram backfill first only burns startup time
                 # and WAL space before v11 throws the work away.
-                if fts5_available:
+                if fts5_available and not trigram_disabled:
                     _fts_trigram_exists = self._fts_table_probe(
                         cursor, "messages_fts_trigram"
                     )
@@ -1637,7 +1663,7 @@ class SessionDB:
                             fts_migrations_complete = False
                     elif _fts_trigram_exists is None:
                         fts_migrations_complete = False
-                else:
+                elif not trigram_disabled:
                     fts_migrations_complete = False
             if current_version < 11:
                 # v11: re-index FTS5 tables to cover tool_name + tool_calls and
@@ -1679,18 +1705,20 @@ class SessionDB:
                                 "COALESCE(tool_calls, '') "
                                 "FROM messages"
                             )
-                        trigram_ok = self._ensure_fts_schema(
-                            cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
-                        )
-                        if trigram_ok:
-                            cursor.execute(
-                                "INSERT INTO messages_fts_trigram(rowid, content) "
-                                "SELECT id, "
-                                "COALESCE(content, '') || ' ' || "
-                                "COALESCE(tool_name, '') || ' ' || "
-                                "COALESCE(tool_calls, '') "
-                                "FROM messages"
+                        trigram_ok = False
+                        if not trigram_disabled:
+                            trigram_ok = self._ensure_fts_schema(
+                                cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                             )
+                            if trigram_ok:
+                                cursor.execute(
+                                    "INSERT INTO messages_fts_trigram(rowid, content) "
+                                    "SELECT id, "
+                                    "COALESCE(content, '') || ' ' || "
+                                    "COALESCE(tool_name, '') || ' ' || "
+                                    "COALESCE(tool_calls, '') "
+                                    "FROM messages"
+                                )
                         if not base_fts_ok:
                             fts_migrations_complete = False
                         # Track trigram availability for CJK LIKE fallback.
@@ -1801,13 +1829,19 @@ class SessionDB:
             # FTS5 setup. Run the DDL even when the virtual table exists so
             # CREATE TRIGGER IF NOT EXISTS repairs trigger-only degradation from
             # an earlier no-FTS5 runtime.
-            triggers_need_repair = self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
+            expected_triggers = (
+                _BASE_FTS_TRIGGERS if trigram_disabled else _FTS_TRIGGERS
+            )
+            triggers_need_repair = self._fts_trigger_count(
+                cursor,
+                include_trigram=not trigram_disabled,
+            ) < len(expected_triggers)
             self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", FTS_SQL)
 
             # Trigram FTS5 for CJK/substring search. This is optional relative
             # to the main FTS table; if it cannot be created, CJK search falls
             # back to LIKE.
-            if self._fts_enabled:
+            if self._fts_enabled and not trigram_disabled:
                 trigram_enabled = self._ensure_fts_schema(
                     cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL
                 )
@@ -1817,6 +1851,12 @@ class SessionDB:
                         cursor,
                         include_trigram=trigram_enabled,
                     )
+            elif trigram_disabled:
+                self._trigram_available = False
+                if triggers_need_repair and self._fts_enabled:
+                    self._rebuild_fts_indexes(cursor, include_trigram=False)
+                if triggers_need_repair and self._fts_enabled:
+                    self._rebuild_fts_indexes(cursor, include_trigram=False)
 
         self._conn.commit()
 
@@ -7140,9 +7180,9 @@ class SessionDB:
         speed. It is complementary to VACUUM: ``optimize`` compacts the FTS
         index internally, then VACUUM returns the freed pages to the OS.
 
-        Skips any FTS table that does not exist (e.g. the trigram index when
-        disabled via ``HERMES_DISABLE_FTS_TRIGRAM`` or not yet created), so
-        it is safe to call unconditionally.
+        Skips any FTS table that does not exist. In particular, opening a DB
+        with ``HERMES_DISABLE_FTS_TRIGRAM=1`` removes the trigram table and
+        triggers, so this method safely optimizes only the base index.
 
         Returns the number of FTS indexes that were optimized.
         """
