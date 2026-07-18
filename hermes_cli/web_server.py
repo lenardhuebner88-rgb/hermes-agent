@@ -1215,6 +1215,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # field — fold it into the agent tab rather than spawning a one-field
     # orphan category.
     "computer_use": "agent",
+    # The answer-suggestion backend intentionally has one operator-facing
+    # setting (its model). Keep that single key in the existing agent tab.
+    "agent_questions": "agent",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.
