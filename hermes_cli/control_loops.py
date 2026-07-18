@@ -615,6 +615,26 @@ def register_loops_routes(app: FastAPI) -> None:
         return {"stop_requested": True, "pack": loaded.name,
                 "note": "greift vor der nächsten Phase; laufende Phase endet regulär"}
 
+    @app.get("/api/loops/{pack}/queue/{stage}/{filename:path}")
+    def loop_queue_file(pack: str, stage: str, filename: str) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        if stage not in loop_runner.QUEUE_STAGES:
+            raise HTTPException(status_code=400, detail=f"Queue-Stufe nicht erlaubt: {stage!r}")
+        if not _FILENAME_RE.fullmatch(filename) or not filename.endswith(".md"):
+            raise HTTPException(status_code=400, detail=f"Dateiname nicht erlaubt: {filename!r}")
+        stage_dir = (_state_root() / loaded.name / "queue" / stage).resolve()
+        target = (stage_dir / filename).resolve()
+        if not target.is_relative_to(stage_dir):
+            raise HTTPException(status_code=400, detail=f"Dateiname nicht erlaubt: {filename!r}")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"Queue-Datei existiert nicht: {filename!r}")
+        return {
+            "pack": loaded.name,
+            "stage": stage,
+            "filename": filename,
+            "content": target.read_text(encoding="utf-8"),
+        }
+
     @app.get("/api/loops/{pack}/files")
     def loop_files(pack: str) -> dict[str, Any]:
         loaded = _load_pack_or_404(pack)
