@@ -147,8 +147,11 @@ export function FleetView() {
     const hasBoard = boardParam != null && boardParam !== "";
     const hasStatus = statusParam != null && statusParam !== "";
     if (!hasBoard && !hasStatus) return;
-    // Race-guard: wait until first catalog poll settles before validating board.
-    if (hasBoard && boardCatalog.loading && boardCatalog.data == null) return;
+    // Race-guard: mit ?board= erst konsumieren, wenn der Katalog wirklich DA ist.
+    // Ein transient fehlgeschlagener erster Poll hat loading=false + data=null —
+    // dann NICHT konsumieren (Params bleiben in der URL, der nächste erfolgreiche
+    // Poll wendet den Deep-Link an), sonst ginge der Link still verloren.
+    if (hasBoard && boardCatalog.data == null) return;
     deepLinkConsumedRef.current = true;
     const next = new URLSearchParams(searchParams);
     next.delete("board");
@@ -170,10 +173,18 @@ export function FleetView() {
   }, [
     searchParams,
     setSearchParams,
-    boardCatalog.loading,
     boardCatalog.data,
     setSelectedBoard,
   ]);
+
+  // Der Deep-Link-Status gilt nur für die MOUNT-Instanz von BoardTab, die ihn
+  // konsumiert. Verlässt der Operator den Board-Subtab, ist er verbraucht —
+  // sonst würde ein Remount (Heute→Board) den Filter still zurücksetzen.
+  useEffect(() => {
+    if (subtab !== "board" && deepLinkStatusFilter != null) {
+      setDeepLinkStatusFilter(null);
+    }
+  }, [subtab, deepLinkStatusFilter]);
   const planspecs = usePlanSpecs({ scope: "open", limit: 10 });
   const selectedPlanspecs = usePlanSpecs({ scope: "open", limit: 10 }, selectedBoard);
   const costs = useHermesRunsCosts();

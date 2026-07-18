@@ -293,6 +293,64 @@ describe("FleetView deep-link ?board=&status=", () => {
     expect(screen.queryByText("Blocked canary")).toBeNull();
   });
 
+  it("survives a transient catalog failure: params stay unconsumed until data arrives", async () => {
+    // Erster Poll scheitert: usePolling liefert loading=false + data=null + error.
+    // Der Deep-Link darf dann NICHT konsumiert werden (sonst still verloren).
+    const catalogBox = { data: null as typeof CATALOG | null, error: "boom" as string | null };
+    hooks.useBoardCatalog.mockImplementation(() => ({
+      data: catalogBox.data,
+      loading: false,
+      error: catalogBox.error,
+      reload,
+    }));
+
+    const { rerender } = render(
+      <MemoryRouter initialEntries={["/control/fleet?board=health-track&status=blocked"]}>
+        <FleetView />
+      </MemoryRouter>,
+    );
+
+    // Nichts konsumiert: keine Board-Auswahl persistiert, kein Subtab-Zwang.
+    expect(window.localStorage.getItem(FLEET_BOARD_STORAGE_KEY)).toBeNull();
+    expect(screen.queryByRole("combobox", { name: "Board auswählen" })).toBeNull();
+
+    // Nächster Poll liefert den Katalog → Deep-Link wird jetzt angewendet.
+    catalogBox.data = CATALOG;
+    catalogBox.error = null;
+    rerender(
+      <MemoryRouter initialEntries={["/control/fleet?board=health-track&status=blocked"]}>
+        <FleetView />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(selectValue("Board auswählen")).toBe("health-track");
+    });
+    expect(selectValue("Nach Status filtern")).toBe("blocked");
+  });
+
+  it("does not re-apply the deep-link status after leaving and re-entering the Board subtab", async () => {
+    const { getByRole } = renderFleet("/control/fleet?board=health-track&status=blocked");
+
+    await waitFor(() => {
+      expect(selectValue("Nach Status filtern")).toBe("blocked");
+    });
+
+    // Operator verlässt den Board-Subtab und kommt zurück → der Deep-Link-Status
+    // ist verbraucht; der Filter startet wie immer auf "all" statt still auf
+    // "blocked" zurückzuspringen.
+    getByRole("button", { name: "Subtab Heute" }).click();
+    await waitFor(() => {
+      expect(screen.queryByRole("combobox", { name: "Nach Status filtern" })).toBeNull();
+    });
+    getByRole("button", { name: "Subtab Board" }).click();
+    await waitFor(() => {
+      expect(selectValue("Nach Status filtern")).toBe("all");
+    });
+    // Board-Auswahl bleibt erhalten (localStorage-Semantik des Switchers).
+    expect(selectValue("Board auswählen")).toBe("health-track");
+  });
+
   it("waits for catalog load before consuming board param", async () => {
     const catalogBox = { data: null as typeof CATALOG | null, loading: true };
     hooks.useBoardCatalog.mockImplementation(() => ({
