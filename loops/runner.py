@@ -96,11 +96,14 @@ AUTOLAND_PHASE_CONTRACT = {
 
 def _autoland_safety_hash(raw: dict) -> str:
     """Hash der Landungsautorität — schließt Laufzeit-Modell und -Budgets bewusst
-    aus, bindet aber Rolle/Engine, Prompt-Zuordnung, Repo, Params und Notify.
+    aus, bindet aber Rolle/Engine, Prompt-Zuordnung, Repo, Params, Notify und die
+    Landungsziel-/Gate-Parameter (base_branch, land_remote, land_push, land_gates).
 
     So bleibt ein Modell-Swap (gpt-5.6-sol → gpt-5.5) OHNE Manifest-Drift, während
-    jede Änderung an Engine-Rolle, Prompt, Repo oder Scope-Params fail-closed
-    auffällt. `stop`/Budgets nur über die Schlüssel gebunden (Werte floaten)."""
+    jede Änderung an Engine-Rolle, Prompt, Repo, Scope-Params ODER am Push-Ziel/den
+    Land-Gates fail-closed auffällt. `stop`/Budgets nur über die Schlüssel gebunden
+    (Werte floaten). Push-Ziel und Gates dürfen NICHT floaten: land_remote=origin
+    oder land_gates=[] müssen den Hash drehen (sonst nicht fail-closed)."""
     phases = raw.get("phases") or {}
     projection = {
         "name": raw.get("name"),
@@ -115,6 +118,13 @@ def _autoland_safety_hash(raw: dict) -> str:
         "params": raw.get("params") or {},
         "notify": raw.get("notify") or {},
         "autoland": raw.get("autoland", False),
+        # Landungsziel + Gate-Ausführung binden — dieselben Defaults wie load_pack,
+        # damit ein Manifest ohne diese Keys stabil hasht, jede Abweichung (origin,
+        # land_push=false, leere/andere Gate-Liste) aber Drift erzeugt.
+        "base_branch": raw.get("base_branch", "main"),
+        "land_remote": raw.get("land_remote", "piet-fork"),
+        "land_push": raw.get("land_push", True),
+        "land_gates": raw.get("land_gates"),
     }
     canonical = json.dumps(
         projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -148,7 +158,7 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
     "dashboard-experience": AutolandContract(
         path_prefixes=("web/src/control/",),
         deny_prefixes=(),
-        safety_sha256="457e7f5aa1527478430803835c6efceb7c06f363013295a7faff5ec30677a003",
+        safety_sha256="8940bc59f98cfdb9ae45c4fec67f39da364d59a2aa5be2e67f52292adb42585c",
         prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
