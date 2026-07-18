@@ -230,10 +230,16 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
     return pack_dir
 
 
-def write_autoland_pack(packs_dir: Path, repo: Path, **overrides) -> Path:
+def write_autoland_pack(
+    packs_dir: Path,
+    repo: Path,
+    *,
+    name: str = "dashboard-experience",
+    **overrides,
+) -> Path:
     """Schreibt den exakten Fable→Sol→Fable-Vertrag für Loader-Tests."""
     pack_dir = write_pack(
-        packs_dir, "dashboard-experience", "pipeline", repo,
+        packs_dir, name, "pipeline", repo,
         autoland=True, **overrides,
     )
     manifest_path = pack_dir / "pack.yaml"
@@ -254,32 +260,47 @@ def authorize_autoland_fixture(
     monkeypatch, packs_dir: Path, repo: Path, pack_dir: Path
 ) -> None:
     """Bindet die Produktionsschienen für einen expliziten Temp-Test neu."""
+    name = pack_dir.name
     manifest = pack_dir / "pack.yaml"
     monkeypatch.setattr(runner_module, "PACKS_DIR", packs_dir)
     monkeypatch.setattr(runner_module, "AUTOLAND_EXPECTED_REPO", repo.resolve())
+    monkeypatch.setattr(runner_module, "AUTOLAND_PACK_ALLOWLIST", frozenset({name}))
+    source_contract = runner_module.AUTOLAND_CONTRACTS[name]
     monkeypatch.setattr(
         runner_module,
-        "AUTOLAND_MANIFEST_SHA256",
-        {"dashboard-experience": runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()},
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "AUTOLAND_PROMPT_SHA256",
+        "AUTOLAND_CONTRACTS",
         {
-            "dashboard-experience": {
-                prompt: runner_module.hashlib.sha256((pack_dir / prompt).read_bytes()).hexdigest()
-                for _, _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
-            }
+            **runner_module.AUTOLAND_CONTRACTS,
+            name: runner_module.AutolandContract(
+                path_prefixes=source_contract.path_prefixes,
+                deny_prefixes=source_contract.deny_prefixes,
+                manifest_sha256=runner_module.hashlib.sha256(
+                    manifest.read_bytes()
+                ).hexdigest(),
+                prompt_sha256={
+                    prompt: runner_module.hashlib.sha256(
+                        (pack_dir / prompt).read_bytes()
+                    ).hexdigest()
+                    for _, _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
+                },
+                require_visual=source_contract.require_visual,
+            ),
         },
     )
 
 
-def load_autoland_fixture(tmp_path: Path, monkeypatch, **overrides):
+def load_autoland_fixture(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    name: str = "dashboard-experience",
+    **overrides,
+):
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
-    pack_dir = write_autoland_pack(packs_dir, repo, **overrides)
+    pack_dir = write_autoland_pack(packs_dir, repo, name=name, **overrides)
     authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
-    pack = load_pack(packs_dir, "dashboard-experience")
+    pack = load_pack(packs_dir, name)
     # Nach dem erfolgreichen Vertrags-Test nur den Prozessadapter durch den
     # registrierten Fake ersetzen; der geladene Produktionsvertrag bleibt belegt.
     for phase in pack.phases.values():
@@ -394,6 +415,14 @@ def commit_control_in(cwd: Path, name: str) -> None:
     g(cwd, "commit", "-m", f"loop(test): {name}")
 
 
+def commit_path_in(cwd: Path, path: str, name: str) -> None:
+    target = cwd / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"# fix {name}\n", encoding="utf-8")
+    g(cwd, "add", "-A")
+    g(cwd, "commit", "-m", f"loop(test): {name}")
+
+
 # ── (a)+(b) Manifest laden/validieren ────────────────────────────────────────
 
 def test_shipped_builder_reviewer_pack_loads():
@@ -471,6 +500,37 @@ def test_autoland_rejects_non_allowlisted_pack(tmp_path, fake_engine):
         load_pack(tmp_path / "packs", "lander")
 
 
+def test_contract_entry_does_not_authorize_non_allowlisted_pack(
+    tmp_path, fake_engine
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_autoland_pack(
+        packs_dir, repo, name="hermes-feature-forge"
+    )
+
+    with pytest.raises(ManifestError, match="autoland nicht autorisiert"):
+        load_pack(packs_dir, "hermes-feature-forge")
+
+
+def test_allowlisted_pack_requires_complete_sha_contract(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    write_autoland_pack(
+        packs_dir, repo, name="hermes-feature-forge"
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "AUTOLAND_PACK_ALLOWLIST",
+        frozenset({"hermes-feature-forge"}),
+    )
+
+    with pytest.raises(ManifestError, match="Allowlist-Vertrag ist unvollständig"):
+        load_pack(packs_dir, "hermes-feature-forge")
+
+
 def test_autoland_allowlist_requires_pipeline(tmp_path, fake_engine):
     repo = init_repo(tmp_path / "repo")
     write_pack(
@@ -528,7 +588,9 @@ def test_dashboard_experience_manifest_still_pinned():
     # Proves the field additions did NOT require editing the SHA-pinned pack.
     manifest = PACKS_DIR / "dashboard-experience" / "pack.yaml"
     actual = runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()
-    assert actual == runner_module.AUTOLAND_MANIFEST_SHA256["dashboard-experience"]
+    assert actual == (
+        runner_module.AUTOLAND_CONTRACTS["dashboard-experience"].manifest_sha256
+    )
 
 
 def test_autoland_rejects_prompt_content_drift(tmp_path, fake_engine, monkeypatch):
@@ -1819,6 +1881,79 @@ def test_autoland_blocks_commit_outside_dashboard_scope(
     ledger = runner.ledger_path.read_text(encoding="utf-8")
     assert "außerhalb web/src/control" in ledger
     assert "modul.py" in ledger
+
+
+def test_autoland_deny_prefix_blocks_allowed_parent_scope(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch, name="hermes-feature-forge"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "hermes_cli/auth.py", "denied-auth")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Deny-Präfix" in ledger
+    assert "hermes_cli/auth.py" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
+
+
+def test_if_web_touched_backend_only_autolands_without_visual_attestation(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch, name="hermes-feature-forge"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_path_in(runner.wt, "hermes_cli/feature.py", "backend-only")
+    plan = runner.queue / "20-verified" / "P1-fertig.md"
+    plan.write_text(PLAN_BODY, encoding="utf-8")
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+    runner._land_gates = lambda repo_path, base: (True, "seamed grün")
+    pushes = []
+    runner._push = lambda repo_path: (pushes.append(str(repo_path)) or (True, "ok"))
+
+    assert runner._try_autoland("test") is True
+    assert pushes == [str(repo)]
+    assert runner.qcount("20-verified") == 0
+    assert runner.qcount("30-landed") == 1
+    assert "backend-only" in g(repo, "log", "-1", "--pretty=%s", "main").stdout
+
+
+def test_if_web_touched_control_diff_requires_visual_attestation(
+    tmp_path, fake_engine, monkeypatch
+):
+    repo, pack = load_autoland_fixture(
+        tmp_path, monkeypatch, name="hermes-hardening"
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.ensure_wt()
+    commit_control_in(runner.wt, "control-needs-visual")
+    (runner.queue / "20-verified" / "P1-fertig.md").write_text(
+        PLAN_BODY, encoding="utf-8"
+    )
+    runner.status_path.write_text(
+        "PASS fl-20260702-beispiel\n", encoding="utf-8"
+    )
+
+    assert runner._try_autoland("test") is False
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert "Visual-Attestation fehlt/unlesbar" in ledger
+    assert g(repo, "log", "-1", "--pretty=%s", "main").stdout.strip() == "init"
 
 
 def test_autoland_scope_detects_backend_to_dashboard_rename(

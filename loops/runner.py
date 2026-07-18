@@ -42,6 +42,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import yaml
 
@@ -67,12 +68,12 @@ def _utc_iso() -> str:
     """Unambiguous wire timestamp for dashboard/state consumers."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-# Operator-Entscheid 2026-07-09 (Modell-Update 2026-07-12: Fable raus, Opus 4.8
-# plant + verifiziert): genau dieser kuratierte Opus→Sol→Opus-Loop darf
-# nach einem unabhaengigen PASS ueber die deterministische Landungsleiter selbst
-# ff-mergen und nach piet-fork pushen. Die Autoritaet ist nicht nur an den Namen,
-# sondern an Quelle, Live-Repo, Rollen/Modelle und exakte Manifest-/Prompt-Inhalte
-# gebunden. Eine Pack-Kopie oder Manifest-Aenderung faellt dadurch fail-closed aus.
+# Operator-Entscheid 2026-07-18: dieselbe deterministische Opus→Sol→Opus-
+# Landungsleiter wird pro Pack vertraglich vorbereitet. hermes-hardening folgt
+# nach 3, hermes-feature-forge nach 5 sauberen manuellen Landungen. Der Flip
+# braucht jeweils Allowlist-Eintrag + autoland:true + echte Manifest-/Prompt-SHAs.
+# Bis dahin bleiben beide neuen Vertraege fail-closed. Quelle, Live-Repo,
+# Rollen/Modelle und exakte Inhalte bleiben Teil der Autoritaetsbindung.
 AUTOLAND_PACK_ALLOWLIST = frozenset({"dashboard-experience"})
 AUTOLAND_EXPECTED_REPO = Path("/home/piet/.hermes/hermes-agent").resolve()
 AUTOLAND_PHASE_CONTRACT = {
@@ -80,18 +81,54 @@ AUTOLAND_PHASE_CONTRACT = {
     "build": ("codex", "gpt-5.6-sol", "BUILDER-PROMPT.md"),
     "verify": ("claude", "claude-opus-4-8", "VERIFIER-PROMPT.md"),
 }
-AUTOLAND_PATH_PREFIXES = ("web/src/control/",)
+
+
+@dataclass(frozen=True)
+class AutolandContract:
+    path_prefixes: tuple[str, ...]
+    deny_prefixes: tuple[str, ...]
+    manifest_sha256: str | None
+    prompt_sha256: dict[str, str] | None
+    require_visual: Literal["always", "if_web_touched"]
+
+
+_HERMES_REPO_PREFIXES = ("web/src/control/", "hermes_cli/", "tests/")
+_HERMES_REPO_DENIES = (
+    "hermes_cli/auth.py",
+    "hermes_cli/dashboard_auth/",
+    "hermes_cli/kanban_db.py",
+    "web/package.json",
+    "web/package-lock.json",
+)
+
 # Werden zusammen mit den kuratierten Dateien aktualisiert. Der Loader prueft
 # beide Ebenen: menschenlesbaren Rollenvertrag und bytegenaue Inhaltsbindung.
-AUTOLAND_MANIFEST_SHA256 = {
-    "dashboard-experience": "656a47081bc6e91fcb06c1346c93f93316a08a8db9588d1aa7604ee3e86e3eff",
-}
-AUTOLAND_PROMPT_SHA256 = {
-    "dashboard-experience": {
+AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
+    "dashboard-experience": AutolandContract(
+        path_prefixes=("web/src/control/",),
+        deny_prefixes=(),
+        manifest_sha256="656a47081bc6e91fcb06c1346c93f93316a08a8db9588d1aa7604ee3e86e3eff",
+        prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
         "VERIFIER-PROMPT.md": "05916a02da05f005c64407decb2468e296565e356d04c04da6ac5b3916ebd441",
-    },
+        },
+        require_visual="always",
+    ),
+    "hermes-feature-forge": AutolandContract(
+        path_prefixes=_HERMES_REPO_PREFIXES,
+        deny_prefixes=_HERMES_REPO_DENIES,
+        manifest_sha256=None,
+        prompt_sha256=None,
+        require_visual="if_web_touched",
+    ),
+    "hermes-hardening": AutolandContract(
+        path_prefixes=_HERMES_REPO_PREFIXES,
+        deny_prefixes=_HERMES_REPO_DENIES,
+        manifest_sha256=None,
+        prompt_sha256=None,
+        require_visual="if_web_touched",
+    ),
 }
 
 PHASES_BY_TYPE = {"pipeline": ("plan", "build", "verify"), "sweep": ("round",)}
@@ -232,6 +269,15 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
     if not isinstance(autoland_raw, bool):
         raise ManifestError(f"Pack {name!r}: autoland muss boolean sein")
     autoland = autoland_raw
+    autoland_contract = AUTOLAND_CONTRACTS.get(name)
+    if name in AUTOLAND_PACK_ALLOWLIST and (
+        autoland_contract is None
+        or autoland_contract.manifest_sha256 is None
+        or autoland_contract.prompt_sha256 is None
+    ):
+        raise ManifestError(
+            f"Pack {name!r}: Allowlist-Vertrag ist unvollständig (echte SHAs fehlen)"
+        )
     if autoland and name not in AUTOLAND_PACK_ALLOWLIST:
         raise ManifestError(
             f"Pack {name!r}: autoland nicht autorisiert; Allowlist="
@@ -261,16 +307,15 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 "erwartet Opus→Sol→Opus mit den kuratierten Prompts"
             )
         manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        if manifest_hash != AUTOLAND_MANIFEST_SHA256.get(name):
+        if manifest_hash != autoland_contract.manifest_sha256:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Manifestinhalt weicht vom kuratierten Hash ab"
             )
-        expected_prompts = AUTOLAND_PROMPT_SHA256.get(name, {})
         actual_prompts = {
             cfg.prompt: hashlib.sha256((pack_dir / cfg.prompt).read_bytes()).hexdigest()
             for cfg in phases.values()
         }
-        if actual_prompts != expected_prompts:
+        if actual_prompts != autoland_contract.prompt_sha256:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Promptinhalt weicht vom kuratierten Hash ab"
             )
@@ -1015,6 +1060,36 @@ class LoopRunner:
         self.notify(f"ℹ️ {self.pack.name}: {note}; manuell prüfen und landen")
         return True
 
+    def _autoland_contract(self) -> AutolandContract:
+        """Return the already loader-validated per-pack landing contract."""
+        contract = AUTOLAND_CONTRACTS.get(self.pack.name)
+        if contract is None:
+            raise RuntimeError(
+                f"Pack {self.pack.name}: kein per-Pack-Autoland-Vertrag vorhanden"
+            )
+        return contract
+
+    def _autoland_touched_paths(self) -> tuple[list[str] | None, str]:
+        scope = self.git(
+            "diff", "--no-renames", "--name-only",
+            f"main...{self.pack.branch}", cwd=self.pack.repo,
+        )
+        if scope.returncode != 0:
+            return None, f"Commit-Scope nicht lesbar: {scope.stderr.strip()[:200]}"
+        return [line.strip() for line in scope.stdout.splitlines() if line.strip()], ""
+
+    def _autoland_visual_required(self, touched: list[str] | None = None) -> bool:
+        contract = self._autoland_contract()
+        if contract.require_visual == "always":
+            return True
+        if touched is None:
+            touched, _ = self._autoland_touched_paths()
+        # Ein unlesbarer Scope darf nie als vermeintlicher Backend-only-Diff die
+        # visuelle Pflicht umgehen.
+        return touched is None or any(
+            path.startswith("web/src/control/") for path in touched
+        )
+
     # ── Queue-Disposition (pipeline) ──
     def qcount(self, stage: str) -> int:
         stage_dir = self.queue / stage
@@ -1423,9 +1498,16 @@ class LoopRunner:
             except OSError:
                 plan_text = ""
             pass_matches = pass_status_matches_plan(status, plan_text, building)
-            visual_ok = not self.pack.autoland
-            visual_report = "für Review-only-Pack nicht erforderlich"
-            if verify.rc == 0 and pass_matches and self.pack.autoland:
+            visual_required = (
+                self.pack.autoland and self._autoland_visual_required()
+            )
+            visual_ok = not visual_required
+            visual_report = (
+                "für Review-only-Pack nicht erforderlich"
+                if not self.pack.autoland
+                else "für Backend-only-Diff nicht erforderlich"
+            )
+            if verify.rc == 0 and pass_matches and visual_required:
                 evidence_after = self._verifier_evidence_dirs()
                 fresh_evidence = sorted(evidence_after - evidence_before)
                 if len(fresh_evidence) != 1:
@@ -1535,21 +1617,30 @@ class LoopRunner:
             return False, f"Queue nicht abgeschlossen: planned={planned}, building={building}"
         if verified != 1 or ahead != 1:
             return False, f"erwartet verified=1/ahead=1, ist verified={verified}/ahead={ahead}"
-        scope = self.git(
-            "diff", "--no-renames", "--name-only",
-            f"main...{self.pack.branch}", cwd=self.pack.repo,
-        )
-        if scope.returncode != 0:
-            return False, f"Commit-Scope nicht lesbar: {scope.stderr.strip()[:200]}"
-        touched = [line.strip() for line in scope.stdout.splitlines() if line.strip()]
+        contract = self._autoland_contract()
+        touched, scope_error = self._autoland_touched_paths()
+        if touched is None:
+            return False, scope_error
+        denied = [
+            path
+            for path in touched
+            if any(path.startswith(prefix) for prefix in contract.deny_prefixes)
+        ]
+        if denied:
+            return False, "Commit-Scope trifft Deny-Präfix: " + ", ".join(denied)
         outside = [
             path
             for path in touched
-            if not any(path.startswith(prefix) for prefix in AUTOLAND_PATH_PREFIXES)
+            if not any(path.startswith(prefix) for prefix in contract.path_prefixes)
         ]
         if not touched or outside:
+            scope_label = (
+                "web/src/control/**"
+                if self.pack.name == "dashboard-experience"
+                else f"erlaubter Präfixe {contract.path_prefixes}"
+            )
             return False, (
-                "Commit-Scope außerhalb web/src/control/**: "
+                f"Commit-Scope außerhalb {scope_label}: "
                 + (", ".join(outside) if outside else "keine geänderten Dateien")
             )
         verified_plans = sorted((self.queue / "20-verified").glob("*.md"))
@@ -1568,11 +1659,14 @@ class LoopRunner:
         branch_head = self.git(
             "rev-parse", f"refs/heads/{self.pack.branch}", cwd=self.pack.repo
         ).stdout.strip()
-        visual_ok, visual_report = self._visual_attestation_ready(
-            plan_text, branch_head
-        )
-        if not visual_ok:
-            return False, visual_report
+        if self._autoland_visual_required(touched):
+            visual_ok, visual_report = self._visual_attestation_ready(
+                plan_text, branch_head
+            )
+            if not visual_ok:
+                return False, visual_report
+        else:
+            visual_report = "Visual-Attestation für Backend-only-Diff nicht erforderlich"
         return True, (
             f"genau ein verifizierter Plan ({plan_id}), ein Commit und "
             f"{visual_report}"
