@@ -1,4 +1,4 @@
-import type { KeyboardEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -42,7 +42,7 @@ function fleetChipHref(board: string, status?: TaskStatus): string {
   return `/control/fleet?${params.toString()}`;
 }
 
-/** Touch-friendly chip link; stopPropagation so the card drawer stays closed. */
+/** Touch-friendly chip link; stopPropagation stays as defensive isolation. */
 function KanbanChipLink({
   to,
   children,
@@ -62,7 +62,7 @@ function KanbanChipLink({
         event.stopPropagation();
       }}
       onKeyDown={(event) => {
-        // Nested interactive inside role=button card: keep Enter/Space from opening drawer.
+        // Defensive isolation if the link is reused inside a clickable parent.
         event.stopPropagation();
       }}
       className={cn(
@@ -131,11 +131,11 @@ export interface ProjectCardProps {
 }
 
 /** Eine Karte pro Projekt — die Grundeinheit des Projekte-Tabs.
- *  Klick / Enter / Space öffnet den Detail-Drawer. Der frühere Footer mit
+ *  Der Titel-Button öffnet den Detail-Drawer. Der frühere Footer mit
  *  anonymen Agent-Chips ist seit 2026-07-17 in zwei Sektionen aufgeteilt:
  *  SESSIONS (echte laufende tmux-Prozesse, mit Laufzeit + ✕-Kill) und
  *  CHECK-INS (Vault-Claims mit Task-Text, bewusst NICHT killbar). Der Kill-
- *  Button stoppt die Propagation, damit nicht der Drawer aufgeht. */
+ *  Button behält seine defensive Propagation-Isolation. */
 export function ProjectCard({ project, agents, parentName, attention, now, onOpen, onKillSession }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
@@ -149,27 +149,10 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
   const showBadge = level !== "quiet";
   const reasons = attention.reasons;
 
-  const onKeyDown = (event: KeyboardEvent) => {
-    // Only the card itself opens the drawer: Enter/Space on a NESTED control
-    // (the kill button) must not bubble up and open the drawer alongside the
-    // sheet (Fable review 2026-07-17, obs. 1).
-    if (event.target !== event.currentTarget) return;
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      onOpen();
-    }
-  };
-
   return (
     <Card
       surface="card"
-      interactive
-      className="relative overflow-hidden flex h-full flex-col gap-3 p-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze"
-      ariaLabel={t.detailOpenAria(project.name)}
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={onKeyDown}
+      className="relative overflow-hidden flex h-full flex-col gap-3 p-4"
     >
       <span
         aria-hidden
@@ -187,7 +170,16 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
               data-tone={tone}
               className={cn("size-1.5 shrink-0 rounded-full", ATTENTION_DOT[level])}
             />
-            <h3 className="min-w-0 truncate text-sec font-semibold text-ink">{project.name}</h3>
+            <h3 className="min-w-0 text-sec font-semibold">
+              <button
+                type="button"
+                aria-label={t.detailOpenAria(project.name)}
+                onClick={onOpen}
+                className="inline-flex min-h-11 max-w-full items-center truncate text-left text-ink hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze tab:min-h-0"
+              >
+                <span className="truncate">{project.name}</span>
+              </button>
+            </h3>
             {showBadge ? (
               <span
                 data-attention-badge={level}

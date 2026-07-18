@@ -53,25 +53,41 @@ function renderCard(overrides: Partial<Parameters<typeof ProjectCard>[0]> = {}) 
     onKillSession: vi.fn(),
     ...overrides,
   };
-  render(
+  const view = render(
     <MemoryRouter>
       <ProjectCard {...props} />
     </MemoryRouter>,
   );
-  return props;
+  return { ...props, container: view.container };
 }
 
-describe("ProjectCard keyboard interaction (Fable obs. 1)", () => {
+describe("ProjectCard drawer interaction", () => {
   afterEach(() => cleanup());
 
-  it("Enter on the card opens the drawer", () => {
+  it("clicking the title button opens the drawer", () => {
     const props = renderCard();
-    const card = screen.getByRole("button", { name: "Projekt Hermes Infra öffnen" });
-    fireEvent.keyDown(card, { key: "Enter" });
+    const titleButton = screen.getByRole("button", { name: "Projekt Hermes Infra öffnen" });
+    fireEvent.click(titleButton);
     expect(props.onOpen).toHaveBeenCalledTimes(1);
   });
 
-  it("Enter on the nested kill button opens the kill flow ONLY, not the drawer", () => {
+  it("keeps the card container non-interactive", () => {
+    const props = renderCard();
+    const card = props.container.firstElementChild;
+    expect(card).toBeTruthy();
+    expect(card?.getAttribute("role")).toBeNull();
+    expect(card?.getAttribute("tabindex")).toBeNull();
+  });
+
+  it("does not open the drawer when the card surface is clicked", () => {
+    const props = renderCard();
+    const card = props.container.firstElementChild;
+    expect(card).toBeTruthy();
+    fireEvent.click(card as Element);
+    expect(props.onOpen).not.toHaveBeenCalled();
+  });
+
+  it("Enter on the kill button opens the kill flow ONLY, not the drawer", () => {
     const props = renderCard();
     const kill = screen.getByRole("button", { name: "Session work:2 kimi beenden" });
     fireEvent.keyDown(kill, { key: "Enter" });
@@ -232,4 +248,3 @@ describe("ProjectCard attention badge + reason chips (2.3 Ampel)", () => {
     expect(cls).toContain("tab:min-h-7");
   });
 });
-
