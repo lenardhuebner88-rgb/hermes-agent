@@ -51,6 +51,38 @@ def gated_app():
     web_server.app.state.auth_required = prev_required
 
 
+@pytest.fixture
+def gated_pwa_app(monkeypatch, tmp_path):
+    """Serve a minimal built PWA through the real auth gate and SPA mount."""
+    from fastapi import FastAPI, Request
+
+    from hermes_cli.dashboard_auth.middleware import gated_auth_middleware
+
+    dist = tmp_path / "web_dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "icons").mkdir()
+    for relative_path in (
+        "manifest.webmanifest",
+        "icons/icon-192.png",
+        "sw.js",
+        "registerSW.js",
+        "workbox-0000dead.js",
+    ):
+        (dist / relative_path).write_text("pwa fixture", encoding="utf-8")
+    (dist / "index.html").write_text("<html><head></head></html>", encoding="utf-8")
+
+    monkeypatch.setattr(web_server, "WEB_DIST", dist)
+    application = FastAPI()
+    application.state.auth_required = True
+
+    @application.middleware("http")
+    async def dashboard_auth_gate(request: Request, call_next):
+        return await gated_auth_middleware(request, call_next)
+
+    web_server.mount_spa(application)
+    return TestClient(application)
+
+
 # ---------------------------------------------------------------------------
 # Allowlist (public) routes
 # ---------------------------------------------------------------------------
@@ -153,21 +185,21 @@ def test_gated_static_asset_path_is_public(gated_app):
     "/sw.js",
     "/registerSW.js",
 ])
-def test_gated_pwa_static_paths_are_public(gated_app, path):
+def test_gated_pwa_static_paths_are_public(gated_pwa_app, path):
     """PWA install metadata must load before login in gated deployments."""
-    r = gated_app.get(path, follow_redirects=False)
+    r = gated_pwa_app.get(path, follow_redirects=False)
     assert r.status_code == 200, (
         f"{path} should bypass the OAuth gate for installability, got "
         f"{r.status_code}: {r.text[:200]}"
     )
 
 
-def test_gated_workbox_chunk_passes_the_gate(gated_app):
+def test_gated_workbox_chunk_passes_the_gate(gated_pwa_app):
     """Workbox chunks carry a build hash in the filename, so assert the
     prefix passes the middleware instead of pinning a hash that changes
     every build. Unknown non-API paths land on the SPA fallback (200);
     the gate would answer 302 — so any 200 proves the gate was bypassed."""
-    r = gated_app.get("/workbox-0000dead.js", follow_redirects=False)
+    r = gated_pwa_app.get("/workbox-0000dead.js", follow_redirects=False)
     assert r.status_code == 200, (
         f"/workbox-* should bypass the OAuth gate (SW imports it), got "
         f"{r.status_code}"
