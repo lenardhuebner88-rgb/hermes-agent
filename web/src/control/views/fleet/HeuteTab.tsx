@@ -11,10 +11,15 @@ import type { DotKind } from "../../lib/tones";
 import {
   buildLagezeile,
   runProgressFraction,
+  heartbeatAge,
+  fmtSeconds,
   deriveKpi,
   fmtTokens,
   planSpecHasParkedSignedChain,
   planSpecWaitsForOperator,
+  profileInitial,
+  profileColorClass,
+  premiumLaneMarker,
   deriveSparklinePoints,
   type SparklinePoint,
   type PlanSpecActionState,
@@ -28,6 +33,9 @@ import { LaneQuickSwitch } from "./LaneQuickSwitch";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
 import { Led } from "../../components/atoms";
 import { profileLabel } from "../../lib/tones";
+import { elapsedSeconds } from "../../lib/derive";
+import { BoardBadge } from "../../components/fleet/BoardIdentity";
+import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 
 export function ExpandableText({ text, className }: { text: string; className: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -73,10 +81,11 @@ interface HeuteTabProps {
   /** Wartende Freigaben + Operator-Halts (aus FleetView), für den Handlungsblock. */
   pendingItems: PendingItem[];
   onWorkerClick: (w: Worker) => void;
+  onPlanSpecClick: (ps: PlanSpecRecord) => void;
   onNavigate: (target: HeuteNavTarget) => void;
 }
 
-export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, pendingItems, onWorkerClick, onNavigate }: HeuteTabProps) {
+export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, pendingItems, onWorkerClick, onPlanSpecClick, onNavigate }: HeuteTabProps) {
   const [costDrawerOpen, setCostDrawerOpen] = useState(false);
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
@@ -90,19 +99,6 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
   // Liefert null bei <2 Punkten → keine Sparkline (kein Fake, keine Platzhalter).
   const sparklinePts = useMemo(() => deriveSparklinePoints(daily), [daily]);
   const activeProfileBreakdown = useMemo(() => formatActiveProfileBreakdown(activeWorkers), [activeWorkers]);
-  const operationalWorkers = useMemo(() => {
-    const rows = [...activeWorkers];
-    const seen = new Set(rows.map((worker) => `${worker.board_slug ?? "current"}:${worker.run_id}`));
-    for (const worker of allWorkers) {
-      if (worker.task_status !== "blocked" && worker.task_status !== "review") continue;
-      const key = `${worker.board_slug ?? "current"}:${worker.run_id}`;
-      if (!seen.has(key)) {
-        rows.push(worker);
-        seen.add(key);
-      }
-    }
-    return rows;
-  }, [activeWorkers, allWorkers]);
   const costAverageDimension = useMemo(
     () => formatCostAverageDimension(costs, kpi.kosten24hEquiv),
     [costs, kpi.kosten24hEquiv],
@@ -175,20 +171,12 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
 
       {/* 2. Aktive Worker und laufende Arbeit — vor den KPIs und PlanSpecs.
           Bei null aktiven Workern ein kompakter Idle-Zustand statt Leere. */}
-      <div className="fleet-section-head">
-        <p className="fleet-section-eyebrow">Jetzt</p>
-        {operationalWorkers.length > 0 ? (
-          <button type="button" className="fleet-section-link" onClick={() => onNavigate("worker")}>
-            Zum Worker-Tab
-            <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-          </button>
-        ) : null}
-      </div>
-      {operationalWorkers.length === 0 ? (
+      <p className="fleet-section-eyebrow">Jetzt</p>
+      {activeWorkers.length === 0 ? (
         <div className="fleet-idle">Keine Worker aktiv — Board ruht.</div>
       ) : (
-        operationalWorkers.map((w) => (
-          <WorkerRow key={`${w.board_slug ?? "current"}:${w.run_id}`} worker={w} now={now} onClick={() => onWorkerClick(w)} />
+        activeWorkers.map((w) => (
+          <WorkerCard key={`${w.board_slug ?? "current"}:${w.run_id}`} worker={w} now={now} onClick={() => onWorkerClick(w)} />
         ))
       )}
 
@@ -237,8 +225,8 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       {rankedPlanspecs.length > 0 ? (
         <>
           <p className="fleet-section-eyebrow fleet-section-eyebrow-plan">Planung</p>
-          {rankedPlanspecs.slice(0, 3).map((ps) => (
-            <PlanSpecReference key={ps.path} ps={ps} onClick={() => onNavigate("plan")} />
+          {rankedPlanspecs.map((ps) => (
+            <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
           ))}
         </>
       ) : null}
@@ -556,61 +544,83 @@ function LagezeileFormatted({ text }: { text: string }) {
   );
 }
 
-// ─── Kompakte Worker-Zeile ───────────────────────────────────────────────────
+// ─── Worker-Karte ────────────────────────────────────────────────────────────
 
-function workerRowStatus(w: Worker): { label: string; tone: "live" | "warn" | "error" } {
-  if (w.task_status === "review" || w.run_status === "review") {
-    return { label: "Wartet auf Review", tone: "warn" };
-  }
-  if (w.task_status === "blocked" || w.run_status === "blocked") {
-    return { label: "Blockiert", tone: "error" };
-  }
-  return { label: "Laufend", tone: "live" };
-}
-
-function compactModel(w: Worker): string {
-  const model = w.active_model || w.effective_model || w.requested_model;
-  return model ? model.split("/").at(-1)! : "—";
-}
-
-function WorkerRow({ worker: w, now, onClick }: { worker: Worker; now: number; onClick: () => void }) {
-  const progress = runProgressFraction(w, now);
-  const percent = progress == null ? null : Math.round(progress * 100);
-  const status = workerRowStatus(w);
+function WorkerCard({ worker: w, now, onClick }: { worker: Worker; now: number; onClick: () => void }) {
+  const hbAge = heartbeatAge(w.last_heartbeat_at, now);
+  const fraction = runProgressFraction(w, now);
+  const isEstimated = w.run_progress == null && fraction != null;
+  const elapsedSec = elapsedSeconds(w.started_at, now) ?? Number.NaN;
+  const initial = profileInitial(w.profile);
+  const colorCls = profileColorClass(w.profile);
+  const isLive = w.run_status === "running";
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      className="fleet-wk-row"
+    <button
+      type="button"
+      className={`fleet-wk text-left${isLive ? " fleet-wk-lebt" : ""}`}
       onClick={onClick}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onClick();
-        }
-      }}
       aria-label={`Worker ${w.profile} öffnen`}
     >
-      <span className={`fleet-wk-row-status fleet-wk-row-status-${status.tone}`}>
-        <span className="fleet-wk-row-dot" aria-hidden="true" />
-        {status.label}
-      </span>
+      {/* Top-Zeile: Avatar + Name + LED */}
+      <div className="fleet-wk-top">
+        <div className={`fleet-avatar ${colorCls}`} {...premiumLaneMarker(w.profile)}>{initial}</div>
+        <div className="fleet-wk-name">
+          {w.profile}
+          <span>{w.task_id.slice(0, 10)}</span>
+        </div>
+        <BoardBadge slug={w.board_slug} />
+        {isLive && hbAge != null ? (
+          <div className="fleet-led">
+            <span className="fleet-led-dot" />
+            ♥ {fmtSeconds(hbAge)}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Task-Titel */}
       <ExpandableText className="fleet-wk-task" text={w.task_title} />
-      <span className="fleet-wk-row-progress" title={w.run_progress == null ? "Fortschritt geschätzt" : "Fortschritt"}>
-        {percent == null ? "—" : `${percent} %`}
-      </span>
-      <span className="fleet-wk-row-model" title={w.active_model || w.effective_model || w.requested_model || "Modell unbekannt"}>
-        {compactModel(w)}
-      </span>
-      <ArrowRight className="fleet-wk-row-arrow" aria-hidden="true" />
-    </div>
+
+      {/* Heartbeat-Notiz */}
+      {w.last_heartbeat_note ? (
+        <ExpandableText className="fleet-wk-note" text={w.last_heartbeat_note} />
+      ) : null}
+
+      {/* Progress-Rail — S2: run_progress wenn vorhanden, sonst ETA-Heuristik (~) */}
+      {fraction != null ? (
+        <div className="fleet-rail" title={isEstimated ? "Fortschritt geschätzt (ETA-Heuristik)" : "Fortschritt (Runtime-Cap)"}>
+          <div className="fleet-rail-fill" style={{ width: `${Math.round(fraction * 100)}%` }} />
+        </div>
+      ) : null}
+
+      <div className="mt-2 flex min-w-0">
+        <ModelRouteBadge
+          requestedProvider={w.requested_provider}
+          requestedModel={w.requested_model}
+          activeProvider={w.active_provider}
+          activeModel={w.active_model}
+          modelState={w.model_state}
+          modelSource={w.model_source}
+          observedAt={w.model_observed_at}
+        />
+      </div>
+
+      {/* Meta-Zeile */}
+      <div className="fleet-wk-meta">
+        <span>{fmtTokens(w.input_tokens)} → {fmtTokens(w.output_tokens)} tok</span>
+        <span>seit {fmtSeconds(elapsedSec)}</span>
+        {w.eta_p50_seconds ? (
+          <span className="fleet-meta-right">ETA ~{fmtSeconds(Number.isFinite(elapsedSec) ? Math.max(0, w.eta_p50_seconds - elapsedSec) : Number.NaN)}</span>
+        ) : null}
+      </div>
+    </button>
   );
 }
 
-// ─── Kompakter PlanSpec-Verweis ───────────────────────────────────────────────
+// ─── PlanSpec-Karte ───────────────────────────────────────────────────────────
 
-function PlanSpecReference({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
+function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
+  const fraction = ps.kanban_child_total > 0 ? ps.kanban_child_done / ps.kanban_child_total : null;
   const waitsForOp = planSpecWaitsForOperator(ps.freigabe, ps.kanban_state);
   const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   const isRunning = ps.kanban_state === "running";
@@ -629,20 +639,28 @@ function PlanSpecReference({ ps, onClick }: { ps: PlanSpecRecord; onClick: () =>
   }
 
   return (
-    <button
-      type="button"
-      className="fleet-ps-ref"
-      onClick={onClick}
-      aria-label={`PlanSpec ${ps.topic || ps.filename} im Plan-Tab öffnen`}
-    >
-      <span className="fleet-ps-topic">{ps.topic || ps.filename}</span>
-      <SignalChip
-        tone={badgeTone}
-        label={badgeLabel}
-        title={badgeLabel}
-        className="min-w-0 max-w-[min(52%,28rem)] shrink overflow-hidden"
-      />
-      <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+    <button type="button" className="fleet-ps" onClick={onClick}>
+      <div className="fleet-ps-top">
+        <ExpandableText className="fleet-ps-name" text={ps.topic || ps.filename} />
+        <SignalChip
+          tone={badgeTone}
+          label={badgeLabel}
+          title={badgeLabel}
+          className="ml-auto min-w-0 max-w-[min(52%,28rem)] shrink overflow-hidden"
+        />
+      </div>
+      {fraction != null ? (
+        <div className="fleet-rail">
+          <div className="fleet-rail-fill" style={{ width: `${Math.round(fraction * 100)}%` }} />
+        </div>
+      ) : null}
+      <div className="fleet-ps-meta">
+        {ps.kanban_child_total > 0 ? (
+          <span><b>{ps.kanban_child_done}</b>/{ps.kanban_child_total} Karten</span>
+        ) : null}
+        <span>{ps.freigabe}</span>
+        {ps.live_test_depth ? <span>{ps.live_test_depth}</span> : null}
+      </div>
     </button>
   );
 }
