@@ -112,7 +112,7 @@ class TestMattermostWSAuthRetry:
 class TestMatrixSyncAuthRetry:
     """gateway/platforms/matrix.py — _sync_loop()"""
 
-    def test_unknown_token_sync_error_stops_loop(self):
+    def test_unknown_token_sync_error_stops_loop(self, monkeypatch):
         """A SyncError with M_UNKNOWN_TOKEN should stop syncing."""
         import types
         nio_mock = types.ModuleType("nio")
@@ -143,16 +143,13 @@ class TestMatrixSyncAuthRetry:
 
         async def run():
             import sys
-            sys.modules["nio"] = nio_mock
-            try:
-                await adapter._sync_loop()
-            finally:
-                del sys.modules["nio"]
+            monkeypatch.setitem(sys.modules, "nio", nio_mock)
+            await adapter._sync_loop()
 
         asyncio.run(run())
         assert sync_count == 1
 
-    def test_exception_with_401_stops_loop(self):
+    def test_exception_with_401_stops_loop(self, monkeypatch):
         """An exception containing '401' should stop syncing."""
         from plugins.platforms.matrix.adapter import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
@@ -178,16 +175,13 @@ class TestMatrixSyncAuthRetry:
             nio_mock.SyncError = type("SyncError", (), {})
 
             import sys
-            sys.modules["nio"] = nio_mock
-            try:
-                await adapter._sync_loop()
-            finally:
-                del sys.modules["nio"]
+            monkeypatch.setitem(sys.modules, "nio", nio_mock)
+            await adapter._sync_loop()
 
         asyncio.run(run())
         assert call_count == 1
 
-    def test_transient_error_retries(self):
+    def test_transient_error_retries(self, monkeypatch):
         """A transient error should retry (not stop immediately)."""
         from plugins.platforms.matrix.adapter import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
@@ -216,12 +210,9 @@ class TestMatrixSyncAuthRetry:
             nio_mock.SyncError = type("SyncError", (), {})
 
             import sys
-            sys.modules["nio"] = nio_mock
-            try:
-                with patch("asyncio.sleep", new_callable=AsyncMock):
-                    await adapter._sync_loop()
-            finally:
-                del sys.modules["nio"]
+            monkeypatch.setitem(sys.modules, "nio", nio_mock)
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                await adapter._sync_loop()
 
         asyncio.run(run())
         assert call_count >= 2
