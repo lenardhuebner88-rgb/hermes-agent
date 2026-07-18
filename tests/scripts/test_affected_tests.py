@@ -62,6 +62,37 @@ def test_monolith_source_falls_back_to_package_dir():
     assert "tests/gateway/" in out
 
 
+def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
+    """Known monoliths select their maintained feature tests, not the package."""
+    mod = _load_module()
+    cases = {
+        "hermes_cli/strategist.py": ("test_strategist*.py",),
+        "hermes_cli/kanban_db.py": (
+            "test_kanban_db*.py",
+            "test_kanban_lanes.py",
+            "test_kanban_block_kind*.py",
+        ),
+        "hermes_cli/kanban_worktrees.py": (
+            "test_kanban_worktrees*.py",
+            "test_visual_gate.py",
+        ),
+    }
+
+    for source, patterns in cases.items():
+        expected = sorted(
+            {
+                str(path.relative_to(REPO_ROOT))
+                for pattern in patterns
+                for path in (REPO_ROOT / "tests/hermes_cli").glob(pattern)
+            }
+        )
+        selected = mod.affected_pytest_modules(REPO_ROOT, [source])
+
+        assert expected, f"fixture patterns for {source} must match real tests"
+        assert selected == expected
+        assert "tests/hermes_cli/" not in selected
+
+
 def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
     """When the package test directory exceeds _FALLBACK_MAX_TEST_FILES,
     the fallback downgrades to no selection — the nightly full suite
@@ -97,7 +128,6 @@ def test_matches_kanban_worktrees_mapping():
     from hermes_cli.kanban_worktrees import _affected_pytest_modules
 
     sample = [
-        "hermes_cli/kanban_db.py",
         "hermes_cli/config.py",
         "gateway/run.py",
         "tests/hermes_cli/test_kanban_cli.py",
@@ -110,17 +140,16 @@ def test_matches_kanban_worktrees_mapping():
 
 
 def test_changed_module_selects_feature_named_sibling_tests_from_imports():
-    """Historical stale-sibling shape: direct test green, feature test stale.
+    """The explicit kanban DB mapping retains its feature-split DB tests.
 
     tests/hermes_cli/test_kanban_db.py was split into domain files
-    (2213f85be); the import-based siblings must still be selected."""
+    (2213f85be), so the mapping must retain those files."""
     mod = _load_module()
 
     selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/kanban_db.py"])
 
     assert "tests/hermes_cli/test_kanban_db_schema.py" in selected
-    # Root-level feature tests are import-scanned too.
-    assert "tests/test_design_board_kanban.py" in selected
+    assert "tests/test_design_board_kanban.py" not in selected
 
 
 def test_changed_module_selects_submodule_from_import_sibling_tests():
