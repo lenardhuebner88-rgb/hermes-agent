@@ -71,8 +71,13 @@ function parseFeed(payload: unknown = REAL_FEED_PAYLOAD): ProjectReceiptEntry[] 
   return parseOrThrow(ProjectsReceiptsResponseSchema, payload, "test").receipts;
 }
 
-function renderFeed(receipts: ProjectReceiptEntry[] = parseFeed()) {
-  return render(<ReceiptsFeed receipts={receipts} projectNames={NAMES} now={NOW} />);
+function renderFeed(
+  receipts: ProjectReceiptEntry[] = parseFeed(),
+  opts: { error?: boolean } = {},
+) {
+  return render(
+    <ReceiptsFeed receipts={receipts} projectNames={NAMES} now={NOW} error={opts.error} />,
+  );
 }
 
 afterEach(() => cleanup());
@@ -152,5 +157,22 @@ describe("ReceiptsFeed", () => {
     expect(
       screen.getByText("Noch keine Receipts — Agents legen sie nach abgeschlossener Arbeit im Vault ab."),
     ).toBeTruthy();
+  });
+
+  it("shows the section title and inline error when fetch failed and list is empty", () => {
+    renderFeed([], { error: true });
+    expect(screen.getByText("Ergebnisse")).toBeTruthy();
+    expect(screen.getByText("Receipts konnten nicht geladen werden.")).toBeTruthy();
+    expect(
+      screen.queryByText("Noch keine Receipts — Agents legen sie nach abgeschlossener Arbeit im Vault ab."),
+    ).toBeNull();
+  });
+
+  it("keeps the list visible when error is set but data is still present", () => {
+    renderFeed(parseFeed(), { error: true });
+    expect(screen.getByText("Ergebnisse")).toBeTruthy();
+    expect(screen.getByText("B3 coordination parser drift receipt")).toBeTruthy();
+    expect(screen.getByText("Codex")).toBeTruthy();
+    expect(screen.queryByText("Receipts konnten nicht geladen werden.")).toBeNull();
   });
 });

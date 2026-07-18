@@ -66,13 +66,15 @@ export interface ReceiptsFeedProps {
   /** slug → display name for the project chip; missing slugs fall back to the raw slug. */
   projectNames: Readonly<Record<string, string>>;
   now: number;
+  /** Fetch failed: empty list → inline error in the section; data still present → keep list. */
+  error?: boolean;
 }
 
 /** "Ergebnisse" — der projektübergreifende Receipt-Feed: welcher Agent hat
  *  zuletzt was abgeschlossen (Vault-Receipts, neueste zuerst, Backend-Cap 30).
  *  Zeilenklick öffnet das Lese-Sheet (ReceiptSheet). Read-only by design —
  *  der Feed beantwortet "was kam raus", nicht "greif ein". */
-export function ReceiptsFeed({ receipts, projectNames, now }: ReceiptsFeedProps) {
+export function ReceiptsFeed({ receipts, projectNames, now, error = false }: ReceiptsFeedProps) {
   const [expanded, setExpanded] = useState(false);
   const [selected, setSelected] = useState<ProjectReceiptEntry | null>(null);
   const visible = expanded ? receipts : receipts.slice(0, RECEIPTS_VISIBLE);
@@ -85,7 +87,13 @@ export function ReceiptsFeed({ receipts, projectNames, now }: ReceiptsFeedProps)
       </header>
 
       {receipts.length === 0 ? (
-        <p className="text-sec text-ink-3">{t.receiptsEmpty}</p>
+        error ? (
+          <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+            {t.receiptsError}
+          </div>
+        ) : (
+          <p className="text-sec text-ink-3">{t.receiptsEmpty}</p>
+        )
       ) : (
         <>
           <ul className="min-w-0 space-y-1">

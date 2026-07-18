@@ -506,13 +506,26 @@ describe("ProjekteView", () => {
     expect(posFeed).toBeLessThan(posSessions);
   });
 
-  it("surfaces the receipts-endpoint error banner without breaking the rest", () => {
+  it("keeps the Ergebnisse section with inline error on receipts fetch failure (no top-level banner)", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
-    mockReceipts({ error: "scan failed" });
+    // data null + error set: the section must still mount with the inline error
+    // state; the old top-level receipts banner is gone (error lives in-section).
+    mockReceipts({ data: null, error: "scan failed", loading: false });
     const html = renderView();
+    expect(html).toContain("Ergebnisse");
     expect(html).toContain("Receipts konnten nicht geladen werden.");
     expect(html).toContain("Hermes Infra");
+    // Single occurrence of the error text (inline in the section, not also as a
+    // top-level banner above the card grid).
+    expect(html.split("Receipts konnten nicht geladen werden.").length - 1).toBe(1);
+    // Order: project cards → Ergebnisse (with error), not a banner before cards.
+    const posCard = html.indexOf("Hermes Infra");
+    const posFeed = html.indexOf("Ergebnisse");
+    const posError = html.indexOf("Receipts konnten nicht geladen werden.");
+    expect(posCard).toBeGreaterThanOrEqual(0);
+    expect(posCard).toBeLessThan(posFeed);
+    expect(posFeed).toBeLessThan(posError);
   });
 
   it("surfaces the sessions-endpoint error banner without breaking the rest", () => {

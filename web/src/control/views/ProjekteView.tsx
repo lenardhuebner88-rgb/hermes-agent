@@ -145,13 +145,6 @@ export function ProjekteView() {
         </div>
       ) : null}
 
-      {receipts.error ? (
-        <div className="flex items-start gap-2 rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
-          <AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />
-          {t.receiptsError}
-        </div>
-      ) : null}
-
       {registryErrors.length > 0 ? (
         <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
           <p className="font-semibold">{t.registryErrors}</p>
@@ -196,9 +189,12 @@ export function ProjekteView() {
         </div>
       ) : null}
 
-      {receipts.data !== null ? (
-        <ReceiptsFeed receipts={receiptList} projectNames={projectNames} now={now} />
-      ) : null}
+      <ReceiptsFeed
+        receipts={receiptList}
+        projectNames={projectNames}
+        now={now}
+        error={Boolean(receipts.error)}
+      />
 
       {sessions.data !== null ? (
         <SessionsSection sessions={sessionList} projectNames={projectNames} now={now} />
