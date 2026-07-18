@@ -11,19 +11,30 @@ import struct
 import subprocess
 import types
 import wave
+from importlib.machinery import ModuleSpec
+from importlib.util import find_spec
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-if "faster_whisper" not in sys.modules:
+
+def _has_faster_whisper() -> bool:
+    try:
+        return find_spec("faster_whisper") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _stub_missing_faster_whisper(monkeypatch):
+    """Keep the optional-dependency stub local to each test invocation."""
+    if _has_faster_whisper():
+        return
+
     faster_whisper_stub = types.ModuleType("faster_whisper")
     faster_whisper_stub.WhisperModel = MagicMock(name="WhisperModel")
-    # Set ``__spec__`` so ``importlib.util.find_spec("faster_whisper")``
-    # doesn't raise ``ValueError: faster_whisper.__spec__ is None`` during
-    # collection (used by skipif markers further down in this file).
-    from importlib.machinery import ModuleSpec
     faster_whisper_stub.__spec__ = ModuleSpec("faster_whisper", loader=None)
-    sys.modules["faster_whisper"] = faster_whisper_stub
+    monkeypatch.setitem(sys.modules, "faster_whisper", faster_whisper_stub)
 
 
 # ============================================================================
@@ -431,7 +442,7 @@ class TestTranscribeLocalCommand:
 # ============================================================================
 
 @pytest.mark.skipif(
-    not __import__("importlib").util.find_spec("faster_whisper"),
+    not _has_faster_whisper(),
     reason="faster_whisper not installed",
 )
 class TestTranscribeLocalExtended:
