@@ -43,20 +43,44 @@ def _ensure_telegram_mock():
     sys.modules.pop("plugins.platforms.telegram.adapter", None)
 
 
-_ensure_telegram_mock()
+_telegram_adapter_cls = None
+_ChatType = None
 
-from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
+
+@pytest.fixture(autouse=True)
+def _isolated_telegram_adapter(restore_sys_modules):
+    """Install the Telegram stubs only while each test is running.
+
+    Installing them during collection replaced the real PTB modules for every
+    later-collected test file in the same pytest process. The shared restore
+    fixture also puts the original adapter module and parent-package attribute
+    back, avoiding a module-identity split after the forced re-import.
+    """
+    global _ChatType, _telegram_adapter_cls
+
+    _ensure_telegram_mock()
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+    from telegram.constants import ChatType
+
+    _telegram_adapter_cls = TelegramAdapter
+    _ChatType = ChatType
+    try:
+        yield
+    finally:
+        _telegram_adapter_cls = None
+        _ChatType = None
 
 
 def _make_adapter(dm_topics_config=None, group_topics_config=None):
     """Create a TelegramAdapter with optional DM/group topics config."""
+    assert _telegram_adapter_cls is not None
     extra = {}
     if dm_topics_config is not None:
         extra["dm_topics"] = dm_topics_config
     if group_topics_config is not None:
         extra["group_topics"] = group_topics_config
     config = PlatformConfig(enabled=True, token="***", extra=extra)
-    adapter = TelegramAdapter(config)
+    adapter = _telegram_adapter_cls(config)
     return adapter
 
 
@@ -667,11 +691,8 @@ def test_build_message_event_preserves_true_dm_topic_thread_id():
 
 # ── _build_message_event: group_topics skill binding ──
 
-# The telegram mock sets sys.modules["telegram.constants"] = telegram_mod (root mock),
-# so `from telegram.constants import ChatType` in telegram.py resolves to
-# telegram_mod.ChatType — not telegram_mod.constants.ChatType.  We must use
-# the same ChatType object the production code sees so equality checks work.
-from telegram.constants import ChatType as _ChatType  # noqa: E402
+# ``_isolated_telegram_adapter`` binds this to the same stub ``ChatType`` object
+# the freshly imported adapter sees, so equality checks remain meaningful.
 
 
 def test_group_topic_skill_binding():
