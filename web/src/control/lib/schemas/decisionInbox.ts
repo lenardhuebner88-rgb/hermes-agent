@@ -60,6 +60,10 @@ export const KanbanDecisionSchema = z.object({
   reason: z.string().catch(""),
   age_seconds: z.coerce.number().nullable().catch(null),
   suggested_command: z.string().nullable().catch(null),
+  // disposition_risk trägt die Anzahl offener Risiko-Items (Block 8, kanban_db)
+  // top-level mit — die Karte macht damit die Provenienz ("N offene Risiken aus
+  // Abschluss") explizit statt den Task als neu blockiert erscheinen zu lassen.
+  risk_count: z.coerce.number().nullable().catch(null).optional(),
   operator_escalation: OperatorEscalationPayloadSchema.optional(),
   release_gate: ReleaseGatePayloadSchema.optional(),
 });

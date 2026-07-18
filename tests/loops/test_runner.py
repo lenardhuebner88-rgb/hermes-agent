@@ -237,18 +237,20 @@ def write_autoland_pack(
     name: str = "dashboard-experience",
     **overrides,
 ) -> Path:
-    """Schreibt den exakten Fable→Sol→Fable-Vertrag für Loader-Tests."""
+    """Schreibt den kuratierten Engine-Rollen-Vertrag (engine+prompt pro Phase)
+    für Loader-Tests. Das konkrete Modell bleibt der write_pack-Default (fake-1) —
+    es ist NICHT Teil der Landungsautorität (Sicherheitsprojektion)."""
     pack_dir = write_pack(
         packs_dir, name, "pipeline", repo,
         autoland=True, **overrides,
     )
     manifest_path = pack_dir / "pack.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    for phase, (engine, model, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
+    for phase, (engine, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
         source = pack_dir / f"{phase}.md"
         (pack_dir / prompt_name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         manifest["phases"][phase].update(
-            engine=engine, model=model, prompt=prompt_name,
+            engine=engine, prompt=prompt_name,
         )
     manifest_path.write_text(
         yaml.safe_dump(manifest, allow_unicode=True), encoding="utf-8"
@@ -265,6 +267,22 @@ def authorize_autoland_fixture(
     monkeypatch.setattr(runner_module, "PACKS_DIR", packs_dir)
     monkeypatch.setattr(runner_module, "AUTOLAND_EXPECTED_REPO", repo.resolve())
     monkeypatch.setattr(runner_module, "AUTOLAND_PACK_ALLOWLIST", frozenset({name}))
+    # Hermetischer Engine-/Modell-Katalog: die Produktionsengines der Verträge
+    # (claude/codex) plus die Fake-Engine, auf die load_autoland_fixture die Phasen
+    # stubt. So greift der modellagnostische Katalog-Check (jedes Default- UND
+    # Override-Modell muss gelistet sein), ohne die reale models.yaml zu berühren.
+    test_catalog = {
+        "engines": {
+            "claude": {"label": "Claude", "models": [
+                "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5",
+            ]},
+            "codex": {"label": "Codex", "models": ["gpt-5.6-sol", "gpt-5.5", "gpt-5.3-codex"]},
+            "fake": {"label": "Test-Fake", "models": ["fake-1"]},
+        }
+    }
+    test_models = packs_dir.parent / "test-models.yaml"
+    test_models.write_text(yaml.safe_dump(test_catalog, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(runner_module, "MODELS_FILE", test_models)
     source_contract = runner_module.AUTOLAND_CONTRACTS[name]
     monkeypatch.setattr(
         runner_module,
@@ -274,14 +292,16 @@ def authorize_autoland_fixture(
             name: runner_module.AutolandContract(
                 path_prefixes=source_contract.path_prefixes,
                 deny_prefixes=source_contract.deny_prefixes,
-                manifest_sha256=runner_module.hashlib.sha256(
-                    manifest.read_bytes()
-                ).hexdigest(),
+                # Modellagnostische Sicherheitsprojektion des geschriebenen Manifests,
+                # NICHT dessen Rohbytes — ein Modell-Swap darf hier nicht driften.
+                safety_sha256=runner_module._autoland_safety_hash(
+                    yaml.safe_load(manifest.read_text(encoding="utf-8"))
+                ),
                 prompt_sha256={
                     prompt: runner_module.hashlib.sha256(
                         (pack_dir / prompt).read_bytes()
                     ).hexdigest()
-                    for _, _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
+                    for _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
                 },
                 require_visual=source_contract.require_visual,
             ),
@@ -558,20 +578,40 @@ def test_autoland_rejects_custom_copy_with_authorized_name(
         load_pack(custom, "dashboard-experience")
 
 
-def test_autoland_rejects_phase_contract_drift(tmp_path, fake_engine, monkeypatch):
+def test_autoland_rejects_engine_role_drift(tmp_path, fake_engine, monkeypatch):
+    # Risiko-Pin (Engine-Rollenprojektion): die Engine-ROLLE pro Phase bleibt Teil
+    # der Autorität — eine geänderte Rolle (verify claude→codex) fällt fail-closed.
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
     pack_dir = write_autoland_pack(packs_dir, repo)
     authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
     manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
-    manifest["phases"]["verify"]["model"] = "anderes-modell"
+    manifest["phases"]["verify"]["engine"] = "codex"
     (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
     with pytest.raises(ManifestError, match="Phasenvertrag"):
         load_pack(packs_dir, "dashboard-experience")
 
 
-def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypatch):
+def test_autoland_model_swap_still_loads(tmp_path, fake_engine, monkeypatch):
+    # Risiko-Pin (Modell nicht Teil der Sicherheitsprojektion): ein reiner
+    # Modell-Swap im Manifest driftet WEDER am Phasenvertrag NOCH an der
+    # Sicherheitsprojektion — das Pack lädt weiter mit autoland=True.
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["phases"]["build"]["model"] = "gpt-5.5"
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    pack = load_pack(packs_dir, "dashboard-experience")
+    assert pack.autoland is True
+    assert pack.phases["build"].model == "gpt-5.5"
+
+
+def test_autoland_rejects_safety_projection_drift(tmp_path, fake_engine, monkeypatch):
+    # Scope-Params SIND Teil der Sicherheitsprojektion → Drift fällt fail-closed.
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
     pack_dir = write_autoland_pack(packs_dir, repo)
@@ -580,16 +620,18 @@ def test_autoland_rejects_manifest_content_drift(tmp_path, fake_engine, monkeypa
     manifest["params"] = {"routes": "/zu-breit"}
     (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
-    with pytest.raises(ManifestError, match="Manifestinhalt"):
+    with pytest.raises(ManifestError, match="Sicherheitsprojektion"):
         load_pack(packs_dir, "dashboard-experience")
 
 
-def test_dashboard_experience_manifest_still_pinned():
-    # Proves the field additions did NOT require editing the SHA-pinned pack.
+def test_dashboard_experience_safety_projection_still_pinned():
+    # Proves the curated pack's model-agnostic safety projection matches the pin
+    # (comments/model edits must NOT move it; scope/role edits MUST).
     manifest = PACKS_DIR / "dashboard-experience" / "pack.yaml"
-    actual = runner_module.hashlib.sha256(manifest.read_bytes()).hexdigest()
+    raw = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    actual = runner_module._autoland_safety_hash(raw)
     assert actual == (
-        runner_module.AUTOLAND_CONTRACTS["dashboard-experience"].manifest_sha256
+        runner_module.AUTOLAND_CONTRACTS["dashboard-experience"].safety_sha256
     )
 
 
@@ -2150,14 +2192,19 @@ def test_autoland_rejects_model_outside_ui_catalog(tmp_path, fake_engine, monkey
         runner._validate_autoland_runtime()
 
 
-def test_autoland_custom_phase_contract_disables_automatic_landing(
+def test_autoland_engine_role_override_disables_automatic_landing(
     tmp_path, fake_engine, monkeypatch
 ):
+    # Risiko-Pin (Engine-Rolle bleibt Autorität): eine geänderte Engine-ROLLE zur
+    # Laufzeit (build codex→claude) deaktiviert das automatische Landen — obwohl
+    # das Modell im Katalog liegt. Nur die Rolle, NICHT das Modell, kippt es.
     _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     state = tmp_path / "state" / "dashboard-experience"
     state.mkdir(parents=True)
     (state / "overrides.env").write_text(
-        "PHASE_BUILD_ENGINE=codex\nPHASE_BUILD_MODEL=gpt-5.5\n",
+        "PHASE_PLAN_ENGINE=claude\nPHASE_PLAN_MODEL=claude-opus-4-8\n"
+        "PHASE_BUILD_ENGINE=claude\nPHASE_BUILD_MODEL=claude-opus-4-8\n"
+        "PHASE_VERIFY_ENGINE=claude\nPHASE_VERIFY_MODEL=claude-opus-4-8\n",
         encoding="utf-8",
     )
     runner = LoopRunner(pack, state_root=tmp_path / "state")
@@ -2170,6 +2217,30 @@ def test_autoland_custom_phase_contract_disables_automatic_landing(
     resumed = LoopRunner(pack, state_root=tmp_path / "state")
     assert resumed.overrides == {}
     assert resumed._manual_land_required("resume") is True
+
+
+def test_autoland_valid_model_swap_keeps_automatic_landing(
+    tmp_path, fake_engine, monkeypatch
+):
+    # Risiko-Pin (gültiges Modell != manual-land): ein reiner Modell-Swap auf ein
+    # katalogisiertes Modell (verify opus→sonnet), Engine-Rollen unverändert, hält
+    # autoland autorisiert und setzt KEINEN manual-land-Marker.
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
+    state = tmp_path / "state" / "dashboard-experience"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "PHASE_PLAN_ENGINE=claude\nPHASE_PLAN_MODEL=claude-opus-4-8\n"
+        "PHASE_BUILD_ENGINE=codex\nPHASE_BUILD_MODEL=gpt-5.6-sol\n"
+        "PHASE_VERIFY_ENGINE=claude\nPHASE_VERIFY_MODEL=claude-sonnet-5\n",
+        encoding="utf-8",
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    runner._validate_autoland_runtime()
+    assert runner.phase_cfg("verify").model == "claude-sonnet-5"
+    assert runner._runtime_autoland_authorized() is True
+    runner._prepare_runtime_land_mode()
+    assert runner._manual_land_required("resume") is False
 
 
 def test_autoland_rejects_fractional_budget_override(tmp_path, fake_engine, monkeypatch):

@@ -383,5 +383,28 @@ describe("FleetView deep-link ?board=&status=", () => {
     });
     expect(selectValue("Nach Status filtern")).toBe("blocked");
   });
+
+  it("opens the task detail drawer for ?task=<id> (kanban risk deep-link → Fleet focus)", async () => {
+    // Kanban-Attention aus dem Postfach linkt auf /control/fleet?task=<id>. Der
+    // Param darf NICHT inert bleiben: FleetView öffnet den Node-Detail-Drawer für
+    // den referenzierten Task (mobil, setLgViewport(false) im beforeEach).
+    renderFleet("/control/fleet?task=t_blocked");
+
+    await waitFor(() => {
+      expect(screen.getByText("Task t_blocked")).toBeTruthy();
+    });
+    // Der Task-Fokus überlebt den Mount-Reset (Board-Wechsel-Cleanup darf den
+    // Deep-Link-Drawer nicht sofort wieder schließen).
+    await waitFor(() => {}, { timeout: 50 });
+    expect(screen.getByText("Task t_blocked")).toBeTruthy();
+  });
+
+  it("does not open any drawer without a ?task= param", async () => {
+    renderFleet("/control/fleet");
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Subtab Heute" })).toBeTruthy();
+    });
+    expect(screen.queryByText("Task t_blocked")).toBeNull();
+  });
 });
 

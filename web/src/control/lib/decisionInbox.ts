@@ -234,15 +234,32 @@ export function buildDecisionInbox(input: {
     const meta = KANBAN_KIND_META[d.kind] ?? { weight: 50, tone: "cyan" as ToneName };
     const label = d.kind === "operator_escalation" ? operatorEscalationLabel(d) : (KANBAN_KIND_LABELS[d.kind] ?? d.kind);
     const signal = d.kind === "operator_escalation" ? operatorEscalationSignal(d) : null;
+    // disposition_risk sind FOLGE-Risiken aus dem Abschluss eines (fertigen)
+    // Tasks — nicht der Task selbst, der neu blockiert wäre. Die Headline nennt
+    // daher die Risiko-Anzahl, die "why"-Zeile die Provenienz (welcher Task) +
+    // die konkrete nächste Aktion aus dem Ledger-`reason`.
+    const isDispositionRisk = d.kind === "disposition_risk";
+    const riskCount = typeof d.risk_count === "number" && d.risk_count > 0 ? d.risk_count : null;
+    const title = isDispositionRisk
+      ? (riskCount === 1
+          ? "1 offenes Risiko aus Abschluss"
+          : `${riskCount ? `${riskCount} ` : ""}offene Risiken aus Abschluss`)
+      : (d.title || d.task_id);
+    const why = isDispositionRisk
+      ? [d.title || d.task_id, d.reason].filter(Boolean).join(" · ")
+      : [label, signal, d.reason].filter(Boolean).join(" · ");
     items.push({
       key: `kanban:${d.kind}:${d.task_id}`,
       surface: "kanban",
-      title: d.title || d.task_id,
-      why: [label, signal, d.reason].filter(Boolean).join(" · "),
-      nextAction: d.suggested_command || "Im Board entscheiden",
+      title,
+      why,
+      nextAction: d.suggested_command || (isDispositionRisk ? "Risiken im Fleet prüfen & schließen" : "Im Board entscheiden"),
       tone: meta.tone,
-      // Deep-link to the task in the Board/backlog tab (reads ?focus).
-      target: `/control/backlog?focus=${encodeURIComponent(d.task_id)}`,
+      // Kanban-Tasks leben im Fleet (Board/Ketten/Risiko), NICHT im Family-
+      // Backlog. Deep-link auf den Task-Fokus im Fleet (FleetView liest ?task=
+      // und öffnet den Node-Detail-Drawer) statt des früheren
+      // /control/backlog?focus=, das im falschen (Family-)Tab landete.
+      target: `/control/fleet?task=${encodeURIComponent(d.task_id)}`,
       weight: meta.weight,
       // Gateway liefert age_seconds bereits mit (kanban_db._age) — durchreichen,
       // damit die TopDecision "vor Xm" zeigen kann. null → kein Alter.

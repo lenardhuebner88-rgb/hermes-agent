@@ -223,7 +223,9 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items.map((i) => i.surface)).toEqual(["kanban", "kanban"]);
     // review_rejected (86) outranks sticky_blocked (75)
     expect(items[0].title).toBe("Rejected one");
-    expect(items[0].target).toBe("/control/backlog?focus=t1");
+    // Kanban-Tasks leben im Fleet, nicht im Family-Backlog: Deep-Link auf den
+    // Fleet-Task-Fokus (FleetView ?task=), nie mehr /control/backlog.
+    expect(items[0].target).toBe("/control/fleet?task=t1");
     expect(items[0].nextAction).toBe("hermes kanban show t1");
     expect(items[0].why).toContain("missing tests");
     // K3: nur review_rejected trägt den Inline-Resolve-Anker.
@@ -235,22 +237,50 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[1].ageSeconds).toBe(99);
   });
 
-  it("renders disposition_risk with its own label/tone (FRD Phase 2a sink 1)", () => {
+  it("frames disposition_risk as follow-up risks with count + provenance, routes to Fleet", () => {
     const items = buildDecisionInbox({
       proposals: [],
       foItems: [],
       foNowSec: NOW,
       interventions: [],
       kanbanDecisions: [
-        { kind: "disposition_risk", task_id: "t9", title: "Done task", reason: "1 offenes Risiko", age_seconds: 42, suggested_command: null },
+        {
+          kind: "disposition_risk",
+          task_id: "t9",
+          title: "Adversarial Review: Loop-Autoland",
+          reason: "3 offene(s) Risiko(en) aus Abschluss: Modell-Gleichheitscheck entfernen",
+          age_seconds: 42,
+          suggested_command: null,
+          risk_count: 3,
+        },
       ],
     });
     expect(items).toHaveLength(1);
     expect(items[0].surface).toBe("kanban");
-    expect(items[0].why).toContain("Offenes Risiko aus Abschluss");
+    // Headline nennt die Risiko-Anzahl und erweckt NICHT den Eindruck, der
+    // abgeschlossene Critic-Task selbst sei neu blockiert.
+    expect(items[0].title).toBe("3 offene Risiken aus Abschluss");
+    // Provenienz (welcher Task) + konkrete nächste Aktion in der why-Zeile.
+    expect(items[0].why).toContain("Adversarial Review: Loop-Autoland");
+    expect(items[0].why).toContain("Modell-Gleichheitscheck entfernen");
+    expect(items[0].nextAction).toBe("Risiken im Fleet prüfen & schließen");
     expect(items[0].tone).toBe("amber");
     expect(items[0].key).toBe("kanban:disposition_risk:t9");
-    expect(items[0].target).toBe("/control/backlog?focus=t9");
+    // Nie mehr Family-Backlog: Kanban-Risiken gehören ins Fleet.
+    expect(items[0].target).toBe("/control/fleet?task=t9");
+  });
+
+  it("singularizes the disposition_risk headline for a single open risk", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        { kind: "disposition_risk", task_id: "t9", title: "Done task", reason: "1 offenes Risiko", age_seconds: 42, suggested_command: null, risk_count: 1 },
+      ],
+    });
+    expect(items[0].title).toBe("1 offenes Risiko aus Abschluss");
   });
 
   it("KanbanDecisionKindSchema keeps disposition_risk (no .catch coercion to sticky_blocked)", () => {
@@ -397,7 +427,7 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[0].title).toBe("Escalated one");
     expect(items[0].tone).toBe("red");
     expect(items[0].why).toContain("Operator-Eskalation");
-    expect(items[0].target).toBe("/control/backlog?focus=t1");
+    expect(items[0].target).toBe("/control/fleet?task=t1");
   });
 
   it("surfaces no-silent-stall recovery classes with amber priority", () => {
