@@ -66,7 +66,10 @@ function KanbanChipLink({
         event.stopPropagation();
       }}
       className={cn(
-        "inline-flex min-h-11 min-w-11 items-center rounded-card px-1 -mx-0.5 tab:min-h-7 tab:min-w-7",
+        // Pixel-fest statt min-h-11: die App-Root-Fontsize ist 15px (theme.css),
+        // damit wäre 2.75rem nur 41.25px — unter dem 44px-Touch-Ziel (ui-verify
+        // 2026-07-18). tab: kehrt zur rem-Dichte des Bestands zurück.
+        "inline-flex min-h-[44px] min-w-[44px] items-center rounded-card px-1 -mx-0.5 tab:min-h-7 tab:min-w-7",
         "text-ink-2 underline-offset-2 hover:text-ink hover:underline",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
         className,

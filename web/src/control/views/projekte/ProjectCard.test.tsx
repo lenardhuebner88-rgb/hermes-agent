@@ -225,10 +225,10 @@ describe("ProjectCard attention badge + reason chips (2.3 Ampel)", () => {
 
     renderCard({ project, agents: [] });
 
-    // House idiom: min-h-11 (44px) below tab; tab:min-h-7 restores prior density.
+    // Pixel-fest (44px echte Hit-Area bei 15px-Root-Fontsize); tab:min-h-7 = Bestands-Dichte.
     const open = screen.getByRole("link", { name: /Offen 3/ });
     const cls = open.getAttribute("class") ?? "";
-    expect(cls).toContain("min-h-11");
+    expect(cls).toContain("min-h-[44px]");
     expect(cls).toContain("tab:min-h-7");
   });
 });
