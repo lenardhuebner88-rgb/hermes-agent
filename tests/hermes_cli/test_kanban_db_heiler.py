@@ -310,6 +310,7 @@ def test_claude_cli_heartbeat_note_unchanged_without_transcript(
     # Point CLAUDE_CONFIG_DIR at an empty dir → no transcript for this workspace.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "empty-claude"))
     now = int(time.time())
+    monkeypatch.setattr(_kb.time, "time", lambda: now)
     workspace = "/home/x/.hermes/hermes-agent/.worktrees/kanban/t_nope"
 
     with kb.connect_closing() as conn:

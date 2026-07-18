@@ -24556,42 +24556,10 @@ def auto_retry_blocked_tasks(
         escalated = attempt >= 2
         escalated_model_override: Optional[str] = None
         if escalated:
-            # Prefer an explicit provider/model pair when the escalation model
-            # belongs to a different family than the blocked run's route. A
-            # model-only override would be a poison-pill against the lane
-            # provider (HTTP 400 on every subsequent spawn).
-            from hermes_cli.models import detect_static_provider_for_model
-
-            current_provider = None
-            try:
-                raw_provider = blocked_run["requested_provider"]
-                if isinstance(raw_provider, str) and raw_provider.strip():
-                    current_provider = raw_provider.strip()
-            except Exception:
-                current_provider = None
-            if not current_provider:
-                try:
-                    meta = blocked_run["metadata"]
-                    if isinstance(meta, str) and meta.strip():
-                        import json as _json
-                        parsed = _json.loads(meta)
-                        raw_provider = parsed.get("route_provider") or parsed.get("provider")
-                        if isinstance(raw_provider, str) and raw_provider.strip():
-                            current_provider = raw_provider.strip()
-                except Exception:
-                    current_provider = current_provider
-            if not current_provider:
-                # Safe default for family detection; avoids NoneType in models.py.
-                current_provider = "openai-codex"
-            redirected = detect_static_provider_for_model(
-                AUTO_RETRY_ESCALATION_MODEL, current_provider
-            )
-            if redirected is not None:
-                escalated_model_override = (
-                    f"{redirected[0]}/{AUTO_RETRY_ESCALATION_MODEL}"
-                )
-            else:
-                escalated_model_override = AUTO_RETRY_ESCALATION_MODEL
+            # The escalation profile is a claude-cli lane. Its --model argument
+            # accepts Claude model IDs directly; an ``anthropic/`` provider
+            # prefix is forwarded literally and produces an API 404.
+            escalated_model_override = AUTO_RETRY_ESCALATION_MODEL
         with write_txn(conn):
             latest = conn.execute(
                 "SELECT status FROM tasks WHERE id = ?",

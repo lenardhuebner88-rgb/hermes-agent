@@ -103,10 +103,10 @@ def test_spawn_identity_compatible_model_override_is_applied(
         assert events == []
 
 
-def test_auto_retry_escalation_sets_provider_model_pair(
+def test_auto_retry_escalation_sets_unprefixed_claude_cli_model(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """AC-3: second auto-retry stores anthropic/<model> when lane is openai-codex."""
+    """Second auto-retry stores the target claude-cli lane's raw model ID."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     monkeypatch.setattr(
@@ -134,7 +134,7 @@ def test_auto_retry_escalation_sets_provider_model_pair(
         res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
 
         assert res.auto_retried_blocked == [(tid, 2)]
-        expected = f"anthropic/{kb.AUTO_RETRY_ESCALATION_MODEL}"
+        expected = kb.AUTO_RETRY_ESCALATION_MODEL
         row = conn.execute(
             "SELECT status, auto_retry_count, assignee, model_override FROM tasks WHERE id = ?",
             (tid,),
