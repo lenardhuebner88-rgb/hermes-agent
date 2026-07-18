@@ -608,6 +608,7 @@ def build_projects_payload(
 # stage 2 already uses for ``get_hermes_home``.
 
 _TMUX_TIMEOUT_SECONDS = 2
+_TMUX_SCAN_CACHE_TTL_SECONDS = 3.0
 _TMUX_LIST_PANES_CMD = [
     "tmux",
     "list-panes",
@@ -626,6 +627,12 @@ _COORDINATION_KIND_VALUES = frozenset(
     {"claude", "codex", "kimi", "grok", "hermes", "kanban", "loop"}
 )
 _COORDINATION_FRONTMATTER_BYTES = 4096
+
+_tmux_scan_clock: Callable[[], float] = time.monotonic
+_tmux_scan_cache_lock = threading.Lock()
+_tmux_scan_cache: dict[
+    tuple[str, ...], tuple[float, tuple[str | None, str | None]]
+] = {}
 
 
 def _default_coordination_dir() -> Path:
@@ -697,6 +704,26 @@ def _run_tmux_command(cmd: list[str]) -> tuple[str | None, str | None]:
     return result.stdout, None
 
 
+def _cached_tmux_command(cmd: list[str]) -> tuple[str | None, str | None]:
+    """Share one raw tmux subprocess result across concurrent payload builds."""
+    key = tuple(cmd)
+    with _tmux_scan_cache_lock:
+        cached = _tmux_scan_cache.get(key)
+        now = _tmux_scan_clock()
+        if cached is not None and now - cached[0] < _TMUX_SCAN_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        result = _run_tmux_command(cmd)
+        _tmux_scan_cache[key] = (_tmux_scan_clock(), result)
+        return result
+
+
+def _reset_tmux_scan_cache() -> None:
+    """Test hook: clear cached raw tmux subprocess results."""
+    with _tmux_scan_cache_lock:
+        _tmux_scan_cache.clear()
+
+
 def _classify_tmux_kind(window_name: str, pane_command: str) -> str:
     window_lower = window_name.lower()
     for kind in _TMUX_KIND_ORDER:
@@ -719,7 +746,7 @@ def _tmux_agents(
     if tmux_panes_text is not None:
         panes_text, panes_error = tmux_panes_text, None
     else:
-        panes_text, panes_error = _run_tmux_command(_TMUX_LIST_PANES_CMD)
+        panes_text, panes_error = _cached_tmux_command(_TMUX_LIST_PANES_CMD)
     if panes_error:
         return [], [panes_error]
     if not panes_text:
@@ -728,7 +755,7 @@ def _tmux_agents(
     if tmux_sessions_text is not None:
         sessions_text, sessions_error = tmux_sessions_text, None
     else:
-        sessions_text, sessions_error = _run_tmux_command(_TMUX_LIST_SESSIONS_CMD)
+        sessions_text, sessions_error = _cached_tmux_command(_TMUX_LIST_SESSIONS_CMD)
     if sessions_error:
         return [], [sessions_error]
 

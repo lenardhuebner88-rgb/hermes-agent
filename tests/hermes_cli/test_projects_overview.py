@@ -24,6 +24,7 @@ from hermes_cli.projects_overview import (
     _coordination_agents,
     _parse_coordination_note,
     _reset_projects_cache,
+    _reset_tmux_scan_cache,
     build_agents_payload,
     build_commits_payload,
     build_project_detail,
@@ -37,10 +38,12 @@ from hermes_cli.projects_overview import (
 
 @pytest.fixture(autouse=True)
 def _reset_projects_cache_between_tests() -> None:
-    """Keep route TTL cache from leaking across tests (Stage 9)."""
+    """Keep process-local TTL caches from leaking across tests."""
     _reset_projects_cache()
+    _reset_tmux_scan_cache()
     yield
     _reset_projects_cache()
+    _reset_tmux_scan_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -951,6 +954,146 @@ def test_tmux_source_no_server_running_yields_zero_agents_no_error(tmp_path: Pat
 
     assert payload["errors"] == []
     assert [a for a in payload["agents"] if a["source"] == "tmux"] == []
+
+
+def test_tmux_scan_cache_is_shared_by_agents_and_sessions_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counts = {"list-panes": 0, "list-sessions": 0}
+
+    def counting_run(cmd: list[str]) -> tuple[str | None, str | None]:
+        command = cmd[1]
+        counts[command] += 1
+        if command == "list-panes":
+            return (
+                "shared|0|codex|codex|/home/piet/.hermes/hermes-agent"
+                "|codex|||shared-session\n",
+                None,
+            )
+        return "shared|1700000000\n", None
+
+    monkeypatch.setattr("hermes_cli.projects_overview._run_tmux_command", counting_run)
+    monkeypatch.setattr("hermes_cli.projects_overview._tmux_scan_clock", lambda: 10.0)
+    state_db = tmp_path / "state.db"
+    _make_state_db(state_db)
+
+    build_agents_payload(
+        _hermes_infra_registry(),
+        coordination_dir=tmp_path / "coordination",
+        kanban_db_path=tmp_path / "kanban.db",
+        projects_db_path=tmp_path / "projects.db",
+        loops_state_root=tmp_path / "loops",
+        pack_names=[],
+    )
+    build_sessions_payload(
+        _hermes_infra_registry(), state_db_path=state_db, now=1_700_000_100
+    )
+
+    assert counts == {"list-panes": 1, "list-sessions": 1}
+
+
+def test_tmux_scan_cache_refreshes_after_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counts = {"list-panes": 0, "list-sessions": 0}
+    clock = {"now": 20.0}
+
+    def counting_run(cmd: list[str]) -> tuple[str | None, str | None]:
+        command = cmd[1]
+        counts[command] += 1
+        if command == "list-panes":
+            return "ttl|0|codex|codex|/tmp|codex|||\n", None
+        return "ttl|1700000000\n", None
+
+    monkeypatch.setattr("hermes_cli.projects_overview._run_tmux_command", counting_run)
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._tmux_scan_clock", lambda: clock["now"]
+    )
+    kwargs = {
+        "coordination_dir": tmp_path / "coordination",
+        "kanban_db_path": tmp_path / "kanban.db",
+        "projects_db_path": tmp_path / "projects.db",
+        "loops_state_root": tmp_path / "loops",
+        "pack_names": [],
+    }
+
+    build_agents_payload(ProjectsRegistry(), **kwargs)
+    clock["now"] = 23.0
+    build_agents_payload(ProjectsRegistry(), **kwargs)
+
+    assert counts == {"list-panes": 2, "list-sessions": 2}
+
+
+def test_tmux_injection_neither_reads_nor_overwrites_scan_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    counts = {"list-panes": 0, "list-sessions": 0}
+
+    def counting_run(cmd: list[str]) -> tuple[str | None, str | None]:
+        command = cmd[1]
+        counts[command] += 1
+        if command == "list-panes":
+            return "real|0|codex|codex|/tmp|codex|||\n", None
+        return "real|1700000000\n", None
+
+    monkeypatch.setattr("hermes_cli.projects_overview._run_tmux_command", counting_run)
+    monkeypatch.setattr("hermes_cli.projects_overview._tmux_scan_clock", lambda: 30.0)
+    kwargs = {
+        "coordination_dir": tmp_path / "coordination",
+        "kanban_db_path": tmp_path / "kanban.db",
+        "projects_db_path": tmp_path / "projects.db",
+        "loops_state_root": tmp_path / "loops",
+        "pack_names": [],
+    }
+
+    first_real = build_agents_payload(ProjectsRegistry(), **kwargs)
+    injected = build_agents_payload(
+        ProjectsRegistry(),
+        tmux_panes_text="injected|7|grok|node|/tmp|grok|||\n",
+        tmux_sessions_text="injected|1700000001\n",
+        **kwargs,
+    )
+    second_real = build_agents_payload(ProjectsRegistry(), **kwargs)
+
+    assert [agent["label"] for agent in first_real["agents"] if agent["source"] == "tmux"] == [
+        "real:0 codex"
+    ]
+    assert [agent["label"] for agent in injected["agents"] if agent["source"] == "tmux"] == [
+        "injected:7 grok"
+    ]
+    assert [agent["label"] for agent in second_real["agents"] if agent["source"] == "tmux"] == [
+        "real:0 codex"
+    ]
+    assert counts == {"list-panes": 1, "list-sessions": 1}
+
+
+def test_tmux_scan_cache_reuses_error_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def failing_run(cmd: list[str]) -> tuple[str | None, str | None]:
+        nonlocal calls
+        calls += 1
+        return None, "tmux: timed out"
+
+    monkeypatch.setattr("hermes_cli.projects_overview._run_tmux_command", failing_run)
+    monkeypatch.setattr("hermes_cli.projects_overview._tmux_scan_clock", lambda: 40.0)
+
+    kwargs = {
+        "tmux_sessions_text": "",
+        "coordination_dir": tmp_path / "coordination",
+        "kanban_db_path": tmp_path / "kanban.db",
+        "projects_db_path": tmp_path / "projects.db",
+        "loops_state_root": tmp_path / "loops",
+        "pack_names": [],
+    }
+    first = build_agents_payload(ProjectsRegistry(), **kwargs)
+    second = build_agents_payload(ProjectsRegistry(), **kwargs)
+
+    assert first["errors"][0] == "tmux: timed out"
+    assert second["errors"][0] == "tmux: timed out"
+    assert calls == 1
 
 
 # --- coordination source ------------------------------------------------------
