@@ -17,6 +17,11 @@ export interface SessionsSectionProps {
   /** slug → display name for the project tag; missing slugs fall back to the raw slug. */
   projectNames: Readonly<Record<string, string>>;
   now: number;
+  /** Payload-eigene Quell-Fehler (z.B. "sessions-tmux: …") — NICHT der
+   *  Fetch-Fehler (den rendert ProjekteView). Ohne Konsument war das Signal
+   *  seit Stufe 1.1 unsichtbar: Terminal-Links fehlten still, wenn der
+   *  tmux-Scan degradierte. */
+  errors?: ReadonlyArray<string>;
 }
 
 /** "Offene Sessions" — the spawn tree out of state.db: which session spawned
@@ -25,7 +30,7 @@ export interface SessionsSectionProps {
  *  filter is "Offen" — open AND not stale; the never-closed zombie rows
  *  (≥24h idle, real live-host pattern) sit in their own "Verwaist" bucket so
  *  the operator sees the data-quality reality instead of a 150-row wall. */
-export function SessionsSection({ sessions, projectNames, now }: SessionsSectionProps) {
+export function SessionsSection({ sessions, projectNames, now, errors = [] }: SessionsSectionProps) {
   const [filter, setFilter] = useState<SessionsFilter>("open");
 
   const openCount = countOpenSessions(sessions);
@@ -53,6 +58,19 @@ export function SessionsSection({ sessions, projectNames, now }: SessionsSection
           ariaLabelPrefix="Sessions-Filter"
         />
       </header>
+
+      {/* Quell-Degradation ist IMMER sichtbar, auch mit gerenderten Zeilen —
+          dasselbe Warn-Idiom wie die registry_errors-Box in ProjekteView. */}
+      {errors.length > 0 ? (
+        <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+          <p className="font-semibold">{t.sessionsSourceErrors}</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 font-data text-micro">
+            {errors.map((message, index) => (
+              <li key={index}>{message}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {rows.length === 0 ? (
         <p className="text-sec text-ink-3">{t.sessionsEmpty(filter)}</p>

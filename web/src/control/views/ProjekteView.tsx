@@ -207,7 +207,12 @@ export function ProjekteView() {
       ) : null}
 
       {sessions.data !== null ? (
-        <SessionsSection sessions={sessionList} projectNames={projectNames} now={now} />
+        <SessionsSection
+          sessions={sessionList}
+          projectNames={projectNames}
+          now={now}
+          errors={sessions.data.errors ?? []}
+        />
       ) : null}
 
       {commits.data !== null ? (

@@ -853,6 +853,7 @@ export const de = {
     // Stage 10 — Offene Sessions + Spawn-Baum (state.db)
     summaryOpenSessions: (n: number) => `${n} offene ${n === 1 ? "Session" : "Sessions"}`,
     sessionsError: "Sessions konnten nicht geladen werden.",
+    sessionsSourceErrors: "Session-Quellen unvollständig",
     sessionsEyebrow: "Konversationen",
     sessionsTitle: "Offene Sessions",
     sessionsFilterOpen: "Offen",

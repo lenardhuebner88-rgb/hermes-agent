@@ -33,10 +33,16 @@ function makeSession(overrides: Partial<ProjectSession> & { id: string }): Proje
 function renderSection(
   sessions: ProjectSession[],
   projectNames: Readonly<Record<string, string>> = {},
+  errors: ReadonlyArray<string> = [],
 ) {
   return render(
     <MemoryRouter>
-      <SessionsSection sessions={sessions} projectNames={projectNames} now={1784240000} />
+      <SessionsSection
+        sessions={sessions}
+        projectNames={projectNames}
+        now={1784240000}
+        errors={errors}
+      />
     </MemoryRouter>,
   );
 }
@@ -99,6 +105,20 @@ describe("SessionsSection", () => {
   it("renders the doctrine-shaped empty state per filter", () => {
     renderSection([]);
     expect(screen.getByText("Keine offenen Sessions.")).toBeTruthy();
+  });
+
+  it("surfaces payload source errors inline while still rendering rows", () => {
+    // Reales Fehlerformat aus build_sessions_payload (Stufe 1.1 Degradation).
+    renderSection([ROOT], {}, ["sessions-tmux: tmux command failed"]);
+    expect(screen.getByText("Session-Quellen unvollständig")).toBeTruthy();
+    expect(screen.getByText("sessions-tmux: tmux command failed")).toBeTruthy();
+    // Zeilen bleiben trotz Degradation sichtbar.
+    expect(screen.getByText("Hauptsession")).toBeTruthy();
+  });
+
+  it("renders no source-error box without payload errors", () => {
+    renderSection([ROOT]);
+    expect(screen.queryByText("Session-Quellen unvollständig")).toBeNull();
   });
 
   it("links sessions carrying a tmux address to the terminal deep link, window optional", () => {
