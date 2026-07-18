@@ -4182,6 +4182,22 @@ CONFLICT_FIXER_IDEM_PREFIX = "conflict-fixer:"
 CONFLICT_FIXER_MAX_ATTEMPTS = 2
 CONFLICT_FIXER_BACKOFF_SECONDS = 300
 CONFLICT_FIXER_MAX_RUNTIME_SECONDS = 1800
+
+
+def _conflict_fingerprint(reason: str) -> str:
+    """Return a stable identity for one integration-conflict context."""
+    core = re.sub(r"^integration parked:\s*", "", reason.strip(), flags=re.I)
+    core = " ".join(core.casefold().split())
+    return hashlib.sha256(core.encode("utf-8")).hexdigest()[:16]
+
+
+def _conflict_event_fingerprint(payload: dict[str, Any]) -> str:
+    stored = str(payload.get("conflict_fingerprint") or "").strip()
+    if stored:
+        return stored
+    return _conflict_fingerprint(str(payload.get("reason") or ""))
+
+
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
@@ -13099,6 +13115,9 @@ def complete_task(
     # just tracks "is there a current pathology the breaker should
     # care about", and a success resets that question.
     _clear_failure_counter(conn, task_id)
+    # A successful conflict fixer owns exactly one parked integration context.
+    # The guarded helper is a no-op after any operator/context change.
+    _resume_parent_for_completed_conflict_fixer(conn, task_id)
     _stamp_strategist_lever_outcome_shipped(task_id, shipped_at=now)
     # Recompute ready status for dependents (separate txn so children see done).
     recompute_ready(conn)
@@ -20619,6 +20638,7 @@ def _create_conflict_park_fixer_subtask(
     parent_id = row["id"]
     parent_title = (row["title"] if "title" in row.keys() else None) or parent_id
     branch = _kwt.chain_branch(root_id)
+    conflict_fingerprint = _conflict_fingerprint(reason)
     title = (
         f"Konflikt-Fixer Kette {root_id} "
         f"(Versuch {attempt}/{CONFLICT_FIXER_MAX_ATTEMPTS})"
@@ -20641,7 +20661,10 @@ def _create_conflict_park_fixer_subtask(
             workspace_kind="dir",
             workspace_path=str(wt),
             kind="code",
-            idempotency_key=f"{CONFLICT_FIXER_IDEM_PREFIX}{parent_id}:{attempt}",
+            idempotency_key=(
+                f"{CONFLICT_FIXER_IDEM_PREFIX}{parent_id}:"
+                f"{conflict_fingerprint}:{attempt}"
+            ),
             max_runtime_seconds=CONFLICT_FIXER_MAX_RUNTIME_SECONDS,
             max_retries=1,
         )
@@ -20664,13 +20687,20 @@ def _create_conflict_park_fixer_subtask(
                 "attempt": attempt,
                 "limit": CONFLICT_FIXER_MAX_ATTEMPTS,
                 "reason": (reason or "")[:500],
+                "conflict_fingerprint": conflict_fingerprint,
             },
         )
         _append_event(
             conn,
             child_id,
             "conflict_fixer_for",
-            {"parent_id": parent_id, "root_id": root_id, "attempt": attempt},
+            {
+                "parent_id": parent_id,
+                "root_id": root_id,
+                "attempt": attempt,
+                "reason": (reason or "")[:500],
+                "conflict_fingerprint": conflict_fingerprint,
+            },
         )
     return child_id
 
@@ -20688,6 +20718,83 @@ def _is_conflict_fixer_task(conn: sqlite3.Connection, task_id: str) -> bool:
         (task_id,),
     ).fetchone()
     return row is not None
+
+
+def _resume_parent_for_completed_conflict_fixer(
+    conn: sqlite3.Connection,
+    child_id: str,
+) -> bool:
+    """CAS-resume the integration park this successful fixer still owns."""
+    with write_txn(conn):
+        marker = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'conflict_fixer_for' ORDER BY id DESC LIMIT 1",
+            (child_id,),
+        ).fetchone()
+        if marker is None:
+            return False
+        try:
+            payload = json.loads(marker["payload"] or "{}")
+        except (TypeError, ValueError):
+            return False
+        parent_id = str(payload.get("parent_id") or "").strip()
+        expected_fingerprint = str(
+            payload.get("conflict_fingerprint") or ""
+        ).strip()
+        if not parent_id or not expected_fingerprint:
+            return False
+
+        parent = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (parent_id,),
+        ).fetchone()
+        blocked = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        current_reason = _decision_event_reason(
+            blocked["payload"] if blocked else None
+        ) or ""
+        if (
+            parent is None
+            or parent["status"] != "blocked"
+            or not current_reason.startswith("integration parked:")
+            or _conflict_fingerprint(current_reason) != expected_fingerprint
+        ):
+            return False
+
+        undone_parent = conn.execute(
+            "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
+            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        new_status = "todo" if undone_parent else "ready"
+        cur = conn.execute(
+            "UPDATE tasks SET status = ?, current_run_id = NULL, claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL, block_kind = NULL, "
+            "block_recurrences = 0 WHERE id = ? AND status = 'blocked'",
+            (new_status, parent_id),
+        )
+        if cur.rowcount != 1:
+            return False
+        _append_event(
+            conn,
+            parent_id,
+            "conflict_fixer_parent_resumed",
+            {
+                "child_id": child_id,
+                "conflict_fingerprint": expected_fingerprint,
+                "status": new_status,
+            },
+        )
+        _append_event(
+            conn,
+            parent_id,
+            "unblocked",
+            {"status": new_status, "source": "conflict_fixer_completion"},
+        )
+        return True
 
 
 # BASE-PREP-CONFLICT-FIXER-ROUTE-S10: prepare_worker_base (kanban_worktrees.py)
@@ -20858,7 +20965,25 @@ def _maybe_route_conflict_park_fixer(
         "ORDER BY id",
         (CONFLICT_FIXER_DISPATCHED_EVENT, root_id),
     ).fetchall()
-    attempts = len(prior)
+    conflict_fingerprint = _conflict_fingerprint(reason)
+    parsed_prior: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+    for prior_row in prior:
+        try:
+            payload = json.loads(prior_row["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        parsed_prior.append((prior_row, payload))
+    matching_prior = [
+        (prior_row, payload)
+        for prior_row, payload in parsed_prior
+        if _conflict_event_fingerprint(payload) == conflict_fingerprint
+    ]
+    # Count actual fixer cards, not duplicate/cascade-artifact event rows.
+    attempts = len({
+        str(payload.get("child_id") or "").strip()
+        for _prior_row, payload in matching_prior
+        if str(payload.get("child_id") or "").strip()
+    })
 
     # Budget spent → escalate to the operator (the unresolvable-chain guard).
     if attempts >= CONFLICT_FIXER_MAX_ATTEMPTS:
@@ -20869,11 +20994,8 @@ def _maybe_route_conflict_park_fixer(
     # working (in-flight, root-keyed): a cascade step must not spawn its own
     # fixer while an earlier step's fixer for the SAME root is still open.
     child_ids: list[str] = []
-    for prior_row in prior:
-        try:
-            cid = json.loads(prior_row["payload"] or "{}").get("child_id")
-        except Exception:
-            cid = None
+    for _prior_row, payload in parsed_prior:
+        cid = payload.get("child_id")
         if cid:
             child_ids.append(cid)
     if child_ids:
@@ -20888,7 +21010,7 @@ def _maybe_route_conflict_park_fixer(
 
     # Backoff floor so a tight sweep cadence can't redispatch the instant a
     # fixer finishes (root-keyed, from the same prior rows above).
-    last_at = prior[-1]["created_at"] if prior else None
+    last_at = matching_prior[-1][0]["created_at"] if matching_prior else None
     if last_at is not None and int(last_at) + CONFLICT_FIXER_BACKOFF_SECONDS > now:
         return
 

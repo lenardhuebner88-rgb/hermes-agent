@@ -41,6 +41,84 @@ def repo(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _make_resolved_main_merge(repo, task_id):
+    info = kwt.ensure_worktree(repo, task_id)
+    worktree = info["path"]
+
+    (worktree / "a.txt").write_text("chain version\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "chain change before old main")
+
+    (repo / "a.txt").write_text("old main version\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "old main conflicting change")
+    old_main = _git(repo, "rev-parse", "HEAD")
+
+    # The chain deliberately resolves the old-main collision and records that
+    # resolution in a merge commit, matching the live t_ad03d43e topology.
+    subprocess.run(
+        ["git", "-C", str(worktree), "merge", "main"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / "a.txt").write_text("reviewed merge resolution\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "merge old main with resolution")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    assert _git(worktree, "rev-parse", "HEAD^2") == old_main
+    return worktree, recorded_head
+
+
+def test_prepare_worker_base_preserves_prior_main_merge_resolution(repo):
+    """A resolved merge from the prior main tip must not be flattened away.
+
+    Replaying the chain's older feature commit onto the moved main conflicts;
+    merging the new main tip instead preserves that already-reviewed resolution.
+    """
+    worktree, recorded_head = _make_resolved_main_merge(repo, "t_resolved_merge")
+
+    # Main subsequently moves only by an unrelated commit.
+    (repo / "unrelated.txt").write_text("new main work\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "move main independently")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_resolved_merge",
+    )
+
+    assert result["action"] == "merged"
+    assert (worktree / "a.txt").read_text() == "reviewed merge resolution\n"
+    assert (worktree / "unrelated.txt").read_text() == "new main work\n"
+    assert kwt.dirty_files(worktree) == []
+    assert _git(worktree, "merge-base", "--is-ancestor", "main", "HEAD") == ""
+
+
+def test_prepare_worker_base_routes_new_conflict_after_merge_fallback(repo):
+    worktree, recorded_head = _make_resolved_main_merge(repo, "t_new_conflict")
+
+    # This is a genuinely new collision after the recorded resolution, so the
+    # merge fallback must fail closed and retain the conflict-fixer marker.
+    (repo / "a.txt").write_text("new main collision\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "new main conflicting change")
+
+    with pytest.raises(kwt.WorktreeError, match="could not rebase onto main"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            task_id="t_new_conflict",
+        )
+
+    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
+    assert (worktree / "a.txt").read_text() == "reviewed merge resolution\n"
+    assert kwt.dirty_files(worktree) == []
+
+
 def test_prepare_worker_base_adopts_wip_when_evidence_given(repo):
     """(a) dirty non-artifact worktree + adoption evidence -> the dirt is
     committed on the chain branch under a deterministic message, the
@@ -56,6 +134,7 @@ def test_prepare_worker_base_adopts_wip_when_evidence_given(repo):
         merge_target="main",
         task_id="t_adopt",
         adopt_wip_run_id=42,
+        adopt_wip_scope_paths=["src.py"],
     )
 
     assert kwt.dirty_files(worktree) == []
@@ -187,6 +266,7 @@ def test_dispatch_adopts_wip_left_by_own_blocked_run(
         tid = kb.create_task(
             conn,
             title="fleet drawer slice",
+            body="Scope files (allowed edit paths):\nNodeDetailDrawer.tsx\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
@@ -271,6 +351,97 @@ def test_dispatch_adopts_wip_left_by_own_blocked_run(
     assert adopted[0]["files"] == ["NodeDetailDrawer.tsx"]
     commit_msg = _git(expected, "log", "-1", "--format=%s")
     assert commit_msg == f"wip({tid}): adopt uncommitted WIP from blocked run {run1_id}"
+
+
+def test_dispatch_wip_adoption_skips_untracked_files_outside_task_scope(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="scoped adoption",
+            body=(
+                "Scope files (allowed edit paths):\n"
+                "src/task.py\n\n"
+                "- AC: preserve unrelated untracked files\n"
+            ),
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            scope_contract={"allowed_paths": [str(repo), "README.md"]},
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+        run1_id = kb.get_task(conn, tid).current_run_id
+        assert run1_id is not None
+
+        (expected / "docs").mkdir()
+        (expected / "docs" / "existing.md").write_text("branch edit\n", encoding="utf-8")
+        _git(expected, "add", "docs/existing.md")
+        _git(expected, "commit", "-m", "task branch edit")
+        (expected / "README.md").write_text("tracked task edit\n", encoding="utf-8")
+        (expected / "src").mkdir()
+        (expected / "src" / "task.py").write_text("task edit\n", encoding="utf-8")
+        (expected / "docs" / "new.md").write_text("same touched directory\n", encoding="utf-8")
+        foreign = expected / ".claude" / "skills" / "foreign" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("repo-foreign\n", encoding="utf-8")
+        assert kb.block_task(conn, tid, reason="operator decision")
+        assert kb.unblock_task(conn, tid)
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert foreign.read_text(encoding="utf-8") == "repo-foreign\n"
+    assert kwt.dirty_files(expected) == [".claude/skills/foreign/SKILL.md"]
+    committed = _git(expected, "show", "--name-only", "--format=", "HEAD").splitlines()
+    assert committed == ["README.md", "docs/new.md", "src/task.py"]
+    adopted = [json.loads(e["payload"]) for e in events if e["kind"] == "wip_adopted"]
+    assert adopted[-1]["files"] == ["README.md", "docs/new.md", "src/task.py"]
+    assert adopted[-1]["skipped_files"] == [".claude/skills/foreign/SKILL.md"]
+    assert "Skipped untracked files:\n- .claude/skills/foreign/SKILL.md" in _git(
+        expected, "log", "-1", "--format=%B"
+    )
+
+
+def test_task_scope_paths_unions_contract_and_scope_files_body_section():
+    assert getattr(kwt, "_task_scope_paths")(
+        "Scope files (allowed edit paths):\nsrc/task.py\n\n- AC-1: done\n",
+        {"allowed_paths": ["README.md"]},
+    ) == ["README.md", "src/task.py"]
+
+
+def test_select_wip_paths_without_declared_scope_skips_untracked(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    (repo / "README.md").write_text("tracked task edit\n", encoding="utf-8")
+    foreign = repo / ".claude" / "skills" / "foreign" / "SKILL.md"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("repo-foreign\n", encoding="utf-8")
+
+    adopted, skipped = getattr(kwt, "_select_wip_paths")(
+        repo,
+        kwt.dirty_files(repo),
+        scope_paths=None,
+        merge_target="HEAD",
+    )
+
+    assert adopted == ["README.md"]
+    assert skipped == [".claude/skills/foreign/SKILL.md"]
 
 
 def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
@@ -359,6 +530,7 @@ def test_dispatch_adopts_wip_left_by_transient_retry_run(
         tid = kb.create_task(
             conn,
             title="gateway-restart slice",
+            body="Scope files (allowed edit paths):\napp.py\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
