@@ -17,7 +17,6 @@ These tests pin:
 from __future__ import annotations
 
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -63,6 +62,7 @@ class _StubChild:
         ]
         self._api_call_count = api_call_count
         self._hang = threading.Event()
+        self._run_started = threading.Event()
         self._hang_seconds = hang_seconds
 
     def get_activity_summary(self):
@@ -74,6 +74,7 @@ class _StubChild:
         }
 
     def run_conversation(self, user_message, task_id=None, stream_callback=None):
+        self._run_started.set()
         self._hang.wait(self._hang_seconds)
         return {"final_response": "", "completed": False, "api_calls": self._api_call_count}
 
@@ -94,7 +95,8 @@ class TestDumpSubagentTimeoutDiagnostic:
             daemon=True,
         )
         worker.start()
-        time.sleep(0.1)
+        assert child._run_started.wait(timeout=10.0), "worker did not enter run_conversation"
+        assert worker.is_alive(), "worker must still be blocked when its stack is captured"
         try:
             path = _dump_subagent_timeout_diagnostic(
                 child=child,
@@ -106,7 +108,9 @@ class TestDumpSubagentTimeoutDiagnostic:
             )
         finally:
             child.interrupt()
-            worker.join(timeout=2.0)
+            worker.join()
+
+        assert not worker.is_alive(), "worker did not exit after interrupt"
 
         assert path is not None
         p = Path(path)
