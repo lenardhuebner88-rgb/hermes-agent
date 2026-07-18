@@ -100,6 +100,16 @@ describe("ProjectCard drawer interaction", () => {
     expect(props.onKillSession).toHaveBeenCalledTimes(1);
     expect(props.onKillSession).toHaveBeenCalledWith(LIVE_AGENT);
   });
+
+  it("gives the kill button a ≥44px touch target on mobile, desktop density above tab", () => {
+    // Regression: the destructive ✕-button must honour the 44px touch contract
+    // on the phone Piet uses; tab:size-7 restores the compact desktop density.
+    // Matches the LiveBoard kill button (which already locks this).
+    renderCard();
+    const kill = screen.getByRole("button", { name: "Session work:2 kimi beenden" });
+    expect(kill.className).toContain("size-11");
+    expect(kill.className).toContain("tab:size-7");
+  });
 });
 
 describe("ProjectCard kanban chips → Fleet deep-link", () => {

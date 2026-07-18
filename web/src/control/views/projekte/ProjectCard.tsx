@@ -386,7 +386,7 @@ function LiveSessionRow({
             event.stopPropagation();
             onKillSession(agent);
           }}
-          className="grid size-7 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-status-alert/40 hover:bg-status-alert/10 hover:text-status-alert focus-visible:outline-2 focus-visible:outline-bronze"
+          className="grid size-11 shrink-0 place-items-center rounded-card border border-line text-ink-3 hover:border-status-alert/40 hover:bg-status-alert/10 hover:text-status-alert focus-visible:outline-2 focus-visible:outline-bronze tab:size-7"
         >
           <X className="h-3.5 w-3.5" aria-hidden />
         </button>
