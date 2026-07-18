@@ -1678,6 +1678,27 @@ class TestGatewaySessionDbRecovery:
         assert row["chat_type"] == "dm"
         assert row["thread_id"] == "topic-1"
 
+    def test_new_session_records_active_profile_when_source_has_no_route(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            SessionStore,
+            "_active_profile_name",
+            staticmethod(lambda: "coder"),
+        )
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="chat-1",
+            user_id="user-1",
+        )
+
+        entry = store.get_or_create_session(source)
+
+        assert source.profile is None
+        assert store._db is not None
+        row = store._db.get_session(entry.session_id)
+        assert row is not None
+        assert row["profile_name"] == "coder"
+
     def test_recovers_missing_sessions_json_mapping_from_state_db(self, tmp_path):
         config = GatewayConfig()
         source = SessionSource(
