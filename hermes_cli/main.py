@@ -13904,6 +13904,26 @@ def main():
         help="Reclaim disk space: merge FTS5 segments + VACUUM (no data change)",
     )
 
+    sessions_maintain = sessions_subparsers.add_parser(
+        "maintain",
+        help="Run configured retention maintenance for session databases",
+    )
+    sessions_maintain.add_argument(
+        "--all-profiles",
+        action="store_true",
+        help="Maintain the root home and every non-archived profile with a state.db",
+    )
+    sessions_maintain.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore the configured minimum interval since the last maintenance run",
+    )
+    sessions_maintain.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show prune candidates and database sizes without writing",
+    )
+
     sessions_repair = sessions_subparsers.add_parser(
         "repair",
         help="Repair a malformed state.db schema so hidden sessions reappear",
@@ -13955,6 +13975,139 @@ def main():
         import json as _json
 
         action = args.sessions_action
+
+        if action == "maintain":
+            import yaml
+
+            from hermes_cli.config import DEFAULT_CONFIG
+            from hermes_constants import get_default_hermes_root, get_hermes_home
+            from hermes_state import SessionDB
+
+            current_home = get_hermes_home()
+            homes = [current_home]
+            if args.all_profiles:
+                root = get_default_hermes_root()
+                homes = [root]
+                profiles_dir = root / "profiles"
+                if profiles_dir.is_dir():
+                    homes.extend(
+                        profile_home
+                        for profile_home in sorted(profiles_dir.iterdir())
+                        if profile_home.name != "_archived"
+                        and profile_home.is_dir()
+                        and (profile_home / "state.db").is_file()
+                    )
+
+            # The current home can also be one of the discovered profiles.
+            homes = list(dict.fromkeys(homes))
+            session_defaults = dict(DEFAULT_CONFIG.get("sessions") or {})
+
+            for home in homes:
+                db_path = home / "state.db"
+                before_mb = (
+                    db_path.stat().st_size / (1024 * 1024)
+                    if db_path.is_file()
+                    else 0.0
+                )
+                if not db_path.is_file():
+                    print(
+                        f"{db_path} | size {before_mb:.1f} -> {before_mb:.1f} MB "
+                        "| pruned 0 | vacuum skipped (state.db missing)"
+                    )
+                    continue
+
+                try:
+                    raw_config = {}
+                    config_path = home / "config.yaml"
+                    if config_path.is_file():
+                        with config_path.open("r", encoding="utf-8") as config_file:
+                            raw_config = yaml.safe_load(config_file) or {}
+                    if not isinstance(raw_config, dict):
+                        raise ValueError("config.yaml root must be a mapping")
+                    raw_sessions = raw_config.get("sessions") or {}
+                    if not isinstance(raw_sessions, dict):
+                        raise ValueError("config.yaml sessions section must be a mapping")
+                    session_config = {**session_defaults, **raw_sessions}
+                    retention_days = int(session_config.get("retention_days", 90))
+                    min_interval_hours = int(
+                        session_config.get("min_interval_hours", 24)
+                    )
+                    vacuum_enabled = bool(
+                        session_config.get("vacuum_after_prune", True)
+                    )
+                except Exception as exc:
+                    print(
+                        f"{db_path} | size {before_mb:.1f} -> {before_mb:.1f} MB "
+                        f"| pruned 0 | vacuum skipped (config error: {exc})"
+                    )
+                    continue
+
+                if not session_config.get("auto_prune", False):
+                    print(
+                        f"{db_path} | size {before_mb:.1f} -> {before_mb:.1f} MB "
+                        "| pruned 0 | vacuum skipped (auto_prune disabled)"
+                    )
+                    continue
+
+                db = None
+                try:
+                    db = SessionDB(db_path=db_path, read_only=bool(args.dry_run))
+                    if args.dry_run:
+                        candidate_count = len(
+                            db.list_prune_candidates(
+                                older_than_days=retention_days
+                            )
+                        )
+                        print(
+                            f"{db_path} | size {before_mb:.1f} -> {before_mb:.1f} MB "
+                            f"| candidates {candidate_count} | pruned 0 "
+                            "| vacuum skipped (dry-run)"
+                        )
+                        continue
+
+                    result = db.maybe_auto_prune_and_vacuum(
+                        retention_days=retention_days,
+                        min_interval_hours=(0 if args.force else min_interval_hours),
+                        vacuum=vacuum_enabled,
+                        sessions_dir=home / "sessions",
+                    )
+                    after_mb = (
+                        db_path.stat().st_size / (1024 * 1024)
+                        if db_path.is_file()
+                        else 0.0
+                    )
+                    error = result.get("error")
+                    if result.get("vacuumed"):
+                        vacuum_status = "yes"
+                    elif error:
+                        vacuum_status = f"skipped (error: {error})"
+                    elif result.get("skipped"):
+                        vacuum_status = "skipped (minimum interval not elapsed)"
+                    elif not vacuum_enabled:
+                        vacuum_status = "skipped (disabled by config)"
+                    elif not result.get("pruned"):
+                        vacuum_status = "skipped (no sessions pruned)"
+                    else:
+                        vacuum_status = "skipped (VACUUM failed or database locked)"
+                    print(
+                        f"{db_path} | size {before_mb:.1f} -> {after_mb:.1f} MB "
+                        f"| pruned {result.get('pruned', 0)} "
+                        f"| vacuum {vacuum_status}"
+                    )
+                except Exception as exc:
+                    after_mb = (
+                        db_path.stat().st_size / (1024 * 1024)
+                        if db_path.is_file()
+                        else before_mb
+                    )
+                    print(
+                        f"{db_path} | size {before_mb:.1f} -> {after_mb:.1f} MB "
+                        f"| pruned 0 | vacuum skipped (error: {exc})"
+                    )
+                finally:
+                    if db is not None:
+                        db.close()
+            return
 
         # 'repair' must run BEFORE opening SessionDB(): a malformed schema is
         # exactly the case where SessionDB() can't open, so it operates on the
