@@ -236,6 +236,18 @@ def qdb(tmp_path: Path) -> Path:
     return tmp_path / "question_events.db"
 
 
+@pytest.fixture(autouse=True)
+def _disable_background_suggestions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests opt in explicitly when asserting the async scheduling hook."""
+    from hermes_cli import agent_question_suggest
+
+    monkeypatch.setattr(
+        agent_question_suggest,
+        "schedule_question_suggestion",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_store_schema_init_idempotent_and_list_filter(qdb: Path) -> None:
     conn1 = aq.connect(db_path=qdb)
     conn1.close()
@@ -1457,9 +1469,18 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
 
     aq._INITIALIZED_PATHS.discard(str(qdb.resolve()))
     with aq.connect_closing(db_path=qdb) as c2:
+        aq._ensure_schema_migrations(c2)
         cols = {str(r[1]) for r in c2.execute("PRAGMA table_info(question_events)")}
-    assert "action_context" in cols
-    assert "hook_key" in cols
+    assert {
+        "action_context",
+        "hook_key",
+        "suggestions_json",
+        "suggested_by",
+        "suggested_ts",
+        "suggest_latency_ms",
+        "suggest_confidence",
+        "answer_source",
+    } <= cols
 
     rows = aq.list_question_events(status="open", db_path=qdb)
     assert len(rows) == 1
@@ -1467,6 +1488,10 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
     assert rows[0]["fingerprint"] == "fp-legacy"
     assert rows[0].get("action_context") is None
     assert rows[0].get("hook_key") is None
+    assert rows[0].get("suggestions") is None
+    assert rows[0].get("suggested_by") is None
+    assert rows[0].get("suggest_confidence") is None
+    assert rows[0].get("answer_source") is None
 
 
 def test_i2_ingest_hook_happy_path_real_options(qdb: Path) -> None:
@@ -1488,6 +1513,43 @@ def test_i2_ingest_hook_happy_path_real_options(qdb: Path) -> None:
     assert ev["kind"] == "claude"
     assert ev["pane_id"] == "%80"
     assert str(ev["fingerprint"]).startswith("hook:")
+
+
+def test_suggestion_precompute_is_scheduled_from_hook_and_scrape_inserts(
+    qdb: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hermes_cli import agent_question_push, agent_question_suggest
+
+    scheduled: list[tuple[int, Path | None]] = []
+    monkeypatch.setattr(
+        agent_question_push, "maybe_push_question", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        agent_question_suggest,
+        "schedule_question_suggestion",
+        lambda event_id, *, db_path=None, **_kwargs: scheduled.append((event_id, db_path)),
+    )
+
+    hook = aq.ingest_hook_event(_hook_store_event(pane_id="%81"), db_path=qdb)
+    now = 1_700_001_500.0
+    service = _StubService(
+        [_frage_window(pane_id="%82", now=now, activity=now - 10)],
+        now=now,
+    )
+    ingestor = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=lambda: now,
+    )
+    ingestor.poll_once()
+    scrape = ingestor.poll_once()
+
+    assert scrape["created"] == 1
+    assert [event_id for event_id, _path in scheduled] == [
+        hook["id"],
+        max(e["id"] for e in aq.list_question_events(db_path=qdb)),
+    ]
+    assert all(path == qdb for _event_id, path in scheduled)
 
 
 def test_i2_ingest_invalid_payload_writes_nothing(qdb: Path) -> None:

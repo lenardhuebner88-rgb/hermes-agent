@@ -815,6 +815,8 @@ def _tmux_agents(
                 "kind": kind,
                 "label": f"{session_name}:{window_index} {window_name}",
                 "task": None,
+                "task_body": None,
+                "task_acceptance_criteria": None,
                 "session_id": session_id,
                 "task_id": task_id,
                 "project": _attribute_project([pane_path], registry),
@@ -842,7 +844,8 @@ def _tmux_agents(
     try:
         placeholders = ",".join("?" for _task_id in task_ids)
         rows = conn.execute(
-            f"SELECT id, title FROM tasks WHERE id IN ({placeholders})",
+            f"SELECT id, title, body, acceptance_criteria "
+            f"FROM tasks WHERE id IN ({placeholders})",
             sorted(task_ids),
         ).fetchall()
     except sqlite3.DatabaseError as exc:
@@ -850,11 +853,14 @@ def _tmux_agents(
     finally:
         conn.close()
 
-    titles = {row["id"]: row["title"] for row in rows}
+    task_context = {row["id"]: row for row in rows}
     for agent in agents:
         task_id = agent["task_id"]
-        if task_id in titles:
-            agent["task"] = titles[task_id]
+        task = task_context.get(task_id)
+        if task is not None:
+            agent["task"] = task["title"]
+            agent["task_body"] = task["body"]
+            agent["task_acceptance_criteria"] = task["acceptance_criteria"]
     return agents, []
 
 

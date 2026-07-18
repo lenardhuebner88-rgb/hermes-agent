@@ -929,6 +929,19 @@ def test_tmux_source_options_override_kind_and_join_task_title(tmp_path: Path) -
         project_id=None,
         created_at=1_700_000_000,
     )
+    conn = kanban_db.connect(kdb)
+    try:
+        conn.execute(
+            "UPDATE tasks SET body = ?, acceptance_criteria = ? WHERE id = ?",
+            (
+                "Implement the answer-suggestion backend.",
+                '[{"id":"AC-1","text":"Suggestions are asynchronous"}]',
+                "corr-task",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     panes = (
         "work|7|claude-looking-name|claude|/home/piet/.hermes/hermes-agent"
         "|grok|agent|corr-task|session-123\n"
@@ -955,11 +968,17 @@ def test_tmux_source_options_override_kind_and_join_task_title(tmp_path: Path) -
     assert pane["session_id"] == "session-123"
     assert pane["task_id"] == "corr-task"
     assert pane["task"] == "task corr-task"
+    assert pane["task_body"] == "Implement the answer-suggestion backend."
+    assert pane["task_acceptance_criteria"] == (
+        '[{"id":"AC-1","text":"Suggestions are asynchronous"}]'
+    )
 
     missing = by_label["work:8 codex"]
     assert missing["task_id"] == "missing-task"
     assert missing["session_id"] == "session-456"
     assert missing["task"] is None
+    assert missing["task_body"] is None
+    assert missing["task_acceptance_criteria"] is None
 
 
 def test_tmux_source_no_server_running_yields_zero_agents_no_error(tmp_path: Path) -> None:

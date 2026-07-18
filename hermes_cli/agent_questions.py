@@ -108,6 +108,12 @@ CREATE TABLE IF NOT EXISTS question_meta (
 _SCHEMA_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("action_context", "action_context TEXT"),
     ("hook_key", "hook_key TEXT"),
+    ("suggestions_json", "suggestions_json TEXT"),
+    ("suggested_by", "suggested_by TEXT"),
+    ("suggested_ts", "suggested_ts TEXT"),
+    ("suggest_latency_ms", "suggest_latency_ms REAL"),
+    ("suggest_confidence", "suggest_confidence TEXT"),
+    ("answer_source", "answer_source TEXT"),
 )
 
 _PANE_ID_RE = re.compile(r"^%\d+$")
@@ -404,6 +410,16 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         options = []
     d["options"] = options
+    raw_suggestions = d.pop("suggestions_json", None)
+    if raw_suggestions is None:
+        suggestions = None
+    else:
+        try:
+            parsed = json.loads(raw_suggestions)
+            suggestions = parsed if isinstance(parsed, list) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            suggestions = None
+    d["suggestions"] = suggestions
     return d
 
 
@@ -840,6 +856,14 @@ def ingest_hook_event(
     except Exception:
         logger.warning(
             "ingest_hook_event push hook failed event_id=%s", new_id, exc_info=True
+        )
+    try:
+        from hermes_cli.agent_question_suggest import schedule_question_suggestion
+
+        schedule_question_suggestion(new_id, db_path=db_path)
+    except Exception:
+        logger.warning(
+            "ingest_hook_event suggestion hook failed event_id=%s", new_id, exc_info=True
         )
     return {"ok": True, "id": new_id}
 
@@ -1383,6 +1407,18 @@ class QuestionScrapeIngestor:
                     except Exception:
                         logger.warning(
                             "scrape insert push hook failed event_id=%s",
+                            new_id,
+                            exc_info=True,
+                        )
+                    try:
+                        from hermes_cli.agent_question_suggest import (
+                            schedule_question_suggestion,
+                        )
+
+                        schedule_question_suggestion(int(new_id), db_path=self.db_path)
+                    except Exception:
+                        logger.warning(
+                            "scrape insert suggestion hook failed event_id=%s",
                             new_id,
                             exc_info=True,
                         )
