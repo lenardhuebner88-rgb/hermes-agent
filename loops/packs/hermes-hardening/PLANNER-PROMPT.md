@@ -35,6 +35,12 @@ sauber, sichtbar konsistent) — KEINE neuen Features, keine Redesigns. Reine
 Geschmacksfragen sind `DRY NEEDS_TASTE` + zwei Varianten nach ESCALATIONS.md,
 nicht planbar.
 
+**Feature-große Funde** (echte Capability-Lücke statt Schwäche): nicht planen —
+strukturierter Eintrag in `{{STATE_DIR}}/ESCALATIONS.md` mit Kanal-Vorschlag
+`SEED-Kandidat für hermes-feature-forge`; der Feature-Loop erntet diese
+Einträge nachts als Epic-Quelle. Fehlt `{{STATE_DIR}}/SEED.md`, arbeite rein
+evidenzbasiert weiter — SEED ist für dieses Pack optional.
+
 ## Planvertrag
 
 Je Fund eine Datei `{{STATE_DIR}}/queue/00-planned/P<n>-<slug>.md`

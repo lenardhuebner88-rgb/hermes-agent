@@ -10,7 +10,7 @@ Worker (`HERMES_LOOP_WORKER=1`); Push und Deploy sind außerhalb deiner Rechte.
 ## Kontext lesen (Pflicht, in dieser Reihenfolge)
 
 1. `AGENTS.md` und `web/src/control/DESIGN.md` (Design-Sprache ist bindend).
-2. `{{STATE_DIR}}/SEED.md` — die Epic-Roadmap (Operator-editierbar). Sie ist
+2. `{{STATE_DIR}}/SEED.md` — die Epic-Roadmap (Struktur-Vertrag unten). Sie ist
    **Hinweis, nicht Wahrheit**: prüfe jedes Kandidaten-Epic gegen den echten
    Repo-Stand (das Feature könnte inzwischen existieren).
 3. `{{STATE_DIR}}/LEDGER.md`, `{{STATE_DIR}}/ESCALATIONS.md`, alle Dateien unter
@@ -20,6 +20,33 @@ Worker (`HERMES_LOOP_WORKER=1`); Push und Deploy sind außerhalb deiner Rechte.
 4. Die real existierenden Routen/Tabs: `web/src/control/ControlPage.tsx`,
    `web/src/control/components/ControlShell.tsx`; fürs Backend die passenden
    Module unter `hermes_cli/` (z. B. `web_server.py`-Router, `projects_overview.py`).
+
+## Selbst-Fütterung (SEED-Pflege — Pflicht am Anfang jeder Nacht)
+
+`{{STATE_DIR}}/SEED.md` gehört DIR; der Operator steuert nur über Reihenfolge
+und Vetos. Struktur-Vertrag: `## Epics` (bestätigt/promoted, oben = zuerst) ·
+`## Kandidaten` (agent-generiert, je Eintrag eine `Herkunft:`-Zeile) ·
+`## Vetos` (NIEMALS planen) · `## Erledigt`. Fehlt die Datei oder eine
+Sektion, lege sie in genau dieser Struktur an.
+
+1. Pflege zuerst: gelandete oder obsolet gewordene Epics mit Commit/Beleg nach
+   `## Erledigt` verschieben. `## Vetos` nie anfassen.
+2. Keine baubaren `## Epics` mehr? Promote den stärksten Kandidaten (mit
+   Ein-Zeilen-Begründung) nach `## Epics` und plane ihn.
+3. Auch `## Kandidaten` leer/erschöpft? Generiere 3–5 NEUE Kandidaten —
+   ausschließlich aus belegbaren Quellen, je mit `Herkunft:`-Zeile:
+   - ESCALATIONS der Geschwister-Loops: `~/.hermes/loops/hermes-hardening/ESCALATIONS.md`,
+     `~/.hermes/loops/dashboard-experience/ESCALATIONS.md` (nur lesen);
+     Einträge mit Kanal-Vorschlag „SEED-Kandidat" zuerst.
+   - Eigene `90-bounced`-Pläne mit behebbarem Verifier-Feedback.
+   - Belegte Lücken im Ist-Stand: CLI-only-Workflows ohne /control-Pendant,
+     Routen ohne Drilldown, `TODO`/`FIXME` in `hermes_cli/` und
+     `web/src/control/` (mit Datei:Zeile).
+   Freie Erfindung ohne Quelle ist verboten. Danach Schritt 2.
+4. Halte danach mindestens 3 offene Kandidaten für kommende Nächte vor.
+
+Erst wenn auch nach ehrlicher Generierung kein vertragskonformes Epic
+existiert, ist `DRY <grund>` erlaubt.
 
 ## Epic-Wahl — groß, aber landbar
 
