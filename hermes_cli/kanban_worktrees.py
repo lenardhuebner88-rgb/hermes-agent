@@ -1719,7 +1719,7 @@ class _VisualGateStaticServer:
             raise RuntimeError(f"web_dist missing index.html: {index}")
 
         from fastapi import FastAPI
-        from fastapi.responses import FileResponse
+        from fastapi.responses import FileResponse, Response
         from fastapi.staticfiles import StaticFiles
         import uvicorn
 
@@ -1727,6 +1727,22 @@ class _VisualGateStaticServer:
         assets = self.web_dist / "assets"
         if assets.is_dir():
             app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+        # The gate serves a backendless build: the SPA still fires fire-and-forget
+        # writes against `/api/*` (e.g. the ControlShell agent-questions/visibility
+        # heartbeat that mounts on every surface). A GET-only server answers those
+        # non-GET requests with 405, and Chromium emits a "Failed to load resource:
+        # 405" console error that fails the visual gate as a false positive even
+        # though the JS already swallows the rejection. Swallow writes with a benign
+        # 204 so backend-absence never masquerades as a UI regression; real JS/React
+        # pageerrors and non-API console errors remain gate signals.
+        @app.api_route(
+            "/{full_path:path}",
+            methods=["POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            include_in_schema=False,
+        )
+        async def _swallow_writes(full_path: str = "") -> Response:
+            return Response(status_code=204)
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def _serve_spa(full_path: str = "") -> FileResponse:
