@@ -1638,6 +1638,86 @@ def test_conflict_park_fixer_bounded_then_escalates(kanban_home, monkeypatch):
     assert s4["parked"] == []                            # idempotent: no 2nd escalation
 
 
+def test_conflict_fixer_budget_is_scoped_to_conflict_fingerprint(
+    kanban_home, monkeypatch,
+):
+    monkeypatch.setattr(kb, "CONFLICT_FIXER_MAX_ATTEMPTS", 2)
+    with kb.connect_closing() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "merge conflict/failure (aborted): new.py",
+        )
+        _patch_integrate(monkeypatch, [])
+
+        # Reproduce legacy cascade artifacts: several dispatch events for one
+        # old conflict must not consume a different conflict's attempt budget.
+        with kb.write_txn(conn):
+            for attempt in range(1, 5):
+                kb._append_event(
+                    conn,
+                    tid,
+                    kb.CONFLICT_FIXER_DISPATCHED_EVENT,
+                    {
+                        "child_id": f"t_oldfix{attempt}",
+                        "attempt": attempt,
+                        "reason": "merge conflict/failure (aborted): old.py",
+                    },
+                )
+        summary = kb.no_silent_stall_sweep(conn, now=1_900_000_000)
+
+    assert len(summary["conflict_fixer_dispatched"]) == 1
+    assert summary["conflict_fixer_dispatched"][0]["attempt"] == 1
+
+
+def test_successful_conflict_fixer_resumes_matching_parked_parent(
+    kanban_home, monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "merge conflict/failure (aborted): foo.py",
+        )
+        _patch_integrate(monkeypatch, [])
+        summary = kb.no_silent_stall_sweep(conn, now=1_900_000_000)
+        child_id = summary["conflict_fixer_dispatched"][0]["child_id"]
+
+        assert kb.get_task(conn, tid).status == "blocked"
+        assert kb.complete_task(conn, child_id, summary="conflict fixed")
+        parent = kb.get_task(conn, tid)
+        resumed = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "conflict_fixer_parent_resumed"
+        ]
+
+    assert parent.status == "ready"
+    assert len(resumed) == 1
+    assert resumed[0].payload["child_id"] == child_id
+
+
+def test_successful_conflict_fixer_does_not_resume_changed_parent_context(
+    kanban_home, monkeypatch,
+):
+    with kb.connect_closing() as conn:
+        tid, _wt, _root = _make_integration_parked_in_worktree(
+            conn, "merge conflict/failure (aborted): foo.py",
+        )
+        _patch_integrate(monkeypatch, [])
+        summary = kb.no_silent_stall_sweep(conn, now=1_900_000_000)
+        child_id = summary["conflict_fixer_dispatched"][0]["child_id"]
+
+        # Supersede the dispatch context while leaving the parent integration-
+        # parked, isolating the completion path's compare-and-swap guard.
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn,
+                tid,
+                "blocked",
+                {"reason": "integration parked: merge conflict/failure (aborted): bar.py"},
+            )
+        assert kb.complete_task(conn, child_id, summary="old conflict fixed")
+        parent = kb.get_task(conn, tid)
+
+    assert parent.status == "blocked"
+
+
 def test_conflict_park_needs_operator_unchanged(kanban_home, monkeypatch):
     # An unknown (needs_operator) park is byte-unchanged: it escalates with NO
     # fixer routed, even when a worktree is present.
