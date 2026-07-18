@@ -175,7 +175,9 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
                 type="button"
                 aria-label={t.detailOpenAria(project.name)}
                 onClick={onOpen}
-                className="inline-flex min-h-11 max-w-full items-center truncate text-left text-ink hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze tab:min-h-0"
+                // Pixel-fest wie die Kanban-Chips: 15px-Root-Fontsize macht
+                // min-h-11 zu 41.25px (ui-verify 2026-07-18) — Touch-Ziel 44px.
+                className="inline-flex min-h-[44px] max-w-full items-center truncate text-left text-ink hover:text-bronze-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze tab:min-h-0"
               >
                 <span className="truncate">{project.name}</span>
               </button>

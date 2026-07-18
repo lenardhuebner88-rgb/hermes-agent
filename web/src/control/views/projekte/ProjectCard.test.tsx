@@ -69,6 +69,10 @@ describe("ProjectCard drawer interaction", () => {
     const titleButton = screen.getByRole("button", { name: "Projekt Hermes Infra öffnen" });
     fireEvent.click(titleButton);
     expect(props.onOpen).toHaveBeenCalledTimes(1);
+    // Touch-Ziel pixel-fest (44px echte Hit-Area bei 15px-Root-Fontsize).
+    const cls = titleButton.getAttribute("class") ?? "";
+    expect(cls).toContain("min-h-[44px]");
+    expect(cls).toContain("tab:min-h-0");
   });
 
   it("keeps the card container non-interactive", () => {
