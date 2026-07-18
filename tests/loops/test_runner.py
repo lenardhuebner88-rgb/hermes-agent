@@ -624,6 +624,38 @@ def test_autoland_rejects_safety_projection_drift(tmp_path, fake_engine, monkeyp
         load_pack(packs_dir, "dashboard-experience")
 
 
+def test_autoland_rejects_land_remote_drift(tmp_path, fake_engine, monkeypatch):
+    # Fail-closed gegen Ziel-Umleitung: land_remote=origin würde den Push auf den
+    # NousResearch-Upstream lenken. Das Push-Ziel IST Teil der Landungsautorität →
+    # Drift muss den Safety-Hash drehen, nicht still durchrutschen.
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["land_remote"] = "origin"
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="Sicherheitsprojektion"):
+        load_pack(packs_dir, "dashboard-experience")
+
+
+def test_autoland_rejects_empty_land_gates_drift(tmp_path, fake_engine, monkeypatch):
+    # Fail-closed gegen Gate-Umgehung: land_gates=[] würde ALLE Land-Gates
+    # überspringen (leere Liste ≠ None-Default). Die Gate-Ausführung IST Teil der
+    # Landungsautorität → Drift muss fail-closed auffallen.
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["land_gates"] = []
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    with pytest.raises(ManifestError, match="Sicherheitsprojektion"):
+        load_pack(packs_dir, "dashboard-experience")
+
+
 def test_dashboard_experience_safety_projection_still_pinned():
     # Proves the curated pack's model-agnostic safety projection matches the pin
     # (comments/model edits must NOT move it; scope/role edits MUST).
