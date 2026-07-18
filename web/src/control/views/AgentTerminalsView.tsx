@@ -2274,7 +2274,7 @@ export function AgentTerminalsView() {
         type="button"
         onClick={() => void submitCreateSession()}
         disabled={createBusy}
-        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sec font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sec font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0"
       >
         {createBusy ? "Startet…" : "Session starten"}
       </button>
