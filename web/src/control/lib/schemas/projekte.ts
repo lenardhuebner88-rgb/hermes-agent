@@ -265,10 +265,10 @@ const ProjectSessionSchema = z.object({
   spawn_kind: ProjectSessionSpawnKindSchema,
   spawned_by_id: nullableString,
   spawned_by_label: nullableString,
-  // Terminal-Deep-Link (additive-ready): das Backend annotiert Session-Zeilen
-  // aktuell NICHT mit tmux-Herkunft — optional statt nullableString, damit
-  // alte Fixtures/Payloads ohne die Schlüssel unverändert parsen. Gesetzt →
-  // die Zeile bekommt die "Terminal öffnen"-Affordance.
+  // Terminal-Deep-Link: das Backend annotiert Session-Zeilen mit tmux-Herkunft
+  // (Join über @hermes_session_id in build_sessions_payload); optional statt
+  // nullableString, damit alte Fixtures/Payloads ohne die Schlüssel unverändert
+  // parsen. Gesetzt → die Zeile bekommt die "Terminal öffnen"-Affordance.
   tmux_session: z.string().nullable().optional().catch(null),
   tmux_window: z.string().nullable().optional().catch(null),
   tmux_window_name: z.string().nullable().optional().catch(null),
