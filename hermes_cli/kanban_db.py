@@ -23877,16 +23877,19 @@ def _blocked_kind_for_auto_retry(
     SUPERSEDED / capacity prose (even with ``block_kind`` NULL) is never
     retryable — see ``_AUTO_RETRY_SUPERSEDED_RE`` / ``_AUTO_RETRY_CAPACITY_RE``.
     """
+    normalized_verdict = str(verdict or "").strip().upper()
     if explicit_block_kind is not None:
-        if explicit_block_kind == "transient":
+        if (
+            explicit_block_kind == "transient"
+            and normalized_verdict != "REQUEST_CHANGES"
+        ):
             return "retryable"
         # review_revision has its own bounded body-hash retry path below.
         if explicit_block_kind in OPERATOR_ONLY_BLOCK_KINDS:
             return explicit_block_kind
-        if explicit_block_kind != "review_revision":
+        if explicit_block_kind not in {"review_revision", "transient"}:
             return explicit_block_kind
     text = (reason or "").strip()
-    normalized_verdict = str(verdict or "").strip().upper()
     is_review_feedback = (
         explicit_block_kind == "review_revision"
         or normalized_verdict == "REQUEST_CHANGES"
