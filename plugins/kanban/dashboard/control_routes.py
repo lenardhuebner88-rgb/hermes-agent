@@ -118,8 +118,9 @@ def get_release_status(
     conn = _conn(board=board)
     try:
         rows = conn.execute(
-            "SELECT task_id, created_at, payload FROM task_events "
-            "WHERE kind = 'auto_release' ORDER BY created_at DESC, id DESC LIMIT 10",
+            "SELECT e.task_id, t.title AS task_title, e.created_at, e.payload "
+            "FROM task_events e JOIN tasks t ON t.id = e.task_id "
+            "WHERE e.kind = 'auto_release' ORDER BY e.created_at DESC, e.id DESC LIMIT 10",
         ).fetchall()
         recent = []
         for row in rows:
@@ -130,6 +131,7 @@ def get_release_status(
             recent.append(
                 {
                     "task_id": row["task_id"],
+                    "task_title": row["task_title"],
                     "created_at": row["created_at"],
                     "payload": payload,
                 }

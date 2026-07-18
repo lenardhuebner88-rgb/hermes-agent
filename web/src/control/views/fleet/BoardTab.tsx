@@ -11,7 +11,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
-import { inspectEpochSeconds, validateChronology } from "../../lib/derive";
 import { taskStatusLabel } from "../../lib/tones";
 import type { BoardArchiveResponse, BoardResponse, BoardTask, TaskStatus } from "../../lib/types";
 import {
@@ -74,60 +73,6 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
-function timestampValue(value: number | null | undefined, now: number): { dateTime: string | null; label: string } | null {
-  if (value == null) return null;
-  const inspected = inspectEpochSeconds(value, now);
-  if (!inspected.valid) return { dateTime: null, label: "Zeit ungültig" };
-  const date = new Date(value * 1000);
-  return {
-    dateTime: date.toISOString(),
-    label: date.toLocaleString("de-DE", {
-      dateStyle: "medium",
-      timeStyle: "medium",
-      timeZone: "Europe/Berlin",
-    }) + (inspected.relation === "future" ? " · zukünftig" : ""),
-  };
-}
-
-function TaskInformation({ task, now }: { task: BoardTask; now: number }) {
-  const timestamps = [
-    ["Erstellt", task.created_at],
-    ["Gestartet", task.started_at],
-    ["Fertig", task.completed_at],
-    ["Archiviert", task.archived_at],
-    ["Fällig", task.due_at],
-    ["Heartbeat", task.last_heartbeat_at],
-  ] as const;
-  const chronology = validateChronology({
-    createdAt: task.created_at,
-    startedAt: task.started_at,
-    completedAt: task.completed_at,
-  });
-
-  return (
-    <details className="fleet-boardtab-disclosure">
-      <summary aria-label={`Weitere Informationen zu ${task.title || task.id}`}>Details</summary>
-      <dl className="fleet-boardtab-details">
-        {task.assignee && <><dt>Assignee</dt><dd>{task.assignee}</dd></>}
-        {task.priority !== 0 && <><dt>Priorität</dt><dd>{task.priority}</dd></>}
-        {task.comment_count > 0 && <><dt>Kommentare</dt><dd>{task.comment_count}</dd></>}
-        {task.link_counts.parents > 0 && <><dt>Vorgänger</dt><dd>{task.link_counts.parents}</dd></>}
-        {task.link_counts.children > 0 && <><dt>Nachfolger</dt><dd>{task.link_counts.children}</dd></>}
-        {task.progress && task.progress.total > 0 && <><dt>Fortschritt</dt><dd>{task.progress.done}/{task.progress.total}</dd></>}
-        {!chronology.valid && <><dt>Zeitfolge</dt><dd>{chronology.reason}</dd></>}
-        {timestamps.map(([label, value]) => {
-          const formatted = timestampValue(value, now);
-          return formatted ? (
-            <div className="fleet-boardtab-detail-pair" key={label}>
-              <dt>{label}</dt>
-              <dd>{formatted.dateTime ? <time dateTime={formatted.dateTime}>{formatted.label}</time> : <span>{formatted.label}</span>}</dd>
-            </div>
-          ) : null;
-        })}
-      </dl>
-    </details>
-  );
-}
 
 export function BoardTab({
   board,
@@ -474,19 +419,15 @@ export function BoardTab({
               );
               return (
                 <div key={t.id} className="fleet-boardtab-card">
-                  {readOnly ? (
-                    <div className="fleet-boardtab-row fleet-boardtab-row-readonly" title="Fremd-Board · nur lesen">{content}</div>
-                  ) : (
-                    <button
-                      className={`fleet-boardtab-row${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
-                      onClick={() => onOpenNodeDetail(t.id)}
-                      aria-expanded={selectedNodeId === t.id}
-                      aria-controls={detailControlsId}
-                    >
-                      {content}
-                    </button>
-                  )}
-                  <TaskInformation task={t} now={board?.now ?? Math.floor(Date.now() / 1000)} />
+                  <button
+                    className={`fleet-boardtab-row${readOnly ? " fleet-boardtab-row-readonly" : ""}${selectedNodeId === t.id ? " fleet-boardtab-row-selected" : ""}`}
+                    onClick={() => onOpenNodeDetail(t.id)}
+                    aria-expanded={selectedNodeId === t.id}
+                    aria-controls={detailControlsId}
+                    title={readOnly ? "Fremd-Board · nur lesen" : undefined}
+                  >
+                    {content}
+                  </button>
                 </div>
               );
             })}

@@ -506,6 +506,7 @@ export function FleetView() {
                     void planspecs.reload();
                   }}
                   onShowDetail={openPlanSpecDetail}
+                  onOpenTask={openNodeDetail}
                 />
               </>
             )}

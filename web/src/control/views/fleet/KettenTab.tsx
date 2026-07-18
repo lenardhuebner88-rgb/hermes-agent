@@ -560,23 +560,31 @@ function KettenGraphV4({
                 : focusNode.status === "running" ? 0.58 : 0
               }
             />
-            {/* Values only, no labels */}
             <div className="values-row">
               {focusRuntime != null ? (
-                <span className="val val-strong">{fmtDurationClock(focusRuntime)}</span>
+                <span className="metric">
+                  <span className="metric-label">Laufzeit</span>
+                  <span className="val val-strong">{fmtDurationClock(focusRuntime)}</span>
+                </span>
               ) : null}
               {focusRuntime != null && (focusNode.input_tokens > 0 || focusNode.output_tokens > 0) ? (
                 <span className="val-sep">·</span>
               ) : null}
               {focusNode.input_tokens > 0 || focusNode.output_tokens > 0 ? (
-                <span className="val">
-                  {fmtTokens(focusNode.input_tokens)} ↓ {fmtTokens(focusNode.output_tokens)} tok
+                <span className="metric">
+                  <span className="metric-label">Tokens</span>
+                  <span className="val">
+                    {fmtTokens(focusNode.input_tokens)} ↓ {fmtTokens(focusNode.output_tokens)} tok
+                  </span>
                 </span>
               ) : null}
               {focusEtaP50 != null ? (
                 <>
                   <span className="val-sep">·</span>
-                  <span className="val val-live">p50~{fmtSeconds(focusEtaP50)}</span>
+                  <span className="metric">
+                    <span className="metric-label">ETA</span>
+                    <span className="val val-live">p50~{fmtSeconds(focusEtaP50)}</span>
+                  </span>
                 </>
               ) : null}
             </div>

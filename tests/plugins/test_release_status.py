@@ -72,4 +72,5 @@ def test_release_status_surfaces_recent_auto_release_event(client):
     task_ids = [row["task_id"] for row in body["recent"]]
     assert task_id in task_ids
     matching = next(row for row in body["recent"] if row["task_id"] == task_id)
+    assert matching["task_title"] == "Fake auto-released task"
     assert matching["payload"]["deployed"] is True

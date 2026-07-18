@@ -1561,14 +1561,17 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-copy-id:hover { border-color: var(--fleet-linie-stark); color: var(--fleet-t1); }
 
-/* Scrollbarer Tab-Inhalt */
+/* Der DrawerShell-Body ist die einzige vertikale Scroll-Ebene. */
 .fleet-detail-body {
-  overflow-y: auto;
-  max-height: calc(60vh - 120px);
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding-top: 2px;
+}
+
+.fleet-detail-log pre {
+  max-height: none;
+  overflow-y: visible;
 }
 
 /* Log-Tail im Fleet-Dark-Theme */
@@ -2286,25 +2289,6 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-inchain { color: var(--fleet-t3); opacity: 0.72; }
 .fleet-boardtab-cost { color: var(--fleet-amber); }
 .fleet-boardtab-prog { color: var(--fleet-t2); }
-
-.fleet-boardtab-disclosure {
-  padding: 0 12px 8px 52px;
-  color: var(--fleet-t2);
-  font: 400 10.5px/1.35 var(--hc-font-sans);
-}
-
-.fleet-boardtab-disclosure summary {
-  width: fit-content;
-  cursor: pointer;
-  color: var(--fleet-t3);
-  font-weight: 600;
-}
-
-.fleet-boardtab-disclosure summary:focus-visible {
-  outline: 2px solid var(--fleet-puls);
-  outline-offset: 2px;
-  border-radius: 3px;
-}
 
 .fleet-boardtab-details {
   display: grid;

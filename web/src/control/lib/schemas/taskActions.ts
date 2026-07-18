@@ -49,6 +49,7 @@ const TaskRunSchema = z.object({
   model_source: z.string().nullable().catch(null),
   model_observed_at: nullableEpochSeconds,
   effective_model: z.string().nullable().catch(null),
+  worker_session_id: z.string().nullable().catch(null),
 });
 const TaskEventSchema = z.object({
   id: z.coerce.number().catch(0),
