@@ -17554,6 +17554,7 @@ async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
 class AgentQuestionAnswerRequest(BaseModel):
     answer: str
     answered_by: str = "operator"
+    via_suggestion: Optional[int] = None
 
 
 class AgentQuestionOptionIn(BaseModel):
@@ -17683,6 +17684,7 @@ def agent_questions_answer(
             event_id,
             req.answer,
             answered_by=req.answered_by or "operator",
+            via_suggestion=req.via_suggestion,
         )
     except Exception as exc:
         detail = scrub_detail(str(exc)) or exc.__class__.__name__
@@ -17696,7 +17698,7 @@ def agent_questions_answer(
         raise HTTPException(status_code=404, detail={"ok": False, "reason": reason})
     if reason in ("not-open", "superseded"):
         raise HTTPException(status_code=409, detail={"ok": False, "reason": reason})
-    if reason in ("free-text-not-supported", "invalid-option"):
+    if reason in ("free-text-not-supported", "invalid-option", "invalid-suggestion"):
         raise HTTPException(status_code=400, detail={"ok": False, "reason": reason})
     if reason in ("recheck-failed", "send-failed"):
         raise HTTPException(status_code=503, detail={"ok": False, "reason": reason})

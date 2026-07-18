@@ -856,6 +856,32 @@ def test_endpoint_real_route_get_agent_questions(qdb: Path, monkeypatch: pytest.
     assert "questions" in body
     assert body["questions"][0]["question_text"] == "Approve deploy?"
     assert body["questions"][0]["options"][0]["recommended"] is True
+    assert body["questions"][0]["suggestions"] is None
+    assert body["questions"][0]["suggested_by"] is None
+    assert body["questions"][0]["suggest_confidence"] is None
+
+    event_id = body["questions"][0]["id"]
+    with aq.connect_closing(db_path=qdb) as conn:
+        conn.execute(
+            "UPDATE question_events SET suggestions_json = ?, suggested_by = ?, "
+            "suggest_confidence = ? WHERE id = ?",
+            (
+                '[{"nr":1,"rationale":"Matches the deployment policy."}]',
+                "gpt-5.6-terra",
+                "high",
+                event_id,
+            ),
+        )
+        conn.commit()
+
+    suggested = client.get(
+        "/api/agent-questions", params={"status": "open", "limit": 10}, headers=headers
+    ).json()["questions"][0]
+    assert suggested["suggestions"] == [
+        {"nr": 1, "rationale": "Matches the deployment policy."}
+    ]
+    assert suggested["suggested_by"] == "gpt-5.6-terra"
+    assert suggested["suggest_confidence"] == "high"
 
 
 # ---------------------------------------------------------------------------
@@ -1078,6 +1104,55 @@ def test_answer_claim_double_click_safe(qdb: Path) -> None:
     assert len(svc.sent) == 1
 
 
+@pytest.mark.parametrize(
+    ("ranked", "answer", "via_suggestion", "expected_source"),
+    [
+        (
+            [{"nr": 1, "rationale": "Top choice"}, {"nr": 2, "rationale": "Backup"}],
+            "1",
+            1,
+            "suggested_accepted",
+        ),
+        (
+            [{"nr": 1, "rationale": "Top choice"}, {"nr": 2, "rationale": "Backup"}],
+            "2",
+            2,
+            "suggested_edited",
+        ),
+        (None, "1", None, "operator_free"),
+    ],
+)
+def test_answer_source_provenance(
+    qdb: Path,
+    ranked: list[dict[str, Any]] | None,
+    answer: str,
+    via_suggestion: int | None,
+    expected_source: str,
+) -> None:
+    eid, _pane_id, _fp = _insert_open_select(qdb)
+    if ranked is not None:
+        with aq.connect_closing(db_path=qdb) as conn:
+            conn.execute(
+                "UPDATE question_events SET suggestions_json = ? WHERE id = ?",
+                (json.dumps(ranked), eid),
+            )
+            conn.commit()
+
+    result = aq.answer_question(
+        eid,
+        answer,
+        via_suggestion=via_suggestion,
+        db_path=qdb,
+        service=_RecordingService([_FIXTURE_CLAUDE_SELECT, ""]),
+        verify_delay_s=0,
+        sleep=lambda _s: None,
+    )
+
+    assert result["ok"] is True
+    answered = aq.list_question_events(status="answered", db_path=qdb)
+    assert answered[0]["answer_source"] == expected_source
+
+
 def test_answer_recheck_mismatch_supersedes_no_send(qdb: Path) -> None:
     eid, _pane, _fp = _insert_open_select(qdb, fingerprint="fp-stale-mismatch")
     # Recheck sees a *different* standing prompt → supersede, no send
@@ -1212,6 +1287,12 @@ def test_endpoint_answer_success_and_conflict(
     monkeypatch.setattr(aq, "question_events_db_path", lambda: qdb)
 
     eid, _pane_id, _fp = _insert_open_select(qdb, pane_id="%api-ans")
+    with aq.connect_closing(db_path=qdb) as conn:
+        conn.execute(
+            "UPDATE question_events SET suggestions_json = ? WHERE id = ?",
+            ('[{"nr":2,"rationale":"Top"},{"nr":1,"rationale":"Backup"}]', eid),
+        )
+        conn.commit()
     svc = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
     real_answer = aq.answer_question
 
@@ -1221,6 +1302,7 @@ def test_endpoint_answer_success_and_conflict(
             event_id,
             answer,
             answered_by=kwargs.get("answered_by", "operator"),
+            via_suggestion=kwargs.get("via_suggestion"),
             db_path=qdb,
             service=svc,
             verify_delay_s=0,
@@ -1232,16 +1314,28 @@ def test_endpoint_answer_success_and_conflict(
     client = TestClient(web_server.app)
     headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
 
+    invalid = client.post(
+        f"/api/agent-questions/{eid}/answer",
+        json={"answer": "1", "via_suggestion": 99},
+        headers=headers,
+    )
+    assert invalid.status_code == 400, invalid.text
+    assert invalid.json()["detail"]["reason"] == "invalid-suggestion"
+    assert svc.sent == []
+
     ok = client.post(
         f"/api/agent-questions/{eid}/answer",
-        json={"answer": "1"},
+        json={"answer": "2", "via_suggestion": 2},
         headers=headers,
     )
     assert ok.status_code == 200, ok.text
     body = ok.json()
     assert body["ok"] is True
     assert body["verified"] is True
-    assert svc.sent and svc.sent[0]["text"] == "1"
+    assert svc.sent and svc.sent[0]["text"] == "2"
+    assert aq.list_question_events(status="answered", db_path=qdb)[0][
+        "answer_source"
+    ] == "suggested_accepted"
 
     conflict = client.post(
         f"/api/agent-questions/{eid}/answer",
@@ -1699,6 +1793,7 @@ def test_i2_resolve_hook_event_and_noop(qdb: Path) -> None:
     assert answered[0]["answer"] == "Rolling update"
     assert answered[0]["latency_s"] is not None
     assert answered[0]["status"] == "answered"
+    assert answered[0]["answer_source"] == "terminal"
 
     # Double resolve → resolved:False no-op
     r2 = aq.resolve_hook_event(_HOOK_KEY, "x", db_path=qdb)

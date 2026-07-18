@@ -913,7 +913,8 @@ def resolve_hook_event(
             cur = conn.execute(
                 "UPDATE question_events SET status = 'answered', "
                 "answered_by = 'terminal', answer = ?, latency_s = ?, "
-                "answer_verified = ?, updated_ts = ? WHERE id = ? AND status = 'open'",
+                "answer_verified = ?, answer_source = 'terminal', updated_ts = ? "
+                "WHERE id = ? AND status = 'open'",
                 (answer_s, float(latency_s), verified_flag, ts, event_id),
             )
             if int(cur.rowcount or 0) != 1:
@@ -1036,6 +1037,7 @@ def _claim_event(
     *,
     answer: str,
     answered_by: str,
+    answer_source: str | None = None,
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
 ) -> bool:
@@ -1045,8 +1047,9 @@ def _claim_event(
         with write_txn(conn):
             cur = conn.execute(
                 "UPDATE question_events SET status = 'answered', answered_by = ?, "
-                "answer = ?, updated_ts = ? WHERE id = ? AND status = 'open'",
-                (answered_by, answer, ts, int(event_id)),
+                "answer = ?, answer_source = ?, updated_ts = ? "
+                "WHERE id = ? AND status = 'open'",
+                (answered_by, answer, answer_source, ts, int(event_id)),
             )
             return int(cur.rowcount or 0) == 1
 
@@ -1065,7 +1068,7 @@ def _set_event_status(
             if clear_answer:
                 conn.execute(
                     "UPDATE question_events SET status = ?, answered_by = NULL, "
-                    "answer = NULL, updated_ts = ? WHERE id = ?",
+                    "answer = NULL, answer_source = NULL, updated_ts = ? WHERE id = ?",
                     (status, ts, int(event_id)),
                 )
             else:
@@ -1098,6 +1101,7 @@ def answer_question(
     answer: str,
     *,
     answered_by: str = "operator",
+    via_suggestion: int | None = None,
     db_path: Optional[Path] = None,
     service: Any = None,
     verify_delay_s: float = 1.5,
@@ -1121,10 +1125,27 @@ def answer_question(
     if answer_str not in valid_nrs:
         return {"ok": False, "reason": "invalid-option"}
 
+    suggestions_raw = event.get("suggestions")
+    suggestions = suggestions_raw if isinstance(suggestions_raw, list) else []
+    suggested_nrs = {
+        item.get("nr") for item in suggestions if isinstance(item, dict) and "nr" in item
+    }
+    if via_suggestion is not None and via_suggestion not in suggested_nrs:
+        return {"ok": False, "reason": "invalid-suggestion"}
+
+    if not suggestions:
+        answer_source = "operator_free"
+    else:
+        top_nr = suggestions[0].get("nr") if isinstance(suggestions[0], dict) else None
+        answer_source = (
+            "suggested_accepted" if answer_str == str(top_nr) else "suggested_edited"
+        )
+
     if not _claim_event(
         event_id,
         answer=answer_str,
         answered_by=answered_by,
+        answer_source=answer_source,
         db_path=db_path,
     ):
         return {"ok": False, "reason": "not-open"}
