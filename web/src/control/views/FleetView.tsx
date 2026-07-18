@@ -138,24 +138,31 @@ export function FleetView() {
   const board = useBoard();
   const selectedBoardData = useBoard(selectedBoard);
 
-  // Deep-link ?board=<slug>&status=<TaskStatus> — one-shot idiom (AgentTerminalsView).
-  // Wait for board catalog load; validate board; activate Board subtab; strip params.
+  // Deep-link ?board=<slug>&status=<TaskStatus> und/oder ?task=<id> — one-shot
+  // idiom (AgentTerminalsView). Board/Status: Katalog abwarten, Board-Subtab
+  // aktivieren. task: den Node-Detail-Drawer für den referenzierten Task öffnen
+  // (Kanban-Attention aus dem Postfach → /control/fleet?task=<id> landet hier
+  // und fokussiert den Task, statt einen inerten Query-Param stehen zu lassen).
   useEffect(() => {
     if (deepLinkConsumedRef.current) return;
     const boardParam = searchParams.get("board");
     const statusParam = searchParams.get("status");
+    const taskParam = searchParams.get("task");
     const hasBoard = boardParam != null && boardParam !== "";
     const hasStatus = statusParam != null && statusParam !== "";
-    if (!hasBoard && !hasStatus) return;
+    const hasTask = taskParam != null && taskParam !== "";
+    if (!hasBoard && !hasStatus && !hasTask) return;
     // Race-guard: mit ?board= erst konsumieren, wenn der Katalog wirklich DA ist.
     // Ein transient fehlgeschlagener erster Poll hat loading=false + data=null —
     // dann NICHT konsumieren (Params bleiben in der URL, der nächste erfolgreiche
     // Poll wendet den Deep-Link an), sonst ginge der Link still verloren.
+    // ?task= hängt NICHT am Katalog (NodeDetail lädt selbst per Task-ID).
     if (hasBoard && boardCatalog.data == null) return;
     deepLinkConsumedRef.current = true;
     const next = new URLSearchParams(searchParams);
     next.delete("board");
     next.delete("status");
+    next.delete("task");
     setSearchParams(next, { replace: true });
 
     if (hasBoard) {
@@ -168,8 +175,17 @@ export function FleetView() {
     if (status != null) {
       setDeepLinkStatusFilter(status);
     }
-    // Consumed deep-link always lands on the Board subtab.
-    setSubtab("board");
+    if (hasTask) {
+      // Öffnet den Task-Detail-Drawer (mobil) bzw. die Detail-Pane (Desktop);
+      // NodeDetailContent holt Body/Deliverables/Aktivität selbst per Task-ID,
+      // funktioniert also auch für einen bereits abgeschlossenen Task.
+      openNodeDetail(taskParam as string);
+    }
+    // Board/Status landen auf dem Board-Subtab; ein reiner ?task=-Link belässt
+    // den aktiven Subtab (der Drawer/die Detail-Pane überlagert ohnehin).
+    if (hasBoard || hasStatus) {
+      setSubtab("board");
+    }
   }, [
     searchParams,
     setSearchParams,
@@ -199,7 +215,17 @@ export function FleetView() {
   const releaseMode = useReleaseMode();
   const activeBoardState = selectedBoard ? selectedBoardData : board;
 
+  // Board-Wechsel schließt eine offene Detail-Ansicht (sie gehört zum anderen
+  // Board). Beim ERSTEN Lauf (Mount) NICHT zurücksetzen: sonst würde der
+  // setTimeout(0) einen per ?task= gerade geöffneten Deep-Link-Drawer wieder
+  // schließen. Auf Mount ist ohnehin nichts offen — das Skippen ist ein No-op,
+  // außer für den Deep-Link.
+  const boardResetMountedRef = useRef(false);
   useEffect(() => {
+    if (!boardResetMountedRef.current) {
+      boardResetMountedRef.current = true;
+      return;
+    }
     const reset = window.setTimeout(() => {
       setKettenRootId(null);
       setNodeDetailId(null);

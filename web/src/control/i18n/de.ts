@@ -980,7 +980,7 @@ export const de = {
     confirmYes: "Bestätigen",
     confirmNo: "Abbrechen",
     startPanelTitle: "Loop starten",
-    autolandContractHint: "Einmaliger Laufvertrag: Du bestimmst Engine, Modell und Budgets. Abweichende Phasenmodelle laufen mit manueller Landung; Auto-Land bleibt dem gebundenen Fable → Sol → Fable-Vertrag vorbehalten.",
+    autolandContractHint: "Einmaliger Laufvertrag: Du bestimmst Modell und Budgets pro Phase (aus dem Katalog). Auto-Land bleibt an die kuratierten Engine-Rollen, Prompts und Sicherheits-Gates gebunden; eine geänderte Engine-Rolle läuft mit manueller Landung.",
     chooseModel: (phase: string) => `Modell für ${phase} auswählen`,
     modelSearch: "Modelle durchsuchen",
     modelCatalogTitle: (phase: string) => `Modellwahl · ${phase}`,
