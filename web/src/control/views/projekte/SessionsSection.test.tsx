@@ -79,10 +79,72 @@ describe("SessionsSection", () => {
     expect(html.indexOf("Hauptsession")).toBeLessThan(html.indexOf("Subagent Lauf"));
     expect(html).toContain("von Hauptsession · Subagent");
     expect(html).toContain("(1× gespawnt)");
-    // Indent marker: the child row carries a margin-left style.
+    // Indent: child sets --tree-depth CSS var + responsive calc classes (not marginLeft).
     const rows = container.querySelectorAll("li");
     const childRow = Array.from(rows).find((row) => row.textContent?.includes("Subagent Lauf"));
-    expect(childRow?.getAttribute("style") ?? "").toContain("margin-left");
+    const rootRow = Array.from(rows).find((row) => row.textContent?.includes("Hauptsession"));
+    expect(childRow?.getAttribute("style") ?? "").toContain("--tree-depth");
+    expect(childRow?.className ?? "").toContain("ml-[calc(var(--tree-depth,0)*8px)]");
+    expect(childRow?.className ?? "").toContain("tab:ml-[calc(var(--tree-depth,0)*18px)]");
+    // Root (depth 0) carries neither the var nor margin indent classes.
+    expect(rootRow?.getAttribute("style") ?? "").not.toContain("--tree-depth");
+    expect(rootRow?.className ?? "").not.toContain("--tree-depth");
+    expect(rootRow?.getAttribute("style") ?? "").not.toContain("margin");
+  });
+
+  it("caps spawn-tree depth at 4 for the CSS indent variable", () => {
+    // Chain: root → c1 → c2 → c3 → c4 → c5 → deep (depth 6 in tree)
+    const chain: ProjectSession[] = [
+      makeSession({ id: "root", label: "Root" }),
+      makeSession({
+        id: "c1",
+        label: "D1",
+        spawn_kind: "delegate",
+        spawned_by_id: "root",
+        spawned_by_label: "Root",
+      }),
+      makeSession({
+        id: "c2",
+        label: "D2",
+        spawn_kind: "delegate",
+        spawned_by_id: "c1",
+        spawned_by_label: "D1",
+      }),
+      makeSession({
+        id: "c3",
+        label: "D3",
+        spawn_kind: "delegate",
+        spawned_by_id: "c2",
+        spawned_by_label: "D2",
+      }),
+      makeSession({
+        id: "c4",
+        label: "D4",
+        spawn_kind: "delegate",
+        spawned_by_id: "c3",
+        spawned_by_label: "D3",
+      }),
+      makeSession({
+        id: "c5",
+        label: "D5",
+        spawn_kind: "delegate",
+        spawned_by_id: "c4",
+        spawned_by_label: "D4",
+      }),
+      makeSession({
+        id: "deep",
+        label: "Deep Six",
+        spawn_kind: "delegate",
+        spawned_by_id: "c5",
+        spawned_by_label: "D5",
+      }),
+    ];
+    const { container } = renderSection(chain);
+    const deepRow = Array.from(container.querySelectorAll("li")).find((row) =>
+      row.textContent?.includes("Deep Six"),
+    );
+    // depth 6 → Math.min(depth, 4) = 4
+    expect(deepRow?.getAttribute("style") ?? "").toMatch(/--tree-depth:\s*4/);
   });
 
   it("defaults to the open filter and hides ended sessions until Alle is picked", () => {

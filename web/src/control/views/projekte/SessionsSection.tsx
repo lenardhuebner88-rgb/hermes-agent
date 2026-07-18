@@ -113,12 +113,17 @@ function SessionRow({
     <li
       className={cn(
         "flex min-w-0 items-center gap-2 rounded-card border px-2.5 py-1.5",
+        // Spawn-tree indent: CSS var + responsive step (8px mobile / 18px tab+); cap 4.
+        depth > 0 && "ml-[calc(var(--tree-depth,0)*8px)] tab:ml-[calc(var(--tree-depth,0)*18px)]",
         ended
           ? "border-line-soft bg-surface-1"
           : "border-line-soft bg-surface-2",
       )}
-      // Spawn-tree indent: layout only (color stays on tokens); one step per depth.
-      style={depth > 0 ? { marginLeft: Math.min(depth, 4) * 18 } : undefined}
+      style={
+        depth > 0
+          ? ({ "--tree-depth": Math.min(depth, 4) } as React.CSSProperties)
+          : undefined
+      }
     >
       {session.is_active ? (
         <Led kind="live" size={7} />
