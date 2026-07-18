@@ -11,4 +11,24 @@
 #   scripts/run-affected.sh HEAD~1  # since a ref
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$SCRIPT_DIR/affected_tests.py" "$@"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+FALLBACK_MAX_TEST_FILES=200
+
+RAW="$(python3 "$SCRIPT_DIR/affected_tests.py" "$@")"
+TOKENS=()
+read -r -a TOKENS <<< "$RAW" || true
+SELECTED=()
+shopt -s globstar nullglob
+for token in "${TOKENS[@]}"; do
+  if [[ "$token" == */ ]]; then
+    test_files=("$REPO_ROOT/$token"**/test_*.py)
+    if (( ${#test_files[@]} > FALLBACK_MAX_TEST_FILES )); then
+      printf 'affected-tests: omitted package fallback %s (%d test files; limit %d); directly mapped/importing tests remain selected; nightly full suite remains authoritative\n' \
+        "$token" "${#test_files[@]}" "$FALLBACK_MAX_TEST_FILES" >&2
+      continue
+    fi
+  fi
+  SELECTED+=("$token")
+done
+
+printf '%s\n' "${SELECTED[*]}"
