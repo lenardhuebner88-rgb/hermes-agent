@@ -120,6 +120,13 @@ class TestSessionLifecycle:
         assert enriched["user_id"] == "u1"
         assert enriched["chat_id"] == "c1"
 
+    def test_create_session_persists_profile_without_changing_null_rows(self, db):
+        db.create_session("profiled", source="telegram", profile_name="coder")
+        db.create_session("legacy-null", source="telegram")
+
+        assert db.get_session("profiled")["profile_name"] == "coder"
+        assert db.get_session("legacy-null")["profile_name"] is None
+
     def test_create_session_does_not_overwrite_existing_metadata(self, db):
         """A later bare write (source='unknown', model=...) must not overwrite
         a model/source an earlier writer already set."""

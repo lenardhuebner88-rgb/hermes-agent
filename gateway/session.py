@@ -1357,6 +1357,12 @@ class SessionStore:
         except Exception:
             return "default"
 
+    def _profile_name_for_persistence(self, source: Optional[SessionSource]) -> str:
+        """Return the profile that owns a newly persisted gateway session."""
+        if source is not None and source.profile:
+            return source.profile
+        return self._active_profile_name()
+
     def _recovered_row_allowed_for_active_profile(
         self,
         *,
@@ -2015,7 +2021,7 @@ class SessionStore:
                     "chat_id": source.chat_id,
                     "chat_type": source.chat_type,
                     "thread_id": source.thread_id,
-                    "profile_name": source.profile,
+                    "profile_name": self._profile_name_for_persistence(source),
                 }
 
         if _needs_save:
@@ -2296,7 +2302,7 @@ class SessionStore:
                 "chat_id": old_entry.origin.chat_id if old_entry.origin else None,
                 "chat_type": old_entry.origin.chat_type if old_entry.origin else None,
                 "thread_id": old_entry.origin.thread_id if old_entry.origin else None,
-                "profile_name": old_entry.origin.profile if old_entry.origin else None,
+                "profile_name": self._profile_name_for_persistence(old_entry.origin),
             }
 
         if self._db and db_end_session_id:
