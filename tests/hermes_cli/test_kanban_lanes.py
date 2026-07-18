@@ -219,6 +219,12 @@ class TestLaneSpawnResolution:
         # Claude CLI version. The test binary is a stub, so pin the gate ON to
         # reach the cmd-capture (the dedicated fail-closed test pins it OFF).
         monkeypatch.setenv("HERMES_VERDICT_ALLOWLIST_ENFORCEABLE", "1")
+        # Hermeticity: the verdict allowlist appends the operator-configured
+        # HERMES_REVIEW_BASH_ALLOWLIST verbatim. The dispatcher/integrator
+        # environment sets it (e.g. "Bash(git diff:*),..."), so neutralize it
+        # here to assert the default read-only cage (Read,Grep,Glob). Mirrors
+        # test_kanban_verdict_cage_e2e.py's delenv isolation.
+        monkeypatch.delenv("HERMES_REVIEW_BASH_ALLOWLIST", raising=False)
 
         task = self._make_task(tmp_path, assignee=assignee, model_override=model_override)
         kb._default_spawn(task, str(tmp_path / "ws"))
