@@ -308,17 +308,14 @@ describe("FleetView PlanSpec detail drawer", () => {
     );
   }
 
-  it("opens the PlanSpec full-text drawer from Heute cards", () => {
-    const { container } = renderFleetView();
+  it("uses Heute PlanSpecs only as references to the Plan tab", () => {
+    renderFleetView();
 
-    const heutePlanCard = container.querySelector<HTMLButtonElement>("button.fleet-ps");
-    expect(heutePlanCard).toBeTruthy();
-    fireEvent.click(heutePlanCard!);
+    fireEvent.click(screen.getByRole("button", { name: /im Plan-Tab öffnen/ }));
 
-    expect(hooks.usePlanSpecDetail).toHaveBeenLastCalledWith(planSpec.path);
-    const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
-    expect(drawer).toBeTruthy();
-    expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
+    expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "PlanSpec-Volltext öffnen" })).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
   });
 
   it("surfaces retained board data as stale after a failed refresh", () => {
@@ -424,11 +421,10 @@ describe("FleetView PlanSpec detail drawer", () => {
 
   it("mounts PlanSpec detail beside the list without an overlay at lg", () => {
     setLgViewport(true);
-    const { container } = renderFleetView();
+    renderFleetView();
 
-    const heutePlanCard = container.querySelector<HTMLButtonElement>("button.fleet-ps");
-    expect(heutePlanCard).toBeTruthy();
-    fireEvent.click(heutePlanCard!);
+    fireEvent.click(screen.getByRole("button", { name: /im Plan-Tab öffnen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "PlanSpec-Volltext öffnen" }));
 
     expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
     const detail = screen.getByRole("region", { name: "PlanSpec-Details" });
