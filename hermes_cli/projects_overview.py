@@ -492,13 +492,30 @@ def _loops_for_entry(
             running = control_loops._is_running(state)
             heartbeat = control_loops._heartbeat(state)
             heartbeat_at = _last_heartbeat_at(heartbeat)
+            # Karten-Attention-Ampel braucht den letzten Ledger-Verdict auch
+            # in der Liste (bisher nur im Detail) — gleiche Shape, ~4KB-Tail.
+            last_outcome = _loop_last_outcome(state)
         except Exception as exc:  # isolate: one bad pack never kills the list
             errors.append(f"loops: pack '{name}': {exc}")
-            packs.append({"name": name, "running": False, "last_heartbeat_at": None})
+            packs.append(
+                {
+                    "name": name,
+                    "running": False,
+                    "last_heartbeat_at": None,
+                    "last_outcome": None,
+                }
+            )
             continue
         if running:
             active += 1
-        packs.append({"name": name, "running": running, "last_heartbeat_at": heartbeat_at})
+        packs.append(
+            {
+                "name": name,
+                "running": running,
+                "last_heartbeat_at": heartbeat_at,
+                "last_outcome": last_outcome,
+            }
+        )
 
     return {"active": active, "packs": packs}, errors
 

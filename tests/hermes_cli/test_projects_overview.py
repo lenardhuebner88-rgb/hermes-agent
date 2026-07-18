@@ -680,10 +680,46 @@ def test_loops_source_missing_state_dir_is_isolated(tmp_path: Path) -> None:
     loops = payload["projects"][0]["loops"]
     assert loops == {
         "active": 0,
-        "packs": [{"name": "never-ran-pack", "running": False, "last_heartbeat_at": None}],
+        "packs": [
+            {
+                "name": "never-ran-pack",
+                "running": False,
+                "last_heartbeat_at": None,
+                "last_outcome": None,
+            }
+        ],
     }
     # A missing state dir is a normal "never ran yet" state, not an error.
     assert not any(e.startswith("loops:") for e in payload["projects"][0]["errors"])
+
+
+def test_loops_list_payload_carries_last_outcome_from_ledger(tmp_path: Path) -> None:
+    """Die Karten-Ampel liest den letzten Verdict jetzt aus der LISTE (nicht nur Detail)."""
+    state_root = tmp_path / "loops"
+    pack_dir = state_root / "dashboard-experience"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "phase": "land",
+                "verdict": "landed",
+                "plan": "P1-ship.md",
+                "reason": "main=abc",
+                "ts": "2026-07-16T12:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    entry = _entry(loop_packs=["dashboard-experience"], repo_path=str(tmp_path))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    payload = build_projects_payload(registry, loops_state_root=state_root, now=int(time.time()))
+
+    pack = payload["projects"][0]["loops"]["packs"][0]
+    assert pack["last_outcome"] is not None
+    assert pack["last_outcome"]["verdict"] == "landed"
+    assert pack["last_outcome"]["phase"] == "land"
 
 
 # --- endpoint ----------------------------------------------------------------
