@@ -1571,6 +1571,8 @@ def build_sessions_payload(
     registry: ProjectsRegistry,
     *,
     state_db_path: Path | None = None,
+    tmux_panes_text: str | None = None,
+    tmux_sessions_text: str | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the frozen ``/api/projects/sessions`` payload.
@@ -1636,6 +1638,34 @@ def build_sessions_payload(
     # freshest state; the extra query is only a label/end_reason fallback).
     row_by_id = {row["id"]: row for row in rows}
 
+    tmux_by_session_id: dict[str, tuple[str, str, str]] = {}
+    tmux_errors: list[str] = []
+    try:
+        tmux_agents, source_errors = _tmux_agents(
+            tmux_panes_text=tmux_panes_text,
+            tmux_sessions_text=tmux_sessions_text,
+            registry=registry,
+            kanban_db_path=None,
+        )
+        for agent in tmux_agents:
+            hermes_session_id = agent.get("session_id")
+            if not isinstance(hermes_session_id, str) or not hermes_session_id:
+                continue
+            tmux_by_session_id.setdefault(
+                hermes_session_id,
+                (
+                    agent["tmux_session"],
+                    agent["tmux_window"],
+                    agent["tmux_window_name"],
+                ),
+            )
+        tmux_errors.extend(
+            f"sessions-tmux: {error.removeprefix('tmux:').strip()}"
+            for error in source_errors
+        )
+    except Exception as exc:
+        tmux_errors.append(f"sessions-tmux: {exc}")
+
     def _parent_info(parent_id: str) -> tuple[str | None, str | None]:
         """``(label, end_reason)`` for a spawn parent, best effort."""
         source_row = row_by_id.get(parent_id)
@@ -1657,6 +1687,7 @@ def build_sessions_payload(
     sessions: list[dict[str, Any]] = []
     for row in rows:
         session_id = row["id"]
+        tmux_target = tmux_by_session_id.get(session_id)
         delegate_from = row["delegate_from"]
         branched_from = row["branched_from"]
         parent_session_id = row["parent_session_id"]
@@ -1714,10 +1745,13 @@ def build_sessions_payload(
                 "spawn_kind": spawn_kind,
                 "spawned_by_id": spawned_by_id,
                 "spawned_by_label": spawned_by_label,
+                "tmux_session": tmux_target[0] if tmux_target is not None else None,
+                "tmux_window": tmux_target[1] if tmux_target is not None else None,
+                "tmux_window_name": tmux_target[2] if tmux_target is not None else None,
             }
         )
 
-    return {"generated_at": resolved_now, "errors": [], "sessions": sessions}
+    return {"generated_at": resolved_now, "errors": tmux_errors, "sessions": sessions}
 
 
 # ---------------------------------------------------------------------------

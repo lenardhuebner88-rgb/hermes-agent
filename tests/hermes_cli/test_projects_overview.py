@@ -2402,7 +2402,9 @@ def test_sessions_payload_open_active_and_spawn_tree(tmp_path: Path) -> None:
     )
 
     registry = _hermes_infra_registry()
-    payload = build_sessions_payload(registry, state_db_path=db, now=now)
+    payload = build_sessions_payload(
+        registry, state_db_path=db, tmux_panes_text="", now=now
+    )
 
     assert payload["errors"] == []
     by_id = {s["id"]: s for s in payload["sessions"]}
@@ -2457,6 +2459,101 @@ def test_sessions_payload_open_active_and_spawn_tree(tmp_path: Path) -> None:
     assert ended_started == sorted(ended_started, reverse=True)
 
 
+def test_sessions_payload_annotates_matching_tmux_pane(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _insert_session(db, session_id="sess-abc", started_at=1_700_000_000)
+    panes = (
+        "projekte-r3|1|claude-r3|node|/home/piet/.hermes/hermes-agent"
+        "|claude||t_x|sess-abc\n"
+        "projekte-r3|2|codex-r3|node|/home/piet/.hermes/hermes-agent"
+        "|codex||t_y|sess-abc\n"
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(),
+        state_db_path=db,
+        tmux_panes_text=panes,
+        tmux_sessions_text="projekte-r3|1699999900\n",
+        now=1_700_000_100,
+    )
+
+    assert payload["errors"] == []
+    assert payload["sessions"][0]["tmux_session"] == "projekte-r3"
+    assert payload["sessions"][0]["tmux_window"] == "1"
+    assert payload["sessions"][0]["tmux_window_name"] == "claude-r3"
+
+
+def test_sessions_payload_unmatched_session_has_nullable_tmux_fields(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _insert_session(db, session_id="sess-unmatched", started_at=1_700_000_000)
+    panes = (
+        "projekte-r3|1|claude-r3|node|/home/piet/.hermes/hermes-agent"
+        "|claude||t_x|sess-other\n"
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(),
+        state_db_path=db,
+        tmux_panes_text=panes,
+        tmux_sessions_text="projekte-r3|1699999900\n",
+        now=1_700_000_100,
+    )
+
+    session = payload["sessions"][0]
+    assert session["tmux_session"] is None
+    assert session["tmux_window"] is None
+    assert session["tmux_window_name"] is None
+
+
+def test_sessions_payload_tmux_error_degrades_without_losing_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _insert_session(db, session_id="sess-abc", started_at=1_700_000_000)
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command",
+        lambda cmd: (None, "tmux: launcher failed"),
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(), state_db_path=db, now=1_700_000_100
+    )
+
+    assert payload["errors"] == ["sessions-tmux: launcher failed"]
+    assert [session["id"] for session in payload["sessions"]] == ["sess-abc"]
+    session = payload["sessions"][0]
+    assert session["tmux_session"] is None
+    assert session["tmux_window"] is None
+    assert session["tmux_window_name"] is None
+
+
+def test_sessions_payload_empty_tmux_session_id_never_joins(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    _make_state_db(db)
+    _insert_session(db, session_id="", started_at=1_700_000_000)
+    panes = (
+        "projekte-r3|1|claude-r3|node|/home/piet/.hermes/hermes-agent"
+        "|claude||t_x|\n"
+    )
+
+    payload = build_sessions_payload(
+        ProjectsRegistry(),
+        state_db_path=db,
+        tmux_panes_text=panes,
+        tmux_sessions_text="projekte-r3|1699999900\n",
+        now=1_700_000_100,
+    )
+
+    session = payload["sessions"][0]
+    assert session["id"] == ""
+    assert session["tmux_session"] is None
+    assert session["tmux_window"] is None
+    assert session["tmux_window_name"] is None
+
+
 def test_sessions_payload_parent_outside_window_still_resolved(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     _make_state_db(db)
@@ -2481,7 +2578,10 @@ def test_sessions_payload_parent_outside_window_still_resolved(tmp_path: Path) -
     )
 
     payload = build_sessions_payload(
-        ProjectsRegistry(projects=[], errors=[]), state_db_path=db, now=now
+        ProjectsRegistry(projects=[], errors=[]),
+        state_db_path=db,
+        tmux_panes_text="",
+        now=now,
     )
 
     assert payload["errors"] == []
@@ -2504,7 +2604,10 @@ def test_sessions_payload_orphaned_delegate_has_no_parent_link(tmp_path: Path) -
     )
 
     payload = build_sessions_payload(
-        ProjectsRegistry(projects=[], errors=[]), state_db_path=db, now=now
+        ProjectsRegistry(projects=[], errors=[]),
+        state_db_path=db,
+        tmux_panes_text="",
+        now=now,
     )
 
     orphan = payload["sessions"][0]
@@ -2526,6 +2629,9 @@ def test_sessions_and_commits_endpoints_return_200_frozen_shape(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview._run_tmux_command", lambda cmd: ("", None)
+    )
     _make_state_db(tmp_path / "state.db")
     _insert_session(
         tmp_path / "state.db",
