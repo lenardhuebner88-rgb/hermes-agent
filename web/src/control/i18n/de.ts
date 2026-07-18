@@ -905,6 +905,18 @@ export const de = {
     receiptTruncated: "Gekürzt — das vollständige Receipt liegt im Vault.",
     detailReceipts: "Receipts",
     detailNoReceipts: "Keine Receipts für dieses Projekt.",
+    // Feature A Slice 1 — Offene Agentenfragen (Ein-Tap-Antwort im Projekte-Tab)
+    fragenEyebrow: "Agentenfragen",
+    fragenTitle: "Offene Fragen",
+    fragenCount: (n: number) => `${n} offene ${n === 1 ? "Frage" : "Fragen"}`,
+    fragenEmpty: "Keine offenen Fragen.",
+    fragenError: "Offene Fragen konnten nicht geladen werden.",
+    fragenRecommended: "Empfohlen",
+    fragenSending: "Sende …",
+    fragenVerifyHint: "Antwort gesendet — Bestätigung im Terminal ausstehend",
+    fragenSuperseded: "Frage hat sich geändert",
+    fragenRefresh: "Aktualisieren",
+    fragenOptionsLabel: "Antwortoptionen",
     // Terminal-Deep-Link (/control/agent-terminals?session=&window=)
     terminalOpenAria: (label: string) => `Terminal öffnen: ${label}`,
   },
