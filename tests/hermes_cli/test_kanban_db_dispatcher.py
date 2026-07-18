@@ -530,8 +530,8 @@ def test_dispatch_auto_retry_allows_request_changes_after_body_changes(
         assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
 
 
-def test_dispatch_auto_retry_second_attempt_escalates(
-    kanban_home, all_assignees_spawnable, monkeypatch
+def test_dispatch_auto_retry_second_attempt_escalates_to_spawnable_claude_model(
+    kanban_home, all_assignees_spawnable, monkeypatch, tmp_path
 ):
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
@@ -552,15 +552,47 @@ def test_dispatch_auto_retry_second_attempt_escalates(
         assert row["status"] == "ready"
         assert row["auto_retry_count"] == 2
         assert row["assignee"] == kb.AUTO_RETRY_ESCALATION_PROFILE
-        # Escalation model is stored as provider/model when the blocked run's
-        # route provider is a different family (poison-pill prevention).
-        assert row["model_override"] in {
-            kb.AUTO_RETRY_ESCALATION_MODEL,
-            f"anthropic/{kb.AUTO_RETRY_ESCALATION_MODEL}",
-        }
+        assert row["model_override"] == kb.AUTO_RETRY_ESCALATION_MODEL
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retried"][-1]
         assert event.payload["escalated"] is True
         assert event.payload["model_override"] == row["model_override"]
+
+        task = kb.get_task(conn, t)
+        assert task is not None
+        identity = kb._spawn_identity_metadata(
+            task.assignee,
+            model_override=task.model_override,
+            lane_entry={"worker_runtime": "claude-cli"},
+            task_id=t,
+            conn=conn,
+        )
+        assert identity is not None
+        assert identity["model"] == kb.AUTO_RETRY_ESCALATION_MODEL
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        spec = kb._build_claude_worker_launch_spec(
+            task,
+            str(workspace),
+            env={"HERMES_HOME": str(kanban_home), "PATH": ""},
+            resolved_model=identity["model"],
+        )
+        model_arg = spec.argv[spec.argv.index("--model") + 1]
+        assert model_arg == kb.AUTO_RETRY_ESCALATION_MODEL
+        assert not model_arg.startswith("anthropic/")
+
+        monkeypatch.setattr(
+            kb,
+            "_active_lane_entry_for_profile_from_conn",
+            lambda _conn, _profile: {"worker_runtime": "claude-cli"},
+        )
+        claimed = kb.claim_task(conn, t)
+        assert claimed is not None
+        run = conn.execute(
+            "SELECT requested_model FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert run["requested_model"] == kb.AUTO_RETRY_ESCALATION_MODEL
 
 
 def test_dispatch_auto_retry_stops_after_limit(
