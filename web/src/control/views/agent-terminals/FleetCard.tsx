@@ -1,5 +1,6 @@
 import { memo, type ReactNode } from "react";
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   RotateCcw,
@@ -14,6 +15,7 @@ import type {
   AgentTerminalWindow,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { de } from "../../i18n/de";
 import { KpiTile, SignalChip, type SignalTone } from "../../components/leitstand";
 import {
   AGENTS,
@@ -45,10 +47,16 @@ export function CapabilityPill({ capability, agent }: { capability: AgentTermina
   const agentOk = agentState ? agentState.available : agent.kind === "hermes" ? (capability?.hermes_tui_available ?? false) : windowsOk;
   const ok = windowsOk && agentOk;
   const reason = agentState?.reason ?? capability?.reason ?? null;
-  const label = ok ? "verfügbar" : reason?.includes("symlink") || reason?.includes("resolvable") ? "kaputter Symlink/Binary" : reason ? "CLI fehlt" : "unbekannt";
+  if (ok) return null;
+  const label = reason?.includes("symlink") || reason?.includes("resolvable")
+    ? de.agentTerminals.agentBinaryBroken
+    : reason
+      ? de.agentTerminals.agentCliMissing
+      : de.agentTerminals.agentUnavailable;
   const title = reason ?? agentState?.binary ?? agent.hint;
   return (
-    <span title={title} className={cn("rounded-card border px-1.5 py-0.5 text-[10px]", ok ? "border-status-ok/35 text-status-ok" : "border-line text-ink-3")}>
+    <span title={title} className="inline-flex shrink-0 items-center gap-1 rounded-card border border-status-warn/40 bg-status-warn/10 px-1.5 py-0.5 text-micro text-status-warn">
+      <AlertTriangle className="h-3 w-3" aria-hidden />
       {label}
     </span>
   );

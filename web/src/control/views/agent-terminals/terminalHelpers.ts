@@ -22,6 +22,13 @@ export const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: strin
 ];
 
 export const AGENT_LABELS: Record<AgentTerminalKind, string> = Object.fromEntries(AGENTS.map((agent) => [agent.kind, agent.label])) as Record<AgentTerminalKind, string>;
+export const AGENT_IDENTITY_DOT_CLASS: Record<AgentTerminalKind, string> = {
+  hermes: "bg-data-2",
+  claude: "bg-data-1",
+  codex: "bg-data-4",
+  kimi: "bg-data-5",
+  grok: "bg-data-3",
+};
 const AGENT_KINDS = new Set<AgentTerminalKind>(AGENTS.map((agent) => agent.kind));
 
 const TMUX_PREFIX = "\x02";

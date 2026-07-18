@@ -1571,9 +1571,14 @@ export const de = {
     openInFlow: "Im Flow öffnen",
   },
   agentTerminals: {
+    workdirLabel: "Arbeitsverzeichnis",
+    workdirPathLabel: "Startpfad",
     workdirGroupStandard: "Standard",
     workdirGroupProjects: "Projekte",
     workdirGroupWorktrees: "Worktrees",
+    agentUnavailable: "nicht verfügbar",
+    agentCliMissing: "CLI fehlt",
+    agentBinaryBroken: "Binary defekt",
     // Phone → Terminal Datei-/Screenshot-Upload (Composer-Anhang-Button,
     // Paste, Drag&Drop).
     attachFile: "Datei anhängen",

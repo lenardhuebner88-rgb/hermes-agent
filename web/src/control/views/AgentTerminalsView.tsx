@@ -86,6 +86,7 @@ import {
 } from "./agent-terminals/layout";
 import {
   AGENTS,
+  AGENT_IDENTITY_DOT_CLASS,
   AGENT_LABELS,
   CONTROL_CAPABILITIES,
   COPY_STATUS_TIMEOUT_MS,
@@ -1996,14 +1997,16 @@ export function AgentTerminalsView() {
   const sessionSheetKind = kindFromWindow(selectedWindow, selectedKind);
   const sessionSheetDead = selectedWindow ? isDeadWindow(selectedWindow) : false;
   const sessionSheetManaged = selectedWindow ? isManagedWindow(selectedWindow) : true;
+  const createWorkdirOptions = capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
+  const selectedCreateWorkdir = createWorkdirOptions.find((option) => option.key === workdir) ?? null;
 
   const chipStrip = (
-    <div className="flex h-11 shrink-0 items-stretch border-b border-line-soft bg-surface-1">
+    <div className="flex min-h-[44px] shrink-0 items-stretch border-b border-line-soft bg-surface-1">
       <button
         type="button"
         aria-label={view === "flotte" ? "Terminal-Ansicht" : "Flotten-Übersicht"}
         onClick={() => setView((current) => (current === "flotte" ? "terminal" : "flotte"))}
-        className="grid shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
+        className="grid min-h-[44px] min-w-[44px] shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
       >
         {view === "flotte" ? <TerminalSquare className="h-4 w-4" /> : <LayoutGrid className="h-4 w-4" />}
       </button>
@@ -2011,7 +2014,7 @@ export function AgentTerminalsView() {
         type="button"
         aria-label="Zurück zum Dashboard"
         onClick={() => navigate("/control")}
-        className="grid shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
+        className="grid min-h-[44px] min-w-[44px] shrink-0 place-items-center border-r border-line-soft px-3 text-ink-2 hover:bg-surface-3"
       >
         <ChevronLeft className="h-4 w-4" />
       </button>
@@ -2024,6 +2027,7 @@ export function AgentTerminalsView() {
             setAnswerClosedHint(null);
             setAnswerSheetOpen(true);
           }}
+          className="min-h-[44px] text-micro"
         />
         {orderedWindows.map((win) => {
           const active = activeTarget?.session === win.session && activeTarget.window === win.window;
@@ -2053,7 +2057,7 @@ export function AgentTerminalsView() {
               title={chipName}
               onClick={() => (active ? setSessionSheetOpen(true) : selectPaneTarget(activePane, targetFromWindow(win)))}
               className={cn(
-                "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition",
+                "inline-flex min-h-[44px] shrink-0 items-center gap-1.5 rounded-full border px-3 text-micro font-medium transition",
                 active ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2",
               )}
             >
@@ -2073,7 +2077,7 @@ export function AgentTerminalsView() {
         type="button"
         aria-label="Neue Session starten"
         onClick={() => setCreateSheetOpen(true)}
-        className="grid shrink-0 place-items-center border-l border-line-soft px-3 text-live hover:bg-live/10"
+        className="grid min-h-[44px] min-w-[44px] shrink-0 place-items-center border-l border-line-soft px-3 text-live hover:bg-live/10"
       >
         <Plus className="h-4 w-4" />
       </button>
@@ -2134,20 +2138,20 @@ export function AgentTerminalsView() {
         <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-ink-2">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Status</span><TerminalStatusChip state={state} /></div>
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-        <button type="button" onClick={() => { if (activePane > 0) extraPaneRefs[activePane - 1]?.current?.reconnect(); else setAttachNonce((n) => n + 1); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+      <div className="mt-3 grid grid-cols-3 gap-2 text-sec">
+        <button type="button" onClick={() => { if (activePane > 0) extraPaneRefs[activePane - 1]?.current?.reconnect(); else setAttachNonce((n) => n + 1); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <PlugZap className="h-4 w-4" /><span>Neu verbinden</span>
         </button>
-        <button type="button" disabled={!activeSocketReady} onClick={() => sendKey("\x03")} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
-          <span className="font-mono text-sm">^C</span><span>^C senden</span>
+        <button type="button" disabled={!activeSocketReady} onClick={() => sendKey("\x03")} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
+          <span className="font-data text-sec">^C</span><span>^C senden</span>
         </button>
         {sessionSheetDead && sessionSheetManaged && (
-          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
             <RotateCcw className="h-4 w-4" /><span>Neu starten</span>
           </button>
         )}
         {sessionSheetDead && (
-          <button type="button" onClick={() => { void killWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
+          <button type="button" onClick={() => { void killWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-status-alert/25 px-2 py-2.5 text-center leading-tight text-status-alert hover:bg-status-alert/10">
             <Trash2 className="h-4 w-4" /><span>Fenster entfernen</span>
           </button>
         )}
@@ -2162,7 +2166,7 @@ export function AgentTerminalsView() {
             disabled={terminateBusy}
             onClick={() => { void confirmTerminate(selectedWindow).then(() => setSessionSheetOpen(false)); }}
             className={cn(
-              "flex flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
+              "flex min-h-[44px] flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert disabled:cursor-not-allowed disabled:opacity-40",
               sessionSheetManaged
                 ? "border border-status-alert/50 bg-status-alert/15 hover:bg-status-alert/25"
                 : "border-2 border-status-alert/70 bg-status-alert/25 hover:bg-status-alert/35",
@@ -2177,7 +2181,7 @@ export function AgentTerminalsView() {
             title={sessionSheetManaged ? undefined : "Externes Fenster beenden — gehört einem anderen Agenten/Prozess"}
             onClick={() => requestTerminate(selectedWindow)}
             className={cn(
-              "flex flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert",
+              "flex min-h-[44px] flex-col items-center gap-1 rounded-card px-2 py-2.5 text-center leading-tight text-status-alert",
               sessionSheetManaged
                 ? "border border-status-alert/25 hover:bg-status-alert/10"
                 : "border-2 border-status-alert/50 bg-status-alert/10 hover:bg-status-alert/20",
@@ -2186,19 +2190,19 @@ export function AgentTerminalsView() {
             <Trash2 className="h-4 w-4" /><span>{sessionSheetManaged ? "Session beenden" : "Extern beenden"}</span>
           </button>
         ))}
-        <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+        <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
         </button>
-        <button type="button" onClick={() => adjustFont(-1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
-          <span className="font-mono text-sm">A−</span><span>Schrift kleiner</span>
+        <button type="button" onClick={() => adjustFont(-1)} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+          <span className="font-data text-sec">A−</span><span>Schrift kleiner</span>
         </button>
-        <button type="button" onClick={() => adjustFont(1)} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
-          <span className="font-mono text-sm">A+</span><span>Schrift größer</span>
+        <button type="button" onClick={() => adjustFont(1)} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+          <span className="font-data text-sec">A+</span><span>Schrift größer</span>
         </button>
-        <button type="button" onClick={() => { setToolsOpen(true); setSessionSheetOpen(false); }} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+        <button type="button" onClick={() => { setToolsOpen(true); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Wrench className="h-4 w-4" /><span>Tools / Tageslage</span>
         </button>
-        <button type="button" onClick={() => void refresh()} className="flex flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+        <button type="button" onClick={() => void refresh()} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <RefreshCw className="h-4 w-4" /><span>Liste aktualisieren</span>
         </button>
       </div>
@@ -2214,19 +2218,22 @@ export function AgentTerminalsView() {
             type="button"
             onClick={() => setCreateKind(agent.kind)}
             className={cn(
-              "rounded-card border px-2 py-2 text-left text-xs transition",
+              "min-h-[44px] rounded-card border px-2 py-2 text-left text-sec transition sm:min-h-0",
               createKind === agent.kind ? "border-live/60 bg-live/10 text-live" : "border-line bg-surface-2 text-ink-2 hover:bg-surface-3",
             )}
           >
             <span className="flex min-w-0 items-center justify-between gap-1.5">
-              <span className="flex min-w-0 items-center gap-1.5"><TerminalSquare className="h-3.5 w-3.5 shrink-0" /><span className="truncate">{agent.label}</span></span>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", AGENT_IDENTITY_DOT_CLASS[agent.kind])} aria-hidden />
+                <span className="truncate">{agent.label}</span>
+              </span>
               <CapabilityPill capability={capability} agent={agent} />
             </span>
           </button>
         ))}
       </div>
-      <label className="grid gap-1 text-xs text-ink-3">
-        <span>Arbeitsverzeichnis</span>
+      <label className="grid gap-1 text-ink-3">
+        <span className="font-display text-micro font-semibold uppercase tracking-[0.08em]">{de.agentTerminals.workdirLabel}</span>
         <select
           aria-label="Arbeitsverzeichnis für neue Terminals"
           value={workdir}
@@ -2234,14 +2241,14 @@ export function AgentTerminalsView() {
             setWorkdirResetNote(null);
             selectWorkdir(event.target.value);
           }}
-          className="rounded-card border border-line bg-surface-2 px-2 py-2 text-xs text-ink-2 focus:border-live/50 focus:outline-none"
+          className="min-h-[44px] rounded-card border border-line bg-surface-2 px-2 py-2 text-sec text-ink-2 focus:border-live/50 focus:outline-none sm:min-h-0"
         >
           {([
             ["standard", de.agentTerminals.workdirGroupStandard],
             ["projekt", de.agentTerminals.workdirGroupProjects],
             ["worktree", de.agentTerminals.workdirGroupWorktrees],
           ] as const).map(([group, label]) => {
-            const options = (capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS)
+            const options = createWorkdirOptions
               .filter((option) => (option.group ?? "standard") === group);
             return options.length ? (
               <optgroup key={group} label={label}>
@@ -2252,18 +2259,22 @@ export function AgentTerminalsView() {
             ) : null;
           })}
         </select>
+        <span className="truncate font-data text-micro text-ink-3" title={selectedCreateWorkdir?.path}>
+          <span className="sr-only">{de.agentTerminals.workdirPathLabel}: </span>
+          {selectedCreateWorkdir?.path ?? "—"}
+        </span>
       </label>
       {workdirResetNote && (
-        <div className="rounded-card border border-line bg-surface-2 p-2 text-[11px] text-ink-3" role="status">
+        <div className="rounded-card border border-line bg-surface-2 p-2 text-micro text-ink-3" role="status">
           {workdirResetNote}
         </div>
       )}
-      {createError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-xs text-status-alert">{createError}</div>}
+      {createError && <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-2 text-sec text-status-alert">{createError}</div>}
       <button
         type="button"
         onClick={() => void submitCreateSession()}
         disabled={createBusy}
-        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sm font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50"
+        className="inline-flex items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sec font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {createBusy ? "Startet…" : "Session starten"}
       </button>
@@ -2272,7 +2283,7 @@ export function AgentTerminalsView() {
 
   const createSheetHeader = (
     <div className="mb-3 flex items-center justify-between gap-2">
-      <div><Eyebrow>Neue Session</Eyebrow><h2 className="text-sm font-semibold text-ink">Agent wählen</h2></div>
+      <div><Eyebrow>Neue Session</Eyebrow><h2 className="text-sec font-semibold text-ink">Agent wählen</h2></div>
       <button type="button" onClick={() => setCreateSheetOpen(false)} aria-label="Schließen" className="rounded-card border border-line p-1.5 text-ink-2 hover:bg-surface-3"><X className="h-4 w-4" /></button>
     </div>
   );
@@ -2597,21 +2608,21 @@ export function AgentTerminalsView() {
           {compactLayout && view === "terminal" && (
             // Mobile toolbar: xterm has no touch selection, so "Auswählen" opens a
             // frozen native-text snapshot; copy stays reachable next to it.
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft bg-surface-1 px-2 py-1 text-xs text-ink-2">
+            <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line-soft bg-surface-1 px-2 py-1 text-sec text-ink-2">
               <div className="flex min-w-0 items-center gap-2">
                 {/* Mobile is the operator's primary surface — the desktop rail/identity
                     bar with the cwd chips is CSS-hidden here, so surface it in the strip. */}
                 {selectedWindow && copyState === "idle" && (
                   <span
                     data-testid="mobile-cwd-chip"
-                    className="min-w-0 truncate font-mono text-[10px] text-ink-3"
+                    className="min-w-0 truncate font-data text-micro text-ink-2"
                     title={selectedWindow.cwd?.trim() || undefined}
                   >
                     {formatCwdShort(selectedWindow.cwd)}
                   </span>
                 )}
                 {copyState !== "idle" && (
-                  <span role="status" className={cn("shrink-0 text-[10px]", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
+                  <span role="status" className={cn("shrink-0 text-micro", copyState === "copied" ? "text-live" : copyState === "error" ? "text-status-alert" : "text-ink-3")}>
                     {copyState === "copied" ? "Kopiert" : copyState === "empty" ? "Keine Auswahl" : "Kopieren fehlgeschlagen"}
                   </span>
                 )}
@@ -2622,7 +2633,7 @@ export function AgentTerminalsView() {
                   aria-label="Auswahl kopieren"
                   title="Auswahl kopieren"
                   onClick={() => void copySelection()}
-                  className="grid h-11 w-11 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                  className="grid min-h-[44px] min-w-[44px] place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
                 >
                   <Copy className="h-3.5 w-3.5" />
                 </button>
@@ -2631,7 +2642,7 @@ export function AgentTerminalsView() {
                   aria-label="Text auswählen"
                   title="Text auswählen"
                   onClick={openSelectOverlay}
-                  className="inline-flex h-11 items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 text-[11px] font-medium text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
+                  className="inline-flex min-h-[44px] min-w-[44px] items-center gap-1 rounded-card border border-line bg-surface-2 px-2.5 text-micro font-medium text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live"
                 >
                   <TextSelect className="h-3.5 w-3.5" />
                   Auswählen

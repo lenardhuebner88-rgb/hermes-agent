@@ -1109,6 +1109,28 @@ describe("AgentTerminalsView desktop rendering", () => {
       ["Alpha"],
       ["Alpha · feature/one"],
     ]);
+    expect(select.className).toContain("min-h-[44px]");
+    fireEvent.change(select, { target: { value: "dir:/srv/alpha" } });
+    expect(screen.getByText("/srv/alpha").className).toContain("font-data");
+  });
+
+  it("uses data-palette identity and only warns for unavailable agents", async () => {
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        kimi: { available: false, binary: null, reason: "kimi CLI missing" },
+      },
+    });
+    await renderView();
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+
+    expect(screen.queryByText("verfügbar")).toBeNull();
+    const hermesButton = screen.getByRole("button", { name: /^Hermes/ });
+    expect(hermesButton.querySelector(".bg-data-2")).toBeTruthy();
+    expect(hermesButton.className).toContain("min-h-[44px]");
+    const kimiButton = screen.getByRole("button", { name: /Kimi/ });
+    expect(kimiButton.textContent).toContain("CLI fehlt");
+    expect(kimiButton.querySelector(".text-status-warn")).toBeTruthy();
   });
 
   it("opens the create-session modal and resets a disappeared worktree localStorage key to home after capability load", async () => {
@@ -1212,11 +1234,15 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     // Chips hängen an geladenen Fenstern — als Erstes darauf warten, sonst sind
     // die folgenden Sync-Assertions ein Race gegen den async getAgentTerminalWindows-Resolve.
     // Accessible name may include overview state (" — läuft" / " — frage") once polled.
-    expect(await screen.findByRole("button", { name: /^hermes-agents:hermes/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /^hermes-agents:codex/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: /^hermes-agents:claude/ })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Zurück zum Dashboard" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Neue Session starten" })).toBeTruthy();
+    const hermesChip = await screen.findByRole("button", { name: /^hermes-agents:hermes/ });
+    const codexChip = screen.getByRole("button", { name: /^hermes-agents:codex/ });
+    const claudeChip = screen.getByRole("button", { name: /^hermes-agents:claude/ });
+    const backButton = screen.getByRole("button", { name: "Zurück zum Dashboard" });
+    const createButton = screen.getByRole("button", { name: "Neue Session starten" });
+    for (const control of [hermesChip, codexChip, claudeChip, backButton, createButton]) {
+      expect(control.className).toContain("min-h-[44px]");
+    }
+    expect(hermesChip.getAttribute("aria-label")).toMatch(/— (frage|läuft|wartet|idle|tot)$/);
     expect(screen.getByLabelText("Text an Terminal senden")).toBeTruthy();
     // Kein Page-Header, keine Header-Karte auf compactLayout.
     expect(screen.queryByText("Agent Terminals")).toBeNull();
@@ -1260,6 +1286,16 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Tools / Tageslage" }));
     expect((await screen.findAllByText("Terminal-Kontext")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("Fähigkeiten sichtbar")).length).toBeGreaterThan(0);
+  });
+
+  it("keeps every session-sheet action tile at least 44px high", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: /^hermes-agents:hermes/ }));
+    for (const name of [/^Neu verbinden$/, /\^C senden$/, /^Session beenden hermes-agents:hermes$/, /^Handoff öffnen$/, /Schrift kleiner$/, /Schrift größer$/, /^Tools \/ Tageslage$/, /^Liste aktualisieren$/]) {
+      expect(screen.getAllByRole("button", { name }).some((button) => button.className.includes("min-h-[44px]"))).toBe(true);
+    }
   });
 
   it("refreshes the window list from the session sheet action grid", async () => {
@@ -1322,6 +1358,10 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     const chip = await screen.findByTestId("mobile-cwd-chip");
     await waitFor(() => expect(chip.textContent).toBe("~/projects/family-organizer"));
     expect(chip.getAttribute("title")).toBe("/home/piet/projects/family-organizer");
+    expect(chip.className).toContain("font-data");
+    expect(chip.className).toContain("text-micro");
+    expect(screen.getByRole("button", { name: "Auswahl kopieren" }).className).toContain("min-w-[44px]");
+    expect(screen.getByRole("button", { name: "Text auswählen" }).className).toContain("min-h-[44px]");
   });
 
   it("renames the active window from the session sheet and refreshes the window list", async () => {
