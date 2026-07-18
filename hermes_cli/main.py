@@ -13980,10 +13980,11 @@ def main():
             import yaml
 
             from hermes_cli.config import DEFAULT_CONFIG
-            from hermes_constants import get_default_hermes_root, get_hermes_home
+            from hermes_constants import get_default_hermes_root
+            from hermes_constants import get_hermes_home as _maintain_hermes_home
             from hermes_state import SessionDB
 
-            current_home = get_hermes_home()
+            current_home = _maintain_hermes_home()
             homes = [current_home]
             if args.all_profiles:
                 root = get_default_hermes_root()
