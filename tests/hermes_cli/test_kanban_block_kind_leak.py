@@ -125,7 +125,7 @@ def test_untyped_unblock_keeps_loop_breaker_via_events(
 
         assert _block_fields(conn, task_id) == {
             "status": "triage",
-            "block_kind": None,
+            "block_kind": "transient",
             "block_recurrences": 2,
         }
 

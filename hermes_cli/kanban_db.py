@@ -23988,20 +23988,25 @@ def blocked_task_operator_questions(
 
     result: dict[str, bool] = {}
     for task_id, task in task_by_id.items():
-        if task.block_kind == "needs_input":
+        run = latest_runs.get(task_id)
+        verdict = str(run["verdict"] or "").strip().upper() if run else ""
+        if task.block_kind == "needs_input" and verdict != "REQUEST_CHANGES":
             result[task_id] = True
             continue
         if task.block_kind in {"dependency", "transient"}:
             result[task_id] = False
             continue
-        run = latest_runs.get(task_id)
         if run is None:
             result[task_id] = False
             continue
         reason = (run["summary"] or "").strip() or (run["error"] or "").strip()
         result[task_id] = _blocked_kind_for_auto_retry(
             reason,
-            explicit_block_kind=task.block_kind,
+            explicit_block_kind=(
+                "review_revision"
+                if task.block_kind == "needs_input" and verdict == "REQUEST_CHANGES"
+                else task.block_kind
+            ),
             verdict=run["verdict"],
             auto_retry_count=task.auto_retry_count,
             body_hash=_task_body_hash(task.body),
@@ -24368,6 +24373,18 @@ def auto_retry_blocked_tasks(
         reason = (blocked_run["summary"] or "").strip() or (
             blocked_run["error"] or ""
         ).strip()
+        policy_block_kind = explicit_block_kind
+        if explicit_block_kind == "needs_input":
+            if (
+                str(blocked_run["verdict"] or "").strip().upper()
+                == "REQUEST_CHANGES"
+            ):
+                policy_block_kind = "review_revision"
+            elif (
+                _deterministic_spawn_failure_marker(reason) is not None
+                or reason.lower() in _DECOMPOSE_DETERMINISTIC_LLM_ERROR_REASONS
+            ):
+                policy_block_kind = None
         result_comment = _latest_result_comment_after(
             conn,
             task_id,
@@ -24404,7 +24421,7 @@ def auto_retry_blocked_tasks(
                         },
                     )
             continue
-        if explicit_block_kind in ("needs_input", "capability"):
+        if policy_block_kind in ("needs_input", "capability"):
             answer_comment = _operator_answer_comment_after(
                 conn,
                 task_id,
@@ -24444,7 +24461,7 @@ def auto_retry_blocked_tasks(
         body_hash = _task_body_hash(row["body"])
         blocked_kind = _blocked_kind_for_auto_retry(
             reason,
-            explicit_block_kind=explicit_block_kind,
+            explicit_block_kind=policy_block_kind,
             verdict=blocked_run["verdict"],
             auto_retry_count=current_count,
             body_hash=body_hash,
