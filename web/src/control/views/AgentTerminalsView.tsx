@@ -2236,9 +2236,21 @@ export function AgentTerminalsView() {
           }}
           className="rounded-card border border-line bg-surface-2 px-2 py-2 text-xs text-ink-2 focus:border-live/50 focus:outline-none"
         >
-          {(capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS).map((option) => (
-            <option key={option.key} value={option.key}>{option.label}</option>
-          ))}
+          {([
+            ["standard", de.agentTerminals.workdirGroupStandard],
+            ["projekt", de.agentTerminals.workdirGroupProjects],
+            ["worktree", de.agentTerminals.workdirGroupWorktrees],
+          ] as const).map(([group, label]) => {
+            const options = (capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS)
+              .filter((option) => (option.group ?? "standard") === group);
+            return options.length ? (
+              <optgroup key={group} label={label}>
+                {options.map((option) => (
+                  <option key={option.key} value={option.key}>{option.label}</option>
+                ))}
+              </optgroup>
+            ) : null;
+          })}
         </select>
       </label>
       {workdirResetNote && (

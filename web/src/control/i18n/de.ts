@@ -1571,6 +1571,9 @@ export const de = {
     openInFlow: "Im Flow öffnen",
   },
   agentTerminals: {
+    workdirGroupStandard: "Standard",
+    workdirGroupProjects: "Projekte",
+    workdirGroupWorktrees: "Worktrees",
     // Phone → Terminal Datei-/Screenshot-Upload (Composer-Anhang-Button,
     // Paste, Drag&Drop).
     attachFile: "Datei anhängen",

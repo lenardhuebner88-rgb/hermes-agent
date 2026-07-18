@@ -14,12 +14,14 @@ import secrets
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
 from hermes_cli.config import get_hermes_home
+from hermes_cli.projects_overview import load_projects_registry
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
@@ -146,6 +148,53 @@ _WORKDIR_DEFS: tuple[tuple[str, str, tuple[str, ...], str | None], ...] = (
 )
 _WORKDIR_BY_KEY = {key: (label, parts, suffix) for key, label, parts, suffix in _WORKDIR_DEFS}
 _WORKDIR_KEY_BY_SUFFIX = {suffix: key for key, _, _, suffix in _WORKDIR_DEFS if suffix}
+_WORKDIR_CACHE_TTL_SECONDS = 5.0
+_WORKTREE_LIMIT = 15
+_WORKDIR_CACHE_LOCK = threading.Lock()
+_workdir_cache: tuple[float, list[dict[str, object]]] | None = None
+
+
+def _normalise_path(path: Path) -> Path:
+    """Return a stable absolute path without requiring the target to exist."""
+    return path.expanduser().resolve(strict=False)
+
+
+def _parse_worktree_porcelain(output: str) -> list[tuple[Path, str | None]]:
+    """Parse ``git worktree list --porcelain`` records."""
+    records: list[tuple[Path, str | None]] = []
+    path: Path | None = None
+    branch: str | None = None
+    for line in [*output.splitlines(), ""]:
+        if not line:
+            if path is not None:
+                records.append((path, branch))
+            path = None
+            branch = None
+        elif line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree "))
+        elif line.startswith("branch refs/heads/"):
+            branch = line.removeprefix("branch refs/heads/")
+    return records
+
+
+def _run_git(args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _reset_workdir_options_cache() -> None:
+    """Test hook: force the next workdir enumeration to rescan live state."""
+    global _workdir_cache
+    with _WORKDIR_CACHE_LOCK:
+        _workdir_cache = None
 
 
 class AgentTerminalError(RuntimeError):
@@ -413,23 +462,117 @@ class TmuxAgentSessionService:
         raise CapabilityError(f"{kind} CLI not found on PATH or standard install locations")
 
     @staticmethod
-    def workdir_options() -> list[dict[str, object]]:
+    def _enumerate_workdir_options() -> list[dict[str, object]]:
         home = Path.home()
         options: list[dict[str, object]] = []
+        known_paths: set[Path] = set()
+        repos: list[tuple[Path, str]] = []
         for key, label, parts, _suffix in _WORKDIR_DEFS:
             path = home.joinpath(*parts)
             if path.is_dir():
-                options.append({"key": key, "label": label, "path": str(path)})
+                normalised = _normalise_path(path)
+                known_paths.add(normalised)
+                repos.append((normalised, label))
+                options.append(
+                    {"key": key, "label": label, "path": str(path), "group": "standard"}
+                )
+
+        registry = load_projects_registry(home=get_hermes_home())
+        for project in registry.projects:
+            path = _normalise_path(Path(project.repo_path))
+            if not path.is_dir() or path in known_paths:
+                continue
+            known_paths.add(path)
+            repos.append((path, project.name))
+            options.append(
+                {
+                    "key": f"dir:{path}",
+                    "label": project.name,
+                    "path": str(path),
+                    "group": "projekt",
+                }
+            )
+
+        worktrees: dict[Path, tuple[str, str]] = {}
+        for repo, project_name in repos:
+            result = _run_git(
+                ["git", "-C", str(repo), "worktree", "list", "--porcelain"]
+            )
+            if result is None or result.returncode != 0:
+                continue
+            for path, branch in _parse_worktree_porcelain(result.stdout):
+                normalised = _normalise_path(path)
+                if normalised == repo or normalised in known_paths or not normalised.is_dir():
+                    continue
+                branch_label = branch or normalised.name
+                worktrees.setdefault(normalised, (project_name, branch_label))
+
+        free_root = home / ".hermes" / "worktrees"
+        if free_root.is_dir():
+            for candidate in free_root.iterdir():
+                normalised = _normalise_path(candidate)
+                if not candidate.is_dir() or normalised in known_paths or normalised in worktrees:
+                    continue
+                result = _run_git(["git", "-C", str(candidate), "rev-parse", "--git-dir"])
+                if result is None or result.returncode != 0:
+                    continue
+                branch_result = _run_git(
+                    ["git", "-C", str(candidate), "branch", "--show-current"]
+                )
+                branch = (
+                    branch_result.stdout.strip()
+                    if branch_result is not None and branch_result.returncode == 0
+                    else ""
+                )
+                worktrees[normalised] = (candidate.name, branch or candidate.name)
+
+        def worktree_mtime(item: tuple[Path, tuple[str, str]]) -> float:
+            try:
+                return item[0].stat().st_mtime
+            except OSError:
+                return 0.0
+
+        for path, (project_name, branch) in sorted(
+            worktrees.items(), key=worktree_mtime, reverse=True
+        )[:_WORKTREE_LIMIT]:
+            options.append(
+                {
+                    "key": f"dir:{path}",
+                    "label": f"{project_name} · {branch}",
+                    "path": str(path),
+                    "group": "worktree",
+                }
+            )
         return options
+
+    @staticmethod
+    def workdir_options() -> list[dict[str, object]]:
+        global _workdir_cache
+        with _WORKDIR_CACHE_LOCK:
+            now = time.monotonic()
+            if _workdir_cache is None or now - _workdir_cache[0] >= _WORKDIR_CACHE_TTL_SECONDS:
+                options = TmuxAgentSessionService._enumerate_workdir_options()
+                _workdir_cache = (time.monotonic(), options)
+            return [dict(option) for option in _workdir_cache[1]]
 
     @staticmethod
     def resolve_workdir(workdir: str | None) -> tuple[str, Path]:
         key = workdir or "home"
         entry = _WORKDIR_BY_KEY.get(key)
-        if entry is None:
+        if entry is not None:
+            _label, parts, _suffix = entry
+            path = Path.home().joinpath(*parts)
+        elif key.startswith("dir:"):
+            enumerated = {
+                option["key"]: Path(str(option["path"]))
+                for option in TmuxAgentSessionService.workdir_options()
+                if isinstance(option.get("key"), str) and isinstance(option.get("path"), str)
+            }
+            path = enumerated.get(key)
+            if path is None:
+                raise InvalidTarget(f"unknown workdir: {workdir!r}")
+        else:
             raise InvalidTarget(f"unknown workdir: {workdir!r}")
-        _label, parts, _suffix = entry
-        path = Path.home().joinpath(*parts)
         if not path.is_dir():
             raise CapabilityError(f"workdir not available: {path}")
         return key, path
@@ -437,10 +580,17 @@ class TmuxAgentSessionService:
     @staticmethod
     def window_name_for(kind: str, workdir_key: str) -> str:
         entry = _WORKDIR_BY_KEY.get(workdir_key)
-        if entry is None:
+        if entry is not None:
+            suffix = entry[2]
+            return kind if suffix is None else f"{kind}-{suffix}"
+        if not workdir_key.startswith("dir:"):
             raise InvalidTarget(f"unknown workdir: {workdir_key!r}")
-        suffix = entry[2]
-        return kind if suffix is None else f"{kind}-{suffix}"
+        basename = Path(workdir_key.removeprefix("dir:")).name.lower()
+        slug = re.sub(r"[^a-z0-9]+", "-", basename).strip("-") or "workdir"
+        slug = slug[:16].rstrip("-") or "workdir"
+        if slug[-1].isdigit():
+            slug = f"{slug[:15]}x"
+        return f"{kind}-dir-{slug}"
 
     @staticmethod
     def _identity_from_window(window: str) -> tuple[str, str]:
@@ -460,6 +610,8 @@ class TmuxAgentSessionService:
                 key = _WORKDIR_KEY_BY_SUFFIX.get(suffix)
                 if key:
                     return kind, key
+                if suffix.startswith("dir-"):
+                    return kind, "home"
         raise CapabilityError(f"window {window!r} is not a dashboard-managed agent window")
 
     def identity_for(self, session: str, window: str) -> tuple[str, str]:
@@ -476,7 +628,9 @@ class TmuxAgentSessionService:
         if kind_proc.returncode == 0 and workdir_proc.returncode == 0:
             kind = kind_proc.stdout.strip()
             workdir_key = workdir_proc.stdout.strip()
-            if kind in _AGENT_KINDS and workdir_key in _WORKDIR_BY_KEY:
+            if kind in _AGENT_KINDS and (
+                workdir_key in _WORKDIR_BY_KEY or workdir_key.startswith("dir:")
+            ):
                 return kind, workdir_key
         return self._identity_from_window(window)
 
@@ -787,9 +941,11 @@ class TmuxAgentSessionService:
         kind = self.validate_name(kind, field="kind")
         if kind not in _AGENT_KINDS:
             raise InvalidTarget(f"unknown agent kind: {kind}")
-        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
-            raise InvalidTarget(f"unknown workdir: {workdir!r}")
         workdir_key = workdir or "home"
+        if workdir_key.startswith("dir:"):
+            workdir_key, _cwd = self.resolve_workdir(workdir_key)
+        elif workdir_key not in _WORKDIR_BY_KEY:
+            raise InvalidTarget(f"unknown workdir: {workdir!r}")
         # Attach path first: an existing window stays reachable even if the
         # CLI binary or workdir is currently unresolvable.
         window = self.window_name_for(kind, workdir_key)
@@ -812,9 +968,7 @@ class TmuxAgentSessionService:
         kind = self.validate_name(kind, field="kind")
         if kind not in _AGENT_KINDS:
             raise InvalidTarget(f"unknown agent kind: {kind}")
-        if workdir is not None and workdir not in _WORKDIR_BY_KEY:
-            raise InvalidTarget(f"unknown workdir: {workdir!r}")
-        workdir_key = workdir or "home"
+        workdir_key, _cwd = self.resolve_workdir(workdir)
         base_name = self.window_name_for(kind, workdir_key)
         window_name = base_name
         if self.window_exists("work", window_name):

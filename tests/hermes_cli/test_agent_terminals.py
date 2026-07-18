@@ -10,6 +10,7 @@ from collections.abc import Generator
 
 import pytest
 
+import hermes_cli.agent_terminals as agent_terminals
 from hermes_cli.agent_terminals import (
     AgentTerminalError,
     CapabilityError,
@@ -18,9 +19,17 @@ from hermes_cli.agent_terminals import (
     classify_agent_pane,
     strip_ansi,
 )
+from hermes_cli.projects_overview import ProjectEntry, ProjectsRegistry
 
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
+
+
+@pytest.fixture(autouse=True)
+def reset_workdir_options_cache() -> Generator[None, None, None]:
+    agent_terminals._reset_workdir_options_cache()
+    yield
+    agent_terminals._reset_workdir_options_cache()
 
 
 @pytest.fixture
@@ -47,6 +56,179 @@ def test_validate_name_rejects_tmux_option_and_shell_payload() -> None:
     for value in ("-t", "work;kill-server", "work:bad", "../work", ""):
         with pytest.raises(InvalidTarget):
             service.validate_name(value)
+
+
+def test_workdir_options_enumerate_registry_and_git_worktrees(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    repo = tmp_path / "projekt"
+    repo.mkdir()
+    worktree = tmp_path / "worktrees" / "feature-one"
+    worktree.mkdir(parents=True)
+    free_worktree = home / ".hermes" / "worktrees" / "freier-wt"
+    free_worktree.mkdir(parents=True)
+    os.utime(worktree, (100, 100))
+    os.utime(free_worktree, (200, 200))
+    monkeypatch.setattr(
+        agent_terminals,
+        "load_projects_registry",
+        lambda **_kwargs: ProjectsRegistry(
+            projects=[ProjectEntry(slug="alpha", name="Alpha Projekt", repo_path=str(repo))]
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(args))
+        cwd = args[2]
+        if args[3:] == ["worktree", "list", "--porcelain"] and cwd == str(repo):
+            output = (
+                f"worktree {repo}\nHEAD {'a' * 40}\nbranch refs/heads/main\n\n"
+                f"worktree {worktree}\nHEAD {'b' * 40}\n"
+                "branch refs/heads/feature/one\n\n"
+            )
+            return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+        if args[3:] == ["rev-parse", "--git-dir"] and cwd == str(free_worktree):
+            return subprocess.CompletedProcess(args, 0, stdout=".git\n", stderr="")
+        if args[3:] == ["branch", "--show-current"] and cwd == str(free_worktree):
+            return subprocess.CompletedProcess(args, 0, stdout="freie-branch\n", stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="not a git repository")
+
+    monkeypatch.setattr(agent_terminals, "_run_git", fake_git)
+
+    options = TmuxAgentSessionService.workdir_options()
+
+    assert options[0] == {
+        "key": "home",
+        "label": "Zuhause (~)",
+        "path": str(home),
+        "group": "standard",
+    }
+    assert options[1] == {
+        "key": f"dir:{repo}",
+        "label": "Alpha Projekt",
+        "path": str(repo),
+        "group": "projekt",
+    }
+    assert [option["path"] for option in options[2:]] == [str(free_worktree), str(worktree)]
+    assert options[2]["label"] == "freier-wt · freie-branch"
+    assert options[3]["label"] == "Alpha Projekt · feature/one"
+    assert all(option["group"] == "worktree" for option in options[2:])
+    assert not any(option["path"] == str(repo) and option["group"] == "worktree" for option in options)
+
+    # TTL cache shares the expensive enumeration until the explicit test reset.
+    first_call_count = len(calls)
+    assert TmuxAgentSessionService.workdir_options() == options
+    assert len(calls) == first_call_count
+    agent_terminals._reset_workdir_options_cache()
+    TmuxAgentSessionService.workdir_options()
+    assert len(calls) > first_call_count
+
+
+def test_resolve_workdir_accepts_only_enumerated_dir_keys_and_checks_live_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    unknown = tmp_path / "unknown"
+    unknown.mkdir()
+    option = {
+        "key": f"dir:{allowed}",
+        "label": "Allowed",
+        "path": str(allowed),
+        "group": "projekt",
+    }
+    monkeypatch.setattr(TmuxAgentSessionService, "workdir_options", staticmethod(lambda: [option]))
+
+    assert TmuxAgentSessionService.resolve_workdir(f"dir:{allowed}") == (
+        f"dir:{allowed}",
+        allowed,
+    )
+    with pytest.raises(InvalidTarget, match="unknown workdir"):
+        TmuxAgentSessionService.resolve_workdir(f"dir:{unknown}")
+
+    allowed.rmdir()
+    with pytest.raises(CapabilityError, match="workdir not available"):
+        TmuxAgentSessionService.resolve_workdir(f"dir:{allowed}")
+
+
+def test_static_workdir_keys_and_order_remain_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    for relative in (
+        (".hermes", "hermes-agent"),
+        ("projects", "family-organizer"),
+        ("orchestration",),
+    ):
+        home.joinpath(*relative).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        agent_terminals,
+        "load_projects_registry",
+        lambda **_kwargs: ProjectsRegistry(),
+    )
+    monkeypatch.setattr(
+        agent_terminals,
+        "_run_git",
+        lambda args: subprocess.CompletedProcess(args, 1, stdout="", stderr="not a repo"),
+    )
+
+    options = TmuxAgentSessionService.workdir_options()
+
+    assert [option["key"] for option in options] == [
+        "home",
+        "hermes-agent",
+        "family-organizer",
+        "orchestration",
+    ]
+    assert all(option["group"] == "standard" for option in options)
+
+
+def test_worktree_enumeration_is_capped_at_fifteen_newest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(
+        agent_terminals,
+        "load_projects_registry",
+        lambda **_kwargs: ProjectsRegistry(
+            projects=[ProjectEntry(slug="repo", name="Repo", repo_path=str(repo))]
+        ),
+    )
+    paths = [tmp_path / "worktrees" / f"wt-{index:02d}" for index in range(17)]
+    for index, path in enumerate(paths):
+        path.mkdir(parents=True)
+        os.utime(path, (index, index))
+    porcelain = f"worktree {repo}\nHEAD {'a' * 40}\nbranch refs/heads/main\n\n" + "".join(
+        f"worktree {path}\nHEAD {'b' * 40}\nbranch refs/heads/b-{index}\n\n"
+        for index, path in enumerate(paths)
+    )
+
+    def fake_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[2] == str(repo):
+            return subprocess.CompletedProcess(args, 0, stdout=porcelain, stderr="")
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="not a repo")
+
+    monkeypatch.setattr(agent_terminals, "_run_git", fake_git)
+    worktree_options = [
+        option
+        for option in TmuxAgentSessionService.workdir_options()
+        if option["group"] == "worktree"
+    ]
+
+    assert len(worktree_options) == 15
+    assert [option["path"] for option in worktree_options] == [
+        str(path) for path in reversed(paths[2:])
+    ]
 
 
 def test_broken_or_transient_hermes_binary_reports_capability_state(tmp_path: Path) -> None:
@@ -806,6 +988,29 @@ def test_identity_from_window_strips_numbered_collision_suffix() -> None:
     assert TmuxAgentSessionService._identity_from_window("codex-3") == ("codex", "home")
     assert TmuxAgentSessionService._identity_from_window("hermes") == ("hermes", "home")
     assert TmuxAgentSessionService._identity_from_window("claude-fo-9") == ("claude", "family-organizer")
+
+
+def test_dynamic_workdir_window_slug_handles_length_and_digit_suffix() -> None:
+    assert TmuxAgentSessionService.window_name_for(
+        "codex", "dir:/tmp/Feature Branch"
+    ) == "codex-dir-feature-branch"
+    assert TmuxAgentSessionService.window_name_for(
+        "claude", "dir:/tmp/very-long-worktree-42"
+    ) == "claude-dir-very-long-worktr"
+    assert TmuxAgentSessionService.window_name_for(
+        "hermes", "dir:/tmp/Sprint42"
+    ) == "hermes-dir-sprint42x"
+
+
+def test_identity_from_unknown_dynamic_window_falls_back_to_home() -> None:
+    assert TmuxAgentSessionService._identity_from_window("codex-dir-feature-branch") == (
+        "codex",
+        "home",
+    )
+    assert TmuxAgentSessionService._identity_from_window("claude-dir-sprintx-2") == (
+        "claude",
+        "home",
+    )
 
 
 def test_respawn_dead_recovers_numbered_window_guard_still_blocks_live(

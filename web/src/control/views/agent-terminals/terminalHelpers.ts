@@ -68,10 +68,10 @@ const FLEET_STATE_PRIORITY: Record<AgentTerminalOverviewWindow["state"], number>
 
 // Fallback, falls capabilities noch nicht geladen sind — Wahrheit kommt vom Backend.
 export const FALLBACK_WORKDIRS: AgentTerminalWorkdirOption[] = [
-  { key: "home", label: "Zuhause (~)", path: "~" },
-  { key: "hermes-agent", label: "Hermes-Agent", path: "~/.hermes/hermes-agent" },
-  { key: "family-organizer", label: "Family Organizer", path: "~/projects/family-organizer" },
-  { key: "orchestration", label: "Orchestrierung", path: "~/orchestration" },
+  { key: "home", label: "Zuhause (~)", path: "~", group: "standard" },
+  { key: "hermes-agent", label: "Hermes-Agent", path: "~/.hermes/hermes-agent", group: "standard" },
+  { key: "family-organizer", label: "Family Organizer", path: "~/projects/family-organizer", group: "standard" },
+  { key: "orchestration", label: "Orchestrierung", path: "~/orchestration", group: "standard" },
 ];
 
 export const QUICK_KEYS: Array<{ label: string; sequence: string }> = [

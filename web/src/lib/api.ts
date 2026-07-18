@@ -465,6 +465,7 @@ export interface AgentTerminalWorkdirOption {
   key: string;
   label: string;
   path: string;
+  group?: "standard" | "projekt" | "worktree";
 }
 
 export interface AgentTerminalCapabilityState {

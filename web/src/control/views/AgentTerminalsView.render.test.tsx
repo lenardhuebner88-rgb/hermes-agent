@@ -1083,14 +1083,42 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => expect(terminalResetMock.mock.calls.length).toBeGreaterThan(resetsAfterMount));
   });
 
-  it("opens the create-session modal and resets a stale workdir localStorage key to home after capability load", async () => {
-    // Legacy global key still migrates for the default create kind (hermes); invalid → home + note.
-    window.localStorage.setItem("hermes-terminals-workdir", "gibt-es-nicht");
+  it("renders backend workdirs in Standard, Projekte, and Worktrees optgroups", async () => {
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      workdirs: [
+        { key: "home", label: "Zuhause (~)", path: "/home/piet", group: "standard" },
+        { key: "legacy", label: "Ohne Gruppe", path: "/home/piet/legacy" },
+        { key: "dir:/srv/alpha", label: "Alpha", path: "/srv/alpha", group: "projekt" },
+        {
+          key: "dir:/srv/alpha-wt",
+          label: "Alpha · feature/one",
+          path: "/srv/alpha-wt",
+          group: "worktree",
+        },
+      ],
+    });
+    await renderView();
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+
+    const select = screen.getByLabelText("Arbeitsverzeichnis für neue Terminals");
+    const groups = Array.from(select.querySelectorAll("optgroup"));
+    expect(groups.map((group) => group.label)).toEqual(["Standard", "Projekte", "Worktrees"]);
+    expect(groups.map((group) => Array.from(group.querySelectorAll("option"), (option) => option.textContent))).toEqual([
+      ["Zuhause (~)", "Ohne Gruppe"],
+      ["Alpha"],
+      ["Alpha · feature/one"],
+    ]);
+  });
+
+  it("opens the create-session modal and resets a disappeared worktree localStorage key to home after capability load", async () => {
+    // Legacy global key still migrates for the default create kind (hermes); disappeared → home + note.
+    window.localStorage.setItem("hermes-terminals-workdir", "dir:/tmp/verschwundener-worktree");
     await renderView();
 
     await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("home"));
     // Legacy key is left intact (migration read only; anti-scope: no removal).
-    expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("gibt-es-nicht");
+    expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("dir:/tmp/verschwundener-worktree");
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
     expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
     expect(screen.getByText(/Gespeichertes Arbeitsverzeichnis nicht verfügbar/)).toBeTruthy();
