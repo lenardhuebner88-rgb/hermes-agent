@@ -1004,3 +1004,112 @@ def test_draft_path_still_applies_vetoed_dedup(board_home, monkeypatch, tmp_path
     assert "FRESH-KEY" in ingested_keys
     # the vetoed key was dropped by dedup, NOT by the grounding gate (it had grounding)
     assert all(b["key"] != "VETOED-KEY" for b in result["grounding_blocked"])
+
+
+# --------------------------------------------------------------------------- #
+# GATE-FLAKY-RETRY-HONESTY-S1 — flaky (fail->pass) file → HELD de-flake PlanSpec
+# --------------------------------------------------------------------------- #
+def _flaky_night(date, leakers, *, leaker_only=True):
+    rec = {"date": date, "result": "fail", "ts": f"{date}T03:00:00+00:00",
+           "leakers": list(leakers)}
+    if leaker_only:
+        rec["leaker_only"] = True
+    return rec
+
+
+def test_deflake_idle_when_no_flaky_file(board_home):
+    records = [{"date": "2026-07-18", "result": "fail", "ts": "2026-07-18T03:00:00+00:00",
+               "first_fail": {"gate": "python", "detail": "real regression"}}]
+    out_dir = board_home / "specs"
+    result = strategist.propose_deflake(board=None, out_dir=out_dir, gate_records=records)
+    assert result["triggered"] is False
+    assert result["filed"] == []
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_deflake_dry_run_detects_without_ingest(board_home):
+    records = [_flaky_night("2026-07-18", ["python: tests/agent/test_delegate.py"])]
+    out_dir = board_home / "specs"
+    result = strategist.propose_deflake(
+        board=None, out_dir=out_dir, gate_records=records, do_ingest=False
+    )
+    assert result["triggered"] is True
+    assert len(result["filed"]) == 1
+    assert result["filed"][0]["dry_run"] is True
+    assert not out_dir.exists()  # nothing written on a dry run
+    with kb.connect() as conn:
+        assert strategist_surface.held_operator_proposals(conn) == []
+
+
+def test_deflake_opens_one_held_planspec_per_flaky_file(board_home):
+    """AC-1/AC-2b: each confirmed flake gets exactly one HELD, operator-gated
+    de-flake PlanSpec (build + review)."""
+    records = [
+        _flaky_night("2026-07-10", ["python: tests/agent/test_delegate.py"]),
+        _flaky_night("2026-07-12", ["vitest: src/foo.test.ts"]),
+    ]
+    out_dir = board_home / "specs"
+    result = strategist.propose_deflake(board=None, out_dir=out_dir, gate_records=records)
+
+    assert result["triggered"] is True
+    assert len(result["filed"]) == 2
+    for f in result["filed"]:
+        assert f["root_task_id"]
+        assert f["already_ingested"] is False
+
+    with kb.connect() as conn:
+        proposals = strategist_surface.held_operator_proposals(conn)
+    assert len(proposals) == 2
+    for prop in proposals:
+        assert prop["created_by"] == strategist.GATE_DEFLAKE_AUTHOR
+        assert prop["target_metric"]
+        assert prop["counter_metric"]
+    # each held root is scheduled + operator-gated (never auto-deploy)
+    with kb.connect() as conn:
+        for f in result["filed"]:
+            row = conn.execute(
+                "SELECT status, freigabe FROM tasks WHERE id=?", (f["root_task_id"],)
+            ).fetchone()
+            assert row["status"] == "scheduled"
+            assert row["freigabe"] == "operator"
+
+
+def test_deflake_is_idempotent_per_file(board_home):
+    """AC-2b: re-running while the SAME file keeps flaking (more nights, so it now
+    counts as recurring) dedups to the same chain — no PlanSpec spam."""
+    out_dir = board_home / "specs"
+    first = [_flaky_night("2026-07-10", ["python: tests/agent/test_delegate.py"])]
+    r1 = strategist.propose_deflake(board=None, out_dir=out_dir, gate_records=first)
+
+    third = first + [
+        _flaky_night("2026-07-12", ["python: tests/agent/test_delegate.py"]),
+        _flaky_night("2026-07-13", ["python: tests/agent/test_delegate.py"]),
+    ]
+    r2 = strategist.propose_deflake(board=None, out_dir=out_dir, gate_records=third)
+
+    assert r1["filed"][0]["already_ingested"] is False
+    assert r2["filed"][0]["already_ingested"] is True
+    assert r1["filed"][0]["key"] == r2["filed"][0]["key"]
+    assert r1["filed"][0]["root_task_id"] == r2["filed"][0]["root_task_id"]
+    # now recurring (3 distinct nights) — escalation surfaced on the summary
+    assert r2["recurring"] == ["tests/agent/test_delegate.py"]
+    with kb.connect() as conn:
+        assert len(strategist_surface.held_operator_proposals(conn)) == 1
+
+
+def test_deflake_filing_drives_counter_metric_to_zero(board_home):
+    """AC-2b end-to-end: before filing the counter is non-zero; after
+    propose_deflake writes the filed-key set the metric reads 0."""
+    records = [_flaky_night("2026-07-18", ["python: tests/agent/test_delegate.py"])]
+    filed_path = board_home / ".hermes" / "state" / "deflake-filed.json"
+
+    before = vm._green_gate_metric(records, deflake_filed=vm.read_deflake_filed(filed_path))
+    assert before["flake_debt"]["value"] == 1
+
+    out_dir = board_home / "specs"
+    strategist.propose_deflake(
+        board=None, out_dir=out_dir, gate_records=records, filed_path=filed_path
+    )
+    after = vm._green_gate_metric(records, deflake_filed=vm.read_deflake_filed(filed_path))
+    assert after["flake_debt"]["value"] == 0

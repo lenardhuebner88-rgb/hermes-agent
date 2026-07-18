@@ -91,6 +91,15 @@ GATE_TRIAGE_WINDOW = vision_metrics.GATE_TRIAGE_WINDOW
 # Re-export the default streak threshold so the CLI layer has one import site.
 GATE_FIX_MIN_NIGHTS = vision_metrics.GATE_FIX_MIN_NIGHTS
 
+# GATE-FLAKY-RETRY-HONESTY-S1: a distinct author for the per-file de-flake specs
+# (a wieder-gruen-retriebarer Flake — fail->pass on the isolated rerun). Kept
+# separate from STRATEGIST_AUTHOR/GATE_FIX_AUTHOR so ``reflect`` never reflects
+# on a de-flake hold; the held spec still surfaces on the G1 operator surface.
+GATE_DEFLAKE_AUTHOR = "green-gate-deflake"
+
+# Re-export the recurring-flake escalation threshold (one import site).
+RECURRING_FLAKE_MIN_NIGHTS = vision_metrics.RECURRING_FLAKE_MIN_NIGHTS
+
 # Self-gate budgets (cheap, deterministic). A lever passes iff it has a paired
 # counter-metric, a positive ROI score, and a guardrail risk within budget.
 CAP_MAX = 5
@@ -545,6 +554,65 @@ def _persistent_red_triage_lever(cause: dict[str, Any]) -> Lever:
         counter_risk=0.3,
         signal_strength=1.0,
         source="gate-persistent-red-triage",
+    )
+
+
+def _deflake_lever(candidate: dict[str, Any]) -> Lever:
+    """Build the held de-flake PlanSpec lever for one flaky test file.
+
+    Driven by :func:`vision_metrics.derive_flaky_deflake_candidates`. The lever's
+    identity (``key`` → PlanSpec ``slice`` → filename) is a pure function of the
+    flaky FILE (via :func:`vision_metrics.flaky_file_key`), so re-running on a
+    later flaky night of the same file renders byte-identical markdown and the
+    ingest dedups (``already_ingested``) — exactly one HELD de-flake task per
+    file, never spam (AC-1/AC-2b). Only STABLE fields (file + gate) reach the
+    body; the volatile night-count / recurring flag are deliberately NOT rendered
+    so the content hash that backs idempotency cannot drift as the flake recurs
+    (the recurrence escalation lives in the ``recurring_flakes`` metric, not the
+    spec body — mirrors ``_gate_fix_lever``)."""
+    gate = str(candidate.get("gate") or "unknown").strip().lower() or "unknown"
+    file = str(candidate.get("file") or "").strip() or "(unbekannt)"
+    key = candidate.get("key") or vision_metrics.flaky_file_key(gate, file)
+    return Lever(
+        key=key,
+        title=f"Flaky-Test '{file}' de-flaken (Gate '{gate}')",
+        lane="premium",
+        target_metric=(
+            f"flaky_neutralized_without_filed_deflake_task Richtung 0 halten, "
+            f"indem der wieder-gruen-retriebare Flake in '{file}' (Gate '{gate}') "
+            "deterministisch gemacht wird — die Datei faellt im Parallel-Lauf, "
+            "besteht aber allein (fail->pass), zaehlt also neutral fuer die "
+            "green_gate_streak; erst der Fix nimmt sie dauerhaft aus der "
+            "Flake-Debt"
+        ),
+        roi=(
+            "mittel-hoch: ein wieder-gruen-retriebarer Flake kostet Vertrauen "
+            "und Re-Runs und verdeckt echte Regressionen im selben File; ihn "
+            "deterministisch zu machen haelt die naechtliche green-gate-Straehne "
+            "ehrlich, ohne Signale zu verstecken"
+        ),
+        counter_metric=(
+            "keine maskierte Regression: der Flake muss WIRKLICH deterministisch "
+            "gruen werden (Datei laeuft isoliert UND im Parallel-Lauf gruen via "
+            "scripts/run-affected.sh), nicht per skip/xfail unterdrueckt oder aus "
+            "dem Nacht-Gate entfernt werden"
+        ),
+        rationale=(
+            f"Der naechtliche green-gate-Heartbeat hat '{file}' (Gate '{gate}') "
+            "als Flake demoted: die Datei faellt im parallelen Voll-Lauf, besteht "
+            "aber beim isolierten Wiederholungslauf (fail->pass). Das ist honest "
+            "NEUTRAL fuer die Straehne, darf aber nicht dauerhaft gruen-gerechnet "
+            "werden. Diese HELD, operator-gated de-flake-PlanSpec wurde automatisch "
+            "eroeffnet, damit der Flake nicht still in der Leaker-Debt verschwindet. "
+            "Vorgehen: die Nichtdeterminismus-Quelle (geteilter State/Port/Temp-Dir, "
+            "Timing, Reihenfolge-Kopplung) in der Datei finden und schliessen, dann "
+            "die Datei isoliert UND im Parallel-Lauf gruen fahren."
+        ),
+        gain_weight=1.0,
+        cost=0.5,
+        counter_risk=0.3,
+        signal_strength=1.0,
+        source="gate-deflake",
     )
 
 
@@ -1685,6 +1753,114 @@ def propose_persistent_red_triage(
         "already_ingested": result.get("already_ingested", False),
     }
     return summary
+
+
+def propose_deflake(
+    *,
+    board: Optional[str] = None,
+    out_dir: Path,
+    filed_path: Optional[Path] = None,
+    gate_records: Optional[list[dict[str, Any]]] = None,
+    recurring_min_nights: int = RECURRING_FLAKE_MIN_NIGHTS,
+    do_ingest: bool = True,
+) -> dict[str, Any]:
+    """GATE-FLAKY-RETRY-HONESTY-S1 — open exactly one HELD de-flake PlanSpec per
+    flaky test file.
+
+    Reads the green-gate ledger and, for EVERY distinct flaky test file the
+    isolation rerun demoted (fail->pass — :func:`vision_metrics.derive_flaky_deflake_candidates`),
+    ingests a single ``freigabe:operator`` (HELD) de-flake PlanSpec so a
+    neutralized flake is never silently swallowed (AC-1/AC-2b). Per-file dedup is
+    two-layered: the PlanSpec ingest key (byte-stable lever body) reports
+    ``already_ingested`` on a re-run, AND the filed-key set persisted to
+    ``filed_path`` (default :func:`vision_metrics.deflake_filed_path`) is what the
+    counter-metric ``flaky_neutralized_without_filed_deflake_task`` reads — so
+    after this runs the counter reaches 0. A file whose ingest is BLOCKED (the
+    Sonnet judge refuses the baseline body) is NOT added to the filed set, so it
+    correctly stays counted as still-unfiled instead of a false zero.
+
+    Never auto-releases, never deploys (every spec is HELD). ``do_ingest=False``
+    detects only (no DB write, no state write). ``gate_records`` defaults to the
+    on-disk ledger; tests inject an explicit list. Idle (``triggered: False``)
+    when there is no flaky file at all."""
+    if gate_records is None:
+        gate_records = vision_metrics.read_gate_records()
+    candidates = vision_metrics.derive_flaky_deflake_candidates(
+        gate_records, recurring_min_nights=recurring_min_nights
+    )
+    recurring_files = [c["file"] for c in candidates if c["recurring"]]
+    if not candidates:
+        return {
+            "mode": "gate-deflake",
+            "triggered": False,
+            "reason": "keine flaky-neutralisierten Testdateien im green-gate-ledger",
+            "candidates": [],
+            "filed": [],
+            "recurring": [],
+            "ingest_errors": [],
+        }
+
+    filed_path = Path(filed_path) if filed_path else vision_metrics.deflake_filed_path()
+    already_filed = vision_metrics.read_deflake_filed(filed_path)
+
+    filed: list[dict[str, Any]] = []
+    ingest_errors: list[dict[str, Any]] = []
+    newly_filed: set[str] = set()
+    for cand in candidates:
+        lever = _deflake_lever(cand)
+        if not do_ingest:
+            filed.append(
+                {
+                    "key": lever.key,
+                    "file": cand["file"],
+                    "recurring": cand["recurring"],
+                    "dry_run": True,
+                }
+            )
+            continue
+        spec_path = _write_spec(out_dir, lever)
+        try:
+            result = planspecs.ingest_planspec(
+                spec_path, board=board, author=GATE_DEFLAKE_AUTHOR, plans_root=Path(out_dir)
+            )
+        except planspecs.PlanSpecBlocked as exc:
+            # A blocked ingest must NOT be recorded as filed (else the counter
+            # would falsely read 0). The nightly heartbeat retries next night.
+            ingest_errors.append(
+                {"key": lever.key, "file": cand["file"], "findings": exc.findings}
+            )
+            continue
+        newly_filed.add(lever.key)
+        filed.append(
+            {
+                "key": lever.key,
+                "file": cand["file"],
+                "recurring": cand["recurring"],
+                "root_task_id": result.get("root_task_id"),
+                "already_ingested": result.get("already_ingested", False),
+            }
+        )
+
+    if do_ingest and newly_filed:
+        vision_metrics.write_deflake_filed(already_filed | newly_filed, filed_path)
+
+    return {
+        "mode": "gate-deflake",
+        "triggered": True,
+        "candidates": [
+            {
+                "file": c["file"],
+                "gate": c["gate"],
+                "key": c["key"],
+                "nights": c["nights"],
+                "recurring": c["recurring"],
+            }
+            for c in candidates
+        ],
+        "filed": filed,
+        "recurring": recurring_files,
+        "ingest_errors": ingest_errors,
+    }
 
 
 def _key_from_title(title: Optional[str]) -> Optional[str]:
@@ -3312,6 +3488,25 @@ def run_persistent_red_triage(args) -> dict[str, Any]:
         out_dir=out_dir,
         min_reds=getattr(args, "min_reds", GATE_TRIAGE_MIN_REDS),
         window=getattr(args, "window", GATE_TRIAGE_WINDOW),
+        do_ingest=not getattr(args, "dry_run", False),
+    )
+
+
+def run_deflake_check(args) -> dict[str, Any]:
+    """CLI adapter: resolve defaults from the runtime layout, then deflake-check.
+
+    GATE-FLAKY-RETRY-HONESTY-S1 — files exactly one HELD de-flake PlanSpec per
+    flaky test file (fail->pass on the isolated rerun), deduped per file, so the
+    counter-metric ``flaky_neutralized_without_filed_deflake_task`` reaches 0.
+    Intended to run right after ``triage-check`` in the nightly heartbeat."""
+    state_dir = default_state_dir()
+    out_dir = Path(args.out_dir) if getattr(args, "out_dir", None) else state_dir / "specs"
+    return propose_deflake(
+        board=getattr(args, "board", None),
+        out_dir=out_dir,
+        recurring_min_nights=getattr(
+            args, "recurring_min_nights", RECURRING_FLAKE_MIN_NIGHTS
+        ),
         do_ingest=not getattr(args, "dry_run", False),
     )
 
