@@ -18,6 +18,7 @@
  */
 import { useState, useMemo, useEffect, useRef } from "react";
 import { ArrowRight } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { useHermesRunsCosts, useAccountUsage } from "../hooks/costsUsage";
 import { useKanbanDecisionQueue } from "../hooks/decisionInbox";
 import { usePlanSpecs, useLanesCatalog, usePlanSpecDetail } from "../hooks/planSpecsLanes";
@@ -26,9 +27,10 @@ import { useSystemHealth, usePressureStatus, useReleaseStatus, useReleaseMode } 
 import { useHermesWorkers, useAllBoardWorkers, useBoardCatalog, useBoard } from "../hooks/workersBoard";
 import { useFleetBoardSelection } from "../hooks/useFleetBoardSelection";
 import { planSpecAwaitsPlanAction, derivePendingItems, buildChainChips, type PendingItem } from "../lib/fleetHub";
+import { selectableFleetBoards, type BoardsResponse } from "../lib/multiBoard";
 import { useClientNowSeconds } from "../lib/clock";
 import { de } from "../i18n/de";
-import type { Worker, ChainGraphResponse, PlanSpecRecord } from "../lib/types";
+import type { Worker, ChainGraphResponse, PlanSpecRecord, TaskStatus } from "../lib/types";
 import { HeuteTab } from "./fleet/HeuteTab";
 import { WorkerTab } from "./fleet/WorkerTab";
 import { KettenTab } from "./fleet/KettenTab";
@@ -72,6 +74,33 @@ interface SubtabDef {
   warn?: boolean;
 }
 
+/** BoardTab filter vocabulary — only accept these as ?status= deep-link values. */
+const FLEET_DEEP_LINK_STATUSES: ReadonlySet<string> = new Set([
+  "triage", "todo", "scheduled", "ready", "running",
+  "blocked", "review", "done", "archived",
+]);
+
+function parseDeepLinkStatus(raw: string | null): TaskStatus | null {
+  if (raw == null || raw === "") return null;
+  return FLEET_DEEP_LINK_STATUSES.has(raw) ? (raw as TaskStatus) : null;
+}
+
+/**
+ * Resolve ?board= against the live catalog.
+ * - undefined → invalid / ignore (do not change selection)
+ * - null → select the global current board (clear foreign selection)
+ * - string → select that foreign board slug
+ */
+function resolveDeepLinkBoard(
+  boardParam: string,
+  catalog: BoardsResponse | null,
+): string | null | undefined {
+  if (!catalog) return undefined;
+  const available = selectableFleetBoards(catalog.boards);
+  if (!available.some((entry) => entry.slug === boardParam)) return undefined;
+  return boardParam === catalog.current ? null : boardParam;
+}
+
 // ─── Haupt-View ──────────────────────────────────────────────────────────────
 
 export function FleetView() {
@@ -97,6 +126,10 @@ export function FleetView() {
   const [nodeDetailId, setNodeDetailId] = useState<string | null>(null);
   // Ketten-Nodes beim Öffnen des Drawers mitgeben → ErgebnisTab kann chainCost berechnen
   const [nodeDetailChainNodes, setNodeDetailChainNodes] = useState<ChainGraphResponse["nodes"]>([]);
+  // One-shot deep-link status for BoardTab (consumed from ?status= once per mount).
+  const [deepLinkStatusFilter, setDeepLinkStatusFilter] = useState<TaskStatus | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkConsumedRef = useRef(false);
 
   const workers = useHermesWorkers();
   const fleetWorkers = useAllBoardWorkers();
@@ -104,6 +137,43 @@ export function FleetView() {
   const { selectedBoard, setSelectedBoard } = useFleetBoardSelection(boardCatalog.data);
   const board = useBoard();
   const selectedBoardData = useBoard(selectedBoard);
+
+  // Deep-link ?board=<slug>&status=<TaskStatus> — one-shot idiom (AgentTerminalsView).
+  // Wait for board catalog load; validate board; activate Board subtab; strip params.
+  useEffect(() => {
+    if (deepLinkConsumedRef.current) return;
+    const boardParam = searchParams.get("board");
+    const statusParam = searchParams.get("status");
+    const hasBoard = boardParam != null && boardParam !== "";
+    const hasStatus = statusParam != null && statusParam !== "";
+    if (!hasBoard && !hasStatus) return;
+    // Race-guard: wait until first catalog poll settles before validating board.
+    if (hasBoard && boardCatalog.loading && boardCatalog.data == null) return;
+    deepLinkConsumedRef.current = true;
+    const next = new URLSearchParams(searchParams);
+    next.delete("board");
+    next.delete("status");
+    setSearchParams(next, { replace: true });
+
+    if (hasBoard) {
+      const resolved = resolveDeepLinkBoard(boardParam, boardCatalog.data);
+      if (resolved !== undefined) {
+        setSelectedBoard(resolved);
+      }
+    }
+    const status = parseDeepLinkStatus(statusParam);
+    if (status != null) {
+      setDeepLinkStatusFilter(status);
+    }
+    // Consumed deep-link always lands on the Board subtab.
+    setSubtab("board");
+  }, [
+    searchParams,
+    setSearchParams,
+    boardCatalog.loading,
+    boardCatalog.data,
+    setSelectedBoard,
+  ]);
   const planspecs = usePlanSpecs({ scope: "open", limit: 10 });
   const selectedPlanspecs = usePlanSpecs({ scope: "open", limit: 10 }, selectedBoard);
   const costs = useHermesRunsCosts();
@@ -437,6 +507,7 @@ export function FleetView() {
                   board={activeBoardData}
                   boardSlug={selectedBoard}
                   readOnly={selectedBoard != null}
+                  initialStatusFilter={deepLinkStatusFilter}
                   selectedNodeId={selectedBoard ? null : nodeDetailId}
                   detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
                   onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}

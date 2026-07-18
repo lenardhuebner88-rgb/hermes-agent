@@ -1,16 +1,77 @@
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Card } from "../../components/primitives";
 import { Led } from "../../components/atoms";
 import { SectionHeader, SignalLabel } from "../../components/leitstand";
 import { fmtAge, fmtRelativeTime } from "../../lib/derive";
 import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
+import type { TaskStatus } from "../../lib/types";
 import { de } from "../../i18n/de";
 import { AGENT_KIND_STYLES } from "./agentKinds";
 import { attentionTone, killTarget, splitAgentsBySource, type ProjectAttention } from "./derive";
 
 const t = de.projekte;
+
+/**
+ * Board slug from registry (`kanban_project`). Schema is passthrough-only for
+ * this field today — read defensively without widening the shared type surface.
+ */
+function projectKanbanBoard(project: ProjectEntry): string | null {
+  const raw = (project as ProjectEntry & { kanban_project?: string | null }).kanban_project;
+  if (typeof raw !== "string") return null;
+  const slug = raw.trim();
+  return slug.length > 0 ? slug : null;
+}
+
+/**
+ * Honest chip → Fleet deep-link mapping (see projects_overview._kanban_counts):
+ * - open: aggregates triage/todo/scheduled/ready → board only, no status
+ * - running / blocked / review: exact BoardTab TaskStatus → board + status
+ * - done_7d: 7-day window, not BoardTab "done" → no link (static)
+ * - needs_input: no chip in this stage
+ */
+function fleetChipHref(board: string, status?: TaskStatus): string {
+  const params = new URLSearchParams({ board });
+  if (status) params.set("status", status);
+  return `/control/fleet?${params.toString()}`;
+}
+
+/** Touch-friendly chip link; stopPropagation so the card drawer stays closed. */
+function KanbanChipLink({
+  to,
+  children,
+  className,
+  ariaLabel,
+}: {
+  to: string;
+  children: ReactNode;
+  className?: string;
+  ariaLabel: string;
+}) {
+  return (
+    <Link
+      to={to}
+      aria-label={ariaLabel}
+      onClick={(event) => {
+        event.stopPropagation();
+      }}
+      onKeyDown={(event) => {
+        // Nested interactive inside role=button card: keep Enter/Space from opening drawer.
+        event.stopPropagation();
+      }}
+      className={cn(
+        "inline-flex min-h-7 min-w-7 items-center rounded-card px-1 -mx-0.5",
+        "text-ink-2 underline-offset-2 hover:text-ink hover:underline",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
+        className,
+      )}
+    >
+      {children}
+    </Link>
+  );
+}
 
 /** Left-edge accent bar for the attention ampel. Rendered as an absolute child
  *  rather than a `border-l-*` utility: the Card's own `.hc-surface-card` border
@@ -52,6 +113,7 @@ export interface ProjectCardProps {
 export function ProjectCard({ project, agents, parentName, attention, now, onOpen, onKillSession }: ProjectCardProps) {
   const commit = project.last_commit;
   const kanban = project.kanban;
+  const kanbanBoard = projectKanbanBoard(project);
   const loopsActive = project.loops?.active ?? 0;
   const hasErrors = project.errors.length > 0;
   const { live, claims } = splitAgentsBySource(agents);
@@ -126,14 +188,59 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
 
       {kanban ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-data text-micro tabular-nums text-ink-2">
-          <span>{t.kanbanOpen} {kanban.open}</span>
-          <span>{t.kanbanRunning} {kanban.running}</span>
+          {kanbanBoard ? (
+            <KanbanChipLink
+              to={fleetChipHref(kanbanBoard)}
+              ariaLabel={`${t.kanbanOpen} ${kanban.open} — Fleet-Board öffnen`}
+            >
+              {t.kanbanOpen} {kanban.open}
+            </KanbanChipLink>
+          ) : (
+            <span>{t.kanbanOpen} {kanban.open}</span>
+          )}
+          {kanbanBoard ? (
+            <KanbanChipLink
+              to={fleetChipHref(kanbanBoard, "running")}
+              ariaLabel={`${t.kanbanRunning} ${kanban.running} — Fleet-Board öffnen`}
+            >
+              {t.kanbanRunning} {kanban.running}
+            </KanbanChipLink>
+          ) : (
+            <span>{t.kanbanRunning} {kanban.running}</span>
+          )}
           {kanban.blocked > 0 ? (
-            <SignalLabel tone="warn" label={`${t.kanbanBlocked} ${kanban.blocked}`} />
+            kanbanBoard ? (
+              <KanbanChipLink
+                to={fleetChipHref(kanbanBoard, "blocked")}
+                ariaLabel={`${t.kanbanBlocked} ${kanban.blocked} — Fleet-Board öffnen`}
+                className="text-status-warn hover:text-status-warn"
+              >
+                <SignalLabel tone="warn" label={`${t.kanbanBlocked} ${kanban.blocked}`} />
+              </KanbanChipLink>
+            ) : (
+              <SignalLabel tone="warn" label={`${t.kanbanBlocked} ${kanban.blocked}`} />
+            )
+          ) : kanbanBoard ? (
+            <KanbanChipLink
+              to={fleetChipHref(kanbanBoard, "blocked")}
+              ariaLabel={`${t.kanbanBlocked} ${kanban.blocked} — Fleet-Board öffnen`}
+            >
+              {t.kanbanBlocked} {kanban.blocked}
+            </KanbanChipLink>
           ) : (
             <span>{t.kanbanBlocked} {kanban.blocked}</span>
           )}
-          <span>{t.kanbanReview} {kanban.review}</span>
+          {kanbanBoard ? (
+            <KanbanChipLink
+              to={fleetChipHref(kanbanBoard, "review")}
+              ariaLabel={`${t.kanbanReview} ${kanban.review} — Fleet-Board öffnen`}
+            >
+              {t.kanbanReview} {kanban.review}
+            </KanbanChipLink>
+          ) : (
+            <span>{t.kanbanReview} {kanban.review}</span>
+          )}
+          {/* done_7d is a 7-day window, not BoardTab status=done — stay static (honesty). */}
           <span>{t.kanbanDone7d} {kanban.done_7d}</span>
         </div>
       ) : null}

@@ -30,6 +30,12 @@ interface BoardTabProps {
   loadDonePage?: DonePageLoader;
   /** Foreign boards are visibility-only in Stufe 3. */
   readOnly?: boolean;
+  /**
+   * One-shot deep-link status from FleetView (?status=). Applied once when
+   * first provided; later prop changes are ignored so the operator filter
+   * stays in control after the deep link lands.
+   */
+  initialStatusFilter?: TaskStatus | null;
   /** Callback: öffnet den Karten-Detail-Drawer. */
   onOpenNodeDetail: (taskId: string, chainNodes?: ChainNode[]) => void;
   selectedNodeId?: string | null;
@@ -129,12 +135,25 @@ export function BoardTab({
   loadArchivePage = fetchArchivePage,
   loadDonePage = loadDoneBoardPage,
   readOnly = false,
+  initialStatusFilter = null,
   onOpenNodeDetail,
   selectedNodeId = null,
   detailControlsId,
 }: BoardTabProps) {
   const [q, setQ] = useState("");
-  const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">("all");
+  const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">(() =>
+    initialStatusFilter && STATUS_ORDER.includes(initialStatusFilter) ? initialStatusFilter : "all",
+  );
+  // One-shot apply if the deep-link status arrives after first mount (e.g. catalog race).
+  const initialStatusAppliedRef = useRef(
+    initialStatusFilter != null && STATUS_ORDER.includes(initialStatusFilter),
+  );
+  useEffect(() => {
+    if (initialStatusAppliedRef.current) return;
+    if (initialStatusFilter == null || !STATUS_ORDER.includes(initialStatusFilter)) return;
+    initialStatusAppliedRef.current = true;
+    setStatusFilter(initialStatusFilter);
+  }, [initialStatusFilter]);
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
   const [archiveTasks, setArchiveTasks] = useState<BoardTask[]>([]);
   const [archivePage, setArchivePage] = useState<BoardArchiveResponse | null>(null);

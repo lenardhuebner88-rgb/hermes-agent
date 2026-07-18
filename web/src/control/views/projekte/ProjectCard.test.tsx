@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
 
 import { ProjectCard } from "./ProjectCard";
@@ -32,6 +33,15 @@ const LIVE_AGENT: ProjectAgent = {
   task_id: null,
 };
 
+const KANBAN_COUNTS = {
+  open: 3,
+  running: 1,
+  blocked: 2,
+  review: 0,
+  done_7d: 5,
+  needs_input: 0,
+};
+
 function renderCard(overrides: Partial<Parameters<typeof ProjectCard>[0]> = {}) {
   const props = {
     project: PROJECT,
@@ -43,7 +53,11 @@ function renderCard(overrides: Partial<Parameters<typeof ProjectCard>[0]> = {}) 
     onKillSession: vi.fn(),
     ...overrides,
   };
-  render(<ProjectCard {...props} />);
+  render(
+    <MemoryRouter>
+      <ProjectCard {...props} />
+    </MemoryRouter>,
+  );
   return props;
 }
 
@@ -67,3 +81,62 @@ describe("ProjectCard keyboard interaction (Fable obs. 1)", () => {
     expect(props.onKillSession).toHaveBeenCalledWith(LIVE_AGENT);
   });
 });
+
+describe("ProjectCard kanban chips → Fleet deep-link", () => {
+  afterEach(() => cleanup());
+
+  it("links chips to /control/fleet?board=…&status=… when kanban_project is set", () => {
+    const project = {
+      ...PROJECT,
+      kanban_project: "health-track",
+      kanban: KANBAN_COUNTS,
+    } as ProjectEntry & { kanban_project: string };
+
+    renderCard({ project, agents: [] });
+
+    // open aggregates multiple statuses → board only (no status param)
+    const open = screen.getByRole("link", { name: /Offen 3/ });
+    expect(open.getAttribute("href")).toBe("/control/fleet?board=health-track");
+
+    const running = screen.getByRole("link", { name: /Läuft 1/ });
+    expect(running.getAttribute("href")).toBe("/control/fleet?board=health-track&status=running");
+
+    const blocked = screen.getByRole("link", { name: /Blockiert 2/ });
+    expect(blocked.getAttribute("href")).toBe("/control/fleet?board=health-track&status=blocked");
+
+    const review = screen.getByRole("link", { name: /Review 0/ });
+    expect(review.getAttribute("href")).toBe("/control/fleet?board=health-track&status=review");
+
+    // done_7d is time-windowed — honesty: no link
+    expect(screen.queryByRole("link", { name: /Erledigt/ })).toBeNull();
+    expect(screen.getByText(/Erledigt · 7T 5/)).toBeTruthy();
+  });
+
+  it("keeps chips static when kanban_project is null", () => {
+    const project = {
+      ...PROJECT,
+      kanban_project: null,
+      kanban: KANBAN_COUNTS,
+    } as ProjectEntry & { kanban_project: null };
+
+    renderCard({ project, agents: [] });
+
+    expect(screen.queryByRole("link")).toBeNull();
+    expect(screen.getByText(/Offen 3/)).toBeTruthy();
+    expect(screen.getByText(/Blockiert 2/)).toBeTruthy();
+  });
+
+  it("chip click does not propagate to card onOpen", () => {
+    const project = {
+      ...PROJECT,
+      kanban_project: "health-track",
+      kanban: KANBAN_COUNTS,
+    } as ProjectEntry & { kanban_project: string };
+
+    const props = renderCard({ project, agents: [] });
+    const blocked = screen.getByRole("link", { name: /Blockiert 2/ });
+    fireEvent.click(blocked);
+    expect(props.onOpen).not.toHaveBeenCalled();
+  });
+});
+
