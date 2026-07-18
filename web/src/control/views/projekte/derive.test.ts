@@ -12,8 +12,10 @@ import {
   computeAttention,
   countAgentsByProject,
   countOpenSessions,
+  countStaleSessionsByProject,
   filterSessions,
   groupAgentsByProject,
+  isLoopOutcomeRed,
   kanbanTaskTone,
   killTarget,
   liveBoardGroups,
@@ -390,19 +392,157 @@ function projectFixture(
   ).projects[0];
 }
 
-describe("computeAttention", () => {
-  it("returns alert when blocked > 0", () => {
+describe("countStaleSessionsByProject (real sessions payload shape)", () => {
+  it("aggregates stale_open===true by project slug and ignores project:null", () => {
+    // Real field set from ProjectSessionSchema / build_sessions_payload.
+    const sessions = [
+      sessionFixture({ id: "s1", project: "hermes-infra", stale_open: true }),
+      sessionFixture({ id: "s2", project: "hermes-infra", stale_open: true }),
+      sessionFixture({ id: "s3", project: "health-track", stale_open: true }),
+      // Fresh open — must not count.
+      sessionFixture({ id: "s4", project: "hermes-infra", stale_open: false }),
+      // Unassigned stale graveyard (project null) — not a card signal.
+      sessionFixture({ id: "s5", project: null, stale_open: true }),
+    ];
+    expect(countStaleSessionsByProject(sessions)).toEqual({
+      "hermes-infra": 2,
+      "health-track": 1,
+    });
+  });
+
+  it("returns an empty map when nothing is stale", () => {
+    expect(
+      countStaleSessionsByProject([
+        sessionFixture({ id: "fresh", project: "hermes-infra", stale_open: false }),
+      ]),
+    ).toEqual({});
+  });
+});
+
+describe("isLoopOutcomeRed (reuses loopOutcomeTone fail set)", () => {
+  it("is true exactly when loopOutcomeTone returns warn", () => {
+    for (const v of ["fail", "stopped", "bounced", "blocked", "FAIL"]) {
+      expect(isLoopOutcomeRed(v)).toBe(true);
+      expect(loopOutcomeTone(v)).toBe("warn");
+    }
+    for (const v of ["landed", "passed", "ok", null, undefined, "", "running"]) {
+      expect(isLoopOutcomeRed(v)).toBe(false);
+    }
+  });
+});
+
+describe("computeAttention v2", () => {
+  it("returns alert + blocked reason when blocked > 0", () => {
     const p = projectFixture("blocked-only", {
       kanban: { open: 0, running: 0, blocked: 2, review: 0, done_7d: 0, needs_input: 0 },
     });
-    expect(computeAttention(p, 0)).toBe("alert");
+    expect(computeAttention(p, 0)).toEqual({
+      level: "alert",
+      reasons: [{ kind: "blocked", count: 2 }],
+    });
   });
 
-  it("returns alert when needs_input > 0 even if blocked == 0", () => {
+  it("returns alert + needs_input reason when needs_input > 0 even if blocked == 0", () => {
     const p = projectFixture("needs-input-only", {
       kanban: { open: 1, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 1 },
     });
-    expect(computeAttention(p, 0)).toBe("alert");
+    expect(computeAttention(p, 0)).toEqual({
+      level: "alert",
+      reasons: [{ kind: "needs_input", count: 1 }],
+    });
+  });
+
+  it("returns alert + stale_sessions reason from the staleCount arg", () => {
+    const p = projectFixture("stale-only", {
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+    });
+    expect(computeAttention(p, 0, 3)).toEqual({
+      level: "alert",
+      reasons: [{ kind: "stale_sessions", count: 3 }],
+    });
+  });
+
+  it("returns alert + loop_red when a pack last_outcome is a fail-family verdict", () => {
+    const p = projectFixture("loop-red", {
+      kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
+      loops: {
+        active: 0,
+        packs: [
+          {
+            name: "builder-reviewer",
+            running: false,
+            last_heartbeat_at: null,
+            last_outcome: {
+              verdict: "fail",
+              phase: "verify",
+              reason: "gate red",
+              plan: "P1.md",
+              ts: 1784234000,
+            },
+          },
+          {
+            name: "error-sweep",
+            running: false,
+            last_heartbeat_at: null,
+            last_outcome: {
+              verdict: "landed",
+              phase: "land",
+              reason: null,
+              plan: null,
+              ts: 1784230000,
+            },
+          },
+          {
+            name: "nacht",
+            running: false,
+            last_heartbeat_at: null,
+            last_outcome: {
+              verdict: "bounced",
+              phase: "review",
+              reason: "diff too big",
+              plan: null,
+              ts: 1784231000,
+            },
+          },
+        ],
+      },
+    });
+    expect(computeAttention(p, 0)).toEqual({
+      level: "alert",
+      reasons: [{ kind: "loop_red", count: 2 }],
+    });
+  });
+
+  it("combines all four sources into one alert with all reason chips", () => {
+    const p = projectFixture("all-sources", {
+      kanban: { open: 1, running: 0, blocked: 1, review: 0, done_7d: 0, needs_input: 2 },
+      loops: {
+        active: 1,
+        packs: [
+          {
+            name: "builder-reviewer",
+            running: true,
+            last_heartbeat_at: 1,
+            last_outcome: {
+              verdict: "stopped",
+              phase: "build",
+              reason: "timeout",
+              plan: null,
+              ts: 1,
+            },
+          },
+        ],
+      },
+    });
+    expect(computeAttention(p, 2, 1)).toEqual({
+      level: "alert",
+      reasons: [
+        { kind: "needs_input", count: 2 },
+        { kind: "blocked", count: 1 },
+        { kind: "stale_sessions", count: 1 },
+        { kind: "loop_red", count: 1 },
+      ],
+    });
   });
 
   it("returns active when agents > 0 and no alert signals", () => {
@@ -410,15 +550,25 @@ describe("computeAttention", () => {
       kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
       loops: { active: 0, packs: [] },
     });
-    expect(computeAttention(p, 3)).toBe("active");
+    expect(computeAttention(p, 3)).toEqual({ level: "active", reasons: [] });
   });
 
   it("returns active when loops.active > 0 and no alert signals", () => {
     const p = projectFixture("loops-only", {
       kanban: { open: 0, running: 0, blocked: 0, review: 0, done_7d: 0, needs_input: 0 },
-      loops: { active: 1, packs: [{ name: "builder-reviewer", running: true, last_heartbeat_at: null }] },
+      loops: {
+        active: 1,
+        packs: [
+          {
+            name: "builder-reviewer",
+            running: true,
+            last_heartbeat_at: null,
+            last_outcome: null,
+          },
+        ],
+      },
     });
-    expect(computeAttention(p, 0)).toBe("active");
+    expect(computeAttention(p, 0)).toEqual({ level: "active", reasons: [] });
   });
 
   it("returns quiet when nothing is happening", () => {
@@ -426,12 +576,12 @@ describe("computeAttention", () => {
       kanban: { open: 2, running: 0, blocked: 0, review: 0, done_7d: 5, needs_input: 0 },
       loops: { active: 0, packs: [] },
     });
-    expect(computeAttention(p, 0)).toBe("quiet");
+    expect(computeAttention(p, 0)).toEqual({ level: "quiet", reasons: [] });
   });
 
   it("returns quiet when kanban is null and no agents/loops", () => {
     const p = projectFixture("no-board", { kanban: null, loops: null });
-    expect(computeAttention(p, 0)).toBe("quiet");
+    expect(computeAttention(p, 0)).toEqual({ level: "quiet", reasons: [] });
   });
 
   it("prefers alert over active when both blocked and agents present", () => {
@@ -439,7 +589,88 @@ describe("computeAttention", () => {
       kanban: { open: 0, running: 1, blocked: 1, review: 0, done_7d: 0, needs_input: 0 },
       loops: { active: 1, packs: [] },
     });
-    expect(computeAttention(p, 2)).toBe("alert");
+    expect(computeAttention(p, 2)).toEqual({
+      level: "alert",
+      reasons: [{ kind: "blocked", count: 1 }],
+    });
+  });
+
+  it("does not treat landed/ok loop outcomes as loop_red", () => {
+    const p = projectFixture("loop-ok", {
+      loops: {
+        active: 1,
+        packs: [
+          {
+            name: "builder-reviewer",
+            running: false,
+            last_heartbeat_at: 1,
+            last_outcome: {
+              verdict: "landed",
+              phase: "land",
+              reason: "main=abc",
+              plan: "P1.md",
+              ts: 1,
+            },
+          },
+        ],
+      },
+    });
+    expect(computeAttention(p, 0)).toEqual({ level: "active", reasons: [] });
+  });
+});
+
+describe("ProjectsResponseSchema last_outcome (list pack shape)", () => {
+  it("parses Detail-Shape last_outcome on list packs", () => {
+    const parsed = parseOrThrow(
+      ProjectsResponseSchema,
+      {
+        generated_at: 1,
+        registry_errors: [],
+        projects: [
+          {
+            slug: "hermes-infra",
+            name: "Hermes Infra",
+            repo_path: "/tmp/h",
+            parent: null,
+            links: [],
+            last_commit: null,
+            kanban: null,
+            loops: {
+              active: 0,
+              packs: [
+                {
+                  name: "builder-reviewer",
+                  running: false,
+                  last_heartbeat_at: 1784235000,
+                  last_outcome: {
+                    verdict: "fail",
+                    phase: "verify",
+                    reason: "gate red",
+                    plan: "P1-ship.md",
+                    ts: 1784234000,
+                  },
+                },
+              ],
+            },
+            errors: [],
+          },
+        ],
+      },
+      "list-last-outcome",
+    );
+    expect(parsed.projects[0].loops?.packs[0].last_outcome).toEqual({
+      verdict: "fail",
+      phase: "verify",
+      reason: "gate red",
+      plan: "P1-ship.md",
+      ts: 1784234000,
+    });
+  });
+
+  it("tolerates missing last_outcome on older list payloads (→ null)", () => {
+    const parsed = parseOrThrow(ProjectsResponseSchema, REAL_PROJECTS_PAYLOAD, "legacy-list");
+    // Fixture has packs without last_outcome key — schema catches to null.
+    expect(parsed.projects[0].loops?.packs[0].last_outcome).toBeNull();
   });
 });
 

@@ -10,7 +10,14 @@ import type { ProjectAgent, ProjectEntry } from "../../lib/schemas";
 import type { TaskStatus } from "../../lib/types";
 import { de } from "../../i18n/de";
 import { AGENT_KIND_STYLES } from "./agentKinds";
-import { attentionTone, killTarget, splitAgentsBySource, type ProjectAttention } from "./derive";
+import {
+  attentionTone,
+  killTarget,
+  splitAgentsBySource,
+  type AttentionReason,
+  type ProjectAttention,
+  type ProjectAttentionResult,
+} from "./derive";
 
 const t = de.projekte;
 
@@ -86,14 +93,33 @@ const ATTENTION_DOT: Record<ProjectAttention, string> = {
   quiet: "bg-ink-3",
 };
 
+/** Badge surface for the v2 Ampel (tokens only). Quiet is never rendered. */
+const ATTENTION_BADGE: Record<Exclude<ProjectAttention, "quiet">, string> = {
+  alert: "border-status-alert/40 bg-status-alert/10 text-status-alert",
+  active: "border-bronze/40 bg-bronze/10 text-bronze-hi",
+};
+
+function reasonChipLabel(reason: AttentionReason): string {
+  switch (reason.kind) {
+    case "needs_input":
+      return t.reasonNeedsInput(reason.count);
+    case "blocked":
+      return t.reasonBlocked(reason.count);
+    case "stale_sessions":
+      return t.reasonStale(reason.count);
+    case "loop_red":
+      return t.reasonLoopRed;
+  }
+}
+
 export interface ProjectCardProps {
   project: ProjectEntry;
   /** Agents assigned to this project (from groupAgentsByProject). Empty = idle. */
   agents: ReadonlyArray<ProjectAgent>;
   /** Anzeigename des Elternprojekts, falls `project.parent` gesetzt ist. */
   parentName: string | null;
-  /** Stufe 7 attention state (alert / active / quiet). */
-  attention: ProjectAttention;
+  /** Stufe 7/2.3 attention (level + intervention reasons). */
+  attention: ProjectAttentionResult;
   now: number;
   /** Opens the project detail drawer (Stufe 6). */
   onOpen: () => void;
@@ -114,8 +140,11 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
   const loopsActive = project.loops?.active ?? 0;
   const hasErrors = project.errors.length > 0;
   const { live, claims } = splitAgentsBySource(agents);
-  const tone = attentionTone(attention);
-  const attentionLabel = t.attentionLabel[attention];
+  const level = attention.level;
+  const tone = attentionTone(level);
+  const attentionLabel = t.attentionLabel[level];
+  const showBadge = level !== "quiet";
+  const reasons = attention.reasons;
 
   const onKeyDown = (event: KeyboardEvent) => {
     // Only the card itself opens the drawer: Enter/Space on a NESTED control
@@ -141,21 +170,50 @@ export function ProjectCard({ project, agents, parentName, attention, now, onOpe
     >
       <span
         aria-hidden
-        className={cn("pointer-events-none absolute inset-y-0 left-0 w-0.5", ATTENTION_ACCENT[attention])}
+        className={cn("pointer-events-none absolute inset-y-0 left-0 w-0.5", ATTENTION_ACCENT[level])}
       />
-      <header className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+      <header className="flex min-w-0 items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-2">
+            {/* Existing attention marker — v2 keeps data-attention / tone for
+                tests and the left accent; badge is additive, not a replacement. */}
             <span
               aria-label={attentionLabel}
               title={attentionLabel}
-              data-attention={attention}
+              data-attention={level}
               data-tone={tone}
-              className={cn("size-1.5 shrink-0 rounded-full", ATTENTION_DOT[attention])}
+              className={cn("size-1.5 shrink-0 rounded-full", ATTENTION_DOT[level])}
             />
-            <h3 className="truncate text-sec font-semibold text-ink">{project.name}</h3>
+            <h3 className="min-w-0 truncate text-sec font-semibold text-ink">{project.name}</h3>
+            {showBadge ? (
+              <span
+                data-attention-badge={level}
+                className={cn(
+                  "inline-flex shrink-0 items-center rounded-card border px-1.5 py-0.5 font-data text-micro",
+                  ATTENTION_BADGE[level],
+                )}
+              >
+                {t.attentionBadge[level]}
+              </span>
+            ) : null}
           </div>
           {parentName ? <p className="mt-0.5 truncate text-micro text-ink-3">{t.partOf(parentName)}</p> : null}
+          {reasons.length > 0 ? (
+            <div
+              data-attention-reasons=""
+              className="mt-1.5 flex min-w-0 flex-nowrap items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            >
+              {reasons.map((reason) => (
+                <span
+                  key={reason.kind}
+                  data-reason={reason.kind}
+                  className="inline-flex shrink-0 items-center rounded-card border border-line bg-surface-1 px-1.5 py-0.5 font-data text-micro text-ink-2"
+                >
+                  {reasonChipLabel(reason)}
+                </span>
+              ))}
+            </div>
+          ) : null}
         </div>
         {hasErrors ? (
           <span

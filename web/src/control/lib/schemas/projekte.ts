@@ -31,10 +31,25 @@ const ProjectKanbanCountsSchema = z.object({
   needs_input: z.coerce.number().catch(0),
 }).passthrough().nullable().catch(null);
 
+// Shared loop-ledger outcome shape for list packs AND detail packs
+// ({verdict, phase, reason, plan, ts} | null). Defined once so the Karten-
+// Ampel and the Detail-Drawer never drift. Missing field / null → null.
+const ProjectLoopOutcomeSchema = z.object({
+  verdict: z.string().catch(""),
+  phase: nullableString,
+  reason: nullableString,
+  plan: nullableString,
+  ts: nullableEpochSeconds,
+}).passthrough().nullable().catch(null);
+export type ProjectLoopOutcome = z.infer<typeof ProjectLoopOutcomeSchema>;
+
 const ProjectLoopPackStatusSchema = z.object({
   name: z.string().catch(""),
   running: z.boolean().catch(false),
   last_heartbeat_at: nullableEpochSeconds,
+  // Backend additive (Karten-Ampel-Quelle): same shape as detail last_outcome.
+  // Older list payloads omit it → null via .catch(null) on the shared schema.
+  last_outcome: ProjectLoopOutcomeSchema,
 }).passthrough();
 
 const ProjectLoopsSchema = z.object({
@@ -178,13 +193,8 @@ const ProjectDetailKanbanTaskSchema = z.object({
   age_seconds: z.coerce.number().catch(0),
 }).passthrough();
 
-const ProjectDetailLoopOutcomeSchema = z.object({
-  verdict: z.string().catch(""),
-  phase: nullableString,
-  reason: nullableString,
-  plan: nullableString,
-  ts: nullableEpochSeconds,
-}).passthrough().nullable().catch(null);
+// Alias: detail packs reuse the same outcome schema as list packs (no drift).
+const ProjectDetailLoopOutcomeSchema = ProjectLoopOutcomeSchema;
 
 const ProjectDetailLoopSchema = z.object({
   name: z.string().catch(""),

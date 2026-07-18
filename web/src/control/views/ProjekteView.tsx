@@ -11,6 +11,7 @@ import {
   computeAttention,
   countAgentsByProject,
   countOpenSessions,
+  countStaleSessionsByProject,
   groupAgentsByProject,
   parentDisplayName,
   sortProjectsByAttention,
@@ -59,7 +60,10 @@ export function ProjekteView() {
   const receiptList = receipts.data?.receipts ?? [];
   const agentsByProject = groupAgentsByProject(agentList);
   const agentCountBySlug = countAgentsByProject(agentList);
-  const sortedList = sortProjectsByAttention(list, agentCountBySlug);
+  // Stale-open sessions → per-card Ampel source (client aggregate; sessions
+  // payload is already loaded for the Sessions section).
+  const staleBySlug = countStaleSessionsByProject(sessionList);
+  const sortedList = sortProjectsByAttention(list, agentCountBySlug, staleBySlug);
   const projectNames: Record<string, string> = {};
   for (const project of list) {
     projectNames[project.slug] = project.name;
@@ -173,13 +177,14 @@ export function ProjekteView() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {sortedList.map((project) => {
             const agentCount = agentCountBySlug[project.slug] ?? 0;
+            const staleCount = staleBySlug[project.slug] ?? 0;
             return (
               <ProjectCard
                 key={project.slug}
                 project={project}
                 agents={agentsByProject[project.slug] ?? []}
                 parentName={parentDisplayName(project.parent, list)}
-                attention={computeAttention(project, agentCount)}
+                attention={computeAttention(project, agentCount, staleCount)}
                 now={now}
                 onOpen={() => setSelectedSlug(project.slug)}
                 onKillSession={setKillAgent}

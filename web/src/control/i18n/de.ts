@@ -841,6 +841,15 @@ export const de = {
       active: "Aufmerksamkeit: aktiv",
       quiet: "Aufmerksamkeit: ruhig",
     },
+    // 2.3 — Ampel-Badge + Grund-Chips (Intervention-Quellen sichtbar)
+    attentionBadge: {
+      alert: "Eingriff",
+      active: "Aktiv",
+    },
+    reasonNeedsInput: (n: number) => `${n} ${n === 1 ? "Frage" : "Fragen"}`,
+    reasonBlocked: (n: number) => `${n} blocked`,
+    reasonStale: (n: number) => `${n} stale`,
+    reasonLoopRed: "Loop rot",
     // Stage 10 — Offene Sessions + Spawn-Baum (state.db)
     summaryOpenSessions: (n: number) => `${n} offene ${n === 1 ? "Session" : "Sessions"}`,
     sessionsError: "Sessions konnten nicht geladen werden.",

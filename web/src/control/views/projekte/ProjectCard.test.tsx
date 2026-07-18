@@ -47,7 +47,7 @@ function renderCard(overrides: Partial<Parameters<typeof ProjectCard>[0]> = {}) 
     project: PROJECT,
     agents: [LIVE_AGENT],
     parentName: null,
-    attention: "active" as const,
+    attention: { level: "active" as const, reasons: [] },
     now: 1784238000 + 3600,
     onOpen: vi.fn(),
     onKillSession: vi.fn(),
@@ -137,6 +137,83 @@ describe("ProjectCard kanban chips → Fleet deep-link", () => {
     const blocked = screen.getByRole("link", { name: /Blockiert 2/ });
     fireEvent.click(blocked);
     expect(props.onOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("ProjectCard attention badge + reason chips (2.3 Ampel)", () => {
+  afterEach(() => cleanup());
+
+  it("shows badge + needs_input / blocked / stale / loop_red chips for alert", () => {
+    renderCard({
+      agents: [],
+      attention: {
+        level: "alert",
+        reasons: [
+          { kind: "needs_input", count: 2 },
+          { kind: "blocked", count: 1 },
+          { kind: "stale_sessions", count: 1 },
+          { kind: "loop_red", count: 1 },
+        ],
+      },
+    });
+
+    // Existing attention marker still present (v2 is additive).
+    expect(document.querySelector('[data-attention="alert"]')).toBeTruthy();
+    expect(document.querySelector('[data-attention-badge="alert"]')).toBeTruthy();
+    expect(screen.getByText("Eingriff")).toBeTruthy();
+    expect(screen.getByText("2 Fragen")).toBeTruthy();
+    expect(screen.getByText("1 blocked")).toBeTruthy();
+    expect(screen.getByText("1 stale")).toBeTruthy();
+    expect(screen.getByText("Loop rot")).toBeTruthy();
+    expect(document.querySelector('[data-reason="needs_input"]')).toBeTruthy();
+    expect(document.querySelector('[data-reason="blocked"]')).toBeTruthy();
+    expect(document.querySelector('[data-reason="stale_sessions"]')).toBeTruthy();
+    expect(document.querySelector('[data-reason="loop_red"]')).toBeTruthy();
+  });
+
+  it("shows active badge without reason-chip noise when only active", () => {
+    renderCard({
+      attention: { level: "active", reasons: [] },
+    });
+    expect(document.querySelector('[data-attention="active"]')).toBeTruthy();
+    expect(document.querySelector('[data-attention-badge="active"]')).toBeTruthy();
+    expect(screen.getByText("Aktiv")).toBeTruthy();
+    expect(document.querySelector("[data-attention-reasons]")).toBeNull();
+    expect(screen.queryByText("Loop rot")).toBeNull();
+  });
+
+  it("quiet card: no badge, no reason chips (no badge noise)", () => {
+    renderCard({
+      agents: [],
+      attention: { level: "quiet", reasons: [] },
+    });
+    expect(document.querySelector('[data-attention="quiet"]')).toBeTruthy();
+    expect(document.querySelector("[data-attention-badge]")).toBeNull();
+    expect(document.querySelector("[data-attention-reasons]")).toBeNull();
+    expect(screen.queryByText("Eingriff")).toBeNull();
+    expect(screen.queryByText("Aktiv")).toBeNull();
+  });
+
+  it("keeps KanbanChipLink deep-links when alert reasons are also shown", () => {
+    const project = {
+      ...PROJECT,
+      kanban_project: "health-track",
+      kanban: KANBAN_COUNTS,
+    } as ProjectEntry & { kanban_project: string };
+
+    renderCard({
+      project,
+      agents: [],
+      attention: {
+        level: "alert",
+        reasons: [{ kind: "blocked", count: 2 }],
+      },
+    });
+
+    const blockedLink = screen.getByRole("link", { name: /Blockiert 2/ });
+    expect(blockedLink.getAttribute("href")).toBe("/control/fleet?board=health-track&status=blocked");
+    // Reason chip is separate text ("2 blocked"), not a replacement for the fleet chip.
+    expect(screen.getByText("2 blocked")).toBeTruthy();
   });
 });
 

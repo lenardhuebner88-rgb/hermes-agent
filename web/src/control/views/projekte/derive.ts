@@ -281,10 +281,28 @@ export function kanbanTaskTone(
   return "neutral";
 }
 
-// ── Stufe 7 — Attention (Ampel) ────────────────────────────────────────────
+// ── Stufe 7 / 2.3 — Attention (Ampel) ──────────────────────────────────────
 
-/** Per-card attention state for the Projekte grid (operator "where does it hang"). */
+/** Per-card attention level for the Projekte grid (operator "where do I intervene"). */
 export type ProjectAttention = "alert" | "active" | "quiet";
+
+/** Intervention sources that surface as reason-chips on the card. */
+export type AttentionReasonKind =
+  | "needs_input"
+  | "blocked"
+  | "stale_sessions"
+  | "loop_red";
+
+export interface AttentionReason {
+  kind: AttentionReasonKind;
+  count: number;
+}
+
+/** v2 result: level (sort/accent) + concrete reasons (badge chips). */
+export interface ProjectAttentionResult {
+  level: ProjectAttention;
+  reasons: AttentionReason[];
+}
 
 const ATTENTION_RANK: Record<ProjectAttention, number> = {
   alert: 0,
@@ -293,42 +311,101 @@ const ATTENTION_RANK: Record<ProjectAttention, number> = {
 };
 
 /**
- * Derive attention for one project card.
- * - alert: blocked tasks or operator-waiting (needs_input)
- * - active: agents running or loops active
+ * Count stale-open sessions per project slug (client-side aggregate of the
+ * sessions payload ProjekteView already loads).
+ * Rule: `stale_open === true && project === slug`. Rows with `project: null`
+ * never count (unassigned graveyard — not a card signal).
+ */
+export function countStaleSessionsByProject(
+  sessions: ReadonlyArray<Pick<ProjectSession, "project" | "stale_open">>,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const session of sessions) {
+    if (!session.stale_open) continue;
+    if (!session.project) continue;
+    counts[session.project] = (counts[session.project] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** True when a pack's last_outcome is a fail-family verdict.
+ *  Reuses the fail set from `loopOutcomeTone` (warn ⇔ fail/stopped/bounced/blocked)
+ *  — never invent a second fail list. */
+export function isLoopOutcomeRed(verdict: string | null | undefined): boolean {
+  return loopOutcomeTone(verdict) === "warn";
+}
+
+/**
+ * Derive attention for one project card (v2).
+ *
+ * Sources (each becomes a reason chip when count > 0):
+ * 1. kanban.needs_input
+ * 2. kanban.blocked
+ * 3. stale_sessions (client aggregate, see countStaleSessionsByProject)
+ * 4. loop_red — packs whose last_outcome fails `loopOutcomeTone` (warn set)
+ *
+ * Level rules:
+ * - alert: any intervention reason present (needs_input | blocked | loop_red |
+ *   stale_sessions). Stale alone is also alert: on mobile the question is
+ *   "wo muss ich eingreifen?" and zombie open sessions are real hygiene debt
+ *   the operator should see first (same rank as blocked/needs_input so the
+ *   sort bubbles them). A weaker "active-only" for stale would hide them
+ *   under live work.
+ * - active: agents running or loops active, no intervention reasons
  * - quiet: neither
  */
 export function computeAttention(
   project: Pick<ProjectEntry, "kanban" | "loops">,
   agentCount: number,
-): ProjectAttention {
-  const kanban = project.kanban;
-  if (kanban && (kanban.blocked > 0 || kanban.needs_input > 0)) return "alert";
-  if (agentCount > 0 || (project.loops?.active ?? 0) > 0) return "active";
-  return "quiet";
+  staleCount = 0,
+): ProjectAttentionResult {
+  const reasons: AttentionReason[] = [];
+  const needsInput = project.kanban?.needs_input ?? 0;
+  const blocked = project.kanban?.blocked ?? 0;
+  if (needsInput > 0) reasons.push({ kind: "needs_input", count: needsInput });
+  if (blocked > 0) reasons.push({ kind: "blocked", count: blocked });
+  if (staleCount > 0) reasons.push({ kind: "stale_sessions", count: staleCount });
+
+  let loopRed = 0;
+  for (const pack of project.loops?.packs ?? []) {
+    if (isLoopOutcomeRed(pack.last_outcome?.verdict)) loopRed += 1;
+  }
+  if (loopRed > 0) reasons.push({ kind: "loop_red", count: loopRed });
+
+  if (reasons.length > 0) return { level: "alert", reasons };
+  if (agentCount > 0 || (project.loops?.active ?? 0) > 0) {
+    return { level: "active", reasons: [] };
+  }
+  return { level: "quiet", reasons: [] };
 }
 
 /**
  * Stable sort: alert → active → quiet; within a bucket keep registry order
  * (Array.prototype.sort is stable; equal ranks preserve input index).
+ * `staleCountBySlug` is optional (defaults empty) so older call sites keep working.
  */
 export function sortProjectsByAttention(
   projects: ReadonlyArray<ProjectEntry>,
   agentCountBySlug: Readonly<Record<string, number>>,
+  staleCountBySlug: Readonly<Record<string, number>> = {},
 ): ProjectEntry[] {
   return projects
     .map((project, index) => ({
       project,
       index,
       rank: ATTENTION_RANK[
-        computeAttention(project, agentCountBySlug[project.slug] ?? 0)
+        computeAttention(
+          project,
+          agentCountBySlug[project.slug] ?? 0,
+          staleCountBySlug[project.slug] ?? 0,
+        ).level
       ],
     }))
     .sort((a, b) => a.rank - b.rank || a.index - b.index)
     .map(({ project }) => project);
 }
 
-/** Map attention to an existing Leitstand SignalTone (alert is loudest). */
+/** Map attention level to an existing Leitstand SignalTone (alert is loudest). */
 export function attentionTone(a: ProjectAttention): SignalTone {
   if (a === "alert") return "alert";
   if (a === "active") return "warn";
