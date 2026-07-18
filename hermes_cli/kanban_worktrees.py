@@ -917,21 +917,18 @@ def _task_scope_paths(
     body: str | None,
     scope_contract: dict[str, object] | None = None,
 ) -> list[str] | None:
-    """Extract declared edit paths from the task body's scope section."""
+    """Union edit paths declared in the structured contract and task body."""
+    paths: list[str] = []
     if scope_contract is not None:
         raw_paths = scope_contract.get("allowed_paths")
-        if not isinstance(raw_paths, list):
-            return []
-        normalized_paths = []
-        for path in raw_paths:
-            if not isinstance(path, str):
-                continue
-            normalized = _normalize_dirty_path(path).rstrip("/")
-            if normalized and ".." not in Path(normalized).parts:
-                normalized_paths.append(normalized)
-        return list(dict.fromkeys(normalized_paths))
+        if isinstance(raw_paths, list):
+            for path in raw_paths:
+                if not isinstance(path, str):
+                    continue
+                normalized = _normalize_dirty_path(path).rstrip("/")
+                if normalized and ".." not in Path(normalized).parts:
+                    paths.append(normalized)
 
-    paths: list[str] = []
     collecting = False
     for line in (body or "").splitlines():
         stripped = line.strip()
@@ -950,7 +947,7 @@ def _task_scope_paths(
         normalized = _normalize_dirty_path(candidate)
         if normalized and ".." not in Path(normalized).parts:
             paths.append(normalized.rstrip("/"))
-    return list(dict.fromkeys(paths)) if collecting else None
+    return list(dict.fromkeys(paths)) if scope_contract is not None or collecting else None
 
 
 def _path_is_under(path: str, roots: Sequence[str]) -> bool:
@@ -966,9 +963,6 @@ def _select_wip_paths(
     merge_target: str,
 ) -> tuple[list[str], list[str]]:
     """Select tracked dirt plus task-related untracked paths for adoption."""
-    if scope_paths is None:
-        return list(dirty_paths), []
-
     untracked_out = _git(
         worktree, "ls-files", "--others", "--exclude-standard", "-z", strip=False
     )
@@ -983,7 +977,7 @@ def _select_wip_paths(
     )
     normalized_scope = [
         normalized.rstrip("/")
-        for path in scope_paths
+        for path in scope_paths or ()
         if (normalized := _normalize_dirty_path(path))
         and ".." not in Path(normalized).parts
     ]

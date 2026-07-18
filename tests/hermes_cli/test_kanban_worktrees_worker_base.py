@@ -134,6 +134,7 @@ def test_prepare_worker_base_adopts_wip_when_evidence_given(repo):
         merge_target="main",
         task_id="t_adopt",
         adopt_wip_run_id=42,
+        adopt_wip_scope_paths=["src.py"],
     )
 
     assert kwt.dirty_files(worktree) == []
@@ -265,6 +266,7 @@ def test_dispatch_adopts_wip_left_by_own_blocked_run(
         tid = kb.create_task(
             conn,
             title="fleet drawer slice",
+            body="Scope files (allowed edit paths):\nNodeDetailDrawer.tsx\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
@@ -367,11 +369,15 @@ def test_dispatch_wip_adoption_skips_untracked_files_outside_task_scope(
         tid = kb.create_task(
             conn,
             title="scoped adoption",
-            body="- AC: preserve unrelated untracked files\n",
+            body=(
+                "Scope files (allowed edit paths):\n"
+                "src/task.py\n\n"
+                "- AC: preserve unrelated untracked files\n"
+            ),
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
-            scope_contract={"allowed_paths": ["README.md", "src/task.py"]},
+            scope_contract={"allowed_paths": [str(repo), "README.md"]},
         )
         first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
         expected = repo / ".worktrees" / "kanban" / tid
@@ -412,10 +418,30 @@ def test_dispatch_wip_adoption_skips_untracked_files_outside_task_scope(
     )
 
 
-def test_task_scope_paths_falls_back_to_scope_files_body_section():
+def test_task_scope_paths_unions_contract_and_scope_files_body_section():
     assert getattr(kwt, "_task_scope_paths")(
-        "Scope files (allowed edit paths):\nREADME.md\nsrc/task.py\n\n- AC-1: done\n"
+        "Scope files (allowed edit paths):\nsrc/task.py\n\n- AC-1: done\n",
+        {"allowed_paths": ["README.md"]},
     ) == ["README.md", "src/task.py"]
+
+
+def test_select_wip_paths_without_declared_scope_skips_untracked(tmp_path):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    (repo / "README.md").write_text("tracked task edit\n", encoding="utf-8")
+    foreign = repo / ".claude" / "skills" / "foreign" / "SKILL.md"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("repo-foreign\n", encoding="utf-8")
+
+    adopted, skipped = getattr(kwt, "_select_wip_paths")(
+        repo,
+        kwt.dirty_files(repo),
+        scope_paths=None,
+        merge_target="HEAD",
+    )
+
+    assert adopted == ["README.md"]
+    assert skipped == [".claude/skills/foreign/SKILL.md"]
 
 
 def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
@@ -504,6 +530,7 @@ def test_dispatch_adopts_wip_left_by_transient_retry_run(
         tid = kb.create_task(
             conn,
             title="gateway-restart slice",
+            body="Scope files (allowed edit paths):\napp.py\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
