@@ -1855,8 +1855,6 @@ class SessionDB:
                 self._trigram_available = False
                 if triggers_need_repair and self._fts_enabled:
                     self._rebuild_fts_indexes(cursor, include_trigram=False)
-                if triggers_need_repair and self._fts_enabled:
-                    self._rebuild_fts_indexes(cursor, include_trigram=False)
 
         self._conn.commit()
 
