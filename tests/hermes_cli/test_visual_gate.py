@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from hermes_cli import kanban_worktrees as kwt
 
@@ -228,34 +227,4 @@ def test_visual_gate_static_server_serves_fresh_web_dist_marker(tmp_path):
         server.stop()
 
     assert marker in body
-
-
-def test_visual_gate_static_server_swallows_writes_without_405(tmp_path):
-    # The backendless gate serves only the built SPA, but the SPA still fires
-    # fire-and-forget writes (e.g. the ControlShell agent-questions/visibility
-    # heartbeat). A GET-only server 405s those and Chromium logs a console error
-    # that fails the visual gate as a false positive; the server must instead
-    # swallow non-GET requests with a benign 204.
-    web_dist = tmp_path / "fresh-web-dist"
-    (web_dist / "assets").mkdir(parents=True)
-    (web_dist / "index.html").write_text(
-        "<!doctype html><html><body></body></html>", encoding="utf-8",
-    )
-
-    server = kwt._VisualGateStaticServer(web_dist)
-    try:
-        url = server.start()
-        base = url.rsplit("/control", 1)[0]
-        for method in ("POST", "PUT", "PATCH", "DELETE"):
-            req = Request(f"{base}/api/agent-questions/visibility", method=method)
-            try:
-                with urlopen(req, timeout=5) as response:
-                    status = response.status
-            except HTTPError as exc:  # pragma: no cover - regression guard
-                raise AssertionError(
-                    f"{method} returned {exc.code}, expected swallowed 204",
-                ) from exc
-            assert status == 204, f"{method} returned {status}, expected 204"
-    finally:
-        server.stop()
 

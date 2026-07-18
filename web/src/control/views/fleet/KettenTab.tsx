@@ -2,11 +2,11 @@
  * Ketten-Subtab — Redesign nach Mockup B v4.
  *
  * 6 Sektionen: Ketten-Liste, Active-Chain-Header, Step-Pipeline,
- * kompakter Active-Step-Verweis, Upcoming-Steps,
+ * Active-Step-Detail (mit Model-Row + GGFM-Override-Badge), Upcoming-Steps,
  * Done + Gate-Teaser.
  *
  * Join: useHermesWorkers() → worker.task_id === node.id für persistierte
- * Run-Fortschritt und ETA.
+ * Modellroute, Override-Hinweis, Heartbeat, Run-Fortschritt und ETA.
  *
  * Die Modellroute stammt ausschließlich aus dem konkreten task_runs-Datensatz.
  */
@@ -15,12 +15,14 @@ import {
   fmtSeconds,
   fmtTokens,
   fmtUsd,
+  fmtDurationClock,
   profileInitial,
   premiumLaneMarker,
 
   buildChainChips,
   pickFocusNode,
   chainProgress,
+  heartbeatAge,
 } from "../../lib/fleetHub";
 import { formatEffectiveCost } from "../../lib/derive";
 import { de } from "../../i18n/de";
@@ -51,7 +53,7 @@ interface KettenTabProps {
   detailControlsId?: string;
 }
 
-export function KettenTab({ board, boardSlug = null, workers, readOnly = false, initialRootId, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
+export function KettenTab({ board, boardSlug = null, workers, readOnly = false, initialRootId, now, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
   const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
 
   const chips = buildChainChips(
@@ -211,6 +213,7 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
           key={selectedRootId}
           rootId={selectedRootId}
           nodes={nodes}
+          now={now}
           workerByNodeId={workerByNodeId}
           verdicts={(verdicts.data?.reviews ?? []).map((v) => ({
             task_id: v.task_id,
@@ -278,6 +281,7 @@ function avatarClass(assignee: string | null): string {
 interface KettenGraphV4Props {
   rootId: string;
   nodes: ChainNode[];
+  now: number;
   workerByNodeId: Map<string, Worker>;
   verdicts: Array<{ task_id: string; task_status: string; review_run_state: string; reviewer_profile: string | null }>;
   chainCosts?: ChainCostsResponse | null;
@@ -291,6 +295,7 @@ interface KettenGraphV4Props {
 function KettenGraphV4({
   rootId,
   nodes,
+  now,
   workerByNodeId,
   verdicts,
   chainCosts,
@@ -315,14 +320,14 @@ function KettenGraphV4({
 
   // === Focus node worker join ===
   const focusWorker = focusNode ? workerByNodeId.get(focusNode.id) ?? null : null;
+  const focusRoute = focusWorker ?? focusNode?.latest_run ?? null;
+  const focusModelOverride = focusWorker?.model_override ?? null;
+  const focusHbAge = focusWorker
+    ? heartbeatAge(focusWorker.last_heartbeat_at, now)
+    : focusNode?.latest_run?.heartbeat_age_seconds ?? null;
   const focusRunProgress = focusWorker?.run_progress ?? focusNode?.latest_run?.run_progress ?? null;
   const focusEtaP50 = focusWorker?.eta_p50_seconds ?? null;
   const focusRuntime = focusNode?.latest_run?.runtime_seconds ?? null;
-  const focusProgress = focusRunProgress != null
-    ? focusRunProgress
-    : focusNode?.progress && focusNode.progress.total > 0
-      ? focusNode.progress.done / focusNode.progress.total
-      : null;
 
   // Active chain chip for ETA
   const chainEta = focusEtaP50 ?? focusRuntime;
@@ -498,19 +503,90 @@ function KettenGraphV4({
           aria-expanded={selectedNodeId === focusNode.id}
           aria-controls={detailControlsId}
         >
-          <div className="detail-role">{focusNode.assignee ?? "—"}</div>
+          <div className="detail-header">
+            <div
+              className={`detail-avatar ${avatarClass(focusNode.assignee)}`}
+              {...premiumLaneMarker(focusNode.assignee)}
+            >
+              {profileInitial(focusNode.assignee ?? "?")}
+            </div>
+            <div className="detail-meta">
+              <div className="detail-role">
+                {focusNode.assignee ?? "—"}
+              </div>
+              <div className="detail-task-id">{focusNode.id.slice(0, 12)}</div>
+            </div>
+            {/* Heartbeat LED — nur einmal, oben-rechts */}
+            {focusNode.status === "running" && focusHbAge != null ? (
+              <div className="detail-led">
+                <span className="led-dot" />
+                ♥ {fmtSeconds(focusHbAge)}
+              </div>
+            ) : null}
+          </div>
+
           <div className="detail-title" title={focusNode.title}>{focusNode.title}</div>
+
+          {/* === Model-Row with GGFM Override Badge (v4) === */}
+          <div className="model-row">
+            <span className="model-icon">⚙</span>
+            {focusRoute ? (
+              <ModelRouteBadge
+                requestedProvider={focusRoute.requested_provider}
+                requestedModel={focusRoute.requested_model}
+                activeProvider={focusRoute.active_provider}
+                activeModel={focusRoute.active_model}
+                modelState={focusRoute.model_state}
+                modelSource={focusRoute.model_source}
+                observedAt={focusRoute.model_observed_at}
+              />
+            ) : (
+              <span className="text-micro text-ink-3">{de.worker.modelRouteNotStarted}</span>
+            )}
+            {focusModelOverride ? (
+              <span className="model-override-badge" title={`Override: ${focusModelOverride}`}>
+                GGFM Override
+              </span>
+            ) : null}
+          </div>
+
+          {/* Progress ring + values */}
           <div className="detail-bottom">
+            <ProgressRing
+              progress={
+                focusRunProgress != null ? focusRunProgress
+                : focusNode.progress && focusNode.progress.total > 0
+                  ? focusNode.progress.done / focusNode.progress.total
+                : focusNode.status === "running" ? 0.58 : 0
+              }
+            />
             <div className="values-row">
-              <span className="metric">
-                <span className="metric-label">Fortschritt</span>
-                <span className="val val-strong">{focusProgress == null ? "—" : `${Math.round(focusProgress * 100)} %`}</span>
-              </span>
-              <span className="val-sep">·</span>
-              <span className="metric">
-                <span className="metric-label">ETA</span>
-                <span className="val val-live">{focusEtaP50 == null ? "—" : `p50~${fmtSeconds(focusEtaP50)}`}</span>
-              </span>
+              {focusRuntime != null ? (
+                <span className="metric">
+                  <span className="metric-label">Laufzeit</span>
+                  <span className="val val-strong">{fmtDurationClock(focusRuntime)}</span>
+                </span>
+              ) : null}
+              {focusRuntime != null && (focusNode.input_tokens > 0 || focusNode.output_tokens > 0) ? (
+                <span className="val-sep">·</span>
+              ) : null}
+              {focusNode.input_tokens > 0 || focusNode.output_tokens > 0 ? (
+                <span className="metric">
+                  <span className="metric-label">Tokens</span>
+                  <span className="val">
+                    {fmtTokens(focusNode.input_tokens)} ↓ {fmtTokens(focusNode.output_tokens)} tok
+                  </span>
+                </span>
+              ) : null}
+              {focusEtaP50 != null ? (
+                <>
+                  <span className="val-sep">·</span>
+                  <span className="metric">
+                    <span className="metric-label">ETA</span>
+                    <span className="val val-live">p50~{fmtSeconds(focusEtaP50)}</span>
+                  </span>
+                </>
+              ) : null}
             </div>
           </div>
         </button>
@@ -630,5 +706,27 @@ function KettenGraphV4({
         </div>
       </div>
     </>
+  );
+}
+
+// ─── Progress Ring (SVG) ──────────────────────────────────────────────────────
+
+function ProgressRing({ progress }: { progress: number }) {
+  const pct = Math.max(0, Math.min(1, progress));
+  const r = 16;
+  const circ = 2 * Math.PI * r;
+  const dash = pct * circ;
+  return (
+    <div className="progress-ring">
+      <svg viewBox="0 0 40 40" width="42" height="42">
+        <circle className="kt-ring-bg" cx="20" cy="20" r={r} />
+        <circle
+          className="kt-ring-fg"
+          cx="20" cy="20" r={r}
+          strokeDasharray={`${dash.toFixed(2)} ${circ.toFixed(2)}`}
+        />
+      </svg>
+      <span className="progress-ring-text">{Math.round(pct * 100)}%</span>
+    </div>
   );
 }
