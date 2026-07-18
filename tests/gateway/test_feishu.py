@@ -290,15 +290,19 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         # Real thread loop to schedule the close coroutine on.
         ws_thread_loop = asyncio.new_event_loop()
         ready = threading.Event()
+        stopped = threading.Event()
 
         def _run_loop() -> None:
             asyncio.set_event_loop(ws_thread_loop)
             ready.set()
-            ws_thread_loop.run_forever()
+            try:
+                ws_thread_loop.run_forever()
+            finally:
+                stopped.set()
 
         thread = threading.Thread(target=_run_loop, daemon=True)
         thread.start()
-        ready.wait()
+        self.assertTrue(ready.wait(timeout=10.0), "websocket loop thread did not start")
 
         close_called = threading.Event()
 
@@ -315,9 +319,12 @@ class TestFeishuAdapterMessaging(unittest.TestCase):
         finally:
             if not ws_thread_loop.is_closed():
                 ws_thread_loop.call_soon_threadsafe(ws_thread_loop.stop)
-            thread.join(timeout=2.0)
+            self.assertTrue(stopped.wait(timeout=10.0), "websocket loop thread did not stop")
+            thread.join()
             if not ws_thread_loop.is_closed():
                 ws_thread_loop.close()
+
+        self.assertFalse(thread.is_alive(), "websocket loop thread leaked")
 
         self.assertTrue(
             close_called.is_set(),
