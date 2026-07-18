@@ -4009,7 +4009,7 @@ def test_task_detail_includes_runs(client):
             tid,
             result="done",
             summary="tested on rate limiter",
-            metadata={"changed_files": ["limiter.py"]},
+            metadata={"changed_files": ["limiter.py"], "worker_session_id": "hermes-worker-42"},
         )
     finally:
         conn.close()
@@ -4022,7 +4022,8 @@ def test_task_detail_includes_runs(client):
     assert run["profile"] == "worker"
     assert run["summary"] == "tested on rate limiter"
     md = {k: v for k, v in run["metadata"].items() if k != "cost"}
-    assert md == {"changed_files": ["limiter.py"]}
+    assert md == {"changed_files": ["limiter.py"], "worker_session_id": "hermes-worker-42"}
+    assert run["worker_session_id"] == "hermes-worker-42"
     assert run["ended_at"] is not None
 
 

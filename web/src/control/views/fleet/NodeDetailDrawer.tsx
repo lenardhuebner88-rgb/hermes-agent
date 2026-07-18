@@ -4,6 +4,7 @@
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
 import { useMemo, useState } from "react";
+import { Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   fmtSeconds,
@@ -27,7 +28,7 @@ import { WorkerLogTail } from "../../components/WorkerCard";
 import { Eyebrow } from "../../components/primitives";
 import { fetchJSON, openAuthedApiFile } from "@/lib/api";
 import { fmtUsdDisplay, type ChainNode } from "./shared";
-import { elapsedSeconds } from "../../lib/derive";
+import { elapsedSeconds, inspectEpochSeconds, validateChronology } from "../../lib/derive";
 import { FleetTaskActions } from "./TaskActions";
 import { AnswerQuestion } from "./AnswerQuestion";
 import { isOperatorQuestion } from "../../lib/fleet";
@@ -39,6 +40,23 @@ import type { ModelRouteState } from "../../lib/types";
 // ─── Karten-Detail-Drawer ─────────────────────────────────────────────────────
 
 type DetailTab = "uebersicht" | "aktivitaet" | "log" | "ergebnis";
+
+type ReviewVerdict = {
+  task_id: string;
+  reviewer_profile: string | null;
+  review_run_state: string;
+  verifier_verdict: string | null;
+};
+
+function middleEllipsis(value: string, edge = 32): string {
+  if (value.length <= edge * 2 + 3) return value;
+  return `${value.slice(0, edge)}…${value.slice(-edge)}`;
+}
+
+function copyText(value: string): void {
+  if (typeof navigator === "undefined" || !navigator.clipboard) return;
+  void navigator.clipboard.writeText(value).catch(() => undefined);
+}
 
 interface NodeDetailDrawerProps {
   taskId: string;
@@ -133,9 +151,9 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
 
   const TABS: Array<{ id: DetailTab; label: string }> = [
     { id: "uebersicht", label: de.fleet.detailTabUebersicht },
+    { id: "ergebnis", label: de.fleet.detailTabErgebnis },
     { id: "aktivitaet", label: de.fleet.detailTabAktivitaet },
     { id: "log", label: de.fleet.detailTabLog },
-    { id: "ergebnis", label: de.fleet.detailTabErgebnis },
   ];
 
   return (
@@ -193,9 +211,11 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
           {tab === "uebersicht" && (
             <UebersichtTab
               task={task}
+              now={now}
               latestRun={latestRun}
               elapsedSec={elapsedSec}
               deliverables={deliverables}
+              verdicts={taskVerdicts}
             />
           )}
           {tab === "aktivitaet" && (
@@ -206,7 +226,6 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
           )}
           {tab === "ergebnis" && (
             <ErgebnisTab
-              verdicts={taskVerdicts}
               deliverables={deliverables}
               chainCost={chainTotalCostUsdWithSource(chainNodes)}
             />
@@ -368,14 +387,22 @@ function TaskReassignControl({
 // ─── Detail-Drawer Tabs ───────────────────────────────────────────────────────
 
 interface UebersichtTabProps {
+  now: number;
   task: {
     id?: string;
     title?: string;
     body?: string | null;
     status?: string;
     assignee?: string | null;
+    priority?: number | null;
     block_reason?: string | null;
     operator_question?: boolean;
+    created_at?: number | null;
+    started_at?: number | null;
+    completed_at?: number | null;
+    archived_at?: number | null;
+    due_at?: number | null;
+    last_heartbeat_at?: number | null;
     review_tier?: string | null;
     branch_name?: string | null;
     model_override?: string | null;
@@ -399,12 +426,32 @@ interface UebersichtTabProps {
     model_state?: ModelRouteState | null;
     model_source?: string | null;
     model_observed_at?: number | null;
+    worker_session_id?: string | null;
   } | null;
   elapsedSec: number | null;
   deliverables: Array<{ filename: string; url: string; size: number }>;
+  verdicts?: ReviewVerdict[];
 }
 
-export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: UebersichtTabProps) {
+function taskTimestamp(value: unknown, now: number): { dateTime: string | null; label: string } | null {
+  if (value == null) return null;
+  const inspected = inspectEpochSeconds(value, now);
+  if (!inspected.valid || typeof value !== "number") {
+    return { dateTime: null, label: "Zeit ungültig" };
+  }
+  const date = new Date(value * 1000);
+  const label = date.toLocaleString("de-DE", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZone: "Europe/Berlin",
+  });
+  return {
+    dateTime: date.toISOString(),
+    label: inspected.relation === "future" ? `${label} (zukünftig)` : label,
+  };
+}
+
+export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, verdicts = [] }: UebersichtTabProps) {
   if (!task) {
     return (
       <div className="fleet-empty" style={{ padding: "16px 4px" }}>
@@ -425,7 +472,20 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
   } else if (typeof ac === "string" && ac.trim()) {
     acList = [ac];
   }
-
+  const branchPath = task.branch_name ?? task.workspace_path ?? (task.workspace_kind ? `(${task.workspace_kind})` : null);
+  const timestamps = [
+    ["Erstellt", task.created_at],
+    ["Gestartet", task.started_at],
+    ["Fertig", task.completed_at],
+    ["Archiviert", task.archived_at],
+    ["Fällig", task.due_at],
+    ["Heartbeat", task.last_heartbeat_at],
+  ] as const;
+  const chronology = validateChronology({
+    createdAt: task.created_at,
+    startedAt: task.started_at,
+    completedAt: task.completed_at,
+  });
   return (
     <>
       {/* Status-Badge — LED + Label, nie farb-only (DESIGN.md Regel 2). */}
@@ -476,6 +536,41 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
           <div className="fleet-kv-v">{latestRun?.profile ?? "—"}</div>
         </div>
         <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.detailLabelLaufzeit}</div>
+          <div className="fleet-kv-v">{elapsedSec != null ? fmtSeconds(elapsedSec) : "—"}</div>
+        </div>
+        {latestRun?.status ? (
+          <div className="fleet-kv">
+            <div className="fleet-kv-k">Laufstatus</div>
+            <div className="fleet-kv-v" title={latestRun.status}>{runStatusLabel(latestRun.status)}</div>
+          </div>
+        ) : null}
+        {latestRun?.cost_usd != null ? (
+          <div className="fleet-kv">
+            <div className="fleet-kv-k">{de.fleet.detailLabelKosten}</div>
+            <div className="fleet-kv-v">{fmtUsd(latestRun.cost_usd)}</div>
+          </div>
+        ) : null}
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.detailLabelBranch}</div>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <code className="min-w-0 flex-1 whitespace-nowrap font-data text-micro text-ink-2" title={branchPath ?? undefined}>
+              {branchPath ? middleEllipsis(branchPath) : "—"}
+            </code>
+            {branchPath ? (
+              <button
+                type="button"
+                onClick={() => copyText(branchPath)}
+                className="flex min-h-8 min-w-8 shrink-0 items-center justify-center rounded-card border border-line text-ink-2 hover:bg-surface-1 hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze"
+                aria-label="Branch-Pfad kopieren"
+                title="Branch-Pfad kopieren"
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelModelRoute}</div>
           <div className="fleet-kv-v" style={{ fontSize: 11 }}>
             <ModelRouteBadge
@@ -490,22 +585,6 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
             />
           </div>
         </div>
-        <div className="fleet-kv">
-          <div className="fleet-kv-k">{de.fleet.detailLabelBranch}</div>
-          <div className="fleet-kv-v" style={{ fontSize: 11, overflow: "hidden", textOverflow: "ellipsis" }}>
-            {task.branch_name ?? task.workspace_path ?? (task.workspace_kind ? `(${task.workspace_kind})` : "—")}
-          </div>
-        </div>
-        <div className="fleet-kv">
-          <div className="fleet-kv-k">{de.fleet.detailLabelLaufzeit}</div>
-          <div className="fleet-kv-v">{elapsedSec != null ? fmtSeconds(elapsedSec) : "—"}</div>
-        </div>
-        {latestRun?.status ? (
-          <div className="fleet-kv">
-            <div className="fleet-kv-k">Laufstatus</div>
-            <div className="fleet-kv-v" title={latestRun.status}>{runStatusLabel(latestRun.status)}</div>
-          </div>
-        ) : null}
         {(latestRun?.input_tokens != null || latestRun?.output_tokens != null) ? (
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.detailLabelTokens}</div>
@@ -514,19 +593,30 @@ export function UebersichtTab({ task, latestRun, elapsedSec, deliverables }: Ueb
             </div>
           </div>
         ) : null}
-        {latestRun?.cost_usd != null ? (
-          <div className="fleet-kv">
-            <div className="fleet-kv-k">{de.fleet.detailLabelKosten}</div>
-            <div className="fleet-kv-v">{fmtUsd(latestRun.cost_usd)}</div>
-          </div>
-        ) : null}
       </div>
+
+      <dl className="fleet-boardtab-details">
+        {task.assignee && <><dt>Assignee</dt><dd>{task.assignee}</dd></>}
+        {typeof task.priority === "number" && <><dt>Priorität</dt><dd>{task.priority}</dd></>}
+        {!chronology.valid && <><dt>Zeitfolge</dt><dd>{chronology.reason}</dd></>}
+        {timestamps.map(([label, value]) => {
+          const formatted = taskTimestamp(value, now);
+          return formatted ? (
+            <div className="fleet-boardtab-detail-pair" key={label}>
+              <dt>{label}</dt>
+              <dd>{formatted.dateTime ? <time dateTime={formatted.dateTime}>{formatted.label}</time> : formatted.label}</dd>
+            </div>
+          ) : null;
+        })}
+      </dl>
+
+      <ReviewVerdicts verdicts={verdicts} />
 
       {/* Task-Body */}
       {task.body ? (
         <div>
           <Eyebrow className="mb-1.5">{de.fleet.detailBodyLabel}</Eyebrow>
-          <div className="max-h-40 overflow-y-auto wrap-anywhere whitespace-pre-wrap border-l-2 border-line pl-2.5 text-sec text-ink-2">
+          <div className="wrap-anywhere whitespace-pre-wrap border-l-2 border-line pl-2.5 text-sec text-ink-2">
             {task.body}
           </div>
         </div>
@@ -630,19 +720,39 @@ export function AktivitaetTab({
 
 function LogTab({ taskId }: { taskId: string }) {
   // WorkerLogTail gibt es schon im WorkerCard — wir renutzen es.
-  return <WorkerLogTail taskId={taskId} />;
+  return <div className="fleet-detail-log"><WorkerLogTail taskId={taskId} /></div>;
+}
+
+function ReviewVerdicts({ verdicts }: { verdicts: ReviewVerdict[] }) {
+  if (verdicts.length === 0) return null;
+  return (
+    <div>
+      <Eyebrow className="mb-1.5">Review-Verdicts</Eyebrow>
+      {verdicts.map((v) => (
+        <div key={`${v.task_id}-${v.reviewer_profile ?? "reviewer"}`} className="flex items-center gap-2 border-b border-line py-1.5 text-sec text-ink-2">
+          <span className="flex-1">{v.reviewer_profile ?? "reviewer"}</span>
+          <span
+            className={cn(
+              "rounded-full border px-[7px] py-0.5 font-data text-micro",
+              v.verifier_verdict === "APPROVED" ? "border-status-ok/35 text-status-ok" : "border-status-warn/40 text-status-warn",
+            )}
+          >
+            {v.verifier_verdict ?? v.review_run_state ?? "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ErgebnisTab({
-  verdicts,
   deliverables,
   chainCost,
 }: {
-  verdicts: Array<{ task_id: string; reviewer_profile: string | null; review_run_state: string; verifier_verdict: string | null }>;
   deliverables: Array<{ filename: string; url: string; size: number }>;
   chainCost: CostDisplayValue;
 }) {
-  if (verdicts.length === 0 && deliverables.length === 0 && chainCost.value == null) {
+  if (deliverables.length === 0 && chainCost.value == null) {
     return (
       <p className="px-0.5 py-2 text-sec text-ink-3">
         {de.fleet.detailErgebnisEmpty}
@@ -652,25 +762,6 @@ function ErgebnisTab({
 
   return (
     <>
-      {/* Review-Verdicts */}
-      {verdicts.length > 0 ? (
-        <div>
-          <Eyebrow className="mb-1.5">Review-Verdicts</Eyebrow>
-          {verdicts.map((v) => (
-            <div key={`${v.task_id}-${v.reviewer_profile ?? "reviewer"}`} className="flex items-center gap-2 border-b border-line py-1.5 text-sec text-ink-2">
-              <span className="flex-1">{v.reviewer_profile ?? "reviewer"}</span>
-              <span
-                className={cn(
-                  "rounded-full border px-[7px] py-0.5 font-data text-micro",
-                  v.verifier_verdict === "APPROVED" ? "border-status-ok/35 text-status-ok" : "border-status-warn/40 text-status-warn",
-                )}
-              >
-                {v.verifier_verdict ?? v.review_run_state ?? "—"}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
 
       {/* Deliverables — Auth-geschützte Endpoints: openAuthedApiFile statt raw href */}
       {deliverables.length > 0 ? (

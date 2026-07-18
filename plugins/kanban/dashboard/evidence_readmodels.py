@@ -246,6 +246,7 @@ def _run_dict(
         "outcome": r.outcome,
         "summary": r.summary,
         "metadata": r.metadata,
+        "worker_session_id": (r.metadata or {}).get("worker_session_id"),
         "error": r.error,
         # K5a: per-run token/cost accounting (NULL until a run records usage).
         "input_tokens": r.input_tokens,

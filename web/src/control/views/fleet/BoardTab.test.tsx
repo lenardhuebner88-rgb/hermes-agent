@@ -129,12 +129,13 @@ describe("BoardTab operator information", () => {
     expect(titleNode?.getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("keeps all material card fields discoverable on a read-only board", () => {
+  it("uses the row drawer as the only detail affordance on a read-only board", () => {
+    const onOpenNodeDetail = vi.fn();
     render(
       <BoardTab
         board={board([task()])}
         readOnly
-        onOpenNodeDetail={vi.fn()}
+        onOpenNodeDetail={onOpenNodeDetail}
       />,
     );
 
@@ -153,13 +154,9 @@ describe("BoardTab operator information", () => {
       "t_truth0 · premium-reviewer · Prio 7 · 3 Kommentare · 2 Vorgänger · 4 Nachfolger · 1/4",
     );
 
-    const summary = screen.getByLabelText("Weitere Informationen zu Operator truth card");
-    expect(summary.tagName).toBe("SUMMARY");
-    fireEvent.click(summary);
-    const disclosure = summary.parentElement as HTMLElement;
-    for (const label of ["Erstellt", "Gestartet", "Fertig", "Fällig", "Heartbeat"]) {
-      expect(within(disclosure).getByText(label)).toBeTruthy();
-    }
+    expect(screen.queryByLabelText("Weitere Informationen zu Operator truth card")).toBeNull();
+    fireEvent.click(row as HTMLElement);
+    expect(onOpenNodeDetail).toHaveBeenCalledWith("t_truth01");
   });
 
   it("does not invent zero-value metadata for absent card information", () => {
@@ -192,7 +189,8 @@ describe("BoardTab operator information", () => {
     expect(text).not.toContain("0 Nachfolger");
   });
 
-  it("renders invalid, future, and impossible chronology explicitly", () => {
+  it("opens adversarial timestamp cards in the drawer instead of expanding inline", () => {
+    const onOpenNodeDetail = vi.fn();
     render(
       <BoardTab
         board={board([task({
@@ -204,14 +202,13 @@ describe("BoardTab operator information", () => {
           due_at: 1_783_800_300 + 86_400,
           last_heartbeat_at: 1_783_800_300 * 1000,
         })])}
-        onOpenNodeDetail={vi.fn()}
+        onOpenNodeDetail={onOpenNodeDetail}
       />,
     );
 
-    fireEvent.click(screen.getByLabelText("Weitere Informationen zu Adversarial time card"));
-    const disclosure = screen.getByLabelText("Weitere Informationen zu Adversarial time card").parentElement as HTMLElement;
-    expect(within(disclosure).getByText("Zeit ungültig")).toBeTruthy();
-    expect(within(disclosure).getByText(/zukünftig/)).toBeTruthy();
-    expect(within(disclosure).getByText("Start liegt vor Anlage")).toBeTruthy();
+    const row = screen.getByText("Adversarial time card").closest(".fleet-boardtab-row");
+    fireEvent.click(row as HTMLElement);
+    expect(onOpenNodeDetail).toHaveBeenCalledWith("t_timebad");
+    expect(screen.queryByLabelText("Weitere Informationen zu Adversarial time card")).toBeNull();
   });
 });

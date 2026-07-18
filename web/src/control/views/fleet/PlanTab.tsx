@@ -46,10 +46,11 @@ interface PlanTabProps {
   accountUsage: import("../../lib/types").AccountUsageResponse | null;
   onApproveSuccess: () => void;
   onShowDetail: (ps: PlanSpecRecord) => void;
+  onOpenTask?: (taskId: string) => void;
   readOnly?: boolean;
 }
 
-export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail, readOnly = false }: PlanTabProps) {
+export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApproveSuccess, onShowDetail, onOpenTask, readOnly = false }: PlanTabProps) {
   // PlanSpecs, die Operator-Freigabe oder den Start einer signierten, geparkten Kette brauchen.
   const pendingSpecs = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps));
   const pendingPaths = pendingSpecs.map((ps) => ps.path);
@@ -92,7 +93,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
     return (
       <>
         {composerSection}
-        {readOnly ? null : <AutoReleaseTile />}
+        {readOnly ? null : <AutoReleaseTile onOpenTask={onOpenTask} />}
         <div className="fleet-empty">
           <p className="fleet-empty-title">{de.fleet.planLeer}</p>
           <p className="fleet-empty-sub">{de.fleet.planLeerDesc}</p>
@@ -104,7 +105,7 @@ export function PlanTab({ allPlanspecs, costs, lanesCatalog, accountUsage, onApp
   return (
     <>
       {composerSection}
-      {readOnly ? null : <AutoReleaseTile />}
+      {readOnly ? null : <AutoReleaseTile onOpenTask={onOpenTask} />}
 
       {/* Liste wartender PlanSpecs — wenn mehr als eine, als auswählbare Chips */}
       {pendingSpecs.length > 1 ? (

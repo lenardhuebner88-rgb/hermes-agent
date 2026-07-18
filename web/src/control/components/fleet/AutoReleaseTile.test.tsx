@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AutoReleaseTile } from "./AutoReleaseTile";
@@ -43,13 +43,15 @@ describe("AutoReleaseTile", () => {
     expect(screen.getByText("Noch keine autonomen Releases")).toBeTruthy();
   });
 
-  it("renders a rolled_back outcome badge and the latest anchor", async () => {
+  it("renders title plus short id and opens the task detail", async () => {
+    const onOpenTask = vi.fn();
     fetchMock.mockResolvedValueOnce(jsonResponse({
       autonomous: true,
       max_tier_autonomous: "gate",
       recent: [
         {
           task_id: "t_abc123",
+          task_title: "Release-Pipeline reparieren",
           created_at: 1782508076,
           payload: { outcome: "rolled_back", detail: "post-deploy live test red" },
         },
@@ -57,11 +59,14 @@ describe("AutoReleaseTile", () => {
       anchors: ["release/pre-deploy/20260701T000000", "release/pre-deploy/20260705T000000"],
     }));
 
-    render(<AutoReleaseTile />);
+    render(<AutoReleaseTile onOpenTask={onOpenTask} />);
 
     expect(await screen.findByText("AUTONOM (≤ gate)")).toBeTruthy();
     expect(screen.getByText("rolled_back")).toBeTruthy();
+    expect(screen.getByText("Release-Pipeline reparieren")).toBeTruthy();
     expect(screen.getByText("t_abc123")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Release-Pipeline reparieren/ }));
+    expect(onOpenTask).toHaveBeenCalledWith("t_abc123");
     expect(screen.getByText("Anker: release/pre-deploy/20260705T000000")).toBeTruthy();
   });
 

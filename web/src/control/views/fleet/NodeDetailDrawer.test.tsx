@@ -126,9 +126,33 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     vi.clearAllMocks();
   });
 
+  it("verlinkt state.db-Worker-Sessions nicht als tmux-Terminal", () => {
+    const workerSessionId = "20260717_233938_4da4c4";
+    const tmuxSessionNames = new Set(["work"]);
+    expect(tmuxSessionNames.has(workerSessionId)).toBe(false);
+
+    const html = renderToStaticMarkup(
+      <UebersichtTab
+        now={1782508100}
+        task={{ id: "t1", title: "T", status: "running" }}
+        latestRun={{
+          profile: "coder",
+          status: "running",
+          worker_session_id: workerSessionId,
+        }}
+        elapsedSec={10}
+        deliverables={[]}
+      />,
+    );
+
+    expect(html).not.toContain("/control/agent-terminals");
+    expect(html).not.toContain("Im Terminal öffnen");
+  });
+
   it("beschriftet Task-Lane und Laufprofil getrennt", () => {
     const html = renderToStaticMarkup(
       <UebersichtTab
+        now={1782508100}
         task={{ id: "t1", title: "T", status: "running", assignee: "premium", body: null }}
         latestRun={{ profile: "premium", status: "running", runtime_seconds: 60 }}
         elapsedSec={60}
@@ -139,15 +163,16 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).toContain("Task-Lane");
     expect(html).toContain("Laufprofil");
     expect(html).toContain("premium");
-    expect(html).not.toContain("Assignee");
+    expect(html).toContain("Assignee");
     expect(html).toContain("Modell");
     expect(html).toContain("Modell unbekannt – Telemetrie fehlt");
   });
 
-  it("rendert lange Taskbeschreibungen mit Wortumbruch und eigener Scrollfläche statt hartem Abschneiden", () => {
+  it("rendert lange Taskbeschreibungen mit Wortumbruch im einzigen Sheet-Scroller", () => {
     const body = `## Auftrag\n${"x".repeat(500)}ENDE`;
     const html = renderToStaticMarkup(
       <UebersichtTab
+        now={1782508100}
         task={{ id: "t1", title: "T", status: "running", assignee: "coder", body }}
         latestRun={{ profile: "coder", status: "running", runtime_seconds: 60 }}
         elapsedSec={60}
@@ -155,7 +180,8 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
       />,
     );
 
-    expect(html).toContain("overflow-y-auto");
+    expect(html).not.toContain("overflow-y-auto");
+    expect(html).not.toContain("max-h-40");
     expect(html).toContain("wrap-anywhere");
     expect(html).toContain("whitespace-pre-wrap");
     expect(html).toContain("ENDE");
@@ -165,6 +191,7 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
   it("names a contaminated runtime explicitly", () => {
     const html = renderToStaticMarkup(
       <UebersichtTab
+        now={1782508100}
         task={{ id: "t1", title: "T", status: "running", assignee: "coder", body: null }}
         latestRun={{ profile: "coder", status: "running", runtime_seconds: Number.NaN }}
         elapsedSec={Number.NaN}
@@ -178,6 +205,7 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
   it("names the lossless latest run state instead of inventing running or done", () => {
     const html = renderToStaticMarkup(
       <UebersichtTab
+        now={1782508100}
         task={{ id: "t1", title: "T", status: "review", assignee: "verifier", body: null }}
         latestRun={{ profile: "verifier", status: "completed", runtime_seconds: 60 }}
         elapsedSec={60}
@@ -187,6 +215,35 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
 
     expect(html).toContain("Laufstatus");
     expect(html).toContain("Abgeschlossen (completed)");
+  });
+
+  it("shows former board-inline metadata and guards adversarial timestamps", () => {
+    render(
+      <UebersichtTab
+        now={1_783_800_300}
+        task={{
+          id: "t_timebad", title: "Adversarial time card", status: "running", body: null,
+          assignee: "premium-reviewer", priority: 7,
+          created_at: 1_783_800_200, started_at: 1_783_800_100, completed_at: 1_783_800_050,
+          archived_at: 1_783_800_250, due_at: 1_783_800_300 + 86_400,
+          last_heartbeat_at: 1_783_800_300 * 1000,
+        }}
+        latestRun={null}
+        elapsedSec={null}
+        deliverables={[]}
+      />,
+    );
+
+    expect(screen.getByText("Assignee")).toBeTruthy();
+    expect(screen.getAllByText("premium-reviewer")).toHaveLength(2);
+    expect(screen.getByText("Priorität")).toBeTruthy();
+    expect(screen.getByText("7")).toBeTruthy();
+    for (const label of ["Erstellt", "Gestartet", "Fertig", "Archiviert", "Fällig", "Heartbeat"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    expect(screen.getByText("Zeit ungültig")).toBeTruthy();
+    expect(screen.getByText(/zukünftig/)).toBeTruthy();
+    expect(screen.getByText(/Start liegt vor Anlage/)).toBeTruthy();
   });
 });
 

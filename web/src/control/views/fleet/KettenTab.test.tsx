@@ -75,6 +75,13 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(src).toContain("de.worker.modelRouteNotStarted");
   });
 
+  it("labels active-step values and gives the horizontal pipeline a fade affordance", () => {
+    expect(src).toContain('<span className="metric-label">Laufzeit</span>');
+    expect(src).toContain('<span className="metric-label">Tokens</span>');
+    expect(src).toContain('<span className="metric-label">ETA</span>');
+    expect(kettenCss).toMatch(/\.ketten-v4 \.pipe-scroll\s*\{[^}]*mask-image:\s*linear-gradient/s);
+  });
+
   it("FIX-1: chain-list fraction uses done/total (not the 0..1 progress ratio)", () => {
     expect(src).toContain("chip.done / chip.total");
     expect(src).toContain("{chip.done}/{chip.total}");

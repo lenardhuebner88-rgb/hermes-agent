@@ -250,7 +250,11 @@
 }
 .ketten-v4 .pipe-step-count { font-size: 9px; color: var(--kt-ink-4); font-weight: 500; }
 
-.ketten-v4 .pipe-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.ketten-v4 .pipe-scroll {
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 28px), transparent 100%);
+}
 .ketten-v4 .pipe-scroll::-webkit-scrollbar { display: none; }
 
 .ketten-v4 .pipe { display: flex; align-items: flex-start; gap: 0; min-width: min-content; padding: 0 4px; }
@@ -464,10 +468,14 @@
   font-size: 10px; font-weight: 700; color: var(--kt-live);
 }
 
-/* Values only, no labels */
 .ketten-v4 .values-row {
   display: flex; gap: 0; align-items: center;
   font-size: 11px; font-variant-numeric: tabular-nums; flex: 1; flex-wrap: wrap;
+}
+.ketten-v4 .metric { display: inline-flex; flex-direction: column; gap: 1px; }
+.ketten-v4 .metric-label {
+  color: var(--kt-ink-4); font-size: 9px; font-weight: 600;
+  letter-spacing: .05em; line-height: 1; text-transform: uppercase;
 }
 .ketten-v4 .val { color: var(--kt-ink-2); }
 .ketten-v4 .val-strong { color: var(--kt-ink); font-weight: 600; }

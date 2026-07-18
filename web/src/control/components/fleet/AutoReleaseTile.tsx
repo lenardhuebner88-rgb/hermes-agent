@@ -7,6 +7,7 @@ const POLL_MS = 30_000;
 
 interface ReleaseStatusEvent {
   task_id: string;
+  task_title: string;
   created_at: number;
   payload: { outcome?: string; detail?: string; [key: string]: unknown };
 }
@@ -32,7 +33,7 @@ const OUTCOME_TONE_DEFAULT = "border-line bg-surface-2 text-ink-3";
 
 /** Read-only Auto-Release-Statuskachel — kein Toggle (Freischalten bleibt ein
  * Config-Datei-Akt), speist sich aus GET /api/plugins/kanban/release-status. */
-export function AutoReleaseTile() {
+export function AutoReleaseTile({ onOpenTask }: { onOpenTask?: (taskId: string) => void }) {
   const [data, setData] = useState<ReleaseStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,11 +89,18 @@ export function AutoReleaseTile() {
             const outcome = typeof ev.payload?.outcome === "string" ? ev.payload.outcome : "unbekannt";
             const toneClass = OUTCOME_TONE[outcome] ?? OUTCOME_TONE_DEFAULT;
             return (
-              <div key={`${ev.task_id}-${index}`} className="flex min-w-0 items-center gap-2 text-[11px]">
+              <button
+                key={`${ev.task_id}-${index}`}
+                type="button"
+                onClick={() => onOpenTask?.(ev.task_id)}
+                className="flex min-w-0 items-center gap-2 rounded-md text-left text-[11px] hover:bg-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                aria-label={`${ev.task_title} (${ev.task_id}) öffnen`}
+              >
                 <span className={`shrink-0 rounded-lg border px-2 py-0.5 ${toneClass}`}>{outcome}</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-ink-3" title={ev.task_id}>{ev.task_id}</span>
+                <span className="min-w-0 flex-1 truncate text-ink-2" title={ev.task_title}>{ev.task_title}</span>
+                <span className="shrink-0 font-mono text-ink-3">{ev.task_id}</span>
                 <span className="shrink-0 font-mono text-ink-3">{fmtRelativeTime(ev.created_at)}</span>
-              </div>
+              </button>
             );
           })}
         </div>
