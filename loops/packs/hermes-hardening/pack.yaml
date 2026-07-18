@@ -1,0 +1,40 @@
+# hermes-hardening — Zwei-Linsen-Härtungs-Pipeline (UI-Design · Backend-Robustheit).
+# Vertrag (Operator 2026-07-18): Opus 4.8 wählt pro Nacht die am stärksten belegte
+# Schwäche aus einer der beiden Linsen, GPT-5.6 Sol baut, Opus 4.8 verifiziert.
+# Landung: --cmd land; Auto-Land erst mit Sprint-2-Vertrag nach 3 sauberen
+# manuellen Landungen (Plan 2026-07-18-projekt-loops-v2.md).
+name: hermes-hardening
+type: pipeline
+description: Opus 4.8 findet die staerkste belegte Schwaeche (UI-Design-Ratchet oder FastAPI-Robustheit), GPT-5.6 Sol haertet, Opus 4.8 verifiziert adversarial
+stability: experimental
+repo: /home/piet/.hermes/hermes-agent
+phases:
+  plan:
+    engine: claude
+    model: claude-opus-4-8
+    timeout: 2700
+    prompt: PLANNER-PROMPT.md
+  build:
+    engine: codex
+    model: gpt-5.6-sol
+    timeout: 5400
+    prompt: BUILDER-PROMPT.md
+  verify:
+    engine: claude
+    model: claude-opus-4-8
+    timeout: 2700
+    prompt: VERIFIER-PROMPT.md
+stop:
+  max_rounds: 3
+  max_hours: 5
+  fail_streak: 2
+  dry_rounds: 1
+params:
+  max_plans: "2"
+  scope_allow: "web/src/control/** hermes_cli/** tests/**"
+  scope_deny: "hermes_cli/auth.py hermes_cli/dashboard_auth/** hermes_cli/kanban_db.py web/package.json web/package-lock.json package*.json .env* config"
+  viewports: "390x844 820x1180 1366x900"
+  lenses: "ui-design backend-robustheit"
+notify:
+  discord_channel: "1486480074491559966"
+autoland: false
