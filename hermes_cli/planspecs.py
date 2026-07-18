@@ -93,7 +93,8 @@ _CC_INSTRUMENT_AC_TOKENS = {
     "cross-family",
 }
 
-_WARN_ONLY_RUBRIC_PREFIXES = ("over-decomposed: ",)
+_WARN_ONLY_RUBRIC_PREFIXES = ("over-decomposed: ", "role_misuse: ")
+_ROLE_MISUSE_PREFIX = "role_misuse: "
 _FO_VIEW_SURFACE_NAMES = frozenset({"admin", "kitchen", "lists", "shopping"})
 
 # Template-residue patterns: a literal ``<…>`` angle placeholder, a TODO/FIXME/TBD
@@ -1263,6 +1264,21 @@ def _blocking_spec_rubric_findings(findings: list[str]) -> list[str]:
     ]
 
 
+def _role_contract_findings(spec: BindingPlanSpec) -> list[str]:
+    """Return PlanSpec lane/kind mismatches using the dispatch contract text."""
+    from hermes_cli import kanban_db
+
+    findings: list[str] = []
+    for subtask in spec.hints.subtasks:
+        reason = kanban_db.role_misuse_reason(
+            assignee=subtask.lane,
+            kind=subtask.kind,
+        )
+        if reason is not None:
+            findings.append(reason)
+    return findings
+
+
 def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
     """Run the deterministic rubric over an already-parsed *spec* and return all
     findings, including advisory warn-only findings.
@@ -1272,7 +1288,7 @@ def _collect_spec_rubric_findings(spec: BindingPlanSpec) -> list[str]:
     rubric adds the *quality* checks that keep an under-specified PlanSpec from
     minting unworkable Kanban tasks. Each finding is its own actionable line.
     """
-    findings: list[str] = []
+    findings: list[str] = _role_contract_findings(spec)
     # ``spec.children`` (from taskgraph_hints_to_children) carry the resolved AC
     # — per-subtask plus the plan-wide / applies_to-inherited threading — keyed by
     # planspec_subtask_id. ``spec.hints.subtasks`` carry the verbatim title/body/
@@ -1448,7 +1464,8 @@ def validate_planspec(
         "freigabe": spec.freigabe,
         "board": target_board,
         "findings": findings,
-        "would_block": disposition in ("block", "invalid"),
+        "would_block": disposition in ("block", "invalid")
+        or any(finding.startswith(_ROLE_MISUSE_PREFIX) for finding in findings),
     }
 
 
@@ -1907,6 +1924,9 @@ def ingest_planspec(
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
     target_board = _resolve_target_board(spec, board)
+    role_contract_findings = _role_contract_findings(spec)
+    if role_contract_findings:
+        raise PlanSpecBlocked(role_contract_findings)
     # Deterministic rubric gate — layered ON TOP of parse_binding_planspec's
     # structural validation and applied BEFORE any DB write. ``--force`` bypasses
     # it but the skipped reasons are logged so the override is never silent.
