@@ -7,7 +7,6 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 const src = readFileSync(path.resolve(import.meta.dirname, "KettenTab.tsx"), "utf8");
 const kettenCss = readFileSync(path.resolve(import.meta.dirname, "ketten-v4.css"), "utf8");
 const fleetCss = readFileSync(path.resolve(import.meta.dirname, "fleet.css"), "utf8");
-const heuteSrc = readFileSync(path.resolve(import.meta.dirname, "HeuteTab.tsx"), "utf8");
 
 describe("KettenTab v4 — redesign checks", () => {
   it("makes all interactive elements keyboard-focus-visible", () => {
@@ -42,7 +41,7 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(kettenCss).toContain("--color-status-warn");
   });
 
-  it("pairs premium avatar color with the double ring and title/aria marker", () => {
+  it("pairs premium avatar color with the double ring and title/aria marker where avatars remain", () => {
     const fleetPremiumRule = fleetCss.match(/\.fleet-avatar-prem\s*\{([\s\S]*?)\}/)?.[1];
     const kettenPremiumRule = kettenCss.match(/\.ketten-v4 \.avatar-premium\s*\{([\s\S]*?)\}/)?.[1];
 
@@ -52,7 +51,6 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(kettenPremiumRule).toMatch(/box-shadow:[^;]*var\(--color-surface-1\)[^;]*var\(--color-lane-prem\)/);
     expect(src).toContain("premiumLaneMarker(focusNode.assignee)");
     expect(src).toContain("premiumLaneMarker(n.assignee)");
-    expect(heuteSrc).toContain("premiumLaneMarker(w.profile)");
   });
 
   it("renders all 6 sections", () => {
