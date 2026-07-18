@@ -183,3 +183,44 @@ def test_cli_isolate_fails_missing_log_is_safe(
     out = json.loads(capsys.readouterr().out.strip())
     # empty/unparseable python log -> no files parsed -> deterministic, not demoted
     assert out["leaker_only"] is False
+
+
+# ---------------------------------------------------------------------------
+# deflake-check (GATE-FLAKY-RETRY-HONESTY-S1) — CLI wiring
+# ---------------------------------------------------------------------------
+
+def test_cli_deflake_check_idle_when_no_flaky(tmp_path, monkeypatch, state_dir, capsys):
+    # a clean ledger (one green night) has no flaky file -> idle
+    _run_cli(["vision", "record-gate-result", "pass"], monkeypatch, tmp_path / "kanban.db")
+    capsys.readouterr()
+    rc = _run_cli(
+        ["vision", "deflake-check", "--dry-run", "--json"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is False
+    assert out["filed"] == []
+
+
+def test_cli_deflake_check_dry_run_lists_flaky_file(tmp_path, monkeypatch, state_dir, capsys):
+    # seed a leaker-only (flaky) night via the record CLI, then detect it
+    _run_cli(
+        [
+            "vision", "record-gate-result", "fail",
+            "--leakers-json", json.dumps(["python: tests/agent/test_delegate.py"]),
+            "--leaker-only",
+        ],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    capsys.readouterr()
+    rc = _run_cli(
+        ["vision", "deflake-check", "--dry-run", "--json"],
+        monkeypatch, tmp_path / "kanban.db",
+    )
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["triggered"] is True
+    assert len(out["candidates"]) == 1
+    assert out["candidates"][0]["file"] == "tests/agent/test_delegate.py"
+    assert out["filed"][0]["dry_run"] is True

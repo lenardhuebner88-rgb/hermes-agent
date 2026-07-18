@@ -116,6 +116,43 @@ def gate_ledger_path() -> Path:
     return vision_state_dir() / GATE_LEDGER_FILENAME
 
 
+# Flaky de-flake accountability (GATE-FLAKY-RETRY-HONESTY-S1): the set of
+# per-file de-flake keys the strategist has already filed a HELD de-flake task
+# for. Read by the counter-metric so ``flaky_neutralized_without_filed_deflake_task``
+# is derivable at snapshot time; written by ``strategist.propose_deflake``.
+DEFLAKE_FILED_FILENAME = "green-gate-deflake-filed.json"
+
+
+def deflake_filed_path() -> Path:
+    return vision_state_dir() / DEFLAKE_FILED_FILENAME
+
+
+def read_deflake_filed(path: Optional[Path] = None) -> set[str]:
+    """Read the set of flaky-file keys that already have a filed HELD de-flake
+    task (written by :func:`strategist.propose_deflake`). Missing or corrupt
+    state resolves to an empty set — the counter-metric then reports every
+    current flaky file as still-unfiled (fail-loud, never a silent zero)."""
+    target = path or deflake_filed_path()
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return set()
+    if isinstance(data, list):
+        return {str(k) for k in data if k}
+    return set()
+
+
+def write_deflake_filed(keys, path: Optional[Path] = None) -> Path:
+    """Persist the filed de-flake key set (sorted JSON list). Returns the path."""
+    target = path or deflake_filed_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(sorted({str(k) for k in keys if k}), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Green-gate ledger: record + read + streak derivation
 # ---------------------------------------------------------------------------
@@ -444,6 +481,116 @@ def red_streak_from_head(records: list[dict]) -> int:
         else:  # NIGHT_GREEN
             break
     return streak
+
+
+# ---------------------------------------------------------------------------
+# Flaky de-flake debt (GATE-FLAKY-RETRY-HONESTY-S1)
+#
+# A ``leakers`` entry on a fail record means that test file FAILED in the
+# parallel suite but PASSED on the isolated rerun (fail->pass) — a confirmed
+# flake. :func:`derive_gate_streak` already makes such a night streak-NEUTRAL
+# (honest: a flake must not reset the green streak). But a neutral night that is
+# otherwise never acted on lets a genuinely flaky test accrue as invisible
+# leaker debt forever — "dauerhaft gruen-gerechnet". This turns that silent debt
+# into accountable, actionable signal:
+#
+#   * every distinct flaky test FILE the isolation rerun demoted (across
+#     leaker-only AND partially-leaky red nights) is a de-flake CANDIDATE; the
+#     strategist files exactly one HELD de-flake PlanSpec per file (deduped), so
+#     a flake is never silently swallowed — the counter-metric
+#     ``flaky_neutralized_without_filed_deflake_task`` must reach 0;
+#   * a file flaky-neutralized on >= RECURRING_FLAKE_MIN_NIGHTS DISTINCT nights
+#     without a fix ESCALATES into the recurring-flake counter (a stuck flake
+#     the operator should prioritise) rather than being permanently green-counted.
+#
+# A file that FAILS alone too (fail->fail) is NOT a leaker — it is a reproduced
+# product failure that stays a red first_fail and never reaches this list. The
+# symmetry (a real regression can never be de-flaked away) is preserved by the
+# upstream isolation step, not re-derived here.
+# ---------------------------------------------------------------------------
+
+RECURRING_FLAKE_MIN_NIGHTS = 3
+
+
+def flaky_file_key(gate: str, file: str) -> str:
+    """Stable per-file de-flake identity (gate token + sha1(file) digest).
+
+    Kept here (not in strategist) so the counter-metric's filed-set membership
+    check and the strategist lever key are the SAME function — a flaky file the
+    strategist ingests under key K is exactly the K the metric looks up in the
+    filed set. Deterministic (sha1); the gate token is upper-alnum so it round-
+    trips through a PlanSpec ``slice`` / filename unchanged."""
+    digest = hashlib.sha1(str(file).encode("utf-8")).hexdigest()[:8]
+    token = re.sub(r"[^A-Z0-9]+", "-", str(gate).upper()).strip("-") or "UNKNOWN"
+    return f"GATE-DEFLAKE-{token}-{digest}"
+
+
+def _split_leaker_entry(entry: str) -> tuple[str, str]:
+    """Split a stored ``"<gate>: <file>"`` leaker entry into ``(gate, file)``.
+
+    Robust to the redaction/whitespace-flatten pass the ledger applies: the gate
+    is the token before the first ``": "``; the rest is the file path. An entry
+    with no separator is a bare file under an ``"unknown"`` gate."""
+    s = " ".join(str(entry or "").split())
+    if ": " in s:
+        gate, _, file = s.partition(": ")
+        return (gate.strip().lower() or "unknown"), file.strip()
+    return "unknown", s.strip()
+
+
+def derive_flaky_deflake_candidates(
+    records: list[dict],
+    *,
+    recurring_min_nights: int = RECURRING_FLAKE_MIN_NIGHTS,
+) -> list[dict]:
+    """Per flaky test FILE, the de-flake debt derived from the ledger.
+
+    Collects every ``leakers`` entry across all fail records (leaker-only AND
+    partially-leaky red nights), deduped per file by DATE (a file listed twice
+    the same night counts as one flaky night). Returns one dict per file::
+
+        {"file", "gate", "key", "nights", "dates": [...], "recurring": bool}
+
+    ``recurring`` is ``True`` when the file was flaky-neutralized on
+    >= ``recurring_min_nights`` DISTINCT nights (AC-2c escalation). Sorted by
+    (most nights first, then file) so the worst offenders lead. A fail record
+    without a ``leakers`` list contributes nothing; pass records never do."""
+    by_file: dict[str, dict] = {}
+    for rec in records:
+        if str(rec.get("result", "")).lower() != "fail":
+            continue
+        leakers = rec.get("leakers")
+        if not isinstance(leakers, list):
+            continue
+        date = str(rec.get("date") or "")
+        for entry in leakers:
+            gate, file = _split_leaker_entry(entry)
+            if not file:
+                continue
+            slot = by_file.setdefault(file, {"file": file, "gate": gate, "dates": set()})
+            if date:
+                slot["dates"].add(date)
+            # First concrete (non-unknown) gate seen wins — a redacted/odd entry
+            # must not overwrite a good attribution.
+            if slot["gate"] == "unknown" and gate != "unknown":
+                slot["gate"] = gate
+    threshold = max(1, int(recurring_min_nights))
+    out: list[dict] = []
+    for file, slot in by_file.items():
+        dates = sorted(slot["dates"])
+        nights = len(dates)
+        out.append(
+            {
+                "file": file,
+                "gate": slot["gate"],
+                "key": flaky_file_key(slot["gate"], file),
+                "nights": nights,
+                "dates": dates,
+                "recurring": nights >= threshold,
+            }
+        )
+    out.sort(key=lambda c: (-c["nights"], c["file"]))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1452,8 +1599,10 @@ def _cost_per_task_metric(
     }
 
 
-def _green_gate_metric(gate_records: list[dict]) -> dict:
-    """Green-Gate-Streak ↔ counter 'fail_nights' + leaker-debt channel.
+def _green_gate_metric(
+    gate_records: list[dict], *, deflake_filed: Optional[set] = None
+) -> dict:
+    """Green-Gate-Streak ↔ counter 'fail_nights' + leaker-debt + flake-debt.
 
     Headline = consecutive green nights from the ledger. Counter = total
     recorded RED nights (product / unattributed reds — the streak's antagonist).
@@ -1464,9 +1613,20 @@ def _green_gate_metric(gate_records: list[dict]) -> dict:
     in their OWN low-severity, visible channel (``leaker_debt`` + the flat
     ``leaker_debt_nights`` the dashboard tile reads) so the debt stays visible
     without building or dissolving trust.
-    """
+
+    Flake-debt (GATE-FLAKY-RETRY-HONESTY-S1): the accountability guardrail on the
+    above neutrality. ``flaky_neutralized_without_filed_deflake_task`` counts
+    distinct flaky test FILES (:func:`derive_flaky_deflake_candidates`) whose
+    per-file de-flake key is NOT yet in the strategist's filed set — it MUST reach
+    0 so no flake is silently swallowed (AC-2b). ``recurring_flakes`` escalates
+    files flaky over >= :data:`RECURRING_FLAKE_MIN_NIGHTS` nights (AC-2c). The
+    filed set is read from disk unless injected (tests)."""
     streak = derive_gate_streak(gate_records)
     neutral_nights = streak.get("neutral_nights", 0)
+    candidates = derive_flaky_deflake_candidates(gate_records)
+    filed = deflake_filed if deflake_filed is not None else read_deflake_filed()
+    unfiled = [c for c in candidates if c["key"] not in filed]
+    recurring = [c for c in candidates if c["recurring"]]
     return {
         "streak": streak["streak"],
         "green_nights": streak["green_nights"],
@@ -1494,6 +1654,23 @@ def _green_gate_metric(gate_records: list[dict]) -> dict:
                 "nights whose ONLY gate failures were test-isolation leakers — "
                 "neutral for streak/triage/release, tracked as low-severity "
                 "debt so it stays visible without building or dissolving trust"
+            ),
+        },
+        "flake_debt": {
+            "name": "flaky_neutralized_without_filed_deflake_task",
+            "value": len(unfiled),
+            # A flake with no filed de-flake task IS the silent-swallow the
+            # guardrail forbids -> high severity until the strategist files it.
+            "severity": "high" if unfiled else "low",
+            "flaky_files_total": len(candidates),
+            "recurring_flakes": len(recurring),
+            "recurring_flake_files": [c["file"] for c in recurring][:GATE_LEAKERS_MAX],
+            "unfiled_flake_files": [c["file"] for c in unfiled][:GATE_LEAKERS_MAX],
+            "description": (
+                "distinct flaky test files (fail->pass on the isolated rerun) "
+                "with NO filed HELD de-flake task — MUST be 0 so a neutralized "
+                "flake is never silently swallowed; recurring_flakes escalates "
+                "files flaky over many nights instead of green-counting them"
             ),
         },
     }

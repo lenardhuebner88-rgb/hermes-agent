@@ -2240,3 +2240,127 @@ def test_full_snapshot_carries_leaker_debt_channel(conn):
     assert g["leaker_debt_nights"] == 1
     assert g["leaker_debt"]["severity"] == "low"
     assert g["counter"]["value"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Flaky de-flake debt (GATE-FLAKY-RETRY-HONESTY-S1)
+# ---------------------------------------------------------------------------
+
+def _leaker_fail(date, leakers, *, leaker_only=True, first_fail=None):
+    """A red ledger record carrying demoted leaker (flaky) files."""
+    rec = {"date": date, "result": "fail", "ts": f"{date}T03:00:00+00:00",
+           "leakers": list(leakers)}
+    if leaker_only:
+        rec["leaker_only"] = True
+    if first_fail is not None:
+        rec["first_fail"] = first_fail
+    return rec
+
+
+def test_derive_flaky_candidates_groups_by_file_and_counts_nights():
+    # The live example: test_delegate flaky-neutralized on 3 distinct nights.
+    records = [
+        _leaker_fail("2026-07-10", ["python: tests/agent/test_delegate.py"]),
+        _leaker_fail("2026-07-12", ["python: tests/agent/test_delegate.py"]),
+        # partially-leaky RED night: a real first_fail + the same flake demoted.
+        _leaker_fail(
+            "2026-07-13",
+            ["python: tests/agent/test_delegate.py"],
+            leaker_only=False,
+            first_fail={"gate": "python", "detail": "assert real regression"},
+        ),
+    ]
+    cands = vm.derive_flaky_deflake_candidates(records)
+    assert len(cands) == 1
+    c = cands[0]
+    assert c["file"] == "tests/agent/test_delegate.py"
+    assert c["gate"] == "python"
+    assert c["nights"] == 3
+    assert c["dates"] == ["2026-07-10", "2026-07-12", "2026-07-13"]
+    assert c["recurring"] is True  # >= RECURRING_FLAKE_MIN_NIGHTS (3)
+
+
+def test_derive_flaky_candidates_single_night_is_not_recurring():
+    records = [_leaker_fail("2026-07-18", ["vitest: src/foo.test.ts"])]
+    cands = vm.derive_flaky_deflake_candidates(records)
+    assert len(cands) == 1
+    assert cands[0]["nights"] == 1
+    assert cands[0]["recurring"] is False
+    assert cands[0]["gate"] == "vitest"
+
+
+def test_derive_flaky_candidates_dedups_same_file_within_one_night():
+    # A file listed twice the same night is ONE flaky night, not two.
+    records = [
+        _leaker_fail(
+            "2026-07-18",
+            ["python: tests/x.py", "python: tests/x.py"],
+        )
+    ]
+    cands = vm.derive_flaky_deflake_candidates(records)
+    assert len(cands) == 1
+    assert cands[0]["nights"] == 1
+
+
+def test_derive_flaky_candidates_none_when_no_leakers():
+    # A real fail->fail red night carries no leakers -> no de-flake candidate
+    # (a reproduced regression is never de-flaked away).
+    records = [
+        {"date": "2026-07-18", "result": "fail", "ts": "2026-07-18T03:00:00+00:00",
+         "first_fail": {"gate": "python", "detail": "block_kind transient"}},
+        _rec("2026-07-17", "pass"),
+    ]
+    assert vm.derive_flaky_deflake_candidates(records) == []
+
+
+def test_derive_flaky_candidates_sorted_worst_first():
+    records = [
+        _leaker_fail("2026-07-10", ["python: tests/a.py"]),
+        _leaker_fail("2026-07-11", ["python: tests/b.py"]),
+        _leaker_fail("2026-07-12", ["python: tests/b.py"]),
+    ]
+    cands = vm.derive_flaky_deflake_candidates(records)
+    assert [c["file"] for c in cands] == ["tests/b.py", "tests/a.py"]  # 2 nights, then 1
+
+
+def test_flaky_file_key_is_stable_and_gate_scoped():
+    k1 = vm.flaky_file_key("python", "tests/x.py")
+    k2 = vm.flaky_file_key("python", "tests/x.py")
+    assert k1 == k2
+    assert k1.startswith("GATE-DEFLAKE-PYTHON-")
+    # different file -> different key; different gate -> different token
+    assert vm.flaky_file_key("python", "tests/y.py") != k1
+    assert vm.flaky_file_key("vitest", "tests/x.py").startswith("GATE-DEFLAKE-VITEST-")
+
+
+def test_green_gate_metric_flake_debt_counter_unfiled_vs_filed():
+    records = [
+        _leaker_fail("2026-07-10", ["python: tests/agent/test_delegate.py"]),
+        _leaker_fail("2026-07-12", ["python: tests/agent/test_delegate.py"]),
+        _leaker_fail("2026-07-13", ["python: tests/agent/test_delegate.py"]),
+    ]
+    # Nothing filed yet -> the guardrail counter is non-zero, high severity.
+    m = vm._green_gate_metric(records, deflake_filed=set())
+    fd = m["flake_debt"]
+    assert fd["name"] == "flaky_neutralized_without_filed_deflake_task"
+    assert fd["value"] == 1
+    assert fd["severity"] == "high"
+    assert fd["recurring_flakes"] == 1
+    assert fd["recurring_flake_files"] == ["tests/agent/test_delegate.py"]
+
+    # Once the file's key is in the filed set, the counter reaches 0 (AC-2b).
+    key = vm.flaky_file_key("python", "tests/agent/test_delegate.py")
+    m2 = vm._green_gate_metric(records, deflake_filed={key})
+    assert m2["flake_debt"]["value"] == 0
+    assert m2["flake_debt"]["severity"] == "low"
+    # recurring escalation is independent of filing (AC-2c): still surfaced.
+    assert m2["flake_debt"]["recurring_flakes"] == 1
+
+
+def test_deflake_filed_roundtrip(tmp_path):
+    path = tmp_path / "deflake-filed.json"
+    assert vm.read_deflake_filed(path) == set()  # missing -> empty
+    vm.write_deflake_filed({"GATE-DEFLAKE-PYTHON-aaaa", "GATE-DEFLAKE-VITEST-bbbb"}, path)
+    assert vm.read_deflake_filed(path) == {
+        "GATE-DEFLAKE-PYTHON-aaaa", "GATE-DEFLAKE-VITEST-bbbb"
+    }

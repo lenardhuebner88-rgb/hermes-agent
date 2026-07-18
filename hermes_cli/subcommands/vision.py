@@ -189,6 +189,50 @@ def build_vision_parser(subparsers) -> None:
     )
     triage.add_argument("--json", action="store_true", help="Emit JSON output")
 
+    # --- deflake-check (GATE-FLAKY-RETRY-HONESTY-S1) ---
+    deflake = sub.add_parser(
+        "deflake-check",
+        help=(
+            "Open exactly one HELD de-flake PlanSpec per flaky test file "
+            "(fail->pass on the isolated rerun) so no neutralized flake is "
+            "silently swallowed"
+        ),
+        description=(
+            "Accountability guardrail for the neutral (leaker/flaky) half of the "
+            "nightly green-gate: for every distinct test file the isolation rerun "
+            "demoted as a flake (it FAILED in the parallel suite but PASSED alone "
+            "— fail->pass, streak-neutral), ingest a single freigabe:operator "
+            "(HELD) de-flake PlanSpec. Deduped per file (byte-stable lever + a "
+            "persisted filed-key set), so the counter-metric "
+            "flaky_neutralized_without_filed_deflake_task reaches 0 and a flaky "
+            "test is never green-counted forever; files flaky over many nights "
+            "escalate via the recurring-flake counter. Never auto-releases, never "
+            "deploys. Idle when there is no flaky file. Intended to run right "
+            "after triage-check in the nightly heartbeat."
+        ),
+    )
+    deflake.add_argument("--board", default=None, help="Kanban board slug (defaults to current board)")
+    deflake.add_argument(
+        "--recurring-min-nights",
+        type=int,
+        default=strategist.RECURRING_FLAKE_MIN_NIGHTS,
+        help=(
+            "Distinct flaky nights after which a file escalates into the "
+            f"recurring-flake counter (default {strategist.RECURRING_FLAKE_MIN_NIGHTS})"
+        ),
+    )
+    deflake.add_argument(
+        "--out-dir",
+        default=None,
+        help="Directory for the drafted de-flake PlanSpec markdown (default: <hermes-home>/state/strategist/specs)",
+    )
+    deflake.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Detect only; do not write or ingest a PlanSpec",
+    )
+    deflake.add_argument("--json", action="store_true", help="Emit JSON output")
+
     # --- metrics-snapshot ---
     snapshot = sub.add_parser(
         "metrics-snapshot",
@@ -452,6 +496,33 @@ def vision_command(args: argparse.Namespace) -> int:
                 f"triage-check: gate '{result['gate']}' red {result['red_count']} of "
                 f"{result['window']} nights → {verb} Triage-PlanSpec "
                 f"{ingested.get('key')} → root {ingested.get('root_task_id')}"
+            )
+        return 0
+
+    if action == "deflake-check":
+        result = strategist.run_deflake_check(args)
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        if not result.get("triggered"):
+            print(f"deflake-check: idle — {result.get('reason')}")
+            return 0
+        filed = result.get("filed") or []
+        errors = result.get("ingest_errors") or []
+        recurring = result.get("recurring") or []
+        if filed and filed[0].get("dry_run"):
+            print(
+                f"deflake-check (dry-run): would open {len(filed)} HELD de-flake "
+                f"PlanSpec(s) for {len(result['candidates'])} flaky file(s) "
+                f"({len(recurring)} recurring)"
+            )
+        else:
+            newly = sum(1 for f in filed if not f.get("already_ingested"))
+            print(
+                f"deflake-check: {len(result['candidates'])} flaky file(s) → "
+                f"{newly} de-flake task(s) opened, {len(filed) - newly} already held "
+                f"(dedup), {len(recurring)} recurring"
+                + (f", {len(errors)} ingest-blocked" if errors else "")
             )
         return 0
 
