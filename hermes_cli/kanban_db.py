@@ -4214,7 +4214,7 @@ def _reason_for_lane(assignee: Optional[str]) -> str:
     )
 
 
-def _role_misuse_reason(
+def role_misuse_reason(
     *,
     assignee: Optional[str],
     kind: Optional[str],
@@ -4224,9 +4224,10 @@ def _role_misuse_reason(
     if task_kind == "code" and role in _VERDICT_ONLY_BUILD_ROLES:
         allowed = ", ".join(sorted(_CODE_LANE_REASONS))
         return (
-            f"role_misuse: {role!r} is a verdict/research-only lane and "
-            "cannot own kind='code' implementation work; route build/code "
-            f"tasks to one of: {allowed}"
+            f"role_misuse: lane={role!r} cannot own kind='code' implementation "
+            "work because it is verdict/research-only; route build/code "
+            f"tasks to one of: {allowed}; use lane='scout' with a non-code "
+            "kind for read-only reconnaissance"
         )
     return None
 
@@ -4451,7 +4452,7 @@ def _code_contract_issue_for_row(
     source: str,
 ) -> tuple[Optional[str], Optional[dict]]:
     task_id = row["id"]
-    role_misuse = _role_misuse_reason(
+    role_misuse = role_misuse_reason(
         assignee=row["assignee"],
         kind=row["kind"] if "kind" in row.keys() else None,
     )
@@ -4619,7 +4620,7 @@ def create_task(
         body=body,
         kind=kind,
     )
-    role_misuse = _role_misuse_reason(assignee=assignee, kind=kind)
+    role_misuse = role_misuse_reason(assignee=assignee, kind=kind)
     if role_misuse is not None:
         raise ValueError(role_misuse)
     project = None
@@ -23876,16 +23877,19 @@ def _blocked_kind_for_auto_retry(
     SUPERSEDED / capacity prose (even with ``block_kind`` NULL) is never
     retryable — see ``_AUTO_RETRY_SUPERSEDED_RE`` / ``_AUTO_RETRY_CAPACITY_RE``.
     """
+    normalized_verdict = str(verdict or "").strip().upper()
     if explicit_block_kind is not None:
-        if explicit_block_kind == "transient":
+        if (
+            explicit_block_kind == "transient"
+            and normalized_verdict != "REQUEST_CHANGES"
+        ):
             return "retryable"
         # review_revision has its own bounded body-hash retry path below.
         if explicit_block_kind in OPERATOR_ONLY_BLOCK_KINDS:
             return explicit_block_kind
-        if explicit_block_kind != "review_revision":
+        if explicit_block_kind not in {"review_revision", "transient"}:
             return explicit_block_kind
     text = (reason or "").strip()
-    normalized_verdict = str(verdict or "").strip().upper()
     is_review_feedback = (
         explicit_block_kind == "review_revision"
         or normalized_verdict == "REQUEST_CHANGES"

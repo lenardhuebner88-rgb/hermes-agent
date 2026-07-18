@@ -596,9 +596,12 @@ def test_dispatch_auto_retry_leaves_question_blocks_untouched(
         res = kb.dispatch_once(conn, auto_retry_blocked=True, max_spawn=0)
 
         assert res.auto_retried_blocked == []
-        assert kb.get_task(conn, t).status == "blocked"
+        task = kb.get_task(conn, t)
+        assert task is not None
+        assert task.status == "blocked"
+        assert task.block_kind == "needs_input"
         event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
-        assert event.payload["blocked_kind"] == "operator_question"
+        assert event.payload["blocked_kind"] == "needs_input"
 
 
 def test_dispatch_auto_retry_honors_explicit_needs_input_without_reason_keywords(
@@ -731,8 +734,9 @@ def test_dispatch_auto_retry_leaves_secret_and_irreversible_blocks_untouched(
             task = kb.get_task(conn, t)
             assert task is not None
             assert task.status == "blocked"
+            assert task.block_kind == "needs_input"
             event = [e for e in kb.list_events(conn, t) if e.kind == "auto_retry_skipped"][-1]
-            assert event.payload["blocked_kind"] == "operator_question"
+            assert event.payload["blocked_kind"] == "needs_input"
 
 
 def test_dispatch_auto_retry_respects_failure_breaker(

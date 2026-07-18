@@ -317,6 +317,44 @@ def test_plan_validate_shows_target_board(
     assert "board=health-track" in capsys.readouterr().out
 
 
+def test_verdict_only_code_lane_warns_on_validate_and_blocks_ingest(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace(
+            """      title: "Document schema"
+      lane: coder
+      deps: []
+""",
+            """      title: "Recon existing behavior"
+      lane: research
+      kind: code
+      deps: []
+""",
+        ),
+        encoding="utf-8",
+    )
+
+    preview = planspecs.validate_planspec(path, plans_root=plans_root)
+
+    assert preview["disposition"] == "warn"
+    assert preview["would_block"] is True
+    assert len(preview["findings"]) == 1
+    finding = preview["findings"][0]
+    assert "role_misuse" in finding
+    assert "lane='research' cannot own kind='code'" in finding
+    assert "coder, coder-claude, premium" in finding
+    assert "scout" in finding
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert exc.value.findings == [finding]
+    assert _task_count() == 0
+
+
 def test_parse_binding_planspec_maps_reviewer_lane_to_review_kind(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     path = _write_planspec(plans_root)
