@@ -168,11 +168,13 @@ describe("ReceiptsFeed", () => {
     ).toBeNull();
   });
 
-  it("keeps the list visible when error is set but data is still present", () => {
+  it("keeps the list visible AND surfaces the error when stale data is still present", () => {
+    // Der frühere Top-Banner zeigte Refresh-Fehler auch bei vorhandenen Daten —
+    // dieses Signal darf mit dem Umzug in die Sektion nicht verschwinden.
     renderFeed(parseFeed(), { error: true });
     expect(screen.getByText("Ergebnisse")).toBeTruthy();
     expect(screen.getByText("B3 coordination parser drift receipt")).toBeTruthy();
     expect(screen.getByText("Codex")).toBeTruthy();
-    expect(screen.queryByText("Receipts konnten nicht geladen werden.")).toBeNull();
+    expect(screen.getByText("Receipts konnten nicht geladen werden.")).toBeTruthy();
   });
 });

@@ -528,6 +528,17 @@ describe("ProjekteView", () => {
     expect(posFeed).toBeLessThan(posError);
   });
 
+  it("hides the Ergebnisse section during the initial receipts load (no false empty state)", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    // Initialer Load: data null, KEIN Fehler → Sektion noch nicht mounten,
+    // sonst behauptet sie fälschlich "Noch keine Receipts".
+    mockReceipts({ data: null, error: null, loading: true });
+    const html = renderView();
+    expect(html).not.toContain("Noch keine Receipts");
+    expect(html).not.toContain("Receipts konnten nicht geladen werden.");
+  });
+
   it("surfaces the sessions-endpoint error banner without breaking the rest", () => {
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });

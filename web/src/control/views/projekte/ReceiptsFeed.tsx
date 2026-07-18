@@ -86,14 +86,17 @@ export function ReceiptsFeed({ receipts, projectNames, now, error = false }: Rec
         <h3 className="mt-1 font-display text-sec font-semibold text-ink">{t.receiptsTitle}</h3>
       </header>
 
+      {/* Fehler ist IMMER sichtbar, sobald er anliegt — auch wenn noch alte
+          Daten gerendert werden (der frühere Top-Banner trug dieses Signal;
+          seit er inline lebt, darf der Stale-Daten-Fall nicht stumm werden). */}
+      {error ? (
+        <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
+          {t.receiptsError}
+        </div>
+      ) : null}
+
       {receipts.length === 0 ? (
-        error ? (
-          <div className="rounded-card border border-status-warn/30 bg-status-warn/10 px-3 py-2 text-sec text-status-warn">
-            {t.receiptsError}
-          </div>
-        ) : (
-          <p className="text-sec text-ink-3">{t.receiptsEmpty}</p>
-        )
+        error ? null : <p className="text-sec text-ink-3">{t.receiptsEmpty}</p>
       ) : (
         <>
           <ul className="min-w-0 space-y-1">

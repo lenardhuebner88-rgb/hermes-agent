@@ -189,12 +189,17 @@ export function ProjekteView() {
         </div>
       ) : null}
 
-      <ReceiptsFeed
-        receipts={receiptList}
-        projectNames={projectNames}
-        now={now}
-        error={Boolean(receipts.error)}
-      />
+      {/* Sichtbar sobald der erste Fetch beantwortet ist (Daten ODER Fehler) —
+          nie mehr komplett fehlend bei Fehler; während des initialen Ladens
+          aber kein falscher "Noch keine Receipts"-Zustand. */}
+      {receipts.data !== null || receipts.error ? (
+        <ReceiptsFeed
+          receipts={receiptList}
+          projectNames={projectNames}
+          now={now}
+          error={Boolean(receipts.error)}
+        />
+      ) : null}
 
       {sessions.data !== null ? (
         <SessionsSection sessions={sessionList} projectNames={projectNames} now={now} />
