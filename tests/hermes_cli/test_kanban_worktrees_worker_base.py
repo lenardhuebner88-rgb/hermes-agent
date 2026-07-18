@@ -41,6 +41,84 @@ def repo(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _make_resolved_main_merge(repo, task_id):
+    info = kwt.ensure_worktree(repo, task_id)
+    worktree = info["path"]
+
+    (worktree / "a.txt").write_text("chain version\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "chain change before old main")
+
+    (repo / "a.txt").write_text("old main version\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "old main conflicting change")
+    old_main = _git(repo, "rev-parse", "HEAD")
+
+    # The chain deliberately resolves the old-main collision and records that
+    # resolution in a merge commit, matching the live t_ad03d43e topology.
+    subprocess.run(
+        ["git", "-C", str(worktree), "merge", "main"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    (worktree / "a.txt").write_text("reviewed merge resolution\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "merge old main with resolution")
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    assert _git(worktree, "rev-parse", "HEAD^2") == old_main
+    return worktree, recorded_head
+
+
+def test_prepare_worker_base_preserves_prior_main_merge_resolution(repo):
+    """A resolved merge from the prior main tip must not be flattened away.
+
+    Replaying the chain's older feature commit onto the moved main conflicts;
+    merging the new main tip instead preserves that already-reviewed resolution.
+    """
+    worktree, recorded_head = _make_resolved_main_merge(repo, "t_resolved_merge")
+
+    # Main subsequently moves only by an unrelated commit.
+    (repo / "unrelated.txt").write_text("new main work\n")
+    _git(repo, "add", "unrelated.txt")
+    _git(repo, "commit", "-m", "move main independently")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_resolved_merge",
+    )
+
+    assert result["action"] == "merged"
+    assert (worktree / "a.txt").read_text() == "reviewed merge resolution\n"
+    assert (worktree / "unrelated.txt").read_text() == "new main work\n"
+    assert kwt.dirty_files(worktree) == []
+    assert _git(worktree, "merge-base", "--is-ancestor", "main", "HEAD") == ""
+
+
+def test_prepare_worker_base_routes_new_conflict_after_merge_fallback(repo):
+    worktree, recorded_head = _make_resolved_main_merge(repo, "t_new_conflict")
+
+    # This is a genuinely new collision after the recorded resolution, so the
+    # merge fallback must fail closed and retain the conflict-fixer marker.
+    (repo / "a.txt").write_text("new main collision\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "new main conflicting change")
+
+    with pytest.raises(kwt.WorktreeError, match="could not rebase onto main"):
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            task_id="t_new_conflict",
+        )
+
+    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
+    assert (worktree / "a.txt").read_text() == "reviewed merge resolution\n"
+    assert kwt.dirty_files(worktree) == []
+
+
 def test_prepare_worker_base_adopts_wip_when_evidence_given(repo):
     """(a) dirty non-artifact worktree + adoption evidence -> the dirt is
     committed on the chain branch under a deterministic message, the

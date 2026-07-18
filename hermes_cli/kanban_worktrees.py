@@ -661,6 +661,39 @@ def _branch_is_ancestor(repo: Path, branch: str, target: str) -> bool:
         return False
 
 
+def _failed_rebase_commit_precedes_target_merge(
+    repo: Path, branch_head: str, target_head: str, failed_commit: str
+) -> bool:
+    """Whether a failed replay was already reconciled by merging old target.
+
+    A normal rebase drops merge commits.  If the branch previously merged the
+    old target tip and resolved a collision there, replaying an older first-
+    parent commit can therefore recreate a conflict whose resolution the rebase
+    discarded.  Restrict the fallback to that exact topology: the current
+    merge-base must reach a non-first parent of a branch-side merge, while the
+    failed commit must precede that merge on its first-parent side.
+    """
+    merge_base = _git(repo, "merge-base", branch_head, target_head)
+    merges = _git(
+        repo, "rev-list", "--merges", "--parents", f"{merge_base}..{branch_head}"
+    ).splitlines()
+    for line in merges:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        first_parent = parts[1]
+        # ``git merge <target>`` records the then-target tip directly as a
+        # non-first parent.  Requiring that exact parent avoids treating an
+        # unrelated feature merge merely based on the same main history as a
+        # previously resolved target merge.
+        merged_old_target = merge_base in parts[2:]
+        if merged_old_target and _branch_is_ancestor(
+            repo, failed_commit, first_parent
+        ):
+            return True
+    return False
+
+
 def _first_parent_merges_reaching_branch(
     repo: Path, branch: str, target: str
 ) -> list[str]:
@@ -997,6 +1030,9 @@ def prepare_worker_base(
     edit.  Dirty state or an unexpected HEAD is never rewritten.  A clean
     branch whose target advanced is rebased, with an automatic abort on
     conflict so the dispatcher can block with the original worktree intact.
+    When that conflict replays a commit which an earlier merge of the old target
+    already reconciled, the target is merged instead so the recorded resolution
+    survives; an actual new merge conflict still follows the normal blocker path.
 
     When ``task_id`` is provided, known artifact-only dirt (scratch, receipts,
     screenshots, archived artifact dirs) is preserved to the receipts area and
@@ -1085,17 +1121,34 @@ def prepare_worker_base(
     try:
         _git(wt, "rebase", target)
     except WorktreeError as exc:
+        failed_commit = _git(wt, "rev-parse", "REBASE_HEAD", check=False)
+        merge_fallback = bool(failed_commit) and _failed_rebase_commit_precedes_target_merge(
+            wt, actual_head, target_head, failed_commit
+        )
         _git(wt, "rebase", "--abort", check=False)
-        raise WorktreeError(
-            f"clean stale worktree could not rebase onto {target}: {exc}"
-        ) from exc
+        if merge_fallback:
+            try:
+                _git(wt, "merge", "--no-edit", target)
+            except WorktreeError as merge_exc:
+                _git(wt, "merge", "--abort", check=False)
+                raise WorktreeError(
+                    f"clean stale worktree could not rebase onto {target}: {exc}; "
+                    f"merge fallback also failed: {merge_exc}"
+                ) from merge_exc
+            action = "merged"
+        else:
+            raise WorktreeError(
+                f"clean stale worktree could not rebase onto {target}: {exc}"
+            ) from exc
+    else:
+        action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
     if dirty_files(wt):
         raise WorktreeError(
             "worktree became dirty while preparing the worker base"
         )
     result = {
-        "action": "rebased",
+        "action": action,
         "previous_head": actual_head,
         "head": new_head,
         "merge_target": target,
