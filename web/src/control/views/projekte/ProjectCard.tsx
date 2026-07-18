@@ -66,7 +66,7 @@ function KanbanChipLink({
         event.stopPropagation();
       }}
       className={cn(
-        "inline-flex min-h-7 min-w-7 items-center rounded-card px-1 -mx-0.5",
+        "inline-flex min-h-11 min-w-11 items-center rounded-card px-1 -mx-0.5 tab:min-h-7 tab:min-w-7",
         "text-ink-2 underline-offset-2 hover:text-ink hover:underline",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bronze",
         className,

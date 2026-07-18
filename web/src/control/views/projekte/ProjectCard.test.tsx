@@ -215,5 +215,21 @@ describe("ProjectCard attention badge + reason chips (2.3 Ampel)", () => {
     // Reason chip is separate text ("2 blocked"), not a replacement for the fleet chip.
     expect(screen.getByText("2 blocked")).toBeTruthy();
   });
+
+  it("gives KanbanChipLink ≥44px mobile hit area, compact from tab", () => {
+    const project = {
+      ...PROJECT,
+      kanban_project: "health-track",
+      kanban: KANBAN_COUNTS,
+    } as ProjectEntry & { kanban_project: string };
+
+    renderCard({ project, agents: [] });
+
+    // House idiom: min-h-11 (44px) below tab; tab:min-h-7 restores prior density.
+    const open = screen.getByRole("link", { name: /Offen 3/ });
+    const cls = open.getAttribute("class") ?? "";
+    expect(cls).toContain("min-h-11");
+    expect(cls).toContain("tab:min-h-7");
+  });
 });
 
