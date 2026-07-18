@@ -351,6 +351,73 @@ def test_dispatch_adopts_wip_left_by_own_blocked_run(
     assert commit_msg == f"wip({tid}): adopt uncommitted WIP from blocked run {run1_id}"
 
 
+def test_dispatch_wip_adoption_skips_untracked_files_outside_task_scope(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="scoped adoption",
+            body="- AC: preserve unrelated untracked files\n",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            scope_contract={"allowed_paths": ["README.md", "src/task.py"]},
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+        run1_id = kb.get_task(conn, tid).current_run_id
+        assert run1_id is not None
+
+        (expected / "docs").mkdir()
+        (expected / "docs" / "existing.md").write_text("branch edit\n", encoding="utf-8")
+        _git(expected, "add", "docs/existing.md")
+        _git(expected, "commit", "-m", "task branch edit")
+        (expected / "README.md").write_text("tracked task edit\n", encoding="utf-8")
+        (expected / "src").mkdir()
+        (expected / "src" / "task.py").write_text("task edit\n", encoding="utf-8")
+        (expected / "docs" / "new.md").write_text("same touched directory\n", encoding="utf-8")
+        foreign = expected / ".claude" / "skills" / "foreign" / "SKILL.md"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("repo-foreign\n", encoding="utf-8")
+        assert kb.block_task(conn, tid, reason="operator decision")
+        assert kb.unblock_task(conn, tid)
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert foreign.read_text(encoding="utf-8") == "repo-foreign\n"
+    assert kwt.dirty_files(expected) == [".claude/skills/foreign/SKILL.md"]
+    committed = _git(expected, "show", "--name-only", "--format=", "HEAD").splitlines()
+    assert committed == ["README.md", "docs/new.md", "src/task.py"]
+    adopted = [json.loads(e["payload"]) for e in events if e["kind"] == "wip_adopted"]
+    assert adopted[-1]["files"] == ["README.md", "docs/new.md", "src/task.py"]
+    assert adopted[-1]["skipped_files"] == [".claude/skills/foreign/SKILL.md"]
+    assert "Skipped untracked files:\n- .claude/skills/foreign/SKILL.md" in _git(
+        expected, "log", "-1", "--format=%B"
+    )
+
+
+def test_task_scope_paths_falls_back_to_scope_files_body_section():
+    assert getattr(kwt, "_task_scope_paths")(
+        "Scope files (allowed edit paths):\nREADME.md\nsrc/task.py\n\n- AC-1: done\n"
+    ) == ["README.md", "src/task.py"]
+
+
 def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):

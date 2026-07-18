@@ -913,7 +913,99 @@ def _preserve_artifact_files(worktree: Path, task_id: str, paths: Sequence[str])
     return {"destination": str(dest), "file_count": len(copied), "paths": dirty_paths}
 
 
-def _adopt_wip_commit(worktree: Path, task_id: str, run_id: int, dirty_paths: Sequence[str]) -> list[str]:
+def _task_scope_paths(
+    body: str | None,
+    scope_contract: dict[str, object] | None = None,
+) -> list[str] | None:
+    """Extract declared edit paths from the task body's scope section."""
+    if scope_contract is not None:
+        raw_paths = scope_contract.get("allowed_paths")
+        if not isinstance(raw_paths, list):
+            return []
+        normalized_paths = []
+        for path in raw_paths:
+            if not isinstance(path, str):
+                continue
+            normalized = _normalize_dirty_path(path).rstrip("/")
+            if normalized and ".." not in Path(normalized).parts:
+                normalized_paths.append(normalized)
+        return list(dict.fromkeys(normalized_paths))
+
+    paths: list[str] = []
+    collecting = False
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if re.match(r"^(?:[-*]\s*)?scope files \(allowed edit paths\):$", stripped, re.I):
+            collecting = True
+            continue
+        if collecting and not stripped:
+            if paths:
+                break
+            continue
+        if not collecting:
+            continue
+        candidate = re.sub(r"^[-*]\s+", "", stripped).strip("` ")
+        if not candidate or candidate.startswith("#") or candidate.lower().startswith("ac-"):
+            break
+        normalized = _normalize_dirty_path(candidate)
+        if normalized and ".." not in Path(normalized).parts:
+            paths.append(normalized.rstrip("/"))
+    return list(dict.fromkeys(paths)) if collecting else None
+
+
+def _path_is_under(path: str, roots: Sequence[str]) -> bool:
+    normalized = _normalize_dirty_path(path)
+    return any(normalized == root or normalized.startswith(f"{root}/") for root in roots)
+
+
+def _select_wip_paths(
+    worktree: Path,
+    dirty_paths: Sequence[str],
+    *,
+    scope_paths: Sequence[str] | None,
+    merge_target: str,
+) -> tuple[list[str], list[str]]:
+    """Select tracked dirt plus task-related untracked paths for adoption."""
+    if scope_paths is None:
+        return list(dirty_paths), []
+
+    untracked_out = _git(
+        worktree, "ls-files", "--others", "--exclude-standard", "-z", strip=False
+    )
+    untracked = {path for path in untracked_out.split("\0") if path}
+    branch_paths = _git(worktree, "diff", "--name-only", f"{merge_target}...HEAD").splitlines()
+    touched_dirs = sorted(
+        {
+            Path(path).parent.as_posix()
+            for path in branch_paths
+            if Path(path).parent.as_posix() not in {"", "."}
+        }
+    )
+    normalized_scope = [
+        normalized.rstrip("/")
+        for path in scope_paths
+        if (normalized := _normalize_dirty_path(path))
+        and ".." not in Path(normalized).parts
+    ]
+    adopted: list[str] = []
+    skipped: list[str] = []
+    for path in dirty_paths:
+        if path not in untracked or _path_is_under(path, normalized_scope + touched_dirs):
+            adopted.append(path)
+        else:
+            skipped.append(path)
+    return adopted, skipped
+
+
+def _adopt_wip_commit(
+    worktree: Path,
+    task_id: str,
+    run_id: int,
+    dirty_paths: Sequence[str],
+    *,
+    scope_paths: Sequence[str] | None = None,
+    merge_target: str = "HEAD",
+) -> tuple[list[str], list[str]]:
     """Commit *dirty_paths* on the chain branch as adopted WIP from a blocked
     predecessor run, instead of parking the chain.
 
@@ -921,18 +1013,29 @@ def _adopt_wip_commit(worktree: Path, task_id: str, run_id: int, dirty_paths: Se
     unambiguously attributable to the guard rather than to whichever human
     or worker identity happened to be configured in the worktree.
     """
-    _git(worktree, "add", "-A")
-    _git(
+    adopted, skipped = _select_wip_paths(
         worktree,
-        "-c",
-        "user.name=Hermes Worker Base",
-        "-c",
-        "user.email=worker-base@hermes.local",
-        "commit",
-        "-m",
-        f"wip({task_id}): adopt uncommitted WIP from blocked run {run_id}",
+        dirty_paths,
+        scope_paths=scope_paths,
+        merge_target=merge_target,
     )
-    return list(dirty_paths)
+    if adopted:
+        _git(worktree, "add", "-A", "--", *adopted)
+        commit_args = [
+            "-c",
+            "user.name=Hermes Worker Base",
+            "-c",
+            "user.email=worker-base@hermes.local",
+            "commit",
+            "-m",
+            f"wip({task_id}): adopt uncommitted WIP from blocked run {run_id}",
+        ]
+        if skipped:
+            commit_args.extend(
+                ["-m", "Skipped untracked files:\n" + "\n".join(f"- {path}" for path in skipped)]
+            )
+        _git(worktree, *commit_args)
+    return adopted, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -1021,6 +1124,7 @@ def prepare_worker_base(
     merge_target: str,
     task_id: str | None = None,
     adopt_wip_run_id: int | None = None,
+    adopt_wip_scope_paths: Sequence[str] | None = None,
     skip_stale_rebase: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on reused-worktree drift, then update a clean stale base.
@@ -1059,8 +1163,12 @@ def prepare_worker_base(
             "worktree HEAD does not match recorded pre-run HEAD "
             f"(recorded={recorded or 'missing'}, actual={actual_head})"
         )
+    target = str(merge_target or "").strip()
+    if not target:
+        raise WorktreeError("worktree merge target is missing")
     dirty = dirty_files(wt)
     adopted_wip_files: list[str] | None = None
+    skipped_wip_files: list[str] = []
     if dirty:
         if task_id is None:
             raise WorktreeError(
@@ -1077,7 +1185,14 @@ def prepare_worker_base(
                     "worktree is dirty before worker edits; refusing automatic "
                     f"base update ({', '.join(dirty[:8])})"
                 )
-            adopted_wip_files = _adopt_wip_commit(wt, task_id, adopt_wip_run_id, dirty)
+            adopted_wip_files, skipped_wip_files = _adopt_wip_commit(
+                wt,
+                task_id,
+                adopt_wip_run_id,
+                dirty,
+                scope_paths=adopt_wip_scope_paths,
+                merge_target=target,
+            )
         else:
             receipt = _preserve_artifact_files(wt, task_id, artifact_paths)
             remaining = dirty_files(wt)
@@ -1087,14 +1202,16 @@ def prepare_worker_base(
                         "worktree is dirty before worker edits; refusing "
                         f"automatic base update ({', '.join(remaining[:8])})"
                     )
-                adopted_wip_files = _adopt_wip_commit(
-                    wt, task_id, adopt_wip_run_id, remaining
+                adopted_wip_files, skipped_wip_files = _adopt_wip_commit(
+                    wt,
+                    task_id,
+                    adopt_wip_run_id,
+                    remaining,
+                    scope_paths=adopt_wip_scope_paths,
+                    merge_target=target,
                 )
     if adopted_wip_files is not None:
         actual_head = _git(wt, "rev-parse", "HEAD")
-    target = str(merge_target or "").strip()
-    if not target:
-        raise WorktreeError("worktree merge target is missing")
     target_head = _git(wt, "rev-parse", target)
     if actual_head == target_head or _branch_is_ancestor(wt, target_head, actual_head):
         result: dict[str, Any] = {
@@ -1106,6 +1223,7 @@ def prepare_worker_base(
         }
         if adopted_wip_files is not None:
             result["adopted_wip_files"] = adopted_wip_files
+            result["skipped_wip_files"] = skipped_wip_files
         return result
     if skip_stale_rebase:
         result = {
@@ -1117,6 +1235,7 @@ def prepare_worker_base(
         }
         if adopted_wip_files is not None:
             result["adopted_wip_files"] = adopted_wip_files
+            result["skipped_wip_files"] = skipped_wip_files
         return result
     try:
         _git(wt, "rebase", target)
@@ -1143,9 +1262,12 @@ def prepare_worker_base(
     else:
         action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
-    if dirty_files(wt):
+    post_dirty = dirty_files(wt)
+    unexpected_dirty = [path for path in post_dirty if path not in skipped_wip_files]
+    if unexpected_dirty:
         raise WorktreeError(
-            "worktree became dirty while preparing the worker base"
+            "worktree became dirty while preparing the worker base "
+            f"({', '.join(unexpected_dirty[:8])})"
         )
     result = {
         "action": action,
@@ -1156,6 +1278,7 @@ def prepare_worker_base(
     }
     if adopted_wip_files is not None:
         result["adopted_wip_files"] = adopted_wip_files
+        result["skipped_wip_files"] = skipped_wip_files
     return result
 
 
@@ -1258,6 +1381,7 @@ def prepare_reused_task_worktree(
         merge_target=merge_target,
         task_id=task.id,
         adopt_wip_run_id=adopt_wip_run_id,
+        adopt_wip_scope_paths=_task_scope_paths(task.body, task.scope_contract),
         skip_stale_rebase=_is_conflict_fixer_task(conn, task.id),
     )
     from hermes_cli import kanban_db as kb
@@ -1280,7 +1404,11 @@ def prepare_reused_task_worktree(
                 conn,
                 task.id,
                 "wip_adopted",
-                {"run_id": adopt_wip_run_id, "files": adopted_wip_files},
+                {
+                    "run_id": adopt_wip_run_id,
+                    "files": adopted_wip_files,
+                    "skipped_files": result.get("skipped_wip_files") or [],
+                },
                 run_id=run_id,
             )
     return result
