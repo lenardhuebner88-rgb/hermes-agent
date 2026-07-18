@@ -131,12 +131,10 @@ def _build_context(event: dict[str, Any], *, kanban_db_path: Path | None = None)
             "acceptance_criteria": owner.get("task_acceptance_criteria"),
         }
 
-    receipt_payload = projects_overview.build_receipts_payload(registry)
-    receipts = [
-        receipt
-        for receipt in receipt_payload.get("receipts", [])
-        if project is not None and receipt.get("project") == project
-    ][:3]
+    receipt_payload = projects_overview.build_receipts_payload(
+        registry, project=str(project) if project is not None else None, limit=3
+    )
+    receipts = receipt_payload.get("receipts", []) if project is not None else []
     options = event.get("options")
     return _bounded_context(
         question_text=str(event.get("question_text") or ""),

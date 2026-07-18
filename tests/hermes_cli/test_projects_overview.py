@@ -3080,6 +3080,38 @@ def test_receipts_mtime_order_and_cap_skips_non_markdown(tmp_path: Path) -> None
     assert payload["receipts"][-1]["filename"] == "receipt-05.md"
 
 
+def test_receipts_project_filter_applies_before_limit(tmp_path: Path) -> None:
+    root = tmp_path / "Agents"
+    for index in range(35):
+        path = _receipt(root, "Other", f"newer-{index:02d}.md", "# Unrelated\n")
+        os.utime(path, (1_800_000_000 + index, 1_800_000_000 + index))
+    for index in range(4):
+        path = _receipt(
+            root,
+            "Codex",
+            f"project-{index:02d}.md",
+            f"# Project receipt {index}\n\nScope: /srv/repos/project\n",
+        )
+        os.utime(path, (1_700_000_000 + index, 1_700_000_000 + index))
+
+    registry = ProjectsRegistry(
+        projects=[_entry(slug="project", repo_path="/srv/repos/project")], errors=[]
+    )
+    payload = build_receipts_payload(
+        registry,
+        receipts_root=root,
+        project="project",
+        limit=3,
+        now=1_900_000_000,
+    )
+
+    assert [row["filename"] for row in payload["receipts"]] == [
+        "project-03.md",
+        "project-02.md",
+        "project-01.md",
+    ]
+
+
 def test_receipt_content_route_rejects_traversal_and_unknowns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1974,10 +1974,13 @@ def build_receipts_payload(
     *,
     receipts_root: Path | None = None,
     now: int | float | None = None,
+    project: str | None = None,
+    limit: int = _RECEIPTS_LIMIT,
 ) -> dict[str, Any]:
-    """Scan the newest Markdown receipts across every agent directory."""
+    """Scan newest receipts, optionally filtering by project before limiting."""
     root = receipts_root if receipts_root is not None else _RECEIPTS_ROOT
     resolved_now = now if now is not None else time.time()
+    resolved_limit = max(1, int(limit))
     candidates: list[tuple[float, str, Path]] = []
 
     try:
@@ -2002,15 +2005,17 @@ def build_receipts_payload(
 
     candidates.sort(key=lambda item: item[0], reverse=True)
     receipts: list[dict[str, Any]] = []
-    for mtime, agent, path in candidates[:_RECEIPTS_LIMIT]:
+    for mtime, agent, path in candidates:
         fallback_title = path.stem
         try:
             with path.open("rb") as handle:
                 head = handle.read(_RECEIPTS_HEAD_BYTES).decode("utf-8", errors="replace")
             title, excerpt = _receipt_title_and_excerpt(head, fallback_title)
-            project = _attribute_receipt_project(head, registry)
+            project_slug = _attribute_receipt_project(head, registry)
         except OSError:
-            title, excerpt, project = fallback_title, None, None
+            title, excerpt, project_slug = fallback_title, None, None
+        if project is not None and project != project_slug:
+            continue
         receipts.append(
             {
                 "agent": agent,
@@ -2018,10 +2023,12 @@ def build_receipts_payload(
                 "title": title,
                 "mtime": datetime.fromtimestamp(mtime, timezone.utc).isoformat(),
                 "age_seconds": max(0, int(resolved_now - mtime)),
-                "project": project,
+                "project": project_slug,
                 "excerpt": excerpt,
             }
         )
+        if len(receipts) >= resolved_limit:
+            break
 
     return {"generated_at": int(resolved_now), "receipts": receipts}
 
