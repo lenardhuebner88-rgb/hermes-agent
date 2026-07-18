@@ -191,6 +191,49 @@ class TestShouldExclude:
 # Backup tests
 # ---------------------------------------------------------------------------
 
+class TestPruneBackupsByPrefix:
+    def test_default_suffix_only_prunes_zip_files(self, tmp_path):
+        from hermes_cli.backup import _prune_backups_by_prefix
+
+        for stamp in ("01", "02", "03"):
+            (tmp_path / f"pre-update-{stamp}.zip").write_bytes(b"zip")
+        foreign = tmp_path / "pre-update-00.db"
+        foreign.write_bytes(b"db")
+
+        deleted = _prune_backups_by_prefix(tmp_path, "pre-update-", keep=2)
+
+        assert deleted == 1
+        assert sorted(path.name for path in tmp_path.glob("pre-update-*.zip")) == [
+            "pre-update-02.zip",
+            "pre-update-03.zip",
+        ]
+        assert foreign.exists()
+
+    def test_custom_suffix_prunes_only_matching_backup_family(self, tmp_path):
+        from hermes_cli.backup import _prune_backups_by_prefix
+
+        sweeps = []
+        for stamp in ("01", "02", "03"):
+            path = tmp_path / f"state.db.{stamp}.before-stale-sweep.db"
+            path.write_bytes(b"sweep")
+            sweeps.append(path)
+        foreign = tmp_path / "state.db.00.before-label-backfill.db"
+        foreign.write_bytes(b"foreign")
+
+        deleted = _prune_backups_by_prefix(
+            tmp_path,
+            "state.db.",
+            keep=2,
+            suffix=".before-stale-sweep.db",
+        )
+
+        assert deleted == 1
+        assert not sweeps[0].exists()
+        assert sweeps[1].exists()
+        assert sweeps[2].exists()
+        assert foreign.exists()
+
+
 class TestBackup:
     def test_creates_zip(self, tmp_path, monkeypatch):
         """Backup creates a valid zip containing expected files."""

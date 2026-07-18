@@ -303,19 +303,27 @@ def _verify_zip_integrity(path: Path) -> Optional[str]:
     return None
 
 
-def _prune_backups_by_prefix(directory: Path, prefix: str, keep: int) -> int:
-    """Remove oldest ``<prefix>*.zip`` files in *directory* beyond *keep*.
+def _prune_backups_by_prefix(
+    directory: Path,
+    prefix: str,
+    keep: int,
+    suffix: str = ".zip",
+) -> int:
+    """Remove oldest ``<prefix>*<suffix>`` files beyond *keep*.
 
     Only touches files matching the given prefix so unrelated files (or
-    other backup families) in the same directory are never affected. A
-    ``keep`` of 0 or less disables pruning entirely.
+    other backup families) in the same directory are never affected. The
+    default suffix preserves the existing zip-backup behavior. A ``keep`` of
+    0 or less disables pruning entirely.
     """
     if keep <= 0 or not directory.exists():
         return 0
 
     backups = sorted(
         (p for p in directory.iterdir()
-         if p.is_file() and p.name.startswith(prefix) and p.suffix.lower() == ".zip"),
+         if p.is_file()
+         and p.name.startswith(prefix)
+         and p.name.lower().endswith(suffix.lower())),
         key=lambda p: p.name,
         reverse=True,
     )

@@ -264,3 +264,80 @@ class TestReapStaleSessionsScript:
 
         backups = list((tmp_path / "backups").glob("state.db.*.before-stale-sweep.db"))
         assert len(backups) == 1
+
+    def test_apply_with_no_candidates_creates_no_backup(self, tmp_path):
+        state_db = tmp_path / "state.db"
+        session_db = SessionDB(db_path=state_db)
+        try:
+            _seed_three(session_db)
+        finally:
+            session_db.close()
+
+        script = Path(__file__).resolve().parent.parent / "scripts" / "reap_stale_sessions.py"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--state-db",
+                str(state_db),
+                "--days",
+                "1000",
+                "--apply",
+                "--now",
+                str(_NOW),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert "reaped 0 sessions (applied)" in proc.stdout
+        assert "backup:" not in proc.stdout
+        assert not (tmp_path / "backups").exists()
+
+    def test_apply_rotates_stale_sweep_backups_and_preserves_foreign_family(
+        self, tmp_path
+    ):
+        state_db = tmp_path / "state.db"
+        session_db = SessionDB(db_path=state_db)
+        try:
+            _seed_three(session_db)
+        finally:
+            session_db.close()
+
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        old_sweeps = [
+            backup_dir / f"state.db.2020010{day}T000000Z.before-stale-sweep.db"
+            for day in range(1, 4)
+        ]
+        for backup in old_sweeps:
+            backup.write_bytes(b"old sweep")
+        foreign = backup_dir / "state.db.20200104T000000Z.before-label-backfill.db"
+        foreign.write_bytes(b"foreign backup")
+
+        script = Path(__file__).resolve().parent.parent / "scripts" / "reap_stale_sessions.py"
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--state-db",
+                str(state_db),
+                "--days",
+                "7",
+                "--apply",
+                "--now",
+                str(_NOW),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        remaining = sorted(backup_dir.glob("state.db.*.before-stale-sweep.db"))
+        assert len(remaining) == 2
+        assert old_sweeps[0] not in remaining
+        assert old_sweeps[1] not in remaining
+        assert foreign.exists()

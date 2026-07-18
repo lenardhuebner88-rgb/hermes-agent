@@ -24,6 +24,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from hermes_constants import get_hermes_home  # noqa: E402
+from hermes_cli.backup import _prune_backups_by_prefix  # noqa: E402
 from hermes_state import SessionDB  # noqa: E402
 
 DEFAULT_DAYS = 7
@@ -144,26 +145,41 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     older_than_seconds = int(args.days * 86400)
-    dry_run = not args.apply
     wall = args.now if args.now is not None else time.time()
-
-    if args.apply:
-        hermes_home = state_db.parent
-        backup_dst = _backup_path(hermes_home)
-        if not _safe_copy_db(state_db, backup_dst):
-            print("Backup failed — aborting apply (no writes).", file=sys.stderr)
-            return 1
-        print(f"backup: {backup_dst}")
 
     db = SessionDB(db_path=state_db)
     try:
         candidates = db.close_stale_sessions(
             older_than_seconds=older_than_seconds,
             now=wall,
-            dry_run=dry_run,
+            dry_run=True,
         )
     finally:
         db.close()
+
+    if args.apply and candidates:
+        hermes_home = state_db.parent
+        backup_dst = _backup_path(hermes_home)
+        if not _safe_copy_db(state_db, backup_dst):
+            print("Backup failed — aborting apply (no writes).", file=sys.stderr)
+            return 1
+        print(f"backup: {backup_dst}")
+        _prune_backups_by_prefix(
+            backup_dst.parent,
+            prefix="state.db.",
+            keep=2,
+            suffix=".before-stale-sweep.db",
+        )
+
+        db = SessionDB(db_path=state_db)
+        try:
+            candidates = db.close_stale_sessions(
+                older_than_seconds=older_than_seconds,
+                now=wall,
+                dry_run=False,
+            )
+        finally:
+            db.close()
 
     for cand in candidates:
         age = cand["age_days"]
@@ -172,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{age:.1f}d"
         )
 
-    mode = "dry-run" if dry_run else "applied"
+    mode = "applied" if args.apply else "dry-run"
     n = len(candidates)
     print(f"reaped {n} sessions ({mode})")
 
