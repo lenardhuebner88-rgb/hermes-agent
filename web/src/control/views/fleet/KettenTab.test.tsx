@@ -28,10 +28,10 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(src).not.toContain("latest_run?.profile ?? null");
   });
 
-  it("renders model-row with GGFM Override badge when override is present", () => {
-    expect(src).toMatch(/model-row/);
-    expect(src).toMatch(/model-override-badge/);
-    expect(src).toContain("GGFM Override");
+  it("keeps model and override telemetry out of the compact active-step reference", () => {
+    expect(src).not.toMatch(/model-row/);
+    expect(src).not.toMatch(/model-override-badge/);
+    expect(src).not.toContain("GGFM Override");
   });
 
   it("uses CSS design tokens (no raw hex)", () => {
@@ -49,7 +49,7 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(fleetPremiumRule).toMatch(/box-shadow:[^;]*var\(--color-surface-1\)[^;]*var\(--color-lane-prem\)/);
     expect(kettenPremiumRule).toContain("var(--color-lane-prem)");
     expect(kettenPremiumRule).toMatch(/box-shadow:[^;]*var\(--color-surface-1\)[^;]*var\(--color-lane-prem\)/);
-    expect(src).toContain("premiumLaneMarker(focusNode.assignee)");
+    expect(src).not.toContain("premiumLaneMarker(focusNode.assignee)");
     expect(src).toContain("premiumLaneMarker(n.assignee)");
   });
 
@@ -62,9 +62,9 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(src).toMatch(/SECTION 6.*Done.*Gate/);
   });
 
-  it("shows heartbeat LED only for running nodes", () => {
-    expect(src).toMatch(/focusNode\.status === "running" && focusHbAge/);
-    expect(src).toContain("led-dot");
+  it("keeps heartbeat telemetry out of the active-step reference", () => {
+    expect(src).not.toContain("focusHbAge");
+    expect(src).not.toContain("led-dot");
   });
 
   it("shows inline model for upcoming steps", () => {
@@ -74,9 +74,10 @@ describe("KettenTab v4 — redesign checks", () => {
   });
 
   it("labels active-step values and gives the horizontal pipeline a fade affordance", () => {
-    expect(src).toContain('<span className="metric-label">Laufzeit</span>');
-    expect(src).toContain('<span className="metric-label">Tokens</span>');
+    expect(src).toContain('<span className="metric-label">Fortschritt</span>');
     expect(src).toContain('<span className="metric-label">ETA</span>');
+    expect(src).not.toContain('<span className="metric-label">Laufzeit</span>');
+    expect(src).not.toContain('<span className="metric-label">Tokens</span>');
     expect(kettenCss).toMatch(/\.ketten-v4 \.pipe-scroll\s*\{[^}]*mask-image:\s*linear-gradient/s);
   });
 
@@ -315,6 +316,29 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(chainTitle.getAttribute("aria-expanded")).toBe("true");
     const focusTitle = await screen.findByText("Slice B — running", { selector: ".detail-title" });
     expect(focusTitle.getAttribute("title")).toBe("Slice B — running");
+  });
+
+  it("keeps the active step compact and delegates full detail to the drawer", async () => {
+    const onOpenNodeDetail = vi.fn();
+    const { container } = render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={onOpenNodeDetail} />,
+    );
+
+    await screen.findByText("Slice B — running", { selector: ".detail-title" });
+    const detail = container.querySelector(".detail") as HTMLElement;
+    expect(detail).toBeTruthy();
+    expect(within(detail).getByText("coder")).toBeTruthy();
+    expect(within(detail).getByText("Slice B — running")).toBeTruthy();
+    expect(within(detail).getByText("Fortschritt")).toBeTruthy();
+    expect(within(detail).getByText("40 %")).toBeTruthy();
+    expect(within(detail).getByText("ETA")).toBeTruthy();
+    expect(within(detail).getByText("—")).toBeTruthy();
+    expect(within(detail).queryByText("Laufzeit")).toBeNull();
+    expect(within(detail).queryByText("Tokens")).toBeNull();
+    expect(detail.querySelector(".model-row")).toBeNull();
+
+    fireEvent.click(detail);
+    expect(onOpenNodeDetail).toHaveBeenCalledWith(ACTIVE_ID, expect.any(Array));
   });
 
   it("adds the selected board to every chain graph and chain costs request", async () => {

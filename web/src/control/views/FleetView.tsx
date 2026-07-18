@@ -432,7 +432,6 @@ export function FleetView() {
                     setDrawerWorker(w);
                     setSubtab("worker");
                   }}
-                  onPlanSpecClick={openPlanSpecDetail}
                   onNavigate={setSubtab}
                 />
               </>

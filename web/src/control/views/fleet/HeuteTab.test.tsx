@@ -178,7 +178,6 @@ function renderHeute({
       now={100}
       pendingItems={pendingItems}
       onWorkerClick={onWorkerClick}
-      onPlanSpecClick={() => undefined}
       onNavigate={onNavigate}
     />,
   );
@@ -361,7 +360,7 @@ describe("HeuteTab PlanSpec relevance ordering", () => {
   }
 
   function renderedPlanTopics(container: HTMLElement): string[] {
-    return Array.from(container.querySelectorAll(".fleet-ps-name")).map((el) => el.textContent ?? "");
+    return Array.from(container.querySelectorAll(".fleet-ps-topic")).map((el) => el.textContent ?? "");
   }
 
   it("renders operator-waiting and running plans ahead of merely-open ones", () => {
@@ -379,6 +378,20 @@ describe("HeuteTab PlanSpec relevance ordering", () => {
 
     const { container } = renderHeute({ plans: [a, b] });
     expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta"]);
+  });
+
+  it("limits planning to three compact references that jump to the Plan tab", () => {
+    const onNavigate = vi.fn();
+    const plans = ["Alpha", "Beta", "Gamma", "Delta"].map((topic) => spec(topic, { open: true }));
+
+    const { container } = renderHeute({ plans, onNavigate });
+
+    expect(renderedPlanTopics(container)).toEqual(["Alpha", "Beta", "Gamma"]);
+    expect(container.querySelectorAll(".fleet-ps-ref")).toHaveLength(3);
+    expect(container.querySelector(".fleet-ps-meta")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /PlanSpec Alpha im Plan-Tab öffnen/ }));
+    expect(onNavigate).toHaveBeenCalledWith("plan");
   });
 });
 
@@ -400,7 +413,6 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
         now={100}
         pendingItems={[]}
         onWorkerClick={() => undefined}
-        onPlanSpecClick={() => undefined}
         onNavigate={() => undefined}
       />,
     );
@@ -429,7 +441,6 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
         now={200}
         pendingItems={[{ kind: "approval", topic: "Cockpit-Umbau", targetSubtab: "plan" }]}
         onWorkerClick={() => undefined}
-        onPlanSpecClick={() => undefined}
         onNavigate={() => undefined}
       />,
     );

@@ -73,11 +73,10 @@ interface HeuteTabProps {
   /** Wartende Freigaben + Operator-Halts (aus FleetView), für den Handlungsblock. */
   pendingItems: PendingItem[];
   onWorkerClick: (w: Worker) => void;
-  onPlanSpecClick: (ps: PlanSpecRecord) => void;
   onNavigate: (target: HeuteNavTarget) => void;
 }
 
-export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, pendingItems, onWorkerClick, onPlanSpecClick, onNavigate }: HeuteTabProps) {
+export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingApprovals, allPlanspecs, costs, daily, now, pendingItems, onWorkerClick, onNavigate }: HeuteTabProps) {
   const [costDrawerOpen, setCostDrawerOpen] = useState(false);
   const lagezeile = buildLagezeile({ workers: allWorkers, blockedCount, pendingApprovals });
   const kpi = deriveKpi(
@@ -238,8 +237,8 @@ export function HeuteTab({ allWorkers, activeWorkers, blockedCount, pendingAppro
       {rankedPlanspecs.length > 0 ? (
         <>
           <p className="fleet-section-eyebrow fleet-section-eyebrow-plan">Planung</p>
-          {rankedPlanspecs.map((ps) => (
-            <PlanSpecCard key={ps.path} ps={ps} onClick={() => onPlanSpecClick(ps)} />
+          {rankedPlanspecs.slice(0, 3).map((ps) => (
+            <PlanSpecReference key={ps.path} ps={ps} onClick={() => onNavigate("plan")} />
           ))}
         </>
       ) : null}
@@ -609,10 +608,9 @@ function WorkerRow({ worker: w, now, onClick }: { worker: Worker; now: number; o
   );
 }
 
-// ─── PlanSpec-Karte ───────────────────────────────────────────────────────────
+// ─── Kompakter PlanSpec-Verweis ───────────────────────────────────────────────
 
-function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
-  const fraction = ps.kanban_child_total > 0 ? ps.kanban_child_done / ps.kanban_child_total : null;
+function PlanSpecReference({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void }) {
   const waitsForOp = planSpecWaitsForOperator(ps.freigabe, ps.kanban_state);
   const isSignedParkedChain = planSpecHasParkedSignedChain(ps);
   const isRunning = ps.kanban_state === "running";
@@ -631,28 +629,20 @@ function PlanSpecCard({ ps, onClick }: { ps: PlanSpecRecord; onClick: () => void
   }
 
   return (
-    <button type="button" className="fleet-ps" onClick={onClick}>
-      <div className="fleet-ps-top">
-        <ExpandableText className="fleet-ps-name" text={ps.topic || ps.filename} />
-        <SignalChip
-          tone={badgeTone}
-          label={badgeLabel}
-          title={badgeLabel}
-          className="ml-auto min-w-0 max-w-[min(52%,28rem)] shrink overflow-hidden"
-        />
-      </div>
-      {fraction != null ? (
-        <div className="fleet-rail">
-          <div className="fleet-rail-fill" style={{ width: `${Math.round(fraction * 100)}%` }} />
-        </div>
-      ) : null}
-      <div className="fleet-ps-meta">
-        {ps.kanban_child_total > 0 ? (
-          <span><b>{ps.kanban_child_done}</b>/{ps.kanban_child_total} Karten</span>
-        ) : null}
-        <span>{ps.freigabe}</span>
-        {ps.live_test_depth ? <span>{ps.live_test_depth}</span> : null}
-      </div>
+    <button
+      type="button"
+      className="fleet-ps-ref"
+      onClick={onClick}
+      aria-label={`PlanSpec ${ps.topic || ps.filename} im Plan-Tab öffnen`}
+    >
+      <span className="fleet-ps-topic">{ps.topic || ps.filename}</span>
+      <SignalChip
+        tone={badgeTone}
+        label={badgeLabel}
+        title={badgeLabel}
+        className="min-w-0 max-w-[min(52%,28rem)] shrink overflow-hidden"
+      />
+      <ArrowRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
     </button>
   );
 }
