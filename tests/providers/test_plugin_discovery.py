@@ -11,9 +11,28 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _restore_provider_state(restore_sys_modules):
+    """Keep discovery purges and registry rewrites local to each test."""
+    import providers as provider_module
+
+    registry = dict(provider_module._REGISTRY)
+    aliases = dict(provider_module._ALIASES)
+    discovered = provider_module._discovered
+    try:
+        yield
+    finally:
+        provider_module._REGISTRY.clear()
+        provider_module._REGISTRY.update(registry)
+        provider_module._ALIASES.clear()
+        provider_module._ALIASES.update(aliases)
+        provider_module._discovered = discovered
 
 
 def _clear_provider_caches():
