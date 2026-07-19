@@ -1124,6 +1124,13 @@ def register_pa_routes(app: FastAPI) -> None:
         chains + freigabe gates, sorted by block radius."""
         return await _run_sync(build_inbox)
 
+    @app.get("/api/pa/graph")
+    async def pa_graph() -> dict[str, Any]:
+        """S2.7 bounded Estate graph; all blocking source reads stay off-loop."""
+        from hermes_cli.pa_graph import build_graph
+
+        return await _run_sync(build_graph)
+
     @app.get("/api/pa/engines")
     async def pa_engines() -> dict[str, Any]:
         """S2.2 switcher roster: engines with models, defaults, capabilities."""
