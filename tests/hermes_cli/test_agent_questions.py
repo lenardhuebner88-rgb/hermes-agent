@@ -1567,6 +1567,7 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
         cols = {str(r[1]) for r in c2.execute("PRAGMA table_info(question_events)")}
     assert {
         "action_context",
+        "action_payload",
         "hook_key",
         "suggestions_json",
         "suggested_by",
@@ -1581,11 +1582,165 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
     assert rows[0]["question_text"] == "Legacy open?"
     assert rows[0]["fingerprint"] == "fp-legacy"
     assert rows[0].get("action_context") is None
+    assert rows[0].get("action_payload") is None
     assert rows[0].get("hook_key") is None
     assert rows[0].get("suggestions") is None
     assert rows[0].get("suggested_by") is None
     assert rows[0].get("suggest_confidence") is None
     assert rows[0].get("answer_source") is None
+
+
+@pytest.mark.parametrize(
+    ("category", "payload", "expected"),
+    [
+        (
+            "tmux.send_keys",
+            {"session": " work ", "window": " kimi ", "keys": " weiter\n"},
+            {"session": "work", "window": "kimi", "keys": " weiter\n"},
+        ),
+        (
+            "tmux.interrupt",
+            {"session": "work", "window": "codex"},
+            {"session": "work", "window": "codex"},
+        ),
+        *[
+            (
+                f"kanban.{verb}",
+                {"card_id": " t_123 ", "reason": " operator request "},
+                {"card_id": "t_123", "reason": "operator request"},
+            )
+            for verb in ("unblock", "nudge", "hold", "resume", "kill", "release")
+        ],
+    ],
+)
+def test_pa_action_v1_payload_schemas(
+    category: str,
+    payload: dict[str, str],
+    expected: dict[str, str],
+) -> None:
+    assert aq.normalize_pa_action_payload(category, payload) == expected
+
+
+@pytest.mark.parametrize(
+    ("category", "payload", "error"),
+    [
+        ("unknown", {"card_id": "t_1"}, "Unbekannte"),
+        ("tmux.send_keys", {"session": "work", "window": "kimi"}, "fehlt"),
+        (
+            "tmux.interrupt",
+            {"session": "work", "window": "kimi", "keys": "x"},
+            "unbekannte Felder",
+        ),
+        ("kanban.hold", {"card_id": 42}, "muss Text sein"),
+        ("kanban.release", {"card_id": "  "}, "darf nicht leer sein"),
+    ],
+)
+def test_pa_action_invalid_payload_is_rejected_before_insert(
+    qdb: Path,
+    category: str,
+    payload: dict[str, Any],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        envelope = aq.build_pa_action_envelope(category, payload, reason="test")
+        aq.insert_question_event(
+            session=aq.PA_ACTION_SENTINEL,
+            window=aq.PA_ACTION_SENTINEL,
+            pane_id=aq.PA_ACTION_SENTINEL,
+            fingerprint="not-reached",
+            question_text="Nicht einreihen",
+            options=[],
+            kind="pa_action",
+            action_payload=envelope,
+            db_path=qdb,
+        )
+    assert aq.list_question_events(status="open", db_path=qdb) == []
+
+
+def test_pa_action_sentinel_roundtrip_and_stable_payload_fingerprint(qdb: Path) -> None:
+    payload = {"session": "work", "window": "kimi", "keys": "weiter"}
+    envelope = aq.build_pa_action_envelope(
+        "tmux.send_keys", payload, reason="Kimi soll fortfahren"
+    )
+    fingerprint = aq.pa_action_fingerprint("tmux.send_keys", payload)
+    assert fingerprint == aq.pa_action_fingerprint(
+        "tmux.send_keys",
+        {"window": "kimi", "keys": "weiter", "session": "work"},
+    )
+
+    event_id = aq.insert_question_event(
+        session=aq.PA_ACTION_SENTINEL,
+        window=aq.PA_ACTION_SENTINEL,
+        pane_id=aq.PA_ACTION_SENTINEL,
+        fingerprint=fingerprint,
+        question_text="Aktion ausführen?",
+        options=[{"nr": 1, "label": "Ausführen"}, {"nr": 2, "label": "Ablehnen"}],
+        kind="pa_action",
+        source="pa",
+        class_="action",
+        action_payload=envelope,
+        db_path=qdb,
+    )
+
+    assert event_id is not None
+    event = aq.list_question_events(status="open", db_path=qdb)[0]
+    assert (event["session"], event["window"], event["pane_id"]) == ("pa", "pa", "pa")
+    assert event["fingerprint"] == fingerprint
+    assert event["action_payload"] == envelope
+
+
+@pytest.mark.parametrize("kind", ["claude", "codex", "kimi", "grok"])
+def test_pa_action_schema_keeps_existing_supersede_and_keystroke_path(
+    qdb: Path,
+    kind: str,
+) -> None:
+    pane_id = f"%compat-{kind}"
+    old_id = aq.insert_question_event(
+        session="work",
+        window=kind,
+        pane_id=pane_id,
+        fingerprint="old-fingerprint",
+        question_text="Old question",
+        options=[{"nr": 1, "label": "Old"}],
+        kind=kind,
+        db_path=qdb,
+    )
+    assert old_id is not None
+    parsed = aq.parse_question(_FIXTURE_CLAUDE_SELECT)
+    assert parsed is not None
+    fingerprint = aq.compute_fingerprint(pane_id, parsed["region"])
+    superseded, new_id = aq.supersede_and_insert(
+        session="work",
+        window=kind,
+        pane_id=pane_id,
+        fingerprint=fingerprint,
+        question_text=parsed["question_text"],
+        options=parsed["options"],
+        kind=kind,
+        db_path=qdb,
+    )
+    assert superseded == 1
+    assert new_id is not None
+
+    service = _RecordingService([_FIXTURE_CLAUDE_SELECT, ""])
+    result = aq.answer_question(
+        new_id,
+        "1",
+        db_path=qdb,
+        service=service,
+        verify_delay_s=0,
+        sleep=lambda _seconds: None,
+    )
+
+    assert result["ok"] is True
+    assert service.sent == [
+        {
+            "pane_id": pane_id,
+            "text": "1",
+            "enter": aq._answer_enter_flag(kind, "1"),
+        }
+    ]
+    assert [event["id"] for event in aq.list_question_events(status="superseded", db_path=qdb)] == [old_id]
 
 
 def test_i2_ingest_hook_happy_path_real_options(qdb: Path) -> None:

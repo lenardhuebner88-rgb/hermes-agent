@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS question_events (
     answer_verified INTEGER,
     override      INTEGER NOT NULL DEFAULT 0,
     action_context TEXT,
+    action_payload TEXT,
     hook_key      TEXT
 );
 
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS question_meta (
 # Live DBs may predate I2 additive columns — migrate on connect.
 _SCHEMA_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("action_context", "action_context TEXT"),
+    ("action_payload", "action_payload TEXT"),
     ("hook_key", "hook_key TEXT"),
     ("suggestions_json", "suggestions_json TEXT"),
     ("suggested_by", "suggested_by TEXT"),
@@ -131,6 +133,137 @@ _INITIALIZED_PATHS: set[str] = set()
 def _iso_now(now: Optional[float] = None) -> str:
     ts = time.time() if now is None else float(now)
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+# ``pa_action`` rows deliberately keep the legacy NOT NULL pane columns.  The
+# enqueue path uses the stable ``pa`` sentinel for session/window/pane_id, so
+# the existing partial unique index remains the idempotency primitive without a
+# table rebuild on live question databases.
+PA_ACTION_SENTINEL = "pa"
+PA_ACTION_VERSION = 1
+_PA_ACTION_SCHEMAS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "tmux.send_keys": (("session", "window", "keys"), ()),
+    "tmux.interrupt": (("session", "window"), ()),
+    "kanban.unblock": (("card_id",), ("reason",)),
+    "kanban.nudge": (("card_id",), ("reason",)),
+    "kanban.hold": (("card_id",), ("reason",)),
+    "kanban.resume": (("card_id",), ("reason",)),
+    "kanban.kill": (("card_id",), ("reason",)),
+    "kanban.release": (("card_id",), ("reason",)),
+}
+
+
+def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, str]:
+    """Validate and normalize one v1 action payload.
+
+    Every category is a closed schema: unknown/missing fields and non-string
+    values are rejected before an event can be enqueued.  ``keys`` preserves
+    its exact text (including surrounding whitespace); identifiers/reasons are
+    stripped because whitespace is not part of their identity.
+    """
+    category_s = str(category or "").strip()
+    schema = _PA_ACTION_SCHEMAS.get(category_s)
+    if schema is None:
+        raise ValueError(f"Unbekannte pa_action-Kategorie: {category_s or '<leer>'}")
+    if not isinstance(payload, dict):
+        raise ValueError(f"Payload für {category_s} muss ein JSON-Objekt sein")
+
+    required, optional = schema
+    allowed = set(required) | set(optional)
+    unknown = sorted(str(key) for key in payload if key not in allowed)
+    if unknown:
+        raise ValueError(
+            f"Payload für {category_s} enthält unbekannte Felder: {', '.join(unknown)}"
+        )
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(
+            f"Payload für {category_s} fehlt: {', '.join(missing)}"
+        )
+
+    normalized: dict[str, str] = {}
+    for key in (*required, *optional):
+        if key not in payload:
+            continue
+        value = payload[key]
+        if not isinstance(value, str):
+            raise ValueError(f"Payload-Feld {key} für {category_s} muss Text sein")
+        if not value.strip():
+            raise ValueError(f"Payload-Feld {key} für {category_s} darf nicht leer sein")
+        normalized[key] = value if key == "keys" else value.strip()
+    return normalized
+
+
+def build_pa_action_envelope(
+    category: str,
+    payload: Any,
+    *,
+    reason: str | None,
+) -> dict[str, Any]:
+    """Return the canonical JSON envelope stored in ``action_payload``."""
+    category_s = str(category or "").strip()
+    normalized_payload = normalize_pa_action_payload(category_s, payload)
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("pa_action reason muss Text sein")
+    reason_s = reason.strip() if isinstance(reason, str) else ""
+    return {
+        "version": PA_ACTION_VERSION,
+        "category": category_s,
+        "payload": normalized_payload,
+        "reason": reason_s or None,
+    }
+
+
+def normalize_pa_action_envelope(value: Any) -> dict[str, Any]:
+    """Validate a stored/enqueue-time action envelope and canonicalize it."""
+    if not isinstance(value, dict):
+        raise ValueError("pa_action action_payload muss ein JSON-Objekt sein")
+    allowed = {"version", "category", "payload", "reason"}
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ValueError(
+            "pa_action action_payload enthält unbekannte Felder: " + ", ".join(unknown)
+        )
+    if value.get("version") != PA_ACTION_VERSION:
+        raise ValueError(f"pa_action version muss {PA_ACTION_VERSION} sein")
+    if "category" not in value or "payload" not in value:
+        raise ValueError("pa_action action_payload braucht category und payload")
+    return build_pa_action_envelope(
+        value["category"],
+        value["payload"],
+        reason=value.get("reason"),
+    )
+
+
+def pa_action_fingerprint(category: str, payload: Any) -> str:
+    """Stable identity for an executable category+payload (reason excluded)."""
+    category_s = str(category or "").strip()
+    normalized = normalize_pa_action_payload(category_s, payload)
+    canonical = json.dumps(
+        {
+            "version": PA_ACTION_VERSION,
+            "category": category_s,
+            "payload": normalized,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "pa:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _action_payload_json(kind: str | None, action_payload: Any) -> str | None:
+    if kind == "pa_action":
+        envelope = normalize_pa_action_envelope(action_payload)
+        return json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    if action_payload is not None:
+        raise ValueError("action_payload ist nur für kind='pa_action' erlaubt")
+    return None
 
 
 def _ensure_schema_migrations(conn: sqlite3.Connection) -> None:
@@ -420,6 +553,16 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
         except (TypeError, ValueError, json.JSONDecodeError):
             suggestions = None
     d["suggestions"] = suggestions
+    raw_action_payload = d.pop("action_payload", None)
+    if raw_action_payload is None:
+        action_payload = None
+    else:
+        try:
+            parsed_payload = json.loads(raw_action_payload)
+            action_payload = parsed_payload if isinstance(parsed_payload, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            action_payload = None
+    d["action_payload"] = action_payload
     return d
 
 
@@ -517,6 +660,7 @@ def insert_question_event(
     source: str = "scrape",
     class_: str = "unknown",
     action_context: str | None = None,
+    action_payload: dict[str, Any] | None = None,
     hook_key: str | None = None,
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
@@ -524,14 +668,15 @@ def insert_question_event(
     """Insert a new open event; returns row id, or None if unique-index ignored."""
     ts = _iso_now(now)
     options_json = json.dumps(options if options is not None else [], ensure_ascii=False)
+    action_payload_json = _action_payload_json(kind, action_payload)
     with connect_closing(db_path=db_path) as conn:
         with write_txn(conn):
             cur = conn.execute(
                 "INSERT OR IGNORE INTO question_events ("
                 "ts, updated_ts, source, session, window, pane_id, fingerprint, "
                 "kind, cwd, question_text, options_json, class, status, override, "
-                "action_context, hook_key"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)",
+                "action_context, action_payload, hook_key"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?, ?)",
                 (
                     ts,
                     ts,
@@ -546,6 +691,7 @@ def insert_question_event(
                     options_json,
                     class_,
                     action_context,
+                    action_payload_json,
                     hook_key,
                 ),
             )
@@ -567,6 +713,7 @@ def supersede_and_insert(
     source: str = "scrape",
     class_: str = "unknown",
     action_context: str | None = None,
+    action_payload: dict[str, Any] | None = None,
     hook_key: str | None = None,
     db_path: Optional[Path] = None,
     now: Optional[float] = None,
@@ -580,6 +727,7 @@ def supersede_and_insert(
     """
     ts = _iso_now(now)
     options_json = json.dumps(options if options is not None else [], ensure_ascii=False)
+    action_payload_json = _action_payload_json(kind, action_payload)
     with connect_closing(db_path=db_path) as conn:
         with write_txn(conn):
             sup = conn.execute(
@@ -592,8 +740,8 @@ def supersede_and_insert(
                 "INSERT OR IGNORE INTO question_events ("
                 "ts, updated_ts, source, session, window, pane_id, fingerprint, "
                 "kind, cwd, question_text, options_json, class, status, override, "
-                "action_context, hook_key"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)",
+                "action_context, action_payload, hook_key"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?, ?)",
                 (
                     ts,
                     ts,
@@ -608,6 +756,7 @@ def supersede_and_insert(
                     options_json,
                     class_,
                     action_context,
+                    action_payload_json,
                     hook_key,
                 ),
             )
