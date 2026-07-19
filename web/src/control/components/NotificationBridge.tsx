@@ -240,12 +240,25 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
     await enableNotifications();
   };
 
-  const statusLabel = enabled ? de.notifications.statusOn : de.notifications.statusOff;
+  // Sichtbares Feedback statt stillem "aus": denied/dismissed Permission
+  // (z. B. versehentlich weggeklickte Browser-Abfrage) muss der Nutzer in
+  // den Site-Einstellungen lösen — ein erneuter Tap allein kann das nicht.
+  const statusLabel = enabled
+    ? de.notifications.statusOn
+    : pushStatus === "blocked"
+      ? de.notifications.statusBlocked
+      : pushStatus === "error"
+        ? de.notifications.statusError
+        : de.notifications.statusOff;
   const title = enabled
     ? de.notifications.disable
-    : pushStatus === "unconfigured"
-      ? de.notifications.unconfigured
-      : de.notifications.enable;
+    : pushStatus === "blocked"
+      ? de.notifications.blockedHint
+      : pushStatus === "error"
+        ? de.notifications.errorHint
+        : pushStatus === "unconfigured"
+          ? de.notifications.unconfigured
+          : de.notifications.enable;
 
   return (
     // Inline-Button im Shell-Header (nicht mehr schwebend): der frühere
@@ -261,7 +274,11 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
       disabled={busy}
       className={cn(
         "inline-flex h-11 min-w-[4.5rem] shrink-0 items-center justify-center gap-1.5 rounded-lg border px-2 text-xs transition disabled:opacity-60",
-        enabled ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]" : "border-white/10 hc-soft hover:bg-white/5",
+        enabled
+          ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
+          : pushStatus === "blocked" || pushStatus === "error"
+            ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+            : "border-white/10 hc-soft hover:bg-white/5",
       )}
     >
       {enabled ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}

@@ -7,6 +7,10 @@ export const de = {
     busy: "…",
     statusOn: "an",
     statusOff: "aus",
+    statusBlocked: "blockiert",
+    statusError: "Fehler",
+    blockedHint: "Benachrichtigungen sind im Browser blockiert — in den Site-Einstellungen (Schloss-Symbol) zulassen, dann erneut tippen",
+    errorHint: "Push-Anmeldung fehlgeschlagen — erneut versuchen",
     localTitle: "Rote Entscheidung wartet",
   },
   staleBadge: {
