@@ -172,6 +172,18 @@ die verbindliche Design-Quelle, NICHT das Werkbank-Mockup oben.
   (killTarget-Doktrin). Deep-Links: `?aktivitaet=open` / `?sessions=open`.
   Das LiveBoard der Klassik wird bewusst nicht doppelt (Begründung:
   S3-SHELL2-REPORT; Klassik-Tab bleibt Fallback).
+- **PlanSpec-Draft-Flow (S3.3-FE):** „/plan <idee>" in der Frag-Leiste
+  startet statt eines Chat-Turns den Draft-Flow (`jarvis/usePlanspecDraft.ts`,
+  `POST /api/pa/planspec/draft`, engine/model aus der S2.2-Switcher-Wahl).
+  Die validierte Draft-Card (`jarvis/PlanspecCard.tsx`) ist eine client-
+  interne Bubble im Thread — Validate-Status als farbiges Chip (CLEAN grün /
+  WARN amber / BLOCK rot), Findings bei WARN+BLOCK offen sichtbar, Slices
+  (id · title · lane · deps), Planspec-Text als `<details>`. CLEAN/WARN:
+  „Als Approval einreichen" (`POST /api/pa/planspec/propose`) → Inbox-
+  Refresh über den geteilten pollingStore-Key; BLOCK: Button disabled +
+  Erklärung. In der Inbox tragen `planspec.ingest`-Cards den PLANSPEC-Chip
+  und die draft_id als Zielzeile — der Ausführen/Ablehnen-Flow ist der
+  bestehende S2.4-Mechanismus.
 - **Embedding-Regeln:** die Desktop-Stage füllt den ControlShell-Content-
   Bereich (A4 rechnet mit vollem Viewport: 100vh/min-height 880px — unter der
   Masthead würde die Frag-Leiste clippen); mobil liegt die Frag-Leiste ÜBER

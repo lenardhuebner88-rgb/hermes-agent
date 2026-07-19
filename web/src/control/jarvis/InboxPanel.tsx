@@ -6,7 +6,8 @@
  *
  * Item-Typen:
  *  - pa_action → Approval-Card: Kategorie, Ziel lesbar aus action_payload
- *    (tmux.* → session:window, kanban.* → card_id), Keys-Vorschau, reason.
+ *    (tmux.* → session:window, kanban.* → card_id, planspec.ingest →
+ *    draft_id mit PLANSPEC-Chip, S3.3-FE), Keys-Vorschau, reason.
  *    Ausführen/Ablehnen über den BESTEHENDEN Endpoint
  *    POST /api/agent-questions/{question_id}/answer ("1"/"2", answered_by
  *    operator). Nach Confirm verschwindet die Karte über den Inbox-Refresh
@@ -36,12 +37,14 @@ function boardLink(cardId: string): string {
 }
 
 /** Ziel einer pa_action lesbar aus dem typisierten Payload (Brief-Beispiel:
- *  „tmux.send_keys → work:kimi"). Kein JSON-Dump, keine Pane-Annahmen. */
+ *  „tmux.send_keys → work:kimi"). Kein JSON-Dump, keine Pane-Annahmen.
+ *  S3.3-FE: planspec.ingest zeigt die draft_id als Zielzeile. */
 function actionTarget(item: PaInboxActionItem): string | null {
   const payload = item.action_payload?.payload;
   if (!payload) return null;
   if (payload.session && payload.window) return `${payload.session}:${payload.window}`;
   if (payload.card_id) return payload.card_id;
+  if (payload.draft_id) return payload.draft_id;
   return null;
 }
 
@@ -119,6 +122,9 @@ function ApprovalCard({
   const target = actionTarget(item);
   const keys = item.action_payload?.payload.keys ?? null;
   const reason = item.action_payload?.reason ?? null;
+  // S3.3-FE: planspec.ingest-Cards tragen den PLANSPEC-Chip statt des
+  // generischen PA-AKTION-Chips; der Ausführen/Ablehnen-Flow ist derselbe.
+  const isPlanspec = category === "planspec.ingest";
   const executeLabel = item.options.find((opt) => Number(opt.nr) === 1)?.label ?? t.inboxExecute;
   const rejectLabel = item.options.find((opt) => Number(opt.nr) === 2)?.label ?? t.inboxReject;
 
@@ -156,7 +162,9 @@ function ApprovalCard({
   return (
     <div className="jv-frage jv-appr" data-testid={`jv-appr-${item.id}`}>
       <p className="jv-frage-meta">
-        <span className="jv-appr-chip">{t.inboxActionChip}</span>
+        <span className={isPlanspec ? "jv-appr-chip jv-planspec" : "jv-appr-chip"}>
+          {isPlanspec ? t.inboxPlanspecChip : t.inboxActionChip}
+        </span>
         {category ? <span className="jv-appr-cat">{category}</span> : null}
       </p>
 

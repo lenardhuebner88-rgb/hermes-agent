@@ -71,7 +71,7 @@ export const JARVIS_EMBLEM_STATUS = "● ONLINE · WACHE AKTIV";
 export const JARVIS_EMBLEM_MODEL = "◆ GPT-5.6-SOL ▾";
 
 export const JARVIS_ASK_HINT =
-  "Frag · „erinnere mich …“ · „guten Morgen“ · „zeig mir Health Track“";
+  "Frag · „/plan idee …“ · „erinnere mich …“ · „guten Morgen“";
 
 export interface JarvisSpark {
   label: string;

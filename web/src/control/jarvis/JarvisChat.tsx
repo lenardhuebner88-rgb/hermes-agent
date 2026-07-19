@@ -13,7 +13,11 @@
  * stiller Fehler. Bild-Paste/Attach → POST /api/pa/upload → attachments im
  * Message-POST (max 1 Bild/Turn); bei Engines mit supports_images=false
  * (S2.2-Roster) ist der Attach-Button deaktiviert (Tooltip) statt erst beim
- * Senden in den 400 zu laufen.
+ * Senden in den 400 zu laufen. S3.3-FE: „/plan <idee>" in der Frag-Leiste
+ * startet den PlanSpec-Draft-Flow (usePlanspecDraft) statt eines Chat-Turns
+ * — die validierte Draft-Card (PlanspecCard) ist eine client-interne Bubble
+ * im Thread; „Als Approval einreichen" stellt sie als planspec.ingest-Card
+ * in die S2.4-Inbox.
  */
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
 import { ImagePlus, Send, X } from "lucide-react";
@@ -27,7 +31,9 @@ import {
   usePaEngines,
 } from "./engineSelection";
 import { JARVIS_ASK_HINT } from "./mockContent";
+import { PlanspecCard } from "./PlanspecCard";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
+import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
 
 const t = de.jarvis;
 
@@ -104,6 +110,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // turnPollIntervalMs ist eine Di/Test-Naht (kürzere Turn-Poll-Kadenz in
   // Komponententests); Produktiv Default: PA_TURN_POLL_INTERVAL_MS.
   const chat = usePaChat({ turnPollIntervalMs });
+  const planspec = usePlanspecDraft();
   const roster = usePaEngines();
   const choice = useEngineChoice();
   const [text, setText] = useState("");
@@ -119,19 +126,28 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   const claudeModels =
     roster.data?.engines.find((spec) => spec.engine === "claude")?.models ?? null;
 
-  // Auto-Anschluss ans Verlaufsende: nur bei NEUEN Inhalten (neue Bubble oder
-  // Turn-Zustandswechsel), nie beim bloßen Hintergrund-Refresh der History
-  // und nie bei einem Prepend älterer Seiten („Ältere laden").
+  // Auto-Anschluss ans Verlaufsende: nur bei NEUEN Inhalten (neue Bubble,
+  // Draft-Card oder Turn-Zustandswechsel), nie beim bloßen Hintergrund-
+  // Refresh der History und nie bei einem Prepend älterer Seiten („Ältere
+  // laden"). Draft-Cards zählen beim Phasenwechsel drafting→ready/error als
+  // neue Aktivität (sonst bliebe die aufgelöste Card mobil bei leerem
+  // Verlauf unter dem Fold, ohne dass ein Effekt erneut läuft).
   const messageCount = chat.messages?.length ?? 0;
+  const planCount = planspec.cards.length;
+  const settledPlanCount = planspec.cards.filter((c) => c.phase !== "drafting").length;
   const turnPhase = chat.activeTurn?.phase ?? null;
   const consumePrepending = chat.consumePrepending;
   const didInitRef = useRef(false);
+  const seenSettledRef = useRef(0);
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
     const prepended = consumePrepending();
-    const grew = messageCount > seenCountRef.current;
-    seenCountRef.current = messageCount;
+    const contentCount = messageCount + planCount;
+    const grew = contentCount > seenCountRef.current;
+    seenCountRef.current = contentCount;
+    const settled = settledPlanCount !== seenSettledRef.current;
+    seenSettledRef.current = settledPlanCount;
     if (prepended) return; // „Ältere laden": Scrollposition behalten
     // matchMedia fehlt in jsdom — Default ist die Desktop-Variante (Thread-Scroll).
     const mobile =
@@ -146,20 +162,31 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     }
     // Mobil liegt der Verlauf im Seitenfluss: beim INITIALEN Verlauf nie die
     // Seite zum Chat ziehen (die Shell soll zuerst wirken) — nur bei neuen
-    // Inhalten NACH der ersten Anzeige (z. B. eigene Frage + Antwort).
+    // Inhalten NACH der ersten Anzeige (z. B. eigene Frage + Antwort, oder
+    // eine Draft-Card, die gerade ihren Validate-Status bekommen hat).
     if (!didInitRef.current) {
       didInitRef.current = true;
       return;
     }
-    if (!grew && turnPhase === null) return;
+    if (!grew && !settled && turnPhase === null) return;
     el.lastElementChild?.scrollIntoView?.({ block: "end" });
-  }, [messageCount, turnPhase, consumePrepending]);
+  }, [messageCount, planCount, settledPlanCount, turnPhase, consumePrepending]);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
     const value = text.trim();
     if (!value || chat.sending) return;
     setText("");
+    // Jeder neue Submit nimmt einen etwaigen /plan-Usage-Hinweis wieder weg
+    // (gleiche Klebrigkeits-Regel wie die Chat-Composer-Fehler).
+    planspec.clearUsageError();
+    // S3.3-FE: „/plan <idee>" geht in den Draft-Flow (Draft-Card im Thread),
+    // nicht in einen Chat-Turn. „/plan" ohne Idee → Usage-Hinweis im Hook.
+    const planMatch = PLAN_PREFIX_RE.exec(value);
+    if (planMatch) {
+      void planspec.submitIdea(planMatch[1] ?? "");
+      return;
+    }
     void chat.send(value);
   };
 
@@ -173,7 +200,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     }
   };
 
-  const hasThread = messageCount > 0 || chat.activeTurn !== null;
+  const hasThread = messageCount > 0 || chat.activeTurn !== null || planCount > 0;
 
   return (
     <>
@@ -226,12 +253,22 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
               )}
             </>
           ) : null}
+          {/* S3.3-FE: Draft-Cards des /plan-Flows — client-intern, sie stehen
+              NACH den Server-Bubbles (Einreich-Reihenfolge). */}
+          {planspec.cards.map((card) => (
+            <PlanspecCard key={card.key} card={card} onPropose={planspec.propose} />
+          ))}
         </div>
       ) : null}
 
       {chat.composerError ? (
         <div className="jv-composer-error" role="alert">
           {chat.composerError}
+        </div>
+      ) : null}
+      {planspec.usageError ? (
+        <div className="jv-composer-error" role="alert">
+          {planspec.usageError}
         </div>
       ) : null}
 
