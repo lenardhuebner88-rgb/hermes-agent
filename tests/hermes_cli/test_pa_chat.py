@@ -550,7 +550,7 @@ paths = {getattr(route, 'path', '') for route in app.routes}
 required = {
     '/api/pa/message', '/api/pa/turns/{turn_id}',
     '/api/pa/upload', '/api/pa/history', '/api/pa/messages',
-    '/api/pa/asset/{asset_id}',
+    '/api/pa/asset/{asset_id}', '/api/pa/feed',
 }
 print(json.dumps({
     'ok': required <= paths and not (required & set(_PUBLIC_API_PATHS)),
@@ -609,6 +609,62 @@ def test_messages_endpoint_pages_with_before_id_cursor(
     assert set(newest_ids).isdisjoint(older_ids)
     assert all(row_id < cursor for row_id in older_ids)
     assert all("status" in row and "error" in row for row in newest_body["messages"])
+
+
+def test_feed_schema_and_endpoint_use_bounded_ascending_since_cursor(
+    isolated_pa_home: Path,
+) -> None:
+    store = pa.PAStore()
+    store.ensure_schema()
+    with store.connect() as conn:
+        columns = {
+            str(row[1]): str(row[2])
+            for row in conn.execute("PRAGMA table_info(pa_feed)")
+        }
+        assert columns == {
+            "id": "INTEGER",
+            "ts": "INTEGER",
+            "kind": "TEXT",
+            "severity": "TEXT",
+            "title": "TEXT",
+            "ref": "TEXT",
+            "delivered_push": "INTEGER",
+        }
+        conn.executemany(
+            "INSERT INTO pa_feed(ts, kind, severity, title, ref) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (100, "watcher_bundle", "info", "eins", "t1"),
+                (101, "watcher_bundle", "warning", "zwei", "receipt.md"),
+                (102, "watcher_bundle", "critical", "drei", "t3"),
+            ],
+        )
+
+    app = FastAPI()
+    pa.register_pa_routes(app)
+    with TestClient(app) as client:
+        first = client.get("/api/pa/feed?since_id=0&limit=2")
+        assert first.status_code == 200
+        first_body = first.json()
+        assert [item["id"] for item in first_body["items"]] == [1, 2]
+        assert first_body["next_since_id"] == 2
+        assert first_body["has_more"] is True
+        assert first_body["items"][0] == {
+            "id": 1,
+            "ts": 100,
+            "kind": "watcher_bundle",
+            "severity": "info",
+            "title": "eins",
+            "ref": "t1",
+            "delivered_push": 0,
+        }
+        second = client.get("/api/pa/feed?since_id=2&limit=500")
+        assert second.status_code == 200
+        assert [item["id"] for item in second.json()["items"]] == [3]
+        empty = client.get("/api/pa/feed?since_id=3")
+        assert empty.json()["next_since_id"] == 3
+        invalid = client.get("/api/pa/feed?since_id=-1")
+        assert invalid.status_code == 400
 
 
 def test_route_registration_reaps_pending_and_running_turns(

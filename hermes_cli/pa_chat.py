@@ -142,6 +142,47 @@ CREATE TABLE IF NOT EXISTS pa_messages (
 
 CREATE INDEX IF NOT EXISTS idx_pa_messages_conversation_id
     ON pa_messages(conversation_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS pa_feed (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              INTEGER NOT NULL,
+    kind            TEXT NOT NULL,
+    severity        TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    ref             TEXT,
+    delivered_push  INTEGER NOT NULL DEFAULT 0 CHECK(delivered_push IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_pa_feed_ts ON pa_feed(ts, id);
+
+CREATE TABLE IF NOT EXISTS pa_watcher_state (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pa_watcher_events (
+    fingerprint  TEXT PRIMARY KEY,
+    event_id     TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    severity     TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    ref          TEXT,
+    payload_json TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK(
+        status IN ('candidate','judging','pending','ignored','delivered')
+    ),
+    reason       TEXT,
+    first_seen_at INTEGER NOT NULL,
+    judged_at    INTEGER,
+    delivered_at INTEGER,
+    claim_token  TEXT,
+    claim_expires INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_pa_watcher_events_status
+    ON pa_watcher_events(status, first_seen_at);
 """
 
 _log = logging.getLogger(__name__)
@@ -510,6 +551,44 @@ class PAStore:
             "next_before_id": (
                 int(selected[-1]["id"]) if has_more and selected else None
             ),
+        }
+
+    def feed_page(
+        self,
+        *,
+        since_id: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return an ascending, bounded PA-feed page for polling clients."""
+        self._ensure_schema()
+        since = int(since_id)
+        if since < 0:
+            raise ValueError("since_id darf nicht negativ sein")
+        bounded_limit = max(1, min(int(limit), 100))
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, ts, kind, severity, title, ref, delivered_push "
+                "FROM pa_feed WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (since, bounded_limit + 1),
+            ).fetchall()
+        has_more = len(rows) > bounded_limit
+        selected = rows[:bounded_limit]
+        items = [
+            {
+                "id": int(row["id"]),
+                "ts": int(row["ts"]),
+                "kind": row["kind"],
+                "severity": row["severity"],
+                "title": row["title"],
+                "ref": row["ref"],
+                "delivered_push": int(row["delivered_push"]),
+            }
+            for row in selected
+        ]
+        return {
+            "items": items,
+            "next_since_id": items[-1]["id"] if items else since,
+            "has_more": has_more,
         }
 
 
@@ -1171,6 +1250,21 @@ def register_pa_routes(app: FastAPI) -> None:
                 store.message_page,
                 limit=limit,
                 before_id=before_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/pa/feed")
+    async def pa_feed(
+        since_id: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Browser wire v1: bounded ascending polling by durable feed id."""
+        try:
+            return await _run_sync(
+                store.feed_page,
+                since_id=since_id,
+                limit=limit,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
