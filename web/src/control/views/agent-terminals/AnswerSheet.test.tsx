@@ -52,6 +52,13 @@ function fixtureEvent(overrides: Partial<AgentQuestionEvent> = {}): AgentQuestio
     latency_s: null,
     answer_verified: null,
     override: 0,
+    // Feature A Slice 2 — Null-Variante (AnswerSheet zeigt keine Vorschläge).
+    suggestions: null,
+    suggested_by: null,
+    suggest_confidence: null,
+    suggested_ts: null,
+    suggest_latency_ms: null,
+    answer_source: null,
     ...overrides,
   };
 }

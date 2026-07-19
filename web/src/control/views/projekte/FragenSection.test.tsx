@@ -55,8 +55,39 @@ function fixtureEvent(overrides: Partial<AgentQuestionEvent> = {}): AgentQuestio
     latency_s: null,
     answer_verified: null,
     override: 0,
+    // Feature A Slice 2 — Null-Variante aus dem BUILD-REPORT (kein Vorschlag).
+    suggestions: null,
+    suggested_by: null,
+    suggest_confidence: null,
+    suggested_ts: null,
+    suggest_latency_ms: null,
+    answer_source: null,
     ...overrides,
   };
+}
+
+/** Exaktes Payload aus feat/a-suggest-be BUILD-REPORT („Exact API shape"):
+ *  Top-Rang = erstes Array-Element (nr 2), suggested_by/confidence gesetzt.
+ *  Die Top-vorgeschlagene Option ist hier bewusst NICHT die `recommended`-
+ *  Option, damit Marker/Highlight und via_suggestion-Logik getrennt greifen. */
+function suggestedFixture(): AgentQuestionEvent {
+  return fixtureEvent({
+    id: 303,
+    question_text: "Wie soll das Deploy laufen?",
+    options: [
+      { nr: 1, label: "Sofort deployen", recommended: true },
+      { nr: 2, label: "Canary zuerst", recommended: false },
+    ],
+    suggestions: [
+      { nr: 2, rationale: "Safer zero-downtime cutover." },
+      { nr: 1, rationale: "Simpler rollback path." },
+    ],
+    suggested_by: "gpt-5.6-terra",
+    suggest_confidence: "high",
+    suggested_ts: "2026-07-18T20:00:00.000000+00:00",
+    suggest_latency_ms: 1234.5,
+    answer_source: null,
+  });
 }
 
 function ynFixture(): AgentQuestionEvent {
@@ -108,13 +139,16 @@ describe("FragenSection (echtes GET /api/agent-questions-Format)", () => {
 
     fireEvent.click(screen.getByText("Ja, mergen"));
     await waitFor(() => {
-      expect(answerAgentQuestionMock).toHaveBeenCalledWith(101, "1");
+      // Drittes Arg = via_suggestion (Slice 2): bei Fragen ohne Vorschlag
+      // undefined → das Feld wird im POST-Body weggelassen (Wire-Test in
+      // lib/api.test.ts).
+      expect(answerAgentQuestionMock).toHaveBeenCalledWith(101, "1", undefined);
     });
 
     answerAgentQuestionMock.mockClear();
     fireEvent.click(screen.getByText("Yes"));
     await waitFor(() => {
-      expect(answerAgentQuestionMock).toHaveBeenCalledWith(202, "y");
+      expect(answerAgentQuestionMock).toHaveBeenCalledWith(202, "y", undefined);
     });
   });
 
@@ -203,7 +237,7 @@ describe("FragenSection (echtes GET /api/agent-questions-Format)", () => {
     renderSection({ questions: [fixtureEvent(), ynFixture()] });
 
     fireEvent.click(screen.getByText("Ja, mergen"));
-    expect(answerAgentQuestionMock).toHaveBeenCalledWith(101, "1");
+    expect(answerAgentQuestionMock).toHaveBeenCalledWith(101, "1", undefined);
 
     const yesButton = screen.getByText("Yes").closest("button");
     expect(yesButton?.disabled).toBe(true);
@@ -213,5 +247,84 @@ describe("FragenSection (echtes GET /api/agent-questions-Format)", () => {
     await waitFor(() => {
       expect(yesButton?.disabled).toBe(false);
     });
+  });
+});
+
+describe("FragenSection Slice 2 — KI-Antwort-Vorschläge (Report-Payload)", () => {
+  it("rendert Top-Vorschlag bronze mit Rationale + Provenienz (exaktes Report-Payload)", () => {
+    renderSection({ questions: [suggestedFixture()] });
+
+    // Suggestion-Block unter den Optionen: Titel nennt die Top-Option (nr 2
+    // = erstes Array-Element, NICHT die recommended Option nr 1).
+    const block = screen.getByTestId("frage-suggestion-303");
+    expect(block.textContent).toContain("KI-Vorschlag: Option 2");
+    expect(block.textContent).toContain("Safer zero-downtime cutover.");
+    expect(block.textContent).toContain("vorgeschlagen von gpt-5.6-terra");
+    expect(block.textContent).toContain("Konfidenz hoch");
+    // Nur der Top-Rang wird gezeigt — die zweite Suggestion bleibt unsichtbar.
+    expect(screen.queryByText("Simpler rollback path.")).toBeNull();
+
+    // Top-vorgeschlagene Option trägt den bronze Primär-Kanal + KI-Marker.
+    const top = screen.getByText("Canary zuerst").closest("button");
+    expect(top?.className).toContain("border-bronze/50");
+    expect(top?.className).toContain("bg-bronze/10");
+    expect(top?.textContent).toContain("KI-Vorschlag");
+
+    // Die recommended-aber-nicht-vorgeschlagene Option behält „Empfohlen".
+    const recommended = screen.getByText("Sofort deployen").closest("button");
+    expect(recommended?.textContent).toContain("Empfohlen");
+    expect(recommended?.textContent).not.toContain("KI-Vorschlag");
+  });
+
+  it("null-Suggestions: heutiges Verhalten, kein Block, kein Marker (Degradation)", () => {
+    renderSection({ questions: [fixtureEvent()] });
+
+    expect(screen.queryByTestId("frage-suggestion-101")).toBeNull();
+    expect(screen.queryByText("KI-Vorschlag")).toBeNull();
+    // Empfohlen-Marker der Slice-1-Welt bleibt unverändert.
+    expect(screen.getByText("Empfohlen")).toBeTruthy();
+  });
+
+  it("Klick auf die Top-Option sendet via_suggestion mit der Top-nr", async () => {
+    answerAgentQuestionMock.mockResolvedValue({ ok: true, verified: true, latency_s: 1 });
+    renderSection({ questions: [suggestedFixture()] });
+
+    fireEvent.click(screen.getByText("Canary zuerst"));
+    await waitFor(() => {
+      expect(answerAgentQuestionMock).toHaveBeenCalledWith(303, "2", 2);
+    });
+  });
+
+  it("Klick auf eine ANDERE Option sendet KEIN via_suggestion", async () => {
+    // Option 1 steht zwar im suggestions-Array (Rang 2), ist aber NICHT der
+    // Top-Rang — der Server stempelt dann selbst suggested_edited.
+    answerAgentQuestionMock.mockResolvedValue({ ok: true, verified: true, latency_s: 1 });
+    renderSection({ questions: [suggestedFixture()] });
+
+    fireEvent.click(screen.getByText("Sofort deployen"));
+    await waitFor(() => {
+      expect(answerAgentQuestionMock).toHaveBeenCalledWith(303, "1", undefined);
+    });
+    expect(answerAgentQuestionMock.mock.calls[0][2]).toBeUndefined();
+  });
+
+  it("invalid-suggestion-400 zeigt Fehler statt stillem Schlucken", async () => {
+    const updateData = vi.fn();
+    const props = renderSection({ questions: [suggestedFixture()], updateData });
+    answerAgentQuestionMock.mockRejectedValueOnce(
+      new Error('400: {"detail":{"ok":false,"reason":"invalid-suggestion"}}'),
+    );
+
+    fireEvent.click(screen.getByText("Canary zuerst"));
+    await waitFor(() => {
+      expect(
+        screen.getByText("KI-Vorschlag nicht mehr gültig — bitte Option erneut wählen."),
+      ).toBeTruthy();
+    });
+    // Die Frage bleibt stehen (kein optimistisches Entfernen, kein Reload) —
+    // der Operator kann ohne Vorschlag erneut wählen.
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(updateData).not.toHaveBeenCalled();
+    expect(props.reload).not.toHaveBeenCalled();
   });
 });

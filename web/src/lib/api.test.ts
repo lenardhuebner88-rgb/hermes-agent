@@ -351,3 +351,34 @@ describe("agent terminal worker contract", () => {
     );
   });
 });
+
+describe("answerAgentQuestion via_suggestion (Feature A Slice 2)", () => {
+  // Kontrakt aus feat/a-suggest-be BUILD-REPORT: via_suggestion ist die nr
+  // einer gespeicherten Suggestion und wird NUR beim Akzeptieren des
+  // Top-Vorschlags gesendet — freie/editierte Antworten lassen das Feld weg
+  // (der Server stempelt dann suggested_edited/operator_free selbst).
+  it("posts via_suggestion only when a stored suggestion was accepted", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => mockResponse(200, { jsonBody: { ok: true, verified: true, latency_s: 1 } })),
+    );
+
+    await api.answerAgentQuestion(101, "2", 2);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/agent-questions/101/answer",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ answer: "2", answered_by: "operator", via_suggestion: 2 }),
+      }),
+    );
+
+    await api.answerAgentQuestion(101, "1");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-questions/101/answer",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ answer: "1", answered_by: "operator" }),
+      }),
+    );
+  });
+});

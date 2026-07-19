@@ -1,5 +1,5 @@
 /**
- * FragenSection — offene Agentenfragen im Projekte-Tab (Feature A, Slice 1).
+ * FragenSection — offene Agentenfragen im Projekte-Tab (Feature A, Slice 1+2).
  *
  * Listet ALLE offenen Fragen aus dem Frage-Assistent-Store und beantwortet sie
  * mit einem Tap über den bestehenden answer-Endpunkt — ohne Discord, ohne
@@ -9,9 +9,13 @@
  *
  * Aufbau folgt SessionsSection (Eyebrow-Header + Rows); Options-Buttons,
  * Empfohlen-Marker, optimistisches Entfernen und 409/superseded-Handling
- * folgen dem gelesenen AnswerSheet-Idiom (kein Fork). Keine AI-Vorschläge
- * (Slice 2), kein Keyboard-Map: bei N Fragen gleichzeitig ist eine globale
- * 1–9-Belegung mehrdeutig — der Kontrakt hier ist Tap/Klick.
+ * folgen dem gelesenen AnswerSheet-Idiom (kein Fork). Slice 2: zeigt eine
+ * vorhandene KI-Antwort-Empfehlung (`suggestions[0]` = Top-Rang) bronze mit
+ * Rationale unter den Optionen und sendet `via_suggestion` nur beim Tap auf
+ * DIESE Option — jede andere Wahl geht ohne das Feld raus (der Server
+ * stempelt dann selbst `suggested_edited`/`operator_free`). Kein Keyboard-Map:
+ * bei N Fragen gleichzeitig ist eine globale 1–9-Belegung mehrdeutig — der
+ * Kontrakt hier ist Tap/Klick.
  */
 import { useCallback, useEffect, useState } from "react";
 
@@ -40,6 +44,14 @@ function isSupersededError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   if (!msg.startsWith("409")) return false;
   return /superseded|not-open/i.test(msg);
+}
+
+/** Slice 2: fetchJSON wirft `Error("400: {...}")` — via_suggestion verweist auf
+ *  keine gespeicherte Suggestion (z. B. stale Poll-Snapshot). Nicht still
+ *  schlucken: Fehler unter der Frage zeigen, Refresh-Knopf bleibt. */
+function isInvalidSuggestionError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.startsWith("400") && msg.includes("invalid-suggestion");
 }
 
 type AnswerError = { id: number; line: string; superseded: boolean };
@@ -85,13 +97,13 @@ export function FragenSection({ questions, error = false, reload, updateData }: 
   );
 
   const submitAnswer = useCallback(
-    async (question: AgentQuestionEvent, answer: string) => {
+    async (question: AgentQuestionEvent, answer: string, viaSuggestion?: number) => {
       if (sendingId !== null) return;
       setSendingId(question.id);
       setAnswerError(null);
       setVerifyHint(null);
       try {
-        const result = await api.answerAgentQuestion(question.id, answer);
+        const result = await api.answerAgentQuestion(question.id, answer, viaSuggestion);
         removeQuestion(question.id);
         if (result.verified === false) {
           setVerifyHint(t.fragenVerifyHint);
@@ -100,6 +112,8 @@ export function FragenSection({ questions, error = false, reload, updateData }: 
       } catch (err) {
         if (isSupersededError(err)) {
           setAnswerError({ id: question.id, line: t.fragenSuperseded, superseded: true });
+        } else if (isInvalidSuggestionError(err)) {
+          setAnswerError({ id: question.id, line: t.fragenInvalidSuggestion, superseded: false });
         } else {
           setAnswerError({ id: question.id, line: extractDetail(err), superseded: false });
         }
@@ -152,7 +166,7 @@ export function FragenSection({ questions, error = false, reload, updateData }: 
               sending={sendingId !== null}
               sendingThis={sendingId === question.id}
               answerError={answerError?.id === question.id ? answerError : null}
-              onAnswer={(answer) => void submitAnswer(question, answer)}
+              onAnswer={(answer, viaSuggestion) => void submitAnswer(question, answer, viaSuggestion)}
               onRefresh={onRefresh}
             />
           ))}
@@ -187,9 +201,13 @@ function FrageRow({
   /** DIESE Frage wird gerade beantwortet — "Sende …" unter dieser Zeile. */
   sendingThis: boolean;
   answerError: AnswerError | null;
-  onAnswer: (answer: string) => void;
+  onAnswer: (answer: string, viaSuggestion?: number) => void;
   onRefresh: () => void;
 }) {
+  // Slice 2: Top-Vorschlag = suggestions[0] (Array-Ordnung = Ranking). null
+  // oder leer = heutiges Verhalten, kein Platzhalter, keine leere Badge.
+  const topSuggestion =
+    question.suggestions && question.suggestions.length > 0 ? question.suggestions[0] : null;
   return (
     <li
       className="rounded-card border border-line-soft bg-surface-2 p-3"
@@ -211,42 +229,81 @@ function FrageRow({
 
       {/* Antwort ist IMMER eine Options-Wahl (Freitext backend-verboten).
           Buttons: AnswerSheet-Idiom — 44px mobil (min-h-11), Desktop-Dichte
-          ab tab; Empfohlen in bronze (interaktiver Primär-Kanal), kein
-          Freitext-Feld. */}
+          ab tab; Empfohlen und KI-Top-Vorschlag in bronze (interaktiver
+          Primär-Kanal), kein Freitext-Feld. via_suggestion geht nur beim
+          Tap auf die Top-vorgeschlagene Option raus. */}
       {question.options.length > 0 ? (
         <div className="mt-2.5 flex flex-col gap-2" role="group" aria-label={t.fragenOptionsLabel}>
-          {question.options.map((opt) => (
-            <button
-              key={String(opt.nr)}
-              type="button"
-              disabled={sending}
-              onClick={() => onAnswer(String(opt.nr))}
-              className={cn(
-                "flex min-h-11 w-full items-center gap-3 rounded-card border px-3 py-2 text-left text-sm transition tab:min-h-9",
-                "focus-visible:outline-2 focus-visible:outline-bronze disabled:cursor-not-allowed disabled:opacity-60",
-                opt.recommended
-                  ? "border-bronze/50 bg-bronze/10 text-ink hover:border-bronze hover:bg-bronze/15"
-                  : "border-line bg-surface-2 text-ink hover:border-bronze/40 hover:bg-surface-3",
-              )}
-            >
-              <span
+          {question.options.map((opt) => {
+            const isTopSuggestion =
+              topSuggestion !== null && String(opt.nr) === String(topSuggestion.nr);
+            return (
+              <button
+                key={String(opt.nr)}
+                type="button"
+                disabled={sending}
+                onClick={() =>
+                  onAnswer(String(opt.nr), isTopSuggestion ? topSuggestion.nr : undefined)
+                }
                 className={cn(
-                  "inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-card border font-data text-xs font-semibold",
-                  opt.recommended
-                    ? "border-bronze/50 bg-bronze/10 text-bronze-hi"
-                    : "border-line bg-surface-1 text-ink",
+                  "flex min-h-11 w-full items-center gap-3 rounded-card border px-3 py-2 text-left text-sm transition tab:min-h-9",
+                  "focus-visible:outline-2 focus-visible:outline-bronze disabled:cursor-not-allowed disabled:opacity-60",
+                  opt.recommended || isTopSuggestion
+                    ? "border-bronze/50 bg-bronze/10 text-ink hover:border-bronze hover:bg-bronze/15"
+                    : "border-line bg-surface-2 text-ink hover:border-bronze/40 hover:bg-surface-3",
                 )}
               >
-                {opt.nr}
-              </span>
-              <span className="min-w-0 flex-1">{opt.label}</span>
-              {opt.recommended ? (
-                <span className="shrink-0 text-micro font-medium text-bronze-hi">
-                  {t.fragenRecommended}
+                <span
+                  className={cn(
+                    "inline-flex h-7 min-w-7 shrink-0 items-center justify-center rounded-card border font-data text-xs font-semibold",
+                    opt.recommended || isTopSuggestion
+                      ? "border-bronze/50 bg-bronze/10 text-bronze-hi"
+                      : "border-line bg-surface-1 text-ink",
+                  )}
+                >
+                  {opt.nr}
                 </span>
-              ) : null}
-            </button>
-          ))}
+                <span className="min-w-0 flex-1">{opt.label}</span>
+                {isTopSuggestion ? (
+                  <span className="shrink-0 text-micro font-medium text-bronze-hi">
+                    {t.fragenSuggestedMarker}
+                  </span>
+                ) : opt.recommended ? (
+                  <span className="shrink-0 text-micro font-medium text-bronze-hi">
+                    {t.fragenRecommended}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {/* Slice 2: Top-Vorschlag unter den Optionen — bronze (Token, kein
+          Chip: DESIGN.md Kanal-Trennung), Rationale, Provenienz klein. */}
+      {topSuggestion ? (
+        <div
+          className="mt-2 rounded-card border border-bronze/30 bg-bronze/5 px-3 py-2"
+          data-testid={`frage-suggestion-${question.id}`}
+        >
+          <p className="text-micro font-medium text-bronze-hi">
+            {t.fragenSuggestionTitle(topSuggestion.nr)}
+          </p>
+          <p className="mt-1 whitespace-pre-wrap text-sec text-ink-2">
+            {topSuggestion.rationale}
+          </p>
+          {question.suggested_by || question.suggest_confidence ? (
+            <p className="mt-1 text-micro text-ink-3">
+              {[
+                question.suggested_by ? t.fragenSuggestedBy(question.suggested_by) : null,
+                question.suggest_confidence
+                  ? t.fragenSuggestionConfidence(question.suggest_confidence)
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          ) : null}
         </div>
       ) : null}
 

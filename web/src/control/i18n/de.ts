@@ -917,6 +917,13 @@ export const de = {
     fragenSuperseded: "Frage hat sich geändert",
     fragenRefresh: "Aktualisieren",
     fragenOptionsLabel: "Antwortoptionen",
+    // Feature A Slice 2 — KI-Antwort-Vorschläge (Top-Rang bronze, Rationale, Provenienz)
+    fragenSuggestedMarker: "KI-Vorschlag",
+    fragenSuggestionTitle: (nr: number | string) => `KI-Vorschlag: Option ${nr}`,
+    fragenSuggestedBy: (model: string) => `vorgeschlagen von ${model}`,
+    fragenSuggestionConfidence: (c: "high" | "low") =>
+      c === "high" ? "Konfidenz hoch" : "Konfidenz niedrig",
+    fragenInvalidSuggestion: "KI-Vorschlag nicht mehr gültig — bitte Option erneut wählen.",
     // Terminal-Deep-Link (/control/agent-terminals?session=&window=)
     terminalOpenAria: (label: string) => `Terminal öffnen: ${label}`,
   },
