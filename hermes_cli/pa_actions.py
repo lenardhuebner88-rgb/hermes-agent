@@ -193,6 +193,12 @@ def _handle_kanban_release(payload: dict[str, str]) -> dict[str, Any]:
     return _handle_kanban("kanban.release", payload)
 
 
+def _handle_planspec_ingest(payload: dict[str, str]) -> dict[str, Any]:
+    from hermes_cli.pa_planspec import ingest_draft
+
+    return ingest_draft(payload)
+
+
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "tmux.send_keys": _handle_tmux_send_keys,
     "tmux.interrupt": _handle_tmux_interrupt,
@@ -202,6 +208,7 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "kanban.resume": _handle_kanban_resume,
     "kanban.kill": _handle_kanban_kill,
     "kanban.release": _handle_kanban_release,
+    "planspec.ingest": _handle_planspec_ingest,
 }
 
 
@@ -231,16 +238,22 @@ def enqueue_pa_action(
         reason=reason,
     )
     normalized = envelope["payload"]
+    if category == "planspec.ingest":
+        from hermes_cli.pa_planspec import build_ingest_question
+
+        question_text = build_ingest_question(envelope)
+    else:
+        question_text = (
+            f"PA-Aktion ausführen: {category}?"
+            + (f" — {envelope['reason']}" if envelope.get("reason") else "")
+        )
     fingerprint = agent_questions.pa_action_fingerprint(category, normalized)
     event_id = agent_questions.insert_question_event(
         session=agent_questions.PA_ACTION_SENTINEL,
         window=agent_questions.PA_ACTION_SENTINEL,
         pane_id=agent_questions.PA_ACTION_SENTINEL,
         fingerprint=fingerprint,
-        question_text=(
-            f"PA-Aktion ausführen: {category}?"
-            + (f" — {envelope['reason']}" if envelope.get("reason") else "")
-        ),
+        question_text=question_text,
         options=PA_ACTION_OPTIONS,
         kind="pa_action",
         source="pa",
@@ -261,7 +274,7 @@ def enqueue_pa_action(
             window=agent_questions.PA_ACTION_SENTINEL,
             pane_id=agent_questions.PA_ACTION_SENTINEL,
             fingerprint=fingerprint,
-            question_text=f"PA-Aktion ausführen: {category}?",
+            question_text=question_text,
             options=PA_ACTION_OPTIONS,
             kind="pa_action",
             source="pa",
@@ -294,6 +307,15 @@ def _thread_message(evidence: dict[str, Any]) -> str:
     pane_tail = result.get("pane_tail")
     if pane_tail:
         lines.extend(["Pane-Evidenz:", str(pane_tail)])
+    chain_id = result.get("chain_id")
+    if chain_id:
+        lines.append(f"Ketten-ID: {chain_id}")
+    task_ids = result.get("task_ids")
+    if isinstance(task_ids, list) and task_ids:
+        lines.append("Task-IDs: " + ", ".join(str(item) for item in task_ids))
+    stdout_tail = result.get("stdout_tail")
+    if stdout_tail:
+        lines.extend(["CLI-Evidenz:", str(stdout_tail)])
     return "\n".join(lines)
 
 

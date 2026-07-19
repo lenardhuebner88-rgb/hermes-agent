@@ -920,6 +920,48 @@ def test_plan_validate_cli_wires_through(kanban_home, tmp_path: Path, capsys):
     assert _task_count() == 0  # validate never writes
 
 
+def test_plan_cli_private_pa_root_override_wires_validate_and_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "profile-plans"
+    path = _write(root, CLEAN, name="draft_a.md")
+    monkeypatch.setenv("HERMES_PA_PLANS_ROOT", str(root))
+    calls: list[tuple[str, Path]] = []
+
+    def fake_validate(path_arg, **kwargs):
+        calls.append(("validate", kwargs["plans_root"]))
+        return {
+            "ok": True,
+            "disposition": "clean",
+            "path": str(path_arg),
+            "signed": False,
+            "approved_by": "",
+            "freigabe": "operator",
+            "board": "health-track",
+            "findings": [],
+            "would_block": False,
+        }
+
+    def fake_ingest(path_arg, **kwargs):
+        calls.append(("ingest", kwargs["plans_root"]))
+        return {
+            "path": str(path_arg),
+            "root_task_id": "t_root",
+            "child_ids": [],
+            "initial_child_status": "scheduled",
+        }
+
+    monkeypatch.setattr(plan_cmd.planspecs, "validate_planspec", fake_validate)
+    monkeypatch.setattr(plan_cmd.planspecs, "ingest_planspec", fake_ingest)
+    parser = argparse.ArgumentParser(prog="hermes", add_help=False)
+    sub = parser.add_subparsers(dest="command")
+    plan_cmd.build_plan_parser(sub)
+
+    assert plan_cmd.plan_command(parser.parse_args(["plan", "validate", str(path)])) == 0
+    assert plan_cmd.plan_command(parser.parse_args(["plan", "ingest", str(path)])) == 0
+    assert calls == [("validate", root), ("ingest", root)]
+
+
 # ---------------------------------------------------------------------------
 # Canon example shape still ingests
 # ---------------------------------------------------------------------------

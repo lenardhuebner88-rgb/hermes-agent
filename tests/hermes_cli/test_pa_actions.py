@@ -232,7 +232,7 @@ def test_tmux_handlers_reuse_target_validation_and_existing_methods(
 
 
 def test_registry_covers_every_v1_category() -> None:
-    assert set(pa_actions.ACTION_HANDLERS) == {
+    expected = {
         "tmux.send_keys",
         "tmux.interrupt",
         "kanban.unblock",
@@ -241,4 +241,7 @@ def test_registry_covers_every_v1_category() -> None:
         "kanban.resume",
         "kanban.kill",
         "kanban.release",
+        "planspec.ingest",
     }
+    assert set(pa_actions.ACTION_HANDLERS) == expected
+    assert set(aq._PA_ACTION_SCHEMAS) == expected
