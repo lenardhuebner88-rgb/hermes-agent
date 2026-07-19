@@ -189,6 +189,12 @@ def test_api_pending_to_done_history_upload_and_attachment(
         assert history.status_code == 200
         assert history.json()["turns"][0]["turn_id"] == turn_id
 
+        messages = client.get("/api/pa/messages")
+        assert messages.status_code == 200
+        roles = [m["role"] for m in messages.json()["messages"]]
+        assert roles == ["user", "assistant"]
+        assert messages.json()["messages"][0]["content"] == "Was ist offen?"
+
 
 def test_api_engine_error_is_persisted_and_http_poll_stays_200(
     isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch
@@ -240,7 +246,7 @@ from hermes_cli.web_server import _PUBLIC_API_PATHS, app
 paths = {getattr(route, 'path', '') for route in app.routes}
 required = {
     '/api/pa/message', '/api/pa/turns/{turn_id}',
-    '/api/pa/upload', '/api/pa/history',
+    '/api/pa/upload', '/api/pa/history', '/api/pa/messages',
 }
 print(json.dumps({
     'ok': required <= paths and not (required & set(_PUBLIC_API_PATHS)),

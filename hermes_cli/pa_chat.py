@@ -548,6 +548,15 @@ def register_pa_routes(app: FastAPI) -> None:
     async def pa_history(limit: int = 30) -> dict[str, Any]:
         return {"turns": await _run_sync(store.recent_turns, limit)}
 
+    @app.get("/api/pa/messages")
+    async def pa_messages() -> dict[str, Any]:
+        """Chronological user/assistant bubbles for the chat UI.
+
+        /api/pa/history intentionally serves turns without the user text;
+        the bubble view needs both roles (review finding 2026-07-19).
+        """
+        return {"messages": await _run_sync(store.recent_messages)}
+
     @app.post("/api/pa/upload")
     async def pa_upload(file: UploadFile = File(...)) -> dict[str, str]:
         content_type = (file.content_type or "").lower()
