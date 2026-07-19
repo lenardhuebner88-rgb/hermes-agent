@@ -927,6 +927,28 @@ export const de = {
     // Terminal-Deep-Link (/control/agent-terminals?session=&window=)
     terminalOpenAria: (label: string) => `Terminal öffnen: ${label}`,
   },
+  // Jarvis-Zone (/control/projekte, Sprint 1 Karte e) — funktionale Strings;
+  // A4-Mock-Inhalte (KI-Lage, Hubs, Filter, Emblem) leben in jarvis/mockContent.ts.
+  jarvis: {
+    chatRegion: "Jarvis-Chat",
+    composerLabel: "Frag an Jarvis",
+    inputLabel: "Nachricht an Jarvis",
+    attachLabel: "Bild anhängen",
+    removeAttachment: "Bild entfernen",
+    sendLabel: "Nachricht senden",
+    thinking: "Jarvis denkt …",
+    errorLabel: "FEHLER",
+    sendFailed: "Nachricht konnte nicht gesendet werden.",
+    turnTimeout: "Zeitüberschreitung: Jarvis antwortet nicht — bitte später erneut versuchen.",
+    uploadNotImage: "Nur Bilder können angehängt werden (PNG, JPEG, GIF, WebP, BMP).",
+    uploadTooLarge: "Bild ist zu groß (max. 15 MiB).",
+    uploadFailed: "Bild-Upload fehlgeschlagen.",
+    wartetError: "Fragen konnten nicht geladen werden.",
+    wartetLoading: "Lade offene Fragen …",
+    wartetMore: (n: number) => `▾ +${n} WEITERE — KLASSISCHE ANSICHT`,
+    wartetAnswer: (questionText: string) => `Frage beantworten: ${questionText}`,
+    klassischLink: "KLASSISCHE ANSICHT →",
+  },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).
     eyebrow: "Nachtschicht · Loop-Runner",

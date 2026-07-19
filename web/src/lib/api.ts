@@ -630,6 +630,39 @@ export interface AgentQuestionEvent {
     | null;
 }
 
+/**
+ * PA (Jarvis) chat contracts — hermes_cli/pa_chat.py. Single global
+ * conversation ("default"); send returns a turn_id, the turn is polled until
+ * done|error, GET /api/pa/messages is the bubble source of truth.
+ */
+
+/** One bubble from GET /api/pa/messages (chronological, capped at 16 server-side). */
+export interface PaChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  engine: string;
+  model: string;
+  /** Unix seconds. */
+  ts: number;
+}
+
+/** Turn state from GET /api/pa/turns/{id}. On error the poll stays HTTP 200
+ *  and `error`/`reply` carry the same human-readable message. */
+export interface PaTurn {
+  turn_id: string;
+  status: "pending" | "running" | "done" | "error";
+  reply: string | null;
+  engine: string;
+  model: string;
+  ts: number;
+  error: string | null;
+}
+
+/** Attachment reference accepted by POST /api/pa/message (max 1 per turn). */
+export interface PaAttachmentRef {
+  asset_id: string;
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -685,6 +718,31 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
     }),
+  // PA (Jarvis) chat — pa_chat.py. Bubble history is the source of truth;
+  // send returns a turn_id that is polled until done|error.
+  listPaMessages: () => fetchJSON<{ messages: PaChatMessage[] }>("/api/pa/messages"),
+  sendPaMessage: (text: string, attachments?: PaAttachmentRef[]) =>
+    fetchJSON<{ turn_id: string }>("/api/pa/message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      }),
+    }),
+  getPaTurn: (turnId: string) =>
+    fetchJSON<PaTurn>(`/api/pa/turns/${encodeURIComponent(turnId)}`),
+  uploadPaImage: (file: File) => {
+    // Same raw multipart/form-data pattern as uploadAgentTerminalFile — no
+    // Content-Type header, the browser sets the multipart boundary itself.
+    // Backend contract: field name "file", images only, max 15 MiB.
+    const form = new FormData();
+    form.append("file", file, file.name);
+    return fetchJSON<{ asset_id: string }>("/api/pa/upload", {
+      method: "POST",
+      body: form,
+    });
+  },
   createAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
       method: "POST",

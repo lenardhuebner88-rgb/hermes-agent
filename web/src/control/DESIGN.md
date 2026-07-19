@@ -116,6 +116,41 @@ RoleChips kombinieren Initiale und Rollenlabel; Pipeline-Stufen kombinieren Eyeb
 und Rail. Unbekannte Identitäten bleiben neutral. Die AA-Tabelle an der Token-Definition
 in `theme.css` belegt alle sechs Farben gegen `surface-1` und `surface-2`.
 
+## Jarvis-Zone (`/control/projekte`) — einzige Token-Ausnahme
+
+**Ausnahme-Entscheidung (Plan of Record, Canon-Entwurf Punkt 4):** die Route
+`/control/projekte` ist die **Jarvis-Zone** — ein dunkles Command-Center-HUD
+nach dem Piet-freigegebenen A4-Mockup (Design-Board `c_8c6f034b`,
+`jarvis-variante-a4-brain-feinschliff.html`, Freigabe 2026-07-19). A4 ist dort
+die verbindliche Design-Quelle, NICHT das Werkbank-Mockup oben.
+
+- **Geltungsbereich:** ausschließlich diese eine Route. Code unter
+  `web/src/control/jarvis/`, eigene Token-Datei `web/src/control/jarvis.css`
+  (A4-Farben/Glow/Typo als `--*` Custom Properties auf `.jv`, alle Regeln
+  unter `.jv` gescopet, lazy mit dem Route-Chunk geladen). Der Rest des
+  Dashboards bleibt vollständig ratchet- und bronze-gebunden.
+- **Ratchet-Ausnahme:** `scripts/check-design-tokens.sh` filtert
+  `src/control/jarvis/` heraus — NUR diesen Pfad. Neue Rohfarben außerhalb
+  der Jarvis-Zone schlagen weiter fehl.
+- **Graph = Mock (S1, F11):** der Estate-Graph rendert die statische
+  A4-Vorschau des `#pa-graph-mock`-Datensatzes (`jarvis/graphMock.ts`) und
+  trägt das deutsche Vorschau-Label („GRAPH · VORSCHAU — MOCK-DATEN · S2.7
+  FOLGT" Desktop, „· Graph: Vorschau (Mock)" mobil). Echte Daten: S2.7.
+- **Statik-Mocks (S1):** KI-Lage, Brain-Stats/Hubs/Filter und Sparklines sind
+  A4-Mock-Inhalte ohne Endpoint (`jarvis/mockContent.ts`). „Wartet · dezent"
+  ist KEIN Mock — es hängt an echten offenen Fragen (`GET /api/agent-questions`)
+  und verlinkt zur Beantwortung in die klassische Ansicht.
+- **Klassik-Fallback:** die bisherige ProjekteView bleibt unverändert unter
+  `/control/projekte-klassisch` erreichbar, bis S2/S3 die Sektionen migrieren.
+- **Embedding-Regeln:** die Desktop-Stage füllt den ControlShell-Content-
+  Bereich (A4 rechnet mit vollem Viewport: 100vh/min-height 880px — unter der
+  Masthead würde die Frag-Leiste clippen); mobil liegt die Frag-Leiste ÜBER
+  der Dashboard-Bottom-Nav (<600px), nicht am Viewport-Rand. Der A4-Szenen-
+  Toggle (LIVE/OVERFLOW/LEER/LADEN) ist Mockup-Chrome und gehört nicht ins
+  Produkt. Animationen laufen ausschließlich unter
+  `@media (prefers-reduced-motion: no-preference)` (A4-Idiom, zentraler
+  Kill-Switch bleibt gewahrt); Touch-Ziele mobil ≥44px.
+
 ## Mono = data only
 
 Mono type (`--font-data` / `IBM Plex Mono`) is reserved for **data**: ids,

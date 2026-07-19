@@ -93,6 +93,11 @@ const SystemView = lazy(() =>
 const ProjekteView = lazy(() =>
   import("./views/ProjekteView").then((m) => ({ default: m.ProjekteView })),
 );
+// Jarvis-Zone (Sprint 1 Karte e): /control/projekte wird zur A4-Shell mit
+// Chat; die bisherige ProjekteView bleibt als Klassik-Fallback erhalten.
+const JarvisShellView = lazy(() =>
+  import("./jarvis/JarvisShellView").then((m) => ({ default: m.JarvisShellView })),
+);
 
 function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/fleet")) return "fleet";
@@ -142,7 +147,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   orchestrator: () => import("./views/OrchestratorBacklogView"),
   crons: () => import("./views/CronView"),
   loops: () => import("./views/LoopsView"),
-  projekte: () => import("./views/ProjekteView"),
+  projekte: () => import("./jarvis/JarvisShellView"),
   lanes: () => import("./views/LanesView"),
   system: () => import("./views/system/SystemView"),
   research: () => import("./views/ResearchView"),
@@ -309,7 +314,10 @@ export default function ControlPage() {
               <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
               <Route path="crons" element={<CronView density={density.density} />} />
               <Route path="loops" element={<LoopsView />} />
-              <Route path="projekte" element={<ProjekteView />} />
+              <Route path="projekte" element={<JarvisShellView />} />
+              {/* Klassik-Fallback (Sprint 1 Karte e): bisheriger Projekte-Tab
+                  bleibt ohne Inhaltsänderung erreichbar, bis S2/S3 migrieren. */}
+              <Route path="projekte-klassisch" element={<ProjekteView />} />
               <Route path="lanes" element={<LanesView density={density.density} />} />
               <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
               {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}

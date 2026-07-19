@@ -1,0 +1,143 @@
+/**
+ * JarvisShellView — die Jarvis-Zone auf /control/projekte (Sprint 1, Karte e).
+ *
+ * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
+ * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (Mock, F11 —
+ * Vorschau-Label, echter Endpoint kommt mit S2.7), schwebende Panels,
+ * J.A.R.V.I.S.-Emblem mit statischem Modell-Badge (Roster kommt S2),
+ * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an echten
+ * offenen Fragen, funktionale Frag-Leiste mit Bubble-Chat gegen die
+ * LIVE-PA-Endpoints. Der bisherige Projekte-Tab bleibt als
+ * /control/projekte-klassisch erreichbar (Fallback bis S2/S3 migrieren).
+ *
+ * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
+ * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
+ * siehe DESIGN.md „Jarvis-Zone".
+ */
+import { Link } from "react-router-dom";
+
+import "../jarvis.css";
+import { de } from "../i18n/de";
+import { JarvisChat } from "./JarvisChat";
+import { JarvisGraph } from "./JarvisGraph";
+import { WartetPanel } from "./WartetPanel";
+import {
+  JARVIS_BRAIN_MOCKTAG,
+  JARVIS_BRAIN_STATS,
+  JARVIS_EMBLEM_MODEL,
+  JARVIS_EMBLEM_NAME,
+  JARVIS_EMBLEM_STATUS,
+  JARVIS_FILTER_ROWS,
+  JARVIS_NEWS_CRON,
+  JARVIS_NEWS_ITEMS,
+  JARVIS_SEARCH_HINT,
+  JARVIS_SPARKS,
+  JARVIS_TOP_HUBS,
+} from "./mockContent";
+
+const t = de.jarvis;
+
+export function JarvisShellView() {
+  return (
+    <div className="jv">
+      <div className="jv-stage">
+        <JarvisGraph />
+
+        {/* ══ Links: Brain-Panel ══ */}
+        <div className="jv-float jv-brainpanel">
+          <h1>
+            PIET-ESTATE <b>OS</b>
+          </h1>
+          <div className="jv-stats">
+            {JARVIS_BRAIN_STATS}
+            <span className="jv-mocktag">{JARVIS_BRAIN_MOCKTAG}</span>
+          </div>
+          <div className="jv-search">{JARVIS_SEARCH_HINT}</div>
+          <div className="jv-hubs">
+            <div className="jv-ptitle" style={{ marginBottom: 5 }}>
+              TOP-HUBS
+            </div>
+            {JARVIS_TOP_HUBS.map((hub) => (
+              <div className="jv-hub" key={hub.name}>
+                <span className={`jv-d jv-tone-${hub.tone}`} aria-hidden="true" />
+                <span className="jv-nm">{hub.name}</span>
+                <span className="jv-n">{hub.count}</span>
+              </div>
+            ))}
+          </div>
+          <div className="jv-inspector">
+            <b>Knoten antippen</b> → fokussiert ihn samt Verbindungen, Notiz öffnet rechts.{" "}
+            <b>Shift-Tipp</b> auf zweiten Knoten → Pfad verfolgen. Jarvis nutzt denselben Graphen
+            als Gedächtnis.
+          </div>
+          <Link className="jv-klassisch" to="/control/projekte-klassisch">
+            {t.klassischLink}
+          </Link>
+        </div>
+
+        {/* ══ Rechts oben: Filter ══ */}
+        <div className="jv-float jv-filter">
+          <div className="jv-ptitle">FILTER</div>
+          {JARVIS_FILTER_ROWS.map((row) => (
+            <div className="jv-frow" key={row.name}>
+              <span className={`jv-d jv-tone-${row.tone}`} aria-hidden="true" />
+              {row.name} <span className="jv-n">{row.count}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* ══ Rechts: KI-LAGE (statischer A4-Mock, S1) ══ */}
+        <div className="jv-float jv-news">
+          <div className="jv-ptitle">
+            KI-LAGE <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
+          </div>
+          {JARVIS_NEWS_ITEMS.map((item) => (
+            <div className={item.lead ? "jv-item jv-lead" : "jv-item"} key={item.text}>
+              {item.text}
+              <span className="jv-src">{item.source}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* ══ Rechts unten: Jarvis-Emblem ══ */}
+        <div className="jv-float jv-emblem">
+          <div className="jv-ering" aria-hidden="true">
+            <span className="jv-r" />
+            <span className="jv-r jv-r2" />
+            <span className="jv-r jv-r3" />
+            <span className="jv-core" />
+          </div>
+          <div className="jv-nm">{JARVIS_EMBLEM_NAME}</div>
+          <div className="jv-on">{JARVIS_EMBLEM_STATUS}</div>
+          <div className="jv-model">{JARVIS_EMBLEM_MODEL}</div>
+        </div>
+
+        {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (Mock) ══ */}
+        <div className="jv-float jv-quiet">
+          <WartetPanel />
+          <div className="jv-sys">
+            {JARVIS_SPARKS.map((spark) => (
+              <div className="jv-spark" key={spark.label}>
+                <div className="jv-lb">
+                  {spark.label} <b>{spark.value}</b>
+                </div>
+                <svg viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">
+                  <path d={spark.areaPath} className={`jv-sparkarea-${spark.tone}`} />
+                  <path d={spark.linePath} className={`jv-sparkline-${spark.tone}`} />
+                </svg>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ══ Graph-Vorschau-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
+        <div className="jv-gtag">
+          GRAPH · <b>VORSCHAU</b> — MOCK-DATEN · S2.7 FOLGT
+        </div>
+
+        {/* ══ Chat: Bubble-Verlauf + Frag-Leiste (LIVE PA-Endpoints) ══ */}
+        <JarvisChat />
+      </div>
+    </div>
+  );
+}

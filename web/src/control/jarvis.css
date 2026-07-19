@@ -1,0 +1,373 @@
+/**
+ * jarvis.css — Token- und Style-Datei NUR für die Jarvis-Zone (/control/projekte).
+ *
+ * Extrahiert aus dem Piet-freigegebenen A4-Mockup (Design-Board c_8c6f034b,
+ * jarvis-variante-a4-brain-feinschliff.html, Szene LIVE). Alle Regeln sind
+ * unter `.jv` gescopet: die Datei wird nur vom lazy-geladenen JarvisShellView-
+ * Chunk importiert, und selbst dann wirkt nichts außerhalb der Zone. Der
+ * Token-Ratchet (scripts/check-design-tokens.sh) nimmt diese Route als
+ * einzige aus — Begründung und Regeln: web/src/control/DESIGN.md „Jarvis-Zone".
+ *
+ * Mockup-Chrome NICHT übernommen (Brief): Szenen-Toggle (LIVE/OVERFLOW/LEER/
+ * LADEN), Graph-Overlays, Skeletons, Überlauf-Varianten.
+ * Embedding-Abweichungen vom Mockup (begründet in DESIGN.md):
+ *  - Desktop-Stage füllt den ControlShell-Content-Bereich (100% Höhe statt
+ *    100vh/min-height:880px — sonst clippt die Frag-Leiste unter der Masthead).
+ *  - Mobile Frag-Leiste sitzt ÜBER der Dashboard-Bottom-Nav (<600px), nicht
+ *    am Viewport-Rand.
+ */
+
+.jv {
+  /* A4-Token-Sheet (verbatime Werte, auf der Zone statt :root definiert). */
+  --void: #04070f;
+  --panel: rgba(10, 17, 32, .86);
+  --line: rgba(56, 120, 190, .28);
+  --line2: rgba(56, 120, 190, .13);
+  --txt: #eaf3ff;
+  --dim: #a6bbdc;
+  --faint: #8ea3c4;
+  --cyan: #38d8ff;
+  --grün: #3ddc97;
+  --amber: #ffb347;
+  --blau: #5b8cff;
+  --violett: #b78cff;
+  --pink: #ff7ab8;
+  --grau: #5a6f8f;
+  --rot: #ff5c69;
+  --mono: ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+
+  position: relative;
+  background: var(--void);
+  color: var(--txt);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+
+/* ══ Embedding in die ControlShell (A4 rechnet mit vollem Viewport) ══
+   Desktop: Stage füllt exakt von Masthead-Unterkante (h-14 tab = 3.5rem /
+   h-16 lg = 4rem) bis zum Viewport-Ende — negatives Top-Margin hebt main
+   pt-4 auf, die Höhe reicht bis ganz unten, damit die Frag-Leiste wie im
+   A4 am unteren Rand sitzt. Seitlich heben die Margins main px-6/lg:px-8 auf. */
+@media (min-width: 760px) {
+  .jv {
+    height: calc(100dvh - 3.5rem);
+    margin: -1rem -1.5rem -1.5rem;
+    overflow: hidden;
+  }
+}
+@media (min-width: 1024px) {
+  .jv { height: calc(100dvh - 4rem); margin: -1rem -2rem -1.5rem; }
+}
+/* Mobil (<760px): Zone blutet seitlich an den Viewport-Rand (main px-4) und
+   wächst im Seitenfluss; Mindesthöhe ≈ Viewport minus Masthead/Bottom-Nav,
+   damit der Graph-Canvas auch bei wenig Inhalt trägt. */
+@media (max-width: 759px) {
+  .jv { min-height: calc(100dvh - 10rem); margin: 0 -1rem; }
+}
+
+/* ══ Stage: dunkler Command-Center-Canvas ══ */
+.jv-stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(1000px 700px at 62% 40%, rgba(56, 140, 255, .07), transparent 65%), var(--void);
+}
+.jv-brain { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+.jv-float {
+  position: absolute;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  backdrop-filter: blur(7px);
+  box-shadow: 0 6px 26px rgba(0, 0, 0, .38);
+}
+.jv-ptitle {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .2em;
+  color: var(--dim);
+  margin-bottom: 9px;
+}
+
+/* ══ Links: Brain-Panel ══ */
+.jv-brainpanel { top: 16px; left: 16px; width: 254px; padding: 14px 15px; z-index: 3; }
+.jv-brainpanel h1 { font-family: var(--mono); font-size: 14px; letter-spacing: .3em; color: var(--txt); font-weight: 400; }
+.jv-brainpanel h1 b { color: var(--cyan); font-weight: 500; }
+.jv-stats { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin: 5px 0 11px; line-height: 1.5; }
+.jv-stats .jv-mocktag { display: none; color: var(--faint); }
+.jv-search {
+  display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px;
+  min-height: 44px; padding: 0 12px; color: var(--faint); font-size: 12.5px; background: rgba(4, 7, 15, .6);
+}
+.jv-search::before { content: "⌕"; color: var(--dim); font-size: 15px; }
+.jv-hubs { margin-top: 13px; }
+.jv-hub { display: flex; align-items: center; gap: 9px; min-height: 26px; padding: 3px 0; font-size: 12.5px; color: var(--txt); }
+.jv-hub .jv-d { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.jv-hub .jv-nm { min-width: 0; overflow-wrap: anywhere; hyphens: auto; }
+.jv-hub .jv-n { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--dim); flex: none; padding-left: 8px; }
+.jv-inspector { margin-top: 10px; border-top: 1px solid var(--line2); padding-top: 10px; font-size: 11.5px; color: var(--dim); line-height: 1.6; }
+.jv-inspector b { color: var(--txt); font-weight: 600; }
+.jv-klassisch {
+  display: inline-flex; align-items: center; min-height: 28px; margin-top: 10px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px; padding: 0 12px;
+  background: rgba(4, 7, 15, .45); text-decoration: none;
+}
+.jv-klassisch:hover, .jv-klassisch:focus-visible { color: var(--cyan); border-color: var(--line); }
+
+/* Cluster-Töne (Punkte in Hubs/Filter, Sparklines) — Farben = Graph-Mock-Cluster. */
+.jv-tone-cyan { --tone: var(--cyan); }
+.jv-tone-gruen { --tone: var(--grün); }
+.jv-tone-amber { --tone: var(--amber); }
+.jv-tone-blau { --tone: var(--blau); }
+.jv-tone-violett { --tone: var(--violett); }
+.jv-tone-pink { --tone: var(--pink); }
+.jv-tone-grau { --tone: var(--grau); }
+.jv-d { background: var(--tone, var(--grau)); }
+
+/* ══ Rechts oben: Filter ══ */
+.jv-filter { top: 16px; right: 16px; width: 172px; padding: 12px 13px; z-index: 3; }
+.jv-frow { display: flex; align-items: center; gap: 8px; min-height: 24px; font-size: 11.5px; color: var(--dim); }
+.jv-frow .jv-d { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.jv-frow .jv-n { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--dim); }
+
+/* ══ Rechts unten: Jarvis-Emblem ══ */
+.jv-emblem { bottom: 20px; right: 16px; width: 172px; padding: 12px 12px 11px; text-align: center; z-index: 3; }
+.jv-ering { position: relative; width: 96px; height: 96px; margin: 0 auto 8px; }
+.jv-ering .jv-r { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid rgba(56, 216, 255, .5); border-left-color: transparent; border-bottom-color: transparent; transform: rotate(24deg); }
+.jv-ering .jv-r2 { inset: 8px; border-color: rgba(255, 179, 71, .55); border-top-color: transparent; border-right-color: transparent; transform: rotate(-38deg); }
+.jv-ering .jv-r3 { inset: 16px; border: 1px dashed rgba(125, 147, 184, .4); transform: rotate(8deg); }
+.jv-ering .jv-core {
+  position: absolute; inset: 24px; border-radius: 50%;
+  background: radial-gradient(circle at 40% 32%, #7fe6ff, #1c8ec2 55%, #0a2f52);
+  box-shadow: 0 0 26px rgba(56, 216, 255, .5);
+}
+.jv-emblem .jv-nm { font-family: var(--mono); font-size: 12px; letter-spacing: .42em; color: var(--txt); text-shadow: 0 0 10px rgba(56, 216, 255, .5); }
+.jv-emblem .jv-on { font-family: var(--mono); font-size: 9.5px; letter-spacing: .3em; color: var(--grün); margin-top: 6px; }
+.jv-emblem .jv-model {
+  margin-top: 9px; display: inline-flex; align-items: center; min-height: 28px; font-family: var(--mono);
+  font-size: 10px; letter-spacing: .14em; color: var(--cyan); border: 1px solid var(--line); border-radius: 999px; padding: 0 12px;
+}
+
+/* ══ Rechts: KI-LAGE ══ */
+.jv-news { top: 238px; right: 16px; width: 262px; padding: 15px 16px; z-index: 3; }
+.jv-news .jv-ptitle { font-size: 10px; margin-bottom: 10px; }
+.jv-news .jv-item {
+  padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; line-height: 1.42; font-weight: 500;
+  color: var(--txt); overflow-wrap: anywhere; hyphens: auto;
+}
+.jv-news .jv-item.jv-lead { font-size: 14px; font-weight: 600; line-height: 1.38; }
+.jv-news .jv-item:last-child { border-bottom: 0; }
+.jv-news .jv-src {
+  display: inline-flex; align-items: center; min-height: 20px; font-family: var(--mono); font-size: 8.5px;
+  letter-spacing: .08em; color: var(--dim); border: 1px solid var(--line2); border-radius: 999px;
+  padding: 0 9px; margin-top: 7px; background: rgba(4, 7, 15, .5);
+}
+.jv-news .jv-fresh { color: var(--grün); float: right; letter-spacing: .05em; }
+
+/* ══ Links unten: Wartet · dezent + System ══ */
+.jv-quiet { left: 16px; bottom: 86px; width: 254px; padding: 12px 14px; z-index: 3; }
+.jv-qrow { display: flex; align-items: center; gap: 9px; padding: 6px 0; font-size: 11.5px; color: var(--dim); border-bottom: 1px solid var(--line2); }
+.jv-qrow:last-of-type { border-bottom: 0; }
+.jv-qrow .jv-rd { width: 6px; height: 6px; border-radius: 50%; background: var(--rot); box-shadow: 0 0 5px rgba(255, 92, 105, .6); flex: none; }
+.jv-qrow .jv-tx { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jv-qrow .jv-ok {
+  display: inline-flex; align-items: center; min-height: 28px; padding: 0 10px; flex: none;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--cyan);
+  border: 1px solid var(--line); border-radius: 6px; background: rgba(4, 7, 15, .45); text-decoration: none;
+}
+.jv-qrow .jv-ok:hover, .jv-qrow .jv-ok:focus-visible { border-color: var(--cyan); }
+.jv-quietempty { font-size: 11.5px; color: var(--grün); padding: 8px 0; line-height: 1.5; }
+.jv-quietempty span { display: block; color: var(--faint); font-size: 10.5px; margin-top: 2px; }
+.jv-qerror { font-size: 11.5px; color: var(--amber); padding: 8px 0; line-height: 1.5; }
+.jv-qloading { font-size: 11.5px; color: var(--faint); padding: 8px 0; line-height: 1.5; }
+.jv-more { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim); margin-top: 7px; display: inline-block; text-decoration: none; }
+.jv-more:hover, .jv-more:focus-visible { color: var(--cyan); }
+.jv-sys { display: flex; gap: 14px; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line2); }
+.jv-spark { flex: 1; min-width: 0; }
+.jv-spark .jv-lb { font-family: var(--mono); font-size: 9px; letter-spacing: .18em; color: var(--dim); display: flex; justify-content: space-between; }
+.jv-spark .jv-lb b { color: var(--txt); font-weight: 500; }
+.jv-spark svg { width: 100%; height: 22px; display: block; margin-top: 4px; }
+.jv-sparkarea-cyan { fill: rgba(56, 216, 255, .18); }
+.jv-sparkline-cyan { fill: none; stroke: #38d8ff; stroke-width: 1.2; }
+.jv-sparkarea-amber { fill: rgba(255, 179, 71, .16); }
+.jv-sparkline-amber { fill: none; stroke: #ffb347; stroke-width: 1.2; }
+.jv-sparkarea-grau { fill: rgba(125, 147, 184, .14); }
+.jv-sparkline-grau { fill: none; stroke: #7d93b8; stroke-width: 1.2; }
+
+/* ══ Graph-Vorschau-Tag (Desktop; mobil: inline in .jv-stats) ══ */
+.jv-gtag {
+  position: absolute; left: 16px; bottom: 20px; z-index: 3; font-family: var(--mono); font-size: 9px;
+  letter-spacing: .16em; color: var(--dim); border: 1px solid var(--line2); border-radius: 999px;
+  padding: 7px 13px; background: rgba(9, 15, 28, .66);
+}
+.jv-gtag b { color: var(--txt); font-weight: 500; }
+
+/* ══ Chat-Verlauf (Bubble-Zone, Produkt — kein Mockup-Chrome) ══ */
+.jv-chat {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 4;
+  width: min(640px, calc(100% - 28px)); max-height: 42%;
+  display: flex; flex-direction: column; gap: 10px;
+  overflow-y: auto; padding: 6px;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.jv-bubble {
+  max-width: 88%; padding: 10px 14px; border-radius: 12px; font-size: 13px; line-height: 1.5;
+  color: var(--txt); white-space: pre-wrap; overflow-wrap: anywhere;
+  backdrop-filter: blur(7px); box-shadow: 0 4px 18px rgba(0, 0, 0, .34);
+}
+.jv-bubble-user {
+  align-self: flex-end;
+  background: rgba(56, 216, 255, .12); border: 1px solid rgba(56, 216, 255, .35);
+}
+.jv-bubble-assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); }
+.jv-bubble-error { align-self: flex-start; background: rgba(255, 92, 105, .08); border: 1px solid rgba(255, 92, 105, .45); }
+.jv-bubble-error .jv-errlabel {
+  display: block; font-family: var(--mono); font-size: 8.5px; letter-spacing: .2em;
+  color: var(--rot); margin-bottom: 5px;
+}
+.jv-badge {
+  display: block; margin-top: 7px; font-family: var(--mono); font-size: 8.5px;
+  letter-spacing: .08em; color: var(--faint);
+}
+.jv-attref { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.jv-attref img { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex: none; }
+.jv-attref .jv-an { font-family: var(--mono); font-size: 9px; color: var(--dim); overflow-wrap: anywhere; }
+.jv-thinking { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-family: var(--mono); font-size: 9.5px; letter-spacing: .2em; }
+.jv-thinking .jv-dots { display: inline-flex; gap: 4px; }
+.jv-thinking .jv-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); opacity: .35; }
+
+/* ══ Frag-Leiste (A4 Ask-Bar → funktionaler Composer) ══ */
+.jv-ask {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 4;
+  width: min(640px, calc(100% - 28px)); min-height: 60px;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  padding: 8px 10px 8px 20px; backdrop-filter: blur(8px);
+  box-shadow: 0 0 34px rgba(56, 216, 255, .14);
+}
+.jv-ask input[type="text"] {
+  flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+  color: var(--txt); font-family: var(--sans); font-size: 13px; min-height: 44px; padding: 0;
+}
+.jv-ask input[type="text"]::placeholder { color: var(--dim); }
+.jv-ask input[type="text"]:disabled { opacity: .55; }
+/* Fokus-Sichtbarkeit: die ganze Pille reagiert auf Tastatur-Fokus im Input. */
+.jv-ask:focus-within { border-color: rgba(56, 216, 255, .55); box-shadow: 0 0 34px rgba(56, 216, 255, .22); }
+.jv-icons { display: flex; gap: 8px; flex: none; }
+.jv-ic {
+  width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line);
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--dim); background: rgba(4, 7, 15, .5); cursor: pointer; padding: 0;
+}
+.jv-ic:hover, .jv-ic:focus-visible { color: var(--cyan); border-color: var(--cyan); }
+.jv-ic:disabled { opacity: .5; cursor: not-allowed; }
+.jv-send {
+  width: 52px; height: 52px;
+  background: radial-gradient(circle at 35% 30%, #66e2ff, #1587b8); color: #03222f;
+  border: none; box-shadow: 0 0 16px rgba(56, 216, 255, .55);
+}
+.jv-send:hover, .jv-send:focus-visible { color: #03222f; border: none; filter: brightness(1.08); }
+.jv-attachchip {
+  display: flex; align-items: center; gap: 8px; flex: none; max-width: 40%;
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px 3px 3px;
+  background: rgba(4, 7, 15, .6);
+}
+.jv-attachchip img { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; flex: none; }
+.jv-attachchip .jv-an {
+  font-family: var(--mono); font-size: 9px; color: var(--dim); max-width: 90px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.jv-attachchip .jv-ax {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 44px; height: 44px; margin: -6px -6px -6px 0; border: 0; background: transparent;
+  color: var(--faint); cursor: pointer; font-size: 14px; padding: 0;
+}
+.jv-attachchip .jv-ax:hover, .jv-attachchip .jv-ax:focus-visible { color: var(--rot); }
+.jv-composer-error {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 86px; z-index: 5;
+  width: min(640px, calc(100% - 28px));
+  border: 1px solid rgba(255, 92, 105, .45); border-radius: 10px;
+  background: rgba(255, 92, 105, .1); color: var(--txt);
+  font-size: 12px; line-height: 1.5; padding: 8px 14px; backdrop-filter: blur(7px);
+}
+
+/* ══ Graph-Labels: Hub/Satellit-Staffelung + dunkler Halo ══ */
+.jv .maplabel {
+  font-family: var(--mono); fill: #b7cbe9; font-size: 10.5px; letter-spacing: .07em;
+  paint-order: stroke; stroke: rgba(4, 7, 15, .82); stroke-width: 2px; stroke-linejoin: round;
+}
+.jv .maplabel.big { font-size: 13px; fill: #eef5ff; font-weight: 600; letter-spacing: .09em; stroke-width: 2.6px; }
+.jv .maplabel.dim2 { fill: #8fa4c6; font-size: 9px; stroke-width: 1.8px; }
+.jv .maplabel.focuslbl { fill: var(--grün); font-size: 8.5px; letter-spacing: .18em; stroke-width: 1.8px; opacity: .92; }
+
+/* ══ Animationen: zentraler Kill-Switch über no-preference (A4-Idiom) ══ */
+@media (prefers-reduced-motion: no-preference) {
+  .jv-ering .jv-r { animation: jv-sp 11s linear infinite; }
+  .jv-ering .jv-r2 { animation: jv-sp 17s linear infinite reverse; }
+  @keyframes jv-sp { to { transform: rotate(384deg); } }
+  .jv-breathe { animation: jv-br 4.6s ease-in-out infinite; }
+  @keyframes jv-br { 0%, 100% { opacity: .10; } 50% { opacity: .24; } }
+  .jv-thinking .jv-dots i { animation: jv-tk 1.2s ease-in-out infinite; }
+  .jv-thinking .jv-dots i:nth-child(2) { animation-delay: .18s; }
+  .jv-thinking .jv-dots i:nth-child(3) { animation-delay: .36s; }
+  @keyframes jv-tk { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+}
+
+/* ══ Mobil (A4 ≤760px): Panels als vertikaler Stack über fixiertem Graph ══ */
+@media (max-width: 759px) {
+  .jv { min-height: 100%; }
+  .jv-stage { display: flex; flex-direction: column; height: auto; min-height: 100%; padding: 10px 12px 92px; }
+  /* Rand-Vignette: Graph-Fragmente lösen sich zu Schwarz auf statt hart zu schneiden */
+  .jv-stage::after {
+    content: ""; position: fixed; inset: 0; z-index: 1; pointer-events: none;
+    background: linear-gradient(90deg, rgba(4, 7, 15, .94), rgba(4, 7, 15, 0) 15%, rgba(4, 7, 15, 0) 85%, rgba(4, 7, 15, .94));
+  }
+  .jv-float { position: relative; inset: auto; width: auto; margin: 0 0 10px; }
+  .jv-brainpanel { order: 1; padding: 12px 13px; }
+  .jv-stats { margin-bottom: 9px; }
+  .jv-stats .jv-mocktag { display: block; margin-top: 2px; }
+  .jv .maplabel { display: none; }
+  .jv-hubs, .jv-inspector { display: none; }
+  .jv-filter { display: none; }
+  .jv-gtag { display: none; }
+  .jv-klassisch { min-height: 44px; padding: 0 14px; }
+  .jv-news { order: 2; padding: 13px 14px; }
+  .jv-news .jv-item { padding: 9px 0; }
+  .jv-news .jv-item:nth-child(n+5) { display: none; }
+  .jv-news::after {
+    content: "▾ 3 VON 4 · REST IM FEED"; display: block; font-family: var(--mono);
+    font-size: 9px; letter-spacing: .14em; color: var(--dim); margin-top: 8px;
+  }
+  .jv-emblem {
+    order: 3; display: grid; grid-template-columns: auto 1fr auto; grid-template-rows: auto auto;
+    column-gap: 12px; align-items: center; text-align: left; padding: 10px 14px;
+  }
+  .jv-ering { grid-row: 1 / 3; width: 52px; height: 52px; margin: 0; }
+  .jv-ering .jv-core { inset: 13px; }
+  .jv-emblem .jv-nm { grid-column: 2; font-size: 10px; letter-spacing: .24em; }
+  .jv-emblem .jv-on { grid-column: 2; font-size: 8.5px; letter-spacing: .16em; margin-top: 3px; }
+  .jv-emblem .jv-model { grid-row: 1 / 3; grid-column: 3; margin: 0; min-height: 32px; font-size: 8.5px; padding: 0 10px; }
+  .jv-quiet { order: 4; margin-top: auto; padding: 12px 13px; }
+  .jv-qrow { min-height: 44px; padding: 4px 0; font-size: 12px; }
+  .jv-qrow .jv-ok { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 13px; font-size: 9.5px; }
+  .jv-chat {
+    position: relative; left: auto; bottom: auto; transform: none; order: 5;
+    width: auto; max-height: none; overflow: visible; margin: 0 0 10px; padding: 0;
+  }
+  .jv-bubble { max-width: 92%; font-size: 13px; }
+  .jv-composer-error { position: relative; left: auto; bottom: auto; transform: none; order: 6; width: auto; margin: 0 0 10px; }
+  .jv-ask {
+    position: fixed; left: 12px; right: 12px; transform: none; width: auto;
+    bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px) + 8px);
+    min-height: 64px; padding: 8px 8px 8px 16px; gap: 8px;
+  }
+}
+
+/* 600–759px: Dashboard-Bottom-Nav ist ab `tab` (600px) weg — Frag-Leiste ans
+   untere Viewport-Ende wie im A4 (unter 600px schwebt sie ÜBER der Bottom-Nav). */
+@media (min-width: 600px) and (max-width: 759px) {
+  .jv-ask { bottom: 12px; }
+}

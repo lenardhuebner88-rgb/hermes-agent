@@ -20,7 +20,12 @@ cd "$repo_root/web"
 
 design_token_baseline_file="$script_dir/design-token-baseline.txt"
 design_token_baseline="$(cat "$design_token_baseline_file")"
-design_token_matches="$(grep -rEno '#[0-9a-fA-F]{3,8}\b|\[(#|rgb)' src/control --include='*.tsx' --include='*.ts' | grep -v '/control/theme\.css' || true)"
+# Jarvis-Zone-Ausnahme (Plan-Entscheidung, Canon-Entwurf Punkt 4): NUR die Route
+# /control/projekte (Code unter src/control/jarvis/, Tokens in src/control/jarvis.css)
+# folgt dem eigenen A4-Token-Sheet und ist vom Ratchet ausgenommen — siehe
+# web/src/control/DESIGN.md „Jarvis-Zone". Der gesamte Rest von src/control
+# bleibt ratchet-gebunden.
+design_token_matches="$(grep -rEno '#[0-9a-fA-F]{3,8}\b|\[(#|rgb)' src/control --include='*.tsx' --include='*.ts' | grep -v '/control/theme\.css' | grep -v '/control/jarvis/' || true)"
 design_token_count="$(printf '%s\n' "$design_token_matches" | grep -c . || true)"
 if [[ "$design_token_count" -gt "$design_token_baseline" ]]; then
   echo "FAIL: raw color literals in web/src/control went from $design_token_baseline to $design_token_count." >&2
