@@ -1568,6 +1568,7 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
     assert {
         "action_context",
         "action_payload",
+        "action_result",
         "hook_key",
         "suggestions_json",
         "suggested_by",
@@ -1583,6 +1584,7 @@ def test_i2_migration_adds_columns_preserves_old_events(tmp_path: Path) -> None:
     assert rows[0]["fingerprint"] == "fp-legacy"
     assert rows[0].get("action_context") is None
     assert rows[0].get("action_payload") is None
+    assert rows[0].get("action_result") is None
     assert rows[0].get("hook_key") is None
     assert rows[0].get("suggestions") is None
     assert rows[0].get("suggested_by") is None

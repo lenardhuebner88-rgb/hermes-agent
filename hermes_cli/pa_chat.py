@@ -75,8 +75,10 @@ _LEGACY_MODEL_ALIASES = {"sol": {"sol": SOL_MODEL}}
 
 PA_SYSTEM_PROMPT = """Du bist der persönliche Assistent im Projekte-Tab von Hermes.
 Du beantwortest Fragen ausschließlich aus dem mitgelieferten Live-Kontext und der
-PA-Historie. Du darfst NICHTS mutieren: keine Writes, keine Aktionen, keine
-Bestätigungen und keine Ausführung von Vorschlägen. Vorschläge gibst du nur als Text.
+PA-Historie. Du darfst selbst NICHTS mutieren oder bestätigen. Wenn eine Aktion
+wirklich nötig ist, darfst du genau einen Vorschlag ausschließlich als
+```pa_action {"category":"...","payload":{...},"reason":"..."}``` ausgeben;
+führe ihn niemals selbst aus. Gib nie mehr als einen solchen Block pro Antwort aus.
 Antworte kurz auf Deutsch, kennzeichne Unsicherheit und nenne die verwendeten Belege
 (z. B. Board, offene Fragen, laufende Ketten oder Receipts)."""
 
@@ -89,6 +91,7 @@ _UPLOAD_SUFFIXES = {
     "image/webp": ".webp",
     "image/bmp": ".bmp",
 }
+_PA_ACTION_BLOCK_RE = re.compile(r"```pa_action\b(.*?)```", re.IGNORECASE | re.DOTALL)
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pa_conversations (
     id          TEXT PRIMARY KEY,
@@ -272,6 +275,45 @@ class PAStore:
                 ),
             )
 
+    def append_executor_message(
+        self,
+        event_id: int,
+        content: str,
+        *,
+        now: int | None = None,
+    ) -> str:
+        """Append one idempotent action-evidence bubble to the default thread."""
+        self._ensure_schema()
+        ts = int(time.time()) if now is None else int(now)
+        turn_id = f"pa_action_{int(event_id)}"
+        engine = "pa-executor"
+        model = "gated-actions-v1"
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO pa_conversations(id, created_at, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at",
+                (_DEFAULT_CONVERSATION_ID, ts, ts),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO pa_turns("
+                "id, conversation_id, status, reply, error, engine, model, "
+                "project_scope, attachments_json, ts, updated_ts"
+                ") VALUES (?, ?, 'done', ?, NULL, ?, ?, NULL, '[]', ?, ?)",
+                (turn_id, _DEFAULT_CONVERSATION_ID, content, engine, model, ts, ts),
+            )
+            exists = conn.execute(
+                "SELECT 1 FROM pa_messages WHERE turn_id=? AND role='assistant' "
+                "AND engine=? LIMIT 1",
+                (turn_id, engine),
+            ).fetchone()
+            if exists is None:
+                conn.execute(
+                    "INSERT INTO pa_messages(conversation_id, turn_id, role, content, "
+                    "engine, model, ts) VALUES (?, ?, 'assistant', ?, ?, ?, ?)",
+                    (_DEFAULT_CONVERSATION_ID, turn_id, content, engine, model, ts),
+                )
+        return turn_id
+
     def get_turn(self, turn_id: str) -> dict[str, Any] | None:
         self._ensure_schema()
         with self.connect() as conn:
@@ -435,6 +477,53 @@ def compose_prompt(
         f"LETZTE PA-HISTORIE:\n{_bounded_history(history)}\n\n"
         f"AKTUELLE FRAGE:\n{text.strip()}"
     )
+
+
+def parse_pa_action_proposal(
+    reply: str,
+) -> tuple[str, dict[str, Any] | None, str | None]:
+    """Strip typed action blocks and return at most one validated proposal."""
+    matches = list(_PA_ACTION_BLOCK_RE.finditer(reply or ""))
+    if not matches:
+        return reply, None, None
+    visible = _PA_ACTION_BLOCK_RE.sub("", reply or "")
+    visible = re.sub(r"\n{3,}", "\n\n", visible).strip()
+    if len(matches) != 1:
+        return (
+            visible,
+            None,
+            "Mehrere Aktionsvorschläge wurden verworfen; erlaubt ist höchstens einer.",
+        )
+
+    try:
+        decoded = json.loads(matches[0].group(1).strip())
+        if not isinstance(decoded, dict):
+            raise ValueError("proposal must be an object")
+        allowed = {"category", "payload", "reason"}
+        if set(decoded) - allowed:
+            raise ValueError("unknown proposal fields")
+        if "category" not in decoded or "payload" not in decoded:
+            raise ValueError("category/payload missing")
+        from hermes_cli.agent_questions import build_pa_action_envelope
+
+        envelope = build_pa_action_envelope(
+            decoded["category"],
+            decoded["payload"],
+            reason=decoded.get("reason") or "PA-Vorschlag aus dem aktuellen Turn",
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return (
+            visible,
+            None,
+            "Der Aktionsvorschlag wurde wegen ungültiger oder unbekannter Daten verworfen.",
+        )
+    return visible, envelope, None
+
+
+def _reply_with_notice(reply: str, notice: str) -> str:
+    prefix = reply.strip()
+    rendered = f"Hinweis: {notice}"
+    return f"{prefix}\n\n{rendered}" if prefix else rendered
 
 
 def _hermes_bin() -> str:
@@ -629,6 +718,24 @@ async def _process_turn(
             ),
             timeout=TURN_TIMEOUT_SECONDS + 5,
         )
+        reply, proposal, notice = parse_pa_action_proposal(reply)
+        if proposal is not None:
+            try:
+                from hermes_cli.pa_actions import enqueue_pa_action
+
+                event_id = await _run_sync(
+                    enqueue_pa_action,
+                    proposal["category"],
+                    proposal["payload"],
+                    reason=proposal.get("reason"),
+                )
+                if not reply:
+                    reply = f"Aktion zur Bestätigung eingereiht (#{event_id})."
+            except Exception as exc:
+                _log.warning("PA action proposal enqueue failed: %s", exc)
+                notice = "Der Aktionsvorschlag konnte nicht eingereiht werden."
+        if notice:
+            reply = _reply_with_notice(reply, notice)
         await _run_sync(store.finish_turn, turn_id, reply)
     except asyncio.TimeoutError:
         await _run_sync(store.fail_turn, turn_id, "Engine-Zeitlimit erreicht")

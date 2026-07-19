@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS question_events (
     override      INTEGER NOT NULL DEFAULT 0,
     action_context TEXT,
     action_payload TEXT,
+    action_result TEXT,
     hook_key      TEXT
 );
 
@@ -109,6 +110,7 @@ CREATE TABLE IF NOT EXISTS question_meta (
 _SCHEMA_COLUMN_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("action_context", "action_context TEXT"),
     ("action_payload", "action_payload TEXT"),
+    ("action_result", "action_result TEXT"),
     ("hook_key", "hook_key TEXT"),
     ("suggestions_json", "suggestions_json TEXT"),
     ("suggested_by", "suggested_by TEXT"),
@@ -563,6 +565,16 @@ def _row_to_event(row: sqlite3.Row) -> dict[str, Any]:
         except (TypeError, ValueError, json.JSONDecodeError):
             action_payload = None
     d["action_payload"] = action_payload
+    raw_action_result = d.pop("action_result", None)
+    if raw_action_result is None:
+        action_result = None
+    else:
+        try:
+            parsed_result = json.loads(raw_action_result)
+            action_result = parsed_result if isinstance(parsed_result, dict) else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            action_result = None
+    d["action_result"] = action_result
     return d
 
 
@@ -1245,6 +1257,48 @@ def _set_verify_fields(
             )
 
 
+def set_pa_action_result(
+    event_id: int,
+    result: dict[str, Any],
+    *,
+    db_path: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> None:
+    """Persist bounded structured executor evidence on a ``pa_action`` row."""
+    if not isinstance(result, dict):
+        raise ValueError("pa_action result muss ein JSON-Objekt sein")
+    encoded = json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    # Pane tails are bounded by the executor; retain a final defensive limit so
+    # a custom handler cannot grow question_events.db without bound.
+    if len(encoded) > 32_000:
+        encoded = json.dumps(
+            {
+                "version": PA_ACTION_VERSION,
+                "status": "evidence-truncated",
+                "excerpt": encoded[:31_000],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    ts = _iso_now(now)
+    with connect_closing(db_path=db_path) as conn:
+        with write_txn(conn):
+            cur = conn.execute(
+                "UPDATE question_events SET action_result = ?, updated_ts = ? "
+                "WHERE id = ? AND kind = 'pa_action'",
+                (encoded, ts, int(event_id)),
+            )
+            if int(cur.rowcount or 0) != 1:
+                raise ValueError("pa_action event nicht gefunden")
+
+
 def answer_question(
     event_id: int,
     answer: str,
@@ -1281,6 +1335,21 @@ def answer_question(
     }
     if via_suggestion is not None and via_suggestion not in suggested_nrs:
         return {"ok": False, "reason": "invalid-suggestion"}
+
+    if event.get("kind") == "pa_action":
+        # Gated actions never touch a pane.  Keep this import lazy so the
+        # existing scraper/answer process does not acquire kanban/PA-store
+        # dependencies unless it is actually executing an operator-confirmed
+        # action.
+        from hermes_cli.pa_actions import answer_pa_action
+
+        return answer_pa_action(
+            event_id,
+            answer_str,
+            event=event,
+            answered_by=answered_by,
+            db_path=db_path,
+        )
 
     if not suggestions:
         answer_source = "operator_free"

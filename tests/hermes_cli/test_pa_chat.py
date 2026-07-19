@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import hermes_cli.pa_chat as pa
+from hermes_cli import agent_questions as aq
 
 
 @pytest.fixture
@@ -485,3 +486,86 @@ print(json.dumps({
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {"ok": True, "missing": []}
+
+
+def test_fake_engine_valid_action_proposal_is_hidden_and_enqueued(
+    isolated_pa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = {
+        "category": "kanban.nudge",
+        "payload": {"card_id": "t_123", "reason": "Bitte Status prüfen"},
+        "reason": "Die Karte wirkt still",
+    }
+    monkeypatch.setattr(pa, "build_context_pack", lambda scope: "{}")
+    monkeypatch.setattr(
+        pa,
+        "run_engine",
+        lambda *args, **kwargs: (
+            "Ich schlage eine kontrollierte Aktion vor.\n"
+            f"```pa_action {json.dumps(proposal)}```"
+        ),
+    )
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    with TestClient(app) as client:
+        created = client.post("/api/pa/message", json={"text": "Was tun?"})
+        assert created.status_code == 200
+        turn = _poll(client, created.json()["turn_id"], "done")
+
+    assert "pa_action" not in str(turn["reply"])
+    assert turn["reply"] == "Ich schlage eine kontrollierte Aktion vor."
+    events = aq.list_question_events(status="open")
+    assert len(events) == 1
+    assert events[0]["kind"] == "pa_action"
+    assert events[0]["action_payload"] == {
+        "version": 1,
+        **proposal,
+    }
+
+
+@pytest.mark.parametrize(
+    ("reply", "notice_fragment"),
+    [
+        (
+            "Text\n```pa_action {\"category\":\"unknown\",\"payload\":{}}```",
+            "ungültiger oder unbekannter Daten",
+        ),
+        (
+            "Text\n```pa_action {\"category\":\"tmux.interrupt\",\"payload\":{\"session\":\"work\",\"window\":\"a\"}}```\n"
+            "```pa_action {\"category\":\"tmux.interrupt\",\"payload\":{\"session\":\"work\",\"window\":\"b\"}}```",
+            "höchstens einer",
+        ),
+    ],
+)
+def test_proposal_parser_removes_invalid_unknown_and_multiple_blocks(
+    reply: str,
+    notice_fragment: str,
+) -> None:
+    visible, proposal, notice = pa.parse_pa_action_proposal(reply)
+
+    assert proposal is None
+    assert notice is not None and notice_fragment in notice
+    assert "```pa_action" not in visible
+    assert visible == "Text"
+
+
+def test_proposal_parser_accepts_single_fenced_json_block() -> None:
+    reply = (
+        "Weiter nur nach Bestätigung.\n"
+        "```pa_action {\"category\":\"tmux.interrupt\","
+        "\"payload\":{\"session\":\"work\",\"window\":\"codex\"},"
+        "\"reason\":\"Prozess hängt\"}```"
+    )
+
+    visible, proposal, notice = pa.parse_pa_action_proposal(reply)
+
+    assert visible == "Weiter nur nach Bestätigung."
+    assert notice is None
+    assert proposal == {
+        "version": 1,
+        "category": "tmux.interrupt",
+        "payload": {"session": "work", "window": "codex"},
+        "reason": "Prozess hängt",
+    }
