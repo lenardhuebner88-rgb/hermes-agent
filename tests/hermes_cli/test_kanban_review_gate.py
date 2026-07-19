@@ -476,14 +476,19 @@ def test_review_stages_for_tier(monkeypatch):
         "verifier",
         "reviewer",
     ]
-    # A temporarily missing critic remains a required stage. Runtime
-    # availability is a retryable dispatch concern, not permission to weaken
-    # the configured review topology.
+    # Critic is never an automatic tier stage, so a missing critic profile can
+    # not weaken (or extend) the topology. A temporarily missing *reviewer*
+    # stays a required critical stage: runtime availability is a retryable
+    # dispatch concern, not permission to drop the configured stage.
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name != "critic")
     assert kb._review_stages_for_tier("critical", cfg) == [
         "verifier",
         "reviewer",
-        "critic",
+    ]
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name != "reviewer")
+    assert kb._review_stages_for_tier("critical", cfg) == [
+        "verifier",
+        "reviewer",
     ]
     monkeypatch.setattr(
         profiles_mod,
@@ -1110,7 +1115,13 @@ def test_zero_diff_auto_tier_uses_single_verifier_without_fake_adjustment(
 
 
 def test_final_review_completion_writes_review_released_event(kanban_home, gate_on):
-    """Live t_92528385 event gap: final review approve gets an explicit release verb."""
+    """Live t_92528385 event gap: final review approve gets an explicit release verb.
+
+    ``critical`` is the two-stage tier (verifier → reviewer); the final reviewer
+    approval must emit the explicit ``review_released`` release verb. ``review``
+    is single-stage (verifier only), so the reviewer final stage lives on the
+    critical tier under the new topology.
+    """
     with kb.connect() as conn:
         tid = kb.create_task(
             conn,
@@ -1122,7 +1133,7 @@ def test_final_review_completion_writes_review_released_event(kanban_home, gate_
             ),
             assignee="coder",
             kind="code",
-            review_tier="review",
+            review_tier="critical",
         )
         kb.claim_task(conn, tid)
         assert kb.complete_task(conn, tid, summary="impl", review_gate=True)
@@ -1146,7 +1157,7 @@ def test_final_review_completion_writes_review_released_event(kanban_home, gate_
         releases = [e for e in kb.list_events(conn, tid) if e.kind == "review_released"]
         assert len(releases) == 1
         assert releases[0].payload["verdict"] == "APPROVED"
-        assert releases[0].payload["review_tier"] == "review"
+        assert releases[0].payload["review_tier"] == "critical"
         assert releases[0].payload["review_stage"] == 1
         assert releases[0].payload["target_profile"] == "reviewer"
 

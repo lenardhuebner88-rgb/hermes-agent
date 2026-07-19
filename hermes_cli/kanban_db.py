@@ -5357,6 +5357,32 @@ def rewire_superseding_review_parent(
     return payload
 
 
+def _normalized_review_list(value: Any) -> list[str]:
+    """Coerce reviewer findings / required-verification metadata into a clean
+    list of non-empty strings.
+
+    Reviewers may hand us a list of items, a single string, or ``None`` (key
+    absent). We accept all three and never raise on malformed metadata: the
+    review-revision payload persisted from :func:`block_task` must stay a plain
+    list of strings regardless of what the reviewer profile emitted.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        items: list[Any] = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = [value]
+    normalized: list[str] = []
+    for item in items:
+        text = item.decode() if isinstance(item, bytes) else str(item)
+        text = text.strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
 def _render_review_findings(reviewer_metadata: dict[str, Any]) -> str:
     """Render the structured reviewer findings block (B). Shared by the
     NEEDS_REVISION fix-body and the auto-retry feedback comment so both surface
