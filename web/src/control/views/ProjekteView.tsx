@@ -8,13 +8,10 @@ import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
 import type { ProjectAgent } from "../lib/schemas";
 import {
+  buildProjectsOverview,
   computeAttention,
-  countAgentsByProject,
   countOpenSessions,
-  countStaleSessionsByProject,
-  groupAgentsByProject,
   parentDisplayName,
-  sortProjectsByAttention,
   splitAgentsBySource,
 } from "./projekte/derive";
 import { ProjectCard } from "./projekte/ProjectCard";
@@ -68,16 +65,10 @@ export function ProjekteView() {
   const commitList = commits.data?.commits ?? [];
   const receiptList = receipts.data?.receipts ?? [];
   const openQuestions = questions.data?.questions ?? [];
-  const agentsByProject = groupAgentsByProject(agentList);
-  const agentCountBySlug = countAgentsByProject(agentList);
-  // Stale-open sessions → per-card Ampel source (client aggregate; sessions
-  // payload is already loaded for the Sessions section).
-  const staleBySlug = countStaleSessionsByProject(sessionList);
-  const sortedList = sortProjectsByAttention(list, agentCountBySlug, staleBySlug);
-  const projectNames: Record<string, string> = {};
-  for (const project of list) {
-    projectNames[project.slug] = project.name;
-  }
+  // Geteilte Aggregation (S2.6): Karten-Sortierung, Ampel-Inputs und Namen
+  // kommen aus derselben Ableitung wie das Jarvis-ProjektePanel — kein Drift.
+  const { sortedList, agentsByProject, agentCountBySlug, staleBySlug, projectNames } =
+    buildProjectsOverview(list, agentList, sessionList);
   const selectedParentName =
     selectedSlug == null
       ? null

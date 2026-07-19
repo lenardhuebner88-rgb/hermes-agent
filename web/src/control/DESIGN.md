@@ -140,6 +140,15 @@ die verbindliche Design-Quelle, NICHT das Werkbank-Mockup oben.
   A4-Mock-Inhalte ohne Endpoint (`jarvis/mockContent.ts`). „Wartet · dezent"
   ist KEIN Mock — es hängt an echten offenen Fragen (`GET /api/agent-questions`)
   und verlinkt zur Beantwortung in die klassische Ansicht.
+- **Echte Bestandsdaten (S2.6):** das PROJEKTE-Panel (`jarvis/ProjektePanel.tsx`)
+  zeigt die echten ProjectCards (Name, Attention-Ampel, Grund-Chips, Kanban-
+  Zähler, Commit, live/Check-ins/Loops) über dieselben Hooks/Polling-Keys und
+  dieselbe Ableitung wie ProjekteView (`buildProjectsOverview` in
+  `views/projekte/derive.ts` — geteilt, kein Fork); Tap auf eine Karte führt
+  per Link zum Klassik-Drilldown, keine neue Navigation/Mechanik. Die volle
+  Fragen-Ansicht (`jarvis/FragenPanel.tsx`) ist ein Expand-Drawer aus „Wartet ·
+  dezent" heraus: gleiche open-gefilterten Daten wie FragenSection, Optionen/
+  KI-Vorschlag read-only, Antworten weiterhin nur über den Klassik-Pfad.
 - **Klassik-Fallback:** die bisherige ProjekteView bleibt unverändert unter
   `/control/projekte-klassisch` erreichbar, bis S2/S3 die Sektionen migrieren.
 - **Embedding-Regeln:** die Desktop-Stage füllt den ControlShell-Content-

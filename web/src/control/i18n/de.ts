@@ -945,9 +945,20 @@ export const de = {
     uploadFailed: "Bild-Upload fehlgeschlagen.",
     wartetError: "Fragen konnten nicht geladen werden.",
     wartetLoading: "Lade offene Fragen …",
-    wartetMore: (n: number) => `▾ +${n} WEITERE — KLASSISCHE ANSICHT`,
     wartetAnswer: (questionText: string) => `Frage beantworten: ${questionText}`,
     klassischLink: "KLASSISCHE ANSICHT →",
+    // S2.6 — volle Fragen-Ansicht (Expand aus „Wartet · dezent" heraus)
+    wartetExpand: (n: number) => `▸ +${n} WEITERE — ALLE FRAGEN`,
+    wartetExpandAll: "▸ ALLE FRAGEN",
+    wartetCollapse: "▾ FRAGEN ZUKLAPPEN",
+    fragenPanelTitle: "OFFENE FRAGEN",
+    fragenClose: "Fragen-Ansicht schließen",
+    fragenAnswerLink: "ANTWORTEN →",
+    // S2.6 — Projekte-Panel (ProjectCards im Jarvis-Look, echte Daten)
+    projekteTitle: "PROJEKTE",
+    projekteLoading: "Lade Projekte …",
+    projekteError: "Projekte konnten nicht geladen werden.",
+    projekteOpenAria: (name: string) => `Projekt öffnen: ${name} — klassische Ansicht`,
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

@@ -205,6 +205,121 @@
 }
 .jv-gtag b { color: var(--txt); font-weight: 500; }
 
+/* ══ Mitte oben: PROJEKTE (S2.6 — echte ProjectCards im A4-Look) ══ */
+.jv-projekte {
+  top: 16px; left: 50%; transform: translateX(-50%);
+  width: min(600px, 46%); max-height: min(342px, 42%);
+  display: flex; flex-direction: column; padding: 12px 14px; z-index: 3;
+}
+/* 760–1099px: die Mitte wird knapp (Brain 254px links, Filter 172px rechts) —
+   das Panel dockt rechts vom Brain-Panel an statt zu zentrieren. */
+@media (min-width: 760px) and (max-width: 1099px) {
+  .jv-projekte { left: 286px; right: 200px; transform: none; width: auto; }
+}
+.jv-projlist {
+  overflow-y: auto; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.jv-pcard {
+  display: block; text-decoration: none; color: inherit; cursor: pointer;
+  border: 1px solid var(--line2); border-radius: 8px; background: rgba(4, 7, 15, .45);
+  padding: 9px 11px; margin-bottom: 8px;
+}
+.jv-pcard:last-child { margin-bottom: 0; }
+.jv-pcard:hover, .jv-pcard:focus-visible { border-color: var(--line); background: rgba(10, 17, 32, .72); }
+.jv-pcard:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1px; }
+.jv-attn-alert { --tone: var(--rot); }
+.jv-attn-active { --tone: var(--amber); }
+.jv-attn-quiet { --tone: var(--grau); }
+.jv-pc-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.jv-pc-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--tone); box-shadow: 0 0 6px var(--tone); }
+.jv-attn-quiet .jv-pc-dot { box-shadow: none; }
+.jv-pc-name { font-size: 13px; font-weight: 600; color: var(--txt); min-width: 0; overflow-wrap: anywhere; hyphens: auto; }
+.jv-pcard:hover .jv-pc-name, .jv-pcard:focus-visible .jv-pc-name { color: var(--cyan); }
+.jv-pc-badge {
+  margin-left: auto; flex: none; font-family: var(--mono); font-size: 8.5px; letter-spacing: .12em;
+  padding: 3px 8px; border-radius: 999px; border: 1px solid;
+}
+.jv-attn-alert .jv-pc-badge { color: var(--rot); border-color: rgba(255, 92, 105, .5); background: rgba(255, 92, 105, .1); }
+.jv-attn-active .jv-pc-badge { color: var(--amber); border-color: rgba(255, 179, 71, .45); background: rgba(255, 179, 71, .08); }
+.jv-pc-err {
+  flex: none; width: 16px; height: 16px; display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 10px; color: var(--amber);
+  border: 1px solid rgba(255, 179, 71, .45); border-radius: 50%;
+}
+.jv-pc-parent { display: block; margin-top: 2px; font-size: 10.5px; color: var(--faint); overflow-wrap: anywhere; hyphens: auto; }
+.jv-pc-reasons { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.jv-pc-chip {
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: .06em; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px; padding: 2px 8px; background: rgba(4, 7, 15, .5);
+}
+.jv-pc-kanban {
+  display: flex; flex-wrap: wrap; gap: 3px 10px; margin-top: 7px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .05em; color: var(--dim);
+}
+.jv-pc-kanban b { color: var(--txt); font-weight: 500; }
+.jv-pc-kanban .jv-pc-warn, .jv-pc-kanban .jv-pc-warn b { color: var(--amber); }
+.jv-pc-meta { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; font-size: 10.5px; color: var(--faint); }
+.jv-pc-commit { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jv-pc-live { flex: none; font-family: var(--mono); font-size: 8.5px; letter-spacing: .06em; color: var(--dim); }
+
+/* ══ Volle Fragen-Ansicht (S2.6 — Expand aus „Wartet · dezent" heraus) ══ */
+.jv-expand {
+  display: inline-flex; align-items: center; min-height: 32px; margin-top: 7px; padding: 0;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim);
+  background: none; border: 0; cursor: pointer; text-align: left;
+}
+.jv-expand:hover, .jv-expand:focus-visible { color: var(--cyan); }
+/* Desktop: Drawer wächst aus dem Wartet-Panel nach oben (ankernd an .jv-quiet). */
+.jv-fragen {
+  left: 0; bottom: calc(100% + 10px); width: 352px;
+  max-height: min(430px, calc(100dvh - 300px));
+  display: flex; flex-direction: column; padding: 12px 14px; z-index: 6;
+}
+.jv-fragen-head { position: relative; }
+.jv-fclose {
+  position: absolute; top: -7px; right: -5px; width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line2); border-radius: 6px; background: rgba(4, 7, 15, .45);
+  color: var(--dim); font-size: 14px; line-height: 1; cursor: pointer;
+}
+.jv-fclose:hover, .jv-fclose:focus-visible { color: var(--cyan); border-color: var(--line); }
+.jv-fbody {
+  overflow-y: auto; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.jv-frage { border: 1px solid var(--line2); border-radius: 8px; background: rgba(4, 7, 15, .45); padding: 9px 11px; margin-bottom: 8px; }
+.jv-frage:last-child { margin-bottom: 0; }
+.jv-frage-meta { font-family: var(--mono); font-size: 8.5px; letter-spacing: .06em; color: var(--faint); overflow-wrap: anywhere; }
+.jv-frage-kind { color: var(--dim); }
+.jv-frage-text { margin-top: 5px; font-size: 12px; line-height: 1.5; color: var(--txt); white-space: pre-wrap; overflow-wrap: anywhere; hyphens: auto; }
+.jv-fopts { margin-top: 7px; display: flex; flex-direction: column; gap: 5px; }
+.jv-fopt {
+  display: flex; align-items: center; gap: 8px; border: 1px solid var(--line2); border-radius: 6px;
+  padding: 5px 8px; font-size: 11px; color: var(--dim); background: rgba(4, 7, 15, .35);
+}
+.jv-fopt .jv-fnr {
+  flex: none; min-width: 20px; height: 20px; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--line2); border-radius: 5px; font-family: var(--mono); font-size: 9px; color: var(--dim);
+}
+.jv-fopt .jv-flabel { flex: 1; min-width: 0; overflow-wrap: anywhere; hyphens: auto; }
+.jv-fopt.jv-rec { border-color: rgba(56, 216, 255, .4); color: var(--txt); }
+.jv-fopt.jv-rec .jv-fnr { color: var(--cyan); border-color: rgba(56, 216, 255, .4); }
+.jv-fopt.jv-sug { border-color: rgba(255, 179, 71, .5); color: var(--txt); }
+.jv-fopt.jv-sug .jv-fnr { color: var(--amber); border-color: rgba(255, 179, 71, .5); }
+.jv-ftag { flex: none; font-family: var(--mono); font-size: 8px; letter-spacing: .08em; color: var(--cyan); }
+.jv-ftag-sug { color: var(--amber); }
+.jv-fsug { margin-top: 7px; border: 1px solid rgba(255, 179, 71, .3); background: rgba(255, 179, 71, .06); border-radius: 6px; padding: 7px 9px; }
+.jv-fsug b { display: block; font-family: var(--mono); font-size: 8.5px; letter-spacing: .12em; color: var(--amber); font-weight: 500; }
+.jv-fsug p { margin-top: 4px; font-size: 11px; line-height: 1.5; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.jv-fsug-prov { display: block; margin-top: 4px; font-family: var(--mono); font-size: 8px; color: var(--faint); }
+.jv-fanswer {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 32px; margin-top: 8px; padding: 0 13px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; color: var(--cyan);
+  border: 1px solid var(--line); border-radius: 6px; background: rgba(4, 7, 15, .45); text-decoration: none;
+}
+.jv-fanswer:hover, .jv-fanswer:focus-visible { border-color: var(--cyan); }
+
 /* ══ Chat-Verlauf (Bubble-Zone, Produkt — kein Mockup-Chrome) ══ */
 .jv-chat {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 4;
@@ -353,6 +468,20 @@
   .jv-quiet { order: 4; margin-top: auto; padding: 12px 13px; }
   .jv-qrow { min-height: 44px; padding: 4px 0; font-size: 12px; }
   .jv-qrow .jv-ok { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 13px; font-size: 9.5px; }
+  /* S2.6: Projekte-Panel stapelt zwischen Wartet und Chat; Liste wächst im
+     Seitenfluss (kein Inner-Scroll auf Touch — die Seite scrollt selbst).
+     transform:none ist Pflicht: die Desktop-Zentrierung (translateX(-50%))
+     würde das Panel sonst mobil um die halbe Breite nach links schieben. */
+  .jv-projekte { order: 5; max-height: none; padding: 12px 13px; transform: none; }
+  .jv-projlist { overflow: visible; }
+  .jv-pcard { padding: 11px 12px; }
+  /* S2.6: Fragen-Drawer liegt mobil im Fluss des Wartet-Panels (das generische
+     .jv-float-Reset macht ihn zur eingebetteten Karte), Touch-Ziele ≥44px. */
+  .jv-fragen { max-height: none; margin: 10px 0 0; }
+  .jv-fbody { overflow: visible; }
+  .jv-fclose { width: 44px; height: 44px; top: -10px; right: -4px; }
+  .jv-fanswer { min-height: 44px; }
+  .jv-expand { min-height: 44px; }
   .jv-chat {
     position: relative; left: auto; bottom: auto; transform: none; order: 5;
     width: auto; max-height: none; overflow: visible; margin: 0 0 10px; padding: 0;

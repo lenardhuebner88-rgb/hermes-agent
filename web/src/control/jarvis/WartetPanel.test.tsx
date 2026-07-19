@@ -4,10 +4,12 @@
  * Payload-Format exakt wie in projekte/FragenSection.test.tsx (flacher
  * AgentQuestionEvent-Stamm aus GET /api/agent-questions, kein erfundener
  * Shape). Tap führt zur bestehenden Beantwortung im klassischen Tab
- * (/control/projekte-klassisch) — keine neue Antwort-Mechanik.
+ * (/control/projekte-klassisch) — keine neue Antwort-Mechanik. S2.6: der
+ * Expand-Toggle öffnet die volle Fragen-Ansicht (FragenPanel) mit denselben
+ * Daten; Detail-Inhalte des Drawers deckt FragenPanel.test.tsx.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, render, screen } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import type { AgentQuestionEvent } from "@/lib/api";
@@ -105,7 +107,7 @@ describe("WartetPanel (echtes GET /api/agent-questions-Format)", () => {
     }
   });
 
-  it("zeigt maximal 3 Zeilen dezent + Weitere-Link bei mehr offenen Fragen", async () => {
+  it("zeigt maximal 3 Zeilen dezent + Expand-Toggle zur vollen Fragen-Ansicht", async () => {
     listAgentQuestionsMock.mockResolvedValue({
       questions: [1, 2, 3, 4, 5].map((n) =>
         fixtureEvent({ id: n, question_text: `Frage Nummer ${n}?` }),
@@ -116,8 +118,57 @@ describe("WartetPanel (echtes GET /api/agent-questions-Format)", () => {
     await screen.findByText("Frage Nummer 1?");
     const rows = container.querySelectorAll(".jv-qrow");
     expect(rows).toHaveLength(3);
-    const more = await screen.findByRole("link", { name: /\+2 WEITERE/ });
-    expect(more.getAttribute("href")).toBe("/control/projekte-klassisch");
+
+    // Toggle öffnet den Drawer mit ALLEN Fragen (gleiche Daten, kein zweiter Poll).
+    const toggle = await screen.findByRole("button", { name: /\+2 WEITERE — ALLE FRAGEN/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+
+    const drawer = await screen.findByRole("region", { name: "OFFENE FRAGEN" });
+    expect(drawer).toBeTruthy();
+    expect(await screen.findByTestId("jv-frage-4")).toBeTruthy();
+    expect(await screen.findByTestId("jv-frage-5")).toBeTruthy();
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toContain("FRAGEN ZUKLAPPEN");
+
+    // Antworten läuft weiter über den Klassik-Pfad: Drawer- und dezente
+    // ANTWORTEN-Links zeigen beide auf /control/projekte-klassisch.
+    const links = await screen.findAllByRole("link", { name: /Frage beantworten:/ });
+    expect(links.length).toBeGreaterThanOrEqual(5);
+    for (const link of links) {
+      expect(link.getAttribute("href")).toBe("/control/projekte-klassisch");
+    }
+
+    // Zuklappen über denselben Toggle.
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
+  });
+
+  it("Expand bei ≤3 Fragen ohne Weitere-Zähler; × und ESC schließen den Drawer", async () => {
+    listAgentQuestionsMock.mockResolvedValue({
+      questions: [fixtureEvent({ id: 1, question_text: "Einzige Frage?" })],
+    });
+    renderPanel();
+
+    const toggle = await screen.findByRole("button", { name: /ALLE FRAGEN/ });
+    expect(toggle.textContent).not.toContain("WEITERE");
+    fireEvent.click(toggle);
+    await screen.findByRole("region", { name: "OFFENE FRAGEN" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Fragen-Ansicht schließen" }));
+    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
+
+    fireEvent.click(toggle);
+    await screen.findByRole("region", { name: "OFFENE FRAGEN" });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
+  });
+
+  it("kein Expand-Toggle im Leer-/Fehlerzustand", async () => {
+    listAgentQuestionsMock.mockResolvedValue({ questions: [] });
+    renderPanel();
+    expect(await screen.findByText(/Nichts wartet — Estate ruhig/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /ALLE FRAGEN/ })).toBeNull();
   });
 
   it("Leer-Zustand: Nichts-wartet-Text statt falscher Zeilen", async () => {
