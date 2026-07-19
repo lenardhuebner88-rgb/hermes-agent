@@ -1,5 +1,7 @@
+import asyncio
 import base64
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -142,6 +144,25 @@ def test_fs_git_root_for_nested_file(client, tmp_path):
     assert response.json() == {"root": str(tmp_path)}
 
 
+def test_fs_git_root_walk_runs_in_executor(client, tmp_path, monkeypatch):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    calls = []
+    original = asyncio.BaseEventLoop.run_in_executor
+
+    def run_in_executor(loop, executor, func, *args):
+        calls.append((executor, func, args))
+        return original(loop, executor, func, *args)
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", run_in_executor)
+
+    response = client.get("/api/fs/git-root", params={"path": str(tmp_path)})
+
+    assert response.status_code == 200
+    assert response.json() == {"root": str(tmp_path)}
+    assert any(func is web_server._fs_find_git_root for _, func, _ in calls)
+
+
 def test_fs_git_root_ignores_empty_dot_git(client, tmp_path):
     # A stray, empty `.git` directory (no HEAD) — e.g. a leftover `mkdir` under a
     # shared /tmp — is not a real repo and must NOT be reported as a root. Guards
@@ -202,6 +223,30 @@ def test_fs_default_cwd_prefers_existing_terminal_cwd(client, tmp_path, monkeypa
 
     assert response.status_code == 200
     assert response.json() == {"cwd": str(tmp_path), "branch": "main"}
+
+
+def test_fs_default_cwd_git_branch_runs_in_executor(client, tmp_path, monkeypatch):
+    calls = []
+    original = asyncio.BaseEventLoop.run_in_executor
+
+    def run_in_executor(loop, executor, func, *args):
+        calls.append((executor, func, args))
+        return original(loop, executor, func, *args)
+
+    def fake_run(argv, **kwargs):
+        assert argv == ["git", "-C", str(tmp_path), "branch", "--show-current"]
+        assert kwargs["timeout"] == 2
+        return SimpleNamespace(returncode=0, stdout="main\n")
+
+    monkeypatch.setattr(asyncio.BaseEventLoop, "run_in_executor", run_in_executor)
+    monkeypatch.setattr(web_server, "_fs_default_cwd", lambda: str(tmp_path))
+    monkeypatch.setattr(web_server.subprocess, "run", fake_run)
+
+    response = client.get("/api/fs/default-cwd")
+
+    assert response.status_code == 200
+    assert response.json() == {"cwd": str(tmp_path), "branch": "main"}
+    assert any(func is web_server._fs_git_branch for _, func, _ in calls)
 
 
 def test_fs_default_cwd_falls_back_when_terminal_cwd_is_invalid(client, tmp_path, monkeypatch):

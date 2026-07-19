@@ -19,6 +19,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +28,15 @@ from pydantic import BaseModel, Field
 
 from hermes_constants import get_hermes_home
 
-ENGINE_NAME = "sol"
+DEFAULT_ENGINE = "sol"
+ENGINE_NAME = DEFAULT_ENGINE
 SOL_MODEL = "gpt-5.6-sol"
-KNOWN_MODELS = {"sol": SOL_MODEL, SOL_MODEL: SOL_MODEL}
+CLAUDE_OPUS_MODEL = "opus-4.8"
+CLAUDE_FABLE_MODEL = "fable-5"
+CLAUDE_OPUS_CLI_MODEL = "claude-opus-4-8"
+CLAUDE_FABLE_CLI_MODEL = "claude-fable-5"
+KIMI_MODEL = "k3"
+KIMI_CLI_MODEL = "kimi-code/k3"
 READ_ONLY_TOOLSETS = "search"
 TURN_TIMEOUT_SECONDS = 180
 DB_BUSY_TIMEOUT_MS = 5_000
@@ -37,6 +44,34 @@ CONTEXT_PACK_MAX_CHARS = 14_000
 HISTORY_MAX_MESSAGES = 16
 HISTORY_MAX_CHARS = 6_000
 UPLOAD_MAX_BYTES = 15 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class EngineSpec:
+    models: tuple[str, ...]
+    default_model: str
+    supports_images: bool
+
+
+ENGINE_REGISTRY: dict[str, EngineSpec] = {
+    "sol": EngineSpec(
+        models=(SOL_MODEL,), default_model=SOL_MODEL, supports_images=True
+    ),
+    "claude": EngineSpec(
+        models=(CLAUDE_OPUS_MODEL, CLAUDE_FABLE_MODEL),
+        default_model=CLAUDE_OPUS_MODEL,
+        supports_images=False,
+    ),
+    "kimi": EngineSpec(
+        models=(KIMI_MODEL,), default_model=KIMI_MODEL, supports_images=False
+    ),
+}
+
+_CLAUDE_CLI_MODELS = {
+    CLAUDE_OPUS_MODEL: CLAUDE_OPUS_CLI_MODEL,
+    CLAUDE_FABLE_MODEL: CLAUDE_FABLE_CLI_MODEL,
+}
+_LEGACY_MODEL_ALIASES = {"sol": {"sol": SOL_MODEL}}
 
 PA_SYSTEM_PROMPT = """Du bist der persönliche Assistent im Projekte-Tab von Hermes.
 Du beantwortest Fragen ausschließlich aus dem mitgelieferten Live-Kontext und der
@@ -110,6 +145,7 @@ class AttachmentIn(BaseModel):
 class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=32_000)
     project_scope: str | None = Field(default=None, max_length=128)
+    engine: str | None = None
     model: str | None = None
     # The current Hermes CLI exposes one --image value. Keep the v1 wire shape
     # list-based for the UI contract, but reject ambiguous multi-image turns.
@@ -418,8 +454,30 @@ def _hermes_bin() -> str:
     return "hermes"
 
 
-def run_sol_engine(prompt: str, *, model: str, image_paths: list[Path]) -> str:
-    """Run one stateless quiet Hermes turn; stdout is the text contract."""
+def _claude_bin() -> str:
+    path = shutil.which("claude")
+    if path:
+        return path
+    candidate = Path.home() / ".local" / "bin" / "claude"
+    return str(candidate) if candidate.is_file() else "claude"
+
+
+def _kimi_bin() -> str:
+    path = shutil.which("kimi")
+    if path:
+        return path
+    for candidate in (
+        Path.home() / "bin" / "kimi",
+        Path.home() / ".kimi-code" / "bin" / "kimi",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return "kimi"
+
+
+def build_sol_argv(
+    prompt: str, *, model: str, image_paths: list[Path]
+) -> list[str]:
     argv = [
         _hermes_bin(),
         "chat",
@@ -433,6 +491,80 @@ def run_sol_engine(prompt: str, *, model: str, image_paths: list[Path]) -> str:
     ]
     for path in image_paths:
         argv.extend(["--image", str(path)])
+    return argv
+
+
+def build_claude_argv(
+    prompt: str, *, model: str, image_paths: list[Path]
+) -> list[str]:
+    if image_paths:
+        raise PAEngineError(
+            "Engine 'claude' unterstützt keine Bilder im One-Shot-Modus"
+        )
+    cli_model = _CLAUDE_CLI_MODELS.get(model)
+    if cli_model is None:
+        raise PAEngineError("PA-Modell passt nicht zur Engine")
+    return [
+        _claude_bin(),
+        "-p",
+        prompt,
+        "--model",
+        cli_model,
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "",
+        "--no-session-persistence",
+        "--output-format",
+        "text",
+    ]
+
+
+def build_kimi_argv(
+    prompt: str, *, model: str, image_paths: list[Path]
+) -> list[str]:
+    if image_paths:
+        raise PAEngineError(
+            "Engine 'kimi' unterstützt keine Bilder im One-Shot-Modus"
+        )
+    if model != KIMI_MODEL:
+        raise PAEngineError("PA-Modell passt nicht zur Engine")
+    # Kimi 0.27.0 rejects prompt mode combined with --plan, --auto, or --yolo;
+    # its prompt-mode request also sets toolSelect=false. Do not enable approval.
+    return [
+        _kimi_bin(),
+        "-p",
+        prompt,
+        "-m",
+        KIMI_CLI_MODEL,
+        "--output-format",
+        "text",
+    ]
+
+
+_ENGINE_ARGV_BUILDERS = {
+    "sol": build_sol_argv,
+    "claude": build_claude_argv,
+    "kimi": build_kimi_argv,
+}
+
+
+def run_engine(
+    engine: str, prompt: str, *, model: str, image_paths: list[Path]
+) -> str:
+    """Run one stateless text turn through the selected engine adapter."""
+    spec = ENGINE_REGISTRY.get(engine)
+    if spec is None:
+        raise PAEngineError("Unbekannte PA-Engine")
+    if model not in spec.models:
+        raise PAEngineError("PA-Modell passt nicht zur Engine")
+    if image_paths and not spec.supports_images:
+        raise PAEngineError(
+            f"Engine '{engine}' unterstützt keine Bilder im One-Shot-Modus"
+        )
+    argv = _ENGINE_ARGV_BUILDERS[engine](
+        prompt, model=model, image_paths=image_paths
+    )
     try:
         result = subprocess.run(
             argv,
@@ -456,6 +588,13 @@ def run_sol_engine(prompt: str, *, model: str, image_paths: list[Path]) -> str:
     return reply
 
 
+def run_sol_engine(prompt: str, *, model: str, image_paths: list[Path]) -> str:
+    """Backward-compatible Sprint-1 sol adapter entry point."""
+    return run_engine(
+        "sol", prompt, model=model, image_paths=image_paths
+    )
+
+
 async def _run_sync(fn: Any, /, *args: Any, executor: Any = None, **kwargs: Any) -> Any:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(executor, functools.partial(fn, *args, **kwargs))
@@ -467,6 +606,7 @@ async def _process_turn(
     turn_id: str,
     text: str,
     project_scope: str | None,
+    engine: str,
     model: str,
     image_paths: list[Path],
 ) -> None:
@@ -480,7 +620,8 @@ async def _process_turn(
         prompt = compose_prompt(text=text, context_pack=context_pack, history=history)
         reply = await asyncio.wait_for(
             _run_sync(
-                run_sol_engine,
+                run_engine,
+                engine,
                 prompt,
                 model=model,
                 image_paths=image_paths,
@@ -504,10 +645,21 @@ def register_pa_routes(app: FastAPI) -> None:
 
     @app.post("/api/pa/message")
     async def pa_message(payload: MessageIn) -> dict[str, str]:
-        model_key = (payload.model or SOL_MODEL).strip()
-        model = KNOWN_MODELS.get(model_key)
-        if model is None:
-            raise HTTPException(status_code=400, detail="Unbekanntes PA-Modell")
+        engine = (payload.engine or DEFAULT_ENGINE).strip() or DEFAULT_ENGINE
+        spec = ENGINE_REGISTRY.get(engine)
+        if spec is None:
+            raise HTTPException(status_code=400, detail="Unbekannte PA-Engine")
+        model = (payload.model or spec.default_model).strip() or spec.default_model
+        model = _LEGACY_MODEL_ALIASES.get(engine, {}).get(model, model)
+        if model not in spec.models:
+            raise HTTPException(
+                status_code=400, detail="PA-Modell passt nicht zur Engine"
+            )
+        if payload.attachments and not spec.supports_images:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine '{engine}' unterstützt keine Bilder im One-Shot-Modus",
+            )
         try:
             image_paths = [
                 await _run_sync(resolve_asset, attachment.asset_id)
@@ -518,7 +670,7 @@ def register_pa_routes(app: FastAPI) -> None:
         turn_id = await _run_sync(
             store.create_turn,
             text=payload.text,
-            engine=ENGINE_NAME,
+            engine=engine,
             model=model,
             project_scope=payload.project_scope,
             attachments=[attachment.asset_id for attachment in payload.attachments],
@@ -529,6 +681,7 @@ def register_pa_routes(app: FastAPI) -> None:
                 turn_id=turn_id,
                 text=payload.text,
                 project_scope=payload.project_scope,
+                engine=engine,
                 model=model,
                 image_paths=image_paths,
             )

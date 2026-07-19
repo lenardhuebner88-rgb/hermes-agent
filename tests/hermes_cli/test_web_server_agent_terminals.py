@@ -159,6 +159,21 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert "external" in schemas["AgentTerminalTerminateRequest"].get("properties", {})
 
 
+def test_agent_terminal_sessions_maps_tmux_timeout_to_structured_503(monkeypatch):
+    class TimeoutService(FakeAgentTerminalService):
+        def cleanup_stale_isolated_attaches(self):
+            raise AgentTerminalError("tmux command timed out: 10 seconds")
+
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: TimeoutService())
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    response = client.get("/api/agent-terminals/sessions", headers=headers)
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "tmux command timed out: 10 seconds"}
+
+
 def test_agent_terminal_terminate_external_flag_reaches_service(monkeypatch):
     """POST /terminate with external=true passes allow_external to the service."""
     calls: list[tuple[str, str, bool]] = []

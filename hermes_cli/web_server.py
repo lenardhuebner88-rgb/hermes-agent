@@ -3557,13 +3557,17 @@ async def fs_git_root(path: str):
         start = target if stat.S_ISDIR(st.st_mode) else target.parent
     except OSError:
         start = target
-    return {"root": _fs_find_git_root(start)}
+    loop = asyncio.get_running_loop()
+    root = await loop.run_in_executor(None, _fs_find_git_root, start)
+    return {"root": root}
 
 
 @app.get("/api/fs/default-cwd")
 async def fs_default_cwd():
-    cwd = _fs_default_cwd()
-    return {"cwd": cwd, "branch": _fs_git_branch(cwd)}
+    loop = asyncio.get_running_loop()
+    cwd = await loop.run_in_executor(None, _fs_default_cwd)
+    branch = await loop.run_in_executor(None, _fs_git_branch, cwd)
+    return {"cwd": cwd, "branch": branch}
 
 
 # ---------------------------------------------------------------------------
@@ -17529,9 +17533,13 @@ async def agent_terminal_capabilities() -> Dict[str, object]:
 
 @app.get("/api/agent-terminals/sessions")
 async def agent_terminal_sessions() -> Dict[str, object]:
-    service = _agent_terminal_service()
-    service.cleanup_stale_isolated_attaches()
-    return {"sessions": service.list_sessions()}
+    try:
+        service = _agent_terminal_service()
+        service.cleanup_stale_isolated_attaches()
+        sessions = service.list_sessions()
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    return {"sessions": sessions}
 
 
 @app.get("/api/agent-terminals/windows")
