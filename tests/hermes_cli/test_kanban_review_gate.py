@@ -471,11 +471,10 @@ def test_review_stages_for_tier(monkeypatch):
     }
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     assert kb._review_stages_for_tier("standard", cfg) == ["verifier"]
-    assert kb._review_stages_for_tier("review", cfg) == ["verifier", "reviewer"]
+    assert kb._review_stages_for_tier("review", cfg) == ["verifier"]
     assert kb._review_stages_for_tier("critical", cfg) == [
         "verifier",
         "reviewer",
-        "critic",
     ]
     # A temporarily missing critic remains a required stage. Runtime
     # availability is a retryable dispatch concern, not permission to weaken
@@ -491,7 +490,7 @@ def test_review_stages_for_tier(monkeypatch):
         "profile_exists",
         lambda name: (_ for _ in ()).throw(RuntimeError("resolver unavailable")),
     )
-    assert kb._review_stages_for_tier("review", cfg) == ["verifier", "reviewer"]
+    assert kb._review_stages_for_tier("review", cfg) == ["verifier"]
     # unknown tier → single verifier stage (today's behavior)
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     assert kb._review_stages_for_tier("bogus", cfg) == ["verifier"]
@@ -553,7 +552,7 @@ def test_review_chain_target_reads_event(kanban_home, gate_on):
 # ---------------------------------------------------------------------------
 
 
-def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
+def test_critical_chain_walks_verifier_then_reviewer(kanban_home, gate_on):
     with kb.connect() as conn:
         tid = kb.create_task(
             conn,
@@ -580,7 +579,8 @@ def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
             kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
         )
 
-        # stage 1: reviewer APPROVED → re-park for stage 2 (critic)
+        # stage 1: reviewer APPROVED → terminal done. Critic remains an
+        # explicit adversarial lane, not an automatic critical-tier stage.
         kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
         kb.complete_task(
             conn,
@@ -589,19 +589,76 @@ def test_critical_chain_walks_verifier_reviewer_critic(kanban_home, gate_on):
             metadata={"review_verdict": "APPROVED"},
             review_gate=True,
         )
-        assert kb.get_task(conn, tid).status == "review"
-        assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
+        assert kb.get_task(conn, tid).status == "done"
 
-        # stage 2: critic APPROVED → terminal done
-        kb.claim_review_task(conn, tid, reviewer_profile="critic")
+
+def test_reviewer_request_changes_resumes_same_task_at_reviewer_stage(
+    kanban_home, gate_on
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical implementation",
+            assignee="coder",
+            review_tier="critical",
+            workspace_kind="dir",
+            workspace_path=str(kanban_home),
+        )
+        kb.claim_task(conn, tid)
+        original_workspace = kb.get_task(conn, tid).workspace_path
+        kb.complete_task(conn, tid, summary="first candidate", review_gate=True)
+
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
         kb.complete_task(
             conn,
             tid,
-            summary="critic ok",
+            summary="technical gate passed",
             metadata={"review_verdict": "APPROVED"},
             review_gate=True,
         )
-        assert kb.get_task(conn, tid).status == "done"
+
+        kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        kb.block_task(
+            conn,
+            tid,
+            reason="semantic contract mismatch",
+            reviewer_metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["preserve the public return shape"],
+                "required_verification": ["run the compatibility test"],
+            },
+        )
+        blocked_event = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? AND kind='blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        blocked_payload = json.loads(blocked_event["payload"])
+        assert blocked_payload["review_revision"] == {
+            "review_tier": "critical",
+            "resume_stage": 1,
+            "reviewed_commit": blocked_payload["review_revision"]["reviewed_commit"],
+            "blocking_findings": ["preserve the public return shape"],
+            "required_verification": ["run the compatibility test"],
+        }
+
+        kb.auto_retry_blocked_tasks(conn, backoff_seconds=0)
+        assert kb.get_task(conn, tid).status == "ready"
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="revised candidate", review_gate=True)
+
+        task = kb.get_task(conn, tid)
+        assert task.id == tid
+        assert task.workspace_path == original_workspace
+        assert task.status == "review"
+        assert kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
+
+        submitted = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert json.loads(submitted["payload"])["review_stage"] == 1
 
 
 def test_standard_tier_still_single_stage(kanban_home, gate_on):
