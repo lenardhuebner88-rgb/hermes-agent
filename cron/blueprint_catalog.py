@@ -147,6 +147,20 @@ CATALOG: List[AutomationBlueprint] = [
         tags=("daily", "jarvis", "ship-report", "pa-thread"),
     ),
     AutomationBlueprint(
+        key="jarvis-tagebuch",
+        title="Jarvis Tagebuch",
+        description="Jarvis' daily self-journal for shared memsearch memory.",
+        category="daily",
+        schedule_template="45 21 * * *",
+        prompt_template=(
+            "Run exactly `./venv/bin/python -m hermes_cli.pa_journal` in the "
+            "configured workdir. Return its stdout verbatim with no commentary. "
+            "If stdout is [SILENT], return exactly [SILENT]."
+        ),
+        deliver_default="local",
+        tags=("daily", "jarvis", "journal", "memsearch"),
+    ),
+    AutomationBlueprint(
         key="morning-brief",
         title="Morning briefing",
         description="A short daily briefing: today's calendar, weather, and "
