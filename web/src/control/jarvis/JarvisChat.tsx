@@ -2,17 +2,30 @@
  * JarvisChat — Bubble-Verlauf + Frag-Leiste der Jarvis-Zone.
  *
  * Verlauf aus GET /api/pa/messages (roles user/assistant, Provenienz-Badge
- * `model` je Assistant-Bubble); Senden über die A4-Frag-Leiste (unten
- * fixiert): pending-Bubble mit Denk-Zustand während des Turn-Polls,
- * Error-Bubble mit Fehlertext bei Fehlern — nie ein stiller Fehler.
- * Bild-Paste/Attach → POST /api/pa/upload → attachments im Message-POST
- * (max 1 Bild/Turn, Backend-Kontrakt), Vorschau-Thumbnail in der Leiste.
+ * `model` je Assistant-Bubble; bei claude-Modellen dezenter „MAX"-Marker —
+ * Fork 19: Hinweis, kein Cap). M1/M2-FE: Bilder der History rendern als
+ * Thumbnails über die authentifizierte Asset-URL (404 = gepruntes Asset →
+ * Broken-Attachment-Chip, der Thread bleibt); Error-Bubbles kommen aus
+ * status==="error" des Turns, nicht mehr aus einer Inhalts-Heuristik;
+ * „Ältere laden" blättert über den before_id-Cursor rückwärts. Senden über
+ * die A4-Frag-Leiste (unten fixiert): pending-Bubble mit Denk-Zustand
+ * während des Turn-Polls, Error-Bubble mit Fehlertext bei Fehlern — nie ein
+ * stiller Fehler. Bild-Paste/Attach → POST /api/pa/upload → attachments im
+ * Message-POST (max 1 Bild/Turn); bei Engines mit supports_images=false
+ * (S2.2-Roster) ist der Attach-Button deaktiviert (Tooltip) statt erst beim
+ * Senden in den 400 zu laufen.
  */
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
 import { ImagePlus, Send, X } from "lucide-react";
 
-import type { PaChatMessage } from "@/lib/api";
+import { api, type PaChatMessage } from "@/lib/api";
 import { de } from "../i18n/de";
+import {
+  effectiveEngine,
+  findEngineSpec,
+  useEngineChoice,
+  usePaEngines,
+} from "./engineSelection";
 import { JARVIS_ASK_HINT } from "./mockContent";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 
@@ -23,24 +36,65 @@ function formatBubbleTime(ts: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/** Thumbnail eines History-Attachments über die authentifizierte Asset-URL.
+ *  404 (gepruntes Upload) → Broken-Chip statt kaputtem Bild — die Bubble
+ *  und der Thread bleiben (Brief: nicht den Thread verwerfen). */
+function AttachmentThumb({ assetId }: { assetId: string }) {
+  const [broken, setBroken] = useState(false);
+  if (broken) {
+    return <span className="jv-attbroken">{t.attachmentGone}</span>;
+  }
+  return (
+    <span className="jv-attref">
+      <img
+        src={api.paAssetUrl(assetId)}
+        alt=""
+        loading="lazy"
+        onError={() => setBroken(true)}
+      />
+    </span>
+  );
+}
+
 function MessageBubble({
   message,
-  isError,
+  claudeModels,
 }: {
   message: PaChatMessage;
-  isError: (content: string) => boolean;
+  /** Modelle der claude-Engine aus dem Roster (MAX-Marker); null = Roster
+   *  noch nicht da → kein Marker (dezent, kein Crash). */
+  claudeModels: ReadonlyArray<string> | null;
 }) {
+  const attachments = message.attachments ?? [];
   if (message.role === "user") {
-    return <div className="jv-bubble jv-bubble-user">{message.content}</div>;
+    return (
+      <div className="jv-bubble jv-bubble-user">
+        {message.content}
+        {attachments.map((att) => (
+          <AttachmentThumb key={att.asset_id} assetId={att.asset_id} />
+        ))}
+      </div>
+    );
   }
-  const error = isError(message.content);
+  const error = message.status === "error";
+  const maxMarker = claudeModels !== null && claudeModels.includes(message.model);
   return (
     <div className={error ? "jv-bubble jv-bubble-error" : "jv-bubble jv-bubble-assistant"}>
       {error ? <span className="jv-errlabel">{t.errorLabel}</span> : null}
-      {message.content}
-      {/* Provenienz-Badge: Modell dezent (Platzhalter für das S2-Roster). */}
+      {message.content || message.error}
+      {attachments.map((att) => (
+        <AttachmentThumb key={att.asset_id} assetId={att.asset_id} />
+      ))}
+      {/* Provenienz-Badge: Modell dezent; „MAX" = Max-Abo-Hinweis (Fork 19). */}
       <span className="jv-badge">
-        {message.model} · {formatBubbleTime(message.ts)}
+        {message.model}
+        {maxMarker ? (
+          <span className="jv-max" title={t.maxMarkerTitle}>
+            {" "}
+            · {t.maxMarker}
+          </span>
+        ) : null}{" "}
+        · {formatBubbleTime(message.ts)}
       </span>
     </div>
   );
@@ -50,21 +104,35 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // turnPollIntervalMs ist eine Di/Test-Naht (kürzere Turn-Poll-Kadenz in
   // Komponententests); Produktiv Default: PA_TURN_POLL_INTERVAL_MS.
   const chat = usePaChat({ turnPollIntervalMs });
+  const roster = usePaEngines();
+  const choice = useEngineChoice();
   const [text, setText] = useState("");
   const threadRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const seenCountRef = useRef(0);
 
+  // Bild-Fähigkeit der Engine für den NÄCHSTEN Turn (Switcher-Wahl +
+  // Roster-Default): Nicht-Vision-Engines deaktivieren den Attach-Button
+  // mit Tooltip statt erst beim Senden in den Backend-400 zu laufen.
+  const engine = effectiveEngine(choice, roster.data);
+  const imagesOk = findEngineSpec(roster.data, engine)?.supports_images ?? true;
+  const claudeModels =
+    roster.data?.engines.find((spec) => spec.engine === "claude")?.models ?? null;
+
   // Auto-Anschluss ans Verlaufsende: nur bei NEUEN Inhalten (neue Bubble oder
-  // Turn-Zustandswechsel), nie beim bloßen Hintergrund-Refresh der History.
+  // Turn-Zustandswechsel), nie beim bloßen Hintergrund-Refresh der History
+  // und nie bei einem Prepend älterer Seiten („Ältere laden").
   const messageCount = chat.messages?.length ?? 0;
   const turnPhase = chat.activeTurn?.phase ?? null;
+  const consumePrepending = chat.consumePrepending;
   const didInitRef = useRef(false);
   useEffect(() => {
     const el = threadRef.current;
     if (!el) return;
+    const prepended = consumePrepending();
     const grew = messageCount > seenCountRef.current;
     seenCountRef.current = messageCount;
+    if (prepended) return; // „Ältere laden": Scrollposition behalten
     // matchMedia fehlt in jsdom — Default ist die Desktop-Variante (Thread-Scroll).
     const mobile =
       typeof window.matchMedia === "function" &&
@@ -85,7 +153,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     }
     if (!grew && turnPhase === null) return;
     el.lastElementChild?.scrollIntoView?.({ block: "end" });
-  }, [messageCount, turnPhase]);
+  }, [messageCount, turnPhase, consumePrepending]);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -111,11 +179,21 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     <>
       {hasThread ? (
         <div className="jv-chat" ref={threadRef} role="log" aria-label={t.chatRegion}>
-          {chat.messages?.map((message, index) => (
+          {chat.nextBeforeId !== null ? (
+            <button
+              type="button"
+              className="jv-older"
+              disabled={chat.loadingOlder}
+              onClick={() => void chat.loadOlder()}
+            >
+              {chat.loadingOlder ? t.loadOlderBusy : t.loadOlder}
+            </button>
+          ) : null}
+          {chat.messages?.map((message) => (
             <MessageBubble
-              key={`${message.ts}-${message.role}-${index}`}
+              key={message.id}
               message={message}
-              isError={chat.isErrorContent}
+              claudeModels={claudeModels}
             />
           ))}
           {chat.activeTurn ? (
@@ -187,7 +265,8 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
             type="button"
             className="jv-ic"
             aria-label={t.attachLabel}
-            disabled={chat.sending || chat.uploading}
+            title={imagesOk ? undefined : t.engineNoImagesTitle}
+            disabled={chat.sending || chat.uploading || !imagesOk}
             onClick={() => fileRef.current?.click()}
           >
             <ImagePlus aria-hidden className="h-4 w-4" />

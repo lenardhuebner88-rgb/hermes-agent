@@ -1,94 +1,174 @@
 /**
- * WartetPanel — „Wartet · dezent" der Jarvis-Shell an den ECHTEN offenen
- * Agentenfragen (GET /api/agent-questions über denselben pollingStore-Key
- * wie FragenSection/AnswerSheet — dedupliziert, keine neue Infrastruktur).
+ * WartetPanel — „Wartet · dezent" der Jarvis-Shell an der echten
+ * Entscheidungs-Inbox (S2.4: GET /api/pa/inbox — offene Fragen +
+ * pa_action-Cards + held chains + freigabe-Gates, serverseitig nach
+ * Blockradius sortiert).
  *
  * Bleibt die dezente 3-Zeilen-Variante (A4: Entscheidungen NUR dezent).
- * Seit S2.6 führt ein Expand-Toggle zur vollen Fragen-Ansicht (FragenPanel,
- * dieselben Daten). Tap auf ANTWORTEN öffnet weiterhin die bestehende
- * Beantwortung im klassischen Tab (/control/projekte-klassisch, dort sitzt
- * FragenSection mit dem answer-Endpunkt) — bewusst KEINE neue Antwort-
- * Mechanik hier (Brief). Fehler werden inline gezeigt (ReceiptsFeed-Idiom),
- * nie still.
+ * Der Expand-Toggle öffnet die volle Inbox-Ansicht (InboxPanel, gleiche
+ * Daten per Props): dort sitzen die Approval-Cards für pa_action
+ * (Ausführen/Ablehnen über den bestehenden answer-Endpoint). Dezente Zeilen
+ * je Typ: pa_action → PRÜFEN öffnet den Drawer, question → ANTWORTEN-Link in
+ * die Klassik (S1-Muster), held/freigabe → Board-Link. Fehler werden inline
+ * gezeigt (ReceiptsFeed-Idiom), Teilquellen-Ausfälle (errors[]) dezent —
+ * nie still, nie ein Crash.
+ *
+ * `?inbox=open` öffnet den Drawer initial (Deep-Link/Screenshot-Naht).
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import type { PaInboxItem } from "@/lib/api";
 import { de } from "../i18n/de";
-import { useAgentQuestions } from "../hooks/useControlData";
-import { FragenPanel } from "./FragenPanel";
+import { InboxPanel } from "./InboxPanel";
+import { usePaInbox } from "./usePaInbox";
 
 const t = de.jarvis;
 
-/** Wie viele Fragen die dezente Leiste maximal zeigt (A4-LIVE: 3 Zeilen). */
+/** Wie viele Items die dezente Leiste maximal zeigt (A4-LIVE: 3 Zeilen). */
 const WARTET_MAX_ROWS = 3;
+/** Hinweiszeilen (Evidenz/Stale nach Approval) verfallen nach 20 s. */
+const HINT_TTL_MS = 20_000;
+
+/** Initial-Expand per Deep-Link (?inbox=open) — Screenshot-/Verlinkungs-Naht. */
+function initialOpen(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("inbox") === "open";
+}
+
+/** Dezente Zeile je Item-Typ (Dot-Ton + Aktions-Affordanz rechts). */
+function QuietRow({ item, onReview }: { item: PaInboxItem; onReview: () => void }) {
+  if (item.type === "pa_action") {
+    return (
+      <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
+        <span className="jv-rd jv-rd-amber" aria-hidden="true" />
+        <span className="jv-tx" title={item.title}>
+          {item.title}
+        </span>
+        <button
+          type="button"
+          className="jv-ok jv-review"
+          onClick={onReview}
+          aria-label={t.inboxReviewAria(item.title)}
+        >
+          {t.inboxReview}
+        </button>
+      </div>
+    );
+  }
+  if (item.type === "question") {
+    return (
+      <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
+        <span className="jv-rd" aria-hidden="true" />
+        <span className="jv-tx" title={item.title}>
+          {item.title}
+        </span>
+        <Link
+          className="jv-ok"
+          to="/control/projekte-klassisch"
+          aria-label={t.wartetAnswer(item.title)}
+        >
+          ANTWORTEN
+        </Link>
+      </div>
+    );
+  }
+  const isGate = item.type === "freigabe_gate";
+  return (
+    <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
+      <span className={isGate ? "jv-rd jv-rd-violett" : "jv-rd jv-rd-blau"} aria-hidden="true" />
+      <span className="jv-tx" title={item.title}>
+        {item.title}
+      </span>
+      <Link className="jv-ok" to={`/control/fleet?task=${encodeURIComponent(item.card_id)}`} aria-label={t.inboxBoardAria(item.title)}>
+        BOARD
+      </Link>
+    </div>
+  );
+}
 
 export function WartetPanel() {
-  const questions = useAgentQuestions();
-  const [fragenOpen, setFragenOpen] = useState(false);
-  const open = questions.data?.questions ?? [];
-  const shown = open.slice(0, WARTET_MAX_ROWS);
-  const extra = open.length - shown.length;
-  // Der Expand braucht geladene Daten und mindestens eine Frage; bei Fehler/
+  const inbox = usePaInbox();
+  const [open, setOpen] = useState(initialOpen);
+  const [hint, setHint] = useState<string | null>(null);
+  const items = inbox.data?.items ?? [];
+  const sourceErrors = inbox.data?.errors ?? [];
+  const shown = items.slice(0, WARTET_MAX_ROWS);
+  const extra = items.length - shown.length;
+  // Der Expand braucht geladene Daten und mindestens ein Item; bei Fehler/
   // Erstladen bleibt nur die dezente Zeile bzw. der Fehler-/Ladehinweis.
-  const canExpand = !questions.error && questions.data !== null && open.length > 0;
+  const canExpand = !inbox.error && inbox.data !== null && items.length > 0;
+
+  // Hinweiszeilen nach Approval-Aktionen verfallen von selbst (dezent).
+  useEffect(() => {
+    if (!hint) return;
+    const id = window.setTimeout(() => setHint(null), HINT_TTL_MS);
+    return () => window.clearTimeout(id);
+  }, [hint]);
 
   return (
     <>
       <div className="jv-ptitle">
         WARTET · DEZENT{" "}
         <span style={{ float: "right", color: "var(--faint)", letterSpacing: ".05em" }}>
-          {open.length}
+          {items.length}
         </span>
       </div>
 
-      {questions.error ? (
+      {inbox.error ? (
         <p className="jv-qerror" role="alert">
           {t.wartetError}
         </p>
       ) : null}
 
-      {!questions.error && questions.data === null ? (
+      {!inbox.error && inbox.data === null ? (
         <p className="jv-qloading">{t.wartetLoading}</p>
       ) : null}
 
-      {!questions.error && questions.data !== null && open.length === 0 ? (
+      {!inbox.error && inbox.data !== null && items.length === 0 ? (
         <div className="jv-quietempty">
           ✓ Nichts wartet — Estate ruhig.
           <span>Neue Entscheidungen erscheinen hier dezent, nie als Popup.</span>
         </div>
       ) : null}
 
-      {shown.map((question) => (
-        <div className="jv-qrow" key={question.id} data-testid={`jv-wartet-row-${question.id}`}>
-          <span className="jv-rd" aria-hidden="true" />
-          <span className="jv-tx" title={question.question_text}>
-            {question.question_text}
-          </span>
-          <Link
-            className="jv-ok"
-            to="/control/projekte-klassisch"
-            aria-label={t.wartetAnswer(question.question_text)}
-          >
-            ANTWORTEN
-          </Link>
-        </div>
+      {/* Teilquellen-Ausfall (errors[]): dezent, der Rest der Inbox gilt
+          weiter — kein Crash, kein Verstecken (Brief). */}
+      {sourceErrors.map((err) => (
+        <p className="jv-srcerr" key={err.source} title={err.error}>
+          {t.inboxSourceError(err.source)}
+        </p>
+      ))}
+
+      {hint ? (
+        <p className="jv-hint" data-testid="jv-wartet-hint">
+          {hint}
+        </p>
+      ) : null}
+
+      {shown.map((item) => (
+        <QuietRow key={item.id} item={item} onReview={() => setOpen(true)} />
       ))}
 
       {canExpand ? (
         <button
           type="button"
           className="jv-expand"
-          aria-expanded={fragenOpen}
-          aria-controls="jv-fragen-panel"
-          onClick={() => setFragenOpen((value) => !value)}
+          aria-expanded={open}
+          aria-controls="jv-inbox-panel"
+          onClick={() => setOpen((value) => !value)}
         >
-          {fragenOpen ? t.wartetCollapse : extra > 0 ? t.wartetExpand(extra) : t.wartetExpandAll}
+          {open ? t.inboxCollapse : extra > 0 ? t.inboxExpand(extra) : t.inboxExpandAll}
         </button>
       ) : null}
 
-      {fragenOpen && canExpand ? (
-        <FragenPanel questions={open} onClose={() => setFragenOpen(false)} />
+      {open && canExpand ? (
+        <InboxPanel
+          items={items}
+          onClose={() => setOpen(false)}
+          onRefresh={inbox.reload}
+          onHint={setHint}
+        />
       ) : null}
     </>
   );

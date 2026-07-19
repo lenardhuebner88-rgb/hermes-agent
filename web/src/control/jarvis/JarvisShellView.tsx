@@ -1,35 +1,40 @@
 /**
  * JarvisShellView — die Jarvis-Zone auf /control/projekte (Sprint 1, Karte e;
- * Sprint 2, Karte S2.6).
+ * Sprint 2, Karten S2.2/S2.4/S2.6/M3).
  *
  * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
  * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (Mock, F11 —
  * Vorschau-Label, echter Endpoint kommt mit S2.7), schwebende Panels,
- * J.A.R.V.I.S.-Emblem mit statischem Modell-Badge (Roster kommt S2),
- * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an echten
- * offenen Fragen (S2.6: Expand zur vollen Fragen-Ansicht als Jarvis-Panel),
- * PROJEKTE-Panel mit den echten ProjectCards (S2.6 — gleiche Hooks/Ableitung
- * wie die Klassik, Tap → Klassik-Drilldown per Link), funktionale Frag-Leiste
- * mit Bubble-Chat gegen die LIVE-PA-Endpoints. Der bisherige Projekte-Tab
- * bleibt als /control/projekte-klassisch erreichbar (Fallback bis S2/S3
- * migrieren).
+ * J.A.R.V.I.S.-Emblem mit dem S2.2-Modell-Switcher (Roster /api/pa/engines,
+ * Wahl gilt für den nächsten Turn; statisches Badge nur als Roster-Fallback),
+ * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an der
+ * echten Entscheidungs-Inbox (S2.4: /api/pa/inbox — Expand zur Inbox-Ansicht
+ * mit Approval-Cards für pa_action), PROJEKTE-Panel mit den echten
+ * ProjectCards (S2.6 — gleiche Hooks/Ableitung wie die Klassik, Tap →
+ * Klassik-Drilldown per Link), funktionale Frag-Leiste mit Bubble-Chat gegen
+ * die LIVE-PA-Endpoints. M3: die Höhe des OfflineStaleBanner reist als
+ * --jv-banner-h in die Stage-Höhe (Frag-Leiste clippt nicht mehr). Der
+ * bisherige Projekte-Tab bleibt als /control/projekte-klassisch erreichbar
+ * (Fallback bis S2/S3 migrieren).
  *
  * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
  * siehe DESIGN.md „Jarvis-Zone".
  */
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 
 import "../jarvis.css";
 import { de } from "../i18n/de";
+import { EngineSwitcher } from "./EngineSwitcher";
 import { JarvisChat } from "./JarvisChat";
 import { JarvisGraph } from "./JarvisGraph";
 import { ProjektePanel } from "./ProjektePanel";
+import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
 import { WartetPanel } from "./WartetPanel";
 import {
   JARVIS_BRAIN_MOCKTAG,
   JARVIS_BRAIN_STATS,
-  JARVIS_EMBLEM_MODEL,
   JARVIS_EMBLEM_NAME,
   JARVIS_EMBLEM_STATUS,
   JARVIS_FILTER_ROWS,
@@ -43,8 +48,10 @@ import {
 const t = de.jarvis;
 
 export function JarvisShellView() {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useOfflineBannerHeight(rootRef);
   return (
-    <div className="jv">
+    <div className="jv" ref={rootRef}>
       <div className="jv-stage">
         <JarvisGraph />
 
@@ -114,7 +121,9 @@ export function JarvisShellView() {
           </div>
           <div className="jv-nm">{JARVIS_EMBLEM_NAME}</div>
           <div className="jv-on">{JARVIS_EMBLEM_STATUS}</div>
-          <div className="jv-model">{JARVIS_EMBLEM_MODEL}</div>
+          {/* S2.2: funktionaler Modell-Switcher (Roster); fällt auf das
+              statische Badge zurück, solange das Roster nicht da ist. */}
+          <EngineSwitcher />
         </div>
 
         {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (Mock) ══ */}

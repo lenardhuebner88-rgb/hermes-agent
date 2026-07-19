@@ -48,22 +48,27 @@
    Desktop: Stage füllt exakt von Masthead-Unterkante (h-14 tab = 3.5rem /
    h-16 lg = 4rem) bis zum Viewport-Ende — negatives Top-Margin hebt main
    pt-4 auf, die Höhe reicht bis ganz unten, damit die Frag-Leiste wie im
-   A4 am unteren Rand sitzt. Seitlich heben die Margins main px-6/lg:px-8 auf. */
+   A4 am unteren Rand sitzt. Seitlich heben die Margins main px-6/lg:px-8 auf.
+   M3: --jv-banner-h spiegelt die Höhe des OfflineStaleBanner (per
+   useOfflineBannerHeight gemessen, Default 0px) — sonst clippt die Frag-
+   Leiste um genau die Bannerhöhe, sobald der Banner die Zone nach unten
+   schiebt. */
+.jv { --jv-banner-h: 0px; }
 @media (min-width: 760px) {
   .jv {
-    height: calc(100dvh - 3.5rem);
+    height: calc(100dvh - 3.5rem - var(--jv-banner-h));
     margin: -1rem -1.5rem -1.5rem;
     overflow: hidden;
   }
 }
 @media (min-width: 1024px) {
-  .jv { height: calc(100dvh - 4rem); margin: -1rem -2rem -1.5rem; }
+  .jv { height: calc(100dvh - 4rem - var(--jv-banner-h)); margin: -1rem -2rem -1.5rem; }
 }
 /* Mobil (<760px): Zone blutet seitlich an den Viewport-Rand (main px-4) und
    wächst im Seitenfluss; Mindesthöhe ≈ Viewport minus Masthead/Bottom-Nav,
    damit der Graph-Canvas auch bei wenig Inhalt trägt. */
 @media (max-width: 759px) {
-  .jv { min-height: calc(100dvh - 10rem); margin: 0 -1rem; }
+  .jv { min-height: calc(100dvh - 10rem - var(--jv-banner-h)); margin: 0 -1rem; }
 }
 
 /* ══ Stage: dunkler Command-Center-Canvas ══ */
@@ -150,6 +155,16 @@
   margin-top: 9px; display: inline-flex; align-items: center; min-height: 28px; font-family: var(--mono);
   font-size: 10px; letter-spacing: .14em; color: var(--cyan); border: 1px solid var(--line); border-radius: 999px; padding: 0 12px;
 }
+/* S2.2 Modell-Switcher: native <select> im Badge-Pill-Look (Erscheinungsbild
+   identisch zum S1-Statik-Badge, aber funktional). */
+.jv-switch { cursor: pointer; gap: 0; }
+.jv-switch:hover, .jv-switch:focus-within { border-color: var(--cyan); }
+.jv-sw-select {
+  appearance: none; border: 0; outline: none; background: transparent; color: inherit;
+  font: inherit; letter-spacing: inherit; text-transform: uppercase; cursor: pointer;
+  max-width: 130px; padding: 0; margin: 0;
+}
+.jv-sw-select option { color: var(--txt); background: #0a1120; text-transform: none; letter-spacing: .06em; }
 
 /* ══ Rechts: KI-LAGE ══ */
 .jv-news { top: 238px; right: 16px; width: 262px; padding: 15px 16px; z-index: 3; }
@@ -183,6 +198,19 @@
 .jv-quietempty span { display: block; color: var(--faint); font-size: 10.5px; margin-top: 2px; }
 .jv-qerror { font-size: 11.5px; color: var(--amber); padding: 8px 0; line-height: 1.5; }
 .jv-qloading { font-size: 11.5px; color: var(--faint); padding: 8px 0; line-height: 1.5; }
+/* S2.4 Inbox: Dot-Töne je Item-Typ (question=rot wie S1, pa_action=amber,
+   held=blau, freigabe=violett) + dezente Quellen-/Hinweiszeilen. Die Varianten
+   brauchen dieselbe Spezifität wie die Basis .jv-qrow .jv-rd (rot) — sonst
+   gewinnt immer rot. */
+.jv-qrow .jv-rd-amber { background: var(--amber); box-shadow: 0 0 5px rgba(255, 179, 71, .6); }
+.jv-qrow .jv-rd-blau { background: var(--blau); box-shadow: 0 0 5px rgba(91, 140, 255, .6); }
+.jv-qrow .jv-rd-violett { background: var(--violett); box-shadow: 0 0 5px rgba(183, 140, 255, .6); }
+button.jv-ok { cursor: pointer; }
+.jv-srcerr { font-size: 10.5px; color: var(--amber); padding: 5px 0 0; line-height: 1.5; }
+.jv-hint {
+  margin-top: 7px; padding: 6px 9px; font-size: 11px; line-height: 1.5; color: var(--grün);
+  border: 1px solid rgba(61, 220, 151, .35); border-radius: 7px; background: rgba(61, 220, 151, .07);
+}
 .jv-more { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim); margin-top: 7px; display: inline-block; text-decoration: none; }
 .jv-more:hover, .jv-more:focus-visible { color: var(--cyan); }
 .jv-sys { display: flex; gap: 14px; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line2); }
@@ -263,7 +291,9 @@
 .jv-pc-commit { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .jv-pc-live { flex: none; font-family: var(--mono); font-size: 8.5px; letter-spacing: .06em; color: var(--dim); }
 
-/* ══ Volle Fragen-Ansicht (S2.6 — Expand aus „Wartet · dezent" heraus) ══ */
+/* ══ Volle Inbox-Ansicht (S2.4 — Expand aus „Wartet · dezent" heraus; der
+   Drawer trug bis S2.6 die reine Fragenliste, daher die generischen
+   jv-fragen-/jv-frage-Klassen für Drawer und Karten) ══ */
 .jv-expand {
   display: inline-flex; align-items: center; min-height: 32px; margin-top: 7px; padding: 0;
   font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim);
@@ -320,6 +350,40 @@
 }
 .jv-fanswer:hover, .jv-fanswer:focus-visible { border-color: var(--cyan); }
 
+/* Approval-Cards (pa_action) in der Inbox-Ansicht: Kategorie-Chip, lesbares
+   Ziel aus dem Payload, Keys-Vorschau, Ausführen/Ablehnen. */
+.jv-appr { border-color: rgba(255, 179, 71, .35); }
+.jv-appr-chip {
+  display: inline-flex; align-items: center; font-family: var(--mono); font-size: 8px;
+  letter-spacing: .14em; color: var(--amber); border: 1px solid rgba(255, 179, 71, .45);
+  border-radius: 999px; padding: 2px 8px; margin-right: 6px; background: rgba(255, 179, 71, .08);
+}
+.jv-appr-chip.jv-held { color: var(--blau); border-color: rgba(91, 140, 255, .45); background: rgba(91, 140, 255, .08); }
+.jv-appr-chip.jv-gate { color: var(--violett); border-color: rgba(183, 140, 255, .45); background: rgba(183, 140, 255, .08); }
+.jv-appr-cat { color: var(--dim); }
+.jv-appr-target {
+  margin-top: 6px; font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
+  color: var(--cyan); overflow-wrap: anywhere;
+}
+.jv-appr-keys {
+  margin-top: 5px; font-family: var(--mono); font-size: 10px; line-height: 1.5; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; background: rgba(4, 7, 15, .35);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.jv-appr-reason { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--dim); }
+.jv-appr-actions { display: flex; gap: 8px; margin-top: 9px; }
+.jv-appr-btn {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 13px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; cursor: pointer;
+  border-radius: 6px; background: rgba(4, 7, 15, .45);
+}
+.jv-appr-btn:disabled { opacity: .55; cursor: wait; }
+.jv-appr-go { color: var(--grün); border: 1px solid rgba(61, 220, 151, .5); }
+.jv-appr-go:hover:not(:disabled), .jv-appr-go:focus-visible { border-color: var(--grün); }
+.jv-appr-no { color: var(--rot); border: 1px solid rgba(255, 92, 105, .45); }
+.jv-appr-no:hover:not(:disabled), .jv-appr-no:focus-visible { border-color: var(--rot); }
+.jv-appr-error { margin-top: 7px; font-size: 11px; line-height: 1.5; color: var(--rot); }
+
 /* ══ Chat-Verlauf (Bubble-Zone, Produkt — kein Mockup-Chrome) ══ */
 .jv-chat {
   position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 4;
@@ -347,6 +411,22 @@
   display: block; margin-top: 7px; font-family: var(--mono); font-size: 8.5px;
   letter-spacing: .08em; color: var(--faint);
 }
+/* „MAX"-Marker auf claude-Assistant-Bubbles (Fork 19: Hinweis, kein Cap). */
+.jv-max { color: var(--violett); letter-spacing: .12em; }
+/* M1: Broken-Attachment-State (gepruntes Asset, 404) — der Thread bleibt. */
+.jv-attbroken {
+  display: inline-flex; align-items: center; min-height: 24px; margin-top: 8px;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .06em; color: var(--dim);
+  border: 1px dashed var(--line); border-radius: 6px; padding: 0 10px;
+}
+/* M2: „Ältere laden" über den before_id-Cursor (oben im Thread). */
+.jv-older {
+  align-self: center; min-height: 30px; padding: 0 14px; cursor: pointer;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .14em; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px; background: rgba(4, 7, 15, .6);
+}
+.jv-older:hover:not(:disabled), .jv-older:focus-visible { color: var(--cyan); border-color: var(--line); }
+.jv-older:disabled { opacity: .55; cursor: wait; }
 .jv-attref { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .jv-attref img { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex: none; }
 .jv-attref .jv-an { font-family: var(--mono); font-size: 9px; color: var(--dim); overflow-wrap: anywhere; }
@@ -481,6 +561,8 @@
   .jv-fbody { overflow: visible; }
   .jv-fclose { width: 44px; height: 44px; top: -10px; right: -4px; }
   .jv-fanswer { min-height: 44px; }
+  .jv-appr-btn { min-height: 44px; }
+  .jv-older { min-height: 44px; }
   .jv-expand { min-height: 44px; }
   .jv-chat {
     position: relative; left: auto; bottom: auto; transform: none; order: 5;

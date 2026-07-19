@@ -66,7 +66,8 @@ export const JARVIS_NEWS_ITEMS: JarvisNewsItem[] = [
 
 export const JARVIS_EMBLEM_NAME = "J.A.R.V.I.S.";
 export const JARVIS_EMBLEM_STATUS = "● ONLINE · WACHE AKTIV";
-/** Statisches Modell-Badge (Platzhalter für das S2-Roster — Text, kein Switcher). */
+/** Statisches Modell-Badge — S1-Platzhalter, seit S2.2 nur noch Fallback des
+ *  EngineSwitchers, solange das Roster (/api/pa/engines) nicht geladen ist. */
 export const JARVIS_EMBLEM_MODEL = "◆ GPT-5.6-SOL ▾";
 
 export const JARVIS_ASK_HINT =
