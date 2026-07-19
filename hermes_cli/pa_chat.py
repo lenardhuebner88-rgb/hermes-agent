@@ -1064,8 +1064,10 @@ def register_pa_routes(app: FastAPI) -> None:
     tasks: set[asyncio.Task[Any]] = set()
 
     from hermes_cli.pa_planspec import register_pa_planspec_routes
+    from hermes_cli.pa_health import register_pa_health_routes
 
     register_pa_planspec_routes(app)
+    register_pa_health_routes(app)
 
     @app.post("/api/pa/message")
     async def pa_message(payload: MessageIn) -> dict[str, str]:
