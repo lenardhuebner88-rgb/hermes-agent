@@ -13,23 +13,28 @@
  * ProjectCards (S2.6 — gleiche Hooks/Ableitung wie die Klassik, Tap →
  * Klassik-Drilldown per Link), funktionale Frag-Leiste mit Bubble-Chat gegen
  * die LIVE-PA-Endpoints. M3: die Höhe des OfflineStaleBanner reist als
- * --jv-banner-h in die Stage-Höhe (Frag-Leiste clippt nicht mehr). Der
- * bisherige Projekte-Tab bleibt als /control/projekte-klassisch erreichbar
- * (Fallback bis S2/S3 migrieren).
+ * --jv-banner-h in die Stage-Höhe (Frag-Leiste clippt nicht mehr). S3.10:
+ * AKTIVITÄT (Receipts+Commits) und SESSIONS (Spawn-Baum) als HUD-Strips im
+ * Band zwischen PROJEKTE und Chat — der Expand öffnet je einen Overlay-
+ * Drawer (Tabs/Filter-Chips), Lese- und Kill-Sheet kommen unverändert aus
+ * der Klassik. Der bisherige Projekte-Tab bleibt als
+ * /control/projekte-klassisch erreichbar (Fallback bis S2/S3 migrieren).
  *
  * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
  * siehe DESIGN.md „Jarvis-Zone".
  */
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import "../jarvis.css";
 import { de } from "../i18n/de";
+import { AktivitaetPanel } from "./AktivitaetPanel";
 import { EngineSwitcher } from "./EngineSwitcher";
 import { JarvisChat } from "./JarvisChat";
 import { JarvisGraph, JarvisGraphStatsTag, JarvisGraphTag } from "./JarvisGraph";
 import { ProjektePanel } from "./ProjektePanel";
+import { SessionsPanel } from "./SessionsPanel";
 import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
 import { WartetPanel } from "./WartetPanel";
 import {
@@ -46,9 +51,26 @@ import {
 
 const t = de.jarvis;
 
+/** Welcher S3.10-Drawer offen ist (höchstens einer gleichzeitig — die
+ *  Drawer teilen sich dieselbe Overlay-Zone mittig über dem Graphen).
+ *  `?aktivitaet=open` / `?sessions=open` öffnen initial (Deep-Link/
+ *  Screenshot-Naht wie ?inbox=open bei S2.4). */
+type ShellPanel = "aktivitaet" | "sessions";
+
+function initialOpenPanel(): ShellPanel | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("aktivitaet") === "open") return "aktivitaet";
+  if (params.get("sessions") === "open") return "sessions";
+  return null;
+}
+
 export function JarvisShellView() {
   const rootRef = useRef<HTMLDivElement | null>(null);
   useOfflineBannerHeight(rootRef);
+  const [openPanel, setOpenPanel] = useState<ShellPanel | null>(initialOpenPanel);
+  const togglePanel = (panel: ShellPanel) =>
+    setOpenPanel((current) => (current === panel ? null : panel));
   return (
     <div className="jv" ref={rootRef}>
       <div className="jv-stage">
@@ -145,6 +167,19 @@ export function JarvisShellView() {
 
         {/* ══ Mitte oben: PROJEKTE (S2.6 — echte ProjectCards im A4-Look) ══ */}
         <ProjektePanel />
+
+        {/* ══ Band unter PROJEKTE: AKTIVITÄT + SESSIONS (S3.10 — HUD-Strips,
+            Expand öffnet den Overlay-Drawer; Daten/Sheets der Klassik) ══ */}
+        <div className="jv-strips">
+          <AktivitaetPanel
+            open={openPanel === "aktivitaet"}
+            onToggle={() => togglePanel("aktivitaet")}
+          />
+          <SessionsPanel
+            open={openPanel === "sessions"}
+            onToggle={() => togglePanel("sessions")}
+          />
+        </div>
 
         {/* ══ Graph-Zustands-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
         <JarvisGraphTag />

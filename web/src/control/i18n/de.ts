@@ -1003,6 +1003,21 @@ export const de = {
     graphAriaStaleSuffix: ", älterer Stand — Aktualisierung fehlgeschlagen",
     graphAriaMock: "Estate-Graph (Vorschau, Mock-Daten)",
     graphSourceErrorsTitle: (detail: string) => `Graph-Teilquellen derzeit fehlerhaft:\n${detail}`,
+    // S3.10 — Shell-Einzug II: AKTIVITÄT (Receipts+Commits) + SESSIONS als
+    // HUD-Strips mit Overlay-Drawer (Klassik-Daten/-Sheets, .jv-Look)
+    aktivitaetTitle: "AKTIVITÄT",
+    aktivitaetLoading: "Lade Aktivität …",
+    aktivitaetEmpty: "Keine Aktivität.",
+    aktivitaetCommitsError: "Commits konnten nicht geladen werden.",
+    aktivitaetClose: "Aktivitäts-Feed schließen",
+    aktivitaetExpandAria: "Aktivitäts-Feed (Receipts und Commits) umschalten",
+    receiptsTab: "RECEIPTS",
+    commitsTab: "COMMITS",
+    sessionsPanelTitle: "SESSIONS",
+    sessionsLoading: "Lade Sessions …",
+    sessionsClose: "Sessions-Panel schließen",
+    sessionsExpandAria: "Sessions-Baum umschalten",
+    sessionsStripCounts: (open: number, active: number) => `${open} OFFEN · ${active} AKTIV`,
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

@@ -160,6 +160,18 @@ die verbindliche Design-Quelle, NICHT das Werkbank-Mockup oben.
   Error-Bubbles aus `status==="error"`, „Ältere laden" per before_id-Cursor.
 - **Klassik-Fallback:** die bisherige ProjekteView bleibt unverändert unter
   `/control/projekte-klassisch` erreichbar, bis S2/S3 die Sektionen migrieren.
+- **Aktivität + Sessions (S3.10):** Receipts, Commits und der Sessions-
+  Spawn-Baum der Klassik leben als HUD-Strips im Band zwischen PROJEKTE und
+  Chat (`jarvis/AktivitaetPanel.tsx`, `jarvis/SessionsPanel.tsx` — bei
+  1280×900 existiert kein freier Permanent-Slot, daher das Wartet→Inbox-
+  Idiom: Strip + Expand zum Overlay-Drawer). Daten über dieselben Hooks/
+  Polling-Keys und Ableitungen wie die Klassik (kein zweiter Poll, kein
+  Fork). Das Lese-Sheet (ReceiptSheet) und die Kill-Bestätigung
+  (SessionKillSheet) werden unverändert wiederverwendet — Kill setzt das
+  eindeutige Agent-Match über die strukturierten tmux-Felder voraus
+  (killTarget-Doktrin). Deep-Links: `?aktivitaet=open` / `?sessions=open`.
+  Das LiveBoard der Klassik wird bewusst nicht doppelt (Begründung:
+  S3-SHELL2-REPORT; Klassik-Tab bleibt Fallback).
 - **Embedding-Regeln:** die Desktop-Stage füllt den ControlShell-Content-
   Bereich (A4 rechnet mit vollem Viewport: 100vh/min-height 880px — unter der
   Masthead würde die Frag-Leiste clippen); mobil liegt die Frag-Leiste ÜBER
