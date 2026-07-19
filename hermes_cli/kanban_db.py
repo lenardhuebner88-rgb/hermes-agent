@@ -12795,7 +12795,9 @@ def complete_task(
         if _wt_eligible:
             from hermes_cli.kanban_worktrees import maybe_integrate_on_complete
 
-            _wt_outcome = maybe_integrate_on_complete(conn, task_id)
+            _wt_outcome = maybe_integrate_on_complete(
+                conn, task_id, completion_metadata=metadata,
+            )
     except Exception:
         _log.error(
             "worker-isolation integration hook failed for %s",

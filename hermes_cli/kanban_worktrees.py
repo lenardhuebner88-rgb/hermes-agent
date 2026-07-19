@@ -5350,10 +5350,96 @@ def _record_integration_events_and_receipts(
     return outcome
 
 
+def _completion_source_metadata(
+    conn: sqlite3.Connection,
+    task_id: str,
+    completion_metadata: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Find the newest completion metadata that identifies the code commit."""
+    candidates: list[dict[str, Any]] = []
+    if isinstance(completion_metadata, dict):
+        candidates.append(completion_metadata)
+    rows = conn.execute(
+        "SELECT metadata FROM task_runs "
+        "WHERE task_id = ? AND outcome = 'completed' ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        raw = row["metadata"] if isinstance(row, sqlite3.Row) else row[0]
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+    return next((item for item in candidates if item.get("commit")), None)
+
+
+def _approved_source_worktree(
+    repo_root: Path,
+    metadata: dict[str, Any],
+) -> tuple[Path, str, str]:
+    """Resolve exactly one kanban worktree whose HEAD is the approved commit."""
+    requested = str(metadata.get("commit") or "").strip()
+    if not requested:
+        raise WorktreeError("approved completion metadata has no commit")
+    approved_commit = _git(
+        repo_root, "rev-parse", "--verify", f"{requested}^{{commit}}",
+    )
+
+    workspace_raw = metadata.get("workspace_path")
+    if isinstance(workspace_raw, str) and workspace_raw.strip():
+        workspace = Path(workspace_raw).expanduser().resolve()
+        try:
+            branch = current_branch(workspace)
+            workspace_head = _git(workspace, "rev-parse", "HEAD")
+        except WorktreeError:
+            pass
+        else:
+            if workspace_head == approved_commit and branch.startswith("kanban/"):
+                return workspace, branch, approved_commit
+
+    refs = _git(
+        repo_root,
+        "for-each-ref",
+        "--format=%(refname:short) %(objectname)",
+        "refs/heads/kanban/",
+    ).splitlines()
+    exact_branches = [
+        line.partition(" ")[0]
+        for line in refs
+        if line.partition(" ")[2].strip() == approved_commit
+    ]
+    resolved: list[tuple[Path, str, str]] = []
+    for branch in exact_branches:
+        workspace = (
+            repo_root / ".worktrees" / "kanban" / branch.removeprefix("kanban/")
+        )
+        if not workspace.is_dir():
+            continue
+        try:
+            if (
+                current_branch(workspace) == branch
+                and _git(workspace, "rev-parse", "HEAD") == approved_commit
+            ):
+                resolved.append((workspace, branch, approved_commit))
+        except WorktreeError:
+            continue
+    if len(resolved) != 1:
+        raise WorktreeError(
+            "approved commit must resolve to exactly one kanban worktree/branch; "
+            f"commit={approved_commit} candidates={len(resolved)}"
+        )
+    return resolved[0]
+
+
 def maybe_integrate_on_complete(
     conn: sqlite3.Connection,
     task_id: str,
     *,
+    completion_metadata: Optional[dict[str, Any]] = None,
     gate_runner=None,
 ) -> Optional[dict]:
     """Completion hook (called by ``complete_task`` on the direct done
@@ -5393,6 +5479,22 @@ def maybe_integrate_on_complete(
 
     target = frozen_merge_target(conn, root_id)
     branch = chain_branch(root_id)
+    approved_commit: Optional[str] = None
+    source_metadata = _completion_source_metadata(
+        conn, task_id, completion_metadata,
+    )
+    if source_metadata is not None:
+        try:
+            wt, branch, approved_commit = _approved_source_worktree(
+                repo_root, source_metadata,
+            )
+        except WorktreeError as exc:
+            return {
+                "action": "parked",
+                "reason": f"cannot resolve approved completion commit: {exc}",
+                "branch": branch,
+                "target": target,
+            }
     if not _branch_exists(repo_root, branch):
         return _recover_missing_branch_integration(
             conn, task_id, root_id, repo_root, branch, target, kb,
@@ -5400,6 +5502,28 @@ def maybe_integrate_on_complete(
     outcome = integrate_chain(
         repo_root, wt, branch, target, gate_runner=gate_runner, cleanup=False,
     )
+    if approved_commit is None:
+        try:
+            approved_commit = _git(repo_root, "rev-parse", f"{branch}^{{commit}}")
+        except WorktreeError:
+            approved_commit = None
+    if approved_commit is not None:
+        outcome["approved_commit"] = approved_commit
+        effective_target = str(outcome.get("target") or target or "")
+        if outcome.get("action") in {"merged", "clean"} and (
+            not effective_target
+            or not _branch_is_ancestor(repo_root, approved_commit, effective_target)
+        ):
+            outcome = {
+                "action": "parked",
+                "reason": (
+                    "approved commit is not an ancestor of integration target: "
+                    f"{approved_commit} !<= {effective_target or 'unknown'}"
+                ),
+                "branch": branch,
+                "target": effective_target or target,
+                "approved_commit": approved_commit,
+            }
     if outcome.get("action") == "merged" and any(
         str(path).startswith("web/")
         for path in outcome.get("changed_files", [])
