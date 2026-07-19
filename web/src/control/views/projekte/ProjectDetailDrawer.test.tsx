@@ -20,14 +20,25 @@ const REAL_DETAIL_PAYLOAD = {
     {
       hash: "9d8fa62d8",
       message: "projekte-tab: Stufe 6 — drilldown",
+      author: "Claude Builder",
       committed_at: 1784239900,
       age_seconds: 100,
+      attribution: {
+        kind: "kanban",
+        pack: null,
+        task_id: "t_1a2b3c4d",
+        lane: "grok-builder",
+        model: "grok-4.5",
+        label: null,
+      },
     },
     {
       hash: "abc123def",
       message: "projekte-tab: Stufe 5 — agents rail",
+      author: "Git Author",
       committed_at: 1784239000,
       age_seconds: 1000,
+      attribution: null,
     },
   ],
   kanban_tasks: [
@@ -202,6 +213,8 @@ describe("ProjectDetailBody (loaded fixture)", () => {
 
     expect(screen.getByText("projekte-tab: Stufe 6 — drilldown")).toBeTruthy();
     expect(screen.getByText("9d8fa62d8")).toBeTruthy();
+    expect(screen.getByText("grok-builder · grok-4.5")).toBeTruthy();
+    expect(screen.getByText("Git Author")).toBeTruthy();
     expect(screen.getByText("Needs operator input")).toBeTruthy();
     expect(screen.getByText("needs_input")).toBeTruthy();
     expect(screen.getByText("builder-reviewer")).toBeTruthy();

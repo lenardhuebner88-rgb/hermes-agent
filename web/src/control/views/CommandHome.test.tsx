@@ -350,6 +350,9 @@ describe("CommandHome", () => {
     expect(html).toContain("state.db über Schwelle — Retention/Archiv alter Sessions");
     expect(html).toContain("Skill Promote Pipeline pausiert seit 06.07.");
     expect(html).toContain("5 WM-2026-Jobs pausiert — Finale ~19.07.");
+    expect(html).toContain("hermes cron resume 836f32946e0a");
+    expect(html).not.toContain("`hermes cron resume 836f32946e0a`");
+    expect(html).not.toMatch(/<code[^>]*>Reaktivieren/);
     expect(html).toContain("Erledigen: open-decision.py resolve");
   });
 

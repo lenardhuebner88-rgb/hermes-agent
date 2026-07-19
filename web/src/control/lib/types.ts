@@ -1310,6 +1310,13 @@ export interface LoopDetailResponse extends LoopPackSummary {
   phase_usage: LoopPhaseUsage[];
 }
 
+export interface LoopQueueFileResponse {
+  pack: string;
+  stage: string;
+  filename: string;
+  content: string;
+}
+
 /** Werkstatt: eine Pack-Datei (pack.yaml oder ein Prompt-*.md). */
 export interface LoopFile {
   name: string;

@@ -2400,6 +2400,174 @@ def test_commits_feed_cap_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert committed == sorted(committed, reverse=True)
 
 
+def test_commit_attribution_parses_every_supported_subject_prefix(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    base = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=base, message="plain subject")
+    _add_commits(
+        repo,
+        [
+            (base + 100, "loop(hermes-feature-forge): build", "loop.txt"),
+            (base + 200, "kanban(t_1a2b3c4d): build", "kanban.txt"),
+            (base + 300, "wip(t_abcdef12): checkpoint", "wip.txt"),
+            (
+                base + 400,
+                "kanban: merge kanban/t_deadbeef (builder)",
+                "merge.txt",
+            ),
+            (base + 500, 'Revert "feat: old change"', "revert.txt"),
+            (base + 600, 'Reapply "feat: old change"', "reapply.txt"),
+        ],
+    )
+
+    entry = _entry(slug="proj", repo_path=str(repo))
+    detail = build_project_detail(
+        entry,
+        ProjectsRegistry(projects=[entry], errors=[]),
+        kanban_db_path=tmp_path / "missing-kanban.db",
+        projects_db_path=tmp_path / "missing-projects.db",
+        loops_state_root=tmp_path / "loops",
+        now=base + 700,
+        agents_payload={"generated_at": base, "errors": [], "agents": []},
+    )
+
+    commits = {commit["message"]: commit for commit in detail["recent_commits"]}
+    expected_keys = {"kind", "pack", "task_id", "lane", "model", "label"}
+    assert set(commits["plain subject"]["attribution"]) == expected_keys
+    assert commits["plain subject"]["attribution"] == {
+        "kind": "direct",
+        "pack": None,
+        "task_id": None,
+        "lane": None,
+        "model": None,
+        "label": "Test User",
+    }
+    assert commits["loop(hermes-feature-forge): build"]["attribution"] == {
+        "kind": "loop",
+        "pack": "hermes-feature-forge",
+        "task_id": None,
+        "lane": None,
+        "model": None,
+        "label": "hermes-feature-forge",
+    }
+    assert commits["kanban(t_1a2b3c4d): build"]["attribution"]["kind"] == "kanban"
+    assert commits["kanban(t_1a2b3c4d): build"]["attribution"]["task_id"] == "t_1a2b3c4d"
+    assert commits["wip(t_abcdef12): checkpoint"]["attribution"]["kind"] == "wip"
+    assert commits["wip(t_abcdef12): checkpoint"]["attribution"]["task_id"] == "t_abcdef12"
+    merge_attribution = commits[
+        "kanban: merge kanban/t_deadbeef (builder)"
+    ]["attribution"]
+    assert merge_attribution["kind"] == "merge"
+    assert merge_attribution["task_id"] == "t_deadbeef"
+    assert commits['Revert "feat: old change"']["attribution"]["kind"] == "revert"
+    assert commits['Reapply "feat: old change"']["attribution"]["kind"] == "revert"
+
+
+def test_commit_attribution_resolves_lane_and_latest_run_model_on_all_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    base = 1_700_000_000
+    _init_repo_with_commit(repo, committed_at=base, message="plain seed")
+    _add_commits(
+        repo,
+        [
+            (base + 50, "loop(hermes-feature-forge): loop build", "loop.txt"),
+            (base + 100, "wip(t_2b3c4d5e): no run", "no-run.txt"),
+            (base + 200, "kanban(t_3c4d5e6f): requested fallback", "fallback.txt"),
+            (base + 300, "kanban(t_1a2b3c4d): newest run", "newest.txt"),
+        ],
+    )
+
+    kdb = tmp_path / "kanban.db"
+    _make_kanban_db(kdb)
+    conn = kanban_db.connect(kdb)
+    try:
+        conn.executemany(
+            "INSERT INTO tasks (id, title, status, assignee, created_at) "
+            "VALUES (?, ?, 'done', ?, ?)",
+            [
+                ("t_1a2b3c4d", "newest run", "grok-builder", base),
+                ("t_2b3c4d5e", "no run", "heiler", base),
+                ("t_3c4d5e6f", "requested fallback", "premium", base),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, requested_model, active_model) "
+            "VALUES (?, ?, 'done', ?, ?, ?)",
+            [
+                ("t_1a2b3c4d", "new-profile", base + 20, "requested-new", "model-new"),
+                ("t_1a2b3c4d", "old-profile", base + 10, "requested-old", "model-old"),
+                ("t_3c4d5e6f", "premium", base + 30, "model-requested", None),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    entry = _entry(slug="proj", name="Project", repo_path=str(repo))
+    registry = ProjectsRegistry(projects=[entry], errors=[])
+    now = base + 400
+
+    card_payload = build_projects_payload(
+        registry,
+        kanban_db_path=kdb,
+        projects_db_path=tmp_path / "projects.db",
+        now=now,
+    )
+    last_commit = card_payload["projects"][0]["last_commit"]
+    assert last_commit is not None
+    assert {
+        key: last_commit[key]
+        for key in ("message", "author", "committed_at", "age_seconds")
+    } == {
+        "message": "kanban(t_1a2b3c4d): newest run",
+        "author": "Test User",
+        "committed_at": base + 300,
+        "age_seconds": 100,
+    }
+    assert last_commit["attribution"]["lane"] == "grok-builder"
+    assert last_commit["attribution"]["model"] == "model-new"
+
+    monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.load_projects_registry", lambda: registry
+    )
+    monkeypatch.setattr("hermes_cli.projects_overview.time.time", lambda: now)
+    app = FastAPI()
+    register_projects_routes(app)
+    response = TestClient(app).get("/api/projects/commits")
+    assert response.status_code == 200
+    commits = {commit["message"]: commit for commit in response.json()["commits"]}
+
+    newest = commits["kanban(t_1a2b3c4d): newest run"]
+    assert len(newest["hash"]) == 9
+    assert {
+        key: newest[key]
+        for key in ("author", "committed_at", "age_seconds")
+    } == {
+        "author": "Test User",
+        "committed_at": base + 300,
+        "age_seconds": 100,
+    }
+    assert newest["attribution"]["lane"] == "grok-builder"
+    assert newest["attribution"]["model"] == "model-new"
+    loop_attribution = commits[
+        "loop(hermes-feature-forge): loop build"
+    ]["attribution"]
+    assert loop_attribution["kind"] == "loop"
+    assert loop_attribution["pack"] == "hermes-feature-forge"
+    fallback = commits["kanban(t_3c4d5e6f): requested fallback"]["attribution"]
+    assert fallback["lane"] == "premium"
+    assert fallback["model"] == "model-requested"
+    no_run = commits["wip(t_2b3c4d5e): no run"]
+    assert no_run["attribution"]["task_id"] == "t_2b3c4d5e"
+    assert no_run["attribution"]["lane"] == "heiler"
+    assert no_run["attribution"]["model"] is None
+
+
 # --- assignee / operator on agents ------------------------------------------
 
 

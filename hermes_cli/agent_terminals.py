@@ -33,6 +33,7 @@ _EPHEMERAL_ATTACH_SOURCE = "@hermes_attach_source"
 _EPHEMERAL_ATTACH_WINDOW = "@hermes_attach_window"
 _EPHEMERAL_ATTACH_CREATED_AT = "@hermes_attach_created_at"
 _EPHEMERAL_ATTACH_GRACE_SECONDS = 60
+_TMUX_RUN_TIMEOUT_SECONDS = 10
 
 # Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
 # Used by window_exists / show / idempotent kill to distinguish not-found from
@@ -332,13 +333,17 @@ class TmuxAgentSessionService:
         return cmd
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            self._tmux_cmd(*args),
-            check=check,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            return subprocess.run(
+                self._tmux_cmd(*args),
+                check=check,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=_TMUX_RUN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AgentTerminalError(f"tmux command timed out: {exc}") from exc
 
     @staticmethod
     def _is_tmux_gone_message(stderr: str | None) -> bool:

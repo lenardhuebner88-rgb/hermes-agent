@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentQuestionEvent } from "@/lib/api";
 import type { ProjectEntry, ProjectAgent, ProjectSession } from "../lib/schemas";
 
 const hooks = vi.hoisted(() => ({
@@ -9,6 +10,7 @@ const hooks = vi.hoisted(() => ({
   useProjectSessions: vi.fn(),
   useProjectCommits: vi.fn(),
   useProjectReceipts: vi.fn(),
+  useAgentQuestions: vi.fn(),
 }));
 
 vi.mock("../hooks/useControlData", () => ({
@@ -17,6 +19,7 @@ vi.mock("../hooks/useControlData", () => ({
   useProjectSessions: hooks.useProjectSessions,
   useProjectCommits: hooks.useProjectCommits,
   useProjectReceipts: hooks.useProjectReceipts,
+  useAgentQuestions: hooks.useAgentQuestions,
   // Transitiv über ReceiptsFeed → ReceiptSheet importiert; das Sheet öffnet
   // sich erst per Klick und wird in dieser Datei nie gerendert.
   useProjectReceipt: vi.fn(),
@@ -181,6 +184,20 @@ function mockReceipts(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function mockQuestions(overrides: Record<string, unknown> = {}) {
+  hooks.useAgentQuestions.mockReturnValue({
+    data: null,
+    error: null,
+    errorObj: null,
+    loading: true,
+    lastUpdated: null,
+    isStale: false,
+    reload: vi.fn(),
+    updateData: vi.fn(),
+    ...overrides,
+  });
+}
+
 describe("ProjekteView", () => {
   beforeEach(() => {
     mockProjects();
@@ -188,6 +205,7 @@ describe("ProjekteView", () => {
     mockSessions();
     mockCommits();
     mockReceipts();
+    mockQuestions();
   });
 
   it("shows the loading state before the first successful poll", () => {
@@ -574,6 +592,62 @@ describe("ProjekteView", () => {
     expect(posCard).toBeGreaterThanOrEqual(0);
     expect(posCard).toBeLessThan(posFeed);
     expect(posFeed).toBeLessThan(posSessions);
+  });
+
+  it("mounts the FragenSection between summary strip and LiveBoard once the questions poll answers", () => {
+    // Feature A Slice 1 (REVIEW.md D1): offene Agentenfragen sind im Projekte-
+    // Tab sichtbar — Zone "zwischen Puls-Strip und Karten", vor dem LiveBoard.
+    const openQuestion: AgentQuestionEvent = {
+      id: 101,
+      ts: "2026-07-17T10:00:00Z",
+      updated_ts: null,
+      source: "scrape",
+      session: "hermes-main",
+      window: "1",
+      pane_id: "%12",
+      fingerprint: "fp-101",
+      kind: "claude",
+      cwd: "/home/piet/.hermes/hermes-agent",
+      question_text: "Soll ich den Branch mergen?",
+      options: [
+        { nr: 1, label: "Ja, mergen", recommended: true },
+        { nr: 2, label: "Nein, warten", recommended: false },
+      ],
+      class: null,
+      status: "open",
+      answered_by: null,
+      answer: null,
+      latency_s: null,
+      answer_verified: null,
+      override: 0,
+    };
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });
+    mockQuestions({ data: { questions: [openQuestion] }, loading: false, lastUpdated: 1 });
+    const html = renderView();
+    expect(html).toContain("Offene Fragen");
+    expect(html).toContain("Soll ich den Branch mergen?");
+    expect(html).toContain("Ja, mergen");
+    // Mount-Reihenfolge: Summary-Strip → Offene Fragen → LiveBoard.
+    // Anker mit Attribut-Form: der Untertitel oben enthält "Wer arbeitet
+    // gerade" als Fließtext — nur das aria-label der LiveBoard-Section ist
+    // kollisionsfrei (gleiches gilt für "Offene Fragen" via section aria-label).
+    const posStrip = html.indexOf("1 live");
+    const posFragen = html.indexOf('aria-label="Offene Fragen"');
+    const posBoard = html.indexOf('aria-label="Wer arbeitet gerade"');
+    expect(posStrip).toBeGreaterThanOrEqual(0);
+    expect(posStrip).toBeLessThan(posFragen);
+    expect(posFragen).toBeLessThan(posBoard);
+  });
+
+  it("hides the FragenSection during the initial questions load (no false empty state)", () => {
+    mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
+    mockAgents({ data: { generated_at: 1, errors: [], agents: [] }, loading: false, lastUpdated: 1 });
+    // Default-Mock: data null, error null, loading true → Sektion noch nicht
+    // mounten, sonst behauptet sie fälschlich "Keine offenen Fragen."
+    const html = renderView();
+    expect(html).not.toContain("Offene Fragen");
+    expect(html).not.toContain("Keine offenen Fragen.");
   });
 
   it("keeps the Ergebnisse section with inline error on receipts fetch failure (no top-level banner)", () => {

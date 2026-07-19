@@ -75,10 +75,12 @@ class DictationTextPipeline(
             DictationTransform.Text(raw)
         }
         if (transformed !is DictationTransform.Text) return transformed
-        val personalized = TextPersonalizer.applyDictionary(
+        val rules = dictionaryRules()
+        val exact = TextPersonalizer.applyDictionary(
             PunctuationMapper.map(transformed.value),
-            dictionaryRules(),
+            rules,
         )
+        val personalized = CanonicalTermCorrector.apply(exact, rules)
         return DictationTransform.Text(TextPersonalizer.expandSnippet(personalized, snippetRules()))
     }
 }

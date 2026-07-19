@@ -48,7 +48,7 @@ def _reset_modules(prefixes: tuple[str, ...]):
 
 
 @pytest.fixture(autouse=True)
-def _restore_tool_and_agent_modules():
+def _restore_tool_agent_and_plugin_modules():
     original_modules = {
         name: module
         for name, module in sys.modules.items()
@@ -56,11 +56,13 @@ def _restore_tool_and_agent_modules():
         or name.startswith("tools.")
         or name == "agent"
         or name.startswith("agent.")
+        or name == "plugins"
+        or name.startswith("plugins.")
     }
     try:
         yield
     finally:
-        _reset_modules(("tools", "agent"))
+        _reset_modules(("tools", "agent", "plugins"))
         sys.modules.update(original_modules)
 
 

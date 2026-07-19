@@ -257,7 +257,8 @@ def claude_cli_version(
                 )
     except Exception:
         version = None
-    _CLAUDE_CLI_VERSION_CACHE[claude_bin] = version
+    if version is not None:
+        _CLAUDE_CLI_VERSION_CACHE[claude_bin] = version
     return version
 
 

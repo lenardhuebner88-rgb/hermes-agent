@@ -73,7 +73,7 @@ fallback_providers: []             # or omit entirely at HUB
 >   provider entry.  HUB Minimax suppression runs exclusively through
 >   `gateway.profile_policy.filter_default_gateway_fallbacks`.
 > * Telegram is out of scope for this sprint.  Its default is already
->   `tool_progress="new"` (`gateway/display_config.py:84`); Slack is
+>   `tool_progress="off"` (`gateway/display_config.py:135-138`); Slack is
 >   `"off"`.  Discord was the only loud default.
 
 ## Operational Check

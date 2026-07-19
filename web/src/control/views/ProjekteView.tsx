@@ -3,7 +3,7 @@ import { AlertTriangle, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Eyebrow } from "../components/primitives";
 import { FleetEmptyState } from "../components/leitstand";
-import { useProjectAgents, useProjectCommits, useProjectReceipts, useProjectSessions, useProjects } from "../hooks/useControlData";
+import { useAgentQuestions, useProjectAgents, useProjectCommits, useProjectReceipts, useProjectSessions, useProjects } from "../hooks/useControlData";
 import { de } from "../i18n/de";
 import { nowSec } from "../lib/derive";
 import type { ProjectAgent } from "../lib/schemas";
@@ -22,22 +22,27 @@ import { ProjectDetailDrawer } from "./projekte/ProjectDetailDrawer";
 import { SessionKillSheet } from "./projekte/SessionKillSheet";
 import { LiveBoard } from "./projekte/LiveBoard";
 import { SessionsSection } from "./projekte/SessionsSection";
+import { FragenSection } from "./projekte/FragenSection";
 import { CommitsFeed } from "./projekte/CommitsFeed";
 import { ReceiptsFeed } from "./projekte/ReceiptsFeed";
 
 const t = de.projekte;
 
 /** Projekte-Tab — der Operator-Blick auf "wer arbeitet gerade wirklich woran":
- *  Summary-Strip (live/Check-ins/offene Sessions/blockiert) → LiveBoard
- *  (Agents nach Projekt gruppiert, mit Lane/Operator, tmux killbar) →
- *  Karten-Grid (Attention-sortiert, Klick = Drilldown) → Ergebnisse (Cross-
- *  Agent Receipt-Feed, Zeilenklick = Lese-Sheet) → Offene Sessions
- *  (Spawn-Baum aus state.db) → Alle Commits (projektübergreifender Feed).
- *  Daten: GET /api/projects + /agents + /sessions + /commits + /receipts.
+ *  Summary-Strip (live/Check-ins/offene Sessions/blockiert) → Offene Fragen
+ *  (ALLE offenen Agentenfragen, Ein-Tap-Antwort über den bestehenden
+ *  answer-Endpunkt — Feature A Slice 1) → LiveBoard (Agents nach Projekt
+ *  gruppiert, mit Lane/Operator, tmux killbar) → Karten-Grid (Attention-
+ *  sortiert, Klick = Drilldown) → Ergebnisse (Cross-Agent Receipt-Feed,
+ *  Zeilenklick = Lese-Sheet) → Offene Sessions (Spawn-Baum aus state.db) →
+ *  Alle Commits (projektübergreifender Feed).
+ *  Daten: GET /api/projects + /agents + /sessions + /commits + /receipts
+ *  + /api/agent-questions (5s Poll über denselben pollingStore-Key wie das
+ *  AnswerSheet im Agent-Terminals-Tab — dedupliziert, keine neue Infra).
  *  Mobile (<tab 600px, sessions-first): der Strip wird zur sticky,
  *  horizontal scrollbaren Zeile direkt unter dem App-Header; die Reihenfolge
- *  Strip → LiveBoard → Karten → Sessions → Commits bleibt (CSS-only, kein
- *  matchMedia); der Commit-Feed steckt hinter einer "Commits anzeigen"-
+ *  Strip → Fragen → LiveBoard → Karten → Sessions → Commits bleibt (CSS-only,
+ *  kein matchMedia); der Commit-Feed steckt hinter einer "Commits anzeigen"-
  *  Disclosure (default zu). Ab tab: exakt das Desktop-Layout von jeher. */
 export function ProjekteView() {
   const projects = useProjects();
@@ -45,6 +50,10 @@ export function ProjekteView() {
   const sessions = useProjectSessions();
   const commits = useProjectCommits();
   const receipts = useProjectReceipts();
+  // Feature A Slice 1: offene Agentenfragen über denselben Polling-Pfad
+  // (pollingStore-Key "agent-questions/open") wie das AnswerSheet im
+  // Agent-Terminals-Tab — der Store dedupliziert, keine neue Infrastruktur.
+  const questions = useAgentQuestions();
   const now = nowSec();
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
   const [killAgent, setKillAgent] = useState<ProjectAgent | null>(null);
@@ -58,6 +67,7 @@ export function ProjekteView() {
   const sessionList = sessions.data?.sessions ?? [];
   const commitList = commits.data?.commits ?? [];
   const receiptList = receipts.data?.receipts ?? [];
+  const openQuestions = questions.data?.questions ?? [];
   const agentsByProject = groupAgentsByProject(agentList);
   const agentCountBySlug = countAgentsByProject(agentList);
   // Stale-open sessions → per-card Ampel source (client aggregate; sessions
@@ -163,6 +173,20 @@ export function ProjekteView() {
       {projects.data === null && !projects.error ? <p className="text-sec text-ink-3">{t.loading}</p> : null}
 
       {projects.data !== null && list.length === 0 ? <FleetEmptyState title={t.empty} desc={t.emptyDesc} /> : null}
+
+      {/* Feature A Slice 1: offene Agentenfragen zwischen Puls-Strip und
+          LiveBoard/Karten — Piets häufigste Intervention als Ein-Tap-Aktion.
+          Sichtbar sobald der erste Poll beantwortet ist (Daten ODER Fehler);
+          der Fehler rendert inline in der Sektion (ReceiptsFeed-Idiom),
+          während des initialen Ladens kein falscher Leer-Zustand. */}
+      {questions.data !== null || questions.error ? (
+        <FragenSection
+          questions={openQuestions}
+          error={Boolean(questions.error)}
+          reload={questions.reload}
+          updateData={questions.updateData}
+        />
+      ) : null}
 
       {agents.data !== null ? (
         <LiveBoard

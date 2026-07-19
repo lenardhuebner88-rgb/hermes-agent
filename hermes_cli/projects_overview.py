@@ -274,6 +274,12 @@ def load_projects_registry(
 
 _GIT_LOG_TIMEOUT_SECONDS = 3
 _KANBAN_DONE_WINDOW_SECONDS = 7 * 24 * 3600
+_COMMIT_LOOP_RE = re.compile(r"^loop\(([^)]+)\):(?:\s|$)")
+_COMMIT_TASK_RE = re.compile(r"^(kanban|wip)\((t_[0-9a-f]{8})\):(?:\s|$)")
+_COMMIT_MERGE_RE = re.compile(
+    r"^kanban:\s+merge\s+kanban/(t_[0-9a-f]{8})(?:\s|$)"
+)
+_COMMIT_REVERT_RE = re.compile(r'^(?:Revert|Reapply)\s+"')
 # Wire instants must carry an explicit zone (``Z`` or ``+HH:MM``) to be treated
 # as unambiguous. Real loop heartbeat.json files mix zoned and naive
 # timestamps (naive ones are local-clock artifacts); naive strings are dropped
@@ -347,6 +353,120 @@ def _git_log_commits(
             }
         )
     return commits, None
+
+
+def _annotate_commit_attribution(
+    commits: list[dict[str, Any]], *, kanban_db_path: Path | None
+) -> None:
+    """Add best-effort commit provenance without changing existing fields.
+
+    Subject prefixes provide the stable attribution kind and task/pack key.
+    Task-backed commits are resolved in one read-only DB open and one batched
+    query; an absent/old/broken Kanban DB leaves nullable fields empty and
+    never removes the commit from its source payload.
+    """
+    task_attributions: list[dict[str, Any]] = []
+    task_ids: set[str] = set()
+
+    for commit in commits:
+        message = commit.get("message")
+        message = message if isinstance(message, str) else ""
+        author = commit.get("author")
+        author = author if isinstance(author, str) and author else None
+        attribution: dict[str, Any] = {
+            "kind": "direct",
+            "pack": None,
+            "task_id": None,
+            "lane": None,
+            "model": None,
+            "label": author,
+        }
+
+        loop_match = _COMMIT_LOOP_RE.match(message)
+        task_match = _COMMIT_TASK_RE.match(message)
+        merge_match = _COMMIT_MERGE_RE.match(message)
+        if loop_match is not None:
+            pack = loop_match.group(1)
+            attribution.update(kind="loop", pack=pack, label=pack)
+        elif task_match is not None:
+            task_id = task_match.group(2)
+            attribution.update(
+                kind=task_match.group(1), task_id=task_id, label=None
+            )
+            task_attributions.append(attribution)
+            task_ids.add(task_id)
+        elif merge_match is not None:
+            task_id = merge_match.group(1)
+            attribution.update(kind="merge", task_id=task_id, label=None)
+            task_attributions.append(attribution)
+            task_ids.add(task_id)
+        elif _COMMIT_REVERT_RE.match(message) is not None:
+            attribution.update(kind="revert", label=None)
+
+        commit["attribution"] = attribution
+
+    if not task_ids or kanban_db_path is None:
+        return
+
+    try:
+        conn = _open_sqlite_ro(kanban_db_path)
+    except sqlite3.DatabaseError:
+        return
+
+    ordered_task_ids = sorted(task_ids)
+    placeholders = ", ".join("?" for _task_id in ordered_task_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            WITH ranked_runs AS (
+                SELECT task_id, active_model, requested_model,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY task_id
+                           ORDER BY started_at DESC, id DESC
+                       ) AS run_rank
+                FROM task_runs
+                WHERE task_id IN ({placeholders})
+            )
+            SELECT tasks.id AS task_id, tasks.assignee AS lane,
+                   ranked_runs.active_model, ranked_runs.requested_model
+            FROM tasks
+            LEFT JOIN ranked_runs
+              ON ranked_runs.task_id = tasks.id AND ranked_runs.run_rank = 1
+            WHERE tasks.id IN ({placeholders})
+            """,
+            (*ordered_task_ids, *ordered_task_ids),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return
+    finally:
+        conn.close()
+
+    resolved: dict[str, tuple[str | None, str | None]] = {}
+    for row in rows:
+        lane_raw = row["lane"]
+        active_model_raw = row["active_model"]
+        requested_model_raw = row["requested_model"]
+        lane = (
+            lane_raw.strip()
+            if isinstance(lane_raw, str) and lane_raw.strip()
+            else None
+        )
+        active_model = (
+            active_model_raw.strip()
+            if isinstance(active_model_raw, str) and active_model_raw.strip()
+            else None
+        )
+        requested_model = (
+            requested_model_raw.strip()
+            if isinstance(requested_model_raw, str) and requested_model_raw.strip()
+            else None
+        )
+        resolved[row["task_id"]] = (lane, active_model or requested_model)
+
+    for attribution in task_attributions:
+        lane, model = resolved.get(attribution["task_id"], (None, None))
+        attribution["lane"] = lane
+        attribution["model"] = model
 
 
 def _project_last_commit(
@@ -558,11 +678,14 @@ def build_projects_payload(
     )
 
     projects_payload: list[dict[str, Any]] = []
+    last_commits_to_annotate: list[dict[str, Any]] = []
     for entry in registry.projects:
         errors: list[str] = []
 
         try:
             last_commit, git_error = _project_last_commit(entry, now=resolved_now)
+            if last_commit is not None:
+                last_commits_to_annotate.append(last_commit)
         except Exception as exc:
             last_commit, git_error = None, f"git: {exc}"
         if git_error:
@@ -602,6 +725,10 @@ def build_projects_payload(
                 "errors": errors,
             }
         )
+
+    _annotate_commit_attribution(
+        last_commits_to_annotate, kanban_db_path=resolved_kanban_db_path
+    )
 
     return {
         "generated_at": resolved_now,
@@ -1483,6 +1610,9 @@ def build_project_detail(
 
     try:
         recent_commits, git_error = _project_recent_commits(entry, now=resolved_now)
+        _annotate_commit_attribution(
+            recent_commits, kanban_db_path=resolved_kanban_db_path
+        )
     except Exception as exc:
         recent_commits, git_error = [], f"git: {exc}"
     if git_error:
@@ -1880,10 +2010,15 @@ _FEED_COMMITS_LIMIT = 30
 def build_commits_payload(
     registry: ProjectsRegistry,
     *,
+    kanban_db_path: Path | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the frozen ``/api/projects/commits`` payload (newest-first)."""
     resolved_now = now if now is not None else int(time.time())
+    home = get_hermes_home()
+    resolved_kanban_db_path = (
+        kanban_db_path if kanban_db_path is not None else home / "kanban.db"
+    )
 
     feed: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -1913,6 +2048,7 @@ def build_commits_payload(
 
     feed.sort(key=lambda commit: (-commit["committed_at"], commit["_order"]))
     feed = feed[:_FEED_COMMITS_LIMIT]
+    _annotate_commit_attribution(feed, kanban_db_path=resolved_kanban_db_path)
     for commit in feed:
         del commit["_order"]
 

@@ -4,13 +4,14 @@ import {
   LoopsResponseSchema,
   LoopModelsResponseSchema,
   LoopDetailResponseSchema,
+  LoopQueueFileResponseSchema,
   LoopFilesResponseSchema,
   LoopFileSaveResultSchema,
   LoopDuplicateResultSchema,
   LoopLandResultSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult } from "../lib/types";
+import type { LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopQueueFileResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult } from "../lib/types";
 import { usePolling, extractDetail } from "./internal";
 
 // ── Loop-Runner (/control Loops-Tab) — Vertrag: hermes_cli/control_loops.py ──
@@ -48,6 +49,55 @@ export function useLoopDetail(pack: string | null) {
   const result = usePolling<LoopDetailResponse | null>(key, loader, pack ? 5000 : 600_000);
   if (!pack) return { ...result, data: null };
   return result;
+}
+
+
+export function useLoopQueueFile(pack: string, stage: string, filename: string, enabled: boolean): {
+  data: LoopQueueFileResponse | null;
+  loading: boolean;
+  error: string | null;
+} {
+  const key = `${pack}/${stage}/${filename}`;
+  const loadedKeyRef = useRef<string | null>(null);
+  const [state, setState] = useState<{
+    key: string;
+    data: LoopQueueFileResponse | null;
+    loading: boolean;
+    error: string | null;
+  }>({ key: "", data: null, loading: false, error: null });
+
+  useEffect(() => {
+    if (!enabled || loadedKeyRef.current === key) return;
+    let alive = true;
+    const initial = window.setTimeout(() => {
+      if (!alive) return;
+      setState({ key, data: null, loading: true, error: null });
+      void (async () => {
+        try {
+          const parsed = parseOrThrow(
+            LoopQueueFileResponseSchema,
+            await fetchJSON<unknown>(
+              `/api/loops/${encodeURIComponent(pack)}/queue/${encodeURIComponent(stage)}/${encodeURIComponent(filename)}`,
+            ),
+            `loops/${pack}/queue/${stage}/${filename}`,
+          );
+          if (alive) {
+            loadedKeyRef.current = key;
+            setState({ key, data: parsed, loading: false, error: null });
+          }
+        } catch (e) {
+          if (alive) setState({ key, data: null, loading: false, error: extractDetail(e) });
+        }
+      })();
+    }, 0);
+    return () => {
+      alive = false;
+      window.clearTimeout(initial);
+    };
+  }, [enabled, filename, key, pack, stage]);
+
+  if (state.key !== key) return { data: null, loading: enabled, error: null };
+  return { data: state.data, loading: state.loading, error: state.error };
 }
 
 
@@ -185,4 +235,3 @@ export async function duplicateLoop(source: string, name: string): Promise<LoopD
 // Wird NUR bei offenem Drawer geladen (task-body-on-demand/{id}) — kein Background-Poll.
 // useTaskBodyOnDemand pollt alle 8s WENN taskId != null (= Drawer offen), ansonsten pausiert.
 // Pattern analog zu useWorkerActivity (Null-Guard + leerer Fallback).
-

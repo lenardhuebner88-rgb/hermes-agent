@@ -529,6 +529,75 @@ def test_files_repo_pack_readonly_and_put_403(api):
     assert resp.status_code == 403
 
 
+def test_queue_file_returns_bounced_plan_verbatim(api):
+    client, _calls, tmp = api
+    content = (
+        "---\n"
+        "id: P1-bounced-plan\n"
+        "retry: 1\n"
+        "---\n"
+        "## Verifier-Evidence\n"
+        "FAIL: Payload enthält noch nicht den vollständigen Text.\n\n"
+        "## Loop-Fail\n"
+        "Verifier hat den Byte-für-Byte-Nachweis abgelehnt.\n"
+    )
+    content_bytes = content.encode("utf-8")
+    target = tmp / "state" / "fliessband" / "queue" / "90-bounced" / "P1-bounced-plan.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(content_bytes)
+
+    response = client.get(
+        "/api/loops/fliessband/queue/90-bounced/P1-bounced-plan.md",
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload == {
+        "pack": "fliessband",
+        "stage": "90-bounced",
+        "filename": "P1-bounced-plan.md",
+        "content": content,
+    }
+    assert payload["content"].encode("utf-8") == content_bytes
+
+
+@pytest.mark.parametrize(
+    ("stage", "filename"),
+    [
+        ("40-unknown", "P1-plan.md"),
+        ("90-bounced", "P1-plan.txt"),
+        ("90-bounced", "%2E%2E%2FLEDGER.md"),
+        ("90-bounced", "..%2F"),
+    ],
+)
+def test_queue_file_rejects_invalid_stage_and_filename(api, stage, filename):
+    client, _calls, _tmp = api
+
+    response = client.get(f"/api/loops/fliessband/queue/{stage}/{filename}")
+
+    assert response.status_code == 400, response.text
+
+
+def test_queue_file_missing_file_returns_404(api):
+    client, _calls, _tmp = api
+
+    response = client.get(
+        "/api/loops/fliessband/queue/90-bounced/P1-missing.md",
+    )
+
+    assert response.status_code == 404
+
+
+def test_queue_file_unknown_pack_returns_404(api):
+    client, _calls, _tmp = api
+
+    response = client.get(
+        "/api/loops/unknown/queue/90-bounced/P1-plan.md",
+    )
+
+    assert response.status_code == 404
+
+
 def test_duplicate_then_edit_custom_pack_with_lint(api, tmp_path):
     client, _calls, _tmp = api
     # Duplikat entsteht im (Test-)Packs-Dir und ist danach als eigenes Pack sichtbar

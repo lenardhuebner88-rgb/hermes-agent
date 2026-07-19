@@ -24,7 +24,9 @@ def test_import_loads_env_from_hermes_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
 
-    sys.modules.pop("trajectory_compressor", None)
+    # Force a fresh import for this assertion, then restore the module object
+    # bound by the rest of the collected suite instead of leaking an identity split.
+    monkeypatch.delitem(sys.modules, "trajectory_compressor")
     importlib.import_module("trajectory_compressor")
 
     assert os.getenv("OPENROUTER_API_KEY") == "from-hermes-home"

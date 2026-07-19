@@ -1,8 +1,41 @@
 // Pure derivation logic for the Projekte-Tab card grid + live board +
 // sessions/commits sections + detail drawer. No React/no fetch — unit-tested
 // in derive.test.ts against the real /api/projects payload shapes.
-import type { ProjectAgent, ProjectEntry, ProjectSession } from "../../lib/schemas";
+import type {
+  ProjectAgent,
+  ProjectCommitAttribution,
+  ProjectEntry,
+  ProjectSession,
+} from "../../lib/schemas";
 import type { SignalTone } from "../../components/leitstand";
+
+/** Human-readable provenance for a commit row. `null` deliberately delegates
+ *  to the existing git-author fallback in the renderer. */
+export function commitAttributionLabel(
+  attribution: ProjectCommitAttribution | null | undefined,
+): string | null {
+  if (!attribution || attribution.kind === "direct") return null;
+
+  if (
+    attribution.kind === "kanban" ||
+    attribution.kind === "wip" ||
+    attribution.kind === "merge"
+  ) {
+    const lane = attribution.lane?.trim();
+    const model = attribution.model?.trim();
+    if (lane && model) return `${lane} · ${model}`;
+    if (lane) return lane;
+    return attribution.task_id?.trim() || null;
+  }
+
+  if (attribution.kind === "loop") {
+    const pack = attribution.pack?.trim();
+    return pack ? `loop · ${pack}` : "loop";
+  }
+
+  if (attribution.kind === "revert") return "revert";
+  return null;
+}
 
 /** Agents grouped by project slug (Karten-Grid). Agents ohne zugeordnetes
  *  Projekt (`project: null`) werden hier weggelassen — auf dem LiveBoard

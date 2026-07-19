@@ -25,6 +25,19 @@ from gateway.config import Platform, PlatformConfig, GatewayConfig
 from gateway.platforms.yuanbao import YuanbaoAdapter
 
 
+@pytest.fixture(autouse=True)
+def _restore_gateway_imports(restore_sys_modules):
+    """Keep the stub-backed ``gateway.run`` import local to each test.
+
+    ``_make_minimal_runner`` temporarily inserts dependency stubs before its
+    first ``gateway.run`` import. Removing only those stubs afterwards leaves
+    the cached gateway module bound to ``MagicMock`` dependencies for later
+    test files in the same pytest process. The shared restore fixture removes
+    that freshly imported module (or restores the pre-test object) at teardown.
+    """
+    yield
+
+
 def make_config(**kwargs):
     extra = kwargs.pop("extra", {})
     extra.setdefault("app_id", "test_key")

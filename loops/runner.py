@@ -53,6 +53,10 @@ logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO_ROOT / "loops" / "packs"
+# Kuratierter Engine/Modell-Katalog (Dashboard-Dropdown). Modul-Konstante, damit
+# Tests einen Temp-Katalog einspielen können; der Autoland-Runtime-Check liest
+# hierüber, dass JEDES Default- UND Override-Modell im Katalog liegt.
+MODELS_FILE = REPO_ROOT / "loops" / "models.yaml"
 # Werkstatt-Substrat (v2.1): vom Operator/Dashboard angelegte Packs leben im State,
 # nie im Repo — Browser-Edits dürfen den Live-Checkout nicht dirty machen.
 _HERMES_HOME = get_hermes_home()
@@ -68,26 +72,73 @@ def _utc_iso() -> str:
     """Unambiguous wire timestamp for dashboard/state consumers."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-# Operator-Entscheid 2026-07-18: dieselbe deterministische Opus→Sol→Opus-
+# Operator-Entscheid 2026-07-18: dieselbe deterministische Drei-Phasen-
 # Landungsleiter wird pro Pack vertraglich vorbereitet. hermes-hardening folgt
 # nach 3, hermes-feature-forge nach 5 sauberen manuellen Landungen. Der Flip
-# braucht jeweils Allowlist-Eintrag + autoland:true + echte Manifest-/Prompt-SHAs.
+# braucht jeweils Allowlist-Eintrag + autoland:true + echte Safety-/Prompt-SHAs.
 # Bis dahin bleiben beide neuen Vertraege fail-closed. Quelle, Live-Repo,
-# Rollen/Modelle und exakte Inhalte bleiben Teil der Autoritaetsbindung.
+# Rollen/Engines und exakte Sicherheits-/Prompt-Inhalte bleiben Teil der
+# Autoritaetsbindung — das konkrete Modell floatet (Katalog-geprueft).
 AUTOLAND_PACK_ALLOWLIST = frozenset({"dashboard-experience"})
 AUTOLAND_EXPECTED_REPO = Path("/home/piet/.hermes/hermes-agent").resolve()
+# Die Landungsautorität bindet Engine-ROLLE + Prompt pro Phase — NICHT das
+# konkrete Modell. Modell und Budgets dürfen zur Laufzeit floaten (Operator wählt
+# im Control-Startdialog), solange sie im Katalog liegen; Engine-Rolle, Prompt,
+# Repo, Pack-Quelle, Pfad-/Visual-/exact-one-commit-/clean-/ff-only-Gates bleiben
+# fail-closed. Keine konkreten Modellnamen hier oder im Fehlertext (sonst kippt
+# ein Modell-Update die Autorität zurück in die modellgebundene Regression).
 AUTOLAND_PHASE_CONTRACT = {
-    "plan": ("claude", "claude-opus-4-8", "PLANNER-PROMPT.md"),
-    "build": ("codex", "gpt-5.6-sol", "BUILDER-PROMPT.md"),
-    "verify": ("claude", "claude-opus-4-8", "VERIFIER-PROMPT.md"),
+    "plan": ("claude", "PLANNER-PROMPT.md"),
+    "build": ("codex", "BUILDER-PROMPT.md"),
+    "verify": ("claude", "VERIFIER-PROMPT.md"),
 }
+
+
+def _autoland_safety_hash(raw: dict) -> str:
+    """Hash der Landungsautorität — schließt Laufzeit-Modell und -Budgets bewusst
+    aus, bindet aber Rolle/Engine, Prompt-Zuordnung, Repo, Params, Notify und die
+    Landungsziel-/Gate-Parameter (base_branch, land_remote, land_push, land_gates).
+
+    So bleibt ein Modell-Swap (gpt-5.6-sol → gpt-5.5) OHNE Manifest-Drift, während
+    jede Änderung an Engine-Rolle, Prompt, Repo, Scope-Params ODER am Push-Ziel/den
+    Land-Gates fail-closed auffällt. `stop`/Budgets nur über die Schlüssel gebunden
+    (Werte floaten). Push-Ziel und Gates dürfen NICHT floaten: land_remote=origin
+    oder land_gates=[] müssen den Hash drehen (sonst nicht fail-closed)."""
+    phases = raw.get("phases") or {}
+    projection = {
+        "name": raw.get("name"),
+        "type": raw.get("type"),
+        "repo": raw.get("repo"),
+        "stability": raw.get("stability"),
+        "phases": {
+            phase: {"engine": cfg.get("engine"), "prompt": cfg.get("prompt")}
+            for phase, cfg in phases.items()
+        },
+        "stop_keys": sorted((raw.get("stop") or {}).keys()),
+        "params": raw.get("params") or {},
+        "notify": raw.get("notify") or {},
+        "autoland": raw.get("autoland", False),
+        # Landungsziel + Gate-Ausführung binden — dieselben Defaults wie load_pack,
+        # damit ein Manifest ohne diese Keys stabil hasht, jede Abweichung (origin,
+        # land_push=false, leere/andere Gate-Liste) aber Drift erzeugt.
+        "base_branch": raw.get("base_branch", "main"),
+        "land_remote": raw.get("land_remote", "piet-fork"),
+        "land_push": raw.get("land_push", True),
+        "land_gates": raw.get("land_gates"),
+    }
+    canonical = json.dumps(
+        projection, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 @dataclass(frozen=True)
 class AutolandContract:
     path_prefixes: tuple[str, ...]
     deny_prefixes: tuple[str, ...]
-    manifest_sha256: str | None
+    # SHA-256 der modellagnostischen Sicherheitsprojektion (_autoland_safety_hash),
+    # NICHT des rohen Manifests — Modell/Budgets sind bewusst nicht Teil davon.
+    safety_sha256: str | None
     prompt_sha256: dict[str, str] | None
     require_visual: Literal["always", "if_web_touched"]
 
@@ -107,7 +158,7 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
     "dashboard-experience": AutolandContract(
         path_prefixes=("web/src/control/",),
         deny_prefixes=(),
-        manifest_sha256="656a47081bc6e91fcb06c1346c93f93316a08a8db9588d1aa7604ee3e86e3eff",
+        safety_sha256="8940bc59f98cfdb9ae45c4fec67f39da364d59a2aa5be2e67f52292adb42585c",
         prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
@@ -118,14 +169,14 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
     "hermes-feature-forge": AutolandContract(
         path_prefixes=_HERMES_REPO_PREFIXES,
         deny_prefixes=_HERMES_REPO_DENIES,
-        manifest_sha256=None,
+        safety_sha256=None,
         prompt_sha256=None,
         require_visual="if_web_touched",
     ),
     "hermes-hardening": AutolandContract(
         path_prefixes=_HERMES_REPO_PREFIXES,
         deny_prefixes=_HERMES_REPO_DENIES,
-        manifest_sha256=None,
+        safety_sha256=None,
         prompt_sha256=None,
         require_visual="if_web_touched",
     ),
@@ -272,7 +323,7 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
     autoland_contract = AUTOLAND_CONTRACTS.get(name)
     if name in AUTOLAND_PACK_ALLOWLIST and (
         autoland_contract is None
-        or autoland_contract.manifest_sha256 is None
+        or autoland_contract.safety_sha256 is None
         or autoland_contract.prompt_sha256 is None
     ):
         raise ManifestError(
@@ -297,19 +348,23 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 f"Pack {name!r}: autoland braucht das gebundene Live-Repo "
                 f"{AUTOLAND_EXPECTED_REPO}, ist {Path(repo).expanduser().resolve()}"
             )
+        # Rollen-/Prompt-Vertrag: Engine-Rolle + Prompt pro Phase, KEIN Modell —
+        # ein Modell-Swap fällt hier bewusst nicht durch (Autorität bindet Rollen).
         actual_contract = {
-            phase: (cfg.engine, cfg.model, cfg.prompt)
+            phase: (cfg.engine, cfg.prompt)
             for phase, cfg in phases.items()
         }
         if actual_contract != AUTOLAND_PHASE_CONTRACT:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Phasenvertrag weicht ab; "
-                "erwartet Opus→Sol→Opus mit den kuratierten Prompts"
+                "erwartet die kuratierten Engine-Rollen und Prompts"
             )
-        manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
-        if manifest_hash != autoland_contract.manifest_sha256:
+        # Modellagnostische Sicherheitsprojektion statt Vollmanifest-Bytes — Modell
+        # und Budget-Werte sind ausgeschlossen, alles Sicherheitsrelevante gebunden.
+        if _autoland_safety_hash(raw) != autoland_contract.safety_sha256:
             raise ManifestError(
-                f"Pack {name!r}: autoland-Manifestinhalt weicht vom kuratierten Hash ab"
+                f"Pack {name!r}: autoland-Sicherheitsprojektion weicht vom "
+                "kuratierten Hash ab"
             )
         actual_prompts = {
             cfg.prompt: hashlib.sha256((pack_dir / cfg.prompt).read_bytes()).hexdigest()
@@ -987,13 +1042,12 @@ class LoopRunner:
                 "Autoland akzeptiert nur Engine, Modell, MAX_ROUNDS und MAX_HOURS"
             )
 
-        catalog_path = REPO_ROOT / "loops" / "models.yaml"
-        catalog_data = yaml.safe_load(catalog_path.read_text(encoding="utf-8")) or {}
+        # Jedes Default- UND Override-Modell muss im Katalog liegen (kein
+        # override-only-continue): auch ein nicht überschriebenes Default-Modell,
+        # das aus dem Katalog gefallen ist, fällt so fail-closed auf.
+        catalog_data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8")) or {}
         catalog = catalog_data.get("engines", {})
         for phase in self.pack.phases:
-            prefix = f"PHASE_{phase.upper()}_"
-            if not ({f"{prefix}ENGINE", f"{prefix}MODEL"} & self.overrides.keys()):
-                continue
             cfg = self.phase_cfg(phase)
             engine_entry = catalog.get(cfg.engine)
             if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
@@ -1020,7 +1074,11 @@ class LoopRunner:
                 )
 
     def _runtime_autoland_authorized(self) -> bool:
-        """Nur der gebundene Phasenvertrag darf automatisch pushen; Budgets sind frei."""
+        """Modell UND Budgets floaten frei; nur die Engine-ROLLE pro Phase bleibt
+        Teil der Landungsautorität. Ohne Engine/Modell-Override ist der beim Laden
+        fail-closed validierte Manifest-Phasenvertrag maßgeblich; mit Override
+        zählt die Engine-Rolle — ein gültiger reiner Modell-Swap erzwingt KEIN
+        manual-land, ein Engine-Rollenwechsel schon."""
         if not self.pack.autoland:
             return False
         phase_keys = {
@@ -1028,10 +1086,9 @@ class LoopRunner:
             if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
         }
         if not phase_keys:
-            return True  # Das Pack-Manifest selbst wurde bereits fail-closed validiert.
+            return True  # Manifest-Phasenvertrag wurde beim Laden fail-closed validiert.
         return all(
-            (self.phase_cfg(phase).engine, self.phase_cfg(phase).model)
-            == AUTOLAND_PHASE_CONTRACT[phase][:2]
+            self.phase_cfg(phase).engine == AUTOLAND_PHASE_CONTRACT[phase][0]
             for phase in AUTOLAND_PHASE_CONTRACT
         )
 

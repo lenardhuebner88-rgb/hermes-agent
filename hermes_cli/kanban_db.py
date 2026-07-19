@@ -5357,6 +5357,32 @@ def rewire_superseding_review_parent(
     return payload
 
 
+def _normalized_review_list(value: Any) -> list[str]:
+    """Coerce reviewer findings / required-verification metadata into a clean
+    list of non-empty strings.
+
+    Reviewers may hand us a list of items, a single string, or ``None`` (key
+    absent). We accept all three and never raise on malformed metadata: the
+    review-revision payload persisted from :func:`block_task` must stay a plain
+    list of strings regardless of what the reviewer profile emitted.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)):
+        items: list[Any] = [value]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        items = [value]
+    normalized: list[str] = []
+    for item in items:
+        text = item.decode() if isinstance(item, bytes) else str(item)
+        text = text.strip()
+        if text:
+            normalized.append(text)
+    return normalized
+
+
 def _render_review_findings(reviewer_metadata: dict[str, Any]) -> str:
     """Render the structured reviewer findings block (B). Shared by the
     NEEDS_REVISION fix-body and the auto-retry feedback comment so both surface
@@ -10864,20 +10890,75 @@ def effective_ui_impact(task: Optional["Task"]) -> str:
 def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
     """Return the complete configured reviewer topology for *tier*.
 
-    standard = [verifier]; review = [verifier, reviewer];
-    critical = [verifier, reviewer, critic]. An unknown tier falls back to the
+    standard/review = [verifier]; critical = [verifier, reviewer]. Critic is an
+    explicit adversarial lane, never an automatic tier stage. Unknown tiers use the
     single verifier stage. Runtime availability never weakens this policy: a
     missing stage is held retryably in ``review`` until its profile returns.
     """
     verifier = cfg.get("verifier_profile") or _DEFAULT_VERIFIER_PROFILE
     review = cfg.get("review_profile") or _DEFAULT_REVIEW_PROFILE
-    critic = cfg.get("critic_profile") or _DEFAULT_CRITIC_PROFILE
     seq = {
         "standard": [verifier],
-        "review": [verifier, review],
-        "critical": [verifier, review, critic],
+        "review": [verifier],
+        "critical": [verifier, review],
     }.get(tier, [verifier])
     return [str(profile).strip() for profile in seq if str(profile).strip()]
+
+
+def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """Return the latest staged-review payload, including its reviewed commit."""
+    row = conn.execute(
+        "SELECT id, run_id, payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'submitted_for_review' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    reviewed_commit = None
+    if row["run_id"] is not None:
+        run = conn.execute(
+            "SELECT metadata FROM task_runs WHERE id = ?", (int(row["run_id"]),)
+        ).fetchone()
+        try:
+            run_metadata = json.loads(run["metadata"] or "{}") if run else {}
+        except (TypeError, ValueError):
+            run_metadata = {}
+        if isinstance(run_metadata, dict):
+            reviewed_commit = run_metadata.get("commit")
+    payload["reviewed_commit"] = reviewed_commit or payload.get("diff_base_commit")
+    payload["event_id"] = int(row["id"])
+    return payload
+
+
+def _pending_review_revision(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    """Return an unconsumed same-card review revision request, if present."""
+    row = conn.execute(
+        "SELECT id, payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return None
+    revision = payload.get("review_revision") if isinstance(payload, dict) else None
+    if not isinstance(revision, dict):
+        return None
+    newer_submission = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'submitted_for_review' AND id > ? LIMIT 1",
+        (task_id, int(row["id"])),
+    ).fetchone()
+    return None if newer_submission else revision
 
 
 def _review_profile_availability(profile: Optional[str]) -> tuple[bool, str]:
@@ -12657,6 +12738,7 @@ def complete_task(
     # to bypass this policy.
     if _review_gate_should_apply(conn, task_id, expected_run_id):
         if review_gate or expected_run_id is not None:
+            _revision = _pending_review_revision(conn, task_id)
             # B1 verification economy: a green deterministic worker gate IS the
             # done signal for a standard-tier task (opt-in via
             # standard_uses_llm_verifier: false). The gate ran and passed →
@@ -12709,6 +12791,10 @@ def complete_task(
                     metadata=metadata,
                     verified_cards=verified_cards,
                     expected_run_id=expected_run_id,
+                    stage=int(_revision.get("resume_stage") or 0) if _revision else 0,
+                    effective_tier=(
+                        str(_revision.get("review_tier")) if _revision else None
+                    ),
                 )
                 if submitted:
                     # The WORKER's own run succeeded (work delivered, worker
@@ -12795,7 +12881,9 @@ def complete_task(
         if _wt_eligible:
             from hermes_cli.kanban_worktrees import maybe_integrate_on_complete
 
-            _wt_outcome = maybe_integrate_on_complete(conn, task_id)
+            _wt_outcome = maybe_integrate_on_complete(
+                conn, task_id, completion_metadata=metadata,
+            )
     except Exception:
         _log.error(
             "worker-isolation integration hook failed for %s",
@@ -14296,7 +14384,8 @@ def block_task(
             )
         # B2: only the review lane writes structured verdicts; ordinary blocks
         # (a coder hitting a wall) leave task_runs.verdict NULL.
-        if _run_originated_from_review(conn, task_id, run_id):
+        review_originated = _run_originated_from_review(conn, task_id, run_id)
+        if review_originated:
             # The block action itself is explicit negative review authority.
             # Metadata can carry findings, but can never turn a blocked run
             # into an APPROVED verdict.
@@ -14313,6 +14402,20 @@ def block_task(
                 ).fetchone()[0]
             ),
         }
+        if review_originated:
+            submission = _latest_review_submission(conn, task_id) or {}
+            review_meta = reviewer_metadata if isinstance(reviewer_metadata, dict) else {}
+            blocked_payload["review_revision"] = {
+                "review_tier": str(submission.get("review_tier") or "standard"),
+                "resume_stage": int(submission.get("review_stage") or 0),
+                "reviewed_commit": submission.get("reviewed_commit"),
+                "blocking_findings": _normalized_review_list(
+                    review_meta.get("blocking_findings")
+                ),
+                "required_verification": _normalized_review_list(
+                    review_meta.get("required_verification")
+                ),
+            }
         _append_event(conn, task_id, "blocked", blocked_payload, run_id=run_id)
         if next_status == "triage":
             _append_event(

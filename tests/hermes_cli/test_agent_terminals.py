@@ -58,6 +58,24 @@ def test_validate_name_rejects_tmux_option_and_shell_payload() -> None:
             service.validate_name(value)
 
 
+def test_run_raises_on_tmux_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_tmux = tmp_path / "fake-tmux"
+    fake_tmux.write_text("#!/bin/sh\nsleep 1\n", encoding="utf-8")
+    fake_tmux.chmod(fake_tmux.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setattr(
+        agent_terminals, "_TMUX_RUN_TIMEOUT_SECONDS", 0.05, raising=False
+    )
+    service = TmuxAgentSessionService(tmux_binary=str(fake_tmux), hermes_home=tmp_path)
+
+    started = time.monotonic()
+    with pytest.raises(AgentTerminalError, match="tmux command timed out"):
+        service._run("list-sessions", check=False)
+
+    assert time.monotonic() - started < 0.5
+
+
 def test_workdir_options_enumerate_registry_and_git_worktrees(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

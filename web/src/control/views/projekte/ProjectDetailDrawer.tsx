@@ -8,7 +8,8 @@ import { de } from "../../i18n/de";
 import { fmtRelativeTime, nowSec } from "../../lib/derive";
 import type { ProjectDetail, ProjectReceiptEntry } from "../../lib/schemas";
 import { AGENT_KIND_STYLES, agentChipText } from "./agentKinds";
-import { kanbanTaskTone, loopOutcomeTone } from "./derive";
+import { commitAttributionLabel, kanbanTaskTone, loopOutcomeTone } from "./derive";
+import { CommitAttributionBadge } from "./CommitsFeed";
 import { ReceiptRow } from "./ReceiptsFeed";
 import { ReceiptSheet } from "./ReceiptSheet";
 import { cn } from "@/lib/utils";
@@ -120,21 +121,29 @@ export function ProjectDetailBody({ data, now }: { data: ProjectDetail; now: num
           <p className="text-micro text-ink-3">{t.detailNoCommits}</p>
         ) : (
           <ul className="min-w-0 space-y-2">
-            {data.recent_commits.map((commit) => (
-              <li
-                key={`${commit.hash}:${commit.committed_at}`}
-                className="min-w-0 rounded-card border border-line-soft bg-surface-2 px-3 py-2"
-              >
-                <p className="truncate text-sec text-ink">{commit.message || t.noCommitMessage}</p>
-                <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 font-data text-micro text-ink-3">
-                  {commit.author ? <span className="truncate text-ink-2">{commit.author}</span> : null}
-                  {commit.author ? <span aria-hidden>·</span> : null}
-                  <span>{commit.hash}</span>
-                  <span aria-hidden>·</span>
-                  <span>{fmtRelativeTime(commit.committed_at, now)}</span>
-                </p>
-              </li>
-            ))}
+            {data.recent_commits.map((commit) => {
+              const attributionLabel = commitAttributionLabel(commit.attribution);
+              const hasActor = Boolean(attributionLabel || commit.author);
+              return (
+                <li
+                  key={`${commit.hash}:${commit.committed_at}`}
+                  className="min-w-0 rounded-card border border-line-soft bg-surface-2 px-3 py-2"
+                >
+                  <p className="truncate text-sec text-ink">{commit.message || t.noCommitMessage}</p>
+                  <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 font-data text-micro text-ink-3">
+                    {attributionLabel ? (
+                      <CommitAttributionBadge label={attributionLabel} />
+                    ) : commit.author ? (
+                      <span className="min-w-0 break-words text-ink-2">{commit.author}</span>
+                    ) : null}
+                    {hasActor ? <span aria-hidden>·</span> : null}
+                    <span>{commit.hash}</span>
+                    <span aria-hidden>·</span>
+                    <span>{fmtRelativeTime(commit.committed_at, now)}</span>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

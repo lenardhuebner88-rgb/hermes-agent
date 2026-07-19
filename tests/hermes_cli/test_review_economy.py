@@ -494,3 +494,57 @@ def test_open_noncode_sibling_does_not_block_tip(
         assert kb.complete_task(conn, t1, summary="s", review_gate=True)
         # t1 is the last open CODE task -> it is the tip -> review fires
         assert kb.get_task(conn, t1).status == "review"
+
+
+# ---------------------------------------------------------------------------
+# B5: compact review context — same-card review-run detection + bounded noise
+# ---------------------------------------------------------------------------
+
+
+def test_review_run_detection_uses_status_not_assignee():
+    """Same-card review economy: the reviewer runs on the coder's own card, so
+    review-run detection must key off the ``review`` status, not the persistent
+    ``assignee`` (which stays ``coder``)."""
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_context
+
+    same_card = SimpleNamespace(
+        assignee="coder", kind="code", status="review", continuation_count=0
+    )
+    assert kanban_context.context_profile_for_task(same_card, "full") == "reviewer_review"
+
+    # A coder card still executing (not in review) keeps the default profile.
+    running = SimpleNamespace(
+        assignee="coder", kind="code", status="running", continuation_count=0
+    )
+    assert kanban_context.context_profile_for_task(running, "full") == "full"
+
+    # Legacy stand-alone review card (assignee=reviewer/kind=review) still works.
+    legacy = SimpleNamespace(
+        assignee="reviewer", kind="review", status="ready", continuation_count=0
+    )
+    assert kanban_context.context_profile_for_task(legacy, "full") == "reviewer_review"
+
+
+def test_reviewer_review_profile_bounds_noise_keeps_evidence_window():
+    """The compact review profile keeps the wide body/field windows (AC, diff,
+    gates, previous-stage findings) but bounds review-irrelevant backlog."""
+    from hermes_cli import kanban_context
+
+    full = kanban_context.context_caps("full")
+    review = kanban_context.context_caps("reviewer_review")
+
+    # Bounded noise: fewer old attempts / comments / cross-task role history.
+    assert review["prior_attempts"] < full["prior_attempts"]
+    assert review["comments"] < full["comments"]
+    assert review["role_history"] < full["role_history"]
+
+    # Retained evidence window: larger opening body, per-field cap kept so the
+    # most recent stage summaries/metadata (findings, delta, residual risk) stay
+    # visible.
+    assert review["body_bytes"] > full["body_bytes"]
+    assert review["field_bytes"] == full["field_bytes"]
+    # Still retains the most recent stage handoffs (coder impl → verifier → prior
+    # reviewer request), not just the single latest attempt.
+    assert review["prior_attempts"] >= 3
