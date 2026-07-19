@@ -19500,6 +19500,9 @@ register_loops_routes(app)
 from hermes_cli.projects_overview import register_projects_routes  # noqa: E402
 register_projects_routes(app)
 
+from hermes_cli.pa_chat import register_pa_routes  # noqa: E402
+register_pa_routes(app)
+
 from hermes_cli.operator_inventory import register_operator_inventory_routes  # noqa: E402
 register_operator_inventory_routes(app)
 
