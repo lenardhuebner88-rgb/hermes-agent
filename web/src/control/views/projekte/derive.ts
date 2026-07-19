@@ -100,7 +100,7 @@ export function buildProjectsOverview(
 }
 
 /** AnswerSheet-Idiom: live tickende Standzeit ("steht seit X min") aus event.ts.
- *  Geteilt zwischen Klassik-FragenSection und Jarvis-FragenPanel (S2.6). */
+ *  Genutzt von der Klassik-FragenSection. */
 export function formatStandingAge(ts: string, nowMs: number): string {
   const ms = Date.parse(ts);
   if (!Number.isFinite(ms)) return "steht seit kurzem";

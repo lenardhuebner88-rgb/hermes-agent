@@ -636,14 +636,22 @@ export interface AgentQuestionEvent {
  * done|error, GET /api/pa/messages is the bubble source of truth.
  */
 
-/** One bubble from GET /api/pa/messages (chronological, capped at 16 server-side). */
+/** One bubble from GET /api/pa/messages (chronological page, newest page first
+ *  loadable via the `before_id` cursor). `status`/`error` come from the JOINed
+ *  turn and are identical on the user and assistant bubble of that turn —
+ *  `status === "error"` marks the failed turn (no content heuristics). */
 export interface PaChatMessage {
+  id: number;
+  turn_id: string;
   role: "user" | "assistant";
   content: string;
   engine: string;
   model: string;
+  attachments: PaAttachmentRef[];
   /** Unix seconds. */
   ts: number;
+  status: "pending" | "running" | "done" | "error";
+  error: string | null;
 }
 
 /** Turn state from GET /api/pa/turns/{id}. On error the poll stays HTTP 200
@@ -661,6 +669,85 @@ export interface PaTurn {
 /** Attachment reference accepted by POST /api/pa/message (max 1 per turn). */
 export interface PaAttachmentRef {
   asset_id: string;
+}
+
+/** One page of the PA bubble history (GET /api/pa/messages). Older pages are
+ *  fetched with `before_id = next_before_id` and prepended; null = no more. */
+export interface PaMessagesPage {
+  messages: PaChatMessage[];
+  next_before_id: number | null;
+}
+
+/** S2.2 engine roster entry (GET /api/pa/engines). */
+export interface PaEngineSpec {
+  engine: string;
+  models: string[];
+  default_model: string;
+  supports_images: boolean;
+}
+
+export interface PaEnginesResponse {
+  default_engine: string;
+  engines: PaEngineSpec[];
+}
+
+/** S2.4 decision inbox (GET /api/pa/inbox). Items are typed; sources that
+ *  failed server-side degrade to an `errors` entry instead of failing all. */
+export interface PaInboxActionPayload {
+  version: number;
+  category: string;
+  payload: Record<string, string>;
+  reason: string | null;
+}
+
+interface PaInboxItemBase {
+  /** "q<event_id>" for question rows, the card id for kanban rows. */
+  id: string;
+  title: string;
+  block_radius: number;
+  /** Unix seconds. */
+  ts: number;
+}
+
+/** pa_action: gated action waiting for operator confirm. Answered through the
+ *  existing POST /api/agent-questions/{question_id}/answer ("1" execute,
+ *  "2" reject); 409 = stale/double-tap → refresh the inbox. */
+export interface PaInboxActionItem extends PaInboxItemBase {
+  type: "pa_action";
+  question_id: number;
+  kind: string | null;
+  category: string | null;
+  action_payload: PaInboxActionPayload | null;
+  options: AgentQuestionOption[];
+}
+
+/** question: classic agent question — answering stays on the classic tab. */
+export interface PaInboxQuestionItem extends PaInboxItemBase {
+  type: "question";
+  question_id: number;
+  kind: string | null;
+  options: AgentQuestionOption[];
+}
+
+/** held_task / freigabe_gate: kanban card waiting — links to the board. */
+export interface PaInboxTaskItem extends PaInboxItemBase {
+  type: "held_task" | "freigabe_gate";
+  card_id: string;
+  status: string | null;
+  freigabe: string | null;
+}
+
+export type PaInboxItem = PaInboxActionItem | PaInboxQuestionItem | PaInboxTaskItem;
+
+export interface PaInboxError {
+  source: string;
+  error: string;
+}
+
+export interface PaInboxResponse {
+  generated_at: number;
+  items: PaInboxItem[];
+  errors: PaInboxError[];
 }
 
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
@@ -698,7 +785,16 @@ export const api = {
       "/api/agent-questions?status=open&limit=50",
     ),
   answerAgentQuestion: (id: number, answer: string, viaSuggestion?: number) =>
-    fetchJSON<{ ok: boolean; verified: boolean; latency_s: number }>(
+    // For kind=pa_action events the 200 body additionally carries
+    // `executed`/`action_result` (S2.3b executor evidence); stale or
+    // double-tapped rows fail with 409 → callers refresh their source.
+    fetchJSON<{
+      ok: boolean;
+      verified: boolean;
+      latency_s?: number;
+      executed?: boolean;
+      action_result?: unknown;
+    }>(
       `/api/agent-questions/${id}/answer`,
       {
         method: "POST",
@@ -720,18 +816,39 @@ export const api = {
     }),
   // PA (Jarvis) chat — pa_chat.py. Bubble history is the source of truth;
   // send returns a turn_id that is polled until done|error.
-  listPaMessages: () => fetchJSON<{ messages: PaChatMessage[] }>("/api/pa/messages"),
-  sendPaMessage: (text: string, attachments?: PaAttachmentRef[]) =>
+  listPaMessages: (limit = 30, beforeId?: number) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (beforeId !== undefined) params.set("before_id", String(beforeId));
+    return fetchJSON<PaMessagesPage>(`/api/pa/messages?${params.toString()}`);
+  },
+  sendPaMessage: (
+    text: string,
+    attachments?: PaAttachmentRef[],
+    options?: { engine?: string; model?: string; projectScope?: string },
+  ) =>
     fetchJSON<{ turn_id: string }>("/api/pa/message", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         text,
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        // S2.2: engine/model choice applies to the NEXT turn (optional, the
+        // backend default stays sol/gpt-5.6-sol). S2.5: the view state rides
+        // along as optional project_scope (omitted when no project is open).
+        ...(options?.engine ? { engine: options.engine } : {}),
+        ...(options?.model ? { model: options.model } : {}),
+        ...(options?.projectScope ? { project_scope: options.projectScope } : {}),
       }),
     }),
   getPaTurn: (turnId: string) =>
     fetchJSON<PaTurn>(`/api/pa/turns/${encodeURIComponent(turnId)}`),
+  // S2.2 switcher roster + S2.4 decision inbox.
+  getPaEngines: () => fetchJSON<PaEnginesResponse>("/api/pa/engines"),
+  getPaInbox: () => fetchJSON<PaInboxResponse>("/api/pa/inbox"),
+  /** Authenticated asset URL (cookie/session like every other same-origin
+   *  request). 404 = pruned upload → the bubble shows a broken-attachment
+   *  state instead of losing the thread. */
+  paAssetUrl: (assetId: string) => `/api/pa/asset/${encodeURIComponent(assetId)}`,
   uploadPaImage: (file: File) => {
     // Same raw multipart/form-data pattern as uploadAgentTerminalFile — no
     // Content-Type header, the browser sets the multipart boundary itself.

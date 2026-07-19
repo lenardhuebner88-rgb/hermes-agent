@@ -1,25 +1,36 @@
 /**
- * usePaChat — Chat-Kern der Jarvis-Zone (Sprint 1, Karte e).
+ * usePaChat — Chat-Kern der Jarvis-Zone (Sprint 1 Karte e, Sprint 2:
+ * S2.2 Engine-Wahl, M1/M2-FE Härtung, S2.5 project_scope-Verdrahtung).
  *
  * Kontrakt (hermes_cli/pa_chat.py, LIVE — kein Mock im Chat-Pfad):
  *  - Verlauf: GET /api/pa/messages (Bubble-Quelle der Wahrheit, über den
- *    pollingStore gepollt — dedupliziert, stale-while-error).
- *  - Senden: POST /api/pa/message {text, attachments?} → {turn_id} →
- *    Poll GET /api/pa/turns/{id} bis done|error → danach Verlauf neu laden.
+ *    pollingStore gepollt — dedupliziert, stale-while-error). Seitenweise
+ *    rückwärts über den before_id-Cursor: „Ältere laden" holt die nächste
+ *    Seite und hängt sie VORNE an; next_before_id=null = Ende. Der Poll
+ *    ersetzt nur die jüngste Seite — geladene Alt-Seiten bleiben bestehen.
+ *  - Senden: POST /api/pa/message {text, attachments?, engine?, model?,
+ *    project_scope?} → {turn_id} → Poll GET /api/pa/turns/{id} bis done|error
+ *    → danach Verlauf neu laden. engine+model kommen aus dem S2.2-Switcher-
+ *    Store (Wahl gilt für den nächsten Turn); project_scope ist verdrahtet,
+ *    die Shell öffnet derzeit kein Projekt → Feld entfällt (S2.5).
  *  - Upload: POST /api/pa/upload (multipart Feld "file") → {asset_id} →
  *    attachments:[{asset_id}] in der nächsten Message (max 1 Bild/Turn).
+ *    Engines mit supports_images=false (Roster) lehnen Bilder ab — der
+ *    Composer blockt sie clientseitig, statt den 400 erst beim Senden
+ *    auszulösen.
  *
  * Fehler werden NIE still geschluckt: Turn-Fehler landen als Error-Bubble
- * mit Fehlertext (das Backend persistiert die Fehler-Reply ebenfalls als
- * Assistant-Message — erkannte Fehler-Inhalte behalten nach dem Reload ihr
- * Error-Styling), POST-/Upload-Fehler als Composer-Fehlerzeile.
+ * mit Fehlertext; der Verlauf markiert fehlgeschlagene Turns serverseitig
+ * über status==="error" (M2 — keine Inhalts-Heuristik mehr). POST-/Upload-
+ * Fehler erscheinen als Composer-Fehlerzeile.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, type PaChatMessage } from "@/lib/api";
+import { api, type PaChatMessage, type PaMessagesPage } from "@/lib/api";
 import { extractDetail, usePolling } from "../hooks/internal";
 import { getSnapshot } from "../hooks/pollingStore";
 import { de } from "../i18n/de";
+import { findEngineSpec, getEngineChoice, getPaEnginesSnapshot } from "./engineSelection";
 
 const t = de.jarvis;
 
@@ -31,6 +42,8 @@ export const PA_TURN_MAX_WAIT_MS = 190_000;
 /** Verlauf-Frische im Hintergrund (pollingStore, geteilte Infrastruktur). */
 export const PA_MESSAGES_POLL_INTERVAL_MS = 10_000;
 const PA_MESSAGES_KEY = "pa/messages";
+/** Seitengröße des Verlaufs (Backend-Default 30, capped 100). */
+export const PA_MESSAGES_PAGE_SIZE = 30;
 
 /** Backend-Kontrakt pa_chat.py: Bilder, max 15 MiB. */
 export const PA_UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
@@ -54,15 +67,33 @@ export interface UsePaChatOptions {
   /** Test-Hebel: kürzere Turn-Poll-Kadenz. */
   turnPollIntervalMs?: number;
   turnMaxWaitMs?: number;
+  /** S2.5: View-State (offenes Projekt) reitet im Message-POST mit. Die
+   *  Jarvis-Shell hat aktuell kein In-Shell-Projekt-Drilldown — der Hook
+   *  verdrahtet das Feld, die Shell lässt es bewusst leer. */
+  projectScope?: string;
+}
+
+/** Ältere Seiten vorne anhängen, Duplikate (Überlapp durch nachgeladene
+ *  jüngste Seite) über die stabile Server-ID entfernen. */
+function mergeMessages(older: PaChatMessage[], latest: PaChatMessage[]): PaChatMessage[] {
+  const seen = new Set<number>();
+  const merged: PaChatMessage[] = [];
+  for (const message of [...older, ...latest]) {
+    if (seen.has(message.id)) continue;
+    seen.add(message.id);
+    merged.push(message);
+  }
+  return merged;
 }
 
 export function usePaChat(options: UsePaChatOptions = {}) {
   const turnPollIntervalMs = options.turnPollIntervalMs ?? PA_TURN_POLL_INTERVAL_MS;
   const turnMaxWaitMs = options.turnMaxWaitMs ?? PA_TURN_MAX_WAIT_MS;
+  const projectScope = options.projectScope;
 
-  const messagesPoll = usePolling<{ messages: PaChatMessage[] }>(
+  const messagesPoll = usePolling<PaMessagesPage>(
     PA_MESSAGES_KEY,
-    () => api.listPaMessages(),
+    () => api.listPaMessages(PA_MESSAGES_PAGE_SIZE),
     PA_MESSAGES_POLL_INTERVAL_MS,
   );
 
@@ -70,9 +101,15 @@ export function usePaChat(options: UsePaChatOptions = {}) {
   const [attachment, setAttachment] = useState<PaAttachment | null>(null);
   const [uploading, setUploading] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
-  /** Fehler-Reply-Texte, die nach dem Verlauf-Reload ihr Error-Styling
-   *  behalten (Backend persistiert Fehler als Assistant-Message). */
-  const errorContentsRef = useRef<Set<string>>(new Set());
+  /** Manuell nachgeladene ältere Seiten (vorne angehängt); der Cursor zeigt
+   *  auf die jeweils älteste geladene Seite (null = keine mehr, undefined =
+   *  noch keine Alt-Seite geholt → Cursor der jüngsten Seite verwenden). */
+  const [olderMessages, setOlderMessages] = useState<PaChatMessage[]>([]);
+  const [olderCursor, setOlderCursor] = useState<number | null | undefined>(undefined);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  /** Wird gesetzt, BEVOR Alt-Seiten ankommen: der Auto-Anschluss ans
+   *  Verlaufsende darf bei einem Prepend nicht ans Ende springen. */
+  const prependingRef = useRef(false);
   /** Monoton: nur der jüngste Sende-Vorgang darf noch pollen/finalisieren. */
   const generationRef = useRef(0);
 
@@ -83,11 +120,59 @@ export function usePaChat(options: UsePaChatOptions = {}) {
     };
   }, []);
 
+  const latestMessages = useMemo(() => messagesPoll.data?.messages ?? null, [messagesPoll.data]);
+  const messages = useMemo(
+    () =>
+      latestMessages === null
+        ? olderMessages.length > 0
+          ? olderMessages
+          : null
+        : mergeMessages(olderMessages, latestMessages),
+    [olderMessages, latestMessages],
+  );
+  const nextBeforeId = olderCursor !== undefined ? olderCursor : (messagesPoll.data?.next_before_id ?? null);
+
+  const loadOlder = useCallback(async () => {
+    if (loadingOlder || nextBeforeId === null) return;
+    prependingRef.current = true;
+    setLoadingOlder(true);
+    try {
+      const page = await api.listPaMessages(PA_MESSAGES_PAGE_SIZE, nextBeforeId);
+      setOlderMessages((current) => mergeMessages(page.messages, current));
+      setOlderCursor(page.next_before_id);
+    } catch (err) {
+      // Fehler beim Nachladen: sichtbar als Composer-Zeile, nie still — und
+      // der Prepend-Schutz wird zurückgenommen (es kam ja nichts an).
+      prependingRef.current = false;
+      setComposerError(`${t.loadOlderFailed} ${extractDetail(err)}`);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [loadingOlder, nextBeforeId]);
+
+  /** Der Chat konsumiert den Auto-Anschluss-Schutz beim Rendern. */
+  const consumePrepending = useCallback(() => {
+    const was = prependingRef.current;
+    prependingRef.current = false;
+    return was;
+  }, []);
+
   const removeAttachment = useCallback(() => {
     setAttachment((current) => {
       if (current) URL.revokeObjectURL(current.previewUrl);
       return null;
     });
+  }, []);
+
+  /** Engine-Fähigkeiten für den nächsten Turn (Roster-Snapshot, kein eigener
+   *  Fetch): die Wahl des Switchers + Roster-Default entscheiden, ob Bilder
+   *  erlaubt sind. Roster unbekannt → erlauben (Backend-Default sol kann es). */
+  const imagesAllowed = useCallback((): boolean => {
+    const choice = getEngineChoice();
+    const roster = getPaEnginesSnapshot();
+    if (!roster) return true;
+    const engine = choice?.engine ?? roster.default_engine;
+    return findEngineSpec(roster, engine)?.supports_images ?? true;
   }, []);
 
   const attachFile = useCallback(
@@ -98,6 +183,10 @@ export function usePaChat(options: UsePaChatOptions = {}) {
       }
       if (file.size > PA_UPLOAD_MAX_BYTES) {
         setComposerError(t.uploadTooLarge);
+        return;
+      }
+      if (!imagesAllowed()) {
+        setComposerError(t.engineNoImages);
         return;
       }
       setComposerError(null);
@@ -117,35 +206,43 @@ export function usePaChat(options: UsePaChatOptions = {}) {
         setUploading(false);
       }
     },
-    [removeAttachment],
+    [imagesAllowed, removeAttachment],
   );
 
   const send = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || activeTurn?.phase === "waiting") return;
+      // S2.2: Switcher-Wahl gilt für genau diesen (nächsten) Turn.
+      const choice = getEngineChoice();
+      const sentAttachment = attachment;
+      if (sentAttachment && !imagesAllowed()) {
+        // Anhang entstand vor einem Engine-Wechsel auf eine Nicht-Vision-
+        // Engine: clientseitig erklären statt den 400 des Backends.
+        setComposerError(t.engineNoImages);
+        return;
+      }
       const generation = generationRef.current + 1;
       generationRef.current = generation;
       setComposerError(null);
 
-      const sentAttachment = attachment;
       setAttachment(null); // wandert in die Pending-User-Bubble
       setActiveTurn({ text: trimmed, attachment: sentAttachment, phase: "waiting", error: null });
 
       const finalize = async (assistantText: string | null, isError: boolean) => {
-        if (isError && assistantText) errorContentsRef.current.add(assistantText);
         // Quelle der Wahrheit: Verlauf neu laden (done UND error — das Backend
-        // persistiert beide als Assistant-Message). reload() dedupliziert
-        // gegen einen gerade laufenden Poll (pollingStore-Kontrakt) — ohne
-        // Landed-Check könnte die lokale Pending-Bubble verschwinden, bevor
-        // die Server-Bubble da ist (liest sich wie Datenverlust). Deshalb:
-        // warten, bis der Verlauf die Assistant-Message DIESES Turns trägt
-        // (gebunden: 4 Versuche, danach trägt die nächste Poll-Runde nach).
+        // persistiert beide als Assistant-Message, die Fehler-Reply trägt
+        // status==="error"). reload() dedupliziert gegen einen gerade
+        // laufenden Poll (pollingStore-Kontrakt) — ohne Landed-Check könnte
+        // die lokale Pending-Bubble verschwinden, bevor die Server-Bubble da
+        // ist (liest sich wie Datenverlust). Deshalb: warten, bis der Verlauf
+        // die Assistant-Message DIESES Turns trägt (gebunden: 4 Versuche,
+        // danach trägt die nächste Poll-Runde nach).
         let landed = false;
         for (let attempt = 0; attempt < 4 && !landed; attempt++) {
           await messagesPoll.reload().catch(() => {});
           if (generationRef.current !== generation) return;
-          const fresh = getSnapshot<{ messages: PaChatMessage[] }>(PA_MESSAGES_KEY)?.data;
+          const fresh = getSnapshot<PaMessagesPage>(PA_MESSAGES_KEY)?.data;
           landed =
             assistantText == null ||
             (fresh?.messages.some(
@@ -168,9 +265,14 @@ export function usePaChat(options: UsePaChatOptions = {}) {
 
       let turnId: string;
       try {
+        const turnOptions = {
+          ...(choice ? { engine: choice.engine, model: choice.model } : {}),
+          ...(projectScope ? { projectScope } : {}),
+        };
         const created = await api.sendPaMessage(
           trimmed,
           sentAttachment ? [{ asset_id: sentAttachment.asset_id }] : undefined,
+          Object.keys(turnOptions).length > 0 ? turnOptions : undefined,
         );
         turnId = created.turn_id;
       } catch (err) {
@@ -207,18 +309,17 @@ export function usePaChat(options: UsePaChatOptions = {}) {
         }
       }
     },
-    [activeTurn?.phase, attachment, messagesPoll, turnPollIntervalMs, turnMaxWaitMs],
-  );
-
-  const isErrorContent = useCallback(
-    (content: string) => errorContentsRef.current.has(content),
-    [],
+    [activeTurn?.phase, attachment, imagesAllowed, messagesPoll, projectScope, turnPollIntervalMs, turnMaxWaitMs],
   );
 
   return {
-    messages: messagesPoll.data?.messages ?? null,
+    messages,
     messagesLoading: messagesPoll.loading && messagesPoll.data === null,
     messagesError: messagesPoll.error,
+    nextBeforeId,
+    loadingOlder,
+    loadOlder,
+    consumePrepending,
     activeTurn,
     sending: activeTurn?.phase === "waiting",
     attachment,
@@ -228,6 +329,5 @@ export function usePaChat(options: UsePaChatOptions = {}) {
     attachFile,
     removeAttachment,
     send,
-    isErrorContent,
   };
 }

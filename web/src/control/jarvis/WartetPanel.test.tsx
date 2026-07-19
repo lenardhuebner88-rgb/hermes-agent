@@ -1,23 +1,24 @@
 // @vitest-environment jsdom
 /**
- * WartetPanel — „Wartet · dezent" an den ECHTEN offenen Agentenfragen:
- * Payload-Format exakt wie in projekte/FragenSection.test.tsx (flacher
- * AgentQuestionEvent-Stamm aus GET /api/agent-questions, kein erfundener
- * Shape). Tap führt zur bestehenden Beantwortung im klassischen Tab
- * (/control/projekte-klassisch) — keine neue Antwort-Mechanik. S2.6: der
- * Expand-Toggle öffnet die volle Fragen-Ansicht (FragenPanel) mit denselben
- * Daten; Detail-Inhalte des Drawers deckt FragenPanel.test.tsx.
+ * WartetPanel — „Wartet · dezent" an der echten Entscheidungs-Inbox
+ * (S2.4, GET /api/pa/inbox): dezente 3-Zeilen-Liste mit typisierten Items
+ * (pa_action → PRÜFEN öffnet den Drawer, question → Klassik-Link,
+ * held/freigabe → Board-Link), Teilquellen-Ausfälle (errors[]) dezent,
+ * Fetch-Fehler inline (nie still). Der Expand öffnet die Inbox-Ansicht mit
+ * denselben Daten (kein zweiter Poll); Karten-Inhalte und der Approval-Flow
+ * sind in InboxPanel.test.tsx belegt. ?inbox=open öffnet den Drawer initial
+ * (Deep-Link/Screenshot-Naht).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import type { AgentQuestionEvent } from "@/lib/api";
+import type { PaInboxItem, PaInboxResponse } from "@/lib/api";
 import { _resetPollingStore } from "../hooks/pollingStore";
 
 configure({ asyncUtilTimeout: 5000 });
 
-const listAgentQuestionsMock = vi.hoisted(() => vi.fn());
+const getPaInboxMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -25,58 +26,77 @@ vi.mock("@/lib/api", async () => {
     ...actual,
     api: {
       ...actual.api,
-      listAgentQuestions: listAgentQuestionsMock,
+      getPaInbox: getPaInboxMock,
     },
   };
 });
 
 import { WartetPanel } from "./WartetPanel";
 
-/** Real store shape from GET /api/agent-questions (flat columns) — derselbe
- *  Fixture-Stamm wie projekte/FragenSection.test.tsx. */
-function fixtureEvent(overrides: Partial<AgentQuestionEvent> = {}): AgentQuestionEvent {
+function paActionItem(id: number, title: string): PaInboxItem {
   return {
-    id: 101,
-    ts: "2026-07-17T10:00:00Z",
-    updated_ts: null,
-    source: "scrape",
-    session: "hermes-main",
-    window: "1",
-    pane_id: "%12",
-    fingerprint: "fp-101",
-    kind: "claude",
-    cwd: "/home/piet/.hermes/hermes-agent",
-    question_text: "Soll ich den Branch mergen?",
+    type: "pa_action",
+    id: `q${id}`,
+    question_id: id,
+    title,
+    kind: "pa_action",
+    category: "tmux.send_keys",
+    action_payload: {
+      version: 1,
+      category: "tmux.send_keys",
+      payload: { session: "work", window: "kimi", keys: "weiter" },
+      reason: null,
+    },
     options: [
-      { nr: 1, label: "Ja, mergen", recommended: true },
-      { nr: 2, label: "Nein, warten", recommended: false },
+      { nr: 1, label: "Ausführen", recommended: false },
+      { nr: 2, label: "Ablehnen", recommended: false },
     ],
-    class: null,
-    status: "open",
-    answered_by: null,
-    answer: null,
-    latency_s: null,
-    answer_verified: null,
-    override: 0,
-    suggestions: null,
-    suggested_by: null,
-    suggest_confidence: null,
-    suggested_ts: null,
-    suggest_latency_ms: null,
-    answer_source: null,
-    ...overrides,
+    block_radius: 1,
+    ts: 1753000000,
   };
+}
+
+function questionItem(id: number, title: string): PaInboxItem {
+  return {
+    type: "question",
+    id: `q${id}`,
+    question_id: id,
+    title,
+    kind: "claude",
+    options: [],
+    block_radius: 1,
+    ts: 1752990000,
+  };
+}
+
+function heldItem(id: string, title: string): PaInboxItem {
+  return {
+    type: "held_task",
+    id,
+    card_id: id,
+    title,
+    status: "blocked",
+    freigabe: null,
+    block_radius: 3,
+    ts: 1752980000,
+  };
+}
+
+function inboxResponse(items: PaInboxItem[], errors: PaInboxResponse["errors"] = []): PaInboxResponse {
+  return { generated_at: 1753000001, items, errors };
 }
 
 beforeEach(() => {
   _resetPollingStore();
-  listAgentQuestionsMock.mockResolvedValue({ questions: [fixtureEvent()] });
+  getPaInboxMock.mockResolvedValue(inboxResponse([questionItem(101, "Soll ich mergen?")]));
+  window.history.replaceState({}, "", "/control/projekte");
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   _resetPollingStore();
+  window.history.replaceState({}, "", "/");
 });
 
 function renderPanel() {
@@ -87,102 +107,97 @@ function renderPanel() {
   );
 }
 
-describe("WartetPanel (echtes GET /api/agent-questions-Format)", () => {
-  it("rendert offene Fragen mit Text und Antworten-Link auf den klassischen Tab", async () => {
-    listAgentQuestionsMock.mockResolvedValue({
-      questions: [
-        fixtureEvent({ id: 101, question_text: "Kimi work:5 hängt — Fix-Anweisung senden?" }),
-        fixtureEvent({ id: 202, question_text: "t_fd072996: Tests splitten oder mappen?" }),
-      ],
-    });
+describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
+  it("rendert typisierte dezente Zeilen: question → Klassik-Link, held → Board-Link", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([
+        questionItem(101, "Kimi work:5 hängt — Fix senden?"),
+        heldItem("t_fd072996", "Release-Kette hält auf Operator"),
+      ]),
+    );
     renderPanel();
 
-    expect(await screen.findByText("Kimi work:5 hängt — Fix-Anweisung senden?")).toBeTruthy();
-    expect(await screen.findByText("t_fd072996: Tests splitten oder mappen?")).toBeTruthy();
+    expect(await screen.findByText("Kimi work:5 hängt — Fix senden?")).toBeTruthy();
+    expect(await screen.findByText("Release-Kette hält auf Operator")).toBeTruthy();
 
-    const links = await screen.findAllByRole("link", { name: /Frage beantworten:/ });
-    expect(links).toHaveLength(2);
-    for (const link of links) {
-      expect(link.getAttribute("href")).toBe("/control/projekte-klassisch");
-    }
+    const answerLink = await screen.findByRole("link", { name: /Frage beantworten: Kimi work:5/ });
+    expect(answerLink.getAttribute("href")).toBe("/control/projekte-klassisch");
+    const boardLink = await screen.findByRole("link", { name: /Zum Board: Release-Kette/ });
+    expect(boardLink.getAttribute("href")).toBe("/control/fleet?task=t_fd072996");
   });
 
-  it("zeigt maximal 3 Zeilen dezent + Expand-Toggle zur vollen Fragen-Ansicht", async () => {
-    listAgentQuestionsMock.mockResolvedValue({
-      questions: [1, 2, 3, 4, 5].map((n) =>
-        fixtureEvent({ id: n, question_text: `Frage Nummer ${n}?` }),
-      ),
+  it("pa_action-Zeile: PRÜFEN öffnet den Drawer mit der Approval-Card", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([paActionItem(77, "PA-Aktion ausführen: tmux.send_keys?")]),
+    );
+    renderPanel();
+
+    const review = await screen.findByRole("button", {
+      name: /Aktion prüfen: PA-Aktion ausführen/,
     });
+    fireEvent.click(review);
+
+    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
+    expect(await screen.findByTestId("jv-appr-q77")).toBeTruthy();
+  });
+
+  it("zeigt maximal 3 Zeilen dezent + Expand-Toggle zur Inbox-Ansicht", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([1, 2, 3, 4, 5].map((n) => questionItem(n, `Entscheidung Nummer ${n}?`))),
+    );
     const { container } = renderPanel();
 
-    await screen.findByText("Frage Nummer 1?");
-    const rows = container.querySelectorAll(".jv-qrow");
-    expect(rows).toHaveLength(3);
+    await screen.findByText("Entscheidung Nummer 1?");
+    expect(container.querySelectorAll(".jv-qrow")).toHaveLength(3);
 
-    // Toggle öffnet den Drawer mit ALLEN Fragen (gleiche Daten, kein zweiter Poll).
-    const toggle = await screen.findByRole("button", { name: /\+2 WEITERE — ALLE FRAGEN/ });
+    const toggle = await screen.findByRole("button", { name: /\+2 WEITERE — INBOX/ });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(toggle);
 
-    const drawer = await screen.findByRole("region", { name: "OFFENE FRAGEN" });
-    expect(drawer).toBeTruthy();
-    expect(await screen.findByTestId("jv-frage-4")).toBeTruthy();
-    expect(await screen.findByTestId("jv-frage-5")).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
+    expect(await screen.findByTestId("jv-inbox-q-q4")).toBeTruthy();
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(toggle.textContent).toContain("FRAGEN ZUKLAPPEN");
+    expect(toggle.textContent).toContain("INBOX ZUKLAPPEN");
 
-    // Antworten läuft weiter über den Klassik-Pfad: Drawer- und dezente
-    // ANTWORTEN-Links zeigen beide auf /control/projekte-klassisch.
-    const links = await screen.findAllByRole("link", { name: /Frage beantworten:/ });
-    expect(links.length).toBeGreaterThanOrEqual(5);
-    for (const link of links) {
-      expect(link.getAttribute("href")).toBe("/control/projekte-klassisch");
-    }
-
-    // Zuklappen über denselben Toggle.
     fireEvent.click(toggle);
-    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "WARTET AUF DICH" })).toBeNull();
   });
 
-  it("Expand bei ≤3 Fragen ohne Weitere-Zähler; × und ESC schließen den Drawer", async () => {
-    listAgentQuestionsMock.mockResolvedValue({
-      questions: [fixtureEvent({ id: 1, question_text: "Einzige Frage?" })],
-    });
+  it("Teilquellen-Ausfall (errors[]) → dezente Zeile, Items bleiben", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([questionItem(1, "Frage bleibt sichtbar?")], [
+        { source: "kanban", "error": "disk i/o error" },
+      ]),
+    );
     renderPanel();
 
-    const toggle = await screen.findByRole("button", { name: /ALLE FRAGEN/ });
-    expect(toggle.textContent).not.toContain("WEITERE");
-    fireEvent.click(toggle);
-    await screen.findByRole("region", { name: "OFFENE FRAGEN" });
-
-    fireEvent.click(screen.getByRole("button", { name: "Fragen-Ansicht schließen" }));
-    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
-
-    fireEvent.click(toggle);
-    await screen.findByRole("region", { name: "OFFENE FRAGEN" });
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("region", { name: "OFFENE FRAGEN" })).toBeNull();
+    expect(await screen.findByText("Frage bleibt sichtbar?")).toBeTruthy();
+    const sourceError = await screen.findByText(/Quelle „kanban" derzeit nicht erreichbar/);
+    expect(sourceError.className).toContain("jv-srcerr");
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("kein Expand-Toggle im Leer-/Fehlerzustand", async () => {
-    listAgentQuestionsMock.mockResolvedValue({ questions: [] });
-    renderPanel();
-    expect(await screen.findByText(/Nichts wartet — Estate ruhig/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /ALLE FRAGEN/ })).toBeNull();
-  });
-
-  it("Leer-Zustand: Nichts-wartet-Text statt falscher Zeilen", async () => {
-    listAgentQuestionsMock.mockResolvedValue({ questions: [] });
+  it("Leer-Zustand: Nichts-wartet-Text statt falscher Zeilen, kein Expand", async () => {
+    getPaInboxMock.mockResolvedValue(inboxResponse([]));
     renderPanel();
 
     expect(await screen.findByText(/Nichts wartet — Estate ruhig/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /INBOX ÖFFNEN/ })).toBeNull();
   });
 
-  it("Fehler des Fragen-Polls → inline Fehlerzeile (role=alert), nie still", async () => {
-    listAgentQuestionsMock.mockRejectedValue(new Error("network timeout after 20000ms"));
+  it("Fehler des Inbox-Polls → inline Fehlerzeile (role=alert), nie still", async () => {
+    getPaInboxMock.mockRejectedValue(new Error("network timeout after 20000ms"));
     renderPanel();
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Fragen konnten nicht geladen werden.");
+    expect(alert.textContent).toContain("Entscheidungen konnten nicht geladen werden.");
+  });
+
+  it("?inbox=open öffnet den Drawer initial (Deep-Link-Naht)", async () => {
+    window.history.pushState({}, "", "/control/projekte?inbox=open");
+    getPaInboxMock.mockResolvedValue(inboxResponse([paActionItem(77, "PA-Aktion?")]));
+    renderPanel();
+
+    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
   });
 });

@@ -138,23 +138,35 @@ die verbindliche Design-Quelle, NICHT das Werkbank-Mockup oben.
   FOLGT" Desktop, „· Graph: Vorschau (Mock)" mobil). Echte Daten: S2.7.
 - **Statik-Mocks (S1):** KI-Lage, Brain-Stats/Hubs/Filter und Sparklines sind
   A4-Mock-Inhalte ohne Endpoint (`jarvis/mockContent.ts`). „Wartet · dezent"
-  ist KEIN Mock — es hängt an echten offenen Fragen (`GET /api/agent-questions`)
-  und verlinkt zur Beantwortung in die klassische Ansicht.
+  ist KEIN Mock — es hängt an der echten Entscheidungs-Inbox
+  (`GET /api/pa/inbox`, S2.4): dezente Zeilen je Item-Typ, Expand zur
+  Inbox-Ansicht (`jarvis/InboxPanel.tsx`) mit Approval-Cards für `pa_action`
+  (Ausführen/Ablehnen über den bestehenden agent-questions-answer-Endpoint,
+  409 → Refresh), `question` verlinkt zur Beantwortung in die klassische
+  Ansicht, `held_task`/`freigabe_gate` aufs Fleet-Board.
 - **Echte Bestandsdaten (S2.6):** das PROJEKTE-Panel (`jarvis/ProjektePanel.tsx`)
   zeigt die echten ProjectCards (Name, Attention-Ampel, Grund-Chips, Kanban-
   Zähler, Commit, live/Check-ins/Loops) über dieselben Hooks/Polling-Keys und
   dieselbe Ableitung wie ProjekteView (`buildProjectsOverview` in
   `views/projekte/derive.ts` — geteilt, kein Fork); Tap auf eine Karte führt
-  per Link zum Klassik-Drilldown, keine neue Navigation/Mechanik. Die volle
-  Fragen-Ansicht (`jarvis/FragenPanel.tsx`) ist ein Expand-Drawer aus „Wartet ·
-  dezent" heraus: gleiche open-gefilterten Daten wie FragenSection, Optionen/
-  KI-Vorschlag read-only, Antworten weiterhin nur über den Klassik-Pfad.
+  per Link zum Klassik-Drilldown, keine neue Navigation/Mechanik.
+- **Modell-Switcher (S2.2):** das Emblem trägt den funktionalen Switcher
+  (`jarvis/EngineSwitcher.tsx`, Roster `GET /api/pa/engines`); die Wahl gilt
+  für den nächsten Turn (`engine`+`model` im Message-POST), das statische
+  S1-Badge ist nur Roster-Fallback. Provenienz-Badge pro Assistant-Bubble,
+  claude-Modelle mit dezentem „MAX"-Marker (Fork 19: Hinweis, kein Cap);
+  Engines ohne Bild-Support deaktivieren den Attach-Button. Chat-Härtung
+  (M1/M2-FE): History rendert Attachments über die Asset-URL (404-State),
+  Error-Bubbles aus `status==="error"`, „Ältere laden" per before_id-Cursor.
 - **Klassik-Fallback:** die bisherige ProjekteView bleibt unverändert unter
   `/control/projekte-klassisch` erreichbar, bis S2/S3 die Sektionen migrieren.
 - **Embedding-Regeln:** die Desktop-Stage füllt den ControlShell-Content-
   Bereich (A4 rechnet mit vollem Viewport: 100vh/min-height 880px — unter der
   Masthead würde die Frag-Leiste clippen); mobil liegt die Frag-Leiste ÜBER
-  der Dashboard-Bottom-Nav (<600px), nicht am Viewport-Rand. Der A4-Szenen-
+  der Dashboard-Bottom-Nav (<600px), nicht am Viewport-Rand. M3: die Höhe des
+  OfflineStaleBanner reist als `--jv-banner-h` (gemessen per
+  `jarvis/useOfflineBannerHeight.ts`) in alle Stage-Höhen ein — die Frag-
+  Leiste clippt auch bei sichtbarem Banner nicht. Der A4-Szenen-
   Toggle (LIVE/OVERFLOW/LEER/LADEN) ist Mockup-Chrome und gehört nicht ins
   Produkt. Animationen laufen ausschließlich unter
   `@media (prefers-reduced-motion: no-preference)` (A4-Idiom, zentraler
