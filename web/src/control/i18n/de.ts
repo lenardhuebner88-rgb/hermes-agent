@@ -992,6 +992,17 @@ export const de = {
     projekteLoading: "Lade Projekte …",
     projekteError: "Projekte konnten nicht geladen werden.",
     projekteOpenAria: (name: string) => `Projekt öffnen: ${name} — klassische Ansicht`,
+    // S2.7 — Estate-Graph live (/api/pa/graph): Zustands-Tags + aria-Labels
+    graphStateLive: "LIVE",
+    graphStateMock: "VORSCHAU",
+    graphTagLiveTail: (n: number, stand: string) => ` — ${n} KNOTEN · Stand ${stand}`,
+    graphTagStaleSuffix: " · STALE",
+    graphTagMockTail: " — MOCK-DATEN · S2.7 FOLGT",
+    graphMocktagLive: (n: number) => ` · Graph: live · ${n} Knoten`,
+    graphAriaLive: (n: number) => `Estate-Graph (live, ${n} Knoten)`,
+    graphAriaStaleSuffix: ", älterer Stand — Aktualisierung fehlgeschlagen",
+    graphAriaMock: "Estate-Graph (Vorschau, Mock-Daten)",
+    graphSourceErrorsTitle: (detail: string) => `Graph-Teilquellen derzeit fehlerhaft:\n${detail}`,
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).
