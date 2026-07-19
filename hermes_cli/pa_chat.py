@@ -936,6 +936,117 @@ async def _process_turn(
         await _run_sync(store.fail_turn, turn_id, message[:1000])
 
 
+# ---------------------------------------------------------------------------
+# S2.4 Entscheidungs-Inbox ("wartet auf dich")
+# ---------------------------------------------------------------------------
+
+INBOX_QUESTION_LIMIT = 50
+INBOX_MAX_ITEMS = 100
+
+
+def _iso_to_epoch(value: object) -> int:
+    """Best-effort epoch seconds for question-event ISO timestamps."""
+    try:
+        from datetime import datetime
+
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except (ValueError, TypeError, OSError):
+        return 0
+
+
+def _kanban_block_radius(conn: Any, task_id: str) -> int:
+    """1 + live (non-terminal) descendants in the ``task_links`` chain."""
+    row = conn.execute(
+        """
+        WITH RECURSIVE descendants(id) AS (
+            SELECT child_id FROM task_links WHERE parent_id = ?
+            UNION
+            SELECT tl.child_id FROM task_links tl
+            JOIN descendants d ON tl.parent_id = d.id
+        )
+        SELECT COUNT(*) FROM descendants d
+        JOIN tasks t ON t.id = d.id
+        WHERE t.status NOT IN ('done', 'archived')
+        """,
+        (task_id,),
+    ).fetchone()
+    return 1 + int(row[0] if row else 0)
+
+
+def build_inbox() -> dict[str, Any]:
+    """Aggregate the operator queue: open questions, pa_action cards, held
+    chains (blocked/needs_input) and freigabe gates (scheduled + freigabe).
+
+    Each source is isolated — a failing store degrades to an ``errors`` entry
+    instead of hiding the other sources (same contract as the context pack).
+    Sorted by block radius, then newest first.
+    """
+    items: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    try:
+        from hermes_cli import agent_questions
+
+        events = agent_questions.list_question_events(
+            status="open", limit=INBOX_QUESTION_LIMIT
+        )
+        for event in events:
+            kind = event.get("kind")
+            item: dict[str, Any] = {
+                "type": "pa_action" if kind == "pa_action" else "question",
+                "id": f"q{event['id']}",
+                "question_id": event["id"],
+                "title": event.get("question_text") or "",
+                "kind": kind,
+                "options": event.get("options") or [],
+                "block_radius": 1,
+                "ts": _iso_to_epoch(event.get("ts")),
+            }
+            if kind == "pa_action":
+                payload = event.get("action_payload") or {}
+                item["category"] = payload.get("category")
+                item["action_payload"] = payload
+            items.append(item)
+    except Exception as exc:
+        errors.append({"source": "questions", "error": str(exc)[:500]})
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        with kb.connect_closing() as conn:
+            rows = conn.execute(
+                "SELECT id, title, status, freigabe, block_kind, created_at "
+                "FROM tasks WHERE "
+                "(status = 'blocked' AND block_kind = 'needs_input') "
+                "OR (freigabe IS NOT NULL AND status = 'scheduled')"
+            ).fetchall()
+            for row in rows:
+                is_gate = row["freigabe"] is not None and row["status"] == "scheduled"
+                items.append(
+                    {
+                        "type": "freigabe_gate" if is_gate else "held_task",
+                        "id": row["id"],
+                        "card_id": row["id"],
+                        "title": row["title"],
+                        "status": row["status"],
+                        "freigabe": row["freigabe"],
+                        "block_radius": _kanban_block_radius(conn, row["id"]),
+                        "ts": int(row["created_at"] or 0),
+                    }
+                )
+    except Exception as exc:
+        errors.append({"source": "kanban", "error": str(exc)[:500]})
+
+    items.sort(
+        key=lambda item: (-int(item.get("block_radius") or 0), -int(item.get("ts") or 0))
+    )
+    return {
+        "generated_at": int(time.time()),
+        "items": items[:INBOX_MAX_ITEMS],
+        "errors": errors,
+    }
+
+
 def register_pa_routes(app: FastAPI) -> None:
     """Register authenticated PA endpoints before the SPA catch-all."""
     store = PAStore()
@@ -1006,6 +1117,12 @@ def register_pa_routes(app: FastAPI) -> None:
     @app.get("/api/pa/history")
     async def pa_history(limit: int = 30) -> dict[str, Any]:
         return {"turns": await _run_sync(store.recent_turns, limit)}
+
+    @app.get("/api/pa/inbox")
+    async def pa_inbox() -> dict[str, Any]:
+        """S2.4 'wartet auf dich' queue: questions + pa_action cards + held
+        chains + freigabe gates, sorted by block radius."""
+        return await _run_sync(build_inbox)
 
     @app.get("/api/pa/messages")
     async def pa_messages(
