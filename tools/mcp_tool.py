@@ -5395,7 +5395,7 @@ def reload_mcp_tools_transactionally() -> List[str]:
         old_connecting = set(_server_connecting)
         old_connect_errors = dict(_server_connect_errors)
         old_parallel_safe = set(_parallel_safe_servers)
-        old_tool_server = dict(_mcp_tool_server)
+        old_tool_server = dict(_mcp_tool_server_names)
         old_registered_names = {
             name: list(getattr(server, "_registered_tool_names", []))
             for name, server in old_servers.items()
@@ -5447,8 +5447,8 @@ def reload_mcp_tools_transactionally() -> List[str]:
                     _server_connect_errors.update(old_connect_errors)
                     _parallel_safe_servers.clear()
                     _parallel_safe_servers.update(old_parallel_safe)
-                    _mcp_tool_server.clear()
-                    _mcp_tool_server.update(old_tool_server)
+                    _mcp_tool_server_names.clear()
+                    _mcp_tool_server_names.update(old_tool_server)
                 for name, server in old_servers.items():
                     server._registered_tool_names = old_registered_names[name]
                 raise
