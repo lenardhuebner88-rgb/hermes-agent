@@ -57,6 +57,35 @@ const PA_ACTION_ITEM: PaInboxItem = {
   ts: 1753000000,
 };
 
+/** S3.3-FE: planspec.ingest-Card — Titel = build_ingest_question-Text (S3.3),
+ *  Payload trägt die draft_id statt eines tmux-Ziels. */
+const PLANSPEC_ACTION_ITEM: PaInboxItem = {
+  type: "pa_action",
+  id: "q88",
+  question_id: 88,
+  title:
+    "PlanSpec als gehaltene Kette ingesten?\nDraft: `draft_0123456789abcdef01234567`\n" +
+    "Validate: WARN (1 Findings)\nGates: freigabe=operator · live_test_depth=contract\n" +
+    "Slices (2):\n- `S1` [coder] Endpoint und Tests implementieren · deps: —\n" +
+    "- `S2` [verifier] Verhalten unabhängig verifizieren · deps: S1\n" +
+    "- Validate-Finding: operator-visible warning\n" +
+    "Grund: Validierten PlanSpec-Entwurf als gehaltene Kette anlegen",
+  kind: "pa_action",
+  category: "planspec.ingest",
+  action_payload: {
+    version: 1,
+    category: "planspec.ingest",
+    payload: { draft_id: "draft_0123456789abcdef01234567" },
+    reason: "Validierten PlanSpec-Entwurf als gehaltene Kette anlegen",
+  },
+  options: [
+    { nr: 1, label: "Ausführen", recommended: false },
+    { nr: 2, label: "Ablehnen", recommended: false },
+  ],
+  block_radius: 1,
+  ts: 1753001000,
+};
+
 const QUESTION_ITEM: PaInboxItem = {
   type: "question",
   id: "q101",
@@ -130,6 +159,34 @@ describe("InboxPanel (/api/pa/inbox-Items)", () => {
     expect(card.querySelectorAll(".jv-appr-reason")).toHaveLength(0);
     expect(screen.getByRole("button", { name: "Ausführen" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ablehnen" })).toBeTruthy();
+  });
+
+  it("S3.3-FE: planspec.ingest-Card — PLANSPEC-Chip, Zielzeile = draft_id, gleicher Flow", async () => {
+    const { onRefresh, onHint } = renderPanel([PLANSPEC_ACTION_ITEM]);
+
+    const card = await screen.findByTestId("jv-appr-q88");
+    // PLANSPEC-Chip statt des generischen PA-AKTION-Chips.
+    expect(card.textContent).toContain("PLANSPEC");
+    expect(card.textContent).not.toContain("PA-AKTION");
+    expect(card.textContent).toContain("planspec.ingest");
+    // Zielzeile = draft_id (kein tmux-Target, keine Keys-Zeile).
+    expect(screen.getByTestId("jv-appr-target-q88").textContent).toBe(
+      "planspec.ingest → draft_0123456789abcdef01234567",
+    );
+    expect(card.querySelectorAll(".jv-appr-keys")).toHaveLength(0);
+    // Der kategoriespezifische Card-Text (Slices/Validate) steht im Titel.
+    expect(card.textContent).toContain("Validate: WARN (1 Findings)");
+    expect(card.textContent).toContain("`S2` [verifier] Verhalten unabhängig verifizieren");
+
+    // Gleicher Ausführen-Flow über den bestehenden answer-Endpoint.
+    fireEvent.click(screen.getByRole("button", { name: "Ausführen" }));
+    await vi.waitFor(() => {
+      expect(answerAgentQuestionMock).toHaveBeenCalledWith(88, "1");
+    });
+    await vi.waitFor(() => {
+      expect(onHint).toHaveBeenCalledWith("✓ Ausgeführt — Evidenz im Chat");
+    });
+    expect(onRefresh).toHaveBeenCalled();
   });
 
   it("Ausführen → answer '1' mit answered_by operator → Evidenz-Hinweis + Refresh", async () => {

@@ -1018,6 +1018,27 @@ export const de = {
     sessionsClose: "Sessions-Panel schließen",
     sessionsExpandAria: "Sessions-Baum umschalten",
     sessionsStripCounts: (open: number, active: number) => `${open} OFFEN · ${active} AKTIV`,
+    // S3.3-FE — PlanSpec-Draft-Flow: „/plan <idee>" in der Frag-Leiste →
+    // Draft-Card im Thread (client-intern) → „Als Approval einreichen" →
+    // planspec.ingest-Card in der S2.4-Inbox.
+    planChip: "PLANSPEC-ENTWURF",
+    planThinking: "Jarvis plant …",
+    planStatusClean: "VALIDATE: CLEAN",
+    planStatusWarn: "VALIDATE: WARN",
+    planStatusBlock: "VALIDATE: BLOCK",
+    planFindings: (n: number) => `Findings (${n})`,
+    planSlicesLabel: (n: number) => `Slices (${n})`,
+    planTextLabel: "Planspec-Text",
+    planPropose: "Als Approval einreichen",
+    planProposed: (questionId: number) =>
+      `Eingereicht — zur Bestätigung in der Inbox (#${questionId})`,
+    planProposeFailed: "Einreichung fehlgeschlagen.",
+    planBlockedHint:
+      "Validator blockiert diesen Entwurf — nicht einreichbar. Findings prüfen, Idee schärfen und erneut entwerfen.",
+    planDraftFailed: "PlanSpec-Entwurf fehlgeschlagen.",
+    planUsage: "„/plan“ braucht eine Idee: „/plan <idee>“.",
+    planCardAria: (draftId: string) => `PlanSpec-Entwurf ${draftId}`,
+    inboxPlanspecChip: "PLANSPEC",
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

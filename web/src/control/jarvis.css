@@ -360,6 +360,8 @@ button.jv-ok { cursor: pointer; }
 }
 .jv-appr-chip.jv-held { color: var(--blau); border-color: rgba(91, 140, 255, .45); background: rgba(91, 140, 255, .08); }
 .jv-appr-chip.jv-gate { color: var(--violett); border-color: rgba(183, 140, 255, .45); background: rgba(183, 140, 255, .08); }
+/* S3.3-FE: planspec.ingest-Cards tragen den PLANSPEC-Chip in cyan. */
+.jv-appr-chip.jv-planspec { color: var(--cyan); border-color: rgba(56, 216, 255, .45); background: rgba(56, 216, 255, .08); }
 .jv-appr-cat { color: var(--dim); }
 .jv-appr-target {
   margin-top: 6px; font-family: var(--mono); font-size: 10px; letter-spacing: .04em;
@@ -433,6 +435,59 @@ button.jv-ok { cursor: pointer; }
 .jv-thinking { display: inline-flex; align-items: center; gap: 8px; color: var(--dim); font-family: var(--mono); font-size: 9.5px; letter-spacing: .2em; }
 .jv-thinking .jv-dots { display: inline-flex; gap: 4px; }
 .jv-thinking .jv-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); opacity: .35; }
+
+/* ══ S3.3-FE PlanSpec-Draft-Card („/plan"-Entwurf im Thread) ══
+   Assistant-Bubble mit cyan-Kante; Validate-Status als farbiges Chip
+   (CLEAN grün / WARN amber / BLOCK rot), Findings bei WARN+BLOCK offen,
+   Slices als kompakte Liste, Planspec-Text als <details>. Buttons und
+   Fehlerzeilen kommen aus dem Inbox-Approval-Vokabular (.jv-appr-*). */
+.jv-plan {
+  align-self: flex-start; width: min(100%, 560px);
+  background: var(--panel); border: 1px solid rgba(56, 216, 255, .3);
+}
+.jv-plan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.jv-plan-chip {
+  display: inline-flex; align-items: center; font-family: var(--mono); font-size: 8px;
+  letter-spacing: .14em; color: var(--cyan); border: 1px solid rgba(56, 216, 255, .45);
+  border-radius: 999px; padding: 2px 8px; background: rgba(56, 216, 255, .08);
+}
+.jv-plan-status {
+  display: inline-flex; align-items: center; font-family: var(--mono); font-size: 8.5px;
+  letter-spacing: .12em; border: 1px solid; border-radius: 999px; padding: 2px 8px;
+}
+.jv-st-clean { color: var(--grün); border-color: rgba(61, 220, 151, .5); background: rgba(61, 220, 151, .08); }
+.jv-st-warn { color: var(--amber); border-color: rgba(255, 179, 71, .5); background: rgba(255, 179, 71, .08); }
+.jv-st-block { color: var(--rot); border-color: rgba(255, 92, 105, .5); background: rgba(255, 92, 105, .08); }
+.jv-plan-id {
+  display: block; margin-top: 6px; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .04em; color: var(--cyan); overflow-wrap: anywhere;
+}
+.jv-plan-details { margin-top: 8px; border: 1px solid var(--line2); border-radius: 6px; background: rgba(4, 7, 15, .35); }
+.jv-plan-details summary {
+  display: flex; align-items: center; min-height: 30px; padding: 0 10px; cursor: pointer;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .12em; color: var(--dim);
+}
+.jv-plan-details summary:hover, .jv-plan-details summary:focus-visible { color: var(--cyan); }
+.jv-plan-findings { margin: 0; padding: 0 10px 8px 24px; font-size: 11px; line-height: 1.55; }
+.jv-plan-findings li { overflow-wrap: anywhere; }
+.jv-f-warn { color: var(--amber); }
+.jv-f-block { color: var(--rot); }
+.jv-plan-slices {
+  margin: 8px 0 0; padding: 0; list-style: none;
+  font-size: 11.5px; line-height: 1.65; color: var(--txt);
+}
+.jv-plan-slices li { overflow-wrap: anywhere; }
+.jv-plan-sid { font-family: var(--mono); font-size: 10px; color: var(--cyan); }
+.jv-plan-lane { font-family: var(--mono); font-size: 9.5px; color: var(--violett); }
+.jv-plan-deps { font-family: var(--mono); font-size: 9.5px; color: var(--dim); }
+.jv-plan-pre {
+  margin: 0; padding: 8px 10px; max-height: 220px; overflow: auto;
+  font-family: var(--mono); font-size: 10px; line-height: 1.5; color: var(--dim);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+}
+.jv-plan-blocked { margin-top: 7px; font-size: 11px; line-height: 1.5; color: var(--rot); }
+.jv-plan-done { margin-top: 8px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--grün); }
 
 /* ══ Frag-Leiste (A4 Ask-Bar → funktionaler Composer) ══ */
 .jv-ask {

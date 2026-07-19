@@ -750,6 +750,29 @@ export interface PaInboxResponse {
   errors: PaInboxError[];
 }
 
+/** S3.3-FE PlanSpec-Draft (POST /api/pa/planspec/draft, pa_planspec.py): die
+ *  Engine erzeugt genau eine PlanSpec-Markdown-Datei, der PA-Validator liefert
+ *  status+findings (INVALID des CLI wird als BLOCK normalisiert). */
+export interface PaPlanspecValidation {
+  status: "CLEAN" | "WARN" | "BLOCK";
+  findings: string[];
+}
+
+/** Ein Slice aus taskgraph_hints.subtasks des Drafts. */
+export interface PaPlanspecSlice {
+  id: string;
+  title: string;
+  lane: string;
+  deps: string[];
+}
+
+export interface PaPlanspecDraft {
+  draft_id: string;
+  planspec_text: string;
+  validation: PaPlanspecValidation;
+  slices: PaPlanspecSlice[];
+}
+
 // S2.7 — Estate-Graph (GET /api/pa/graph, hermes_cli/pa_graph.py). Kontrakt
 // „pa-graph/v1": x/y deterministisch in der 1280x820-ViewBox vorberechnet;
 // Teilquellen-Ausfälle kommen als errors[] mit (HTTP bleibt 200). href ist
@@ -889,6 +912,34 @@ export const api = {
   getPaEngines: () => fetchJSON<PaEnginesResponse>("/api/pa/engines"),
   getPaInbox: () => fetchJSON<PaInboxResponse>("/api/pa/inbox"),
   getPaGraph: () => fetchJSON<PaGraphResponse>("/api/pa/graph"),
+  // S3.3-FE PlanSpec-Draft + Propose (pa_planspec.py). engine/model folgen der
+  // S2.2-Switcher-Wahl (weg gelassen → Backend-Default sol); project ist
+  // optionaler Kontext. 422 = Engine-Ausgabe ohne PlanSpec-Frontmatter
+  // (detail = {error, engine_output}), 400 = unbekannte Engine/Modell.
+  draftPlanspec: (
+    idea: string,
+    options?: { project?: string; engine?: string; model?: string },
+  ) =>
+    fetchJSON<PaPlanspecDraft>("/api/pa/planspec/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        idea,
+        ...(options?.project ? { project: options.project } : {}),
+        ...(options?.engine ? { engine: options.engine } : {}),
+        ...(options?.model ? { model: options.model } : {}),
+      }),
+    }),
+  // Draft als Approval-Card (planspec.ingest) in die Inbox stellen.
+  // 400 = BLOCK/stale Validate-Metadaten, 404 = Draft verschwunden; ein
+  // Duplikat liefert idempotent die bereits offene question_id (Dedup im
+  // Backend, kein 409).
+  proposePlanspec: (draftId: string) =>
+    fetchJSON<{ question_id: number }>("/api/pa/planspec/propose", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft_id: draftId }),
+    }),
   /** Authenticated asset URL (cookie/session like every other same-origin
    *  request). 404 = pruned upload → the bubble shows a broken-attachment
    *  state instead of losing the thread. */
