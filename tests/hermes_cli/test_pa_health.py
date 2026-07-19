@@ -74,9 +74,21 @@ def _set_fresh_world(paths: dict[str, Path], *, now: int) -> None:
     receipt = paths["receipt_dir"] / "ship-receipt.md"
     receipt.write_text("# Ship\n", encoding="utf-8")
     os.utime(receipt, (now - 60, now - 60))
+    store = pa_chat.PAStore()
+    with store.connect() as conn:
+        conn.executemany(
+            "INSERT INTO pa_watcher_state(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value=excluded.value, updated_at=excluded.updated_at",
+            [
+                ("last_tick_at", str(now - 60), now - 60),
+                ("interval_seconds", "60", now - 60),
+                ("enabled", "1", now - 60),
+            ],
+        )
 
 
-def test_healthy_sources_report_not_deployed_slots_truthfully(
+def test_healthy_sources_report_real_watcher_and_pending_push_truthfully(
     isolated_health_sources: dict[str, Path],
 ) -> None:
     now = 2_000_000_000
@@ -90,10 +102,17 @@ def test_healthy_sources_report_not_deployed_slots_truthfully(
     assert payload["checks"]["engine"]["error_rate"] == 0.0
     assert payload["checks"]["kanban_events"]["status"] == "healthy"
     assert payload["checks"]["receipts"]["status"] == "healthy"
-    assert payload["checks"]["watcher"] == "not_deployed"
+    assert payload["checks"]["watcher"] == {
+        "status": "healthy",
+        "enabled": True,
+        "latest_ts": now - 60,
+        "age_seconds": 60,
+        "interval_seconds": 60,
+        "stale_after_seconds": 180,
+    }
     assert payload["checks"]["push"] == "not_deployed"
     assert payload["ok"] is False
-    assert [item["check"] for item in payload["degraded"]] == ["watcher", "push"]
+    assert [item["check"] for item in payload["degraded"]] == ["push"]
 
 
 def test_engine_error_rate_and_last_error_degrade(
@@ -180,6 +199,33 @@ def test_source_failure_is_isolated(
     assert payload["checks"]["engine"]["source_error"] == "database is busy"
     assert payload["checks"]["kanban_events"]["status"] == "healthy"
     assert payload["checks"]["receipts"]["status"] == "healthy"
+
+
+def test_watcher_health_flips_only_after_three_intervals(
+    isolated_health_sources: dict[str, Path],
+) -> None:
+    now = 2_000_000_000
+    _set_fresh_world(isolated_health_sources, now=now)
+    store = pa_chat.PAStore()
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE pa_watcher_state SET value=? WHERE key='last_tick_at'",
+            (str(now - 180),),
+        )
+
+    boundary = health.build_pa_health(now=now)
+    assert boundary["checks"]["watcher"]["status"] == "healthy"
+    assert boundary["checks"]["watcher"]["age_seconds"] == 180
+
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE pa_watcher_state SET value=? WHERE key='last_tick_at'",
+            (str(now - 181),),
+        )
+    stale = health.build_pa_health(now=now)
+    assert stale["checks"]["watcher"]["status"] == "degraded"
+    assert stale["checks"]["watcher"]["stale_after_seconds"] == 180
+    assert "watcher" in {item["check"] for item in stale["degraded"]}
 
 
 def test_endpoint_returns_200_instead_of_500_on_catastrophic_failure(

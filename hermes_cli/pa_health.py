@@ -5,6 +5,7 @@ The v1 thresholds are intentionally explicit and conservative:
 * the latest 20 terminal PA turns degrade at an error rate of 20 percent;
 * Kanban event silence degrades after 2 hours;
 * receipt silence degrades after 24 hours.
+* the gateway PA watcher degrades after three configured tick intervals.
 
 Every source is read independently.  SQLite databases are opened with
 ``mode=ro`` and the receipt tree is only stat'ed.  The route always returns a
@@ -30,8 +31,9 @@ ENGINE_ERROR_RATE_THRESHOLD = 0.20
 KANBAN_STALE_AFTER_SECONDS = 2 * 60 * 60
 RECEIPT_STALE_AFTER_SECONDS = 24 * 60 * 60
 SQLITE_BUSY_TIMEOUT_SECONDS = 2.0
+WATCHER_DEFAULT_INTERVAL_SECONDS = 60
+WATCHER_STALE_INTERVAL_MULTIPLIER = 3
 
-WATCHER_STATUS = "not_deployed"
 PUSH_STATUS = "not_deployed"
 
 _log = logging.getLogger(__name__)
@@ -146,6 +148,53 @@ def _collect_latest_receipt() -> int | None:
     return latest
 
 
+def _collect_watcher_health(*, now: int) -> dict[str, Any]:
+    conn = _open_sqlite_readonly(_pa_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM pa_watcher_state "
+            "WHERE key IN ('last_tick_at', 'interval_seconds', 'enabled')"
+        ).fetchall()
+    finally:
+        conn.close()
+    state = {str(row["key"]): str(row["value"]) for row in rows}
+    try:
+        interval = max(1, int(state.get("interval_seconds", "")))
+    except (TypeError, ValueError):
+        interval = WATCHER_DEFAULT_INTERVAL_SECONDS
+    stale_after = interval * WATCHER_STALE_INTERVAL_MULTIPLIER
+    try:
+        latest_ts = int(state["last_tick_at"])
+    except (KeyError, TypeError, ValueError):
+        latest_ts = None
+    enabled = state.get("enabled", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    age_seconds = None if latest_ts is None else max(0, now - latest_ts)
+    degraded = not enabled or latest_ts is None or age_seconds > stale_after
+    result: dict[str, Any] = {
+        "status": "degraded" if degraded else "healthy",
+        "enabled": enabled,
+        "latest_ts": latest_ts,
+        "age_seconds": age_seconds,
+        "interval_seconds": interval,
+        "stale_after_seconds": stale_after,
+    }
+    if not enabled:
+        result["reason"] = "PA-Wächter ist per Konfiguration deaktiviert"
+    elif latest_ts is None:
+        result["reason"] = "Noch kein PA-Wächter-Tick aufgezeichnet"
+    elif age_seconds > stale_after:
+        result["reason"] = (
+            f"Seit {age_seconds} Sekunden kein PA-Wächter-Tick; "
+            f"Schwellwert {stale_after} Sekunden"
+        )
+    return result
+
+
 def _freshness_check(
     *,
     latest_ts: int | None,
@@ -210,12 +259,14 @@ def build_pa_health(*, now: int | None = None) -> dict[str, Any]:
                 noun="Receipt",
             )
         ),
-        "watcher": WATCHER_STATUS,
+        "watcher": _safe_collect(
+            lambda: _collect_watcher_health(now=generated_at)
+        ),
         "push": PUSH_STATUS,
     }
 
     degraded: list[dict[str, Any]] = []
-    for name in ("engine", "kanban_events", "receipts"):
+    for name in ("engine", "kanban_events", "receipts", "watcher"):
         check = checks[name]
         if check.get("status") == "degraded":
             degraded.append(
@@ -226,19 +277,12 @@ def build_pa_health(*, now: int | None = None) -> dict[str, Any]:
                     or (check.get("last_error") or {}).get("ts"),
                 }
             )
-    degraded.extend(
-        (
-            {
-                "check": "watcher",
-                "reason": "PA-Wächter ist noch nicht deployed (S3.1)",
-                "since_ts": None,
-            },
-            {
-                "check": "push",
-                "reason": "PA-Push ist noch nicht deployed (S3.2)",
-                "since_ts": None,
-            },
-        )
+    degraded.append(
+        {
+            "check": "push",
+            "reason": "PA-Push ist noch nicht deployed (S3.2)",
+            "since_ts": None,
+        }
     )
     return {
         "ok": not degraded,
@@ -263,7 +307,10 @@ def _emergency_health(exc: BaseException) -> dict[str, Any]:
                 "reason": reason,
                 "source_error": detail[:500],
             },
-            "watcher": WATCHER_STATUS,
+            "watcher": {
+                "status": "degraded",
+                "reason": "PA-Wächter-Check nicht verfügbar",
+            },
             "push": PUSH_STATUS,
         },
         "generated_at": generated_at,

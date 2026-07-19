@@ -988,6 +988,10 @@ DEFAULT_CONFIG = {
     # pressure. Reopening one re-resumes it from disk. 0/null disables.
     "max_live_sessions": 16,
     "agent_questions": {"suggest": {"model": "gpt-5.6-terra"}},
+    "pa_watcher": {
+        "enabled": True,
+        "interval_seconds": 60,
+    },
     "voice_web": {
         "enabled": False,
         "model": "gemini-2.5-flash-native-audio-preview-12-2025",
