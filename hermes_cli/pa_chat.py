@@ -1133,6 +1133,18 @@ def register_pa_routes(app: FastAPI) -> None:
         chains + freigabe gates, sorted by block radius."""
         return await _run_sync(build_inbox)
 
+    @app.post("/api/pa/push/test")
+    async def pa_push_test() -> dict[str, Any]:
+        """S3.2 proof helper: fire one Jarvis test push at all subscriptions."""
+        from hermes_cli.pa_push import send_pa_push
+
+        return await _run_sync(
+            send_pa_push,
+            title="Jarvis Test-Push",
+            body="Wenn du das im Hintergrund siehst, ist S3.2 bewiesen.",
+            tag="hermes-pa-test",
+        )
+
     @app.get("/api/pa/graph")
     async def pa_graph() -> dict[str, Any]:
         """S2.7 bounded Estate graph; all blocking source reads stay off-loop."""

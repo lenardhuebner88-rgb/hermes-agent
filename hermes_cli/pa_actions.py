@@ -300,6 +300,7 @@ def enqueue_pa_action(
         db_path=db_path,
     )
     if event_id is not None:
+        _notify_enqueued(event_id, question_text)
         return event_id
     existing = agent_questions.find_open_event(
         agent_questions.PA_ACTION_SENTINEL,
@@ -321,6 +322,7 @@ def enqueue_pa_action(
             db_path=db_path,
         )
         if retry_id is not None:
+            _notify_enqueued(retry_id, question_text)
             return retry_id
         existing = agent_questions.find_open_event(
             agent_questions.PA_ACTION_SENTINEL,
@@ -330,6 +332,13 @@ def enqueue_pa_action(
     if existing is None:
         raise RuntimeError("pa_action konnte nicht atomar eingereiht werden")
     return int(existing["id"])
+
+
+def _notify_enqueued(event_id: int, question_text: str) -> None:
+    """S3.2: push a freshly enqueued gated action; dedup hits stay silent."""
+    from hermes_cli.pa_push import notify_pa_action_enqueued
+
+    notify_pa_action_enqueued(event_id, question_text)
 
 
 def _thread_message(evidence: dict[str, Any]) -> str:
