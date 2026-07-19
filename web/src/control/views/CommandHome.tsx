@@ -299,7 +299,7 @@ function OperatorDigestCard() {
                   <span className="font-data text-[10px] tabular-nums text-ink-3">{d.age_days}d</span>
                   <span className="min-w-0 flex-1 text-sm font-medium text-ink">{d.title}</span>
                 </div>
-                <code className="break-words text-xs text-ink-2">{d.action}</code>
+                <span className="break-words text-xs text-ink-2">{d.action.replace(/`/g, "")}</span>
               </div>
             ))}
           </div>
