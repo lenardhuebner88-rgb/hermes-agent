@@ -88,9 +88,11 @@ def _set_fresh_world(paths: dict[str, Path], *, now: int) -> None:
         )
 
 
-def test_healthy_sources_report_real_watcher_and_pending_push_truthfully(
-    isolated_health_sources: dict[str, Path],
+def test_healthy_sources_report_real_watcher_and_unconfigured_push_truthfully(
+    isolated_health_sources: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    for name in ("VAPID_PRIVATE_KEY", "VAPID_PUBLIC_KEY", "VAPID_CLAIMS_SUB"):
+        monkeypatch.delenv(name, raising=False)
     now = 2_000_000_000
     _add_turn(now=now - 30)
     _set_fresh_world(isolated_health_sources, now=now)
@@ -110,9 +112,62 @@ def test_healthy_sources_report_real_watcher_and_pending_push_truthfully(
         "interval_seconds": 60,
         "stale_after_seconds": 180,
     }
-    assert payload["checks"]["push"] == "not_deployed"
+    assert payload["checks"]["push"] == {
+        "status": "degraded",
+        "reason": "VAPID-Konfiguration unvollständig",
+        "subscriptions": 0,
+    }
     assert payload["ok"] is False
     assert [item["check"] for item in payload["degraded"]] == ["push"]
+
+
+def _set_vapid(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VAPID_PRIVATE_KEY", "priv")
+    monkeypatch.setenv("VAPID_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("VAPID_CLAIMS_SUB", "mailto:test@example.com")
+
+
+def _add_subscription() -> None:
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect_closing() as conn:
+        conn.execute(
+            "INSERT INTO push_subscriptions (endpoint, keys_p256dh, keys_auth, "
+            "created_at, fail_count) VALUES ('https://push.example/s1', 'k1', 'k2', 1, 0)"
+        )
+        conn.commit()
+
+
+def test_push_degraded_without_subscription(
+    isolated_health_sources: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_vapid(monkeypatch)
+    now = 2_000_000_000
+    _add_turn(now=now - 30)
+    _set_fresh_world(isolated_health_sources, now=now)
+
+    payload = health.build_pa_health(now=now)
+
+    assert payload["checks"]["push"]["status"] == "degraded"
+    assert payload["checks"]["push"]["subscriptions"] == 0
+    assert "Kein Gerät" in payload["checks"]["push"]["reason"]
+    assert payload["ok"] is False
+
+
+def test_push_healthy_with_subscription(
+    isolated_health_sources: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_vapid(monkeypatch)
+    _add_subscription()
+    now = 2_000_000_000
+    _add_turn(now=now - 30)
+    _set_fresh_world(isolated_health_sources, now=now)
+
+    payload = health.build_pa_health(now=now)
+
+    assert payload["checks"]["push"] == {"status": "healthy", "subscriptions": 1}
+    assert payload["ok"] is True
+    assert payload["degraded"] == []
 
 
 def test_engine_error_rate_and_last_error_degrade(
