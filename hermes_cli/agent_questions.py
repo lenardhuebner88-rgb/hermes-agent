@@ -153,16 +153,19 @@ _PA_ACTION_SCHEMAS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "kanban.kill": (("card_id",), ("reason",)),
     "kanban.release": (("card_id",), ("reason",)),
     "planspec.ingest": (("draft_id",), ("reason",)),
+    "loops.start_pack": (("pack",), ("model", "max_rounds", "reason")),
+    "loops.status": ((), ("pack",)),
 }
 
 
-def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, str]:
+def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, Any]:
     """Validate and normalize one v1 action payload.
 
-    Every category is a closed schema: unknown/missing fields and non-string
-    values are rejected before an event can be enqueued.  ``keys`` preserves
-    its exact text (including surrounding whitespace); identifiers/reasons are
-    stripped because whitespace is not part of their identity.
+    Every category is a closed schema: unknown/missing fields and wrong value
+    types are rejected before an event can be enqueued.  ``keys`` preserves its
+    exact text (including surrounding whitespace); identifiers/reasons are
+    stripped because whitespace is not part of their identity.  The sole v1
+    numeric field, ``loops.start_pack.max_rounds``, is a positive integer.
     """
     category_s = str(category or "").strip()
     schema = _PA_ACTION_SCHEMAS.get(category_s)
@@ -184,11 +187,23 @@ def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, str]:
             f"Payload für {category_s} fehlt: {', '.join(missing)}"
         )
 
-    normalized: dict[str, str] = {}
+    normalized: dict[str, Any] = {}
     for key in (*required, *optional):
         if key not in payload:
             continue
         value = payload[key]
+        if category_s == "loops.start_pack" and key == "max_rounds":
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not 1 <= value <= 50
+            ):
+                raise ValueError(
+                    "Payload-Feld max_rounds für loops.start_pack muss eine "
+                    "Ganzzahl zwischen 1 und 50 sein"
+                )
+            normalized[key] = value
+            continue
         if not isinstance(value, str):
             raise ValueError(f"Payload-Feld {key} für {category_s} muss Text sein")
         if not value.strip():

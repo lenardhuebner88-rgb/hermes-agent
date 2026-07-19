@@ -242,6 +242,8 @@ def test_registry_covers_every_v1_category() -> None:
         "kanban.kill",
         "kanban.release",
         "planspec.ingest",
+        "loops.start_pack",
+        "loops.status",
     }
     assert set(pa_actions.ACTION_HANDLERS) == expected
     assert set(aq._PA_ACTION_SCHEMAS) == expected

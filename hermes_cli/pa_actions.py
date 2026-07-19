@@ -23,7 +23,8 @@ PA_ACTION_OPTIONS = [
 ]
 _PANE_TAIL_MAX_CHARS = 4_000
 
-ActionHandler = Callable[[dict[str, str]], dict[str, Any]]
+ActionHandler = Callable[[dict[str, Any]], dict[str, Any]]
+ActionQuestionBuilder = Callable[[dict[str, Any]], str]
 
 
 def _utc_now() -> str:
@@ -199,6 +200,18 @@ def _handle_planspec_ingest(payload: dict[str, str]) -> dict[str, Any]:
     return ingest_draft(payload)
 
 
+def _handle_loops_start_pack(payload: dict[str, Any]) -> dict[str, Any]:
+    from hermes_cli.pa_loops import start_pack
+
+    return start_pack(payload)
+
+
+def _handle_loops_status(payload: dict[str, Any]) -> dict[str, Any]:
+    from hermes_cli.pa_loops import status
+
+    return status(payload)
+
+
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "tmux.send_keys": _handle_tmux_send_keys,
     "tmux.interrupt": _handle_tmux_interrupt,
@@ -209,7 +222,40 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "kanban.kill": _handle_kanban_kill,
     "kanban.release": _handle_kanban_release,
     "planspec.ingest": _handle_planspec_ingest,
+    "loops.start_pack": _handle_loops_start_pack,
+    "loops.status": _handle_loops_status,
 }
+
+
+def _build_planspec_question(envelope: dict[str, Any]) -> str:
+    from hermes_cli.pa_planspec import build_ingest_question
+
+    return build_ingest_question(envelope)
+
+
+def _build_loops_question(envelope: dict[str, Any]) -> str:
+    from hermes_cli.pa_loops import build_action_question
+
+    return build_action_question(str(envelope.get("category") or ""), envelope)
+
+
+ACTION_QUESTION_BUILDERS: dict[str, ActionQuestionBuilder] = {
+    "planspec.ingest": _build_planspec_question,
+    "loops.start_pack": _build_loops_question,
+    "loops.status": _build_loops_question,
+}
+
+
+def build_action_question(envelope: dict[str, Any]) -> str:
+    """Build a category-specific card when registered, else the v1 fallback."""
+    category = str(envelope.get("category") or "")
+    builder = ACTION_QUESTION_BUILDERS.get(category)
+    if builder is not None:
+        return builder(envelope)
+    return (
+        f"PA-Aktion ausführen: {category}?"
+        + (f" — {envelope['reason']}" if envelope.get("reason") else "")
+    )
 
 
 def execute_action(category: str, payload: Any) -> dict[str, Any]:
@@ -238,15 +284,7 @@ def enqueue_pa_action(
         reason=reason,
     )
     normalized = envelope["payload"]
-    if category == "planspec.ingest":
-        from hermes_cli.pa_planspec import build_ingest_question
-
-        question_text = build_ingest_question(envelope)
-    else:
-        question_text = (
-            f"PA-Aktion ausführen: {category}?"
-            + (f" — {envelope['reason']}" if envelope.get("reason") else "")
-        )
+    question_text = build_action_question(envelope)
     fingerprint = agent_questions.pa_action_fingerprint(category, normalized)
     event_id = agent_questions.insert_question_event(
         session=agent_questions.PA_ACTION_SENTINEL,
