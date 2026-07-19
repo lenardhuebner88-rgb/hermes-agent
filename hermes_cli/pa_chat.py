@@ -14,8 +14,10 @@ import json
 import logging
 import re
 import secrets
+import shutil
 import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -399,10 +401,27 @@ def compose_prompt(
     )
 
 
+def _hermes_bin() -> str:
+    """Resolve the hermes CLI binary.
+
+    The dashboard systemd unit does not inherit an interactive PATH, so a
+    bare ``hermes`` lookup can fail there (live E2E finding 2026-07-19).
+    Prefer PATH, then the sibling binary of the running interpreter (the
+    dashboard runs from the repo venv, which ships ``hermes``).
+    """
+    path = shutil.which("hermes")
+    if path:
+        return path
+    sibling = Path(sys.executable).with_name("hermes")
+    if sibling.is_file():
+        return str(sibling)
+    return "hermes"
+
+
 def run_sol_engine(prompt: str, *, model: str, image_paths: list[Path]) -> str:
     """Run one stateless quiet Hermes turn; stdout is the text contract."""
     argv = [
-        "hermes",
+        _hermes_bin(),
         "chat",
         "-Q",
         "-q",

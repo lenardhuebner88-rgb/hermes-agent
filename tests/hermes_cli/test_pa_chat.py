@@ -110,7 +110,8 @@ def test_adapter_argv_prompt_history_images_and_no_resume(
     assert '"projects"' in prompt
     assert "Was ist offen?" in prompt
     argv = seen["argv"]
-    assert argv[:3] == ["hermes", "chat", "-Q"]
+    assert Path(str(argv[0])).name == "hermes"
+    assert argv[1:3] == ["chat", "-Q"]
     assert argv[argv.index("-m") + 1] == pa.SOL_MODEL
     assert argv[argv.index("-t") + 1] == pa.READ_ONLY_TOOLSETS
     assert "--resume" not in argv
