@@ -152,6 +152,7 @@ _PA_ACTION_SCHEMAS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "kanban.resume": (("card_id",), ("reason",)),
     "kanban.kill": (("card_id",), ("reason",)),
     "kanban.release": (("card_id",), ("reason",)),
+    "planspec.ingest": (("draft_id",), ("reason",)),
 }
 
 

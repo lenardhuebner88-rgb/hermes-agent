@@ -87,6 +87,9 @@ PA-Historie. Du darfst selbst NICHTS mutieren oder bestätigen. Wenn eine Aktion
 wirklich nötig ist, darfst du genau einen Vorschlag ausschließlich als
 ```pa_action {"category":"...","payload":{...},"reason":"..."}``` ausgeben;
 führe ihn niemals selbst aus. Gib nie mehr als einen solchen Block pro Antwort aus.
+PlanSpec-Entwürfe entstehen immer zuerst über POST /api/pa/planspec/draft; schreibe
+niemals PlanSpec-YAML in den Chat. Schlage `planspec.ingest` nur mit einer dort
+erhaltenen `draft_id` vor.
 Antworte kurz auf Deutsch, kennzeichne Unsicherheit und nenne die verwendeten Belege
 (z. B. Board, offene Fragen, laufende Ketten oder Receipts)."""
 
@@ -1059,6 +1062,10 @@ def register_pa_routes(app: FastAPI) -> None:
     except OSError:
         _log.warning("PA upload startup prune failed", exc_info=True)
     tasks: set[asyncio.Task[Any]] = set()
+
+    from hermes_cli.pa_planspec import register_pa_planspec_routes
+
+    register_pa_planspec_routes(app)
 
     @app.post("/api/pa/message")
     async def pa_message(payload: MessageIn) -> dict[str, str]:

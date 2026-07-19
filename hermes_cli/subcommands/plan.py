@@ -4,11 +4,26 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from hermes_cli import planspecs
 from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan
+
+
+_PA_PLANS_ROOT_ENV = "HERMES_PA_PLANS_ROOT"
+
+
+def _pa_plans_root_kwargs() -> dict[str, Path]:
+    """Allow the gated PA executor to validate its profile-local drafts.
+
+    Normal CLI calls deliberately keep the canonical Vault default.  The PA
+    subprocess opts into this private override explicitly; without it we omit
+    the keyword entirely so existing callers retain the function default.
+    """
+    raw = os.environ.get(_PA_PLANS_ROOT_ENV, "").strip()
+    return {"plans_root": Path(raw).expanduser()} if raw else {}
 
 
 def _has_binding_taskgraph_hints(path: str) -> bool:
@@ -140,6 +155,7 @@ def plan_command(args: argparse.Namespace) -> int:
                     author=args.author,
                     force=getattr(args, "force", False),
                     supersede=getattr(args, "supersede", False),
+                    **_pa_plans_root_kwargs(),
                 )
             else:
                 result = planspecs.ingest_prose_plan(
@@ -176,7 +192,9 @@ def plan_command(args: argparse.Namespace) -> int:
             return 0
         if action == "validate":
             result = planspecs.validate_planspec(
-                args.path, board=getattr(args, "board", None)
+                args.path,
+                board=getattr(args, "board", None),
+                **_pa_plans_root_kwargs(),
             )
             if getattr(args, "json", False):
                 print(json.dumps(result, ensure_ascii=False))
