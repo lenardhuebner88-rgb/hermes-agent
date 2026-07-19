@@ -1124,6 +1124,22 @@ def register_pa_routes(app: FastAPI) -> None:
         chains + freigabe gates, sorted by block radius."""
         return await _run_sync(build_inbox)
 
+    @app.get("/api/pa/engines")
+    async def pa_engines() -> dict[str, Any]:
+        """S2.2 switcher roster: engines with models, defaults, capabilities."""
+        return {
+            "default_engine": DEFAULT_ENGINE,
+            "engines": [
+                {
+                    "engine": engine,
+                    "models": list(spec.models),
+                    "default_model": spec.default_model,
+                    "supports_images": spec.supports_images,
+                }
+                for engine, spec in ENGINE_REGISTRY.items()
+            ],
+        }
+
     @app.get("/api/pa/messages")
     async def pa_messages(
         limit: int = 30,

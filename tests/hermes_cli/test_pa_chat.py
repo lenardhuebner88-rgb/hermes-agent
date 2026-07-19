@@ -937,3 +937,22 @@ def test_inbox_endpoint(isolated_pa_home: Path) -> None:
     body = response.json()
     assert body["items"] == []
     assert body["errors"] == []
+
+
+def test_engines_endpoint_exposes_roster(isolated_pa_home: Path) -> None:
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    with TestClient(app) as client:
+        response = client.get("/api/pa/engines")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["default_engine"] == "sol"
+    engines = {entry["engine"]: entry for entry in body["engines"]}
+    assert engines["sol"]["models"] == ["gpt-5.6-sol"]
+    assert engines["sol"]["supports_images"] is True
+    assert engines["claude"]["default_model"] == "opus-4.8"
+    assert set(engines["claude"]["models"]) == {"opus-4.8", "fable-5"}
+    assert engines["claude"]["supports_images"] is False
+    assert engines["kimi"]["models"] == ["k3"]
