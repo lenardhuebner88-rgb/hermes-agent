@@ -18,6 +18,7 @@ from hermes_cli import kanban_worktrees as kwt
 from tests.hermes_cli._kanban_test_helpers import (
     _git,
     _commit_in,
+    _insert_ended_run,
     _ok_gate,
     _provisioned_chain,
 )
@@ -167,6 +168,169 @@ def test_two_chains_two_separate_merge_commits(repo):
     assert out_a["merge_commit"] != out_b["merge_commit"]
     merges = _git(repo, "log", "--merges", "--oneline").splitlines()
     assert len(merges) == 2
+
+
+def test_finalreview_integrates_approved_salvage_commit_not_card_branch(
+    repo, kanban_home,
+):
+    """Regression: a salvage worker ran in chain worktree A via ``dir:A``,
+    while its final-review card was later materialized on card branch B.
+
+    The approved completion metadata points at A.  B must not be mistaken for
+    the approved code merely because it is the completing task's current
+    workspace/branch.
+    """
+    approved = _provisioned_chain(
+        repo, "t_chain_a", relpath="approved.py", content="APPROVED = True\n",
+    )
+    card = _provisioned_chain(
+        repo, "t_salvage_b", relpath="card_only.py", content="WRONG = True\n",
+    )
+    approved_commit = _git(approved["path"], "rev-parse", "HEAD")
+
+    with kb.connect() as conn:
+        salvage_id = kb.create_task(
+            conn,
+            title="salvage fix",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(approved["path"]),
+        )
+        _insert_ended_run(
+            conn,
+            salvage_id,
+            profile="coder",
+            metadata={
+                "commit": approved_commit,
+                "workspace_path": str(approved["path"]),
+            },
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (salvage_id,),
+        )
+        finalreview_id = kb.create_task(
+            conn,
+            title="salvage finalreview",
+            assignee="reviewer",
+            parents=[salvage_id],
+            workspace_kind="dir",
+            workspace_path=str(card["path"]),
+        )
+        # Reproduce the bad final-review rematerialization: the review card
+        # points at branch B, while its approved parent actually ran in dir:A.
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?",
+            (finalreview_id,),
+        )
+        conn.commit()
+
+        out = kwt.maybe_integrate_on_complete(
+            conn,
+            finalreview_id,
+            completion_metadata={"review_verdict": "APPROVED"},
+            gate_runner=_ok_gate,
+        )
+
+    assert out is not None and out["action"] == "merged"
+    assert out["approved_commit"] == approved_commit
+    assert (repo / "approved.py").read_text() == "APPROVED = True\n"
+    assert not (repo / "card_only.py").exists()
+    assert not approved["path"].exists()
+    # The unrelated card worktree/branch was not selected or cleaned up.
+    assert card["path"].exists()
+    assert _git(repo, "rev-parse", card["branch"])
+
+
+def test_finalreview_parks_on_ambiguous_approved_chain_commits(repo, kanban_home):
+    """Restfix 3/5: two DISTINCT, divergent approved commits live in the same
+    parent/salvage chain (branch A and branch C), while the finalreview card
+    closes on an unrelated branch B.  The finalizer must NOT pick one branch
+    arbitrarily — it fails closed and parks, merging nothing."""
+    branch_a = _provisioned_chain(
+        repo, "t_amb_a", relpath="a_code.py", content="A = 1\n",
+    )
+    branch_c = _provisioned_chain(
+        repo, "t_amb_c", relpath="c_code.py", content="C = 1\n",
+    )
+    card = _provisioned_chain(
+        repo, "t_amb_b", relpath="card.py", content="B = 1\n",
+    )
+    commit_a = _git(branch_a["path"], "rev-parse", "HEAD")
+    commit_c = _git(branch_c["path"], "rev-parse", "HEAD")
+    assert commit_a != commit_c
+
+    with kb.connect() as conn:
+        salvage_id = kb.create_task(
+            conn,
+            title="salvage fix",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(branch_a["path"]),
+        )
+        # Two completed runs in the SAME chain recording divergent approved
+        # commits on different code branches — the ambiguity to fail closed on.
+        _insert_ended_run(
+            conn,
+            salvage_id,
+            profile="coder",
+            metadata={"commit": commit_a, "workspace_path": str(branch_a["path"])},
+        )
+        _insert_ended_run(
+            conn,
+            salvage_id,
+            profile="coder",
+            metadata={"commit": commit_c, "workspace_path": str(branch_c["path"])},
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (salvage_id,),
+        )
+        finalreview_id = kb.create_task(
+            conn,
+            title="salvage finalreview",
+            assignee="reviewer",
+            parents=[salvage_id],
+            workspace_kind="dir",
+            workspace_path=str(card["path"]),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (finalreview_id,),
+        )
+        conn.commit()
+
+        out = kwt.maybe_integrate_on_complete(
+            conn,
+            finalreview_id,
+            completion_metadata={"review_verdict": "APPROVED"},
+            gate_runner=_ok_gate,
+        )
+
+    assert out is not None and out["action"] == "parked"
+    assert "ambiguous" in out["reason"].lower()
+    # Nothing merged; both code branches and the card worktree survive intact.
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+    assert not (repo / "a_code.py").exists()
+    assert not (repo / "c_code.py").exists()
+    assert branch_a["path"].exists()
+    assert branch_c["path"].exists()
+    assert card["path"].exists()
+
+
+def test_approved_commit_resolution_fails_closed_for_ambiguous_branches(repo):
+    approved_commit = _git(repo, "rev-parse", "HEAD")
+    for root_id in ("t_ambiguous_a", "t_ambiguous_b"):
+        branch = f"kanban/{root_id}"
+        path = repo / ".worktrees" / "kanban" / root_id
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git(repo, "branch", branch, approved_commit)
+        _git(repo, "worktree", "add", str(path), branch)
+
+    with pytest.raises(
+        kwt.WorktreeError,
+        match="exactly one kanban worktree/branch.*candidates=2",
+    ):
+        getattr(kwt, "_approved_source_worktree")(
+            repo, {"commit": approved_commit},
+        )
 
 
 def test_dirty_files_reports_full_path_of_unstaged_first_entry(repo):
