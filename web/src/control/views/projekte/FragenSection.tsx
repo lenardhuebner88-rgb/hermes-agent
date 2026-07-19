@@ -24,20 +24,9 @@ import { cn } from "@/lib/utils";
 import { Eyebrow } from "../../components/primitives";
 import { extractDetail } from "../../hooks/internal";
 import { de } from "../../i18n/de";
+import { formatStandingAge } from "./derive";
 
 const t = de.projekte;
-
-/** AnswerSheet-Idiom: live tickende Standzeit ("steht seit X min") aus event.ts. */
-function formatStandingAge(ts: string, nowMs: number): string {
-  const ms = Date.parse(ts);
-  if (!Number.isFinite(ms)) return "steht seit kurzem";
-  const sec = Math.max(0, Math.round((nowMs - ms) / 1000));
-  if (sec < 60) return `steht seit ${sec}s`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `steht seit ${min} min`;
-  const h = Math.round(min / 60);
-  return `steht seit ${h} h`;
-}
 
 /** AnswerSheet-Idiom: fetchJSON wirft `Error("409: {...}")` — superseded/not-open. */
 function isSupersededError(err: unknown): boolean {

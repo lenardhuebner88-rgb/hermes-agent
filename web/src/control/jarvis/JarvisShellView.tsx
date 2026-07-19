@@ -1,14 +1,18 @@
 /**
- * JarvisShellView — die Jarvis-Zone auf /control/projekte (Sprint 1, Karte e).
+ * JarvisShellView — die Jarvis-Zone auf /control/projekte (Sprint 1, Karte e;
+ * Sprint 2, Karte S2.6).
  *
  * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
  * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (Mock, F11 —
  * Vorschau-Label, echter Endpoint kommt mit S2.7), schwebende Panels,
  * J.A.R.V.I.S.-Emblem mit statischem Modell-Badge (Roster kommt S2),
  * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an echten
- * offenen Fragen, funktionale Frag-Leiste mit Bubble-Chat gegen die
- * LIVE-PA-Endpoints. Der bisherige Projekte-Tab bleibt als
- * /control/projekte-klassisch erreichbar (Fallback bis S2/S3 migrieren).
+ * offenen Fragen (S2.6: Expand zur vollen Fragen-Ansicht als Jarvis-Panel),
+ * PROJEKTE-Panel mit den echten ProjectCards (S2.6 — gleiche Hooks/Ableitung
+ * wie die Klassik, Tap → Klassik-Drilldown per Link), funktionale Frag-Leiste
+ * mit Bubble-Chat gegen die LIVE-PA-Endpoints. Der bisherige Projekte-Tab
+ * bleibt als /control/projekte-klassisch erreichbar (Fallback bis S2/S3
+ * migrieren).
  *
  * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
@@ -20,6 +24,7 @@ import "../jarvis.css";
 import { de } from "../i18n/de";
 import { JarvisChat } from "./JarvisChat";
 import { JarvisGraph } from "./JarvisGraph";
+import { ProjektePanel } from "./ProjektePanel";
 import { WartetPanel } from "./WartetPanel";
 import {
   JARVIS_BRAIN_MOCKTAG,
@@ -129,6 +134,9 @@ export function JarvisShellView() {
             ))}
           </div>
         </div>
+
+        {/* ══ Mitte oben: PROJEKTE (S2.6 — echte ProjectCards im A4-Look) ══ */}
+        <ProjektePanel />
 
         {/* ══ Graph-Vorschau-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
         <div className="jv-gtag">

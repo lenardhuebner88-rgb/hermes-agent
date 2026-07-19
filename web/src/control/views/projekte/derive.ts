@@ -66,6 +66,52 @@ export function countAgentsByProject(
   return counts;
 }
 
+// ── Geteilte Overview-Aggregation (S2.6: Klassik-ProjekteView + Jarvis-Panel) ─
+
+/** Einmal-Verdrahtung der drei Projekte-Payloads (Liste/Agents/Sessions) zu
+ *  den Karten-Aggregaten — exakt die Ableitung, die ProjekteView bisher
+ *  inline machte. Geteilt mit dem Jarvis-ProjektePanel, damit Sortierung,
+ *  Ampel-Inputs und Namensauflösung zwischen Klassik und Shell nie driften
+ *  (Logik unverändert, nur Präsentation je Zone). */
+export interface ProjectsOverview {
+  /** Attention-sortiert (alert → active → quiet, stabil) = Karten-Reihenfolge. */
+  sortedList: ProjectEntry[];
+  agentsByProject: Record<string, ProjectAgent[]>;
+  agentCountBySlug: Record<string, number>;
+  staleBySlug: Record<string, number>;
+  /** slug → Anzeigename (Projekt-Chips, Eltern-Auflösung). */
+  projectNames: Record<string, string>;
+}
+
+export function buildProjectsOverview(
+  list: ReadonlyArray<ProjectEntry>,
+  agents: ReadonlyArray<ProjectAgent>,
+  sessions: ReadonlyArray<ProjectSession>,
+): ProjectsOverview {
+  const agentsByProject = groupAgentsByProject(agents);
+  const agentCountBySlug = countAgentsByProject(agents);
+  const staleBySlug = countStaleSessionsByProject(sessions);
+  const sortedList = sortProjectsByAttention(list, agentCountBySlug, staleBySlug);
+  const projectNames: Record<string, string> = {};
+  for (const project of list) {
+    projectNames[project.slug] = project.name;
+  }
+  return { sortedList, agentsByProject, agentCountBySlug, staleBySlug, projectNames };
+}
+
+/** AnswerSheet-Idiom: live tickende Standzeit ("steht seit X min") aus event.ts.
+ *  Geteilt zwischen Klassik-FragenSection und Jarvis-FragenPanel (S2.6). */
+export function formatStandingAge(ts: string, nowMs: number): string {
+  const ms = Date.parse(ts);
+  if (!Number.isFinite(ms)) return "steht seit kurzem";
+  const sec = Math.max(0, Math.round((nowMs - ms) / 1000));
+  if (sec < 60) return `steht seit ${sec}s`;
+  const min = Math.round(sec / 60);
+  if (min < 60) return `steht seit ${min} min`;
+  const h = Math.round(min / 60);
+  return `steht seit ${h} h`;
+}
+
 // ── LiveBoard ("Wer arbeitet gerade", 2026-07-17) ──────────────────────────
 //
 // Der LiveBoard ersetzt die alte Kind-Rail: gruppiert wird nach PROJEKT (die
