@@ -620,6 +620,12 @@ describe("ProjekteView", () => {
       latency_s: null,
       answer_verified: null,
       override: 0,
+      suggestions: null,
+      suggested_by: null,
+      suggest_confidence: null,
+      suggested_ts: null,
+      suggest_latency_ms: null,
+      answer_source: null,
     };
     mockProjects({ data: { generated_at: 1, registry_errors: [], projects: [REAL_PROJECT] }, loading: false, lastUpdated: 1 });
     mockAgents({ data: { generated_at: 1, errors: [], agents: [REAL_AGENT] }, loading: false, lastUpdated: 1 });

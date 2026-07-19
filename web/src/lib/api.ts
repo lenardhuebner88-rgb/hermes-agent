@@ -582,6 +582,16 @@ export interface AgentQuestionOption {
 }
 
 /**
+ * AI answer suggestion (Feature A Slice 2) as serialized by
+ * GET /api/agent-questions: `nr` references an option number, array order is
+ * the ranking (first entry = top suggestion).
+ */
+export interface AgentQuestionSuggestion {
+  nr: number;
+  rationale: string;
+}
+
+/**
  * Flat event dict from GET /api/agent-questions (hermes_cli agent_questions schema).
  * `options[].nr` may be int ("1") or y/n string ("y"/"n"). Newest-first.
  */
@@ -606,6 +616,18 @@ export interface AgentQuestionEvent {
   /** SQLite INTEGER 0/1 — serialized as number, NOT boolean (POST result `verified` IS boolean). */
   answer_verified: number | null;
   override: number;
+  /** Feature A Slice 2 — all six null when no suggestion exists (degradation). */
+  suggestions: AgentQuestionSuggestion[] | null;
+  suggested_by: string | null;
+  suggest_confidence: "high" | "low" | null;
+  suggested_ts: string | null;
+  suggest_latency_ms: number | null;
+  answer_source:
+    | "suggested_accepted"
+    | "suggested_edited"
+    | "operator_free"
+    | "terminal"
+    | null;
 }
 
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
@@ -642,13 +664,19 @@ export const api = {
     fetchJSON<{ questions: AgentQuestionEvent[] }>(
       "/api/agent-questions?status=open&limit=50",
     ),
-  answerAgentQuestion: (id: number, answer: string) =>
+  answerAgentQuestion: (id: number, answer: string, viaSuggestion?: number) =>
     fetchJSON<{ ok: boolean; verified: boolean; latency_s: number }>(
       `/api/agent-questions/${id}/answer`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ answer, answered_by: "operator" }),
+        body: JSON.stringify({
+          answer,
+          answered_by: "operator",
+          // Optional additive field (Feature A Slice 2): nr of the accepted
+          // stored suggestion; omitted entirely for free/edited answers.
+          ...(viaSuggestion !== undefined ? { via_suggestion: viaSuggestion } : {}),
+        }),
       },
     ),
   ensureAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
