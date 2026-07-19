@@ -750,6 +750,49 @@ export interface PaInboxResponse {
   errors: PaInboxError[];
 }
 
+// S2.7 — Estate-Graph (GET /api/pa/graph, hermes_cli/pa_graph.py). Kontrakt
+// „pa-graph/v1": x/y deterministisch in der 1280x820-ViewBox vorberechnet;
+// Teilquellen-Ausfälle kommen als errors[] mit (HTTP bleibt 200). href ist
+// der kanonische Navigationswert (ref = Mock-Kompatibilitätsalias); vault://
+// und memory:// sind semantische Refs, NICHT browser-navigierbar.
+export interface PaGraphCluster {
+  id: string;
+  label: string;
+  color: string;
+}
+
+export interface PaGraphNode {
+  id: string;
+  label: string | null;
+  cluster: string;
+  kind: string;
+  /** 0.2–1.0, gradstarke Hubs angehoben. */
+  weight: number;
+  x: number;
+  y: number;
+  href?: string;
+  ref?: string;
+}
+
+export interface PaGraphEdge {
+  from: string;
+  to: string;
+  kind: string;
+}
+
+export interface PaGraphResponse {
+  schema: string;
+  source: string;
+  layout: string;
+  generated_at: string;
+  refresh: { interval_s: number; cache_ttl_s?: number; invalidation?: string; on_error?: string };
+  clusters: PaGraphCluster[];
+  nodes: PaGraphNode[];
+  edges: PaGraphEdge[];
+  /** {source, error} pro ausgefallener Teilquelle; dezent anzeigen, nie panel. */
+  errors?: PaInboxError[];
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -842,9 +885,10 @@ export const api = {
     }),
   getPaTurn: (turnId: string) =>
     fetchJSON<PaTurn>(`/api/pa/turns/${encodeURIComponent(turnId)}`),
-  // S2.2 switcher roster + S2.4 decision inbox.
+  // S2.2 switcher roster + S2.4 decision inbox + S2.7 estate graph.
   getPaEngines: () => fetchJSON<PaEnginesResponse>("/api/pa/engines"),
   getPaInbox: () => fetchJSON<PaInboxResponse>("/api/pa/inbox"),
+  getPaGraph: () => fetchJSON<PaGraphResponse>("/api/pa/graph"),
   /** Authenticated asset URL (cookie/session like every other same-origin
    *  request). 404 = pruned upload → the bubble shows a broken-attachment
    *  state instead of losing the thread. */

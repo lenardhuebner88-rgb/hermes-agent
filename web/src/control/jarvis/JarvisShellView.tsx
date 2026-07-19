@@ -3,8 +3,8 @@
  * Sprint 2, Karten S2.2/S2.4/S2.6/M3).
  *
  * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
- * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (Mock, F11 —
- * Vorschau-Label, echter Endpoint kommt mit S2.7), schwebende Panels,
+ * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (S2.7: live an
+ * /api/pa/graph — Zustands-Tag live vs. Mock-Fallback), schwebende Panels,
  * J.A.R.V.I.S.-Emblem mit dem S2.2-Modell-Switcher (Roster /api/pa/engines,
  * Wahl gilt für den nächsten Turn; statisches Badge nur als Roster-Fallback),
  * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an der
@@ -28,12 +28,11 @@ import "../jarvis.css";
 import { de } from "../i18n/de";
 import { EngineSwitcher } from "./EngineSwitcher";
 import { JarvisChat } from "./JarvisChat";
-import { JarvisGraph } from "./JarvisGraph";
+import { JarvisGraph, JarvisGraphStatsTag, JarvisGraphTag } from "./JarvisGraph";
 import { ProjektePanel } from "./ProjektePanel";
 import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
 import { WartetPanel } from "./WartetPanel";
 import {
-  JARVIS_BRAIN_MOCKTAG,
   JARVIS_BRAIN_STATS,
   JARVIS_EMBLEM_NAME,
   JARVIS_EMBLEM_STATUS,
@@ -62,7 +61,7 @@ export function JarvisShellView() {
           </h1>
           <div className="jv-stats">
             {JARVIS_BRAIN_STATS}
-            <span className="jv-mocktag">{JARVIS_BRAIN_MOCKTAG}</span>
+            <JarvisGraphStatsTag />
           </div>
           <div className="jv-search">{JARVIS_SEARCH_HINT}</div>
           <div className="jv-hubs">
@@ -78,9 +77,9 @@ export function JarvisShellView() {
             ))}
           </div>
           <div className="jv-inspector">
-            <b>Knoten antippen</b> → fokussiert ihn samt Verbindungen, Notiz öffnet rechts.{" "}
-            <b>Shift-Tipp</b> auf zweiten Knoten → Pfad verfolgen. Jarvis nutzt denselben Graphen
-            als Gedächtnis.
+            <b>Knoten antippen</b> → fokussiert ihn samt Verbindungen. <b>Erneut tippen</b> →
+            Ziel öffnen (Tasks/Receipts); vault://- und memory://-Refs sind reine Anzeige. Jarvis
+            nutzt denselben Graphen als Gedächtnis.
           </div>
           <Link className="jv-klassisch" to="/control/projekte-klassisch">
             {t.klassischLink}
@@ -147,10 +146,8 @@ export function JarvisShellView() {
         {/* ══ Mitte oben: PROJEKTE (S2.6 — echte ProjectCards im A4-Look) ══ */}
         <ProjektePanel />
 
-        {/* ══ Graph-Vorschau-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
-        <div className="jv-gtag">
-          GRAPH · <b>VORSCHAU</b> — MOCK-DATEN · S2.7 FOLGT
-        </div>
+        {/* ══ Graph-Zustands-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
+        <JarvisGraphTag />
 
         {/* ══ Chat: Bubble-Verlauf + Frag-Leiste (LIVE PA-Endpoints) ══ */}
         <JarvisChat />
