@@ -34,8 +34,6 @@ SQLITE_BUSY_TIMEOUT_SECONDS = 2.0
 WATCHER_DEFAULT_INTERVAL_SECONDS = 60
 WATCHER_STALE_INTERVAL_MULTIPLIER = 3
 
-PUSH_STATUS = "not_deployed"
-
 _log = logging.getLogger(__name__)
 
 
@@ -262,11 +260,11 @@ def build_pa_health(*, now: int | None = None) -> dict[str, Any]:
         "watcher": _safe_collect(
             lambda: _collect_watcher_health(now=generated_at)
         ),
-        "push": PUSH_STATUS,
+        "push": _safe_collect(_collect_push_health),
     }
 
     degraded: list[dict[str, Any]] = []
-    for name in ("engine", "kanban_events", "receipts", "watcher"):
+    for name in ("engine", "kanban_events", "receipts", "watcher", "push"):
         check = checks[name]
         if check.get("status") == "degraded":
             degraded.append(
@@ -277,13 +275,6 @@ def build_pa_health(*, now: int | None = None) -> dict[str, Any]:
                     or (check.get("last_error") or {}).get("ts"),
                 }
             )
-    degraded.append(
-        {
-            "check": "push",
-            "reason": "PA-Push ist noch nicht deployed (S3.2)",
-            "since_ts": None,
-        }
-    )
     return {
         "ok": not degraded,
         "degraded": degraded,
@@ -311,10 +302,40 @@ def _emergency_health(exc: BaseException) -> dict[str, Any]:
                 "status": "degraded",
                 "reason": "PA-Wächter-Check nicht verfügbar",
             },
-            "push": PUSH_STATUS,
+            "push": {
+                "status": "degraded",
+                "reason": "PA-Push-Check nicht verfügbar",
+            },
         },
         "generated_at": generated_at,
     }
+
+
+def _collect_push_health() -> dict[str, Any]:
+    """S3.2: real push channel state instead of the deployment slot.
+
+    Degraded truthfully until VAPID is configured AND at least one device
+    holds a subscription — a channel without listeners cannot deliver.
+    """
+    from hermes_cli import pa_push
+
+    if pa_push._vapid_config() is None:
+        return {
+            "status": "degraded",
+            "reason": "VAPID-Konfiguration unvollständig",
+            "subscriptions": 0,
+        }
+    from hermes_cli import kanban_db
+
+    with kanban_db.connect_closing() as conn:
+        count = len(kanban_db.list_push_subscriptions(conn))
+    if count == 0:
+        return {
+            "status": "degraded",
+            "reason": "Kein Gerät subscribed — Glocke im Dashboard aktivieren",
+            "subscriptions": 0,
+        }
+    return {"status": "healthy", "subscriptions": count}
 
 
 def register_pa_health_routes(app: FastAPI) -> None:
