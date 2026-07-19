@@ -614,13 +614,17 @@ def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_p
     reviewer stage (stage 1) still sees the changed-files evidence instead of
     the 'No machine diff snapshot' fallback. Before the fix, the stage-advance
     event dropped changed_files/diff_stat and the reviewer's context regressed
-    to the no-snapshot fallback (infinite bounce loop bug)."""
+    to the no-snapshot fallback (infinite bounce loop bug).
+
+    Uses the ``critical`` tier because it is the two-stage tier (verifier →
+    reviewer) under the review-economy topology; ``review`` is single-stage
+    (verifier only) and never advances to a reviewer stage."""
     repo = tmp_path / "ws"
     repo.mkdir()
     _init_git_repo_with_changes(repo)
     with kb.connect_closing() as conn:
         t = kb.create_task(
-            conn, title="widget", assignee="coder", review_tier="review",
+            conn, title="widget", assignee="coder", review_tier="critical",
             workspace_kind="dir", workspace_path=str(repo),
             initial_status="running",
         )

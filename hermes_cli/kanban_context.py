@@ -25,13 +25,19 @@ _CTX_CAP_PROFILES = {
         "comment_bytes": _CTX_MAX_COMMENT_BYTES,
         "role_history": 5,
     },
+    # Compact review context: keep the wide opening-body window (AC, bounded
+    # diff, gates all live in the body) and the per-field byte cap (previous
+    # stage findings / delta / residual risk live in the most recent run
+    # summaries + metadata), but BOUND the review-irrelevant noise — deep
+    # attempt history, comment storms, and cross-task role history — so the
+    # verdict-only reviewer reads evidence, not backlog.
     "reviewer_review": {
-        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
-        "comments": _CTX_MAX_COMMENTS,
+        "prior_attempts": 4,
+        "comments": 10,
         "field_bytes": _CTX_MAX_FIELD_BYTES,
         "body_bytes": 32 * 1024,
         "comment_bytes": _CTX_MAX_COMMENT_BYTES,
-        "role_history": 5,
+        "role_history": 1,
     },
     "worker_slim": {
         "prior_attempts": 3,
@@ -62,6 +68,24 @@ def cap_text(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
     return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
 
 
+def _is_review_run(task) -> bool:
+    """True when the current run against *task* is a review-stage run.
+
+    Detection keys off the task's *review status* first: under the same-card
+    review economy the verifier/reviewer stage runs on the coder's own card, so
+    the persistent ``assignee`` stays ``coder`` and an assignee check would miss
+    the review run entirely. The legacy dedicated review card
+    (``assignee=reviewer`` + ``kind=review``) remains a valid signal so
+    stand-alone review tasks keep the compact profile.
+    """
+    if (getattr(task, "status", "") or "").strip().lower() == "review":
+        return True
+    return (
+        (getattr(task, "assignee", "") or "").strip().lower() == "reviewer"
+        and (getattr(task, "kind", "") or "").strip().lower() == "review"
+    )
+
+
 def context_profile_for_task(task, profile: str) -> str:
     """Return the effective context cap profile for a task."""
     if int(getattr(task, "continuation_count", 0) or 0) > 0 and profile in {
@@ -69,11 +93,7 @@ def context_profile_for_task(task, profile: str) -> str:
         "full",
     }:
         return "retry"
-    if (
-        profile == "full"
-        and (getattr(task, "assignee", "") or "").strip().lower() == "reviewer"
-        and (getattr(task, "kind", "") or "").strip().lower() == "review"
-    ):
+    if profile == "full" and _is_review_run(task):
         return "reviewer_review"
     return profile
 
