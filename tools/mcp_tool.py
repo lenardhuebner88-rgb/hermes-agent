@@ -5298,6 +5298,181 @@ def discover_mcp_tools() -> List[str]:
     return tool_names
 
 
+class MCPReloadError(RuntimeError):
+    """A candidate MCP topology could not safely replace the live topology."""
+
+    def __init__(self, candidate_error: BaseException, cleanup_errors: Optional[List[str]] = None):
+        self.candidate_error = _format_connect_error(candidate_error)
+        self.cleanup_errors = list(cleanup_errors or [])
+        message = f"MCP reload candidate failed: {self.candidate_error}"
+        if self.cleanup_errors:
+            message += "; candidate cleanup also failed: " + "; ".join(self.cleanup_errors)
+        super().__init__(message)
+
+
+async def _smoke_test_reload_candidate(server: MCPServerTask) -> None:
+    """Exercise the candidate session without invoking a mutating MCP tool."""
+    if server.session is None:
+        raise RuntimeError("candidate has no initialized MCP session")
+
+    try:
+        await asyncio.wait_for(server.session.send_ping(), timeout=30.0)
+    except Exception as exc:
+        if _is_method_not_found_error(exc):
+            logger.debug("MCP reload candidate '%s' does not support ping", server.name)
+        else:
+            raise
+
+    # A read-only, zero-argument tool is safe to invoke and catches auth/policy
+    # failures which initialize/list_tools alone cannot expose. Servers without
+    # such a tool still receive the real protocol ping above.
+    for tool in getattr(server, "_tools", []):
+        annotations = getattr(tool, "annotations", None)
+        input_schema = getattr(tool, "inputSchema", None) or {}
+        required = input_schema.get("required") or []
+        if getattr(annotations, "readOnlyHint", False) is not True or required:
+            continue
+        result = await asyncio.wait_for(
+            server.session.call_tool(tool.name, arguments={}),
+            timeout=min(float(server.tool_timeout), 30.0),
+        )
+        if getattr(result, "isError", False):
+            raise RuntimeError(f"read-only smoke tool '{tool.name}' returned an error")
+        break
+
+
+async def _cleanup_reload_candidates(candidates: Dict[str, MCPServerTask]) -> List[str]:
+    """Close every staged session and return redacted cleanup failures."""
+    if not candidates:
+        return []
+    names = list(candidates)
+    results = await asyncio.gather(
+        *(candidates[name].shutdown() for name in names),
+        return_exceptions=True,
+    )
+    return [
+        f"{name}: {_format_connect_error(result)}"
+        for name, result in zip(names, results)
+        if isinstance(result, BaseException)
+    ]
+
+
+def reload_mcp_tools_transactionally() -> List[str]:
+    """Validate a shadow MCP topology, then atomically publish it."""
+    if not _MCP_AVAILABLE:
+        return []
+
+    configured = _filter_suspicious_mcp_servers(_load_mcp_config())
+    servers = {
+        name: cfg
+        for name, cfg in configured.items()
+        if _parse_boolish(cfg.get("enabled", True), default=True)
+    }
+    _ensure_mcp_loop()
+
+    async def _stage_all() -> Dict[str, MCPServerTask]:
+        staged: Dict[str, MCPServerTask] = {}
+        try:
+            for ordinal, (name, cfg) in enumerate(servers.items()):
+                shadow_name = f"__reload_{time.time_ns()}_{ordinal}__{name}"
+                candidate = await asyncio.wait_for(
+                    _connect_server(shadow_name, cfg),
+                    timeout=float(cfg.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)),
+                )
+                staged[name] = candidate
+                await _smoke_test_reload_candidate(candidate)
+            return staged
+        except BaseException as exc:
+            cleanup_errors = await _cleanup_reload_candidates(staged)
+            raise MCPReloadError(exc, cleanup_errors) from exc
+
+    candidates = _run_on_mcp_loop(_stage_all, timeout=120)
+
+    from tools.registry import registry
+
+    with _lock:
+        old_servers = dict(_servers)
+        old_connecting = set(_server_connecting)
+        old_connect_errors = dict(_server_connect_errors)
+        old_parallel_safe = set(_parallel_safe_servers)
+        old_tool_server = dict(_mcp_tool_server_names)
+        old_registered_names = {
+            name: list(getattr(server, "_registered_tool_names", []))
+            for name, server in old_servers.items()
+        }
+
+    try:
+        # Registry readers take this RLock and therefore see either topology,
+        # never a partially replaced tool/prompt/resource utility set.
+        with registry._lock:
+            registry_snapshot = (
+                dict(registry._tools),
+                dict(registry._toolset_checks),
+                dict(registry._toolset_aliases),
+                registry._generation,
+            )
+            try:
+                for server in old_servers.values():
+                    server._deregister_tools()
+
+                registered: List[str] = []
+                for name, candidate in candidates.items():
+                    candidate.name = name
+                    names = _register_server_tools(name, candidate, servers[name])
+                    candidate._registered_tool_names = list(names)
+                    registered.extend(names)
+
+                with _lock:
+                    _servers.clear()
+                    _servers.update(candidates)
+                    _server_connecting.clear()
+                    _server_connect_errors.clear()
+                    _parallel_safe_servers.clear()
+                    for name, cfg in servers.items():
+                        if _parse_boolish(cfg.get("supports_parallel_tool_calls", False), default=False):
+                            _parallel_safe_servers.add(sanitize_mcp_name_component(name))
+            except BaseException:
+                (
+                    registry._tools,
+                    registry._toolset_checks,
+                    registry._toolset_aliases,
+                    registry._generation,
+                ) = registry_snapshot
+                with _lock:
+                    _servers.clear()
+                    _servers.update(old_servers)
+                    _server_connecting.clear()
+                    _server_connecting.update(old_connecting)
+                    _server_connect_errors.clear()
+                    _server_connect_errors.update(old_connect_errors)
+                    _parallel_safe_servers.clear()
+                    _parallel_safe_servers.update(old_parallel_safe)
+                    _mcp_tool_server_names.clear()
+                    _mcp_tool_server_names.update(old_tool_server)
+                for name, server in old_servers.items():
+                    server._registered_tool_names = old_registered_names[name]
+                raise
+    except BaseException as exc:
+        cleanup_errors = _run_on_mcp_loop(
+            lambda: _cleanup_reload_candidates(candidates),
+            timeout=60,
+        )
+        raise MCPReloadError(exc, cleanup_errors) from exc
+
+    # Old shutdown occurs only after publication. Their registered-name lists
+    # are already empty, so shutdown cannot deregister the new handlers.
+    old_cleanup_errors = _run_on_mcp_loop(
+        lambda: _cleanup_reload_candidates(old_servers),
+        timeout=60,
+    )
+    if old_cleanup_errors:
+        logger.error(
+            "MCP reload committed, but previous-session cleanup failed: %s",
+            "; ".join(old_cleanup_errors),
+        )
+    return registered
+
+
 def is_mcp_tool_parallel_safe(tool_name: str) -> bool:
     """Check if an MCP tool belongs to a server that supports parallel tool calls.
 

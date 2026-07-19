@@ -14492,18 +14492,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         loop = asyncio.get_running_loop()
         try:
-            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
+            import tools.mcp_tool as _mcp_tool
+            from tools.mcp_tool import _servers, _lock
 
-            # Capture old server names before shutdown
+            # Capture old server names before the swap.
             with _lock:
                 old_servers = set(_servers.keys())
 
-            # Read new config before shutting down, so we know what will be added/removed
-            # Shutdown existing connections
-            await loop.run_in_executor(None, shutdown_mcp_servers)
-
-            # Reconnect by discovering tools (reads config.yaml fresh)
-            new_tools = await loop.run_in_executor(None, discover_mcp_tools)
+            # Connect-before-disconnect: build a shadow topology from the fresh
+            # config, validate each candidate (initialize + discover + a
+            # non-mutating smoke invoke), and only then atomically publish it.
+            # A candidate failure raises MCPReloadError and leaves the CURRENT
+            # live servers, their tool registrations, and cached-agent snapshots
+            # completely untouched — the old tools stay callable. Resolve the
+            # symbol off the module so tests can patch it.
+            new_tools = await loop.run_in_executor(
+                None, _mcp_tool.reload_mcp_tools_transactionally
+            )
 
             # Compute what changed
             with _lock:

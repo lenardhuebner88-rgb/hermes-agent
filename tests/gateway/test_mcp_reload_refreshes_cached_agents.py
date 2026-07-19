@@ -106,8 +106,7 @@ async def test_reload_mcp_refreshes_cached_agent_tools():
     ]
 
     with (
-        patch("tools.mcp_tool.shutdown_mcp_servers"),
-        patch("tools.mcp_tool.discover_mcp_tools", return_value=["HassTurnOn", "HassTurnOff"]),
+        patch("tools.mcp_tool.reload_mcp_tools_transactionally", return_value=["HassTurnOn", "HassTurnOff"]),
         patch.dict("tools.mcp_tool._servers", {"homeassistant": object()}, clear=True),
         patch("model_tools.get_tool_definitions", return_value=fresh_tool_defs),
     ):
@@ -136,8 +135,7 @@ async def test_reload_mcp_handles_empty_agent_cache():
     assert len(runner._agent_cache) == 0
 
     with (
-        patch("tools.mcp_tool.shutdown_mcp_servers"),
-        patch("tools.mcp_tool.discover_mcp_tools", return_value=[]),
+        patch("tools.mcp_tool.reload_mcp_tools_transactionally", return_value=[]),
         patch.dict("tools.mcp_tool._servers", {}, clear=True),
         patch("model_tools.get_tool_definitions", return_value=[]),
     ):
@@ -164,8 +162,7 @@ async def test_reload_mcp_preserves_per_agent_toolset_overrides():
         return [{"type": "function", "function": {"name": "refreshed"}}]
 
     with (
-        patch("tools.mcp_tool.shutdown_mcp_servers"),
-        patch("tools.mcp_tool.discover_mcp_tools", return_value=["refreshed"]),
+        patch("tools.mcp_tool.reload_mcp_tools_transactionally", return_value=["refreshed"]),
         patch.dict("tools.mcp_tool._servers", {"homeassistant": object()}, clear=True),
         patch("model_tools.get_tool_definitions", side_effect=_capture_get_tool_definitions),
     ):
@@ -174,3 +171,22 @@ async def test_reload_mcp_preserves_per_agent_toolset_overrides():
     assert captured_calls, "get_tool_definitions was never called to refresh the cache"
     assert captured_calls[0]["enabled_toolsets"] == ["safe"]
     assert captured_calls[0]["disabled_toolsets"] == ["terminal"]
+
+
+@pytest.mark.asyncio
+async def test_reload_mcp_failure_preserves_cached_agent_tools():
+    """A rejected candidate must not publish a partial cache refresh."""
+    runner = _make_runner_with_cached_agents(num_agents=1)
+    agent, _sig = runner._agent_cache["session-0"]
+    original_tools = list(agent.tools)
+    original_names = set(agent.valid_tool_names)
+
+    with patch(
+        "tools.mcp_tool.reload_mcp_tools_transactionally",
+        side_effect=RuntimeError("candidate authentication failed"),
+    ):
+        result = await runner._execute_mcp_reload(_make_event())
+
+    assert "candidate authentication failed" in result
+    assert agent.tools == original_tools
+    assert agent.valid_tool_names == original_names
