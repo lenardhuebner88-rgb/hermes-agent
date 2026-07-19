@@ -794,3 +794,146 @@ def test_proposal_parser_accepts_single_fenced_json_block() -> None:
         "payload": {"session": "work", "window": "codex"},
         "reason": "Prozess hängt",
     }
+
+
+# ---------------------------------------------------------------------------
+# S2.4 Entscheidungs-Inbox
+# ---------------------------------------------------------------------------
+
+
+def _insert_kanban_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    status: str,
+    freigabe: str | None = None,
+    block_kind: str | None = None,
+    created_at: int = 1000,
+) -> None:
+    conn.execute(
+        "INSERT INTO tasks (id, title, status, freigabe, block_kind, created_at, "
+        "workspace_kind) VALUES (?, ?, ?, ?, ?, ?, 'scratch')",
+        (task_id, f"Titel {task_id}", status, freigabe, block_kind, created_at),
+    )
+
+
+def test_inbox_empty_stores(isolated_pa_home: Path) -> None:
+    payload = pa.build_inbox()
+
+    assert payload["items"] == []
+    assert payload["errors"] == []
+    assert payload["generated_at"] > 0
+
+
+def test_inbox_questions_and_pa_action_cards(isolated_pa_home: Path) -> None:
+    aq.insert_question_event(
+        session="work",
+        window="kimi",
+        pane_id="%1",
+        fingerprint="fp-normal",
+        question_text="Weiter mit dem Build?",
+        options=[{"nr": 1, "label": "Ja"}, {"nr": 2, "label": "Nein"}],
+        kind="kimi",
+    )
+    aq.insert_question_event(
+        session="pa",
+        window="pa",
+        pane_id="pa",
+        fingerprint="pa:" + "0" * 64,
+        question_text="PA-Aktion ausführen: tmux.interrupt?",
+        options=[],
+        kind="pa_action",
+        action_payload={
+            "version": 1,
+            "category": "tmux.interrupt",
+            "payload": {"session": "work", "window": "codex"},
+            "reason": "Prozess hängt",
+        },
+    )
+
+    payload = pa.build_inbox()
+
+    assert payload["errors"] == []
+    by_type = {item["type"]: item for item in payload["items"]}
+    assert by_type["question"]["kind"] == "kimi"
+    assert by_type["question"]["question_id"]
+    action = by_type["pa_action"]
+    assert action["category"] == "tmux.interrupt"
+    assert action["action_payload"]["payload"]["window"] == "codex"
+
+
+def test_inbox_kanban_held_tasks_block_radius_and_sorting(
+    isolated_pa_home: Path,
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect_closing() as conn:
+        _insert_kanban_task(conn, "t_root", status="blocked", block_kind="needs_input")
+        _insert_kanban_task(conn, "t_child1", status="todo")
+        _insert_kanban_task(conn, "t_child2", status="done")
+        _insert_kanban_task(conn, "t_grand", status="running")
+        _insert_kanban_task(conn, "t_gate", status="scheduled", freigabe="build")
+        _insert_kanban_task(conn, "t_noise", status="running")
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES ('t_root', 't_child1')"
+        )
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES ('t_root', 't_child2')"
+        )
+        conn.execute(
+            "INSERT INTO task_links (parent_id, child_id) VALUES ('t_child1', 't_grand')"
+        )
+        conn.commit()
+
+    payload = pa.build_inbox()
+
+    assert payload["errors"] == []
+    cards = {item["card_id"]: item for item in payload["items"] if "card_id" in item}
+    # live descendants of t_root: t_child1 + t_grand (t_child2 is done) → 3
+    assert cards["t_root"]["type"] == "held_task"
+    assert cards["t_root"]["block_radius"] == 3
+    assert cards["t_gate"]["type"] == "freigabe_gate"
+    assert cards["t_gate"]["block_radius"] == 1
+    assert "t_noise" not in cards
+    # block radius first: t_root (3) before t_gate (1)
+    ordered = [item.get("card_id") for item in payload["items"] if "card_id" in item]
+    assert ordered.index("t_root") < ordered.index("t_gate")
+
+
+def test_inbox_kanban_failure_isolated(
+    isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    aq.insert_question_event(
+        session="work",
+        window="kimi",
+        pane_id="%1",
+        fingerprint="fp-survives",
+        question_text="Frage überlebt Kanban-Ausfall?",
+    )
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("kanban db wedged")
+
+    monkeypatch.setattr(kb, "connect_closing", boom)
+
+    payload = pa.build_inbox()
+
+    assert [item["type"] for item in payload["items"]] == ["question"]
+    assert payload["errors"] == [
+        {"source": "kanban", "error": "kanban db wedged"}
+    ]
+
+
+def test_inbox_endpoint(isolated_pa_home: Path) -> None:
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    with TestClient(app) as client:
+        response = client.get("/api/pa/inbox")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["errors"] == []
