@@ -134,7 +134,10 @@ def test_candidate_invoke_failure_leaves_old_server_live():
     """Candidate discovers OK but its smoke INVOKE fails → reload aborts,
     the live server object is untouched (never shut down, registration kept),
     and the failed candidate is cleaned up."""
-    old = _FakeServer("vault", registered=["mcp__vault__search"])
+    old_session = _FakeSession()
+    old = _FakeServer(
+        "vault", session=old_session, registered=["mcp__vault__search"]
+    )
     cand_session = _FakeSession(invoke_error=RuntimeError("candidate auth failed"))
     candidate = _FakeServer(
         "vault",
@@ -157,6 +160,15 @@ def test_candidate_invoke_failure_leaves_old_server_live():
             assert old.shutdown_calls == 0
             assert old.deregister_calls == 0
             assert old._registered_tool_names == ["mcp__vault__search"]
+
+            # Prove liveness through the real session API, not object identity
+            # alone. The failed candidate must not receive this post-failure call.
+            old_result = _sync_run_on_mcp_loop(
+                old_session.call_tool("search", {})
+            )
+            assert old_result.isError is False
+            assert old_session.invoke_calls == 1
+            assert cand_session.invoke_calls == 1
 
     # The failure is the invoke error, not a reconnect placebo.
     assert "candidate auth failed" in str(ei.value)
