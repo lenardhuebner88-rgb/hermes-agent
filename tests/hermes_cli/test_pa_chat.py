@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import hermes_cli.pa_chat as pa
+from hermes_cli import agent_questions as aq
 
 
 @pytest.fixture
@@ -80,6 +82,66 @@ def test_store_wal_busy_timeout_roundtrip_and_idempotent_schema(
     ]
 
 
+def test_message_attachment_migration_preserves_legacy_rows(
+    isolated_pa_home: Path,
+) -> None:
+    db_path = isolated_pa_home / "pa" / "legacy.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE pa_conversations (
+            id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE pa_turns (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES pa_conversations(id),
+            status TEXT NOT NULL,
+            reply TEXT,
+            error TEXT,
+            engine TEXT NOT NULL,
+            model TEXT NOT NULL,
+            project_scope TEXT,
+            attachments_json TEXT NOT NULL DEFAULT '[]',
+            ts INTEGER NOT NULL,
+            updated_ts INTEGER NOT NULL
+        );
+        CREATE TABLE pa_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL REFERENCES pa_conversations(id),
+            turn_id TEXT NOT NULL REFERENCES pa_turns(id),
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            engine TEXT NOT NULL,
+            model TEXT NOT NULL,
+            ts INTEGER NOT NULL
+        );
+        INSERT INTO pa_conversations VALUES ('default', 1, 1);
+        INSERT INTO pa_turns VALUES (
+            'legacy-turn', 'default', 'done', 'alt', NULL,
+            'sol', 'gpt-5.6-sol', NULL, '[]', 1, 1
+        );
+        INSERT INTO pa_messages(
+            conversation_id, turn_id, role, content, engine, model, ts
+        ) VALUES ('default', 'legacy-turn', 'assistant', 'alt', 'sol', 'gpt-5.6-sol', 1);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = pa.PAStore(db_path)
+    store.ensure_schema()
+
+    with store.connect() as migrated:
+        columns = {
+            str(row[1]) for row in migrated.execute("PRAGMA table_info(pa_messages)")
+        }
+    assert "attachments_json" in columns
+    page = store.message_page()
+    assert page["messages"][0]["content"] == "alt"
+    assert page["messages"][0]["attachments"] == []
+
+
 def test_adapter_argv_prompt_history_images_and_no_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -114,6 +176,8 @@ def test_adapter_argv_prompt_history_images_and_no_resume(
     assert argv[1:3] == ["chat", "-Q"]
     assert argv[argv.index("-m") + 1] == pa.SOL_MODEL
     assert argv[argv.index("-t") + 1] == pa.READ_ONLY_TOOLSETS
+    assert pa.READ_ONLY_TOOLSETS == "context_engine"
+    assert "search" not in argv
     assert "--resume" not in argv
     assert argv.count("--image") == 1
     assert argv[argv.index("--image") + 1] == str(image)
@@ -317,9 +381,24 @@ def test_api_pending_to_done_history_upload_and_attachment(
 
         messages = client.get("/api/pa/messages")
         assert messages.status_code == 200
-        roles = [m["role"] for m in messages.json()["messages"]]
+        message_rows = messages.json()["messages"]
+        roles = [m["role"] for m in message_rows]
         assert roles == ["user", "assistant"]
-        assert messages.json()["messages"][0]["content"] == "Was ist offen?"
+        assert message_rows[0]["content"] == "Was ist offen?"
+        assert message_rows[0]["attachments"] == [{"asset_id": asset_id}]
+        assert message_rows[1]["attachments"] == []
+        assert {row["status"] for row in message_rows} == {"done"}
+        assert {row["error"] for row in message_rows} == {None}
+
+        asset = client.get(f"/api/pa/asset/{asset_id}")
+        assert asset.status_code == 200
+        assert asset.headers["content-type"].startswith("image/png")
+        assert asset.content == b"\x89PNG\r\n\x1a\nfixture"
+
+        invalid_asset = client.get("/api/pa/asset/bad$id.png")
+        assert invalid_asset.status_code == 400
+        missing_asset = client.get("/api/pa/asset/asset_missing.png")
+        assert missing_asset.status_code == 404
 
 
 def test_api_engine_error_is_persisted_and_http_poll_stays_200(
@@ -347,6 +426,12 @@ def test_api_engine_error_is_persisted_and_http_poll_stays_200(
         assert turn["error"] == "Engine-Zeitlimit erreicht"
         assert turn["engine"] == "claude"
         assert turn["model"] == "opus-4.8"
+        messages = client.get("/api/pa/messages").json()["messages"]
+        assert [row["status"] for row in messages] == ["error", "error"]
+        assert [row["error"] for row in messages] == [
+            "Engine-Zeitlimit erreicht",
+            "Engine-Zeitlimit erreicht",
+        ]
 
 
 @pytest.mark.parametrize(
@@ -465,6 +550,7 @@ paths = {getattr(route, 'path', '') for route in app.routes}
 required = {
     '/api/pa/message', '/api/pa/turns/{turn_id}',
     '/api/pa/upload', '/api/pa/history', '/api/pa/messages',
+    '/api/pa/asset/{asset_id}',
 }
 print(json.dumps({
     'ok': required <= paths and not (required & set(_PUBLIC_API_PATHS)),
@@ -485,3 +571,226 @@ print(json.dumps({
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {"ok": True, "missing": []}
+
+
+def test_messages_endpoint_pages_with_before_id_cursor(
+    isolated_pa_home: Path,
+) -> None:
+    store = pa.PAStore()
+    for index in range(4):
+        turn_id = store.create_turn(
+            text=f"Frage {index}",
+            engine="sol",
+            model=pa.SOL_MODEL,
+            project_scope=None,
+            attachments=[],
+            now=100 + index,
+        )
+        assert store.set_running(turn_id, now=200 + index)
+        store.finish_turn(turn_id, f"Antwort {index}", now=300 + index)
+
+    app = FastAPI()
+    pa.register_pa_routes(app)
+    with TestClient(app) as client:
+        newest = client.get("/api/pa/messages?limit=3")
+        assert newest.status_code == 200
+        newest_body = newest.json()
+        cursor = newest_body["next_before_id"]
+        assert isinstance(cursor, int)
+        older = client.get(f"/api/pa/messages?limit=3&before_id={cursor}")
+        assert older.status_code == 200
+        invalid = client.get("/api/pa/messages?before_id=0")
+        assert invalid.status_code == 400
+
+    newest_ids = [row["id"] for row in newest_body["messages"]]
+    older_ids = [row["id"] for row in older.json()["messages"]]
+    assert newest_ids == sorted(newest_ids)
+    assert older_ids == sorted(older_ids)
+    assert set(newest_ids).isdisjoint(older_ids)
+    assert all(row_id < cursor for row_id in older_ids)
+    assert all("status" in row and "error" in row for row in newest_body["messages"])
+
+
+def test_route_registration_reaps_pending_and_running_turns(
+    isolated_pa_home: Path,
+) -> None:
+    store = pa.PAStore()
+    pending = store.create_turn(
+        text="pending",
+        engine="sol",
+        model=pa.SOL_MODEL,
+        project_scope=None,
+        attachments=[],
+        now=1,
+    )
+    running = store.create_turn(
+        text="running",
+        engine="sol",
+        model=pa.SOL_MODEL,
+        project_scope=None,
+        attachments=[],
+        now=2,
+    )
+    done = store.create_turn(
+        text="done",
+        engine="sol",
+        model=pa.SOL_MODEL,
+        project_scope=None,
+        attachments=[],
+        now=3,
+    )
+    assert store.set_running(running, now=4)
+    assert store.set_running(done, now=5)
+    store.finish_turn(done, "fertig", now=6)
+
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    assert store.get_turn(pending)["status"] == "error"
+    assert store.get_turn(pending)["error"] == "Server-Neustart"
+    assert store.get_turn(running)["status"] == "error"
+    assert store.get_turn(done)["status"] == "done"
+    executor_errors = [
+        row
+        for row in store.message_page(limit=20)["messages"]
+        if row["role"] == "assistant" and row["content"] == "Server-Neustart"
+    ]
+    assert len(executor_errors) == 2
+
+
+def test_upload_retention_ttl_soft_cap_startup_and_upload_hook(
+    isolated_pa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = pa.uploads_dir()
+    root.mkdir(parents=True)
+    now = 2_000_000_000.0
+    old = root / "asset_old.png"
+    cap_oldest = root / "asset_cap_oldest.png"
+    newest = root / "asset_newest.png"
+    ignored = root / "operator$note"
+    old.write_bytes(b"old")
+    cap_oldest.write_bytes(b"12345678")
+    newest.write_bytes(b"abcdefgh")
+    ignored.write_bytes(b"keep")
+    os.utime(old, (now - 31 * 86_400, now - 31 * 86_400))
+    os.utime(cap_oldest, (now - 20, now - 20))
+    os.utime(newest, (now - 10, now - 10))
+    os.utime(ignored, (now - 40 * 86_400, now - 40 * 86_400))
+
+    result = pa.prune_uploads(now=now, ttl_days=30, max_total_bytes=10)
+
+    assert result == {"removed": 2, "removed_bytes": 11, "remaining_bytes": 8}
+    assert not old.exists()
+    assert not cap_oldest.exists()
+    assert newest.exists()
+    assert ignored.exists()
+    with pytest.raises(pa.AssetNotFoundError):
+        pa.resolve_asset(old.name)
+
+    startup_old = root / "asset_startup.png"
+    startup_old.write_bytes(b"stale")
+    real_now = time.time()
+    os.utime(startup_old, (real_now - 31 * 86_400, real_now - 31 * 86_400))
+    app = FastAPI()
+    pa.register_pa_routes(app)
+    assert not startup_old.exists()
+
+    prune_calls = 0
+
+    def fake_prune() -> dict[str, int]:
+        nonlocal prune_calls
+        prune_calls += 1
+        return {"removed": 0, "removed_bytes": 0, "remaining_bytes": 0}
+
+    monkeypatch.setattr(pa, "prune_uploads", fake_prune)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/pa/upload",
+            files={"file": ("new.png", b"png", "image/png")},
+        )
+    assert upload.status_code == 200
+    assert prune_calls == 1
+
+
+def test_fake_engine_valid_action_proposal_is_hidden_and_enqueued(
+    isolated_pa_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = {
+        "category": "kanban.nudge",
+        "payload": {"card_id": "t_123", "reason": "Bitte Status prüfen"},
+        "reason": "Die Karte wirkt still",
+    }
+    monkeypatch.setattr(pa, "build_context_pack", lambda scope: "{}")
+    monkeypatch.setattr(
+        pa,
+        "run_engine",
+        lambda *args, **kwargs: (
+            "Ich schlage eine kontrollierte Aktion vor.\n"
+            f"```pa_action {json.dumps(proposal)}```"
+        ),
+    )
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    with TestClient(app) as client:
+        created = client.post("/api/pa/message", json={"text": "Was tun?"})
+        assert created.status_code == 200
+        turn = _poll(client, created.json()["turn_id"], "done")
+
+    assert "pa_action" not in str(turn["reply"])
+    assert turn["reply"] == "Ich schlage eine kontrollierte Aktion vor."
+    events = aq.list_question_events(status="open")
+    assert len(events) == 1
+    assert events[0]["kind"] == "pa_action"
+    assert events[0]["action_payload"] == {
+        "version": 1,
+        **proposal,
+    }
+
+
+@pytest.mark.parametrize(
+    ("reply", "notice_fragment"),
+    [
+        (
+            "Text\n```pa_action {\"category\":\"unknown\",\"payload\":{}}```",
+            "ungültiger oder unbekannter Daten",
+        ),
+        (
+            "Text\n```pa_action {\"category\":\"tmux.interrupt\",\"payload\":{\"session\":\"work\",\"window\":\"a\"}}```\n"
+            "```pa_action {\"category\":\"tmux.interrupt\",\"payload\":{\"session\":\"work\",\"window\":\"b\"}}```",
+            "höchstens einer",
+        ),
+    ],
+)
+def test_proposal_parser_removes_invalid_unknown_and_multiple_blocks(
+    reply: str,
+    notice_fragment: str,
+) -> None:
+    visible, proposal, notice = pa.parse_pa_action_proposal(reply)
+
+    assert proposal is None
+    assert notice is not None and notice_fragment in notice
+    assert "```pa_action" not in visible
+    assert visible == "Text"
+
+
+def test_proposal_parser_accepts_single_fenced_json_block() -> None:
+    reply = (
+        "Weiter nur nach Bestätigung.\n"
+        "```pa_action {\"category\":\"tmux.interrupt\","
+        "\"payload\":{\"session\":\"work\",\"window\":\"codex\"},"
+        "\"reason\":\"Prozess hängt\"}```"
+    )
+
+    visible, proposal, notice = pa.parse_pa_action_proposal(reply)
+
+    assert visible == "Weiter nur nach Bestätigung."
+    assert notice is None
+    assert proposal == {
+        "version": 1,
+        "category": "tmux.interrupt",
+        "payload": {"session": "work", "window": "codex"},
+        "reason": "Prozess hängt",
+    }
