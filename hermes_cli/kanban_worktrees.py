@@ -5354,15 +5354,32 @@ def _completion_source_metadata(
     conn: sqlite3.Connection,
     task_id: str,
     completion_metadata: Optional[dict[str, Any]],
-) -> Optional[dict[str, Any]]:
-    """Find the newest completion metadata that identifies the code commit."""
+) -> list[dict[str, Any]]:
+    """Completion metadata carrying an approved code commit, newest-first.
+
+    The approved code is not necessarily committed by the task that closes the
+    chain: a salvage/finalreview card can close on branch *B* while the reviewed
+    code was committed by an already-``completed`` PARENT run on branch *A*.  So
+    the resolver traverses the whole parent/salvage chain (``task_links`` from
+    the chain root, plus the completing task itself), not just *task_id*'s own
+    runs, and returns each distinct approved commit's metadata ordered from
+    newest run to oldest.  Deterministic: ``ended_at`` then run id, both
+    descending; distinct by commit value.
+    """
+    root_id = chain_root_id(conn, task_id)
+    members = _chain_member_ids(conn, root_id)
+    members.add(task_id)
     candidates: list[dict[str, Any]] = []
-    if isinstance(completion_metadata, dict):
+    if isinstance(completion_metadata, dict) and str(
+        completion_metadata.get("commit") or ""
+    ).strip():
         candidates.append(completion_metadata)
+    placeholders = ",".join("?" for _ in members)
     rows = conn.execute(
         "SELECT metadata FROM task_runs "
-        "WHERE task_id = ? AND outcome = 'completed' ORDER BY id DESC",
-        (task_id,),
+        f"WHERE task_id IN ({placeholders}) AND outcome = 'completed' "
+        "ORDER BY ended_at DESC, id DESC",
+        tuple(sorted(members)),
     ).fetchall()
     for row in rows:
         raw = row["metadata"] if isinstance(row, sqlite3.Row) else row[0]
@@ -5372,9 +5389,71 @@ def _completion_source_metadata(
             parsed = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             continue
-        if isinstance(parsed, dict):
+        if isinstance(parsed, dict) and str(parsed.get("commit") or "").strip():
             candidates.append(parsed)
-    return next((item for item in candidates if item.get("commit")), None)
+    distinct: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for meta in candidates:
+        commit = str(meta.get("commit")).strip()
+        if commit not in seen:
+            seen.add(commit)
+            distinct.append(meta)
+    return distinct
+
+
+def _select_override_source(
+    repo_root: Path,
+    default_branch: str,
+    candidates: list[dict[str, Any]],
+) -> Optional[tuple[dict[str, Any], str]]:
+    """Pick the single approved-commit metadata that must OVERRIDE the chain
+    branch, or ``None`` when the completing chain branch already carries the
+    approved code (the normal, non-salvage case).
+
+    *candidates* are the newest-first distinct approved-commit metadata dicts
+    from :func:`_completion_source_metadata`.  A candidate whose commit is
+    already an ancestor of *default_branch*'s tip needs no override (a parent
+    that committed to the same chain branch, or a superseded earlier commit on
+    it).  Only commits that live OFF the chain branch require redirecting the
+    merge to the approved code's own worktree.
+
+    Fail-closed (Restfix 3): more than one DISTINCT off-branch approved commit
+    is genuine ambiguity — raise :class:`WorktreeError` so the caller parks
+    instead of picking a branch arbitrarily.
+    """
+    branch_present = _branch_exists(repo_root, default_branch)
+    external: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for meta in candidates:
+        requested = str(meta.get("commit") or "").strip()
+        if not requested:
+            continue
+        try:
+            resolved = _git(
+                repo_root, "rev-parse", "--verify", f"{requested}^{{commit}}",
+            )
+        except WorktreeError:
+            # Unknown in this repo: cannot be a merge target — ignore it rather
+            # than park the whole chain on a stale/foreign commit reference.
+            continue
+        if branch_present and _branch_is_ancestor(
+            repo_root, resolved, default_branch
+        ):
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        external.append((resolved, meta))
+    if not external:
+        return None
+    if len(external) > 1:
+        raise WorktreeError(
+            "approved completion commit is ambiguous across the chain: "
+            f"{len(external)} divergent off-branch candidates "
+            f"{sorted(commit for commit, _ in external)}"
+        )
+    resolved, meta = external[0]
+    return meta, resolved
 
 
 def _approved_source_worktree(
@@ -5480,10 +5559,18 @@ def maybe_integrate_on_complete(
     target = frozen_merge_target(conn, root_id)
     branch = chain_branch(root_id)
     approved_commit: Optional[str] = None
-    source_metadata = _completion_source_metadata(
-        conn, task_id, completion_metadata,
-    )
-    if source_metadata is not None:
+    candidates = _completion_source_metadata(conn, task_id, completion_metadata)
+    try:
+        override = _select_override_source(repo_root, branch, candidates)
+    except WorktreeError as exc:
+        return {
+            "action": "parked",
+            "reason": f"ambiguous approved completion commit: {exc}",
+            "branch": branch,
+            "target": target,
+        }
+    if override is not None:
+        source_metadata, _ = override
         try:
             wt, branch, approved_commit = _approved_source_worktree(
                 repo_root, source_metadata,

@@ -241,6 +241,80 @@ def test_finalreview_integrates_approved_salvage_commit_not_card_branch(
     assert _git(repo, "rev-parse", card["branch"])
 
 
+def test_finalreview_parks_on_ambiguous_approved_chain_commits(repo, kanban_home):
+    """Restfix 3/5: two DISTINCT, divergent approved commits live in the same
+    parent/salvage chain (branch A and branch C), while the finalreview card
+    closes on an unrelated branch B.  The finalizer must NOT pick one branch
+    arbitrarily — it fails closed and parks, merging nothing."""
+    branch_a = _provisioned_chain(
+        repo, "t_amb_a", relpath="a_code.py", content="A = 1\n",
+    )
+    branch_c = _provisioned_chain(
+        repo, "t_amb_c", relpath="c_code.py", content="C = 1\n",
+    )
+    card = _provisioned_chain(
+        repo, "t_amb_b", relpath="card.py", content="B = 1\n",
+    )
+    commit_a = _git(branch_a["path"], "rev-parse", "HEAD")
+    commit_c = _git(branch_c["path"], "rev-parse", "HEAD")
+    assert commit_a != commit_c
+
+    with kb.connect() as conn:
+        salvage_id = kb.create_task(
+            conn,
+            title="salvage fix",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(branch_a["path"]),
+        )
+        # Two completed runs in the SAME chain recording divergent approved
+        # commits on different code branches — the ambiguity to fail closed on.
+        _insert_ended_run(
+            conn,
+            salvage_id,
+            profile="coder",
+            metadata={"commit": commit_a, "workspace_path": str(branch_a["path"])},
+        )
+        _insert_ended_run(
+            conn,
+            salvage_id,
+            profile="coder",
+            metadata={"commit": commit_c, "workspace_path": str(branch_c["path"])},
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (salvage_id,),
+        )
+        finalreview_id = kb.create_task(
+            conn,
+            title="salvage finalreview",
+            assignee="reviewer",
+            parents=[salvage_id],
+            workspace_kind="dir",
+            workspace_path=str(card["path"]),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (finalreview_id,),
+        )
+        conn.commit()
+
+        out = kwt.maybe_integrate_on_complete(
+            conn,
+            finalreview_id,
+            completion_metadata={"review_verdict": "APPROVED"},
+            gate_runner=_ok_gate,
+        )
+
+    assert out is not None and out["action"] == "parked"
+    assert "ambiguous" in out["reason"].lower()
+    # Nothing merged; both code branches and the card worktree survive intact.
+    assert _git(repo, "log", "--merges", "--oneline") == ""
+    assert not (repo / "a_code.py").exists()
+    assert not (repo / "c_code.py").exists()
+    assert branch_a["path"].exists()
+    assert branch_c["path"].exists()
+    assert card["path"].exists()
+
+
 def test_approved_commit_resolution_fails_closed_for_ambiguous_branches(repo):
     approved_commit = _git(repo, "rev-parse", "HEAD")
     for root_id in ("t_ambiguous_a", "t_ambiguous_b"):
