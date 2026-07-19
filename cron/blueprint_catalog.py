@@ -119,6 +119,34 @@ _DELIVER = BlueprintSlot(
 
 CATALOG: List[AutomationBlueprint] = [
     AutomationBlueprint(
+        key="jarvis-tagesbrief-am",
+        title="Jarvis Tagesbrief AM",
+        description="Jarvis' PA-thread brief after the 07:30 quiet-hours cutoff.",
+        category="daily",
+        schedule_template="45 7 * * *",
+        prompt_template=(
+            "Run exactly `./venv/bin/python -m hermes_cli.pa_brief morning` in the "
+            "configured workdir. Return its stdout verbatim with no commentary. "
+            "If stdout is [SILENT], return exactly [SILENT]."
+        ),
+        deliver_default="local",
+        tags=("daily", "jarvis", "briefing", "pa-thread"),
+    ),
+    AutomationBlueprint(
+        key="jarvis-tagesbrief-pm",
+        title="Jarvis Tagesbrief PM",
+        description="Jarvis' 21:30 PA-thread ship report.",
+        category="daily",
+        schedule_template="30 21 * * *",
+        prompt_template=(
+            "Run exactly `./venv/bin/python -m hermes_cli.pa_brief evening` in the "
+            "configured workdir. Return its stdout verbatim with no commentary. "
+            "If stdout is [SILENT], return exactly [SILENT]."
+        ),
+        deliver_default="local",
+        tags=("daily", "jarvis", "ship-report", "pa-thread"),
+    ),
+    AutomationBlueprint(
         key="morning-brief",
         title="Morning briefing",
         description="A short daily briefing: today's calendar, weather, and "
