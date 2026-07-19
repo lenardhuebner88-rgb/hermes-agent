@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from hermes_cli.sqlite_util import add_column_if_missing
 from hermes_constants import get_hermes_home
 
 DEFAULT_ENGINE = "sol"
@@ -37,13 +39,19 @@ CLAUDE_OPUS_CLI_MODEL = "claude-opus-4-8"
 CLAUDE_FABLE_CLI_MODEL = "claude-fable-5"
 KIMI_MODEL = "k3"
 KIMI_CLI_MODEL = "kimi-code/k3"
-READ_ONLY_TOOLSETS = "search"
+# ``context_engine`` is a valid, statically empty built-in toolset.  Keeping an
+# explicit -t value is load-bearing: omitting/emptying -t makes the CLI fall
+# back to configured defaults.  If a local context engine is active it may add
+# its own retrieval schemas, but web_search and every write tool remain absent.
+READ_ONLY_TOOLSETS = "context_engine"
 TURN_TIMEOUT_SECONDS = 180
 DB_BUSY_TIMEOUT_MS = 5_000
 CONTEXT_PACK_MAX_CHARS = 14_000
 HISTORY_MAX_MESSAGES = 16
 HISTORY_MAX_CHARS = 6_000
 UPLOAD_MAX_BYTES = 15 * 1024 * 1024
+UPLOAD_TTL_DAYS = 30
+UPLOAD_SOFT_MAX_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,7 @@ _UPLOAD_SUFFIXES = {
     "image/webp": ".webp",
     "image/bmp": ".bmp",
 }
+_UPLOAD_MIME_BY_SUFFIX = {suffix: content_type for content_type, suffix in _UPLOAD_SUFFIXES.items()}
 _PA_ACTION_BLOCK_RE = re.compile(r"```pa_action\b(.*?)```", re.IGNORECASE | re.DOTALL)
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS pa_conversations (
@@ -124,6 +133,7 @@ CREATE TABLE IF NOT EXISTS pa_messages (
     content         TEXT NOT NULL,
     engine          TEXT NOT NULL,
     model           TEXT NOT NULL,
+    attachments_json TEXT NOT NULL DEFAULT '[]',
     ts              INTEGER NOT NULL
 );
 
@@ -139,6 +149,10 @@ _PA_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 
 class PAEngineError(RuntimeError):
     """A user-visible one-shot engine failure."""
+
+
+class AssetNotFoundError(ValueError):
+    """A syntactically valid PA asset id that no longer exists."""
 
 
 class AttachmentIn(BaseModel):
@@ -176,6 +190,13 @@ class PAStore:
 
             apply_wal_with_fallback(conn, db_label="pa/pa.db")
             conn.executescript(_SCHEMA_SQL)
+            # Live Sprint-1 databases predate message attachment persistence.
+            add_column_if_missing(
+                conn,
+                "pa_messages",
+                "attachments_json",
+                "attachments_json TEXT NOT NULL DEFAULT '[]'",
+            )
         self._schema_ready = True
 
     def _ensure_schema(self) -> None:
@@ -218,8 +239,17 @@ class PAStore:
             )
             conn.execute(
                 "INSERT INTO pa_messages(conversation_id, turn_id, role, content, "
-                "engine, model, ts) VALUES (?, ?, 'user', ?, ?, ?, ?)",
-                (_DEFAULT_CONVERSATION_ID, turn_id, text, engine, model, ts),
+                "engine, model, attachments_json, ts) "
+                "VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
+                (
+                    _DEFAULT_CONVERSATION_ID,
+                    turn_id,
+                    text,
+                    engine,
+                    model,
+                    json.dumps(attachments),
+                    ts,
+                ),
             )
         return turn_id
 
@@ -264,7 +294,8 @@ class PAStore:
             )
             conn.execute(
                 "INSERT INTO pa_messages(conversation_id, turn_id, role, content, "
-                "engine, model, ts) VALUES (?, ?, 'assistant', ?, ?, ?, ?)",
+                "engine, model, attachments_json, ts) "
+                "VALUES (?, ?, 'assistant', ?, ?, ?, '[]', ?)",
                 (
                     row["conversation_id"],
                     turn_id,
@@ -309,10 +340,54 @@ class PAStore:
             if exists is None:
                 conn.execute(
                     "INSERT INTO pa_messages(conversation_id, turn_id, role, content, "
-                    "engine, model, ts) VALUES (?, ?, 'assistant', ?, ?, ?, ?)",
+                    "engine, model, attachments_json, ts) "
+                    "VALUES (?, ?, 'assistant', ?, ?, ?, '[]', ?)",
                     (_DEFAULT_CONVERSATION_ID, turn_id, content, engine, model, ts),
                 )
         return turn_id
+
+    def reap_interrupted_turns(
+        self,
+        *,
+        now: int | None = None,
+        error: str = "Server-Neustart",
+    ) -> int:
+        """Terminalize every turn that cannot survive a process restart."""
+        self._ensure_schema()
+        ts = int(time.time()) if now is None else int(now)
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, conversation_id, engine, model FROM pa_turns "
+                "WHERE status IN ('pending','running') ORDER BY ts, rowid"
+            ).fetchall()
+            for row in rows:
+                cursor = conn.execute(
+                    "UPDATE pa_turns SET status='error', reply=?, error=?, updated_ts=? "
+                    "WHERE id=? AND status IN ('pending','running')",
+                    (error, error, ts, row["id"]),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                exists = conn.execute(
+                    "SELECT 1 FROM pa_messages WHERE turn_id=? AND role='assistant' LIMIT 1",
+                    (row["id"],),
+                ).fetchone()
+                if exists is None:
+                    conn.execute(
+                        "INSERT INTO pa_messages("
+                        "conversation_id, turn_id, role, content, engine, model, "
+                        "attachments_json, ts"
+                        ") VALUES (?, ?, 'assistant', ?, ?, ?, '[]', ?)",
+                        (
+                            row["conversation_id"],
+                            row["id"],
+                            error,
+                            row["engine"],
+                            row["model"],
+                            ts,
+                        ),
+                    )
+        return len(rows)
 
     def get_turn(self, turn_id: str) -> dict[str, Any] | None:
         self._ensure_schema()
@@ -374,9 +449,121 @@ class PAStore:
             for row in rows
         ]
 
+    def message_page(
+        self,
+        *,
+        limit: int = 30,
+        before_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Return one chronological bubble page with turn-derived state."""
+        self._ensure_schema()
+        limit = max(1, min(int(limit), 100))
+        if before_id is not None and int(before_id) < 1:
+            raise ValueError("before_id muss positiv sein")
+        where = "m.conversation_id=?"
+        params: list[Any] = [_DEFAULT_CONVERSATION_ID]
+        if before_id is not None:
+            where += " AND m.id < ?"
+            params.append(int(before_id))
+        params.append(limit + 1)
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT m.id, m.turn_id, m.role, m.content, m.engine, m.model, "
+                "m.attachments_json, m.ts, t.status, t.error "
+                "FROM pa_messages AS m JOIN pa_turns AS t ON t.id=m.turn_id "
+                f"WHERE {where} ORDER BY m.id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        messages: list[dict[str, Any]] = []
+        for row in reversed(selected):
+            try:
+                asset_ids = json.loads(row["attachments_json"] or "[]")
+                if not isinstance(asset_ids, list):
+                    asset_ids = []
+            except (TypeError, ValueError, json.JSONDecodeError):
+                asset_ids = []
+            messages.append(
+                {
+                    "id": int(row["id"]),
+                    "turn_id": row["turn_id"],
+                    "role": row["role"],
+                    "content": row["content"],
+                    "engine": row["engine"],
+                    "model": row["model"],
+                    "attachments": [
+                        {"asset_id": str(asset_id)}
+                        for asset_id in asset_ids
+                        if isinstance(asset_id, str)
+                    ],
+                    "ts": int(row["ts"]),
+                    "status": row["status"],
+                    "error": row["error"],
+                }
+            )
+        return {
+            "messages": messages,
+            "next_before_id": (
+                int(selected[-1]["id"]) if has_more and selected else None
+            ),
+        }
+
 
 def uploads_dir() -> Path:
     return get_hermes_home() / "pa" / "uploads"
+
+
+def prune_uploads(
+    *,
+    now: float | None = None,
+    ttl_days: int = UPLOAD_TTL_DAYS,
+    max_total_bytes: int = UPLOAD_SOFT_MAX_BYTES,
+) -> dict[str, int]:
+    """Prune expired assets, then oldest assets above the soft size cap."""
+    root = uploads_dir()
+    if not root.is_dir():
+        return {"removed": 0, "removed_bytes": 0, "remaining_bytes": 0}
+    now_s = time.time() if now is None else float(now)
+    cutoff = now_s - max(1, int(ttl_days)) * 86_400
+    cap = max(0, int(max_total_bytes))
+    removed = 0
+    removed_bytes = 0
+    survivors: list[tuple[Path, int, float]] = []
+    for candidate in root.iterdir():
+        if not _ASSET_ID_RE.fullmatch(candidate.name):
+            continue
+        try:
+            stat = candidate.stat()
+        except (FileNotFoundError, OSError):
+            continue
+        if not candidate.is_file():
+            continue
+        size = int(stat.st_size)
+        if stat.st_mtime < cutoff:
+            try:
+                candidate.unlink()
+                removed += 1
+                removed_bytes += size
+            except (FileNotFoundError, OSError):
+                pass
+            continue
+        survivors.append((candidate, size, float(stat.st_mtime)))
+
+    total = sum(size for _path, size, _mtime in survivors)
+    # Soft cap: retain the newest asset even if a future upload limit exceeds
+    # the configured cap; otherwise remove oldest-first until under budget.
+    for candidate, size, _mtime in sorted(survivors, key=lambda item: (item[2], item[0].name))[:-1]:
+        if total <= cap:
+            break
+        try:
+            candidate.unlink()
+            removed += 1
+            removed_bytes += size
+            total -= size
+        except (FileNotFoundError, OSError):
+            pass
+    return {"removed": removed, "removed_bytes": removed_bytes, "remaining_bytes": total}
 
 
 def resolve_asset(asset_id: str) -> Path:
@@ -389,8 +576,12 @@ def resolve_asset(asset_id: str) -> Path:
     except ValueError as exc:
         raise ValueError("Ungültige asset_id") from exc
     if not candidate.is_file():
-        raise ValueError("Unbekannte asset_id")
+        raise AssetNotFoundError("Unbekannte asset_id")
     return candidate
+
+
+def asset_content_type(path: Path) -> str:
+    return _UPLOAD_MIME_BY_SUFFIX.get(path.suffix.lower(), "application/octet-stream")
 
 
 def _bounded_json(payload: dict[str, Any]) -> str:
@@ -748,6 +939,14 @@ async def _process_turn(
 def register_pa_routes(app: FastAPI) -> None:
     """Register authenticated PA endpoints before the SPA catch-all."""
     store = PAStore()
+    store.ensure_schema()
+    reaped = store.reap_interrupted_turns()
+    if reaped:
+        _log.warning("Reaped %d interrupted PA turn(s) after server restart", reaped)
+    try:
+        prune_uploads()
+    except OSError:
+        _log.warning("PA upload startup prune failed", exc_info=True)
     tasks: set[asyncio.Task[Any]] = set()
 
     @app.post("/api/pa/message")
@@ -809,13 +1008,35 @@ def register_pa_routes(app: FastAPI) -> None:
         return {"turns": await _run_sync(store.recent_turns, limit)}
 
     @app.get("/api/pa/messages")
-    async def pa_messages() -> dict[str, Any]:
+    async def pa_messages(
+        limit: int = 30,
+        before_id: int | None = None,
+    ) -> dict[str, Any]:
         """Chronological user/assistant bubbles for the chat UI.
 
         /api/pa/history intentionally serves turns without the user text;
         the bubble view needs both roles (review finding 2026-07-19).
         """
-        return {"messages": await _run_sync(store.recent_messages)}
+        try:
+            return await _run_sync(
+                store.message_page,
+                limit=limit,
+                before_id=before_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/pa/asset/{asset_id}")
+    async def pa_asset(asset_id: str) -> FileResponse:
+        if not _ASSET_ID_RE.fullmatch(asset_id or ""):
+            raise HTTPException(status_code=400, detail="Ungültige asset_id")
+        try:
+            path = await _run_sync(resolve_asset, asset_id)
+        except AssetNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return FileResponse(path, media_type=asset_content_type(path))
 
     @app.post("/api/pa/upload")
     async def pa_upload(file: UploadFile = File(...)) -> dict[str, str]:
@@ -833,4 +1054,8 @@ def register_pa_routes(app: FastAPI) -> None:
         asset_id = f"asset_{secrets.token_hex(12)}{suffix}"
         target = root / asset_id
         await _run_sync(target.write_bytes, data)
+        try:
+            await _run_sync(prune_uploads)
+        except OSError:
+            _log.warning("PA upload prune failed after %s", asset_id, exc_info=True)
         return {"asset_id": asset_id}
