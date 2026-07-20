@@ -36,13 +36,15 @@ function formatTime(ts: number): string {
 
 export function PeripheryStrip({
   digest,
+  inboxCount = 0,
   onOpenLog,
 }: {
   digest: WatcherDigest;
+  inboxCount?: number;
   /** Tap → Aktivitaet-Drawer der Shell (volles Log bleibt erreichbar). */
   onOpenLog: () => void;
 }) {
-  if (digest.latest.length === 0) return null; // Leerzustand: Strip unsichtbar
+  if (digest.latest.length === 0 && inboxCount <= 0) return null; // S6: Inbox-Badge bleibt erreichbar.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
@@ -61,6 +63,9 @@ export function PeripheryStrip({
     >
       <span className="jv-periph-counts">
         ✓ {digest.completedToday} · 👁 {digest.attentionOpen} · ⚠ {digest.blockedOpen}
+        {inboxCount > 0 ? (
+          <span className="jv-periph-inbox"> · {t.peripheryInbox(inboxCount)}</span>
+        ) : null}
       </span>
       {last ? (
         <span className="jv-periph-last">

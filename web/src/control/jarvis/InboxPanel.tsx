@@ -5,7 +5,8 @@
  * zweiter Poll, kein Fork der Datenquelle).
  *
  * Item-Typen:
- *  - pa_action → Approval-Card: Kategorie, Ziel lesbar aus action_payload
+ *  - pa_action → Approval-Card: Kategorie, Ziel lesbar aus action_payload;
+ *    S6: Grund und Payload bleiben bis zum Aufklappen kompakt verborgen.
  *    (tmux.* → session:window, kanban.* → card_id, planspec.ingest →
  *    draft_id mit PLANSPEC-Chip, S3.3-FE), Keys-Vorschau, reason.
  *    Ausführen/Ablehnen über den BESTEHENDEN Endpoint
@@ -21,7 +22,7 @@
  *
  * ESC oder × schließt die Ansicht.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 
 import { api, type PaInboxActionItem, type PaInboxItem } from "@/lib/api";
@@ -65,7 +66,11 @@ export interface InboxPanelProps {
 }
 
 export function InboxPanel({ items, onClose, onRefresh, onHint }: InboxPanelProps) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
   useEffect(() => {
+    closeButtonRef.current?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
@@ -73,17 +78,45 @@ export function InboxPanel({ items, onClose, onRefresh, onHint }: InboxPanelProp
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  const trapFocus = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      panelRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <div
+      ref={panelRef}
       className="jv-float jv-fragen"
       id="jv-inbox-panel"
-      role="region"
+      role="dialog"
+      aria-modal="true"
       aria-label={t.inboxPanelTitle}
+      onKeyDown={trapFocus}
     >
       <div className="jv-ptitle jv-fragen-head">
         {t.inboxPanelTitle}{" "}
         <span style={{ color: "var(--faint)", letterSpacing: ".05em" }}>{items.length}</span>
-        <button type="button" className="jv-fclose" onClick={onClose} aria-label={t.inboxClose}>
+        <button
+          ref={closeButtonRef}
+          type="button"
+          className="jv-fclose"
+          onClick={onClose}
+          aria-label={t.inboxClose}
+        >
           ×
         </button>
       </div>
@@ -176,14 +209,16 @@ function ApprovalCard({
         </p>
       ) : null}
 
-      {keys ? (
-        <p className="jv-appr-keys" title={keys}>
-          {t.inboxKeysLabel} {keys.length > 120 ? `${keys.slice(0, 120)}…` : keys}
-        </p>
-      ) : null}
-
-      {reason && !item.title.includes(reason) ? (
-        <p className="jv-appr-reason">{reason}</p>
+      {keys || reason ? (
+        <details className="jv-appr-details">
+          <summary>{t.inboxDetails}</summary>
+          {keys ? (
+            <p className="jv-appr-keys" title={keys}>
+              {t.inboxKeysLabel} {keys.length > 120 ? `${keys.slice(0, 120)}…` : keys}
+            </p>
+          ) : null}
+          {reason ? <p className="jv-appr-reason">{reason}</p> : null}
+        </details>
       ) : null}
 
       <div className="jv-appr-actions">

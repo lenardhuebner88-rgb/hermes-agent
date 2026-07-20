@@ -137,7 +137,7 @@ describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
     });
     fireEvent.click(review);
 
-    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "WARTET AUF DICH" })).toBeTruthy();
     expect(await screen.findByTestId("jv-appr-q77")).toBeTruthy();
   });
 
@@ -154,13 +154,13 @@ describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(toggle);
 
-    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "WARTET AUF DICH" })).toBeTruthy();
     expect(await screen.findByTestId("jv-inbox-q-q4")).toBeTruthy();
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(toggle.textContent).toContain("INBOX ZUKLAPPEN");
 
     fireEvent.click(toggle);
-    expect(screen.queryByRole("region", { name: "WARTET AUF DICH" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "WARTET AUF DICH" })).toBeNull();
   });
 
   it("Teilquellen-Ausfall (errors[]) → dezente Zeile, Items bleiben", async () => {
@@ -198,6 +198,6 @@ describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
     getPaInboxMock.mockResolvedValue(inboxResponse([paActionItem(77, "PA-Aktion?")]));
     renderPanel();
 
-    expect(await screen.findByRole("region", { name: "WARTET AUF DICH" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "WARTET AUF DICH" })).toBeTruthy();
   });
 });

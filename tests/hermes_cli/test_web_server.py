@@ -2912,6 +2912,63 @@ class TestWebServerEndpoints:
         assert resp.status_code == 400
         assert "base64" in resp.json()["detail"]
 
+    def test_audio_transcription_provider_failure_returns_clean_json(self, monkeypatch):
+        import tools.transcription_tools as transcription_tools
+
+        monkeypatch.setattr(
+            transcription_tools,
+            "transcribe_audio",
+            lambda *_args, **_kwargs: {
+                "success": False,
+                "error": "provider unavailable",
+            },
+        )
+
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 502
+        assert resp.json() == {"detail": "provider unavailable"}
+
+    def test_audio_transcription_timeout_returns_clean_json(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        async def timeout(_awaitable, *, timeout):
+            assert timeout == web_server._AUDIO_TRANSCRIPTION_TIMEOUT_SECONDS
+            raise TimeoutError
+
+        monkeypatch.setattr(web_server.asyncio, "wait_for", timeout)
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 504
+        assert resp.json() == {"detail": "Transcription provider timed out"}
+
+    def test_audio_transcription_rejects_oversize_upload_with_clean_json(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        monkeypatch.setattr(web_server, "_MAX_TRANSCRIPTION_UPLOAD_BYTES", 4)
+        resp = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "mime_type": "audio/webm",
+            },
+        )
+
+        assert resp.status_code == 413
+        assert resp.json() == {"detail": "Audio recording is too large"}
+
     def test_desktop_audio_routes_registered(self):
         """All three desktop voice endpoints must exist.
 
@@ -2965,6 +3022,36 @@ class TestWebServerEndpoints:
     def test_speak_text_requires_nonempty_text(self):
         resp = self.client.post("/api/audio/speak", json={"text": "   "})
         assert resp.status_code == 400
+
+    def test_speak_text_provider_failure_returns_clean_json(self, monkeypatch):
+        import tools.tts_tool as tts_tool
+
+        monkeypatch.setattr(
+            tts_tool,
+            "text_to_speech_tool",
+            lambda _text: json.dumps({
+                "success": False,
+                "error": "provider unavailable",
+            }),
+        )
+
+        resp = self.client.post("/api/audio/speak", json={"text": "Hallo"})
+
+        assert resp.status_code == 502
+        assert resp.json() == {"detail": "provider unavailable"}
+
+    def test_speak_text_timeout_returns_clean_json(self, monkeypatch):
+        import hermes_cli.web_server as web_server
+
+        async def timeout(_awaitable, *, timeout):
+            assert timeout == web_server._AUDIO_SPEAK_TIMEOUT_SECONDS
+            raise TimeoutError
+
+        monkeypatch.setattr(web_server.asyncio, "wait_for", timeout)
+        resp = self.client.post("/api/audio/speak", json={"text": "Hallo"})
+
+        assert resp.status_code == 504
+        assert resp.json() == {"detail": "Speech provider timed out"}
 
     def test_update_hermes_returns_docker_guidance_without_spawning(self, monkeypatch):
         import hermes_cli.web_server as web_server

@@ -79,4 +79,16 @@ describe("PeripheryStrip", () => {
     );
     expect(container.firstChild).toBeNull();
   });
+
+  it("zeigt offene Approvals als Badge, auch wenn kein Wächter-Event vorliegt", () => {
+    render(
+      <PeripheryStrip
+        digest={digestOf({})}
+        inboxCount={3}
+        onOpenLog={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText(/3 offene Freigaben/)).toBeTruthy();
+  });
 });

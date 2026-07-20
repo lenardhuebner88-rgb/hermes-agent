@@ -982,6 +982,15 @@ export const de = {
     inboxExecute: "Ausführen",
     inboxReject: "Ablehnen",
     inboxKeysLabel: "Tasten:",
+    // S6: mobile Approval-Details und Gesprächs-Kontext.
+    inboxDetails: "Grund & Payload",
+    nextTurnEngine: (engine: string) => `Nächster Turn: ${engine}`,
+    chatDate: (timestamp: number) =>
+      new Date(timestamp * 1000).toLocaleDateString("de-DE", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      }),
     inboxAnswerFailed: "Antwort fehlgeschlagen.",
     inboxHintExecuted: "✓ Ausgeführt — Evidenz im Chat",
     inboxHintFailed: "Ausführung fehlgeschlagen — Evidenz im Chat",
@@ -1076,6 +1085,7 @@ export const de = {
     peripheryAria:
       "Maschinenraum: Wächter-Zusammenfassung — tippen öffnet das Aktivitäts-Log",
     peripheryLast: "zuletzt:",
+    peripheryInbox: (n: number) => `${n} ${n === 1 ? "offene Freigabe" : "offene Freigaben"}`,
     hudToggle: "HUD-Panels (Mock-Statik) ein-/ausblenden",
     // S6.5 — Frame-Age-Indikator in der Live-Share-Statuszeile
     frameAge: (n: number) => `Frame vor ${n} s`,

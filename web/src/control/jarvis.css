@@ -314,7 +314,8 @@ button.jv-ok { cursor: pointer; }
 .jv-fragen {
   left: 0; bottom: calc(100% + 10px); width: 352px;
   max-height: min(430px, calc(100dvh - 300px));
-  display: flex; flex-direction: column; padding: 12px 14px; z-index: 6;
+  display: flex; flex-direction: column;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); z-index: 6;
 }
 .jv-fragen-head { position: relative; }
 .jv-fclose {
@@ -360,8 +361,8 @@ button.jv-ok { cursor: pointer; }
 }
 .jv-fanswer:hover, .jv-fanswer:focus-visible { border-color: var(--cyan); }
 
-/* Approval-Cards (pa_action) in der Inbox-Ansicht: Kategorie-Chip, lesbares
-   Ziel aus dem Payload, Keys-Vorschau, Ausführen/Ablehnen. */
+/* S6: Approval-Cards (pa_action) — Ziel direkt, Grund/Payload aufklappbar,
+   Daumen-Ziele für Ausführen/Ablehnen. */
 .jv-appr { border-color: rgba(255, 179, 71, .35); }
 .jv-appr-chip {
   display: inline-flex; align-items: center; font-family: var(--mono); font-size: 8px;
@@ -383,9 +384,15 @@ button.jv-ok { cursor: pointer; }
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .jv-appr-reason { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--dim); }
+.jv-appr-details { margin-top: 5px; color: var(--dim); }
+.jv-appr-details summary {
+  min-height: 48px; display: flex; align-items: center; cursor: pointer;
+  font-family: var(--mono); font-size: 10px; letter-spacing: .06em; color: var(--dim);
+}
+.jv-appr-details summary:hover, .jv-appr-details summary:focus-visible { color: var(--cyan); }
 .jv-appr-actions { display: flex; gap: 8px; margin-top: 9px; }
 .jv-appr-btn {
-  display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 0 13px;
+  flex: 1; display: inline-flex; align-items: center; justify-content: center; min-height: 48px; padding: 0 13px;
   font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; cursor: pointer;
   border-radius: 6px; background: rgba(4, 7, 15, .45);
 }
@@ -395,6 +402,16 @@ button.jv-ok { cursor: pointer; }
 .jv-appr-no { color: var(--rot); border: 1px solid rgba(255, 92, 105, .45); }
 .jv-appr-no:hover:not(:disabled), .jv-appr-no:focus-visible { border-color: var(--rot); }
 .jv-appr-error { margin-top: 7px; font-size: 11px; line-height: 1.5; color: var(--rot); }
+.jv-periph-inbox { color: var(--amber); }
+
+/* S6: Datums-Gruppierung bleibt innerhalb des Chat-Flusses dezent. */
+.jv-date-separator {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  font-family: var(--mono); font-size: 8.5px; letter-spacing: .1em; color: var(--faint);
+}
+.jv-date-separator::before, .jv-date-separator::after {
+  content: ""; flex: 1; height: 1px; background: var(--line2);
+}
 
 /* ══ Chat-Verlauf (Bubble-Zone, Produkt — kein Mockup-Chrome) ══ */
 .jv-chat {
@@ -519,6 +536,13 @@ button.jv-ok { cursor: pointer; }
 .jv-ask input[type="text"]:disabled { opacity: .55; }
 /* Fokus-Sichtbarkeit: die ganze Pille reagiert auf Tastatur-Fokus im Input. */
 .jv-ask:focus-within { border-color: rgba(56, 216, 255, .55); box-shadow: 0 0 34px rgba(56, 216, 255, .22); }
+/* S6: Effektive Engine für den unmittelbar nächsten Turn. */
+.jv-engine-hint {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 3px; z-index: 4;
+  max-width: calc(100% - 28px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 8px; letter-spacing: .08em; color: var(--faint);
+  pointer-events: none;
+}
 .jv-icons { display: flex; gap: 8px; flex: none; }
 .jv-ic {
   width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line);

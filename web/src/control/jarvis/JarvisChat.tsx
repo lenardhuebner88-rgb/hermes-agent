@@ -32,7 +32,7 @@
  * lebt der JarvisOrb (idle/listening/thinking/speaking/error) mit dem
  * Engine-Switcher.
  */
-import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
 import { ImagePlus, Loader2, Mic, MicOff, MonitorUp, Send, Volume2, VolumeX, X } from "lucide-react";
 
 import { api, type PaChatMessage, type PaEnginesResponse } from "@/lib/api";
@@ -51,6 +51,7 @@ import { PeripheryStrip } from "./PeripheryStrip";
 import { PlanspecCard } from "./PlanspecCard";
 import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
+import { usePaInbox } from "./usePaInbox";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
 import { useLiveShare } from "./useLiveShare";
 import { useSpeechPlayback } from "./useSpeechPlayback";
@@ -66,6 +67,11 @@ export const JARVIS_OPEN_AKTIVITAET_EVENT = "jarvis:open-aktivitaet";
 function formatBubbleTime(ts: number): string {
   const d = new Date(ts * 1000);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function messageDay(ts: number): string {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
 /** Thumbnail eines History-Attachments über die authentifizierte Asset-URL.
@@ -158,6 +164,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   const chat = usePaChat({ turnPollIntervalMs });
   const planspec = usePlanspecDraft();
   const roster = usePaEngines();
+  const inbox = usePaInbox();
   const choice = useEngineChoice();
   const [text, setText] = useState("");
   const threadRef = useRef<HTMLDivElement | null>(null);
@@ -188,6 +195,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // mit Tooltip statt erst beim Senden in den Backend-400 zu laufen.
   const engine = effectiveEngine(choice, roster.data);
   const imagesOk = findEngineSpec(roster.data, engine)?.supports_images ?? true;
+  const inboxCount = inbox.data?.items.filter((item) => item.type === "pa_action").length ?? 0;
 
   // S5-Design: Wächter-Nachrichten (engine === "pa-watcher") verlassen das
   // Gespräch — die Konversation rendert nur Mensch ↔ Assistent, der Wächter
@@ -406,7 +414,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           (Periphery-Zeile) ÜBER dem Gespräch. */}
       <div className="jv-orbhead">
         <JarvisOrb state={orbState} engineLabel={engineLabel} />
-        <PeripheryStrip digest={watcherDigest} onOpenLog={onOpenLog} />
+        <PeripheryStrip digest={watcherDigest} inboxCount={inboxCount} onOpenLog={onOpenLog} />
       </div>
 
       {hasThread ? (
@@ -421,13 +429,25 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
               {chat.loadingOlder ? t.loadOlderBusy : t.loadOlder}
             </button>
           ) : null}
-          {conversation.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              roster={roster.data ?? null}
-            />
-          ))}
+          {conversation.map((message, index) => {
+            const previous = conversation[index - 1];
+            const startsDay = !previous || messageDay(previous.ts) !== messageDay(message.ts);
+            return (
+              <Fragment key={message.id}>
+                {startsDay ? (
+                  <div
+                    className="jv-date-separator"
+                    data-testid="jv-date-separator"
+                    role="separator"
+                    aria-label={t.chatDate(message.ts)}
+                  >
+                    <span>{t.chatDate(message.ts)}</span>
+                  </div>
+                ) : null}
+                <MessageBubble message={message} roster={roster.data ?? null} />
+              </Fragment>
+            );
+          })}
           {chat.activeTurn ? (
             <>
               <div className="jv-bubble jv-bubble-user">
@@ -631,6 +651,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           }}
         />
       </form>
+      <div className="jv-engine-hint">{t.nextTurnEngine(engine)}</div>
     </div>
   );
 }

@@ -57,6 +57,7 @@ const sendPaMessageMock = vi.hoisted(() => vi.fn());
 const getPaTurnMock = vi.hoisted(() => vi.fn());
 const uploadPaImageMock = vi.hoisted(() => vi.fn());
 const getPaEnginesMock = vi.hoisted(() => vi.fn());
+const getPaInboxMock = vi.hoisted(() => vi.fn());
 const transcribeAudioMock = vi.hoisted(() => vi.fn());
 const speakTextMock = vi.hoisted(() => vi.fn());
 const startLiveShareMock = vi.hoisted(() => vi.fn());
@@ -75,6 +76,7 @@ vi.mock("@/lib/api", async () => {
       getPaTurn: getPaTurnMock,
       uploadPaImage: uploadPaImageMock,
       getPaEngines: getPaEnginesMock,
+      getPaInbox: getPaInboxMock,
       transcribeAudio: transcribeAudioMock,
       speakText: speakTextMock,
       startLiveShare: startLiveShareMock,
@@ -217,6 +219,7 @@ beforeEach(() => {
   );
   uploadPaImageMock.mockResolvedValue({ asset_id: "asset_ab12cd.png" });
   getPaEnginesMock.mockResolvedValue(ROSTER);
+  getPaInboxMock.mockResolvedValue({ items: [], errors: [] });
   transcribeAudioMock.mockResolvedValue({
     ok: true,
     transcript: "hallo welt",
@@ -597,6 +600,52 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     const badge = modelTexts.find((el) => el.closest(".jv-badge"));
     expect(badge).toBeTruthy();
     expect(badge?.textContent).toMatch(/· \d{2}:\d{2}/);
+  });
+
+  it("zeigt die effektive Engine des nächsten Turns am Composer", async () => {
+    setEngineChoice({ engine: "claude", model: "opus-4.8" });
+
+    renderChat();
+
+    expect(await screen.findByText("Nächster Turn: claude")).toBeTruthy();
+  });
+
+  it("gruppiert ältere Bubbles mit Datums-Trennern nach Tag", async () => {
+    const older = new Date(2026, 6, 18, 12).getTime() / 1000;
+    const newer = new Date(2026, 6, 19, 12).getTime() / 1000;
+    serverMessages = [
+      userMessage("älter", { ts: older }),
+      assistantMessage("neuer", { ts: newer }),
+    ];
+
+    renderChat();
+
+    await screen.findByText("neuer");
+    const separators = screen.getAllByTestId("jv-date-separator");
+    expect(separators).toHaveLength(2);
+    expect(separators.map((node) => node.textContent)).toEqual([
+      new Date(older * 1000).toLocaleDateString("de-DE", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      }),
+      new Date(newer * 1000).toLocaleDateString("de-DE", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      }),
+    ]);
+  });
+
+  it("reicht die Zahl offener Approvals an die Periphery-Zeile weiter", async () => {
+    getPaInboxMock.mockResolvedValue({
+      items: [{ type: "pa_action", id: "q1" }, { type: "question", id: "q2" }],
+      errors: [],
+    });
+
+    renderChat();
+
+    expect(await screen.findByText(/1 offene Freigabe/)).toBeTruthy();
   });
 
   // ── S2.2: Switcher-Wahl im POST + MAX-Marker + Bild-Disable ────────────
