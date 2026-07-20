@@ -20,6 +20,8 @@
  *  7. S3.6: Push-to-Talk transkribiert in den Composer (kein Auto-Send),
  *     Permission-/Transkriptionsfehler lassen den Input unverändert; der
  *     persistierte Vorlese-Toggle liest nur neue fertige Antworten einmal.
+ *  8. S3.7: Screenshare zieht genau einen JPEG-Frame, stoppt den Stream und
+ *     nutzt unverändert den bestehenden PA-Bild-Upload-Pfad.
  * Payload-Shapes: realistische Formen aus tests/hermes_cli/test_pa_chat.py.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -72,6 +74,8 @@ let serverMessages: PaChatMessage[] = [];
 let serverNextBeforeId: number | null = null;
 let msgId = 0;
 let getUserMediaMock: ReturnType<typeof vi.fn>;
+let getDisplayMediaMock: ReturnType<typeof vi.fn>;
+let displayTrackStopMock: ReturnType<typeof vi.fn>;
 
 class FakeMediaRecorder {
   static isTypeSupported = vi.fn(() => true);
@@ -104,9 +108,13 @@ function installVoiceBrowserStubs() {
   getUserMediaMock = vi.fn().mockResolvedValue({
     getTracks: () => [{ stop: vi.fn() }],
   } as unknown as MediaStream);
+  displayTrackStopMock = vi.fn();
+  getDisplayMediaMock = vi.fn().mockResolvedValue({
+    getTracks: () => [{ stop: displayTrackStopMock }],
+  } as unknown as MediaStream);
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
-    value: { getUserMedia: getUserMediaMock },
+    value: { getUserMedia: getUserMediaMock, getDisplayMedia: getDisplayMediaMock },
   });
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
 
@@ -349,6 +357,77 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
 
     expect(await screen.findByText("foto.jpg")).toBeTruthy();
     expect(uploadPaImageMock).toHaveBeenCalledWith(file);
+  });
+
+  it("Screenshare-Klick erfasst einen JPEG-Frame, lädt ihn einmal hoch und stoppt den Stream", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      drawImage,
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
+      callback(new Blob(["jpeg-frame"], { type: "image/jpeg" }));
+    });
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(function (
+      this: HTMLMediaElement,
+    ) {
+      Object.defineProperties(this, {
+        videoWidth: { configurable: true, value: 1280 },
+        videoHeight: { configurable: true, value: 720 },
+      });
+      this.dispatchEvent(new Event("loadeddata"));
+      return Promise.resolve();
+    });
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+
+    await vi.waitFor(() => expect(uploadPaImageMock).toHaveBeenCalledTimes(1));
+    const file = uploadPaImageMock.mock.calls[0]?.[0] as File;
+    expect(file).toBeInstanceOf(File);
+    expect(file.name).toBe("screenshot.jpg");
+    expect(file.type).toBe("image/jpeg");
+    expect(getDisplayMediaMock).toHaveBeenCalledWith({ video: true });
+    expect(drawImage).toHaveBeenCalledTimes(1);
+    expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("abgebrochener Screenshare-Picker bleibt still und hängt kein Bild an", async () => {
+    getDisplayMediaMock.mockRejectedValueOnce(new DOMException("cancelled", "NotAllowedError"));
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+
+    await vi.waitFor(() => expect(getDisplayMediaMock).toHaveBeenCalledTimes(1));
+    expect(uploadPaImageMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("toBlob(null) zeigt die Screenshare-Fehlermeldung und stoppt den Stream", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      drawImage: vi.fn(),
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
+      callback(null);
+    });
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(function (
+      this: HTMLMediaElement,
+    ) {
+      Object.defineProperties(this, {
+        videoWidth: { configurable: true, value: 800 },
+        videoHeight: { configurable: true, value: 600 },
+      });
+      this.dispatchEvent(new Event("loadeddata"));
+      return Promise.resolve();
+    });
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Bildschirmaufnahme fehlgeschlagen",
+    );
+    expect(uploadPaImageMock).not.toHaveBeenCalled();
+    expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
   });
 
   it("Message-POST-Fehler → Composer-Fehlerzeile (role=alert), kein stiller Fehler", async () => {

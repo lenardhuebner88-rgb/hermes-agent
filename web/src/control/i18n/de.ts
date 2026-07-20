@@ -938,6 +938,8 @@ export const de = {
     composerLabel: "Frag an Jarvis",
     inputLabel: "Nachricht an Jarvis",
     attachLabel: "Bild anhängen",
+    screenshareLabel: "Bildschirm teilen",
+    screenshareError: "Bildschirmaufnahme fehlgeschlagen",
     removeAttachment: "Bild entfernen",
     sendLabel: "Nachricht senden",
     // S3.6 — Push-to-Talk (Mic-Button) + Vorlese-Toggle
