@@ -97,12 +97,15 @@ class _ThreadAwareEventProxy:
     """Drop-in proxy that maps threading.Event methods to per-thread state."""
 
     def is_set(self) -> bool:
+        """Return whether the CURRENT thread is interrupted (→ is_interrupted)."""
         return is_interrupted()
 
     def set(self) -> None:  # noqa: A003
+        """Signal an interrupt on the CURRENT thread (→ set_interrupt(True))."""
         set_interrupt(True)
 
     def clear(self) -> None:
+        """Clear the interrupt on the CURRENT thread (→ set_interrupt(False))."""
         set_interrupt(False)
 
     def wait(self, timeout: float | None = None) -> bool:
