@@ -240,6 +240,46 @@ def test_kimi_argv_is_one_shot_text_only_without_auto_approval(
     assert "--auto" not in argv
 
 
+def test_qwen_argv_is_stateless_safe_mode_one_shot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pa, "_qwen_bin", lambda: "/opt/bin/qwen")
+
+    argv = pa.build_qwen_argv("prompt", model="qwen3.7-plus", image_paths=[])
+
+    assert argv[:3] == ["/opt/bin/qwen", "-p", "prompt"]
+    assert argv[argv.index("-m") + 1] == "qwen3.7-plus"
+    assert argv[argv.index("-o") + 1] == "text"
+    assert "--safe-mode" in argv
+    assert "--resume" not in argv
+    assert "--continue" not in argv
+    assert "-c" not in argv
+
+
+def test_qwen_argv_inlines_images_as_at_refs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pa, "_qwen_bin", lambda: "/opt/bin/qwen")
+
+    argv = pa.build_qwen_argv(
+        "Was ist das?", model="qwen3.7-plus", image_paths=[Path("/tmp/a.png")]
+    )
+
+    prompt = argv[argv.index("-p") + 1]
+    assert "@/tmp/a.png" in prompt
+    assert "Was ist das?" in prompt
+    assert "--image" not in argv
+
+
+def test_qwen_argv_rejects_cross_engine_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pa, "_qwen_bin", lambda: "/opt/bin/qwen")
+
+    with pytest.raises(pa.PAEngineError, match="PA-Modell passt nicht zur Engine"):
+        pa.build_qwen_argv("prompt", model="qwen3.7-max", image_paths=[])
+
+
 def test_engine_registry_has_complete_roster_and_vision_contract() -> None:
     assert {
         engine: {
@@ -264,12 +304,17 @@ def test_engine_registry_has_complete_roster_and_vision_contract() -> None:
             "default_model": "k3",
             "supports_images": False,
         },
+        "qwen": {
+            "models": ("qwen3.7-plus",),
+            "default_model": "qwen3.7-plus",
+            "supports_images": True,
+        },
     }
 
 
 @pytest.mark.parametrize(
     ("engine", "model"),
-    [("sol", "gpt-5.6-sol"), ("claude", "opus-4.8"), ("kimi", "k3")],
+    [("sol", "gpt-5.6-sol"), ("claude", "opus-4.8"), ("kimi", "k3"), ("qwen", "qwen3.7-plus")],
 )
 def test_run_engine_maps_nonzero_exit(
     engine: str, model: str, monkeypatch: pytest.MonkeyPatch
@@ -317,6 +362,30 @@ def test_run_engine_rejects_empty_stdout(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(pa.PAEngineError, match="Engine lieferte keine Antwort"):
         pa.run_engine("claude", "prompt", model="opus-4.8", image_paths=[])
+
+
+def test_run_engine_qwen_runs_in_image_dir_for_workspace_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(pa.subprocess, "run", fake_run)
+    monkeypatch.setattr(pa, "_qwen_bin", lambda: "/opt/bin/qwen")
+
+    pa.run_engine(
+        "qwen", "prompt", model="qwen3.7-plus", image_paths=[Path("/up/a.png")]
+    )
+    assert seen["cwd"] == "/up"
+
+    pa.run_engine("qwen", "prompt", model="qwen3.7-plus", image_paths=[])
+    assert seen["cwd"] is None
+
+    pa.run_engine("sol", "prompt", model="gpt-5.6-sol", image_paths=[Path("/up/a.png")])
+    assert seen["cwd"] is None
 
 
 def test_api_pending_to_done_history_upload_and_attachment(
@@ -436,7 +505,7 @@ def test_api_engine_error_is_persisted_and_http_poll_stays_200(
 
 @pytest.mark.parametrize(
     ("engine", "model"),
-    [("claude", "fable-5"), ("kimi", "k3")],
+    [("claude", "fable-5"), ("kimi", "k3"), ("qwen", "qwen3.7-plus")],
 )
 def test_api_dispatches_engine_and_model(
     isolated_pa_home: Path,
@@ -1012,3 +1081,6 @@ def test_engines_endpoint_exposes_roster(isolated_pa_home: Path) -> None:
     assert set(engines["claude"]["models"]) == {"opus-4.8", "fable-5"}
     assert engines["claude"]["supports_images"] is False
     assert engines["kimi"]["models"] == ["k3"]
+    assert engines["qwen"]["models"] == ["qwen3.7-plus"]
+    assert engines["qwen"]["default_model"] == "qwen3.7-plus"
+    assert engines["qwen"]["supports_images"] is True
