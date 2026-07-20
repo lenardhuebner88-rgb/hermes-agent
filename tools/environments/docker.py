@@ -36,6 +36,11 @@ _DOCKER_SEARCH_PATHS = [
 
 _docker_executable: Optional[str] = None  # resolved once, cached
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_S6_INIT_ENTRYPOINTS = frozenset({
+    "/init",
+    "/package/admin/s6-overlay/command/init",
+    "/opt/hermes/docker/pre-init-uid-guard.sh",
+})
 
 
 def _normalize_forward_env_names(forward_env: list[str] | None) -> list[str]:
@@ -380,7 +385,7 @@ def _build_security_args(run_as_host_user: bool, run_exec: bool = False) -> list
 
 
 def _image_uses_init_entrypoint(docker_exe: str, image: str) -> bool:
-    """Return True if ``image``'s entrypoint is the s6-overlay ``/init``.
+    """Return True if ``image`` enters s6-overlay directly or via our guard.
 
     Such images (e.g. anything built on ``s6-overlay``, including
     ``hermes-agent:latest``) already provide their own PID-1 init and execute
@@ -421,7 +426,7 @@ def _image_uses_init_entrypoint(docker_exe: str, image: str) -> bool:
     if not isinstance(entrypoint, list) or not entrypoint:
         return False
     first = str(entrypoint[0]).strip()
-    return first in ("/init", "/package/admin/s6-overlay/command/init")
+    return first in _S6_INIT_ENTRYPOINTS
 
 
 def _resolve_host_user_spec() -> Optional[str]:

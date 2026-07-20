@@ -80,12 +80,12 @@ RUN set -eu; \
     # #34192: backward-compat shim for orchestration templates that still\
     # reference the legacy /usr/bin/tini entrypoint (e.g. Hostinger's\
     # 'Hermes WebUI' catalog). The image has moved to s6-overlay /init\
-    # as PID 1 (see ENTRYPOINT below + the migration comment at the top\
-    # of this file), but external wrappers pinned to /usr/bin/tini will\
+    # as PID 1 (the configured pre-init guard execs /init after validating\
+    # the container UID), but external wrappers pinned to /usr/bin/tini will\
     # crash with 'tini: No such file or directory' on startup. The shim\
     # symlinks /usr/bin/tini -> /init so legacy wrappers exec the right\
     # PID-1 reaper without behavior change for users on the current\
-    # ENTRYPOINT. Safe to drop once the affected catalogs are updated.\
+    # runtime. Safe to drop once the affected catalogs are updated.\
     ln -sf /init /usr/bin/tini
 
 # Non-root user for runtime; UID can be overridden via HERMES_UID at runtime
@@ -255,7 +255,9 @@ RUN if [ -n "${HERMES_GIT_SHA}" ]; then \
 # the profile create/delete hooks (Phase 4); they live under
 # /run/service/ (tmpfs) and are reconciled on container restart by
 # /etc/cont-init.d/02-reconcile-profiles (Phase 4 Task 4.0).
-COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
+# a+rX makes the service definitions readable by the hermes user so
+# s6-rc-compile also works with --user 10000:10000.
+COPY --chmod=a+rX docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 
 # stage2-hook handles UID/GID remap, volume chown, config seeding,
 # skills sync — all the work the old entrypoint.sh did before
@@ -357,5 +359,9 @@ VOLUME [ "/opt/data" ]
 # and exec's the final program so its exit code becomes the container
 # exit code. Without the wrapper-as-ENTRYPOINT, leading-dash args
 # like `--version` would be intercepted by /init's POSIX shell.
-ENTRYPOINT [ "/init", "/opt/hermes/docker/main-wrapper.sh" ]
+#
+# The configured entrypoint validates arbitrary --user UIDs before /init can
+# reach s6-rc-compile. It then execs /init, so s6-overlay still becomes PID 1
+# and retains its supervision and signal-forwarding guarantees.
+ENTRYPOINT [ "/opt/hermes/docker/pre-init-uid-guard.sh" ]
 CMD [ ]

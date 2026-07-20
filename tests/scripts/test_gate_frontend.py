@@ -91,6 +91,9 @@ def _make_repo(tmp_path: Path, *, tsc: str) -> tuple[Path, Path, Path]:
     (repo / "scripts" / "gate-frontend.sh").chmod(_EXEC)
     (repo / "scripts" / "check-design-tokens.sh").write_text(TOKENS_SCRIPT.read_text())
     (repo / "scripts" / "check-design-tokens.sh").chmod(_EXEC)
+    # The real helper checks commit drift against main; the fake repository
+    # only needs an executable no-op so the gate can reach the behavior tested.
+    _write_exec(repo / "scripts" / "check-branch-age.sh")
     (repo / "package-lock.json").write_text("{}\n")
 
     bindir = repo / "node_modules" / ".bin"

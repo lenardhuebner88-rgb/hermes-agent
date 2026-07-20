@@ -4,10 +4,12 @@ Build the real image and verify:
 
   1. /usr/bin/tini exists and is a symlink to /init (the compat shim
      for orchestration templates that still reference /usr/bin/tini)
-  2. The actual ENTRYPOINT is /init (s6-overlay), not /usr/bin/tini
+  2. The configured ENTRYPOINT is the UID guard, not /usr/bin/tini
+  3. The guard execs /init so s6-overlay still becomes PID 1
 """
 from __future__ import annotations
 
+import json
 import subprocess
 
 
@@ -31,11 +33,11 @@ def test_tini_compat_symlink_exists(built_image: str) -> None:
     )
 
 
-def test_entrypoint_is_init_not_tini(built_image: str) -> None:
-    """The image's actual ENTRYPOINT must be /init (s6-overlay).
+def test_entrypoint_guard_execs_init_not_tini(built_image: str) -> None:
+    """The UID guard must be the entrypoint and hand PID 1 to /init.
 
     The tini shim is only for legacy external wrappers; the image's own
-    runtime must continue to use the canonical /init.
+    runtime must validate --user before starting the canonical /init.
     """
     r = subprocess.run(
         ["docker", "inspect", built_image,
@@ -43,12 +45,19 @@ def test_entrypoint_is_init_not_tini(built_image: str) -> None:
         capture_output=True, text=True, timeout=30,
     )
     assert r.returncode == 0, f"docker inspect failed: {r.stderr}"
-    entrypoint = r.stdout.strip()
-    assert "/init" in entrypoint, (
-        f"ENTRYPOINT is not /init: {entrypoint!r}"
+    entrypoint = json.loads(r.stdout)
+    guard_path = "/opt/hermes/docker/pre-init-uid-guard.sh"
+    assert entrypoint == [guard_path], (
+        f"ENTRYPOINT does not use the UID guard: {entrypoint!r}"
     )
-    # The entrypoint array should be ["/init", "/opt/hermes/docker/main-wrapper.sh"]
-    # /usr/bin/tini should NOT be in the entrypoint.
-    assert "tini" not in entrypoint.lower(), (
-        f"ENTRYPOINT references tini instead of /init: {entrypoint!r}"
+
+    guard = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "cat",
+         built_image, guard_path],
+        capture_output=True, text=True, timeout=30,
     )
+    assert guard.returncode == 0, f"could not inspect UID guard: {guard.stderr}"
+    assert (
+        'exec /init /opt/hermes/docker/main-wrapper.sh "$@"'
+        in guard.stdout.splitlines()
+    ), "UID guard must exec the canonical /init + main-wrapper chain"

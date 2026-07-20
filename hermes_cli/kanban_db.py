@@ -17176,7 +17176,8 @@ def _terminate_reclaimed_worker(
 
     info["sigkill"] = True
     try:
-        send_signal(pid, signal.SIGKILL)
+        # Windows has no SIGKILL; preserve the escalation path with SIGTERM.
+        send_signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except ProcessLookupError:
         pass
     except (PermissionError, OSError) as exc:

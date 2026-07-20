@@ -49,7 +49,10 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     for name in _REAL:
         shutil.copy2(SCRIPTS / name, scripts / name)
     (scripts / "run_tests.sh").write_text(_STUB_RUN_TESTS)
-    for name in (*_REAL, "run_tests.sh"):
+    # The real helper checks commit drift against main; the fake repository
+    # only needs an executable no-op so the wrapper can reach the behavior tested.
+    (scripts / "check-branch-age.sh").write_text("#!/bin/sh\nexit 0\n")
+    for name in (*_REAL, "run_tests.sh", "check-branch-age.sh"):
         (scripts / name).chmod(0o755)
 
     (repo / "pkg").mkdir()

@@ -1638,6 +1638,22 @@ def test_image_uses_init_entrypoint_detects_s6_init(monkeypatch):
     assert docker_env._image_uses_init_entrypoint("/usr/bin/docker", "hermes-agent:latest") is True
 
 
+def test_image_uses_init_entrypoint_detects_hermes_uid_guard(monkeypatch):
+    """Hermes' pre-init UID guard still enters s6-overlay and must be detected."""
+    def _run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='["/opt/hermes/docker/pre-init-uid-guard.sh"]',
+            stderr="",
+        )
+
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+    assert docker_env._image_uses_init_entrypoint(
+        "/usr/bin/docker", "hermes-agent:latest",
+    ) is True
+
+
 def test_image_uses_init_entrypoint_false_for_plain_image(monkeypatch):
     """A normal image (no /init entrypoint) is not treated as s6-overlay."""
     def _run(cmd, **kwargs):
@@ -1674,11 +1690,13 @@ def test_image_uses_init_entrypoint_false_on_exception(monkeypatch):
     assert docker_env._image_uses_init_entrypoint("/usr/bin/docker", "x") is False
 
 
-def test_s6_image_skips_docker_init_and_mounts_run_exec(monkeypatch):
-    """For an s6-overlay /init image, docker run must omit --init and mount
-    /run with exec (issue #34628)."""
+def test_guarded_s6_image_skips_docker_init_and_mounts_run_exec(monkeypatch):
+    """The Hermes UID guard must retain the s6 launcher requirements."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    calls = _mock_subprocess_run_with_entrypoint(monkeypatch, '["/init"]')
+    calls = _mock_subprocess_run_with_entrypoint(
+        monkeypatch,
+        '["/opt/hermes/docker/pre-init-uid-guard.sh"]',
+    )
 
     _make_dummy_env(image="hermes-agent:latest")
 
@@ -1686,7 +1704,7 @@ def test_s6_image_skips_docker_init_and_mounts_run_exec(monkeypatch):
     assert run_calls, "docker run should have been called"
     run_args = run_calls[0][0]
 
-    assert "--init" not in run_args, "s6 /init image must not get Docker --init"
+    assert "--init" not in run_args, "guarded s6 image must not get Docker --init"
 
     tmpfs_vals = [run_args[i + 1] for i, a in enumerate(run_args[:-1]) if a == "--tmpfs"]
     run_mounts = [v for v in tmpfs_vals if v.startswith("/run:")]

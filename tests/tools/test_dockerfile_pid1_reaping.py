@@ -13,8 +13,9 @@ the properties required for correct production behaviour:
 
 The init can be any reaper-capable PID-1: the historical lineage was
 ``tini``; the current image uses s6-overlay's ``/init`` (which execs
-``s6-svscan`` as PID 1, with the same SIGCHLD-reaping property). The
-checks below accept either family — the contract is behavioural, not
+``s6-svscan`` as PID 1, with the same SIGCHLD-reaping property). A pre-init
+guard may be the configured entrypoint only when it ``exec``s that init.
+The checks below accept either family — the contract is behavioural, not
 nominal.
 """
 
@@ -28,6 +29,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+PRE_INIT_UID_GUARD = REPO_ROOT / "docker" / "pre-init-uid-guard.sh"
+_PRE_INIT_UID_GUARD_IMAGE_PATH = "/opt/hermes/docker/pre-init-uid-guard.sh"
+_PRE_INIT_UID_GUARD_EXEC = 'exec /init /opt/hermes/docker/main-wrapper.sh "$@"'
 
 
 # Init-process families this repo accepts as PID 1. ``tini`` /
@@ -132,10 +136,19 @@ def test_dockerfile_entrypoint_routes_through_the_init(dockerfile_text):
     assert entrypoint_line is not None, "Dockerfile is missing an ENTRYPOINT directive"
 
     routes_through_init = any(name in entrypoint_line for name in _KNOWN_INIT_TOKENS)
+    if _PRE_INIT_UID_GUARD_IMAGE_PATH in entrypoint_line:
+        assert PRE_INIT_UID_GUARD.is_file(), (
+            "Dockerfile ENTRYPOINT names the pre-init UID guard, but its source "
+            "file is missing"
+        )
+        guard_lines = PRE_INIT_UID_GUARD.read_text().splitlines()
+        routes_through_init = _PRE_INIT_UID_GUARD_EXEC in guard_lines
+
     assert routes_through_init, (
         f"ENTRYPOINT does not route through a PID-1 init: {entrypoint_line!r}. "
-        f"Expected one of {_KNOWN_INIT_TOKENS}. If the init is installed but "
-        "not wired into ENTRYPOINT, hermes still runs as PID 1 and zombies "
+        f"Expected one of {_KNOWN_INIT_TOKENS}, or the UID guard with an exact "
+        f"{_PRE_INIT_UID_GUARD_EXEC!r} handoff. If the init is installed but "
+        "not wired through ENTRYPOINT, hermes still runs as PID 1 and zombies "
         "will accumulate (#15012)."
     )
 
