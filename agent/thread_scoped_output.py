@@ -78,10 +78,12 @@ class _ThreadRoutingStream:
 
     # --- registration -----------------------------------------------------
     def silence(self, ident: int) -> None:
+        """Register *ident* as silenced; nestable (silence depth is counted)."""
         with self._lock:
             self._silenced[ident] = self._silenced.get(ident, 0) + 1
 
     def unsilence(self, ident: int) -> None:
+        """Undo one :meth:`silence` for *ident*; fully un-silences at depth 0."""
         with self._lock:
             depth = self._silenced.get(ident, 0) - 1
             if depth > 0:
@@ -91,18 +93,21 @@ class _ThreadRoutingStream:
 
     # --- file-like surface ------------------------------------------------
     def write(self, data):  # type: ignore[no-untyped-def]
+        """Write to the current thread's target; swallow errors, return len(data)."""
         try:
             return self._target().write(data)
         except Exception:
             return len(data) if isinstance(data, str) else 0
 
     def flush(self):  # type: ignore[no-untyped-def]
+        """Flush the current thread's target; swallow errors."""
         try:
             return self._target().flush()
         except Exception:
             return None
 
     def writelines(self, lines):  # type: ignore[no-untyped-def]
+        """Write *lines* to the current thread's target; swallow errors."""
         target = self._target()
         try:
             return target.writelines(lines)
@@ -110,12 +115,18 @@ class _ThreadRoutingStream:
             return None
 
     def isatty(self) -> bool:
+        """Report isatty() of the current thread's target (False on error)."""
         try:
             return bool(self._target().isatty())
         except Exception:
             return False
 
     def fileno(self):  # type: ignore[no-untyped-def]
+        """Return the current thread's target fileno(); propagates errors.
+
+        Unlike write/flush, this does NOT swallow exceptions, so a closed or
+        fake sink surfaces as ``ValueError`` to the caller.
+        """
         return self._target().fileno()
 
     def __getattr__(self, name):  # type: ignore[no-untyped-def]
