@@ -20,8 +20,11 @@
  *  7. S3.6: Push-to-Talk transkribiert in den Composer (kein Auto-Send),
  *     Permission-/Transkriptionsfehler lassen den Input unverändert; der
  *     persistierte Vorlese-Toggle liest nur neue fertige Antworten einmal.
- *  8. S3.7: Screenshare zieht genau einen JPEG-Frame, stoppt den Stream und
- *     nutzt unverändert den bestehenden PA-Bild-Upload-Pfad.
+ *  8. S-live: „Bildschirm live teilen" ist eine ECHTE, fortlaufende Session
+ *     (getDisplayMedia + Backend-Session + Frame-Stream), von „Bild anhängen"
+ *     getrennt; nicht unterstützte mobile Browser bekommen einen ehrlichen
+ *     Hinweis statt eines getarnten Bild-Pickers; der Live-Frame wird beim
+ *     Senden materialisiert und mitgeschickt.
  * Payload-Shapes: realistische Formen aus tests/hermes_cli/test_pa_chat.py.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,6 +52,10 @@ const uploadPaImageMock = vi.hoisted(() => vi.fn());
 const getPaEnginesMock = vi.hoisted(() => vi.fn());
 const transcribeAudioMock = vi.hoisted(() => vi.fn());
 const speakTextMock = vi.hoisted(() => vi.fn());
+const startLiveShareMock = vi.hoisted(() => vi.fn());
+const uploadLiveShareFrameMock = vi.hoisted(() => vi.fn());
+const attachLiveShareFrameMock = vi.hoisted(() => vi.fn());
+const stopLiveShareMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -63,6 +70,10 @@ vi.mock("@/lib/api", async () => {
       getPaEngines: getPaEnginesMock,
       transcribeAudio: transcribeAudioMock,
       speakText: speakTextMock,
+      startLiveShare: startLiveShareMock,
+      uploadLiveShareFrame: uploadLiveShareFrameMock,
+      attachLiveShareFrame: attachLiveShareFrameMock,
+      stopLiveShare: stopLiveShareMock,
     },
   };
 });
@@ -109,9 +120,13 @@ function installVoiceBrowserStubs() {
     getTracks: () => [{ stop: vi.fn() }],
   } as unknown as MediaStream);
   displayTrackStopMock = vi.fn();
-  getDisplayMediaMock = vi.fn().mockResolvedValue({
-    getTracks: () => [{ stop: displayTrackStopMock }],
-  } as unknown as MediaStream);
+  getDisplayMediaMock = vi.fn().mockImplementation(async () => {
+    const track = { stop: displayTrackStopMock, onended: null };
+    return {
+      getTracks: () => [track],
+      getVideoTracks: () => [track],
+    } as unknown as MediaStream;
+  });
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
     value: { getUserMedia: getUserMediaMock, getDisplayMedia: getDisplayMediaMock },
@@ -202,6 +217,10 @@ beforeEach(() => {
     polished: false,
   });
   speakTextMock.mockResolvedValue({ data_url: "data:audio/mpeg;base64,SUQz" });
+  startLiveShareMock.mockResolvedValue({ session_id: "live_abcdef012345" });
+  uploadLiveShareFrameMock.mockResolvedValue({ ok: true });
+  attachLiveShareFrameMock.mockResolvedValue({ asset_id: "asset_live99.jpg" });
+  stopLiveShareMock.mockResolvedValue({ ok: true });
   window.localStorage.clear();
   installVoiceBrowserStubs();
 });
@@ -359,39 +378,73 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     expect(uploadPaImageMock).toHaveBeenCalledWith(file);
   });
 
-  it("Screenshare-Klick erfasst einen JPEG-Frame, lädt ihn einmal hoch und stoppt den Stream", async () => {
-    const drawImage = vi.fn();
+  /** Ein Frame-Sampling scharf machen: getContext/toBlob + play, das
+   *  videoWidth/-Height setzt (jsdom-Videos haben sonst 0×0). */
+  function armFrameSampling(): void {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
-      drawImage,
+      drawImage: vi.fn(),
     } as unknown as CanvasRenderingContext2D);
     vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
       callback(new Blob(["jpeg-frame"], { type: "image/jpeg" }));
     });
-    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(function (
+    vi.mocked(HTMLMediaElement.prototype.play).mockImplementation(function (
       this: HTMLMediaElement,
     ) {
       Object.defineProperties(this, {
         videoWidth: { configurable: true, value: 1280 },
         videoHeight: { configurable: true, value: 720 },
       });
-      this.dispatchEvent(new Event("loadeddata"));
       return Promise.resolve();
     });
-    renderChat();
+  }
 
-    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+  it("Screenshare startet ECHTES Live-Sharing (getDisplayMedia + Session, Frame-Stream), nie der Bild-Picker", async () => {
+    armFrameSampling();
+    const { container } = renderChat();
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const pickerClick = vi.spyOn(fileInput, "click").mockImplementation(() => undefined);
 
-    await vi.waitFor(() => expect(uploadPaImageMock).toHaveBeenCalledTimes(1));
-    const file = uploadPaImageMock.mock.calls[0]?.[0] as File;
-    expect(file).toBeInstanceOf(File);
-    expect(file.name).toBe("screenshot.jpg");
-    expect(file.type).toBe("image/jpeg");
-    expect(getDisplayMediaMock).toHaveBeenCalledWith({ video: true });
-    expect(drawImage).toHaveBeenCalledTimes(1);
-    expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
+
+    // Echte Live-Session: getDisplayMedia (Video, kein Audio) + Backend-Session
+    // + kontinuierlicher Frame-Stream — NICHT der einmalige Bild-Upload/Picker.
+    await vi.waitFor(() => expect(startLiveShareMock).toHaveBeenCalledTimes(1));
+    expect(getDisplayMediaMock).toHaveBeenCalledWith({ video: true, audio: false });
+    await vi.waitFor(() =>
+      expect(uploadLiveShareFrameMock).toHaveBeenCalledWith(
+        "live_abcdef012345",
+        expect.any(Blob),
+      ),
+    );
+    expect(pickerClick).not.toHaveBeenCalled();
+    expect(uploadPaImageMock).not.toHaveBeenCalled();
+
+    // Sichtbarer Aktivzustand + Toggle-Label wechselt auf „beenden".
+    expect(await screen.findByText("Teilt Bildschirm")).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Bildschirmteilen beenden" }),
+    ).toBeTruthy();
   });
 
-  it("Android/PWA-Screenshare öffnet den Bild-Picker und hängt die Auswahl genau einmal an", async () => {
+  it("Bild anhängen und Live-Screensharing sind verschiedene Aktionen", async () => {
+    armFrameSampling();
+    const { container } = renderChat();
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const pickerClick = vi.spyOn(fileInput, "click").mockImplementation(() => undefined);
+
+    // „Bild anhängen" öffnet den Datei-Picker und startet KEINE Live-Session.
+    fireEvent.click(await screen.findByRole("button", { name: "Bild anhängen" }));
+    expect(pickerClick).toHaveBeenCalledTimes(1);
+    expect(getDisplayMediaMock).not.toHaveBeenCalled();
+    expect(startLiveShareMock).not.toHaveBeenCalled();
+
+    // „Bildschirm live teilen" startet die Live-Session und öffnet NICHT den Picker.
+    fireEvent.click(screen.getByRole("button", { name: "Bildschirm live teilen" }));
+    await vi.waitFor(() => expect(getDisplayMediaMock).toHaveBeenCalledTimes(1));
+    expect(pickerClick).toHaveBeenCalledTimes(1); // unverändert
+  });
+
+  it("nicht unterstützter mobiler Browser: ehrlicher Hinweis, kein Bild-Picker, keine Erfolgssimulation", async () => {
     vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
       "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 Mobile Safari/537.36",
     );
@@ -399,55 +452,61 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
     const pickerClick = vi.spyOn(fileInput, "click").mockImplementation(() => undefined);
 
-    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
 
-    expect(pickerClick).toHaveBeenCalledTimes(1);
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "wird von diesem mobilen Browser nicht unterstützt",
+    );
     expect(getDisplayMediaMock).not.toHaveBeenCalled();
+    expect(startLiveShareMock).not.toHaveBeenCalled();
+    expect(pickerClick).not.toHaveBeenCalled();
+    expect(screen.queryByText("Teilt Bildschirm")).toBeNull();
 
-    const file = new File(["mobile-photo"], "display.jpg", { type: "image/jpeg" });
+    // Bild anhängen bleibt davon getrennt nutzbar.
+    const file = new File(["mobile-photo"], "foto.jpg", { type: "image/jpeg" });
     fireEvent.change(fileInput, { target: { files: [file] } });
-
-    await vi.waitFor(() => expect(uploadPaImageMock).toHaveBeenCalledTimes(1));
-    expect(uploadPaImageMock).toHaveBeenCalledWith(file);
+    await vi.waitFor(() => expect(uploadPaImageMock).toHaveBeenCalledWith(file));
   });
 
-  it("abgebrochener Screenshare-Picker bleibt still und hängt kein Bild an", async () => {
-    getDisplayMediaMock.mockRejectedValueOnce(new DOMException("cancelled", "NotAllowedError"));
+  it("abgebrochenes Live-Sharing (NotAllowedError) bleibt still, ohne Aktivzustand", async () => {
+    getDisplayMediaMock.mockRejectedValueOnce(
+      new DOMException("cancelled", "NotAllowedError"),
+    );
     renderChat();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
 
     await vi.waitFor(() => expect(getDisplayMediaMock).toHaveBeenCalledTimes(1));
-    expect(uploadPaImageMock).not.toHaveBeenCalled();
+    expect(startLiveShareMock).not.toHaveBeenCalled();
+    expect(uploadLiveShareFrameMock).not.toHaveBeenCalled();
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText("Teilt Bildschirm")).toBeNull();
   });
 
-  it("toBlob(null) zeigt die Screenshare-Fehlermeldung und stoppt den Stream", async () => {
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
-      drawImage: vi.fn(),
-    } as unknown as CanvasRenderingContext2D);
-    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((callback) => {
-      callback(null);
-    });
-    vi.mocked(HTMLMediaElement.prototype.play).mockImplementationOnce(function (
-      this: HTMLMediaElement,
-    ) {
-      Object.defineProperties(this, {
-        videoWidth: { configurable: true, value: 800 },
-        videoHeight: { configurable: true, value: 600 },
-      });
-      this.dispatchEvent(new Event("loadeddata"));
-      return Promise.resolve();
+  it("Senden während Live-Sharing hängt den aktuellen Bildschirm-Frame an", async () => {
+    armFrameSampling();
+    sendPaMessageMock.mockImplementation(async () => {
+      serverMessages = [userMessage("was siehst du?"), assistantMessage("Ich sehe dein Terminal.")];
+      return { turn_id: "turn_3f9a1c" };
     });
     renderChat();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
+    await vi.waitFor(() => expect(startLiveShareMock).toHaveBeenCalledTimes(1));
 
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "Bildschirmaufnahme ist hier nicht verfügbar. Bitte wähle stattdessen über „Bild anhängen“ ein Bild oder Foto aus.",
+    const input = await screen.findByLabelText("Nachricht an Jarvis");
+    fireEvent.change(input, { target: { value: "was siehst du?" } });
+    fireEvent.click(screen.getByLabelText("Nachricht senden"));
+
+    // Der Live-Frame wird materialisiert (/attach) und als Anhang mitgesendet.
+    await vi.waitFor(() => expect(attachLiveShareFrameMock).toHaveBeenCalledWith("live_abcdef012345"));
+    await vi.waitFor(() =>
+      expect(sendPaMessageMock).toHaveBeenCalledWith(
+        "was siehst du?",
+        [{ asset_id: "asset_live99.jpg" }],
+        undefined,
+      ),
     );
-    expect(uploadPaImageMock).not.toHaveBeenCalled();
-    expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
   });
 
   it("Message-POST-Fehler → Composer-Fehlerzeile (role=alert), kein stiller Fehler", async () => {

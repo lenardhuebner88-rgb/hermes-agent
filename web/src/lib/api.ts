@@ -988,6 +988,33 @@ export const api = {
       body: form,
     });
   },
+  // Live-Screen-Share (S-live): a real, continuous getDisplayMedia session —
+  // NOT the image picker. start() opens a session; the client streams the
+  // latest frame to /frame (latest wins, no asset pile); attach() materialises
+  // the current frame into ONE normal upload asset for the image-turn pipeline;
+  // stop() ends it (idempotent server-side).
+  startLiveShare: () =>
+    fetchJSON<{ session_id: string }>("/api/pa/live-share/start", {
+      method: "POST",
+    }),
+  uploadLiveShareFrame: (sessionId: string, frame: Blob) => {
+    const form = new FormData();
+    form.append("file", frame, "frame.jpg");
+    return fetchJSON<{ ok: boolean }>(
+      `/api/pa/live-share/${encodeURIComponent(sessionId)}/frame`,
+      { method: "POST", body: form },
+    );
+  },
+  attachLiveShareFrame: (sessionId: string) =>
+    fetchJSON<{ asset_id: string }>(
+      `/api/pa/live-share/${encodeURIComponent(sessionId)}/attach`,
+      { method: "POST" },
+    ),
+  stopLiveShare: (sessionId: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/pa/live-share/${encodeURIComponent(sessionId)}/stop`,
+      { method: "POST" },
+    ),
   createAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
       method: "POST",
