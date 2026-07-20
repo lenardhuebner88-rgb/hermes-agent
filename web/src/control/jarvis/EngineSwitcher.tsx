@@ -1,5 +1,6 @@
 /**
- * EngineSwitcher — S2.2 Modell-Switcher im Shell-Emblem (neben dem Badge).
+ * EngineSwitcher — S2.2 Modell-Switcher, seit S5-Design im Orb-Header des
+ * Chats (JarvisOrb; vorher im Shell-Emblem, das mit S5 entfallen ist).
  *
  * Ersetzt das statische S1-Platzhalter-Badge („◆ GPT-5.6-SOL ▾"): Optionen
  * kommen aus dem echten Roster (GET /api/pa/engines, usePaEngines — gleicher

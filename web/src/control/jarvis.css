@@ -214,6 +214,16 @@ button.jv-ok { cursor: pointer; }
 .jv-more { font-family: var(--mono); font-size: 9.5px; letter-spacing: .14em; color: var(--dim); margin-top: 7px; display: inline-block; text-decoration: none; }
 .jv-more:hover, .jv-more:focus-visible { color: var(--cyan); }
 .jv-sys { display: flex; gap: 14px; align-items: flex-end; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line2); }
+/* S4-Härtung: sichtbarer Mock-Tag an den statischen A4-Panels (Brain-Stats,
+   Top-Hubs, Filter, KI-Lage, Sparklines) — gleiches Label-Muster wie der
+   Graph-Fallback (JARVIS_BRAIN_MOCKTAG), bewusst amber statt live-grün. */
+.jv-panelmock {
+  font-family: var(--mono); font-size: 8px; letter-spacing: .18em; color: var(--amber);
+  border: 1px solid rgba(255, 179, 71, .4); border-radius: 4px; padding: 1px 5px;
+  margin-left: 6px; vertical-align: 2px; white-space: nowrap;
+}
+.jv-sysmock { flex: none; align-self: flex-end; }
+.jv-sysmock .jv-panelmock { margin-left: 0; }
 .jv-spark { flex: 1; min-width: 0; }
 .jv-spark .jv-lb { font-family: var(--mono); font-size: 9px; letter-spacing: .18em; color: var(--dim); display: flex; justify-content: space-between; }
 .jv-spark .jv-lb b { color: var(--txt); font-weight: 500; }
@@ -502,7 +512,10 @@ button.jv-ok { cursor: pointer; }
   flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
   color: var(--txt); font-family: var(--sans); font-size: 13px; min-height: 44px; padding: 0;
 }
-.jv-ask input[type="text"]::placeholder { color: var(--dim); }
+/* S5-Design: gekürzter Hint + Ellipsis statt hart abgeschnittenem Wort. */
+.jv-ask input[type="text"]::placeholder {
+  color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .jv-ask input[type="text"]:disabled { opacity: .55; }
 /* Fokus-Sichtbarkeit: die ganze Pille reagiert auf Tastatur-Fokus im Input. */
 .jv-ask:focus-within { border-color: rgba(56, 216, 255, .55); box-shadow: 0 0 34px rgba(56, 216, 255, .22); }
@@ -839,4 +852,171 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   .jv-chip { min-height: 44px; }
   .jv-rrow, .jv-crow, .jv-srow { min-height: 44px; padding: 9px 10px; }
   .jv-iconbtn { width: 44px; height: 44px; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   S5-Design („JARVIS OS", 2026-07-20): der Assistent ist die Mitte, die
+   Maschine tritt in die Peripherie. Chat-Spalte (Orb + Periphery + Verlauf
+   + Composer), Orb-Zustände, HUD-Toggle (Mock-Panels Default aus, Mobile
+   gar nicht), stärker gedimmte Graph-Ambience.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Chat-Spalte: eine Bottom-verankerte Flex-Spalte statt vier einzeln
+   absolut positionierter Blöcke — Orb-Header und Periphery-Zeile nehmen
+   ihre Höhe, der Verlauf scrollt im Rest, die Frag-Leiste bleibt unten.
+   max-height lässt PROJEKTE (top 16 + max min(342px,42%)) + Strip-Band
+   frei, damit die Spalte nie über die Panels wächst. ── */
+.jv-chatcol {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 4;
+  width: min(640px, calc(100% - 28px));
+  max-height: calc(100% - min(342px, 42%) - 78px);
+  display: flex; flex-direction: column; gap: 10px;
+}
+/* S5 (Polish): Konversation bleibt vor der Graph-Ambience immer sauber
+   lesbar — dezente Abdunklung + Backdrop-Blur hinter der Chat-Spalte, und
+   Luft zwischen Periphery-Zeile und erster Bubble. */
+@media (min-width: 760px) {
+  .jv-chatcol {
+    background: rgba(4, 7, 15, .42);
+    backdrop-filter: blur(6px);
+    border-radius: 14px;
+    padding: 10px 8px;
+    box-sizing: border-box;
+  }
+}
+.jv-chatcol .jv-chat {
+  position: relative; left: auto; bottom: auto; transform: none;
+  width: auto; max-height: none; flex: 0 1 auto; min-height: 0;
+  padding: 10px 6px 6px;
+}
+.jv-chatcol .jv-ask,
+.jv-chatcol .jv-composer-error,
+.jv-chatcol .jv-liveshare-status {
+  position: relative; left: auto; bottom: auto; transform: none; width: auto; flex: none;
+}
+
+/* ── Orb-Header (Identität + Engine-Wahl über dem Gespräch) ── */
+.jv-orbhead {
+  flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px;
+}
+.jv-orbwrap { display: flex; align-items: center; gap: 10px; }
+.jv-orb {
+  position: relative; width: 46px; height: 46px; border-radius: 50%; flex: none;
+  border: 0; background: transparent; cursor: pointer; padding: 0;
+}
+.jv-orb:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; }
+.jv-orb-r {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1.5px solid rgba(56, 216, 255, .5);
+  border-left-color: transparent; border-bottom-color: transparent; transform: rotate(24deg);
+}
+.jv-orb-r2 {
+  inset: 6px; border-color: rgba(255, 179, 71, .55);
+  border-top-color: transparent; border-right-color: transparent; transform: rotate(-38deg);
+}
+.jv-orb-core {
+  position: absolute; inset: 13px; border-radius: 50%;
+  background: radial-gradient(circle at 40% 32%, #7fe6ff, #1c8ec2 55%, #0a2f52);
+  box-shadow: 0 0 18px rgba(56, 216, 255, .5);
+}
+.jv-orbstate {
+  font-family: var(--mono); font-size: 9px; letter-spacing: .3em; color: var(--dim);
+}
+.jv-orbswitch { display: flex; }
+/* Zustandsfarben: listening/error = rot (Mic-Idiom), thinking = cyan
+   (schnellere Ringe, Animation unten), speaking = grün. */
+.jv-orb--listening .jv-orb-r, .jv-orb--error .jv-orb-r {
+  border-color: rgba(255, 92, 105, .55);
+  border-left-color: transparent; border-bottom-color: transparent;
+}
+.jv-orb--listening .jv-orb-core, .jv-orb--error .jv-orb-core {
+  background: radial-gradient(circle at 40% 32%, #ff9aa2, #c21c3a 55%, #520a14);
+  box-shadow: 0 0 18px rgba(255, 92, 105, .55);
+}
+.jv-orb--speaking .jv-orb-core {
+  background: radial-gradient(circle at 40% 32%, #8ff5c0, #1c9e62 55%, #0a3a22);
+  box-shadow: 0 0 18px rgba(61, 220, 151, .55);
+}
+.jv-orbwrap--listening .jv-orbstate, .jv-orbwrap--error .jv-orbstate { color: var(--rot); }
+.jv-orbwrap--thinking .jv-orbstate { color: var(--cyan); }
+.jv-orbwrap--speaking .jv-orbstate { color: var(--grün); }
+
+/* ── Periphery-Zeile (Maschinenraum: deduplizierter Wächter-Digest) ── */
+.jv-periphery {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 30px;
+  padding: 4px 12px; cursor: pointer; box-sizing: border-box;
+  border: 1px solid var(--line2); border-radius: 999px; background: rgba(4, 7, 15, .55);
+  backdrop-filter: blur(7px);
+}
+.jv-periphery:hover, .jv-periphery:focus-visible { border-color: var(--line); }
+.jv-periph-counts {
+  flex: none; font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--dim);
+}
+.jv-periph-last {
+  flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  font-size: 11px; color: var(--faint);
+}
+
+/* ── HUD-Toggle: S1-Mock-Panels (Brain/Filter/KI-LAGE/Sparklines) Default
+   aus (Desktop, persistiert), Mobile gar nicht; Graph-Ambience gedimmt. ── */
+.jv-hudtoggle {
+  position: absolute; left: 16px; bottom: 60px; z-index: 3;
+  min-height: 28px; padding: 0 12px; cursor: pointer;
+  font-family: var(--mono); font-size: 9px; letter-spacing: .2em; color: var(--dim);
+  border: 1px solid var(--line2); border-radius: 999px; background: rgba(9, 15, 28, .66);
+}
+.jv-hudtoggle:hover, .jv-hudtoggle:focus-visible { color: var(--cyan); border-color: var(--line); }
+.jv-hudtoggle.jv-on { color: var(--cyan); border-color: rgba(56, 216, 255, .4); }
+@media (min-width: 760px) {
+  .jv-hud-off .jv-brainpanel,
+  .jv-hud-off .jv-filter,
+  .jv-hud-off .jv-news,
+  .jv-hud-off .jv-sys { display: none; }
+  /* Ausgeblendete Panels → der Graph wird reine Ambience, stark gedimmt
+     (S5-Polish: .45 dominierte noch hinter dem Chat). */
+  .jv-hud-off .jv-brain { opacity: .25; }
+}
+@media (max-width: 759px) {
+  /* Mobile zeigt die Mock-Panels gar nicht (die S1-Stack-Regeln oben bleiben
+     für den HUD-Modus irrelevant — display siegt). Der HUD-Toggle ist dort
+     ohne Funktion und wird ausgeblendet. */
+  .jv-brainpanel, .jv-news, .jv-sys, .jv-hudtoggle { display: none; }
+}
+
+/* ── Orb-Animationen (zentraler Kill-Switch wie A4: nur no-preference) ── */
+@media (prefers-reduced-motion: no-preference) {
+  .jv-orb .jv-orb-r { animation: jv-sp 11s linear infinite; }
+  .jv-orb .jv-orb-r2 { animation: jv-sp 17s linear infinite reverse; }
+  .jv-orb--idle .jv-orb-core { animation: jv-orbpuls 4.6s ease-in-out infinite; }
+  .jv-orb--listening .jv-orb-core { animation: jv-orbpuls 1.6s ease-in-out infinite; }
+  .jv-orb--speaking .jv-orb-core { animation: jv-orbpuls 1.1s ease-in-out infinite; }
+  .jv-orb--thinking .jv-orb-r { animation-duration: 2.4s; }
+  .jv-orb--thinking .jv-orb-r2 { animation-duration: 3.4s; }
+  @keyframes jv-orbpuls {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.12); opacity: .82; }
+  }
+}
+
+/* ── S5 mobil: die Chat-Spalte liegt im Seitenfluss (wie der Verlauf vorher);
+   die Frag-Leiste bleibt die fixierte zweizeilige Pille — die Spalten-Regel
+   .jv-chatcol .jv-ask hat höhere Spezifität als der Mobile-Block oben und
+   muss deshalb hier erneut auf fixed gesetzt werden.
+   S5-Polish: mobil ist das Gespräch die primäre, top-verankerte Ansicht —
+   die Chat-Spalte (Orb-Header → Periphery → Verlauf → Composer) kommt ZUERST,
+   WARTET/PROJEKTE/Strip-Band danach (order hier, Markup unverändert). ── */
+@media (max-width: 759px) {
+  .jv-chatcol {
+    position: relative; left: auto; bottom: auto; transform: none; width: auto;
+    max-height: none; order: 1; gap: 0; margin: 0 0 10px;
+  }
+  .jv-quiet { order: 2; margin-top: 0; }
+  .jv-projekte { order: 3; }
+  .jv-strips { order: 4; }
+  .jv-orbhead { margin: 0 0 10px; }
+  .jv-periphery { min-height: 44px; margin: 4px 0 10px; }
+  .jv-chatcol .jv-ask {
+    position: fixed; left: 12px; right: 12px;
+    bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px) + 8px);
+  }
 }

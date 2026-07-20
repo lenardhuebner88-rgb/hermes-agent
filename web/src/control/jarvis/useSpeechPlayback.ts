@@ -41,9 +41,12 @@ export function useSpeechPlayback(): {
   enabled: boolean;
   setEnabled: (next: boolean) => void;
   speakError: string | null;
+  /** S5-Design: true während eine Wiedergabe läuft (Orb-Zustand „speaking"). */
+  playing: boolean;
 } {
   const [enabled, setEnabledState] = useState<boolean>(readEnabled);
   const [speakError, setSpeakError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const sequenceRef = useRef(0);
@@ -61,6 +64,7 @@ export function useSpeechPlayback(): {
       audio.pause();
       audio.src = "";
     }
+    setPlaying(false);
   }, []);
 
   // Laufende Wiedergabe beim Unmount stoppen.
@@ -89,6 +93,9 @@ export function useSpeechPlayback(): {
       stop();
       const ownSequence = sequenceRef.current;
       const isCurrent = () => ownSequence === sequenceRef.current;
+      // Neuer Versuch löscht den sichtbaren Fehler des vorherigen (S4-Härtung:
+      // der Fehler ist jetzt UI-sichtbar und darf nicht kleben bleiben).
+      setSpeakError(null);
 
       try {
         const response = await api.speakText(speakable);
@@ -96,6 +103,7 @@ export function useSpeechPlayback(): {
 
         const audio = new Audio(response.data_url);
         audioRef.current = audio;
+        setPlaying(true);
 
         await new Promise<void>((resolve, reject) => {
           let stall: number | null = null;
@@ -145,12 +153,14 @@ export function useSpeechPlayback(): {
 
         if (isCurrent()) {
           audioRef.current = null;
+          setPlaying(false);
         }
       } catch {
         // Best-effort: das Vorlesen blockiert NIE den Chat — Fehler nur als
         // State für optionales UI bereitstellen.
         if (isCurrent()) {
           audioRef.current = null;
+          setPlaying(false);
           setSpeakError(t.speakError);
         }
       }
@@ -158,5 +168,5 @@ export function useSpeechPlayback(): {
     [stop],
   );
 
-  return { play, stop, enabled, setEnabled, speakError };
+  return { play, stop, enabled, setEnabled, speakError, playing };
 }

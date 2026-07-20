@@ -239,6 +239,13 @@ export function usePaChat(options: UsePaChatOptions = {}) {
       setAttachment(null); // wandert in die Pending-User-Bubble
       setActiveTurn({ text: trimmed, attachment: sentAttachment, phase: "waiting", error: null });
 
+      // S4-Härtung: die Blob-URL des Anhangs wird in JEDEM Finalize-/Abbruch-
+      // Pfad revoked — auch mitten im Turn (ersetzt/unmounted), sonst leakt
+      // sie bis zum Tab-Close.
+      const releaseAttachment = () => {
+        if (sentAttachment) URL.revokeObjectURL(sentAttachment.previewUrl);
+      };
+
       const finalize = async (assistantText: string | null, isError: boolean) => {
         // Quelle der Wahrheit: Verlauf neu laden (done UND error — das Backend
         // persistiert beide als Assistant-Message, die Fehler-Reply trägt
@@ -251,7 +258,10 @@ export function usePaChat(options: UsePaChatOptions = {}) {
         let landed = false;
         for (let attempt = 0; attempt < 4 && !landed; attempt++) {
           await messagesPoll.reload().catch(() => {});
-          if (generationRef.current !== generation) return;
+          if (generationRef.current !== generation) {
+            releaseAttachment();
+            return;
+          }
           const fresh = getSnapshot<PaMessagesPage>(PA_MESSAGES_KEY)?.data;
           landed =
             assistantText == null ||
@@ -262,8 +272,11 @@ export function usePaChat(options: UsePaChatOptions = {}) {
             await new Promise((resolve) => setTimeout(resolve, turnPollIntervalMs));
           }
         }
-        if (generationRef.current !== generation) return;
-        if (sentAttachment) URL.revokeObjectURL(sentAttachment.previewUrl);
+        if (generationRef.current !== generation) {
+          releaseAttachment();
+          return;
+        }
+        releaseAttachment();
         if (isError && !landed && assistantText) {
           // Server-Verlauf trägt den Fehler (noch) nicht — lokale Error-
           // Bubble stehen lassen statt still zu verlieren.
@@ -287,19 +300,28 @@ export function usePaChat(options: UsePaChatOptions = {}) {
         turnId = created.turn_id;
       } catch (err) {
         setActiveTurn(null);
-        if (sentAttachment) URL.revokeObjectURL(sentAttachment.previewUrl);
+        releaseAttachment();
         setComposerError(`${t.sendFailed} ${extractDetail(err)}`);
         return;
       }
 
       const deadline = Date.now() + turnMaxWaitMs;
       for (;;) {
-        if (generationRef.current !== generation) return; // ersetzt/unmounted
+        if (generationRef.current !== generation) {
+          releaseAttachment();
+          return; // ersetzt/unmounted
+        }
         await new Promise((resolve) => setTimeout(resolve, turnPollIntervalMs));
-        if (generationRef.current !== generation) return;
+        if (generationRef.current !== generation) {
+          releaseAttachment();
+          return;
+        }
         try {
           const turn = await api.getPaTurn(turnId);
-          if (generationRef.current !== generation) return;
+          if (generationRef.current !== generation) {
+            releaseAttachment();
+            return;
+          }
           if (turn.status === "done") {
             await finalize(turn.reply, false);
             return;
@@ -335,7 +357,6 @@ export function usePaChat(options: UsePaChatOptions = {}) {
     attachment,
     uploading,
     composerError,
-    clearComposerError: () => setComposerError(null),
     attachFile,
     removeAttachment,
     send,

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /**
- * EngineSwitcher — S2.2 Modell-Switcher im Shell-Emblem:
+ * EngineSwitcher — S2.2 Modell-Switcher (seit S5-Design im Orb-Header des
+ * Chats; das Shell-Emblem ist entfallen):
  *  1. Optionen kommen aus dem Roster (GET /api/pa/engines) mit den Brief-
  *     Labels („Opus 4.8", „Fable 5", „gpt-5.6-sol", „Kimi K3"); Vorauswahl =
  *     Server-Default, solange keine Wahl getroffen wurde.
@@ -107,5 +108,39 @@ describe("EngineSwitcher (Roster /api/pa/engines)", () => {
       "Modell für den nächsten Turn wählen",
     )) as HTMLSelectElement;
     expect(select.value).toBe("sol:gpt-5.6-sol");
+  });
+
+  it("S4-Härtung: die Wahl überlebt einen Reload (localStorage)", async () => {
+    setEngineChoice({ engine: "claude", model: "opus-4.8" });
+    expect(window.localStorage.getItem("hermes.jarvis.engine")).toBe(
+      JSON.stringify({ engine: "claude", model: "opus-4.8" }),
+    );
+
+    // Reload simulieren: Modul frisch importieren — der Store restauriert die
+    // persistierte Wahl beim Load (Muster des Vorlese-Toggles).
+    vi.resetModules();
+    const fresh = await import("./engineSelection");
+    expect(fresh.getEngineChoice()).toEqual({ engine: "claude", model: "opus-4.8" });
+    fresh._resetEngineChoice();
+  });
+
+  it("S4-Härtung: eine restaurierte Wahl ist die Vorauswahl des Switchers", async () => {
+    window.localStorage.setItem(
+      "hermes.jarvis.engine",
+      JSON.stringify({ engine: "claude", model: "opus-4.8" }),
+    );
+    vi.resetModules();
+    // Komponente UND Store aus derselben frischen Modul-Instanz (der statisch
+    // importierte Switcher hängt am alten Store ohne restaurierte Wahl).
+    const fresh = await import("./engineSelection");
+    const { EngineSwitcher: FreshSwitcher } = await import("./EngineSwitcher");
+    expect(fresh.getEngineChoice()).toEqual({ engine: "claude", model: "opus-4.8" });
+
+    render(<FreshSwitcher />);
+    const select = (await screen.findByLabelText(
+      "Modell für den nächsten Turn wählen",
+    )) as HTMLSelectElement;
+    expect(select.value).toBe("claude:opus-4.8");
+    fresh._resetEngineChoice();
   });
 });

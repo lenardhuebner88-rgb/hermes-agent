@@ -338,4 +338,83 @@ describe("useLiveShare session lifecycle", () => {
     expect(attachLiveShareFrameMock).toHaveBeenCalledWith("live_session01");
     expect(assetId).toBe("asset_live.jpg");
   });
+
+  // ── S4-Härtung: Upload-Fehlerbudget (3 aufeinanderfolgende, Reset bei Erfolg)
+
+  it("tolerates transient upload failures and recovers on the next good frame", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    uploadLiveShareFrameMock
+      .mockRejectedValueOnce(new Error("flap 1"))
+      .mockRejectedValueOnce(new Error("flap 2"))
+      .mockResolvedValue({ ok: true });
+
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    await act(async () => {
+      await result.current.start();
+    });
+    // Frame #0 (immediate sample) failed — a single transient error must NOT
+    // kill the share.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBeNull();
+
+    // Frame #1 fails too (second consecutive) — still within the budget.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBeNull();
+    expect(result.current.active).toBe(false);
+
+    // Frame #2 succeeds → the share goes live, no error ever surfaced.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.active).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(stopLiveShareMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed only after three consecutive upload failures", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    uploadLiveShareFrameMock.mockRejectedValue(new Error("upload down"));
+
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    await act(async () => {
+      await result.current.start();
+    });
+    // Failure #1 (immediate frame) — tolerated.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBeNull();
+    // Failure #2 — tolerated.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBeNull();
+    // Failure #3 — budget exhausted: fail closed with the honest error.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBe("boom");
+    expect(result.current.active).toBe(false);
+    expect(stopLiveShareMock).toHaveBeenCalledWith("live_session01");
+  });
 });

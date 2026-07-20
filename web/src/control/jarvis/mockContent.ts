@@ -8,6 +8,11 @@
 
 export const JARVIS_BRAIN_STATS = "13 911 Notizen indiziert · 4 738 Kanban-Tasks · qmd live ✓";
 export const JARVIS_BRAIN_MOCKTAG = " · Graph: Vorschau (Mock)";
+/** S4-Härtung: sichtbarer Mock-Tag für die statischen A4-Panels (Brain-Stats,
+ *  Top-Hubs, Filter, KI-Lage, Sparklines) — dasselbe Label-Muster wie der
+ *  Graph-Fallback (JARVIS_BRAIN_MOCKTAG), damit Mock-Inhalte nie als live
+ *  durchgehen. */
+export const JARVIS_MOCK_TAG = "MOCK";
 export const JARVIS_SEARCH_HINT = "Das Gehirn durchsuchen …";
 
 export interface JarvisHubRow {
@@ -70,8 +75,7 @@ export const JARVIS_EMBLEM_STATUS = "● ONLINE · WACHE AKTIV";
  *  EngineSwitchers, solange das Roster (/api/pa/engines) nicht geladen ist. */
 export const JARVIS_EMBLEM_MODEL = "◆ GPT-5.6-SOL ▾";
 
-export const JARVIS_ASK_HINT =
-  "Frag · „/plan idee …“ · „erinnere mich …“ · „guten Morgen“";
+export const JARVIS_ASK_HINT = "Frag · „/plan idee …“ · „erinnere mich …“";
 
 export interface JarvisSpark {
   label: string;

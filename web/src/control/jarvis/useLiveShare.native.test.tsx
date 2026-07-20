@@ -237,8 +237,8 @@ describe("native capture lifecycle", () => {
     expect(startLiveShareMock).not.toHaveBeenCalled();
   });
 
-  it("an upload failure fails closed instead of showing a frame-less active share", async () => {
-    uploadLiveShareFrameMock.mockRejectedValueOnce(new Error("upload down"));
+  it("a single transient upload failure no longer kills the share (S4 budget)", async () => {
+    uploadLiveShareFrameMock.mockRejectedValueOnce(new Error("flap"));
     const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
     act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
     await act(async () => result.current.start());
@@ -247,12 +247,72 @@ describe("native capture lifecycle", () => {
       await Promise.resolve();
       await Promise.resolve();
       emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
+      await Promise.resolve();
+      await Promise.resolve();
     });
 
-    await waitFor(() => expect(result.current.error).toBe("boom"));
+    // Tolerated: no error, no teardown — the next good frame goes live.
+    expect(result.current.error).toBeNull();
+    expect(stopLiveShareMock).not.toHaveBeenCalled();
+
+    act(() => emit({ v: 1, type: "screen_frame", data: "QUJDRA==" }));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(result.current.error).toBeNull();
+  });
+
+  it("fails closed only after three consecutive upload failures (S4 budget)", async () => {
+    uploadLiveShareFrameMock.mockRejectedValue(new Error("upload down"));
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+    await act(async () => result.current.start());
+    await act(async () => {
+      emit({ v: 1, type: "screen_capture_started" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Failures #1 and #2 are tolerated (each native frame = one upload attempt).
+    for (let i = 0; i < 2; i += 1) {
+      await act(async () => {
+        emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.error).toBeNull();
+    }
+    // Failure #3 exhausts the budget → fail closed, teardown incl. native stop.
+    await act(async () => {
+      emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.error).toBe("boom");
     expect(result.current.active).toBe(false);
     expect(posted).toContainEqual({ v: 1, type: "stop_screen_capture" });
     expect(stopLiveShareMock).toHaveBeenCalledWith("live_native01");
+  });
+
+  it("times out a native start whose bridge never answers (S4 start watchdog)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+      act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+      await act(async () => {
+        await result.current.start();
+      });
+      expect(posted).toContainEqual({ v: 1, type: "start_screen_capture" });
+      expect(result.current.status).toBe("starting");
+
+      // The bridge never emits started/stopped/error → 12 s watchdog fires:
+      // back to idle with the honest error, wedged native side stopped.
+      act(() => vi.advanceTimersByTime(12_001));
+      expect(result.current.status).toBe("idle");
+      expect(result.current.error).toBe("boom");
+      expect(posted).toContainEqual({ v: 1, type: "stop_screen_capture" });
+      expect(startLiveShareMock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("times out a backend session that never receives a usable first frame", async () => {

@@ -10,7 +10,9 @@
  * lokaler UI-State, gilt für den NÄCHSTEN Turn und wird nie gepollt. Ein
  * minimaler Observable-Store (useSyncExternalStore) teilt sie zwischen dem
  * Switcher im Emblem und dem Chat, ohne Props durch die Shell zu ziehen.
- * null = Server-Default (kein engine/model-Feld im POST).
+ * null = Server-Default (kein engine/model-Feld im POST). S4-Härtung: die
+ * Wahl überlebt einen Reload — persistiert in localStorage (Muster des
+ * Vorlese-Toggles in useSpeechPlayback), beim Modul-Load restauriert.
  */
 import { useSyncExternalStore } from "react";
 
@@ -40,12 +42,48 @@ export interface EngineChoice {
   model: string;
 }
 
-let currentChoice: EngineChoice | null = null;
+/** localStorage-Key der persistierten Engine-Wahl (S4-Härtung). */
+export const ENGINE_CHOICE_STORAGE_KEY = "hermes.jarvis.engine";
+
+/** Gespeicherte Wahl lesen; ungültige/korrupte Werte gelten als „keine Wahl". */
+function readStoredChoice(): EngineChoice | null {
+  try {
+    const raw = window.localStorage.getItem(ENGINE_CHOICE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as EngineChoice).engine === "string" &&
+      typeof (parsed as EngineChoice).model === "string"
+    ) {
+      return { engine: (parsed as EngineChoice).engine, model: (parsed as EngineChoice).model };
+    }
+  } catch {
+    // Privatmodus/Quota/korrupte JSON: Wahl gilt eben nur sitzungslokal.
+  }
+  return null;
+}
+
+function persistChoice(next: EngineChoice | null): void {
+  try {
+    if (next) {
+      window.localStorage.setItem(ENGINE_CHOICE_STORAGE_KEY, JSON.stringify(next));
+    } else {
+      window.localStorage.removeItem(ENGINE_CHOICE_STORAGE_KEY);
+    }
+  } catch {
+    // Privatmodus/Quota: Wahl wirkt dann eben nur sitzungslokal.
+  }
+}
+
+let currentChoice: EngineChoice | null = readStoredChoice();
 const listeners = new Set<() => void>();
 
-/** Test-Naht: Store zwischen Tests zurücksetzen. */
+/** Test-Naht: Store zwischen Tests zurücksetzen (inkl. persistierter Wahl). */
 export function _resetEngineChoice(): void {
   currentChoice = null;
+  persistChoice(null);
 }
 
 export function getEngineChoice(): EngineChoice | null {
@@ -54,6 +92,7 @@ export function getEngineChoice(): EngineChoice | null {
 
 export function setEngineChoice(next: EngineChoice | null): void {
   currentChoice = next;
+  persistChoice(next);
   for (const listener of listeners) listener();
 }
 

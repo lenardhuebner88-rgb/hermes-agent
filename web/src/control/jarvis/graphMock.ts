@@ -157,6 +157,3 @@ export const PA_GRAPH_MOCK: PaGraphMock = {
     { from: "ag.jarvis", to: "mem.hub", kind: "link" },
   ],
 };
-
-/** Fokus-Knoten des A4-Mockups: Hermes-Infra (Ring + aktive Kanten + FOKUS-Tag). */
-export const PA_GRAPH_MOCK_FOCUS_ID = "proj.hermes-infra";
