@@ -10892,13 +10892,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._reload_mcp()
 
     def _reload_mcp(self):
-        """Reload MCP servers: disconnect all, re-read config.yaml, reconnect.
+        """Reload MCP servers atomically: stage a shadow topology from the
+        fresh config, validate it, then publish it — old connections are only
+        torn down AFTER the new ones are live.
 
-        After reconnecting, refreshes the agent's tool list so the model
-        sees the updated tools on the next turn.
+        This is the same connect-before-disconnect path the gateway
+        ``/reload-mcp`` uses (``reload_mcp_tools_transactionally``). If any
+        candidate server fails to connect or smoke-test, ``MCPReloadError`` is
+        raised and the CURRENT live servers, their tool registrations, and the
+        agent's toolset are left completely untouched — the old MCP tools stay
+        callable, so a bad config edit never causes a tool-less downtime window.
+
+        After a successful publish, refreshes the agent's tool list so the
+        model sees the updated tools on the next turn.
         """
         try:
-            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
+            from tools.mcp_tool import (
+                reload_mcp_tools_transactionally,
+                MCPReloadError,
+                _servers,
+                _lock,
+            )
 
             # Capture old server names
             with _lock:
@@ -10907,11 +10921,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if not self._command_running:
                 print("🔄 Reloading MCP servers...")
 
-            # Shutdown existing connections
-            shutdown_mcp_servers()
-
-            # Reconnect (reads config.yaml fresh)
-            new_tools = discover_mcp_tools()
+            # Connect-before-disconnect: stage + validate the new topology, and
+            # only publish atomically. On failure the live servers survive
+            # untouched, so we must NOT refresh the agent or inject a change
+            # note — nothing changed. Bail out early and leave the old tools live.
+            try:
+                new_tools = reload_mcp_tools_transactionally()
+            except MCPReloadError as exc:
+                print(
+                    "  ❌ MCP reload failed — existing MCP tools remain live "
+                    f"(no downtime): {exc}"
+                )
+                return
 
             # Compute what changed
             with _lock:
