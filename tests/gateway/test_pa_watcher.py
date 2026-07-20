@@ -872,3 +872,162 @@ def test_morning_briefing_delivers_one_card_with_briefing_model(
             )
         ]
         assert models == ["briefing-v1", "significance-v1"]
+
+
+# ---------------------------------------------------------------------------
+# S7.3 Abend-Rückblick + Inbox-Aging
+# ---------------------------------------------------------------------------
+
+
+def test_evening_target_before_quiet_when_colliding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(watcher, "QUIET_START_HOUR", 21)
+    # 21:00 = Quiet-Start → Ziel 20:55.
+    assert watcher.evening_target_minute_of_day() == 20 * 60 + 55
+    monkeypatch.setattr(watcher, "QUIET_START_HOUR", 23)
+    assert watcher.evening_target_minute_of_day() == 21 * 60
+
+
+def test_evening_briefing_too_early_and_quiet(
+    isolated_watcher: dict[str, object],
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    afternoon = 15 * 3_600  # 15:00 UTC
+    early = watcher.deliver_evening_briefing(
+        store, now=afternoon, zone=timezone.utc
+    )
+    assert early == {"delivered": 0, "reason": "too_early"}
+
+    quiet = watcher.deliver_evening_briefing(
+        store, now=23 * 3_600, zone=timezone.utc
+    )
+    assert quiet == {"delivered": 0, "reason": "quiet_hours"}
+
+
+def test_evening_briefing_delivers_once_with_day_window(
+    isolated_watcher: dict[str, object],
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    # Tag-Fenster ab 07:30; Events nach 08:00; Zustellung 21:05.
+    morning_evt = 8 * 3_600
+    evening = 21 * 3_600 + 5 * 60
+    waiting = _pending_row(
+        "eve-wait",
+        kind="operator_release_required",
+        source="red_gate",
+        severity="warning",
+        ref="t_eve",
+        title="Gate bei Task t_eve: Abend-Freigabe — operator_release_required",
+    )
+    done = _pending_row(
+        "eve-done",
+        kind="completed",
+        severity="info",
+        ref="t_ship",
+        title="Task t_ship: Slice fertig — completed",
+    )
+    _ingest_and_accept(store, [waiting, done], now=morning_evt)
+    # Simuliere Tagsüber-Delivery: Events → delivered, Karte soll sie trotzdem
+    # im Rückblick sehen (status pending|delivered im Tagesfenster).
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE pa_watcher_events SET status='delivered', delivered_at=?, "
+            "first_seen_at=? WHERE status='pending'",
+            (morning_evt + 60, morning_evt),
+        )
+
+    first = watcher.deliver_evening_briefing(
+        store, now=evening, zone=timezone.utc
+    )
+    assert first["reason"] == "delivered"
+    assert first["delivered"] == 2
+    assert first["model"] == "briefing-v1"
+
+    again = watcher.deliver_evening_briefing(
+        store, now=evening + 120, zone=timezone.utc
+    )
+    assert again == {"delivered": 0, "reason": "already_delivered"}
+
+    with store.connect() as conn:
+        messages = conn.execute(
+            "SELECT model, content FROM pa_messages "
+            "WHERE engine='pa-watcher' ORDER BY id"
+        ).fetchall()
+        assert len(messages) == 1
+        assert messages[0]["model"] == "briefing-v1"
+        content = messages[0]["content"]
+        assert "seit heute Morgen" in content
+        assert content.index("👁 Wartet auf dich") < content.index("✓ Abschlüsse")
+        assert "t_eve" not in content
+        assert "Abend-Freigabe" in content or "Freigabe" in content
+        feed = conn.execute(
+            "SELECT kind FROM pa_feed ORDER BY id"
+        ).fetchall()
+        assert feed[0]["kind"] == "watcher_evening"
+
+
+def test_inbox_aging_emits_warning_once_for_old_waiting(
+    isolated_watcher: dict[str, object], tmp_path: Path
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    db_path = tmp_path / "aging-kanban.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            status TEXT,
+            block_kind TEXT,
+            freigabe TEXT,
+            live_test_depth TEXT,
+            created_at INTEGER
+        );
+        """
+    )
+    now = 1_700_000_000
+    old = now - watcher.INBOX_AGING_SECONDS - 60
+    fresh = now - 3_600
+    conn.execute(
+        "INSERT INTO tasks(id, title, status, freigabe, block_kind, created_at) "
+        "VALUES ('t_old', 'Alte Freigabe t_oldffff — operator_release_required', "
+        "'scheduled', 'operator', NULL, ?)",
+        (old,),
+    )
+    conn.execute(
+        "INSERT INTO tasks(id, title, status, freigabe, block_kind, created_at) "
+        "VALUES ('t_new', 'Frische Freigabe', 'scheduled', 'operator', NULL, ?)",
+        (fresh,),
+    )
+    conn.execute(
+        "INSERT INTO tasks(id, title, status, freigabe, block_kind, created_at) "
+        "VALUES ('t_review', 'Review wartet', 'blocked', NULL, "
+        "'review_revision', ?)",
+        (old,),
+    )
+    conn.commit()
+    conn.close()
+
+    board_paths = [("default", db_path)]
+    first = watcher.collect_inbox_aging_events(now=now, board_paths=board_paths)
+    refs = {event.ref for event in first}
+    assert "t_old" in refs
+    assert "t_review" in refs
+    assert "t_new" not in refs
+    assert all(event.severity == "warning" for event in first)
+    assert all(event.source == watcher.INBOX_AGING_SOURCE for event in first)
+
+    # Fingerprint-Dedupe: zweiter Ingest fügt nichts hinzu.
+    inserted = watcher._ingest_events(
+        store, events=first, state_updates={}, now=now
+    )
+    assert inserted == len(first)
+    again = watcher.collect_inbox_aging_events(now=now, board_paths=board_paths)
+    inserted2 = watcher._ingest_events(
+        store, events=again, state_updates={}, now=now + 1
+    )
+    assert inserted2 == 0

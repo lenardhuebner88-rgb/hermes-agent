@@ -60,6 +60,11 @@ READ_ONLY_TOOLSETS = "context_engine"
 TURN_TIMEOUT_SECONDS = 180
 DB_BUSY_TIMEOUT_MS = 5_000
 CONTEXT_PACK_MAX_CHARS = 14_000
+# S7.1: gebundene Memory-/Entscheidungs-Sektionen im Kontextpack.
+CONTEXT_PACK_DIARY_LIMIT = 3
+CONTEXT_PACK_DIARY_CHARS = 400
+CONTEXT_PACK_POINTERS_LIMIT = 3
+CONTEXT_PACK_PENDING_TITLES = 8
 HISTORY_MAX_MESSAGES = 16
 HISTORY_MAX_CHARS = 6_000
 UPLOAD_MAX_BYTES = 15 * 1024 * 1024
@@ -711,6 +716,176 @@ def _bounded_json(payload: dict[str, Any]) -> str:
     ]
 
 
+def _clip_text(value: object, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _read_diary_entries(
+    *,
+    directory: Path | None = None,
+    limit: int = CONTEXT_PACK_DIARY_LIMIT,
+    chars: int = CONTEXT_PACK_DIARY_CHARS,
+) -> list[dict[str, str]]:
+    """S7.1: letzte Jarvis-Tagebuch-Dateien (YYYY-MM-DD-jarvis.md), gekürzt."""
+    from hermes_cli.pa_journal import JARVIS_JOURNAL_DIR
+
+    root = directory if directory is not None else JARVIS_JOURNAL_DIR
+    try:
+        paths = sorted(root.glob("*-jarvis.md"))
+    except OSError as exc:
+        raise RuntimeError(f"diary unreadable: {exc}") from exc
+    entries: list[dict[str, str]] = []
+    for path in paths[-limit:]:
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not body:
+            continue
+        # Dateiname → ISO-Tag (…/2026-07-20-jarvis.md).
+        stem = path.name.removesuffix("-jarvis.md")
+        entries.append({"date": stem, "excerpt": _clip_text(body, chars)})
+    return entries
+
+
+def _read_memory_pointers(
+    *,
+    directory: Path | None = None,
+    limit: int = CONTEXT_PACK_POINTERS_LIMIT,
+) -> list[dict[str, str]]:
+    """S7.1: read-only Memsearch-Pointer (Tagesnotizen), ohne CLI/Schreibzugriff."""
+    root = (
+        directory
+        if directory is not None
+        else Path.home() / ".memsearch" / "shared" / "memory"
+    )
+    try:
+        paths = sorted(p for p in root.glob("*.md") if not p.name.endswith("-jarvis.md"))
+    except OSError as exc:
+        raise RuntimeError(f"memsearch unreadable: {exc}") from exc
+    pointers: list[dict[str, str]] = []
+    for path in paths[-limit:]:
+        label = path.stem
+        try:
+            # Erste nicht-leere Zeile als leichter Anker — kein Modellaufruf.
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                stripped = line.strip().lstrip("#").strip()
+                if stripped:
+                    label = _clip_text(stripped, 80)
+                    break
+        except OSError:
+            pass
+        pointers.append(
+            {
+                "path": path.name,
+                "label": label,
+            }
+        )
+    return pointers
+
+
+def _context_memory_section(
+    *,
+    diary_dir: Path | None = None,
+    pointer_dir: Path | None = None,
+) -> dict[str, Any]:
+    """S7.1: isolierte Memory-Sektion; Teilfehler → error-Feld, Rest bleibt."""
+    section: dict[str, Any] = {}
+    try:
+        section["diary"] = _read_diary_entries(directory=diary_dir)
+    except Exception as exc:
+        section["diary"] = []
+        section["diary_error"] = str(exc)[:300]
+    try:
+        section["pointers"] = _read_memory_pointers(directory=pointer_dir)
+    except Exception as exc:
+        section["pointers"] = []
+        section["pointers_error"] = str(exc)[:300]
+    return section
+
+
+_PENDING_DECISION_SQL = (
+    "SELECT id, title, status, freigabe, block_kind, created_at "
+    "FROM tasks WHERE "
+    "(status = 'blocked' AND block_kind = 'needs_input') "
+    "OR (freigabe IS NOT NULL AND status = 'scheduled')"
+)
+
+
+def _rows_from_pending_decision_conn(
+    conn: Any, *, board: str
+) -> list[dict[str, Any]]:
+    rows = conn.execute(_PENDING_DECISION_SQL).fetchall()
+    return [
+        {
+            "id": row["id"],
+            "title": row["title"],
+            "status": row["status"],
+            "freigabe": row["freigabe"],
+            "block_kind": row["block_kind"] if "block_kind" in row.keys() else None,
+            "created_at": int(row["created_at"] or 0),
+            "board": board,
+        }
+        for row in rows
+    ]
+
+
+def iter_pending_decision_rows(
+    board_paths: list[tuple[str, Path]] | None = None,
+) -> list[dict[str, Any]]:
+    """S7: Kanban freigabe_gates/held_tasks — gemeinsame Quelle für Inbox & Pack.
+
+    Liefert dicts mit id, title, status, freigabe, block_kind, created_at, board.
+    Ohne ``board_paths``: Default-Board via ``kanban_db.connect_closing``
+    (HERMES_KANBAN_DB / Test-Fixtures). Mit Pfaden: read-only pro Datei.
+    """
+    from hermes_cli import kanban_db as kb
+
+    if board_paths is None:
+        with kb.connect_closing() as conn:
+            return _rows_from_pending_decision_conn(
+                conn, board=str(getattr(kb, "DEFAULT_BOARD", "default"))
+            )
+
+    rows_out: list[dict[str, Any]] = []
+    for board, db_path in board_paths:
+        path = Path(db_path).expanduser()
+        try:
+            if not path.is_file():
+                continue
+            conn = sqlite3.connect(
+                f"{path.resolve().as_uri()}?mode=ro",
+                uri=True,
+                timeout=2.0,
+            )
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA query_only=ON")
+                rows_out.extend(
+                    _rows_from_pending_decision_conn(conn, board=str(board))
+                )
+            finally:
+                conn.close()
+        except Exception:
+            continue
+    return rows_out
+
+
+def _context_pending_decisions() -> dict[str, Any]:
+    """S7.1: Anzahl + destillierte Kurztitel freigabe_gates/held_tasks."""
+    from hermes_cli.pa_titles import distill_title
+
+    rows = iter_pending_decision_rows()
+    titles = [
+        distill_title(row.get("title") or row.get("id") or "Entscheidung")
+        for row in rows[:CONTEXT_PACK_PENDING_TITLES]
+    ]
+    return {"count": len(rows), "titles": titles}
+
+
 def build_context_pack(project_scope: str | None = None) -> str:
     """Build a bounded live context from the Projekte-tab read models."""
     from hermes_cli import agent_questions
@@ -731,6 +906,16 @@ def build_context_pack(project_scope: str | None = None) -> str:
     except Exception as exc:
         questions = [{"error": str(exc)}]
 
+    # S7.1: Memory + pending_decisions — isoliert, nie die ganze Packung killen.
+    try:
+        memory = _context_memory_section()
+    except Exception as exc:
+        memory = {"error": str(exc)[:300], "diary": [], "pointers": []}
+    try:
+        pending_decisions = _context_pending_decisions()
+    except Exception as exc:
+        pending_decisions = {"error": str(exc)[:300], "count": 0, "titles": []}
+
     payload: dict[str, Any] = {
         "generated_at": int(time.time()),
         "project_scope": project_scope,
@@ -738,6 +923,8 @@ def build_context_pack(project_scope: str | None = None) -> str:
         "open_questions": questions,
         "running_chains": agents,
         "recent_receipts": receipts,
+        "memory": memory,
+        "pending_decisions": pending_decisions,
     }
     if project_scope:
         entry = next(
@@ -1148,7 +1335,12 @@ def build_inbox() -> dict[str, Any]:
     Each source is isolated — a failing store degrades to an ``errors`` entry
     instead of hiding the other sources (same contract as the context pack).
     Sorted by block radius, then newest first.
+
+    S7.6: jedes Item bekommt ``summary`` (destillierter Titel ≤80 Zeichen);
+    ``pa_action``-Payload bleibt unberührt, Feld ist additiv.
     """
+    from hermes_cli.pa_titles import INBOX_SUMMARY_LIMIT, distill_title
+
     items: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
@@ -1160,11 +1352,13 @@ def build_inbox() -> dict[str, Any]:
         )
         for event in events:
             kind = event.get("kind")
+            title = event.get("question_text") or ""
             item: dict[str, Any] = {
                 "type": "pa_action" if kind == "pa_action" else "question",
                 "id": f"q{event['id']}",
                 "question_id": event["id"],
-                "title": event.get("question_text") or "",
+                "title": title,
+                "summary": distill_title(title, limit=INBOX_SUMMARY_LIMIT),
                 "kind": kind,
                 "options": event.get("options") or [],
                 "block_radius": 1,
@@ -1182,20 +1376,17 @@ def build_inbox() -> dict[str, Any]:
         from hermes_cli import kanban_db as kb
 
         with kb.connect_closing() as conn:
-            rows = conn.execute(
-                "SELECT id, title, status, freigabe, block_kind, created_at "
-                "FROM tasks WHERE "
-                "(status = 'blocked' AND block_kind = 'needs_input') "
-                "OR (freigabe IS NOT NULL AND status = 'scheduled')"
-            ).fetchall()
-            for row in rows:
+            # S7: SQL mit iter_pending_decision_rows teilen (kein Duplikat).
+            for row in conn.execute(_PENDING_DECISION_SQL).fetchall():
                 is_gate = row["freigabe"] is not None and row["status"] == "scheduled"
+                title = row["title"]
                 items.append(
                     {
                         "type": "freigabe_gate" if is_gate else "held_task",
                         "id": row["id"],
                         "card_id": row["id"],
-                        "title": row["title"],
+                        "title": title,
+                        "summary": distill_title(title, limit=INBOX_SUMMARY_LIMIT),
                         "status": row["status"],
                         "freigabe": row["freigabe"],
                         "block_radius": _kanban_block_radius(conn, row["id"]),

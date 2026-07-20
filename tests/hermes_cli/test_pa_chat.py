@@ -982,9 +982,14 @@ def test_inbox_questions_and_pa_action_cards(isolated_pa_home: Path) -> None:
     by_type = {item["type"]: item for item in payload["items"]}
     assert by_type["question"]["kind"] == "kimi"
     assert by_type["question"]["question_id"]
+    # S7.6: summary additiv; pa_action-Payload unberührt.
+    assert by_type["question"]["summary"]
+    assert len(by_type["question"]["summary"]) <= 80
     action = by_type["pa_action"]
     assert action["category"] == "tmux.interrupt"
     assert action["action_payload"]["payload"]["window"] == "codex"
+    assert action["summary"]
+    assert action["action_payload"]["category"] == "tmux.interrupt"
 
 
 def test_inbox_kanban_held_tasks_block_radius_and_sorting(
@@ -1008,6 +1013,15 @@ def test_inbox_kanban_held_tasks_block_radius_and_sorting(
         conn.execute(
             "INSERT INTO task_links (parent_id, child_id) VALUES ('t_child1', 't_grand')"
         )
+        # S7.6: langer PlanSpec-Titel → summary destilliert ≤80.
+        conn.execute(
+            "UPDATE tasks SET title=? WHERE id='t_gate'",
+            (
+                "PlanSpec GATE-GREEN-KANBAN-LIFECYCLE-REGRESSION-FIX: "
+                "Green-Gate-Ursachenfix: die live-reproduzierten Fehler "
+                "werden behoben — operator_release_required",
+            ),
+        )
         conn.commit()
 
     payload = pa.build_inbox()
@@ -1019,6 +1033,9 @@ def test_inbox_kanban_held_tasks_block_radius_and_sorting(
     assert cards["t_root"]["block_radius"] == 3
     assert cards["t_gate"]["type"] == "freigabe_gate"
     assert cards["t_gate"]["block_radius"] == 1
+    assert "summary" in cards["t_gate"]
+    assert len(cards["t_gate"]["summary"]) <= 80
+    assert "operator_release_required" not in cards["t_gate"]["summary"]
     assert "t_noise" not in cards
     # block radius first: t_root (3) before t_gate (1)
     ordered = [item.get("card_id") for item in payload["items"] if "card_id" in item]
@@ -1062,6 +1079,157 @@ def test_inbox_endpoint(isolated_pa_home: Path) -> None:
     body = response.json()
     assert body["items"] == []
     assert body["errors"] == []
+
+
+# ---------------------------------------------------------------------------
+# S7.1 Kontextpack: memory + pending_decisions
+# ---------------------------------------------------------------------------
+
+
+def test_context_pack_memory_diary_and_pending_decisions(
+    isolated_pa_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    diary_dir = tmp_path / "diary"
+    diary_dir.mkdir()
+    (diary_dir / "2026-07-18-jarvis.md").write_text(
+        "# Tag 18\n\nGestern: Deploy gelandet.\n", encoding="utf-8"
+    )
+    (diary_dir / "2026-07-19-jarvis.md").write_text(
+        "# Tag 19\n\nHeute: Review-Queue geleert.\n", encoding="utf-8"
+    )
+    (diary_dir / "2026-07-20-jarvis.md").write_text(
+        "# Tag 20\n\nSprint 7 gestartet.\n", encoding="utf-8"
+    )
+    pointer_dir = tmp_path / "memsearch"
+    pointer_dir.mkdir()
+    (pointer_dir / "2026-07-19.md").write_text(
+        "# Session\nPointer-Notiz A\n", encoding="utf-8"
+    )
+    (pointer_dir / "2026-07-20.md").write_text(
+        "# Session\nPointer-Notiz B\n", encoding="utf-8"
+    )
+
+    with kb.connect_closing() as conn:
+        _insert_kanban_task(
+            conn, "t_hold", status="blocked", block_kind="needs_input", created_at=50
+        )
+        conn.execute(
+            "UPDATE tasks SET title=? WHERE id='t_hold'",
+            ("Task t_holddead: Freigabe nötig — operator_release_required",),
+        )
+        conn.commit()
+
+    _orig_memory = pa._context_memory_section
+
+    monkeypatch.setattr(
+        pa,
+        "_context_memory_section",
+        lambda: _orig_memory(diary_dir=diary_dir, pointer_dir=pointer_dir),
+    )
+    # registry/agents können in Isolation fehlen — nur S7-Felder prüfen.
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.load_projects_registry",
+        lambda: type("R", (), {"projects": []})(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_projects_payload",
+        lambda reg: {"projects": []},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_agents_payload",
+        lambda reg: {"agents": []},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_receipts_payload",
+        lambda reg: {"receipts": []},
+    )
+
+    raw = pa.build_context_pack()
+    payload = json.loads(raw)
+
+    assert "memory" in payload
+    diary = payload["memory"]["diary"]
+    assert len(diary) == 3
+    assert diary[-1]["date"] == "2026-07-20"
+    assert "Sprint 7" in diary[-1]["excerpt"]
+    assert len(payload["memory"]["pointers"]) >= 1
+    pending = payload["pending_decisions"]
+    assert pending["count"] >= 1
+    assert pending["titles"]
+    assert all(len(t) <= 80 for t in pending["titles"])
+    assert not any("operator_release_required" in t for t in pending["titles"])
+
+
+def test_context_pack_memory_failure_isolated(
+    isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.load_projects_registry",
+        lambda: type("R", (), {"projects": []})(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_projects_payload",
+        lambda reg: {"projects": [{"slug": "ok"}]},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_agents_payload",
+        lambda reg: {"agents": []},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_receipts_payload",
+        lambda reg: {"receipts": []},
+    )
+
+    def boom_memory() -> dict[str, object]:
+        raise RuntimeError("memsearch down")
+
+    monkeypatch.setattr(pa, "_context_memory_section", boom_memory)
+    monkeypatch.setattr(
+        pa,
+        "_context_pending_decisions",
+        lambda: {"count": 0, "titles": []},
+    )
+
+    payload = json.loads(pa.build_context_pack())
+    assert payload["projects_summary"]["projects"] == [{"slug": "ok"}]
+    assert payload["memory"]["error"] == "memsearch down"
+    assert payload["memory"]["diary"] == []
+    assert payload["pending_decisions"]["count"] == 0
+
+
+def test_context_pack_respects_char_budget(
+    isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    huge = "X" * 20_000
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.load_projects_registry",
+        lambda: type("R", (), {"projects": []})(),
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_projects_payload",
+        lambda reg: {"blob": huge},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_agents_payload",
+        lambda reg: {"agents": []},
+    )
+    monkeypatch.setattr(
+        "hermes_cli.projects_overview.build_receipts_payload",
+        lambda reg: {"receipts": []},
+    )
+    monkeypatch.setattr(
+        pa, "_context_memory_section", lambda: {"diary": [], "pointers": []}
+    )
+    monkeypatch.setattr(
+        pa, "_context_pending_decisions", lambda: {"count": 0, "titles": []}
+    )
+
+    raw = pa.build_context_pack()
+    assert len(raw) <= pa.CONTEXT_PACK_MAX_CHARS
+    envelope = json.loads(raw)
+    assert envelope.get("truncated") is True or len(raw) <= pa.CONTEXT_PACK_MAX_CHARS
 
 
 def test_engines_endpoint_exposes_roster(isolated_pa_home: Path) -> None:
