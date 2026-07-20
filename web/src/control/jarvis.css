@@ -525,31 +525,10 @@ button.jv-ok { cursor: pointer; }
 .jv-mic-rec, .jv-mic-rec:hover, .jv-mic-rec:focus-visible {
   color: var(--rot); border-color: rgba(255, 92, 105, .65);
 }
-/* S-live — echter Live-Share-Aktivzustand (nicht der alte One-Shot-Capture). */
-.jv-screenshare.jv-live-on, .jv-screenshare.jv-live-on:hover, .jv-screenshare.jv-live-on:focus-visible {
-  color: var(--grün); border-color: rgba(74, 222, 128, .7);
-  box-shadow: 0 0 12px rgba(74, 222, 128, .4);
+.jv-screenshare.jv-capturing {
+  color: var(--cyan); border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(56, 216, 255, .35);
 }
-/* Sichtbarer Aktivzustand: „● Teilt Bildschirm · Stoppen" über dem Composer. */
-.jv-liveshare-status {
-  position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
-  width: min(640px, calc(100% - 28px));
-  display: flex; align-items: center; gap: 8px;
-  border: 1px solid rgba(74, 222, 128, .4); border-radius: 10px;
-  background: rgba(74, 222, 128, .1); color: var(--txt);
-  font-size: 12px; line-height: 1.5; padding: 6px 12px; backdrop-filter: blur(7px);
-}
-.jv-live-dot {
-  width: 9px; height: 9px; border-radius: 50%; flex: none;
-  background: var(--grün); box-shadow: 0 0 8px rgba(74, 222, 128, .8);
-}
-.jv-live-label { flex: 1; min-width: 0; font-family: var(--mono); letter-spacing: .04em; }
-.jv-live-stop {
-  min-height: 32px; padding: 0 12px; border-radius: 999px; flex: none;
-  border: 1px solid rgba(74, 222, 128, .5); background: transparent;
-  color: var(--grün); font-family: var(--mono); font-size: 11px; cursor: pointer;
-}
-.jv-live-stop:hover, .jv-live-stop:focus-visible { border-color: var(--grün); filter: brightness(1.1); }
 .jv-speak.jv-on, .jv-speak.jv-on:hover, .jv-speak.jv-on:focus-visible {
   color: var(--cyan); border-color: var(--cyan);
   box-shadow: 0 0 12px rgba(56, 216, 255, .35);
@@ -796,23 +775,11 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   }
   .jv-bubble { max-width: 92%; font-size: 13px; }
   .jv-composer-error { position: relative; left: auto; bottom: auto; transform: none; order: 6; width: auto; margin: 0 0 10px; }
-  .jv-liveshare-status { position: relative; left: auto; bottom: auto; transform: none; order: 6; width: auto; margin: 0 0 10px; }
-  /* Mobiler Composer: zweizeilig statt einzeilig. Bei 360–430 CSS px passen
-     Eingabe + optionaler Attachment-Chip in Zeile 1, die volle Icon-Leiste
-     (Bild, Screenshare, Mic, Vorlesen, Senden) bekommt eine eigene Zeile 2 —
-     so bleibt der Senden-Button auch mit Anhang vollständig sichtbar und
-     tappbar, ohne horizontalen Overflow (Repro: 360px + Attachment). */
   .jv-ask {
     position: fixed; left: 12px; right: 12px; transform: none; width: auto;
     bottom: calc(5.5rem + env(safe-area-inset-bottom, 0px) + 8px);
-    min-height: 64px; padding: 10px 12px; gap: 8px; row-gap: 10px;
-    flex-wrap: wrap; align-items: center; border-radius: 22px;
+    min-height: 64px; padding: 8px 8px 8px 16px; gap: 8px;
   }
-  .jv-ask input[type="text"] { flex: 1 1 120px; }
-  .jv-ask .jv-attachchip { max-width: 58%; }
-  /* Icon-Leiste = eigene volle Zeile; Controls gleichmäßig verteilt, damit
-     alle fünf (inkl. 52px Senden) hineinpassen. */
-  .jv-ask .jv-icons { flex: 1 0 100%; width: 100%; justify-content: space-between; gap: 6px; }
 }
 
 /* 600–759px: Dashboard-Bottom-Nav ist ab `tab` (600px) weg — Frag-Leiste ans

@@ -938,15 +938,9 @@ export const de = {
     composerLabel: "Frag an Jarvis",
     inputLabel: "Nachricht an Jarvis",
     attachLabel: "Bild anhängen",
-    // Live-Screen-Share (S-live): eine echte, fortlaufende Bildschirmteilung —
-    // getrennt vom statischen „Bild anhängen“ und nie ein Bild-Picker.
-    liveShareStart: "Bildschirm live teilen",
-    liveShareStop: "Bildschirmteilen beenden",
-    liveShareActive: "Teilt Bildschirm",
-    liveShareStopAction: "Stoppen",
-    liveShareError: "Bildschirmteilen fehlgeschlagen — bitte erneut versuchen.",
-    liveShareUnsupported:
-      "Live-Bildschirmteilen wird von diesem mobilen Browser nicht unterstützt. „Bild anhängen“ bleibt separat verfügbar; für Live-Sharing bitte Desktop-Chrome, -Edge oder -Safari verwenden.",
+    screenshareLabel: "Bildschirm teilen",
+    screenshareError:
+      "Bildschirmaufnahme ist hier nicht verfügbar. Bitte wähle stattdessen über „Bild anhängen“ ein Bild oder Foto aus.",
     removeAttachment: "Bild entfernen",
     sendLabel: "Nachricht senden",
     // S3.6 — Push-to-Talk (Mic-Button) + Vorlese-Toggle

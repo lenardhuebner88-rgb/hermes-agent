@@ -27,12 +27,6 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from hermes_cli.pa_live_share import (
-    LIVE_FRAME_MAX_BYTES,
-    LiveShareNoFrame,
-    LiveShareNotFound,
-    LiveShareRegistry,
-)
 from hermes_cli.sqlite_util import add_column_if_missing
 from hermes_constants import get_hermes_home
 
@@ -1154,11 +1148,6 @@ def build_inbox() -> dict[str, Any]:
 def register_pa_routes(app: FastAPI) -> None:
     """Register authenticated PA endpoints before the SPA catch-all."""
     store = PAStore()
-    # Ephemeral live-screen-share sessions (S-live). Process-local by design:
-    # screen frames must not survive a restart and are never persisted by
-    # default — only the frame the user actually asks about is materialised
-    # into a normal upload asset via /attach.
-    live_share = LiveShareRegistry()
     store.ensure_schema()
     reaped = store.reap_interrupted_turns()
     if reaped:
@@ -1341,62 +1330,3 @@ def register_pa_routes(app: FastAPI) -> None:
         except OSError:
             _log.warning("PA upload prune failed after %s", asset_id, exc_info=True)
         return {"asset_id": asset_id}
-
-    # ── Live-Screen-Share (S-live) ──────────────────────────────────────
-    # A real, continuous getDisplayMedia session — deliberately NOT the image
-    # picker. The browser streams the latest frame to /frame (latest wins, one
-    # frame per session, no asset pile); /attach materialises the current frame
-    # into a single normal upload asset for the existing image-turn pipeline.
-
-    @app.post("/api/pa/live-share/start")
-    async def pa_live_share_start() -> dict[str, str]:
-        return {"session_id": live_share.start()}
-
-    @app.post("/api/pa/live-share/{session_id}/frame")
-    async def pa_live_share_frame(
-        session_id: str, file: UploadFile = File(...)
-    ) -> dict[str, bool]:
-        content_type = (file.content_type or "").lower()
-        suffix = _UPLOAD_SUFFIXES.get(content_type)
-        if suffix is None:
-            raise HTTPException(status_code=400, detail="Frame muss ein Bild sein")
-        data = await file.read(LIVE_FRAME_MAX_BYTES + 1)
-        if not data:
-            raise HTTPException(status_code=400, detail="Leerer Frame")
-        if len(data) > LIVE_FRAME_MAX_BYTES:
-            raise HTTPException(status_code=413, detail="Frame ist zu groß")
-        try:
-            live_share.put_frame(session_id, data, suffix)
-        except LiveShareNotFound as exc:
-            raise HTTPException(
-                status_code=404, detail="Unbekannte Live-Share-Session"
-            ) from exc
-        return {"ok": True}
-
-    @app.post("/api/pa/live-share/{session_id}/attach")
-    async def pa_live_share_attach(session_id: str) -> dict[str, str]:
-        try:
-            data, suffix = live_share.latest_frame(session_id)
-        except LiveShareNotFound as exc:
-            raise HTTPException(
-                status_code=404, detail="Unbekannte Live-Share-Session"
-            ) from exc
-        except LiveShareNoFrame as exc:
-            raise HTTPException(
-                status_code=409, detail="Noch kein Bildschirm-Frame empfangen"
-            ) from exc
-        root = uploads_dir()
-        await _run_sync(root.mkdir, parents=True, exist_ok=True)
-        asset_id = f"asset_{secrets.token_hex(12)}{suffix}"
-        await _run_sync((root / asset_id).write_bytes, data)
-        try:
-            await _run_sync(prune_uploads)
-        except OSError:
-            _log.warning("PA live-share prune failed after %s", asset_id, exc_info=True)
-        return {"asset_id": asset_id}
-
-    @app.post("/api/pa/live-share/{session_id}/stop")
-    async def pa_live_share_stop(session_id: str) -> dict[str, bool]:
-        # Idempotent: stopping an already-gone session is not an error (unmount
-        # and an explicit stop click can race).
-        return {"ok": live_share.stop(session_id)}
