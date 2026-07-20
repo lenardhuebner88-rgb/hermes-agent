@@ -520,6 +520,15 @@ button.jv-ok { cursor: pointer; }
   border: none; box-shadow: 0 0 16px rgba(56, 216, 255, .55);
 }
 .jv-send:hover, .jv-send:focus-visible { color: #03222f; border: none; filter: brightness(1.08); }
+/* S3.6 — Push-to-Talk-Mic + Vorlese-Toggle. Touch-Ziele ≥44px erbt .jv-ic;
+   die Puls-/Spin-Animationen liegen im no-preference-Block (A4-Idiom). */
+.jv-mic-rec, .jv-mic-rec:hover, .jv-mic-rec:focus-visible {
+  color: var(--rot); border-color: rgba(255, 92, 105, .65);
+}
+.jv-speak.jv-on, .jv-speak.jv-on:hover, .jv-speak.jv-on:focus-visible {
+  color: var(--cyan); border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(56, 216, 255, .35);
+}
 .jv-attachchip {
   display: flex; align-items: center; gap: 8px; flex: none; max-width: 40%;
   border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px 3px 3px;
@@ -564,6 +573,14 @@ button.jv-ok { cursor: pointer; }
   .jv-thinking .jv-dots i:nth-child(2) { animation-delay: .18s; }
   .jv-thinking .jv-dots i:nth-child(3) { animation-delay: .36s; }
   @keyframes jv-tk { 0%, 100% { opacity: .35; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+  /* S3.6 — Recording-Puls des Mic-Buttons + Spinner der Transkriptions-Phase. */
+  .jv-mic-rec { animation: jv-micpulse 1.6s ease-in-out infinite; }
+  @keyframes jv-micpulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 92, 105, .45); opacity: 1; }
+    50% { box-shadow: 0 0 0 9px rgba(255, 92, 105, 0); opacity: .75; }
+  }
+  .jv-spin { animation: jv-rot 1s linear infinite; }
+  @keyframes jv-rot { to { transform: rotate(360deg); } }
 }
 
 /* ══ Band unter PROJEKTE: AKTIVITÄT + SESSIONS (S3.10) ══

@@ -773,6 +773,22 @@ export interface PaPlanspecDraft {
   slices: PaPlanspecSlice[];
 }
 
+// S3.6 — Push-to-Talk + Vorlesen (Jarvis-Chat). Payload-Shapes exakt aus den
+// Backend-Modellen (hermes_cli/web_server.py: AudioTranscriptionRequest /
+// TTSSpeakRequest und ihre Antworten).
+/** Antwort von POST /api/audio/transcribe. */
+export interface TranscribeResponse {
+  ok: boolean;
+  transcript: string;
+  provider: string;
+  polished: boolean;
+}
+
+/** Antwort von POST /api/audio/speak — data_url ist direkt an `new Audio()` fütterbar. */
+export interface SpeakResponse {
+  data_url: string;
+}
+
 // S2.7 — Estate-Graph (GET /api/pa/graph, hermes_cli/pa_graph.py). Kontrakt
 // „pa-graph/v1": x/y deterministisch in der 1280x820-ViewBox vorberechnet;
 // Teilquellen-Ausfälle kommen als errors[] mit (HTTP bleibt 200). href ist
@@ -939,6 +955,23 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ draft_id: draftId }),
+    }),
+  // S3.6 — Push-to-Talk: Audio als base64 data-URL transkribieren (Limit
+  // 25 MB, language hint "de" wie im Jarvis-Chat üblich). mime_type weg
+  // lassen → Backend liest es aus dem data-URL-Header.
+  transcribeAudio: (dataUrl: string, mimeType?: string) =>
+    fetchJSON<TranscribeResponse>("/api/audio/transcribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_url: dataUrl, mime_type: mimeType, language: "de" }),
+    }),
+  // S3.6 — Antworten vorlesen: TTS über die konfigurierte Provider-Kette,
+  // Antwort trägt eine direkt abspielbare Audio-data-URL.
+  speakText: (text: string) =>
+    fetchJSON<SpeakResponse>("/api/audio/speak", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
     }),
   /** Authenticated asset URL (cookie/session like every other same-origin
    *  request). 404 = pruned upload → the bubble shows a broken-attachment

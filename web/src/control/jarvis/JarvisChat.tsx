@@ -17,10 +17,15 @@
  * startet den PlanSpec-Draft-Flow (usePlanspecDraft) statt eines Chat-Turns
  * — die validierte Draft-Card (PlanspecCard) ist eine client-interne Bubble
  * im Thread; „Als Approval einreichen" stellt sie als planspec.ingest-Card
- * in die S2.4-Inbox.
+ * in die S2.4-Inbox. S3.6: Push-to-Talk — Mic-Button in der Icon-Leiste
+ * (Aufnahme → POST /api/audio/transcribe → Transkript landet im Input, KEIN
+ * Auto-Send: der Nutzer prüft/korrigiert und sendet selbst) plus Vorlese-
+ * Toggle (in localStorage persistiert): die neueste FERTIGE Assistant-
+ * Antwort wird genau einmal über POST /api/audio/speak abgespielt — nie
+ * Historie beim Mount, nie doppelt bei Re-Render/Verlauf-Reload.
  */
-import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
-import { ImagePlus, Send, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import { ImagePlus, Loader2, Mic, MicOff, Send, Volume2, VolumeX, X } from "lucide-react";
 
 import { api, type PaChatMessage } from "@/lib/api";
 import { de } from "../i18n/de";
@@ -32,8 +37,10 @@ import {
 } from "./engineSelection";
 import { JARVIS_ASK_HINT } from "./mockContent";
 import { PlanspecCard } from "./PlanspecCard";
+import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
+import { useSpeechPlayback } from "./useSpeechPlayback";
 
 const t = de.jarvis;
 
@@ -118,6 +125,18 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   const fileRef = useRef<HTMLInputElement | null>(null);
   const seenCountRef = useRef(0);
 
+  // S3.6 — Push-to-Talk + Vorlesen. mic.error hält Recorder-/Permission-
+  // Fehler, micTranscribeError die des Transkribierens; beide erscheinen als
+  // Composer-Fehlerzeile, der Input bleibt bei Fehlern unverändert.
+  const mic = useMicRecorder();
+  const {
+    play: speakPlay,
+    enabled: speakEnabled,
+    setEnabled: setSpeakEnabled,
+  } = useSpeechPlayback();
+  const [transcribing, setTranscribing] = useState(false);
+  const [micTranscribeError, setMicTranscribeError] = useState<string | null>(null);
+
   // Bild-Fähigkeit der Engine für den NÄCHSTEN Turn (Switcher-Wahl +
   // Roster-Default): Nicht-Vision-Engines deaktivieren den Attach-Button
   // mit Tooltip statt erst beim Senden in den Backend-400 zu laufen.
@@ -171,6 +190,71 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     if (!grew && !settled && turnPhase === null) return;
     el.lastElementChild?.scrollIntoView?.({ block: "end" });
   }, [messageCount, planCount, settledPlanCount, turnPhase, consumePrepending]);
+
+  // S3.6 — Vorlesen: die NEUESTE fertige Assistant-Antwort genau EINMAL
+  // abspielen. Robust gegen Doppel-Wiedergabe: der erste geladene Verlauf
+  // (Mount) ist die Baseline und wird NIE vorgelesen; danach löst nur eine
+  // neue Assistant-Message-ID aus. Der Toggle-Stand selbst holt nichts nach.
+  const lastAssistantMessage = useMemo(() => {
+    const list = chat.messages;
+    if (!list) return null;
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const message = list[index];
+      if (
+        message.role === "assistant" &&
+        message.status === "done" &&
+        message.content.trim()
+      ) {
+        return message;
+      }
+    }
+    return null;
+  }, [chat.messages]);
+
+  const speakBaselineRef = useRef(false);
+  const lastSpokenIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (chat.messages === null) return; // Verlauf noch nicht geladen
+    if (!speakBaselineRef.current) {
+      speakBaselineRef.current = true;
+      lastSpokenIdRef.current = lastAssistantMessage?.id ?? null;
+      return;
+    }
+    if (!lastAssistantMessage || lastSpokenIdRef.current === lastAssistantMessage.id) return;
+    lastSpokenIdRef.current = lastAssistantMessage.id;
+    if (speakEnabled) {
+      void speakPlay(lastAssistantMessage.content);
+    }
+  }, [chat.messages, lastAssistantMessage, speakEnabled, speakPlay]);
+
+  // S3.6 — Push-to-Talk: Klick startet die Aufnahme, erneuter Klick stoppt
+  // und transkribiert in den Input (KEIN Auto-Send — der Nutzer prüft und
+  // sendet selbst). Fehler: deutsche Meldung, Input unverändert.
+  const onMicClick = async () => {
+    if (transcribing) return;
+    if (mic.status === "recording") {
+      const blob = await mic.stop();
+      if (!blob) return; // leere/verworfene Aufnahme — Input unverändert
+      setTranscribing(true);
+      try {
+        const dataUrl = await blobToDataUrl(blob);
+        const result = await api.transcribeAudio(dataUrl, blob.type || undefined);
+        const transcript = (result.transcript ?? "").trim();
+        if (!result.ok || !transcript) {
+          throw new Error("empty transcript");
+        }
+        setText((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        setMicTranscribeError(null);
+      } catch {
+        setMicTranscribeError(t.micError);
+      } finally {
+        setTranscribing(false);
+      }
+      return;
+    }
+    setMicTranscribeError(null);
+    void mic.start();
+  };
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -271,6 +355,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           {planspec.usageError}
         </div>
       ) : null}
+      {mic.error || micTranscribeError ? (
+        <div className="jv-composer-error" role="alert">
+          {mic.error ?? micTranscribeError}
+        </div>
+      ) : null}
 
       <form className="jv-ask" onSubmit={onSubmit} aria-label={t.composerLabel}>
         {chat.attachment ? (
@@ -307,6 +396,46 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
             onClick={() => fileRef.current?.click()}
           >
             <ImagePlus aria-hidden className="h-4 w-4" />
+          </button>
+          {/* S3.6 — Push-to-Talk: idle → recording (Puls) → transcribing
+              (Spinner); das Transkript landet im Input, kein Auto-Send. */}
+          <button
+            type="button"
+            className={mic.status === "recording" ? "jv-ic jv-mic jv-mic-rec" : "jv-ic jv-mic"}
+            aria-label={
+              transcribing
+                ? t.micTranscribing
+                : mic.status === "recording"
+                  ? t.micRecording
+                  : t.micLabel
+            }
+            aria-pressed={mic.status === "recording"}
+            disabled={transcribing}
+            onClick={() => void onMicClick()}
+          >
+            {transcribing ? (
+              <Loader2 aria-hidden className="h-4 w-4 jv-spin" />
+            ) : mic.status === "recording" ? (
+              <MicOff aria-hidden className="h-4 w-4" />
+            ) : (
+              <Mic aria-hidden className="h-4 w-4" />
+            )}
+          </button>
+          {/* S3.6 — Vorlese-Toggle (persistiert): fertige Assistant-Antworten
+              einmal abspielen; Aktiv-Zustand sichtbar über .jv-on. */}
+          <button
+            type="button"
+            className={speakEnabled ? "jv-ic jv-speak jv-on" : "jv-ic jv-speak"}
+            aria-label={t.speakLabel}
+            aria-pressed={speakEnabled}
+            title={t.speakLabel}
+            onClick={() => setSpeakEnabled(!speakEnabled)}
+          >
+            {speakEnabled ? (
+              <Volume2 aria-hidden className="h-4 w-4" />
+            ) : (
+              <VolumeX aria-hidden className="h-4 w-4" />
+            )}
           </button>
           <button
             type="submit"
