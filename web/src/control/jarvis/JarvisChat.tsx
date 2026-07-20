@@ -49,7 +49,7 @@ import { JarvisOrb, type JarvisOrbState } from "./JarvisOrb";
 import { JARVIS_ASK_HINT } from "./mockContent";
 import { PeripheryStrip } from "./PeripheryStrip";
 import { PlanspecCard } from "./PlanspecCard";
-import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
+import { blobToDataUrl, useMicRecorder, usePttAutoSend } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { usePaInbox } from "./usePaInbox";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
@@ -175,8 +175,10 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // Fehler, micTranscribeError die des Transkribierens; beide erscheinen als
   // Composer-Fehlerzeile, der Input bleibt bei Fehlern unverändert.
   const mic = useMicRecorder();
+  const { enabled: pttAutoSend, setEnabled: setPttAutoSend } = usePttAutoSend();
   const {
     play: speakPlay,
+    stop: speakStop,
     enabled: speakEnabled,
     setEnabled: setSpeakEnabled,
     speakError,
@@ -308,9 +310,37 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     }
   }, [chat.messages, lastAssistantMessage, speakEnabled, speakPlay]);
 
-  // S3.6 — Push-to-Talk: Klick startet die Aufnahme, erneuter Klick stoppt
-  // und transkribiert in den Input (KEIN Auto-Send — der Nutzer prüft und
-  // sendet selbst). Fehler: deutsche Meldung, Input unverändert.
+  // S7: gemeinsame Submit-Funktion für Formular und PTT-Auto-Send. Ein direktes
+  // Diktat durchläuft damit exakt dieselben /plan-, Live-Share- und Senderegeln.
+  const submitQuestion = async (rawValue: string) => {
+    const value = rawValue.trim();
+    if (!value || chat.sending) return;
+    planspec.clearUsageError();
+    const planMatch = PLAN_PREFIX_RE.exec(value);
+    if (planMatch) {
+      setText("");
+      void planspec.submitIdea(planMatch[1] ?? "");
+      return;
+    }
+    if (liveShare.active) {
+      if (!imagesOk) {
+        setLiveShareNotice(t.engineNoImagesTitle);
+        return;
+      }
+      if (!chat.attachment) {
+        const assetId = await liveShare.attachCurrentFrame();
+        if (!assetId) return;
+        setText("");
+        void chat.send(value, { attachmentAssetId: assetId });
+        return;
+      }
+    }
+    setText("");
+    void chat.send(value);
+  };
+
+  // S7: Push-to-Talk setzt das Transkript standardmäßig weiter nur in den
+  // Input. Auto-Send ist opt-in; Fehler senden nie. Mic-Start unterbricht TTS.
   const onMicClick = async () => {
     if (transcribing) return;
     if (mic.status === "recording") {
@@ -324,8 +354,13 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
         if (!result.ok || !transcript) {
           throw new Error("empty transcript");
         }
-        setText((prev) => (prev ? `${prev} ${transcript}` : transcript));
+        const composedText = text ? `${text} ${transcript}` : transcript;
         setMicTranscribeError(null);
+        if (pttAutoSend) {
+          await submitQuestion(composedText);
+        } else {
+          setText(composedText);
+        }
       } catch {
         setMicTranscribeError(t.micError);
       } finally {
@@ -334,6 +369,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
       return;
     }
     setMicTranscribeError(null);
+    if (speakPlaying) speakStop();
     void mic.start();
   };
 
@@ -356,38 +392,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    const value = text.trim();
-    if (!value || chat.sending) return;
-    // Jeder neue Submit nimmt einen etwaigen /plan-Usage-Hinweis wieder weg
-    // (gleiche Klebrigkeits-Regel wie die Chat-Composer-Fehler).
-    planspec.clearUsageError();
-    // S3.3-FE: „/plan <idee>" geht in den Draft-Flow (Draft-Card im Thread),
-    // nicht in einen Chat-Turn. „/plan" ohne Idee → Usage-Hinweis im Hook.
-    const planMatch = PLAN_PREFIX_RE.exec(value);
-    if (planMatch) {
-      setText("");
-      void planspec.submitIdea(planMatch[1] ?? "");
-      return;
-    }
-    if (liveShare.active) {
-      // A selected text-only engine must never silently bypass the live frame.
-      if (!imagesOk) {
-        setLiveShareNotice(t.engineNoImagesTitle);
-        return;
-      }
-      // Without an explicit static attachment, materialise the freshest uploaded
-      // live frame. Failure is fail-closed in useLiveShare: preserve the question
-      // so the user can retry instead of sending a misleading text-only turn.
-      if (!chat.attachment) {
-        const assetId = await liveShare.attachCurrentFrame();
-        if (!assetId) return;
-        setText("");
-        void chat.send(value, { attachmentAssetId: assetId });
-        return;
-      }
-    }
-    setText("");
-    void chat.send(value);
+    await submitQuestion(text);
   };
 
   const onPaste = (event: ClipboardEvent<HTMLInputElement>) => {
@@ -590,8 +595,8 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           >
             <MonitorUp aria-hidden className="h-4 w-4" />
           </button>
-          {/* S3.6 — Push-to-Talk: idle → recording (Puls) → transcribing
-              (Spinner); das Transkript landet im Input, kein Auto-Send. */}
+          {/* S7: Push-to-Talk: idle → recording → transcribing. Auto-Send ist
+              separat, sichtbar und standardmäßig aus. */}
           <button
             type="button"
             className={mic.status === "recording" ? "jv-ic jv-mic jv-mic-rec" : "jv-ic jv-mic"}
@@ -613,6 +618,16 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
             ) : (
               <Mic aria-hidden className="h-4 w-4" />
             )}
+          </button>
+          <button
+            type="button"
+            className={pttAutoSend ? "jv-ic jv-ptt-auto jv-on" : "jv-ic jv-ptt-auto"}
+            aria-label={t.pttAutoSendLabel}
+            aria-pressed={pttAutoSend}
+            title={t.pttAutoSendLabel}
+            onClick={() => setPttAutoSend(!pttAutoSend)}
+          >
+            <span aria-hidden>Auto</span>
           </button>
           {/* S3.6 — Vorlese-Toggle (persistiert): fertige Assistant-Antworten
               einmal abspielen; Aktiv-Zustand sichtbar über .jv-on. */}
