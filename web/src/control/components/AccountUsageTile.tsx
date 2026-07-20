@@ -156,9 +156,10 @@ function AccountProviderCard({
         <details className="mt-2 text-xs">
           <summary className="cursor-pointer text-ink-3 hover:text-ink">Details</summary>
           <div className="mt-1 space-y-1 text-ink-2">
-            {others.map((w) => (
-              <p key={w.window_key ?? w.label}>
-                {windowLabelDe(w, config)}{" "}
+            {others.map((w, i) => (
+              <p key={`${w.window_key ?? w.label}-${w.detail ?? ""}-${i}`}>
+                {windowLabelDe(w, config)}
+                {w.detail ? ` · ${w.detail}` : ""}{" "}
                 {typeof w.used_percent === "number" ? `${Math.round(w.used_percent)} %` : "—"}
               </p>
             ))}

@@ -53,6 +53,11 @@ windows:
   - key: sonnet_week
     label: Sonnet-Woche
     kind: other
+  # Model-scoped weekly cap (Anthropic `limits[].weekly_scoped`); the model name
+  # rides in the window `detail`, rendered alongside this label in the Details.
+  - key: scoped_week
+    label: Modell-Limit
+    kind: other
 
 # Subscription token buckets (Abo-Token panel + per-card worker-run reconciliation).
 # `key` must match a provider `lane` above. Order = display order; `visible: false`

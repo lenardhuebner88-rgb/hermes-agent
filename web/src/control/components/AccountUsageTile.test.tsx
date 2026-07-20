@@ -426,4 +426,35 @@ describe("AccountUsageTile", () => {
     expect(html).toMatch(/border-line bg-surface-2 text-ink-2[^"]*"[^>]*>[\s\S]*?Stand 5h/);
     expect(html).not.toContain(">Live</");
   });
+
+  it("rendert scoped_week (Modell-Limit) mit Modellname im Detail; detail=null ohne Trenner", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "anthropic",
+          available: true,
+          source: "oauth",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Account limits",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "Current session", window_key: "session", used_percent: 4, reset_at: null, detail: null },
+            { label: "Current week", window_key: "weekly", used_percent: 82, reset_at: null, detail: null },
+            { label: "Modell-Limit", window_key: "scoped_week", used_percent: 94, reset_at: null, detail: "Fable" },
+            { label: "Modell-Limit", window_key: "scoped_week", used_percent: 50, reset_at: null, detail: null },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
+    // Model-scoped cap renders in the Details with its model name …
+    expect(html).toContain("Modell-Limit · Fable 94 %");
+    // … and the detail=null path renders without a dangling " · " separator.
+    expect(html).toContain("Modell-Limit 50 %");
+    expect(html).not.toContain("Modell-Limit ·  50");
+  });
 });

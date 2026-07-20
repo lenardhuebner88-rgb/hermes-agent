@@ -119,7 +119,7 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
             base = f"{window.label}: {remaining}% remaining ({used}% used)"
         if window.reset_at:
             base += f" • resets {_format_reset(window.reset_at)}"
-        elif window.detail:
+        if window.detail:
             base += f" • {window.detail}"
         lines.append(base)
     for detail in snapshot.details:
@@ -516,6 +516,25 @@ def _resolve_codex_usage_credentials(
     return entry.runtime_api_key, str(entry.runtime_base_url or base_url or "").strip(), None
 
 
+def _codex_window_kind(window: dict, fallback_label: str, fallback_key: str) -> tuple[str, str]:
+    """Classify a Codex rate-limit window by its real length as (label, window_key).
+
+    OpenAI historically shipped a 5-hour primary window, but Pro plans now report a
+    single rolling 7-day window as ``primary_window`` (``limit_window_seconds``
+    604800). Classify only well-evidenced duration bands — up to a day is a session
+    window (5 h = 18000 s), multiple days is a weekly window (7 d = 604800 s) — and
+    fall back to the legacy position-based default for a missing, boolean, or
+    ambiguous in-between length, so an unknown window is never mislabelled.
+    """
+    seconds = window.get("limit_window_seconds")
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        if seconds <= 86400:  # ≤ 24 h → session-class
+            return ("Session", "session")
+        if seconds >= 2 * 86400:  # ≥ 2 days → weekly-class
+            return ("Weekly", "weekly")
+    return (fallback_label, fallback_key)
+
+
 def _fetch_codex_account_usage(
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -592,7 +611,7 @@ def _fetch_codex_account_usage(
         )
     rate_limit = payload.get("rate_limit") or {}
     windows: list[AccountUsageWindow] = []
-    for key, label, wkey in (
+    for key, fallback_label, fallback_wkey in (
         ("primary_window", "Session", "session"),
         ("secondary_window", "Weekly", "weekly"),
     ):
@@ -600,6 +619,7 @@ def _fetch_codex_account_usage(
         used = window.get("used_percent")
         if used is None:
             continue
+        label, wkey = _codex_window_kind(window, fallback_label, fallback_wkey)
         windows.append(
             AccountUsageWindow(
                 label=label,
@@ -890,6 +910,44 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
                 window_key=wkey,
             )
         )
+    # Newer OAuth payloads additionally carry a structured ``limits`` list that
+    # includes model-scoped weekly caps (``weekly_scoped``) the flat top-level
+    # fields don't expose. Surface them as secondary ("other") windows so a tight
+    # model-scoped cap shows up in the details instead of being silently dropped.
+    limits = payload.get("limits")
+    if isinstance(limits, list):
+        for entry in limits:
+            if not isinstance(entry, dict) or entry.get("kind") != "weekly_scoped":
+                continue
+            # An explicitly inactive scoped cap is not currently in force — skip it
+            # (missing/None counts as active: fail-open towards showing).
+            if entry.get("is_active") is False:
+                continue
+            raw_pct = entry.get("percent")
+            if isinstance(raw_pct, bool) or not isinstance(raw_pct, (int, float)):
+                continue
+            # ``limits[].percent`` is already in percentage points (4/82/94 in the
+            # live payload) — unlike top-level ``utilization``, which can be a 0..1
+            # fraction. Use it directly; the *100-if-<=1 heuristic would wrongly turn
+            # a legitimate percent=1 into 100 %.
+            scoped_used = max(0.0, min(100.0, float(raw_pct)))
+            model_name: Optional[str] = None
+            scope = entry.get("scope")
+            if isinstance(scope, dict):
+                model = scope.get("model")
+                if isinstance(model, dict):
+                    display = model.get("display_name")
+                    if isinstance(display, str) and display.strip():
+                        model_name = display.strip()
+            windows.append(
+                AccountUsageWindow(
+                    label="Modell-Limit",
+                    used_percent=scoped_used,
+                    reset_at=_parse_dt(entry.get("resets_at")),
+                    detail=model_name,
+                    window_key="scoped_week",
+                )
+            )
     details: list[str] = []
     extra = payload.get("extra_usage") or {}
     if extra.get("is_enabled"):
@@ -1245,89 +1303,133 @@ def _fetch_xai_account_usage(log_path: Optional[Path] = None) -> Optional[Accoun
         )
 
     text = raw.decode("utf-8", errors="replace")
-    for line in reversed(text.splitlines()):
+
+    def _parse_record(line: str) -> Optional[dict]:
         if _XAI_BILLING_MARKER not in line:
-            continue
+            return None
         try:
-            payload = json.loads(line)
+            record_payload = json.loads(line)
         except (json.JSONDecodeError, TypeError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        ctx = payload.get("ctx")
-        if not isinstance(ctx, dict):
-            continue
-        config = ctx.get("config")
-        if not isinstance(config, dict):
-            continue
-        credit_pct = config.get("creditUsagePercent")
+            return None
+        if not isinstance(record_payload, dict):
+            return None
+        record_ctx = record_payload.get("ctx")
+        if not isinstance(record_ctx, dict):
+            return None
+        record_config = record_ctx.get("config")
+        if not isinstance(record_config, dict):
+            return None
+        return {"payload": record_payload, "ctx": record_ctx, "config": record_config}
+
+    def _period_start(record: dict) -> Any:
+        current = record["config"].get("currentPeriod")
+        if isinstance(current, dict):
+            return current.get("start")
+        return None
+
+    def _valid_pct(record: dict) -> Optional[float]:
+        pct = record["config"].get("creditUsagePercent")
         # bool is a subclass of int — reject it.
-        if isinstance(credit_pct, bool) or not isinstance(credit_pct, (int, float)):
-            continue
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            return None
+        return float(pct)
 
-        plan_raw = ctx.get("subscriptionTier")
-        plan: Optional[str] = None
-        if plan_raw not in {None, ""}:
-            cleaned = str(plan_raw).strip()
-            if cleaned:
-                plan = cleaned
+    records = [
+        record
+        for record in (_parse_record(line) for line in reversed(text.splitlines()))
+        if record is not None
+    ]
+    if not records:
+        return _unavailable("Keine Billing-Daten im Grok-CLI-Log.")
 
-        period_end: Any = None
-        current_period = config.get("currentPeriod")
-        if isinstance(current_period, dict):
-            period_end = current_period.get("end")
+    # Plan/reset/signal always come from the NEWEST billing line (the current
+    # period). The percentage is bound to that same period: at a period boundary
+    # the newest line (just-started period, new unified-billing format) can omit
+    # ``creditUsagePercent`` — accept a percentage only from the newest line's own
+    # period, otherwise report an honest "unknown" instead of resurrecting the
+    # previous period's stale value (often 100 % with an already-passed reset).
+    reference = records[0]
+    reference_start = _period_start(reference)
+    credit_pct: Optional[float] = None
+    if reference_start is None:
+        # No reliable period anchor: trust only the newest record — never fall back
+        # to an arbitrarily old percentage (that is exactly the stale path the
+        # period binding exists to prevent).
+        credit_pct = _valid_pct(reference)
+    else:
+        for record in records:
+            if _period_start(record) != reference_start:
+                continue
+            candidate = _valid_pct(record)
+            if candidate is not None:
+                credit_pct = candidate
+                break
 
-        windows = (
-            AccountUsageWindow(
-                label="Diese Woche",
-                used_percent=float(credit_pct),
-                reset_at=_parse_dt(period_end),
-                window_key="weekly",
-            ),
+    ctx = reference["ctx"]
+    config = reference["config"]
+    payload = reference["payload"]
+
+    plan_raw = ctx.get("subscriptionTier")
+    plan: Optional[str] = None
+    if plan_raw not in {None, ""}:
+        cleaned = str(plan_raw).strip()
+        if cleaned:
+            plan = cleaned
+
+    period_end: Any = None
+    current_period = config.get("currentPeriod")
+    if isinstance(current_period, dict):
+        period_end = current_period.get("end")
+
+    windows = (
+        AccountUsageWindow(
+            label="Diese Woche",
+            used_percent=credit_pct,
+            reset_at=_parse_dt(period_end),
+            window_key="weekly",
+        ),
+    )
+
+    details: list[str] = []
+    ts = _parse_dt(payload.get("ts"))
+    if ts is not None:
+        details.append(
+            f"Stand: {ts.astimezone().strftime('%Y-%m-%d %H:%M %Z')}"
         )
 
-        details: list[str] = []
-        ts = _parse_dt(payload.get("ts"))
-        if ts is not None:
-            details.append(
-                f"Stand: {ts.astimezone().strftime('%Y-%m-%d %H:%M %Z')}"
-            )
+    def _nested_val(obj: Any) -> Optional[float]:
+        if not isinstance(obj, dict):
+            return None
+        raw_val = obj.get("val")
+        if raw_val in {None, ""}:
+            return None
+        try:
+            return float(raw_val)
+        except (TypeError, ValueError):
+            return None
 
-        def _nested_val(obj: Any) -> Optional[float]:
-            if not isinstance(obj, dict):
-                return None
-            raw_val = obj.get("val")
-            if raw_val in {None, ""}:
-                return None
-            try:
-                return float(raw_val)
-            except (TypeError, ValueError):
-                return None
+    on_demand_cap = _nested_val(config.get("onDemandCap"))
+    on_demand_used = _nested_val(config.get("onDemandUsed"))
+    if on_demand_cap is not None and on_demand_cap > 0:
+        used_disp = int(on_demand_used) if on_demand_used is not None and on_demand_used == int(on_demand_used) else (on_demand_used if on_demand_used is not None else 0)
+        cap_disp = int(on_demand_cap) if on_demand_cap == int(on_demand_cap) else on_demand_cap
+        details.append(f"On-Demand: {used_disp}/{cap_disp}")
 
-        on_demand_cap = _nested_val(config.get("onDemandCap"))
-        on_demand_used = _nested_val(config.get("onDemandUsed"))
-        if on_demand_cap is not None and on_demand_cap > 0:
-            used_disp = int(on_demand_used) if on_demand_used is not None and on_demand_used == int(on_demand_used) else (on_demand_used if on_demand_used is not None else 0)
-            cap_disp = int(on_demand_cap) if on_demand_cap == int(on_demand_cap) else on_demand_cap
-            details.append(f"On-Demand: {used_disp}/{cap_disp}")
+    prepaid = _nested_val(config.get("prepaidBalance"))
+    if prepaid is not None and prepaid > 0:
+        prepaid_disp = int(prepaid) if prepaid == int(prepaid) else prepaid
+        details.append(f"Prepaid-Guthaben: {prepaid_disp}")
 
-        prepaid = _nested_val(config.get("prepaidBalance"))
-        if prepaid is not None and prepaid > 0:
-            prepaid_disp = int(prepaid) if prepaid == int(prepaid) else prepaid
-            details.append(f"Prepaid-Guthaben: {prepaid_disp}")
-
-        return AccountUsageSnapshot(
-            provider="xai",
-            source="grok_cli_log",
-            fetched_at=_utc_now(),
-            signal_at=ts,
-            title="Grok",
-            plan=plan,
-            windows=windows,
-            details=tuple(details),
-        )
-
-    return _unavailable("Keine Billing-Daten im Grok-CLI-Log.")
+    return AccountUsageSnapshot(
+        provider="xai",
+        source="grok_cli_log",
+        fetched_at=_utc_now(),
+        signal_at=ts,
+        title="Grok",
+        plan=plan,
+        windows=windows,
+        details=tuple(details),
+    )
 
 
 def fetch_account_usage(

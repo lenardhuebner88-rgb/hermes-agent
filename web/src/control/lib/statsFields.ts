@@ -60,6 +60,7 @@ export const DEFAULT_STATS_CONFIG: StatsFieldConfig = {
     { key: "weekly", label: "Diese Woche", kind: "weekly" },
     { key: "opus_week", label: "Opus-Woche", kind: "other" },
     { key: "sonnet_week", label: "Sonnet-Woche", kind: "other" },
+    { key: "scoped_week", label: "Modell-Limit", kind: "other" },
   ],
   subscription_lanes: [
     { key: "chatgpt", label: "ChatGPT/Codex Abo", visible: true },

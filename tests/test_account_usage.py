@@ -637,3 +637,281 @@ def test_fetch_account_usage_dispatches_xai_and_grok(monkeypatch):
     assert fetch_account_usage("xai") is sentinel
     assert fetch_account_usage("grok") is sentinel
     assert len(calls) == 2
+
+
+def test_fetch_account_usage_codex_seven_day_primary_window_is_weekly(monkeypatch):
+    """Live Codex Pro shape: a single rolling 7-day ``primary_window`` (604800 s),
+    no secondary. It must be labelled Weekly — not mis-called a 5-hour session."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_codex_runtime_credentials",
+        lambda refresh_if_expiring=True: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "access-token",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.account_usage._read_codex_tokens",
+        lambda: {"tokens": {"account_id": "acct_123"}},
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 83,
+                        "reset_at": 1_900_000_000,
+                        "limit_window_seconds": 604800,
+                    },
+                    "secondary_window": None,
+                },
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("openai-codex")
+
+    assert snapshot is not None
+    assert len(snapshot.windows) == 1
+    assert snapshot.windows[0].label == "Weekly"
+    assert snapshot.windows[0].window_key == "weekly"
+    assert snapshot.windows[0].used_percent == 83.0
+
+
+def test_fetch_xai_account_usage_new_period_without_pct_reports_unknown(tmp_path):
+    """Period boundary: the newest line (fresh period, new unified-billing format)
+    omits ``creditUsagePercent``. The fetcher must NOT resurrect the previous
+    period's stale value — it reports an honest unknown with the fresh reset."""
+    new_period_line = (
+        '{"ts":"2026-07-19T17:58:45.928Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-19T17:58:33.973068+00:00",'
+        '"end":"2026-07-26T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
+        '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    old_period_line = (
+        '{"ts":"2026-07-19T17:58:15.949Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":100.0,'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+        '"end":"2026-07-19T17:58:33.973068+00:00"},"isUnifiedBillingUser":true},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    log_path = tmp_path / "unified.jsonl"
+    log_path.write_text(
+        "\n".join([old_period_line, new_period_line]) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.available is True
+    assert snapshot.plan == "SuperGrok"
+    assert len(snapshot.windows) == 1
+    window = snapshot.windows[0]
+    assert window.window_key == "weekly"
+    # Honest unknown for the just-started period — not the stale previous 100 %.
+    assert window.used_percent is None
+    assert window.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
+
+
+def test_fetch_account_usage_anthropic_maps_scoped_weekly_limit(monkeypatch):
+    """The structured ``limits[]`` carries a model-scoped weekly cap the flat
+    top-level fields don't expose; it becomes a secondary ``scoped_week`` window
+    with the model name in ``detail``."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: "sk-ant-oat01-test-oauth-token",
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "five_hour": {"utilization": 4.0, "resets_at": "2026-07-20T19:29:59Z"},
+                "seven_day": {"utilization": 82.0, "resets_at": "2026-07-24T03:59:59Z"},
+                "limits": [
+                    {"kind": "session", "group": "session", "percent": 4},
+                    {"kind": "weekly_all", "group": "weekly", "percent": 82},
+                    {
+                        "kind": "weekly_scoped",
+                        "group": "weekly",
+                        "percent": 94,
+                        "resets_at": "2026-07-24T03:59:59Z",
+                        "scope": {"model": {"display_name": "Fable"}, "surface": None},
+                        "is_active": True,
+                    },
+                ],
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    scoped = [w for w in snapshot.windows if w.window_key == "scoped_week"]
+    assert len(scoped) == 1
+    assert scoped[0].label == "Modell-Limit"
+    assert scoped[0].used_percent == 94.0
+    assert scoped[0].detail == "Fable"
+    assert scoped[0].reset_at == datetime(2026, 7, 24, 3, 59, 59, tzinfo=timezone.utc)
+
+
+def test_fetch_account_usage_anthropic_scoped_percent_is_percentage_points(monkeypatch):
+    """``limits[].percent`` is in percentage points: ``percent=1`` means 1 % (NOT
+    100 %), an explicitly inactive scoped cap is skipped, and a bool percent is
+    rejected."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_anthropic_token",
+        lambda: "sk-ant-oat01-test-oauth-token",
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "limits": [
+                    {"kind": "weekly_scoped", "percent": 1, "scope": {"model": {"display_name": "Low"}}, "is_active": True},
+                    {"kind": "weekly_scoped", "percent": 99, "scope": {"model": {"display_name": "Off"}}, "is_active": False},
+                    {"kind": "weekly_scoped", "percent": True, "scope": {"model": {"display_name": "Bool"}}},
+                ],
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    scoped = [w for w in snapshot.windows if w.window_key == "scoped_week"]
+    # percent=1 → 1 % (not 100 %); inactive "Off" skipped; bool percent rejected.
+    assert len(scoped) == 1
+    assert scoped[0].used_percent == 1.0
+    assert scoped[0].detail == "Low"
+
+
+def test_fetch_account_usage_codex_ambiguous_window_falls_back_to_position(monkeypatch):
+    """A window length in the ambiguous band (24 h < len < 2 d) is not force-classified
+    — it falls back to the position-based default (primary → session)."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_codex_runtime_credentials",
+        lambda refresh_if_expiring=True: {
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key": "access-token",
+        },
+    )
+    monkeypatch.setattr(
+        "agent.account_usage._read_codex_tokens",
+        lambda: {"tokens": {"account_id": "acct_123"}},
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 50,
+                        "reset_at": 1_900_000_000,
+                        "limit_window_seconds": 129600,  # 36 h — ambiguous band
+                    },
+                },
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("openai-codex")
+
+    assert snapshot is not None
+    assert len(snapshot.windows) == 1
+    assert snapshot.windows[0].label == "Session"
+    assert snapshot.windows[0].window_key == "session"
+
+
+def test_fetch_xai_account_usage_no_period_anchor_uses_newest_only(tmp_path):
+    """Newest billing line has no ``currentPeriod`` (no period anchor): trust only
+    that newest record — never fall back to an arbitrary older percent."""
+    newest_no_period = (
+        '{"ts":"2026-07-19T18:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{'
+        '"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"prepaidBalance":{"val":0}},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    older_with_pct = (
+        '{"ts":"2026-07-19T17:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":77.0,'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+        '"end":"2026-07-19T17:58:33.973068+00:00"}},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    log_path = tmp_path / "unified.jsonl"
+    log_path.write_text(
+        "\n".join([older_with_pct, newest_no_period]) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.available is True
+    # No stale 77 % resurrected from the older line — honest unknown.
+    assert snapshot.windows[0].used_percent is None
+    assert snapshot.signal_at == datetime(2026, 7, 19, 18, 0, 0, tzinfo=timezone.utc)
+
+
+def test_fetch_xai_account_usage_same_period_older_pct_metadata_from_newest(tmp_path):
+    """Newest line of the current period lacks pct but an older line of the SAME
+    period has it: use that percent, but take signal/plan/reset from the newest line."""
+    newest_no_pct = (
+        '{"ts":"2026-07-16T10:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+        '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0}},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    older_same_period_pct = (
+        '{"ts":"2026-07-16T08:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
+        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":42.0,'
+        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
+        '"end":"2026-07-19T17:58:33.973068+00:00"}},'
+        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+    )
+    log_path = tmp_path / "unified.jsonl"
+    log_path.write_text(
+        "\n".join([older_same_period_pct, newest_no_pct]) + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot = _fetch_xai_account_usage(log_path=log_path)
+
+    assert snapshot is not None
+    assert snapshot.windows[0].used_percent == 42.0  # pct from older same-period line
+    # Signal comes from the NEWEST line, not the older pct line.
+    assert snapshot.signal_at == datetime(2026, 7, 16, 10, 0, 0, tzinfo=timezone.utc)
+    assert snapshot.windows[0].reset_at == datetime(2026, 7, 19, 17, 58, 33, 973068, tzinfo=timezone.utc)
+
+
+def test_render_account_usage_lines_shows_detail_alongside_reset():
+    """A window with BOTH reset and detail renders both (detail no longer swallowed
+    by the reset branch)."""
+    snapshot = AccountUsageSnapshot(
+        provider="anthropic",
+        source="oauth_usage_api",
+        fetched_at=datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+        title="Claude",
+        windows=(
+            AccountUsageWindow(
+                label="Modell-Limit",
+                used_percent=94.0,
+                reset_at=datetime(2026, 7, 24, 3, 59, 59, tzinfo=timezone.utc),
+                detail="Fable",
+                window_key="scoped_week",
+            ),
+        ),
+    )
+
+    lines = render_account_usage_lines(snapshot)
+    scoped_line = next(line for line in lines if line.startswith("Modell-Limit"))
+    assert "resets" in scoped_line
+    assert "Fable" in scoped_line
