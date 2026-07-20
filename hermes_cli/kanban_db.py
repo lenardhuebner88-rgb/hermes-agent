@@ -10228,6 +10228,7 @@ def hold_task(
     *,
     reason: str = "operator hold",
     signal_fn=None,
+    probe_fn=None,
 ) -> bool:
     """Atomically stop a running worker and park the task as ``blocked``.
 
@@ -10259,6 +10260,7 @@ def hold_task(
         row["worker_pid"],
         prev_lock,
         signal_fn=signal_fn,
+        probe_fn=probe_fn,
     )
     with write_txn(conn):
         if (
@@ -10329,6 +10331,7 @@ def cancel_chain(
     *,
     reason: Optional[str] = None,
     signal_fn=None,
+    probe_fn=None,
 ) -> dict[str, list[str]]:
     """Stop every open task in the sink-rooted chain without inventing a status.
 
@@ -10367,7 +10370,13 @@ def cancel_chain(
         if status_by_id.get(task_id) != "running":
             continue
         processed.add(task_id)
-        if hold_task(conn, task_id, reason=cancel_reason, signal_fn=signal_fn):
+        if hold_task(
+            conn,
+            task_id,
+            reason=cancel_reason,
+            signal_fn=signal_fn,
+            probe_fn=probe_fn,
+        ):
             held.append(task_id)
             terminated.append(task_id)
         else:

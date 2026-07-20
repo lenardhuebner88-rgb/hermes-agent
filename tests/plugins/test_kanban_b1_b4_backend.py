@@ -170,6 +170,20 @@ def _dead_signal_recorder(calls: list[tuple[int, signal.Signals]]):
     return _signal
 
 
+def _alive_until_signaled_probe(calls: list[tuple[int, signal.Signals]]):
+    # Documented seam correction (GATE-GREEN-KANBAN-LIFECYCLE-REGRESSION-FIX):
+    # since commit 0e3459e42 ("fence retries on worker group exit")
+    # _terminate_reclaimed_worker probes liveness BEFORE signaling and skips
+    # the signal entirely for a confirmed-dead pid. The cancel_chain fake
+    # worker pid (43210) never exists, so the old signal-without-probe
+    # expectation in these tests is stale seam behavior, not a product
+    # regression. This probe models the worker the tests actually intend:
+    # alive until it receives a signal, dead afterwards.
+    def _probe(pid: int) -> bool:
+        return not any(call_pid == pid for call_pid, _sig in calls)
+    return _probe
+
+
 # ---------------------------------------------------------------------------
 # B1 — workers/active: step_key + model_override + effective_model
 # ---------------------------------------------------------------------------
@@ -825,7 +839,12 @@ def test_cancel_chain_holds_open_nodes_terminates_running_skips_done(kanban_home
         root, running, ready = _make_cancel_chain(conn)
         calls: list[tuple[int, signal.Signals]] = []
 
-        result = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
+        result = kb.cancel_chain(
+            conn,
+            root,
+            signal_fn=_dead_signal_recorder(calls),
+            probe_fn=_alive_until_signaled_probe(calls),
+        )
 
         assert set(result["held"]) == {running, ready}
         assert result["terminated"] == [running]
@@ -893,8 +912,18 @@ def test_cancel_chain_is_idempotent_on_second_call(kanban_home):
         root, running, ready = _make_cancel_chain(conn)
         calls: list[tuple[int, signal.Signals]] = []
 
-        first = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
-        second = kb.cancel_chain(conn, root, signal_fn=_dead_signal_recorder(calls))
+        first = kb.cancel_chain(
+            conn,
+            root,
+            signal_fn=_dead_signal_recorder(calls),
+            probe_fn=_alive_until_signaled_probe(calls),
+        )
+        second = kb.cancel_chain(
+            conn,
+            root,
+            signal_fn=_dead_signal_recorder(calls),
+            probe_fn=_alive_until_signaled_probe(calls),
+        )
 
         assert set(first["held"]) == {running, ready}
         assert first["terminated"] == [running]
