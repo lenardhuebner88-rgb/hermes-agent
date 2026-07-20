@@ -196,8 +196,13 @@ def test_actual_spawn_uses_claimed_route_after_lane_changes(route_db, monkeypatc
 
     assert kb._default_spawn(claimed, str(profile_home)) == 4242
     cmd = captured["cmd"]
-    assert cmd[cmd.index("-m") + 1] == "lane/model-a"
-    assert cmd[cmd.index("--provider") + 1] == "openrouter"
+    # The model/provider flags follow the `chat` subcommand. Anchor on it so
+    # the extraction is robust to the argv prefix: off-PATH the worker is
+    # spawned as `python -m hermes_cli.main ... chat -m <model>`, where a naive
+    # cmd.index("-m") would catch Python's module flag instead of the model.
+    chat_idx = cmd.index("chat")
+    assert cmd[cmd.index("-m", chat_idx) + 1] == "lane/model-a"
+    assert cmd[cmd.index("--provider", chat_idx) + 1] == "openrouter"
     assert "lane/model-b" not in cmd
     assert "changed-provider" not in cmd
 
