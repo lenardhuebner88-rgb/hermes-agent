@@ -873,7 +873,8 @@ def _resolve_anthropic_plan_label() -> Optional[str]:
     try:
         cred_path = Path.home() / ".claude" / ".credentials.json"
         if cred_path.exists():
-            data = json.loads(cred_path.read_text(encoding="utf-8")) or {}
+            data = json.loads(cred_path.read_text(encoding="utf-8"))
+            data = data if isinstance(data, dict) else {}
             oauth = data.get("claudeAiOauth")
             if isinstance(oauth, dict):
                 subscription_type = oauth.get("subscriptionType") or None
@@ -884,7 +885,8 @@ def _resolve_anthropic_plan_label() -> Optional[str]:
         try:
             cfg_path = Path.home() / ".claude.json"
             if cfg_path.exists():
-                data = json.loads(cfg_path.read_text(encoding="utf-8")) or {}
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                data = data if isinstance(data, dict) else {}
                 account = data.get("oauthAccount")
                 if isinstance(account, dict):
                     rate_limit_tier = rate_limit_tier or account.get(

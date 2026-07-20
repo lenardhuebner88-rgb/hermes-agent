@@ -957,3 +957,14 @@ def test_resolve_anthropic_plan_label_fail_soft_when_missing(tmp_path, monkeypat
     # No credential files at all → None, never raises.
     monkeypatch.setattr("agent.account_usage.Path.home", lambda: tmp_path)
     assert _resolve_anthropic_plan_label() is None
+
+
+def test_resolve_anthropic_plan_label_fail_soft_on_non_object_root(tmp_path, monkeypatch):
+    # A malformed credentials file whose JSON root is not an object must never
+    # raise (it would otherwise drop the whole Claude usage snapshot).
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / ".credentials.json").write_text("[1, 2, 3]", encoding="utf-8")
+    (tmp_path / ".claude.json").write_text('"not-an-object"', encoding="utf-8")
+    monkeypatch.setattr("agent.account_usage.Path.home", lambda: tmp_path)
+    assert _resolve_anthropic_plan_label() is None

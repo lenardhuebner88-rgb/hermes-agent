@@ -314,7 +314,7 @@ describe("AccountUsageTile", () => {
     expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
-  it("hält openrouter (details only, lane null, no windows) in der Fußzeile (Regression)", () => {
+  it("rendert openrouter (details only, lane null, no windows) als Ausgaben-Karte im Cockpit", () => {
     const cfg: StatsFieldConfig = {
       ...DEFAULT_STATS_CONFIG,
       providers: [
@@ -342,10 +342,10 @@ describe("AccountUsageTile", () => {
     const html = renderToStaticMarkup(
       <AccountUsageTile usage={u} loading={false} error={null} config={cfg} />,
     );
-    expect(html).toContain("Ohne Fenster-Limit");
+    expect(html).toContain("<article");
     expect(html).toContain("OpenRouter");
     expect(html).toContain("Guthaben: 8.50 USD");
-    expect(html).not.toContain("<article");
+    expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
   it("unavailable xai ohne Fenster fällt in die Fußzeile (dokumentierter Tradeoff)", () => {
