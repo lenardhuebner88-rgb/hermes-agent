@@ -1197,6 +1197,16 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "home"));
   });
 
+  it("creates a Qwen session via the desktop create modal", async () => {
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+    fireEvent.click(screen.getByRole("button", { name: /Qwen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
+
+    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("qwen", "home"));
+  });
+
   it("renders empty and error states", async () => {
     apiMock.getAgentTerminalWindows.mockResolvedValueOnce({ windows: [] });
     await renderView();

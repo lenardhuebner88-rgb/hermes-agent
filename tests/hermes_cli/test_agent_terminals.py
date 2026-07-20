@@ -437,6 +437,29 @@ def test_grok_uses_subscription_cli_and_grok_build_model(
     assert service.capabilities().to_dict()["agents"]["grok"]["available"] is True
 
 
+def test_qwen_uses_qwen_code_cli(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    qwen = home / ".npm-global" / "bin" / "qwen"
+    qwen.parent.mkdir(parents=True)
+    qwen.write_text("#!/bin/sh\nprintf 'fake qwen args: %s\\n' \"$*\"\nsleep 60\n", encoding="utf-8")
+    qwen.chmod(qwen.stat().st_mode | stat.S_IXUSR)
+
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    definition = service.definition_for("qwen")
+
+    # Qwen Code reads model + auth from ~/.qwen/settings.json, so the terminal
+    # launches the bare CLI (generic branch — no server-side argv flags).
+    assert definition.argv == (str(qwen.resolve()),)
+    created = service.ensure("qwen")
+    assert created.window == "qwen"
+    assert "fake qwen args:" in service.capture("work", "qwen")
+    assert service.identity_for("work", "qwen") == ("qwen", "home")
+    assert service.capabilities().to_dict()["agents"]["qwen"]["available"] is True
+
+
 def test_respawn_and_kill_refuse_live_processes_and_recover_dead_panes(
     tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
