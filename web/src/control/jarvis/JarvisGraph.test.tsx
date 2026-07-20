@@ -16,6 +16,9 @@ import type { PaGraphCluster, PaGraphEdge, PaGraphNode, PaGraphResponse } from "
 import { _resetPollingStore, refresh } from "../hooks/pollingStore";
 
 configure({ asyncUtilTimeout: 5000 });
+// S7: unter geteilter Host-Last bounce-t der Footer-Tag-waitFor vereinzelt
+// über den Default-testTimeout (S6.6-Muster: scoped, keine Pauschale).
+vi.setConfig({ testTimeout: 15_000 });
 
 const getPaGraphMock = vi.hoisted(() => vi.fn());
 
