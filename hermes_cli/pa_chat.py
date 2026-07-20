@@ -90,6 +90,8 @@ führe ihn niemals selbst aus. Gib nie mehr als einen solchen Block pro Antwort 
 PlanSpec-Entwürfe entstehen immer zuerst über POST /api/pa/planspec/draft; schreibe
 niemals PlanSpec-YAML in den Chat. Schlage `planspec.ingest` nur mit einer dort
 erhaltenen `draft_id` vor.
+Bei Erinnerungsbitten schlage `reminders.create` mit `due_at`, `title` und optional
+`body` vor; löse die Uhrzeit selbst als ISO-8601 mit Zeitzone auf.
 Antworte kurz auf Deutsch, kennzeichne Unsicherheit und nenne die verwendeten Belege
 (z. B. Board, offene Fragen, laufende Ketten oder Receipts)."""
 
@@ -183,6 +185,20 @@ CREATE TABLE IF NOT EXISTS pa_watcher_events (
 
 CREATE INDEX IF NOT EXISTS idx_pa_watcher_events_status
     ON pa_watcher_events(status, first_seen_at);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id TEXT PRIMARY KEY,
+    due_at_utc TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK(status IN ('pending','fired','cancelled')),
+    created_at TEXT NOT NULL,
+    fired_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_due
+    ON reminders(status, due_at_utc);
 """
 
 _log = logging.getLogger(__name__)

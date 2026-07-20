@@ -155,7 +155,27 @@ _PA_ACTION_SCHEMAS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "planspec.ingest": (("draft_id",), ("reason",)),
     "loops.start_pack": (("pack",), ("model", "max_rounds", "reason")),
     "loops.status": ((), ("pack",)),
+    "reminders.create": (("due_at", "title"), ("body", "reason")),
 }
+
+
+def _normalize_reminder_due_at(value: str) -> str:
+    try:
+        due_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "Payload-Feld due_at für reminders.create muss ISO-8601 sein"
+        ) from exc
+    if due_at.tzinfo is None or due_at.utcoffset() is None:
+        raise ValueError(
+            "Payload-Feld due_at für reminders.create braucht eine Zeitzone"
+        )
+    due_at_utc = due_at.astimezone(timezone.utc)
+    if due_at_utc <= datetime.now(tz=timezone.utc):
+        raise ValueError(
+            "Payload-Feld due_at für reminders.create muss in der Zukunft liegen"
+        )
+    return due_at_utc.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, Any]:
@@ -206,6 +226,26 @@ def normalize_pa_action_payload(category: str, payload: Any) -> dict[str, Any]:
             continue
         if not isinstance(value, str):
             raise ValueError(f"Payload-Feld {key} für {category_s} muss Text sein")
+        if category_s == "reminders.create":
+            if key == "due_at":
+                normalized[key] = _normalize_reminder_due_at(value.strip())
+                continue
+            limit = 200 if key == "title" else 500
+            stripped = value.strip()
+            if key == "body" and not stripped:
+                normalized[key] = ""
+                continue
+            if not stripped:
+                raise ValueError(
+                    f"Payload-Feld {key} für {category_s} darf nicht leer sein"
+                )
+            if len(stripped) > limit:
+                raise ValueError(
+                    f"Payload-Feld {key} für {category_s} darf höchstens "
+                    f"{limit} Zeichen lang sein"
+                )
+            normalized[key] = stripped
+            continue
         if not value.strip():
             raise ValueError(f"Payload-Feld {key} für {category_s} darf nicht leer sein")
         normalized[key] = value if key == "keys" else value.strip()

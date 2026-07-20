@@ -17,7 +17,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, tzinfo
+from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable
 
@@ -784,6 +784,38 @@ def deliver_pending_bundle(
     return {"delivered": len(rows), "reason": "delivered", "turn_id": turn_id}
 
 
+def fire_due_reminders(store: PAStore, *, now: int) -> dict[str, Any]:
+    """Fire due one-shot reminders outside judgement and delivery policies."""
+    from hermes_cli import pa_push
+    from hermes_cli.pa_reminders import due_reminders, mark_fired
+
+    now_utc = datetime.fromtimestamp(now, tz=timezone.utc)
+    fired = 0
+    errors: list[str] = []
+    with store.connect() as conn:
+        # Serialize watcher processes across select -> external push -> state
+        # transition. A thrown push error keeps that reminder pending.
+        conn.execute("BEGIN IMMEDIATE")
+        for reminder in due_reminders(now_utc, store=store, conn=conn):
+            reminder_id = str(reminder["id"])
+            try:
+                pa_push.send_pa_push(
+                    title=str(reminder["title"]),
+                    body=str(reminder["body"]),
+                    tag=f"reminder:{reminder_id}",
+                    url=pa_push.PA_THREAD_URL,
+                )
+            except Exception as exc:
+                detail = _bounded_text(exc, 300) or exc.__class__.__name__
+                errors.append(f"{reminder_id}: {detail}")
+                logger.warning("PA reminder push failed for %s: %s", reminder_id, detail)
+                continue
+            if mark_fired(reminder_id, now_utc, store=store, conn=conn):
+                fired += 1
+        conn.commit()
+    return {"fired": fired, "errors": errors}
+
+
 def _default_agents_payload() -> dict[str, Any]:
     from hermes_cli.projects_overview import build_agents_payload, load_projects_registry
 
@@ -919,6 +951,16 @@ def run_watcher_tick(
     pa_store.ensure_schema()
     result: dict[str, Any] = {"collected": 0, "ingested": 0, "errors": []}
     try:
+        try:
+            result["reminders"] = fire_due_reminders(pa_store, now=observed_at)
+            result["errors"].extend(
+                f"reminders: {error}" for error in result["reminders"]["errors"]
+            )
+        except Exception as exc:
+            detail = _bounded_text(exc, 300) or exc.__class__.__name__
+            result["reminders"] = {"fired": 0, "errors": [detail]}
+            result["errors"].append(f"reminders: {detail}")
+            logger.warning("PA reminder polling failed: %s", detail)
         events, updates, errors = collect_sources(
             pa_store,
             now=observed_at,
@@ -927,7 +969,7 @@ def run_watcher_tick(
             board_paths=board_paths,
         )
         result["collected"] = len(events)
-        result["errors"] = errors
+        result["errors"].extend(errors)
         result["ingested"] = _ingest_events(
             pa_store,
             events=events,
