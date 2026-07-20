@@ -6,12 +6,18 @@ agent/auxiliary_client.py so auth, headers, and API format are handled
 consistently.
 """
 
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 _client = None
 
 
-def get_async_client():
+def get_async_client() -> AsyncOpenAI:
     """Return a shared async OpenAI-compatible client for OpenRouter.
 
     The client is created lazily on first call and reused thereafter.
