@@ -17,6 +17,9 @@
  *  6. M1-FE: History-Attachments rendern über /api/pa/asset/{id}; 404 →
  *     Broken-Chip statt kaputtem Thread. Cursor-Paging: „Ältere laden" holt
  *     die nächste Seite über before_id und hängt sie vorne an.
+ *  7. S3.6: Push-to-Talk transkribiert in den Composer (kein Auto-Send),
+ *     Permission-/Transkriptionsfehler lassen den Input unverändert; der
+ *     persistierte Vorlese-Toggle liest nur neue fertige Antworten einmal.
  * Payload-Shapes: realistische Formen aus tests/hermes_cli/test_pa_chat.py.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +45,8 @@ const sendPaMessageMock = vi.hoisted(() => vi.fn());
 const getPaTurnMock = vi.hoisted(() => vi.fn());
 const uploadPaImageMock = vi.hoisted(() => vi.fn());
 const getPaEnginesMock = vi.hoisted(() => vi.fn());
+const transcribeAudioMock = vi.hoisted(() => vi.fn());
+const speakTextMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api")>("@/lib/api");
@@ -54,6 +59,8 @@ vi.mock("@/lib/api", async () => {
       getPaTurn: getPaTurnMock,
       uploadPaImage: uploadPaImageMock,
       getPaEngines: getPaEnginesMock,
+      transcribeAudio: transcribeAudioMock,
+      speakText: speakTextMock,
     },
   };
 });
@@ -64,6 +71,53 @@ import { JarvisChat } from "./JarvisChat";
 let serverMessages: PaChatMessage[] = [];
 let serverNextBeforeId: number | null = null;
 let msgId = 0;
+let getUserMediaMock: ReturnType<typeof vi.fn>;
+
+class FakeMediaRecorder {
+  static isTypeSupported = vi.fn(() => true);
+
+  readonly mimeType: string;
+  state: RecordingState = "inactive";
+  ondataavailable: ((this: MediaRecorder, ev: BlobEvent) => unknown) | null = null;
+  onerror: ((this: MediaRecorder, ev: Event) => unknown) | null = null;
+  onstop: ((this: MediaRecorder, ev: Event) => unknown) | null = null;
+
+  constructor(_stream: MediaStream, options?: MediaRecorderOptions) {
+    this.mimeType = options?.mimeType ?? "audio/webm";
+  }
+
+  start() {
+    this.state = "recording";
+  }
+
+  stop() {
+    this.state = "inactive";
+    this.ondataavailable?.call(
+      this as unknown as MediaRecorder,
+      { data: new Blob(["recording"], { type: this.mimeType }) } as BlobEvent,
+    );
+    this.onstop?.call(this as unknown as MediaRecorder, new Event("stop"));
+  }
+}
+
+function installVoiceBrowserStubs() {
+  getUserMediaMock = vi.fn().mockResolvedValue({
+    getTracks: () => [{ stop: vi.fn() }],
+  } as unknown as MediaStream);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: { getUserMedia: getUserMediaMock },
+  });
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(function (
+    this: HTMLMediaElement,
+  ): Promise<void> {
+    queueMicrotask(() => this.dispatchEvent(new Event("ended")));
+    return Promise.resolve();
+  });
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+}
 
 const ROSTER: PaEnginesResponse = {
   default_engine: "sol",
@@ -133,11 +187,22 @@ beforeEach(() => {
   );
   uploadPaImageMock.mockResolvedValue({ asset_id: "asset_ab12cd.png" });
   getPaEnginesMock.mockResolvedValue(ROSTER);
+  transcribeAudioMock.mockResolvedValue({
+    ok: true,
+    transcript: "hallo welt",
+    provider: "local",
+    polished: false,
+  });
+  speakTextMock.mockResolvedValue({ data_url: "data:audio/mpeg;base64,SUQz" });
+  window.localStorage.clear();
+  installVoiceBrowserStubs();
 });
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   _resetPollingStore();
   _resetEngineChoice();
 });
@@ -471,5 +536,113 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
 
     expect(await screen.findByText("nur eine seite")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "ÄLTERE LADEN" })).toBeNull();
+  });
+
+  // ── S3.6: Push-to-Talk + persistiertes Vorlesen ─────────────────────────
+
+  it("Mic-Klick → Aufnahme → Stop transkribiert in den Input, ohne Auto-Send", async () => {
+    renderChat();
+
+    const mic = await screen.findByRole("button", { name: "Diktieren" });
+    fireEvent.click(mic);
+    const stopMic = await screen.findByRole("button", {
+      name: "Aufnahme läuft — zum Stoppen tippen",
+    });
+    fireEvent.click(stopMic);
+
+    const input = (await screen.findByLabelText("Nachricht an Jarvis")) as HTMLInputElement;
+    await vi.waitFor(() => {
+      expect(transcribeAudioMock).toHaveBeenCalledWith(
+        expect.stringMatching(/^data:audio\/webm(?:;codecs=opus)?;base64,/),
+        "audio/webm;codecs=opus",
+      );
+      expect(input.value).toBe("hallo welt");
+    });
+    expect(sendPaMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("Mic-Permission verweigert → deutsche Meldung, kein Absturz", async () => {
+    getUserMediaMock.mockRejectedValueOnce(new DOMException("denied", "NotAllowedError"));
+    renderChat();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Diktieren" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Mikrofon-Zugriff verweigert — im Browser erlauben");
+    expect(screen.getByRole("button", { name: "Diktieren" })).toBeTruthy();
+  });
+
+  it("Transkriptionsfehler zeigt Meldung und lässt den Input unverändert", async () => {
+    transcribeAudioMock.mockRejectedValueOnce(new Error("STT offline"));
+    renderChat();
+
+    const input = (await screen.findByLabelText("Nachricht an Jarvis")) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "bestehender Text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Diktieren" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Aufnahme läuft — zum Stoppen tippen",
+      }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain("Aufnahme fehlgeschlagen");
+    expect(input.value).toBe("bestehender Text");
+    expect(sendPaMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("Vorlesen ON spielt eine neue fertige Antwort einmal; Re-Render nicht doppelt", async () => {
+    const reply = "Das ist die neue Antwort.";
+    sendPaMessageMock.mockImplementation(async () => {
+      serverMessages = [userMessage("lies vor"), assistantMessage(reply)];
+      return { turn_id: "turn_3f9a1c" };
+    });
+    const view = renderChat();
+    const speakToggle = await screen.findByRole("button", { name: "Antworten vorlesen" });
+    fireEvent.click(speakToggle);
+
+    await submitQuestion("lies vor");
+    expect(await screen.findByText(reply)).toBeTruthy();
+    await vi.waitFor(() => {
+      expect(speakTextMock).toHaveBeenCalledTimes(1);
+      expect(speakTextMock).toHaveBeenCalledWith(reply);
+      expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1);
+    });
+
+    view.rerender(<JarvisChat turnPollIntervalMs={25} />);
+    await vi.waitFor(() => expect(speakTextMock).toHaveBeenCalledTimes(1));
+  });
+
+  it("Vorlesen OFF liest weder Historie noch eine neue fertige Antwort", async () => {
+    serverMessages = [assistantMessage("Historische Antwort")];
+    renderChat();
+    expect(await screen.findByText("Historische Antwort")).toBeTruthy();
+    expect(speakTextMock).not.toHaveBeenCalled();
+
+    sendPaMessageMock.mockImplementation(async () => {
+      serverMessages = [
+        ...serverMessages,
+        userMessage("bleib still"),
+        assistantMessage("Neue stille Antwort"),
+      ];
+      return { turn_id: "turn_3f9a1c" };
+    });
+    await submitQuestion("bleib still");
+    expect(await screen.findByText("Neue stille Antwort")).toBeTruthy();
+    expect(speakTextMock).not.toHaveBeenCalled();
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+  });
+
+  it("Vorlese-Toggle persistiert in localStorage und wird beim Remount geladen", async () => {
+    const first = renderChat();
+    const toggle = await screen.findByRole("button", { name: "Antworten vorlesen" });
+    fireEvent.click(toggle);
+    expect(window.localStorage.getItem("jarvis.speak.enabled")).toBe("1");
+    first.unmount();
+
+    renderChat();
+    const restored = await screen.findByRole("button", { name: "Antworten vorlesen" });
+    expect(restored.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(restored);
+    expect(window.localStorage.getItem("jarvis.speak.enabled")).toBe("0");
   });
 });
