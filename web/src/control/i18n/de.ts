@@ -956,6 +956,8 @@ export const de = {
     micTranscribing: "Wird transkribiert …",
     micPermissionDenied: "Mikrofon-Zugriff verweigert — im Browser erlauben",
     micError: "Aufnahme fehlgeschlagen",
+    // S7: bewusstes Opt-in für direktes Senden nach erfolgreichem Diktat.
+    pttAutoSendLabel: "Diktat direkt senden",
     speakLabel: "Antworten vorlesen",
     speakError: "Vorlesen fehlgeschlagen",
     thinking: "Jarvis denkt …",

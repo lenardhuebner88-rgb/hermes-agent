@@ -19,7 +19,7 @@
  * verständliche deutsche Meldung in `error` — die Komponente zeigt sie als
  * Composer-Fehlerzeile, der Input bleibt unverändert.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { de } from "../i18n/de";
 
@@ -30,6 +30,35 @@ const t = de.jarvis;
 const MIC_MIME_CANDIDATES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
 
 export type MicStatus = "idle" | "recording";
+
+/** S7: localStorage-Key der optionalen PTT-Auto-Send-Einstellung. */
+export const PTT_AUTOSEND_STORAGE_KEY = "hermes.jarvis.ptt_autosend";
+
+function readPttAutoSend(): boolean {
+  try {
+    return window.localStorage.getItem(PTT_AUTOSEND_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** S7: kleine persistierte Composer-Präferenz; Default bleibt bewusst AUS. */
+export function usePttAutoSend(): {
+  enabled: boolean;
+  setEnabled: (next: boolean) => void;
+} {
+  const [enabled, setEnabledState] = useState<boolean>(readPttAutoSend);
+  const setEnabled = useCallback((next: boolean) => {
+    setEnabledState(next);
+    try {
+      window.localStorage.setItem(PTT_AUTOSEND_STORAGE_KEY, next ? "1" : "0");
+    } catch {
+      // Privatmodus/Quota: Einstellung wirkt dann nur für diese Sitzung.
+    }
+  }, []);
+
+  return { enabled, setEnabled };
+}
 
 /** blobToDataUrl — 1:1-Port aus apps/desktop (session/hooks/use-prompt-actions/
  *  utils.ts), Fehlertext lokal ersetzt. */

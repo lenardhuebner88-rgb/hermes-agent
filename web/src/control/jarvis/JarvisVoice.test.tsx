@@ -26,6 +26,7 @@ import { cleanup, configure, fireEvent, render, screen } from "@testing-library/
 import type { PaChatMessage, PaEnginesResponse, PaTurn } from "@/lib/api";
 import { _resetPollingStore } from "../hooks/pollingStore";
 import { _resetEngineChoice } from "./engineSelection";
+import { PTT_AUTOSEND_STORAGE_KEY } from "./useMicRecorder";
 import { SPEAK_ENABLED_STORAGE_KEY } from "./useSpeechPlayback";
 
 // Voll-Suite-Last kann waitFor über den Default (1s) hinaus bouncen
@@ -284,6 +285,36 @@ describe("JarvisChat S3.6 — Push-to-Talk (Mic → /api/audio/transcribe)", () 
     expect(sendPaMessageMock).not.toHaveBeenCalled();
   });
 
+  it("S7: Auto-Send AN sendet das erfolgreiche Transkript direkt als Turn", async () => {
+    renderChat();
+    const toggle = await screen.findByLabelText("Diktat direkt senden");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(toggle);
+
+    await dictateCycle();
+
+    await vi.waitFor(() => {
+      expect(sendPaMessageMock).toHaveBeenCalledWith("hallo welt", undefined, undefined);
+    });
+    expect((screen.getByLabelText("Nachricht an Jarvis") as HTMLInputElement).value).toBe("");
+  });
+
+  it("S7: Auto-Send-Toggle persistiert und überlebt ein Remount", async () => {
+    const first = renderChat();
+    const toggle = await screen.findByLabelText("Diktat direkt senden");
+
+    fireEvent.click(toggle);
+    expect(window.localStorage.getItem(PTT_AUTOSEND_STORAGE_KEY)).toBe("1");
+
+    first.unmount();
+    renderChat();
+    const remounted = await screen.findByLabelText("Diktat direkt senden");
+    expect(remounted.getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(remounted);
+    expect(window.localStorage.getItem(PTT_AUTOSEND_STORAGE_KEY)).toBe("0");
+  });
+
   it("Permission denied → deutsche Meldung (role=alert), kein Absturz, Input leer", async () => {
     getUserMediaMock.mockReset();
     getUserMediaMock.mockRejectedValue(new DOMException("denied", "NotAllowedError"));
@@ -357,6 +388,26 @@ describe("JarvisChat S3.6 — Vorlese-Toggle (/api/audio/speak)", () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(speakTextMock).toHaveBeenCalledTimes(1);
     expect(FakeAudio.instances).toHaveLength(1);
+  });
+
+  it("S7: Mic-Start während des Vorlesens stoppt die Wiedergabe sofort", async () => {
+    const reply = "Ich lese noch vor.";
+    getPaTurnMock.mockResolvedValue(turnResponse({ status: "done", reply }));
+    sendPaMessageMock.mockImplementation(async () => {
+      serverMessages = [userMessage("lies vor"), assistantMessage(reply)];
+      return { turn_id: "turn_3f9a1c" };
+    });
+    renderChat();
+    fireEvent.click(await screen.findByLabelText("Antworten vorlesen"));
+    await submitQuestion("lies vor");
+
+    await vi.waitFor(() => expect(FakeAudio.instances).toHaveLength(1));
+    const audio = FakeAudio.instances[0];
+    fireEvent.click(await screen.findByLabelText("Diktieren"));
+
+    expect(audio.pause).toHaveBeenCalledTimes(1);
+    expect(audio.src).toBe("");
+    expect(await screen.findByLabelText("Aufnahme läuft — zum Stoppen tippen")).toBeTruthy();
   });
 
   it("Toggle OFF (Default): speakText wird NIE gerufen", async () => {

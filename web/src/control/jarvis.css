@@ -594,6 +594,12 @@ button.jv-ok { cursor: pointer; }
   color: var(--cyan); border-color: var(--cyan);
   box-shadow: 0 0 12px rgba(56, 216, 255, .35);
 }
+/* S7: kompakter Text-Icon-Toggle für bewusstes PTT-Auto-Send. */
+.jv-ptt-auto { font-family: var(--mono); font-size: 8px; letter-spacing: .02em; text-transform: uppercase; }
+.jv-ptt-auto.jv-on, .jv-ptt-auto.jv-on:hover, .jv-ptt-auto.jv-on:focus-visible {
+  color: var(--grün); border-color: var(--grün);
+  box-shadow: 0 0 12px rgba(61, 220, 151, .28);
+}
 .jv-attachchip {
   display: flex; align-items: center; gap: 8px; flex: none; max-width: 40%;
   border: 1px solid var(--line); border-radius: 999px; padding: 3px 6px 3px 3px;
@@ -851,7 +857,7 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   .jv-ask input[type="text"] { flex: 1 1 120px; }
   .jv-ask .jv-attachchip { max-width: 58%; }
   /* Icon-Leiste = eigene volle Zeile; Controls gleichmäßig verteilt, damit
-     alle fünf (inkl. 52px Senden) hineinpassen. */
+     alle sechs (inkl. 52px Senden) hineinpassen. */
   .jv-ask .jv-icons { flex: 1 0 100%; width: 100%; justify-content: space-between; gap: 6px; }
 }
 
