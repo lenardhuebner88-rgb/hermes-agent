@@ -11,7 +11,10 @@
  *    (Anti-Scope: kein VAD, kein Silence-Stop — das ist Sprint 4/5).
  *
  * Ablauf: start() → status "recording" → stop() löst mit dem aufgenommenen
- * Blob (oder null bei leerer Aufnahme); cancel() verwirft ohne Ergebnis.
+ * Blob (oder null bei leerer Aufnahme). S4-Härtung: ein zweites start()
+ * während des Permission-Dialogs ist ein No-op (In-Flight-Guard) — sonst
+ * würde ein Doppelklick einen zweiten Stream öffnen und den ersten
+ * samt Recorder verwaist zurücklassen.
  * Fehler (Permission verweigert, kein Mic, Recorder-Fehler) landen als
  * verständliche deutsche Meldung in `error` — die Komponente zeigt sie als
  * Composer-Fehlerzeile, der Input bleibt unverändert.
@@ -61,7 +64,6 @@ function micErrorMessage(error: unknown): string {
 export function useMicRecorder(): {
   start: () => Promise<void>;
   stop: () => Promise<Blob | null>;
-  cancel: () => void;
   status: MicStatus;
   error: string | null;
 } {
@@ -72,6 +74,10 @@ export function useMicRecorder(): {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const stopResolverRef = useRef<((blob: Blob | null) => void) | null>(null);
+  /** S4-Härtung: gesetzt, BEVOR getUserMedia wartet — ein Doppelklick während
+   *  des Permission-Dialogs wird zum No-op statt einen zweiten Stream zu
+   *  öffnen (der erste wäre samt Recorder verwaist). */
+  const startingRef = useRef(false);
 
   const cleanup = () => {
     // Tracks beim Stop sauber schließen, sonst bleibt die Mic-LED an.
@@ -85,66 +91,71 @@ export function useMicRecorder(): {
   useEffect(() => () => cleanup(), []);
 
   const start = async (): Promise<void> => {
-    if (recorderRef.current) return;
+    if (recorderRef.current || startingRef.current) return;
+    startingRef.current = true;
     setError(null);
 
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setError(t.micError);
-      return;
-    }
-
-    let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (err) {
-      setError(micErrorMessage(err));
-      return;
-    }
-
-    const mimeType =
-      typeof MediaRecorder.isTypeSupported === "function"
-        ? (MIC_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ?? "")
-        : "";
-
-    let recorder: MediaRecorder;
-    try {
-      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    } catch (err) {
-      stream.getTracks().forEach((track) => track.stop());
-      setError(micErrorMessage(err));
-      return;
-    }
-
-    chunksRef.current = [];
-    streamRef.current = stream;
-    recorderRef.current = recorder;
-
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunksRef.current.push(event.data);
+      if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+        setError(t.micError);
+        return;
       }
-    };
 
-    recorder.onstop = () => {
-      const chunks = chunksRef.current;
-      const recordingType = recorder.mimeType || mimeType || "audio/webm";
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        setError(micErrorMessage(err));
+        return;
+      }
+
+      const mimeType =
+        typeof MediaRecorder.isTypeSupported === "function"
+          ? (MIC_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) ?? "")
+          : "";
+
+      let recorder: MediaRecorder;
+      try {
+        recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      } catch (err) {
+        stream.getTracks().forEach((track) => track.stop());
+        setError(micErrorMessage(err));
+        return;
+      }
+
       chunksRef.current = [];
-      cleanup();
-      const resolver = stopResolverRef.current;
-      stopResolverRef.current = null;
-      resolver?.(chunks.length ? new Blob(chunks, { type: recordingType }) : null);
-    };
+      streamRef.current = stream;
+      recorderRef.current = recorder;
 
-    recorder.onerror = () => {
-      const resolver = stopResolverRef.current;
-      stopResolverRef.current = null;
-      cleanup();
-      setError(t.micError);
-      resolver?.(null);
-    };
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
 
-    recorder.start();
-    setStatus("recording");
+      recorder.onstop = () => {
+        const chunks = chunksRef.current;
+        const recordingType = recorder.mimeType || mimeType || "audio/webm";
+        chunksRef.current = [];
+        cleanup();
+        const resolver = stopResolverRef.current;
+        stopResolverRef.current = null;
+        resolver?.(chunks.length ? new Blob(chunks, { type: recordingType }) : null);
+      };
+
+      recorder.onerror = () => {
+        const resolver = stopResolverRef.current;
+        stopResolverRef.current = null;
+        cleanup();
+        setError(t.micError);
+        resolver?.(null);
+      };
+
+      recorder.start();
+      setStatus("recording");
+    } finally {
+      startingRef.current = false;
+    }
   };
 
   const stop = (): Promise<Blob | null> =>
@@ -159,19 +170,5 @@ export function useMicRecorder(): {
       recorder.stop();
     });
 
-  const cancel = () => {
-    const recorder = recorderRef.current;
-    const resolver = stopResolverRef.current;
-    stopResolverRef.current = null;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.ondataavailable = null;
-      recorder.onerror = null;
-      recorder.onstop = null;
-      recorder.stop();
-    }
-    cleanup();
-    resolver?.(null);
-  };
-
-  return { start, stop, cancel, status, error };
+  return { start, stop, status, error };
 }

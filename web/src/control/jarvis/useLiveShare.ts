@@ -50,6 +50,14 @@ export const LIVE_SHARE_SAMPLE_INTERVAL_MS = 1_000;
 export const LIVE_SHARE_MAX_EDGE_PX = 1280;
 const LIVE_SHARE_JPEG_QUALITY = 0.7;
 const LIVE_SHARE_FIRST_FRAME_TIMEOUT_MS = 8_000;
+/** S4-Härtung: Native-Start-Watchdog — meldet die Bridge nach start() weder
+ *  screen_capture_started/-stopped/-error, darf die UI nicht ewig in
+ *  "starting" hängen: zurück auf idle + ehrlicher Fehler. */
+export const LIVE_SHARE_NATIVE_START_TIMEOUT_MS = 12_000;
+/** S4-Härtung: Upload-Fehlerbudget — einzelne transiente Frame-Upload-Fehler
+ *  töten den Share nicht mehr; erst so viele AUFEINANDERFOLGENDE Fehler
+ *  schließen fail-closed (ein Erfolg setzt den Zähler zurück). */
+export const LIVE_SHARE_MAX_CONSECUTIVE_UPLOAD_FAILURES = 3;
 
 export type LiveShareStatus = "idle" | "starting" | "sharing";
 
@@ -131,6 +139,12 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
   const uploadWaitersRef = useRef<Array<() => void>>([]);
   const firstFrameReadyRef = useRef(false);
   const firstFrameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // S4-Härtung: Watchdog gegen eine Native-Bridge, die nach start() nie ein
+  // Lifecycle-Event liefert (gestarteter Dialog ohne Antwort etc.).
+  const nativeStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // S4-Härtung: aufeinanderfolgende Frame-Upload-Fehler (Budget, Reset bei
+  // Erfolg) — einzelne Transienten töten den Share nicht mehr.
+  const uploadFailuresRef = useRef(0);
   // React state is not synchronous: this closes the double-tap window before
   // status="starting" has rendered and prevents duplicate native capture starts.
   const startInFlightRef = useRef(false);
@@ -171,11 +185,16 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     videoRef.current = null;
     pendingRef.current = null;
     uploadingRef.current = false;
+    uploadFailuresRef.current = 0;
     firstFrameReadyRef.current = false;
     startInFlightRef.current = false;
     if (firstFrameTimerRef.current !== null) {
       clearTimeout(firstFrameTimerRef.current);
       firstFrameTimerRef.current = null;
+    }
+    if (nativeStartTimerRef.current !== null) {
+      clearTimeout(nativeStartTimerRef.current);
+      nativeStartTimerRef.current = null;
     }
     for (const resolve of uploadWaitersRef.current.splice(0)) resolve();
     const sid = sessionIdRef.current;
@@ -198,6 +217,33 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     }, LIVE_SHARE_FIRST_FRAME_TIMEOUT_MS);
   }, [failClosed]);
 
+  /** S4-Härtung: Native-Start-Watchdog. Läuft nur bis zum ersten Lifecycle-
+   *  Event der Bridge (started/stopped/error räumen ihn ab); danach übernimmt
+   *  der First-Frame-Timeout. Teardown MIT native-Stop: die Bridge kann
+   *  verwedelt sein (offener System-Dialog), stop_screen_capture räumt sie ab. */
+  const armNativeStartTimeout = useCallback(
+    (generation: number) => {
+      if (nativeStartTimerRef.current !== null) clearTimeout(nativeStartTimerRef.current);
+      nativeStartTimerRef.current = setTimeout(() => {
+        nativeStartTimerRef.current = null;
+        if (generation !== captureGenRef.current) return;
+        teardown();
+        if (mountedRef.current) {
+          setStatus("idle");
+          setError(errorText);
+        }
+      }, LIVE_SHARE_NATIVE_START_TIMEOUT_MS);
+    },
+    [errorText, teardown],
+  );
+
+  const disarmNativeStartTimeout = useCallback(() => {
+    if (nativeStartTimerRef.current !== null) {
+      clearTimeout(nativeStartTimerRef.current);
+      nativeStartTimerRef.current = null;
+    }
+  }, []);
+
   const stop = useCallback(() => {
     teardown();
     if (mountedRef.current) setStatus("idle");
@@ -217,14 +263,27 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         try {
           await api.uploadLiveShareFrame(sid, current);
         } catch {
-          // A green share without a usable backend frame is actively misleading.
-          // Fail closed on every upload error instead of swallowing it forever.
-          if (generation === captureGenRef.current && sessionIdRef.current === sid) {
-            failClosed();
+          if (generation !== captureGenRef.current || sessionIdRef.current !== sid) {
+            return;
           }
-          return;
+          // S4-Härtung: einzelne transiente Upload-Fehler (Netzflacke) töten
+          // den Share nicht mehr — erst ein Budget aufeinanderfolgender
+          // Fehler schließt fail-closed. Der verworfene Frame wird durch den
+          // neuesten pending-Frame ersetzt (latest wins), sonst wartet der
+          // nächste Sample-Tick.
+          uploadFailuresRef.current += 1;
+          if (uploadFailuresRef.current >= LIVE_SHARE_MAX_CONSECUTIVE_UPLOAD_FAILURES) {
+            // A green share without a usable backend frame is actively
+            // misleading — after the budget is exhausted: fail closed.
+            failClosed();
+            return;
+          }
+          current = pendingRef.current;
+          pendingRef.current = null;
+          continue;
         }
         if (generation !== captureGenRef.current || sessionIdRef.current !== sid) return;
+        uploadFailuresRef.current = 0;
         if (!firstFrameReadyRef.current) {
           firstFrameReadyRef.current = true;
           startInFlightRef.current = false;
@@ -276,8 +335,10 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
   const startNative = useCallback(() => {
     const gen = (captureGenRef.current += 1);
     nativeCaptureRef.current = true;
+    armNativeStartTimeout(gen);
     startNativeScreenCapture({
       onStarted: () => {
+        disarmNativeStartTimeout();
         void (async () => {
           if (gen !== captureGenRef.current || !mountedRef.current) {
             // Superseded / cancelled before native confirmed — kill the orphan.
@@ -324,11 +385,13 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         // Native already stopped (system stop / user cancel) — tear down without
         // echoing stop_screen_capture back (avoids a ping-pong). Silent, no error.
         if (gen !== captureGenRef.current) return;
+        disarmNativeStartTimeout();
         teardown(false);
         if (mountedRef.current) setStatus("idle");
       },
       onError: () => {
         if (gen !== captureGenRef.current) return;
+        disarmNativeStartTimeout();
         teardown(false);
         if (mountedRef.current) {
           setStatus("idle");
@@ -336,7 +399,7 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         }
       },
     });
-  }, [armFirstFrameTimeout, drainUpload, errorText, failClosed, teardown]);
+  }, [armFirstFrameTimeout, armNativeStartTimeout, disarmNativeStartTimeout, drainUpload, errorText, failClosed, teardown]);
 
   const start = useCallback(async () => {
     if (

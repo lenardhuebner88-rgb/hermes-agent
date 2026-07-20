@@ -1005,6 +1005,8 @@ export const de = {
     engineNoImagesTitle: "Diese Engine unterstützt keine Bilder",
     // M1/M2-FE — Chat-Härtung (History-Attachments, Cursor-Paging)
     attachmentGone: "Bild nicht mehr verfügbar",
+    attachmentAlt: "Anhang",
+    historyFailed: "Verlauf konnte nicht geladen werden.",
     loadOlder: "ÄLTERE LADEN",
     loadOlderBusy: "LADE …",
     loadOlderFailed: "Ältere Nachrichten konnten nicht geladen werden.",
@@ -1060,6 +1062,20 @@ export const de = {
     planUsage: "„/plan“ braucht eine Idee: „/plan <idee>“.",
     planCardAria: (draftId: string) => `PlanSpec-Entwurf ${draftId}`,
     inboxPlanspecChip: "PLANSPEC",
+    // S5-Design („JARVIS OS"): Orb über dem Gespräch (Identität + Zustand),
+    // Periphery-Zeile (deduplizierter Wächter-Digest) und HUD-Toggle für die
+    // S1-Mock-Panels (Default aus, Mobile gar nicht).
+    orbStateIdle: "BEREIT",
+    orbStateListening: "HÖRT ZU",
+    orbStateThinking: "DENKT",
+    orbStateSpeaking: "SPRICHT",
+    orbStateError: "FEHLER",
+    orbAria: (stateLabel: string, engineLabel: string) =>
+      `Jarvis ${stateLabel} — Modell ${engineLabel}. Tippen wählt das Modell.`,
+    peripheryAria:
+      "Maschinenraum: Wächter-Zusammenfassung — tippen öffnet das Aktivitäts-Log",
+    peripheryLast: "zuletzt:",
+    hudToggle: "HUD-Panels (Mock-Statik) ein-/ausblenden",
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

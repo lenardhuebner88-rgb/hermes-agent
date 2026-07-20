@@ -10,7 +10,8 @@
  * „Ältere laden" blättert über den before_id-Cursor rückwärts. Senden über
  * die A4-Frag-Leiste (unten fixiert): pending-Bubble mit Denk-Zustand
  * während des Turn-Polls, Error-Bubble mit Fehlertext bei Fehlern — nie ein
- * stiller Fehler. Bild-Paste/Attach → POST /api/pa/upload → attachments im
+ * stiller Fehler (S4-Härtung: auch der Verlaufs-Poll-Fehler und TTS-Fehler
+ * landen als Composer-Fehlerzeile statt unsichtbar zu bleiben). Bild-Paste/Attach → POST /api/pa/upload → attachments im
  * Message-POST (max 1 Bild/Turn); bei Engines mit supports_images=false
  * (S2.2-Roster) ist der Attach-Button deaktiviert (Tooltip) statt erst beim
  * Senden in den 400 zu laufen. S3.3-FE: „/plan <idee>" in der Frag-Leiste
@@ -23,27 +24,44 @@
  * Toggle (in localStorage persistiert): die neueste FERTIGE Assistant-
  * Antwort wird genau einmal über POST /api/audio/speak abgespielt — nie
  * Historie beim Mount, nie doppelt bei Re-Render/Verlauf-Reload.
+ * S5-Design („JARVIS OS"): der Assistent ist die Mitte, die Maschine tritt in
+ * die Peripherie — Wächter-Nachrichten (engine === "pa-watcher") fluten den
+ * Verlauf nicht mehr als Bubbles, sondern werden als deduplizierter Digest in
+ * der Periphery-Zeile über dem Gespräch geführt (Tap → Aktivitaet-Drawer der
+ * Shell via window-Event, volles Log bleibt erreichbar). Über dem Gespräch
+ * lebt der JarvisOrb (idle/listening/thinking/speaking/error) mit dem
+ * Engine-Switcher.
  */
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
 import { ImagePlus, Loader2, Mic, MicOff, MonitorUp, Send, Volume2, VolumeX, X } from "lucide-react";
 
-import { api, type PaChatMessage } from "@/lib/api";
+import { api, type PaChatMessage, type PaEnginesResponse } from "@/lib/api";
 import { de } from "../i18n/de";
 import {
   effectiveEngine,
   findEngineSpec,
+  isClaudeModel,
+  modelLabel,
   useEngineChoice,
   usePaEngines,
 } from "./engineSelection";
+import { JarvisOrb, type JarvisOrbState } from "./JarvisOrb";
 import { JARVIS_ASK_HINT } from "./mockContent";
+import { PeripheryStrip } from "./PeripheryStrip";
 import { PlanspecCard } from "./PlanspecCard";
 import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
 import { useLiveShare } from "./useLiveShare";
 import { useSpeechPlayback } from "./useSpeechPlayback";
+import { digestWatcherEvents } from "./watcherDigest";
 
 const t = de.jarvis;
+
+/** S5-Design: Tap auf die Periphery-Zeile öffnet den Aktivitaet-Drawer der
+ *  Shell. Der Drawer lebt in JarvisShellView — statt Prop-Bohrung durch die
+ *  Shell hört sie auf dieses kleine Window-Event. */
+export const JARVIS_OPEN_AKTIVITAET_EVENT = "jarvis:open-aktivitaet";
 
 function formatBubbleTime(ts: number): string {
   const d = new Date(ts * 1000);
@@ -62,7 +80,7 @@ function AttachmentThumb({ assetId }: { assetId: string }) {
     <span className="jv-attref">
       <img
         src={api.paAssetUrl(assetId)}
-        alt=""
+        alt={t.attachmentAlt}
         loading="lazy"
         onError={() => setBroken(true)}
       />
@@ -72,12 +90,12 @@ function AttachmentThumb({ assetId }: { assetId: string }) {
 
 function MessageBubble({
   message,
-  claudeModels,
+  roster,
 }: {
   message: PaChatMessage;
-  /** Modelle der claude-Engine aus dem Roster (MAX-Marker); null = Roster
-   *  noch nicht da → kein Marker (dezent, kein Crash). */
-  claudeModels: ReadonlyArray<string> | null;
+  /** Roster für den MAX-Marker (isClaudeModel); null = Roster noch nicht da
+   *  → kein Marker (dezent, kein Crash). */
+  roster: PaEnginesResponse | null;
 }) {
   const attachments = message.attachments ?? [];
   if (message.role === "user") {
@@ -91,7 +109,7 @@ function MessageBubble({
     );
   }
   const error = message.status === "error";
-  const maxMarker = claudeModels !== null && claudeModels.includes(message.model);
+  const maxMarker = isClaudeModel(roster, message.model);
   return (
     <div className={error ? "jv-bubble jv-bubble-error" : "jv-bubble jv-bubble-assistant"}>
       {error ? <span className="jv-errlabel">{t.errorLabel}</span> : null}
@@ -134,6 +152,8 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     play: speakPlay,
     enabled: speakEnabled,
     setEnabled: setSpeakEnabled,
+    speakError,
+    playing: speakPlaying,
   } = useSpeechPlayback();
   const [transcribing, setTranscribing] = useState(false);
   const [micTranscribeError, setMicTranscribeError] = useState<string | null>(null);
@@ -148,8 +168,35 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // mit Tooltip statt erst beim Senden in den Backend-400 zu laufen.
   const engine = effectiveEngine(choice, roster.data);
   const imagesOk = findEngineSpec(roster.data, engine)?.supports_images ?? true;
-  const claudeModels =
-    roster.data?.engines.find((spec) => spec.engine === "claude")?.models ?? null;
+
+  // S5-Design: Wächter-Nachrichten (engine === "pa-watcher") verlassen das
+  // Gespräch — die Konversation rendert nur Mensch ↔ Assistent, der Wächter
+  // landet als deduplizierter Digest in der Periphery-Zeile.
+  const conversation = useMemo(
+    () => (chat.messages ?? []).filter((m) => m.engine !== "pa-watcher"),
+    [chat.messages],
+  );
+  const watcherDigest = useMemo(
+    () => digestWatcherEvents(chat.messages ?? []),
+    [chat.messages],
+  );
+
+  // S5-Design: Orb-Zustand aus den Chat-Hooks — Priorität
+  // error > listening > thinking > speaking > idle.
+  const orbState: JarvisOrbState =
+    chat.composerError || chat.messagesError
+      ? "error"
+      : mic.status === "recording"
+        ? "listening"
+        : chat.activeTurn !== null
+          ? "thinking"
+          : speakPlaying
+            ? "speaking"
+            : "idle";
+  // Anzeigename des effektiven Modells für die aria-Zeile des Orbs.
+  const engineLabel = modelLabel(
+    choice?.model ?? findEngineSpec(roster.data, engine)?.default_model ?? engine,
+  );
 
   // Auto-Anschluss ans Verlaufsende: nur bei NEUEN Inhalten (neue Bubble,
   // Draft-Card oder Turn-Zustandswechsel), nie beim bloßen Hintergrund-
@@ -157,7 +204,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // laden"). Draft-Cards zählen beim Phasenwechsel drafting→ready/error als
   // neue Aktivität (sonst bliebe die aufgelöste Card mobil bei leerem
   // Verlauf unter dem Fold, ohne dass ein Effekt erneut läuft).
-  const messageCount = chat.messages?.length ?? 0;
+  const messageCount = conversation.length;
   const planCount = planspec.cards.length;
   const settledPlanCount = planspec.cards.filter((c) => c.phase !== "drafting").length;
   const turnPhase = chat.activeTurn?.phase ?? null;
@@ -201,11 +248,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   // abspielen. Robust gegen Doppel-Wiedergabe: der erste geladene Verlauf
   // (Mount) ist die Baseline und wird NIE vorgelesen; danach löst nur eine
   // neue Assistant-Message-ID aus. Der Toggle-Stand selbst holt nichts nach.
+  // S5-Design: nur die Konversation (Mensch ↔ Assistent) — Wächter-Bundles
+  // werden nie vorgelesen.
   const lastAssistantMessage = useMemo(() => {
-    const list = chat.messages;
-    if (!list) return null;
-    for (let index = list.length - 1; index >= 0; index -= 1) {
-      const message = list[index];
+    for (let index = conversation.length - 1; index >= 0; index -= 1) {
+      const message = conversation[index];
       if (
         message.role === "assistant" &&
         message.status === "done" &&
@@ -215,7 +262,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
       }
     }
     return null;
-  }, [chat.messages]);
+  }, [conversation]);
 
   const speakBaselineRef = useRef(false);
   const lastSpokenIdRef = useRef<number | null>(null);
@@ -327,8 +374,21 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
 
   const hasThread = messageCount > 0 || chat.activeTurn !== null || planCount > 0;
 
+  // S5-Design: Tap auf die Periphery-Zeile → Aktivitaet-Drawer der Shell
+  // (Drawer-State lebt in JarvisShellView, Öffnung via Window-Event).
+  const onOpenLog = () => {
+    window.dispatchEvent(new CustomEvent(JARVIS_OPEN_AKTIVITAET_EVENT));
+  };
+
   return (
-    <>
+    <div className="jv-chatcol">
+      {/* S5-Design: Identität (Orb + Engine-Wahl) und Maschinenraum
+          (Periphery-Zeile) ÜBER dem Gespräch. */}
+      <div className="jv-orbhead">
+        <JarvisOrb state={orbState} engineLabel={engineLabel} />
+        <PeripheryStrip digest={watcherDigest} onOpenLog={onOpenLog} />
+      </div>
+
       {hasThread ? (
         <div className="jv-chat" ref={threadRef} role="log" aria-label={t.chatRegion}>
           {chat.nextBeforeId !== null ? (
@@ -341,11 +401,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
               {chat.loadingOlder ? t.loadOlderBusy : t.loadOlder}
             </button>
           ) : null}
-          {chat.messages?.map((message) => (
+          {conversation.map((message) => (
             <MessageBubble
               key={message.id}
               message={message}
-              claudeModels={claudeModels}
+              roster={roster.data ?? null}
             />
           ))}
           {chat.activeTurn ? (
@@ -354,7 +414,10 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
                 {chat.activeTurn.text}
                 {chat.activeTurn.attachment ? (
                   <span className="jv-attref">
-                    <img src={chat.activeTurn.attachment.previewUrl} alt="" />
+                    <img
+                      src={chat.activeTurn.attachment.previewUrl}
+                      alt={chat.activeTurn.attachment.name}
+                    />
                     <span className="jv-an">{chat.activeTurn.attachment.name}</span>
                   </span>
                 ) : null}
@@ -391,6 +454,13 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           {chat.composerError}
         </div>
       ) : null}
+      {/* Verlaufs-Poll-Fehler (S4-Härtung): der Hintergrund-Refresh darf nie
+          still scheitern — dieselbe Fehlerzeile wie der Composer. */}
+      {chat.messagesError ? (
+        <div className="jv-composer-error" role="alert">
+          {t.historyFailed} {chat.messagesError}
+        </div>
+      ) : null}
       {planspec.usageError ? (
         <div className="jv-composer-error" role="alert">
           {planspec.usageError}
@@ -399,6 +469,13 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
       {mic.error || micTranscribeError ? (
         <div className="jv-composer-error" role="alert">
           {mic.error ?? micTranscribeError}
+        </div>
+      ) : null}
+      {/* TTS-Fehler (S4-Härtung): ein fehlgeschlagenes Vorlesen ist sichtbar,
+          blockiert aber nie den Chat. */}
+      {speakError ? (
+        <div className="jv-composer-error" role="alert">
+          {speakError}
         </div>
       ) : null}
       {liveShare.error || liveShareNotice ? (
@@ -424,7 +501,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
       <form className="jv-ask" onSubmit={onSubmit} aria-label={t.composerLabel}>
         {chat.attachment ? (
           <span className="jv-attachchip">
-            <img src={chat.attachment.previewUrl} alt="" />
+            <img src={chat.attachment.previewUrl} alt={chat.attachment.name} />
             <span className="jv-an">{chat.attachment.name}</span>
             <button
               type="button"
@@ -533,6 +610,6 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           }}
         />
       </form>
-    </>
+    </div>
   );
 }

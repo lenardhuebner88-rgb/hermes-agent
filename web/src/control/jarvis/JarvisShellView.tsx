@@ -5,9 +5,8 @@
  * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
  * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (S2.7: live an
  * /api/pa/graph — Zustands-Tag live vs. Mock-Fallback), schwebende Panels,
- * J.A.R.V.I.S.-Emblem mit dem S2.2-Modell-Switcher (Roster /api/pa/engines,
- * Wahl gilt für den nächsten Turn; statisches Badge nur als Roster-Fallback),
- * KI-Lage + Sparklines als statischer A4-Mock (S1), Wartet-dezent an der
+ * KI-Lage + Sparklines als statischer A4-Mock (S1; S4-Härtung: alle Statik-
+ * Panels tragen denselben sichtbaren Mock-Tag wie der Graph-Fallback), Wartet-dezent an der
  * echten Entscheidungs-Inbox (S2.4: /api/pa/inbox — Expand zur Inbox-Ansicht
  * mit Approval-Cards für pa_action), PROJEKTE-Panel mit den echten
  * ProjectCards (S2.6 — gleiche Hooks/Ableitung wie die Klassik, Tap →
@@ -17,21 +16,28 @@
  * AKTIVITÄT (Receipts+Commits) und SESSIONS (Spawn-Baum) als HUD-Strips im
  * Band zwischen PROJEKTE und Chat — der Expand öffnet je einen Overlay-
  * Drawer (Tabs/Filter-Chips), Lese- und Kill-Sheet kommen unverändert aus
- * der Klassik. Der bisherige Projekte-Tab bleibt als
+ * der Klassik. S5-Design („JARVIS OS"): die S1-Mock-Panels (Brain/Filter/
+ * KI-LAGE/Sparklines) stehen hinter einem HUD-Toggle (localStorage
+ * hermes.jarvis.hud, Default aus; Mobile zeigt sie gar nicht), die Graph-
+ * Ambience ist stärker gedimmt, und der Chat trägt Orb + Periphery-Zeile —
+ * deren Tap öffnet den Aktivitaet-Drawer über das Window-Event
+ * JARVIS_OPEN_AKTIVITAET_EVENT. Das alte S1-Emblem (rechts unten) ist mit S5
+ * entfallen — einzige Engine-Wahl ist der Switcher im Orb-Header des Chats
+ * (JarvisOrb), es gibt nur noch EINEN Orb pro Bildschirm.
+ * Der bisherige Projekte-Tab bleibt als
  * /control/projekte-klassisch erreichbar (Fallback bis S2/S3 migrieren).
  *
  * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
  * siehe DESIGN.md „Jarvis-Zone".
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import "../jarvis.css";
 import { de } from "../i18n/de";
 import { AktivitaetPanel } from "./AktivitaetPanel";
-import { EngineSwitcher } from "./EngineSwitcher";
-import { JarvisChat } from "./JarvisChat";
+import { JARVIS_OPEN_AKTIVITAET_EVENT, JarvisChat } from "./JarvisChat";
 import { JarvisGraph, JarvisGraphStatsTag, JarvisGraphTag } from "./JarvisGraph";
 import { ProjektePanel } from "./ProjektePanel";
 import { SessionsPanel } from "./SessionsPanel";
@@ -39,9 +45,8 @@ import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
 import { WartetPanel } from "./WartetPanel";
 import {
   JARVIS_BRAIN_STATS,
-  JARVIS_EMBLEM_NAME,
-  JARVIS_EMBLEM_STATUS,
   JARVIS_FILTER_ROWS,
+  JARVIS_MOCK_TAG,
   JARVIS_NEWS_CRON,
   JARVIS_NEWS_ITEMS,
   JARVIS_SEARCH_HINT,
@@ -50,6 +55,13 @@ import {
 } from "./mockContent";
 
 const t = de.jarvis;
+
+/** S4-Härtung: sichtbarer Mock-Tag an den statischen A4-Panels — dasselbe
+ *  Label-Muster (.jv-mocktag) wie der Graph-Fallback in JarvisGraph, plus
+ *  .jv-panelmock für die Pill-Optik am Panel-Titel. */
+function MockTag() {
+  return <span className="jv-mocktag jv-panelmock">{JARVIS_MOCK_TAG}</span>;
+}
 
 /** Welcher S3.10-Drawer offen ist (höchstens einer gleichzeitig — die
  *  Drawer teilen sich dieselbe Overlay-Zone mittig über dem Graphen).
@@ -65,21 +77,55 @@ function initialOpenPanel(): ShellPanel | null {
   return null;
 }
 
+/** S5-Design („JARVIS OS"): die S1-Mock-Panels (Brain/Filter/KI-LAGE/
+ *  Sparklines) stehen hinter einem HUD-Toggle — Default AUS (persistiert in
+ *  localStorage), Mobile zeigt sie gar nicht (CSS). Der Mock-Tag aus der
+ *  S4-Härtung bleibt am Code für den HUD-Modus. */
+const HUD_STORAGE_KEY = "hermes.jarvis.hud";
+
+function initialHud(): boolean {
+  try {
+    return window.localStorage.getItem(HUD_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export function JarvisShellView() {
   const rootRef = useRef<HTMLDivElement | null>(null);
   useOfflineBannerHeight(rootRef);
   const [openPanel, setOpenPanel] = useState<ShellPanel | null>(initialOpenPanel);
   const togglePanel = (panel: ShellPanel) =>
     setOpenPanel((current) => (current === panel ? null : panel));
+  const [hud, setHud] = useState<boolean>(initialHud);
+  const toggleHud = () =>
+    setHud((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(HUD_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        // Privatmodus/Quota: Toggle wirkt dann eben nur sitzungslokal.
+      }
+      return next;
+    });
+
+  // S5-Design: Tap auf die Periphery-Zeile im Chat öffnet den Aktivitaet-
+  // Drawer (kleines Window-Event statt Prop-Bohrung durch die Shell).
+  useEffect(() => {
+    const onOpenAktivitaet = () => setOpenPanel("aktivitaet");
+    window.addEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, onOpenAktivitaet);
+    return () => window.removeEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, onOpenAktivitaet);
+  }, []);
+
   return (
     <div className="jv" ref={rootRef}>
-      <div className="jv-stage">
+      <div className={hud ? "jv-stage" : "jv-stage jv-hud-off"}>
         <JarvisGraph />
 
         {/* ══ Links: Brain-Panel ══ */}
         <div className="jv-float jv-brainpanel">
           <h1>
-            PIET-ESTATE <b>OS</b>
+            PIET-ESTATE <b>OS</b> <MockTag />
           </h1>
           <div className="jv-stats">
             {JARVIS_BRAIN_STATS}
@@ -110,7 +156,9 @@ export function JarvisShellView() {
 
         {/* ══ Rechts oben: Filter ══ */}
         <div className="jv-float jv-filter">
-          <div className="jv-ptitle">FILTER</div>
+          <div className="jv-ptitle">
+            FILTER <MockTag />
+          </div>
           {JARVIS_FILTER_ROWS.map((row) => (
             <div className="jv-frow" key={row.name}>
               <span className={`jv-d jv-tone-${row.tone}`} aria-hidden="true" />
@@ -122,7 +170,7 @@ export function JarvisShellView() {
         {/* ══ Rechts: KI-LAGE (statischer A4-Mock, S1) ══ */}
         <div className="jv-float jv-news">
           <div className="jv-ptitle">
-            KI-LAGE <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
+            KI-LAGE <MockTag /> <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
           </div>
           {JARVIS_NEWS_ITEMS.map((item) => (
             <div className={item.lead ? "jv-item jv-lead" : "jv-item"} key={item.text}>
@@ -130,21 +178,6 @@ export function JarvisShellView() {
               <span className="jv-src">{item.source}</span>
             </div>
           ))}
-        </div>
-
-        {/* ══ Rechts unten: Jarvis-Emblem ══ */}
-        <div className="jv-float jv-emblem">
-          <div className="jv-ering" aria-hidden="true">
-            <span className="jv-r" />
-            <span className="jv-r jv-r2" />
-            <span className="jv-r jv-r3" />
-            <span className="jv-core" />
-          </div>
-          <div className="jv-nm">{JARVIS_EMBLEM_NAME}</div>
-          <div className="jv-on">{JARVIS_EMBLEM_STATUS}</div>
-          {/* S2.2: funktionaler Modell-Switcher (Roster); fällt auf das
-              statische Badge zurück, solange das Roster nicht da ist. */}
-          <EngineSwitcher />
         </div>
 
         {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (Mock) ══ */}
@@ -162,6 +195,9 @@ export function JarvisShellView() {
                 </svg>
               </div>
             ))}
+            <span className="jv-sysmock">
+              <MockTag />
+            </span>
           </div>
         </div>
 
@@ -183,6 +219,19 @@ export function JarvisShellView() {
 
         {/* ══ Graph-Zustands-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
         <JarvisGraphTag />
+
+        {/* ══ S5-Design: HUD-Toggle für die S1-Mock-Panels (Desktop; Default
+            aus, persistiert — Mobile zeigt die Panels gar nicht) ══ */}
+        <button
+          type="button"
+          className={hud ? "jv-hudtoggle jv-on" : "jv-hudtoggle"}
+          aria-pressed={hud}
+          aria-label={t.hudToggle}
+          title={t.hudToggle}
+          onClick={toggleHud}
+        >
+          HUD
+        </button>
 
         {/* ══ Chat: Bubble-Verlauf + Frag-Leiste (LIVE PA-Endpoints) ══ */}
         <JarvisChat />

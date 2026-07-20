@@ -25,6 +25,10 @@
  *     getrennt; nicht unterstützte mobile Browser bekommen einen ehrlichen
  *     Hinweis statt eines getarnten Bild-Pickers; der Live-Frame wird beim
  *     Senden materialisiert und mitgeschickt.
+ *  9. S5-Design: Wächter-Nachrichten (engine === "pa-watcher") erscheinen
+ *     NICHT als Bubbles — sie landen als deduplizierter Digest in der
+ *     Periphery-Zeile (Tap → jarvis:open-aktivitaet-Event); der Orb über
+ *     dem Gespräch bildet idle/listening/thinking/error ab.
  * Payload-Shapes: realistische Formen aus tests/hermes_cli/test_pa_chat.py.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -78,7 +82,7 @@ vi.mock("@/lib/api", async () => {
   };
 });
 
-import { JarvisChat } from "./JarvisChat";
+import { JarvisChat, JARVIS_OPEN_AKTIVITAET_EVENT } from "./JarvisChat";
 
 /** Verlauf, den listPaMessagesMock gerade liefern soll (Server-Wahrheit). */
 let serverMessages: PaChatMessage[] = [];
@@ -584,9 +588,12 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     expect(
       await screen.findByText("Guten Morgen, Piet. Drei Dinge liegen an."),
     ).toBeTruthy();
-    const badge = await screen.findByText(/gpt-5\.6-sol/);
-    expect(badge.closest(".jv-badge")).toBeTruthy();
-    expect(badge.textContent).toMatch(/· \d{2}:\d{2}/);
+    // S5-Design: das Modell-Label erscheint auch im Orb-Switcher (Option) —
+    // das Provenienz-Badge ist der Treffer innerhalb von .jv-badge.
+    const modelTexts = await screen.findAllByText(/gpt-5\.6-sol/);
+    const badge = modelTexts.find((el) => el.closest(".jv-badge"));
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toMatch(/· \d{2}:\d{2}/);
   });
 
   // ── S2.2: Switcher-Wahl im POST + MAX-Marker + Bild-Disable ────────────
@@ -839,5 +846,195 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     expect(restored.getAttribute("aria-pressed")).toBe("true");
     fireEvent.click(restored);
     expect(window.localStorage.getItem("jarvis.speak.enabled")).toBe("0");
+  });
+
+  // ── S4-Härtung: keine stillen Fehler / keine Leaks ───────────────────────
+
+  it("Verlaufs-Poll-Fehler erscheint als Fehlerzeile statt still zu bleiben", async () => {
+    listPaMessagesMock.mockRejectedValue(new Error("503: history down"));
+    renderChat();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Verlauf konnte nicht geladen werden.");
+    expect(alert.textContent).toContain("503: history down");
+  });
+
+  it("TTS-Fehler (Vorlesen) wird sichtbar und blockiert den Chat nicht", async () => {
+    speakTextMock.mockRejectedValue(new Error("TTS offline"));
+    const reply = "Diese Antwort kann nicht vorgelesen werden.";
+    sendPaMessageMock.mockImplementation(async () => {
+      serverMessages = [userMessage("lies vor"), assistantMessage(reply)];
+      return { turn_id: "turn_3f9a1c" };
+    });
+    renderChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Antworten vorlesen" }));
+
+    await submitQuestion("lies vor");
+    expect(await screen.findByText(reply)).toBeTruthy();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Vorlesen fehlgeschlagen");
+    // Der Chat selbst läuft weiter: die Antwort-Bubble steht im Verlauf.
+    expect(screen.getByText(reply).closest(".jv-bubble-assistant")).toBeTruthy();
+  });
+
+  it("Mic-Doppelklick während des Permission-Dialogs öffnet nur EINEN Stream", async () => {
+    let resolveMic!: (stream: MediaStream) => void;
+    getUserMediaMock.mockImplementation(
+      () =>
+        new Promise<MediaStream>((resolve) => {
+          resolveMic = resolve;
+        }),
+    );
+    renderChat();
+
+    const mic = await screen.findByRole("button", { name: "Diktieren" });
+    fireEvent.click(mic);
+    fireEvent.click(mic); // Permission-Dialog offen → zweiter Klick = No-op
+
+    await vi.waitFor(() => expect(getUserMediaMock).toHaveBeenCalledTimes(1));
+
+    // Dialog nachträglich auflösen: genau eine Aufnahme entsteht, nichts verwaist.
+    resolveMic({ getTracks: () => [{ stop: vi.fn() }] } as unknown as MediaStream);
+    expect(
+      await screen.findByRole("button", { name: "Aufnahme läuft — zum Stoppen tippen" }),
+    ).toBeTruthy();
+    expect(getUserMediaMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Anhang-Blob-URL wird auch bei Unmount mitten im Turn revoked", async () => {
+    const revokeSpy = vi.spyOn(URL, "revokeObjectURL");
+    getPaTurnMock.mockImplementation(() => new Promise<PaTurn>(() => {})); // Turn nie fertig
+    const view = renderChat();
+
+    const input = await screen.findByLabelText("Nachricht an Jarvis");
+    const file = new File(["\x89PNG\r\n\x1a\n"], "board.png", { type: "image/png" });
+    const pasteEvent = createEvent.paste(input, {
+      clipboardData: { files: [file], types: ["Files"] },
+    });
+    fireEvent(input, pasteEvent);
+    expect(await screen.findByText("board.png")).toBeTruthy();
+
+    fireEvent.change(input, { target: { value: "was ist das?" } });
+    fireEvent.click(screen.getByLabelText("Nachricht senden"));
+    await vi.waitFor(() => expect(sendPaMessageMock).toHaveBeenCalled());
+
+    // Unmount mitten im wartenden Turn: die Pending-Bubble verschwindet, die
+    // Blob-URL des Anhangs darf trotzdem nicht leaken.
+    view.unmount();
+
+    await vi.waitFor(() => {
+      expect(revokeSpy).toHaveBeenCalledWith(expect.stringMatching(/^blob:/));
+    });
+  });
+
+  // ── S5-Design: Wächter in die Peripherie, Orb über dem Gespräch ─────────
+
+  /** Realistisches Watcher-Bundle (Format aus gateway/pa_watcher.py). */
+  function watcherMessage(content: string, ts: number): PaChatMessage {
+    return makeMessage({
+      role: "assistant",
+      engine: "pa-watcher",
+      model: "watcher",
+      content,
+      ts,
+    });
+  }
+
+  it("Wächter-Nachrichten fluten den Verlauf nicht — Digest in der Periphery-Zeile", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    serverMessages = [
+      userMessage("guten Morgen", { ts: now - 60 }),
+      assistantMessage("Guten Morgen, Piet. Drei Dinge liegen an.", { ts: now - 50 }),
+      watcherMessage(
+        [
+          "Jarvis-Wächter: 3 signifikante Ereignisse gebündelt.",
+          "- Jarvis Mobile: APK paketieren (t_492864de) — gave_up (Beleg: receipts/a.md)",
+          "- Jarvis Mobile: APK paketieren (t_492864de) — completed (Beleg: receipts/b.md)",
+          "- Vault-Sync (t_aa0011bb) — review_wait_attention (Beleg: receipts/c.md)",
+        ].join("\n"),
+        now - 40,
+      ),
+    ];
+    const { container } = renderChat();
+
+    // Das Gespräch zeigt nur Mensch ↔ Assistent — keine Wächter-Karten,
+    // keine rohen Task-IDs, keine Beleg-Pfade.
+    const log = await screen.findByRole("log", { name: "Jarvis-Chat" });
+    expect(log.textContent).toContain("guten Morgen");
+    expect(log.textContent).not.toContain("Jarvis-Wächter");
+    expect(log.textContent).not.toContain("t_492864de");
+    expect(log.textContent).not.toContain("Beleg");
+    expect(container.querySelectorAll(".jv-bubble")).toHaveLength(2);
+
+    // Abschlüsse sind in der Peripherie sichtbar: gave_up ist hinter dem
+    // neueren completed desselben Tasks verschwunden (Dedupe über taskId).
+    const strip = await screen.findByRole("button", { name: /Wächter-Zusammenfassung/ });
+    expect(strip.textContent).toContain("✓ 1 · 👁 1 · ⚠ 0");
+    expect(strip.textContent).toContain("zuletzt: ✓ Jarvis Mobile: APK paketieren,");
+  });
+
+  it("ohne Wächter-Events bleibt die Periphery-Zeile unsichtbar", async () => {
+    serverMessages = [userMessage("nur das gespräch")];
+    renderChat();
+
+    expect(await screen.findByText("nur das gespräch")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Wächter-Zusammenfassung/ })).toBeNull();
+  });
+
+  it("Tap auf die Periphery-Zeile feuert jarvis:open-aktivitaet (Drawer der Shell)", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    serverMessages = [
+      watcherMessage(
+        "- Jarvis Mobile (t_492864de) — completed (Beleg: receipts/b.md)",
+        now - 40,
+      ),
+    ];
+    const listener = vi.fn();
+    window.addEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, listener);
+    try {
+      renderChat();
+      fireEvent.click(
+        await screen.findByRole("button", { name: /Wächter-Zusammenfassung/ }),
+      );
+      expect(listener).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, listener);
+    }
+  });
+
+  it("Orb-State-Mapping: idle → listening (Mic) → thinking (Turn) → error (Composer-Fehler)", async () => {
+    renderChat();
+    // idle: nichts läuft.
+    expect(document.querySelector(".jv-orb--idle")).toBeTruthy();
+
+    // listening: Mic-Aufnahme läuft.
+    fireEvent.click(await screen.findByRole("button", { name: "Diktieren" }));
+    await vi.waitFor(() => {
+      expect(document.querySelector(".jv-orb--listening")).toBeTruthy();
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Aufnahme läuft — zum Stoppen tippen" }),
+    );
+
+    // thinking: Turn läuft (Poll bleibt offen).
+    getPaTurnMock.mockImplementation(() => new Promise<PaTurn>(() => {}));
+    await submitQuestion("läuft das?");
+    await vi.waitFor(() => {
+      expect(document.querySelector(".jv-orb--thinking")).toBeTruthy();
+    });
+  });
+
+  it("Orb zeigt error bei Composer-Fehler (Priorität über idle)", async () => {
+    sendPaMessageMock.mockRejectedValue(new Error("400: boom"));
+    renderChat();
+
+    await submitQuestion("kaputt");
+    await vi.waitFor(() => {
+      expect(document.querySelector(".jv-orb--error")).toBeTruthy();
+    });
+    expect(screen.getByRole("alert").textContent).toContain(
+      "Nachricht konnte nicht gesendet werden.",
+    );
   });
 });

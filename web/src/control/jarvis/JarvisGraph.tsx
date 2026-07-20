@@ -24,7 +24,7 @@
  *
  * Fallback-Hierarchie: usePaGraphView (keep-last-good + Stale; PA_GRAPH_MOCK
  * nur, wenn noch nie Live-Daten da waren oder nodes leer ist). Der frühere
- * statische Fokus (PA_GRAPH_MOCK_FOCUS_ID) entfällt — Fokus ist jetzt echt.
+ * statische Fokus des A4-Mocks entfällt — Fokus ist jetzt echt.
  */
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
