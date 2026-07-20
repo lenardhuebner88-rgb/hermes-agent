@@ -87,7 +87,10 @@ class MainActivity : ComponentActivity() {
         configureWebView()
         setupBridge()
         captureDictationDraft(intent)
-        webView.loadUrl(VoiceAppConfig.VOICE_URL)
+        // The launcher-alias that started us decides the surface (Jarvis vs voice);
+        // both are the same origin-pinned hull sharing one capture bridge.
+        val launchClass = intent?.component?.className ?: componentName.className
+        webView.loadUrl(VoiceAppConfig.startUrlForComponent(launchClass))
     }
 
     override fun onNewIntent(intent: Intent) {

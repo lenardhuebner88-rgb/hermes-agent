@@ -1,5 +1,6 @@
 package net.hermes.voice
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -56,5 +57,33 @@ class VoiceAppConfigTest {
     fun `null scheme or host is rejected`() {
         assertFalse(VoiceAppConfig.originIsAllowed(null, VoiceAppConfig.ALLOWED_HOST, -1))
         assertFalse(VoiceAppConfig.originIsAllowed("https", null, -1))
+    }
+
+    @Test
+    fun `jarvis launcher alias boots the jarvis board`() {
+        assertEquals(
+            VoiceAppConfig.JARVIS_URL,
+            VoiceAppConfig.startUrlForComponent("net.hermes.voice.JarvisActivity"),
+        )
+    }
+
+    @Test
+    fun `default and voice launchers keep the voice surface`() {
+        assertEquals(
+            VoiceAppConfig.VOICE_URL,
+            VoiceAppConfig.startUrlForComponent("net.hermes.voice.MainActivity"),
+        )
+        // A null launch component (share/dictation intent, cold relaunch) must not
+        // silently switch surfaces — the voice flow stays the safe default.
+        assertEquals(VoiceAppConfig.VOICE_URL, VoiceAppConfig.startUrlForComponent(null))
+    }
+
+    @Test
+    fun `jarvis and voice surfaces are the same origin-pinned host`() {
+        // Both surfaces must pass the shell's own origin lock, else in-hull
+        // navigation to them would be bounced out to an external browser.
+        for (url in listOf(VoiceAppConfig.JARVIS_URL, VoiceAppConfig.VOICE_URL)) {
+            assertTrue(url, url.startsWith("${VoiceAppConfig.ALLOWED_ORIGIN}/"))
+        }
     }
 }

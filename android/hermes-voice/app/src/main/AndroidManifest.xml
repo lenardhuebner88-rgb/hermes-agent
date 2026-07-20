@@ -35,6 +35,21 @@
             </intent-filter>
         </activity>
 
+        <!-- Second launcher entry that boots the same origin-pinned hull straight
+             into the Jarvis board. Reuses MainActivity (and its single capture
+             bridge) verbatim; the loaded surface is chosen from the launch
+             component, so the voice launcher above is completely unchanged. -->
+        <activity-alias
+            android:name=".JarvisActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:label="@string/jarvis_label">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
         <service
             android:name=".MediaProjectionService"
             android:exported="false"
