@@ -286,3 +286,85 @@ def test_success_publishes_candidate_and_retires_old_after():
     # Old deregister emptied its own name list, so its shutdown could not have
     # stripped the newly published handlers.
     assert old._registered_tool_names == []
+
+
+# --------------------------------------------------------------------------- #
+# Restore path: publish begins (old deregistered), then registration fails
+# --------------------------------------------------------------------------- #
+
+def test_registration_failure_after_deregister_restores_old_topology():
+    """The hard rollback path: staging + smoke PASS, so the publish step runs,
+    deregisters the old servers, and starts registering candidates — then
+    ``_register_server_tools`` fails. The inner rollback must restore the old
+    servers into ``_servers``, re-attach their registered-tool-name lists, roll
+    the registry back to its pre-deregister snapshot, and NOT retire the old
+    (still-live) session. The failed candidate is cleaned up.
+
+    This is distinct from the staging-failure tests above: here the old servers
+    were genuinely deregistered (``deregister_calls == 1``) before the failure,
+    so only the restore branch — not the untouched-live branch — can make the
+    old topology callable again.
+    """
+    old_session = _FakeSession()
+    old = _FakeServer(
+        "vault", session=old_session, registered=["mcp__vault__search"]
+    )
+    candidate = _FakeServer("vault", tools=[], session=_FakeSession())
+
+    async def _connect(shadow_name, cfg):
+        return candidate
+
+    config = {"vault": {"command": "x"}}
+
+    # Seed a registry that already holds the old server's tool + a non-zero
+    # generation, so we can prove the snapshot (not just _servers) is restored.
+    fresh_registry = ToolRegistry()
+    fresh_registry._tools["mcp__vault__search"] = SimpleNamespace(name="mcp__vault__search")
+    fresh_registry._generation = 7
+    snapshot_tool_keys = set(fresh_registry._tools)
+
+    def _fake_register(name, server, cfg):
+        # Simulate a partial mutation of the live registry *before* blowing up,
+        # so a missing rollback would leave the bogus entry (and a bumped
+        # generation) visible after the failed reload.
+        fresh_registry._tools["mcp__vault__half_registered"] = SimpleNamespace(
+            name="mcp__vault__half_registered"
+        )
+        fresh_registry._generation += 1
+        raise RuntimeError("tool registration exploded mid-publish")
+
+    patchers = _patchers(config=config, connect=_connect)
+    patchers.append(
+        patch.object(mcp_tool, "_register_server_tools", side_effect=_fake_register)
+    )
+
+    with _Patched(patchers):
+        with patch("tools.registry.registry", fresh_registry):
+            with patch.dict(mcp_tool._servers, {"vault": old}, clear=True):
+                with pytest.raises(MCPReloadError) as ei:
+                    reload_mcp_tools_transactionally()
+
+                # We reached the publish step: the old server WAS deregistered.
+                assert old.deregister_calls == 1
+                # ...but it was restored, not retired: identity preserved, its
+                # session never shut down, and its tool-name list re-attached.
+                assert mcp_tool._servers["vault"] is old
+                assert old.shutdown_calls == 0
+                assert old._registered_tool_names == ["mcp__vault__search"]
+
+                # Registry rolled back to the exact pre-deregister snapshot:
+                # the half-registered candidate tool is gone, the old tool is
+                # present, and the generation counter is restored.
+                assert set(fresh_registry._tools) == snapshot_tool_keys
+                assert "mcp__vault__half_registered" not in fresh_registry._tools
+                assert fresh_registry._generation == 7
+
+                # Old server is genuinely callable again post-restore.
+                old_result = _sync_run_on_mcp_loop(
+                    old_session.call_tool("search", {})
+                )
+                assert old_result.isError is False
+
+    assert "tool registration exploded mid-publish" in str(ei.value)
+    # The staged candidate that could not be published was cleaned up.
+    assert candidate.shutdown_calls == 1
