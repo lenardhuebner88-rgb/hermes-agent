@@ -22,10 +22,26 @@
  * Where the browser cannot really capture a screen (Android Chrome / Samsung
  * Internet / iOS Safari — getDisplayMedia is absent or a mirage), supported is
  * false: the UI must declare it honestly, not fall back to an image picker.
+ *
+ * NATIVE PATH — inside the native Android hull (`android/hermes-voice/`), the
+ * shell exposes a real MediaProjection capture bridge (`window.HermesNative`).
+ * When that capability is present it is PREFERRED over getDisplayMedia: start()
+ * asks native to capture (the only user-visible surface is the mandatory Android
+ * system dialog), and native `screen_frame` JPEGs are decoded and streamed into
+ * the SAME backend live-share session through the SAME backpressure/latest-wins
+ * uploader — no second capture implementation, no second backend pipeline. A
+ * capture generation guards against stale native frames after any stop.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { api } from "@/lib/api";
+import {
+  initNativeCaptureBridge,
+  nativeScreenCaptureAvailable,
+  startNativeScreenCapture,
+  stopNativeScreenCapture,
+  subscribeNativeCaptureAvailability,
+} from "./nativeCaptureBridge";
 
 /** Sampling cadence — 1 fps is plenty for an LLM "look at my screen" and keeps
  *  upload + CPU cost low (research handoff: start at ≤1 fps). */
@@ -56,6 +72,19 @@ function isCancel(error: unknown): boolean {
   );
 }
 
+/** Decode a base64 JPEG (no data: prefix, as the native bridge sends) into a
+ *  Blob the existing uploader can post to /frame. Returns null on bad input. */
+function base64ToJpegBlob(base64: string): Blob | null {
+  try {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: "image/jpeg" });
+  } catch {
+    return null;
+  }
+}
+
 export interface UseLiveShareResult {
   supported: boolean;
   status: LiveShareStatus;
@@ -77,7 +106,17 @@ export interface UseLiveShareOptions {
 export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareResult {
   const [status, setStatus] = useState<LiveShareStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const supported = screenShareSupported();
+  const displaySupported = screenShareSupported();
+  // Native capability is discovered asynchronously (bridge_ready → capabilities).
+  // The bridge is an external store; subscribe with the tear-safe primitive so the
+  // button reveals the native path the moment capability is known, with no
+  // setState-in-effect. Server snapshot is false (no native bridge off-device).
+  const nativeAvailable = useSyncExternalStore(
+    subscribeNativeCaptureAvailability,
+    nativeScreenCaptureAvailable,
+    () => false,
+  );
+  const supported = displaySupported || nativeAvailable;
 
   const streamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -88,8 +127,21 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
   // upload is running overwrites any older pending frame (latest wins).
   const uploadingRef = useRef(false);
   const pendingRef = useRef<Blob | null>(null);
+  // Native capture: bumped on every start/teardown so a native frame or lifecycle
+  // callback from a superseded capture is ignored (no upload after a visible stop).
+  const captureGenRef = useRef(0);
+  // True while a native capture is engaged, so teardown knows to tell native to
+  // stop. Distinguishes the native path from the getDisplayMedia path.
+  const nativeCaptureRef = useRef(false);
 
-  const teardown = useCallback(() => {
+  const teardown = useCallback((notifyNative = true) => {
+    // Invalidate any in-flight native capture: a late started/frame callback must
+    // not resurrect the share (its generation check below now fails).
+    captureGenRef.current += 1;
+    if (nativeCaptureRef.current) {
+      nativeCaptureRef.current = false;
+      stopNativeScreenCapture({ notifyNative });
+    }
     if (timerRef.current !== null) {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -167,10 +219,76 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     );
   }, [drainUpload]);
 
+  // Native capture path: no browser prompt, no <video>, no sampling timer —
+  // native owns the pixels and pushes ready JPEGs. We only open the backend
+  // session AFTER native confirms capture (screen_capture_started), so a
+  // cancelled Android permission dialog never leaks a server session.
+  const startNative = useCallback(() => {
+    const gen = (captureGenRef.current += 1);
+    nativeCaptureRef.current = true;
+    startNativeScreenCapture({
+      onStarted: () => {
+        void (async () => {
+          if (gen !== captureGenRef.current || !mountedRef.current) {
+            // Superseded / cancelled before native confirmed — kill the orphan.
+            stopNativeScreenCapture();
+            return;
+          }
+          try {
+            const session = await api.startLiveShare();
+            if (gen !== captureGenRef.current || !mountedRef.current) {
+              // The share ended while startLiveShare() was in flight — close the
+              // orphaned server session best-effort (mirrors the display path).
+              void api.stopLiveShare(session.session_id).catch(() => {});
+              return;
+            }
+            sessionIdRef.current = session.session_id;
+            setStatus("sharing");
+          } catch {
+            // No backend session → do not pretend we are sharing; stop native.
+            teardown();
+            if (mountedRef.current) {
+              setStatus("idle");
+              setError(errorText);
+            }
+          }
+        })();
+      },
+      onFrame: (base64) => {
+        // Discard stale frames (superseded generation) and any frame arriving
+        // before the session exists or after teardown — nothing uploads post-stop.
+        if (gen !== captureGenRef.current || !sessionIdRef.current || !mountedRef.current) {
+          return;
+        }
+        const blob = base64ToJpegBlob(base64);
+        if (blob) void drainUpload(blob);
+      },
+      onStopped: () => {
+        // Native already stopped (system stop / user cancel) — tear down without
+        // echoing stop_screen_capture back (avoids a ping-pong). Silent, no error.
+        if (gen !== captureGenRef.current) return;
+        teardown(false);
+        if (mountedRef.current) setStatus("idle");
+      },
+      onError: () => {
+        if (gen !== captureGenRef.current) return;
+        teardown(false);
+        if (mountedRef.current) {
+          setStatus("idle");
+          setError(errorText);
+        }
+      },
+    });
+  }, [drainUpload, teardown, errorText]);
+
   const start = useCallback(async () => {
     if (!supported || sessionIdRef.current || status !== "idle") return;
     setError(null);
     setStatus("starting");
+    if (nativeAvailable) {
+      startNative();
+      return;
+    }
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({
@@ -224,7 +342,7 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     timerRef.current = setInterval(sampleTick, LIVE_SHARE_SAMPLE_INTERVAL_MS);
     sampleTick(); // first frame immediately, don't wait a full interval
     if (mountedRef.current) setStatus("sharing");
-  }, [supported, status, errorText, sampleTick, stop, teardown]);
+  }, [supported, nativeAvailable, startNative, status, errorText, sampleTick, stop, teardown]);
 
   const attachCurrentFrame = useCallback(async (): Promise<string | null> => {
     const sid = sessionIdRef.current;
@@ -239,6 +357,9 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
 
   useEffect(() => {
     mountedRef.current = true;
+    // Attach the native bridge + perform the bridge_ready handshake (no-op
+    // off-device). Capability updates flow through useSyncExternalStore above.
+    initNativeCaptureBridge();
     return () => {
       mountedRef.current = false;
       teardown();

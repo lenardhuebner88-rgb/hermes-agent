@@ -38,6 +38,11 @@ class MainActivity : ComponentActivity() {
     private val phoneActionGate = PhoneActionExecutionGate()
     private var pendingDictationDraft: String? = null
 
+    /** The in-origin surface currently loaded, so a warm singleTop relaunch can
+     *  tell whether it needs to switch surfaces (Jarvis vs voice) or leave the
+     *  page untouched. */
+    private var currentSurfaceUrl: String? = null
+
     private val webPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             val request = pendingWebPermissionRequest
@@ -87,12 +92,37 @@ class MainActivity : ComponentActivity() {
         configureWebView()
         setupBridge()
         captureDictationDraft(intent)
-        webView.loadUrl(VoiceAppConfig.VOICE_URL)
+        // The launcher-alias that started us decides the surface (Jarvis vs voice);
+        // both are the same origin-pinned hull sharing one capture bridge.
+        val launchClass = intent?.component?.className ?: componentName.className
+        loadSurface(VoiceAppConfig.startUrlForComponent(launchClass))
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Keep getIntent() consistent with the intent that just re-entered a warm
+        // singleTop activity, matching the standard onNewIntent contract.
+        setIntent(intent)
         captureDictationDraft(intent)
+        // A warm relaunch (e.g. tapping the Jarvis alias while the Voice surface is
+        // already on top) is delivered here instead of recreating the activity, so
+        // the surface must be re-derived AND reloaded — otherwise the shell stays on
+        // whatever it showed before (the original AC1 defect). SurfaceRelaunch.route
+        // owns that decision and drives the load (stopping any live capture first),
+        // so the warm-relaunch behaviour is unit-tested off-device; see
+        // SurfaceRelaunchTest.
+        SurfaceRelaunch.route(
+            isLauncherEntry = intent.action == Intent.ACTION_MAIN,
+            launchClass = intent.component?.className,
+            currentUrl = currentSurfaceUrl,
+            stopCapture = ::stopCaptureIfActive,
+            loadSurface = ::loadSurface,
+        )
+    }
+
+    private fun loadSurface(url: String) {
+        currentSurfaceUrl = url
+        webView.loadUrl(url)
     }
 
     private fun captureDictationDraft(intent: Intent?) {

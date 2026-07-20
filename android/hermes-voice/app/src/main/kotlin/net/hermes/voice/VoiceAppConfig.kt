@@ -5,7 +5,47 @@ object VoiceAppConfig {
     const val ALLOWED_HOST = "huebners.tail50819a.ts.net"
     const val ALLOWED_ORIGIN = "https://$ALLOWED_HOST"
     const val VOICE_URL = "https://$ALLOWED_HOST/voice"
+    /** The Jarvis board (/control SPA). Same origin as VOICE_URL, so the shell's
+     *  origin lock and the single capture bridge cover it unchanged. */
+    const val JARVIS_URL = "https://$ALLOWED_HOST/control/projekte"
     const val BRIDGE_JS_OBJECT_NAME = "HermesNative"
+
+    /**
+     * Which in-origin surface the shell loads, chosen by the launcher component
+     * that started the Activity. The Jarvis launcher-alias (…JarvisActivity)
+     * boots straight into the Jarvis board; every other entry (including the
+     * default voice launcher and share/dictation intents) keeps the existing
+     * voice surface — so the shipped voice flow never regresses. Both surfaces
+     * are the same origin-pinned hull and share one MediaProjection bridge, so
+     * the Jarvis screenshare button never needs an app or route switch.
+     */
+    fun startUrlForComponent(className: String?): String =
+        if (className != null && className.endsWith("JarvisActivity")) JARVIS_URL else VOICE_URL
+
+    /**
+     * Which surface a *re-delivered* launch intent must (re)load, or null to keep
+     * the current one. Because [MainActivity] is `singleTop`, tapping the Jarvis
+     * alias while a warm Voice activity is already on top delivers the intent to
+     * `onNewIntent` instead of recreating the activity — so the surface has to be
+     * re-derived here or the shell silently stays on `/voice`.
+     *
+     * Rules:
+     *  - Only a launcher entry ([isLauncherEntry], i.e. ACTION_MAIN) may switch the
+     *    surface. A share/dictation ACTION_SEND intent keeps its existing behavior
+     *    of only stashing a draft, never navigating.
+     *  - A launcher re-entry that already points at the visible surface returns
+     *    null, so re-tapping the same icon triggers no wasteful reload — and, just
+     *    as importantly, no capture-killing navigation.
+     */
+    fun relaunchSurfaceTarget(
+        isLauncherEntry: Boolean,
+        launchClass: String?,
+        currentUrl: String?,
+    ): String? {
+        if (!isLauncherEntry) return null
+        val target = startUrlForComponent(launchClass)
+        return if (target == currentUrl) null else target
+    }
 
     /** Origin comparison that tolerates a trailing slash on either side. */
     fun originMatches(candidate: String?): Boolean {
