@@ -103,9 +103,9 @@ AA-Beweis siehe W4-8-Report. Nacht-Tiefen-Regel: View-lokale Tiefenvariationen (
 
 ### Daten-Palette (W6-4)
 
-`--color-data-1..6` kennzeichnet ausschließlich die **Identität** unterscheidbarer
+`--color-data-1..7` kennzeichnet ausschließlich die **Identität** unterscheidbarer
 Serien, Engines und Rollen. Die Reihe ist eine eigene, auf Graphit kalibrierte
-Print-Ink-Serie (Olive/Sage/Slate/Violett/Rose/Neutral) — bewusst FARBLICH DISTINKT
+Print-Ink-Serie (Olive/Sage/Slate/Violett/Rose/Neutral/Amber) — bewusst FARBLICH DISTINKT
 von Bronze, Status-Trio und Lane-Prem: Identity-Dots/Chips teilen die FORM mit
 Status-LEDs/Chips, deshalb darf sich das Farbvokabular dort nicht überlappen.
 Sie ist nie Statusvokabular und nie Interaktionsfarbe; Consumers referenzieren
@@ -114,7 +114,7 @@ immer `data-N`, nie Rohwerte.
 Datenfarbe steht außerdem nie allein. Engine-Dots tragen direkt daneben den Engine-Namen;
 RoleChips kombinieren Initiale und Rollenlabel; Pipeline-Stufen kombinieren Eyebrow, Zahl
 und Rail. Unbekannte Identitäten bleiben neutral. Die AA-Tabelle an der Token-Definition
-in `theme.css` belegt alle sechs Farben gegen `surface-1` und `surface-2`.
+in `theme.css` belegt alle sieben Farben gegen `surface-1` und `surface-2`.
 
 ## Jarvis-Zone (`/control/projekte`) — einzige Token-Ausnahme
 

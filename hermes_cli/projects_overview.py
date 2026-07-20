@@ -764,10 +764,10 @@ _TMUX_LIST_SESSIONS_CMD = ["tmux", "list-sessions", "-F", "#{session_name}|#{ses
 _TMUX_SHELL_COMMANDS = frozenset({"bash", "zsh", "sh", "fish", "dash"})
 # Priority order matters: first kind whose name appears wins (see
 # _classify_tmux_kind).
-_TMUX_KIND_ORDER = ("claude", "codex", "kimi", "grok", "hermes")
+_TMUX_KIND_ORDER = ("claude", "codex", "kimi", "grok", "qwen", "hermes")
 
 _COORDINATION_KIND_VALUES = frozenset(
-    {"claude", "codex", "kimi", "grok", "hermes", "kanban", "loop"}
+    {"claude", "codex", "kimi", "grok", "qwen", "hermes", "kanban", "loop"}
 )
 _COORDINATION_FRONTMATTER_BYTES = 4096
 
