@@ -210,12 +210,22 @@ export function usePaChat(options: UsePaChatOptions = {}) {
   );
 
   const send = useCallback(
-    async (text: string) => {
+    async (text: string, sendOptions: { attachmentAssetId?: string } = {}) => {
       const trimmed = text.trim();
       if (!trimmed || activeTurn?.phase === "waiting") return;
       // S2.2: Switcher-Wahl gilt für genau diesen (nächsten) Turn.
       const choice = getEngineChoice();
-      const sentAttachment = attachment;
+      // Live-Screen-Share (S-live): der Composer reicht die materialisierte
+      // asset_id des aktuellen Bildschirm-Frames herein. previewUrl ist die
+      // authentifizierte Asset-URL (kein blob:), revoke bleibt ein No-op.
+      const liveAttachment: PaAttachment | null = sendOptions.attachmentAssetId
+        ? {
+            asset_id: sendOptions.attachmentAssetId,
+            name: t.liveShareActive,
+            previewUrl: api.paAssetUrl(sendOptions.attachmentAssetId),
+          }
+        : null;
+      const sentAttachment = attachment ?? liveAttachment;
       if (sentAttachment && !imagesAllowed()) {
         // Anhang entstand vor einem Engine-Wechsel auf eine Nicht-Vision-
         // Engine: clientseitig erklären statt den 400 des Backends.
