@@ -17,7 +17,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone, tzinfo
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable
 
@@ -39,6 +39,30 @@ QUIET_END_HOUR = 7
 QUIET_END_MINUTE = 30
 JUDGEMENT_LEASE_SECONDS = 10 * 60
 
+# S6: Morgen-Briefing — eine kuratierte Karte für das Nacht-Fenster.
+# Fenster ab 21:00 Vortag; Zustellung ab Quiet-End (07:30). Konstanten oben
+# konfigurierbar; Tagsüber bleiben die Einzel-Bundles unverändert.
+BRIEFING_WINDOW_START_HOUR = 21
+BRIEFING_MAX_LINES = 8
+BRIEFING_MODEL = "briefing-v1"
+BRIEFING_ENGINE = "pa-watcher"
+BRIEFING_HEADER = "Morgen-Briefing (seit gestern Abend)"
+BRIEFING_SECTIONS = (
+    ("waiting", "👁 Wartet auf dich"),
+    ("blocker", "⚠ Blocker"),
+    ("done", "✓ Abschlüsse"),
+)
+# S6: Kinds die „wartet auf dich" signalisieren (Operator-Freigabe/Review).
+BRIEFING_WAITING_KINDS = frozenset(
+    {
+        "operator_release_required",
+        "review_wait_attention",
+        "review_unavailable",
+    }
+)
+# S6: Kinds die Abschlüsse sind (alles andere mit Warnung/Critical → Blocker).
+BRIEFING_DONE_KINDS = frozenset({"completed", "new_receipt"})
+
 KANBAN_TERMINAL_KINDS = frozenset(
     {"completed", "blocked", "gave_up", "crashed", "timed_out"}
 )
@@ -59,6 +83,22 @@ _SOURCE_ORDER = {
     "kanban_status": 2,
     "red_gate": 3,
 }
+# S6: Suffixe, die aus Briefing-Titeln entfernt werden (Klartext ohne Status-Rauschen).
+_BRIEFING_KIND_SUFFIX = re.compile(
+    r"\s*[—–-]\s*(?:"
+    r"completed|blocked|gave_up|crashed|timed_out|"
+    r"operator_release_required|review_wait_attention|review_unavailable|"
+    r"worker_gate_blocked|release_gate_parked|rebase_conflict_returned|"
+    r"session_exit|new_receipt|blocked:\S+"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_BRIEFING_TASK_PREFIX = re.compile(
+    r"^(?:Task|Gate bei Task)\s+\S+\s*[:：]\s*",
+    re.IGNORECASE,
+)
+_BRIEFING_TASK_ID = re.compile(r"\bt_[0-9a-f]{6,}\b", re.IGNORECASE)
+_BRIEFING_PATH = re.compile(r"(?:/home/\S+|(?:[A-Za-z]:)?(?:/[\w.-]+)+)")
 
 
 @dataclass(frozen=True)
@@ -682,6 +722,243 @@ def is_quiet_time(now: int, *, zone: tzinfo | None = None) -> bool:
     return minute >= quiet_start or minute <= quiet_end
 
 
+def _local_dt(now: int, zone: tzinfo | None = None) -> datetime:
+    if zone is None:
+        return datetime.fromtimestamp(now).astimezone()
+    return datetime.fromtimestamp(now, tz=zone)
+
+
+def night_window_start(now: int, *, zone: tzinfo | None = None) -> int:
+    """S6: Unix-Start des Nacht-Fensters (Default: 21:00 Vortag).
+
+    Vor 21:00 lokaler Zeit ist der Fensterstart der Vortag 21:00; ab 21:00
+    zählt der heutige 21:00-Zeitpunkt (für den nächsten Morgen).
+    """
+    local = _local_dt(now, zone)
+    start_today = local.replace(
+        hour=BRIEFING_WINDOW_START_HOUR,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    start = start_today if local >= start_today else start_today - timedelta(days=1)
+    return int(start.timestamp())
+
+
+def briefing_title(raw_title: object) -> str:
+    """S6: Klartext-Titel ohne Task-IDs, Beleg-Pfade und Kind-Suffixe."""
+    text = str(raw_title or "").strip()
+    text = _BRIEFING_TASK_PREFIX.sub("", text)
+    text = _BRIEFING_KIND_SUFFIX.sub("", text)
+    text = _BRIEFING_TASK_ID.sub("", text)
+    text = _BRIEFING_PATH.sub("", text)
+    text = re.sub(r"\s{2,}", " ", text).strip(" \t-—–:;")
+    return _bounded_text(text or "Ereignis", 120)
+
+
+def briefing_section_key(kind: object, source: object, severity: object) -> str:
+    """S6: Sektions-Schlüssel waiting|blocker|done für die feste Reihenfolge."""
+    kind_s = str(kind or "")
+    source_s = str(source or "")
+    severity_s = str(severity or "info")
+    if kind_s in BRIEFING_WAITING_KINDS:
+        return "waiting"
+    if kind_s.startswith("blocked:") or kind_s in {
+        "blocked",
+        "gave_up",
+        "crashed",
+        "timed_out",
+        "worker_gate_blocked",
+        "release_gate_parked",
+        "rebase_conflict_returned",
+    }:
+        return "blocker"
+    if kind_s in BRIEFING_DONE_KINDS:
+        return "done"
+    if source_s == "red_gate":
+        return "blocker" if kind_s not in BRIEFING_WAITING_KINDS else "waiting"
+    if source_s == "session_exit" and severity_s != "info":
+        return "blocker"
+    if source_s == "receipt" or kind_s == "completed":
+        return "done"
+    if severity_s in {"warning", "critical"}:
+        return "blocker"
+    return "done"
+
+
+def _briefing_dedupe_key(row: sqlite3.Row | dict[str, Any]) -> str:
+    ref = str(row["ref"] or "").strip()
+    if ref and not ref.startswith("/") and ref != "-":
+        # Task-IDs und Session-Labels dedupen; reine Dateipfade nicht.
+        if ref.startswith("t_") or "/" not in ref:
+            return f"ref:{ref}"
+    title = briefing_title(row["title"])
+    return f"title:{title.casefold()}"
+
+
+def dedupe_briefing_rows(
+    rows: list[sqlite3.Row] | list[dict[str, Any]],
+) -> list[sqlite3.Row] | list[dict[str, Any]]:
+    """S6: Pro Task-ID nur den letzten Stand behalten (max first_seen_at)."""
+    latest: dict[str, Any] = {}
+    for row in rows:
+        key = _briefing_dedupe_key(row)
+        prev = latest.get(key)
+        prev_ts = int(prev["first_seen_at"] if prev is not None else -1)
+        cur_ts = int(row["first_seen_at"] or 0)
+        if prev is None or cur_ts >= prev_ts:
+            latest[key] = row
+    return sorted(
+        latest.values(),
+        key=lambda r: (
+            {"waiting": 0, "blocker": 1, "done": 2}.get(
+                briefing_section_key(r["kind"], r["source"], r["severity"]), 9
+            ),
+            int(r["first_seen_at"] or 0),
+            str(r["fingerprint"]),
+        ),
+    )
+
+
+def build_morning_briefing(
+    rows: list[sqlite3.Row] | list[dict[str, Any]],
+) -> str:
+    """S6: Kuratierte Briefing-Karte — feste Sektions-Reihenfolge, max 8 Zeilen."""
+    if not rows:
+        return ""
+    deduped = dedupe_briefing_rows(rows)
+    by_section: dict[str, list[str]] = {key: [] for key, _ in BRIEFING_SECTIONS}
+    for row in deduped:
+        section = briefing_section_key(row["kind"], row["source"], row["severity"])
+        title = briefing_title(row["title"])
+        if title and title not in by_section[section]:
+            by_section[section].append(title)
+
+    lines: list[str] = [BRIEFING_HEADER]
+    remaining = BRIEFING_MAX_LINES - 1
+    for key, header in BRIEFING_SECTIONS:
+        items = by_section.get(key) or []
+        if not items or remaining < 2:
+            continue
+        lines.append(header)
+        remaining -= 1
+        for item in items:
+            if remaining <= 0:
+                break
+            lines.append(f"- {item}")
+            remaining -= 1
+        if remaining <= 0:
+            break
+    # Nur Header ohne Inhalt → leere Karte (kein Delivery).
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines)
+
+
+def deliver_morning_briefing(
+    store: PAStore,
+    *,
+    now: int,
+    zone: tzinfo | None = None,
+) -> dict[str, Any]:
+    """S6: Einmal pro Tag nach Quiet-Hours eine Briefing-Karte fürs Nacht-Fenster.
+
+    Leeres Fenster → keine Karte. Quiet-Hours und bereits geliefertes
+    Tages-Briefing verhindern Doppelzustellung. Tagsüber greift weiterhin
+    ``deliver_pending_bundle``.
+    """
+    if is_quiet_time(now, zone=zone):
+        return {"delivered": 0, "reason": "quiet_hours"}
+    day = _local_day(now, zone)
+    window_start = night_window_start(now, zone=zone)
+    with store.connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if _state_get(conn, "briefing_day") == day:
+            conn.commit()
+            return {"delivered": 0, "reason": "already_delivered"}
+        rows = conn.execute(
+            "SELECT fingerprint, source, kind, severity, title, ref, reason, "
+            "first_seen_at FROM pa_watcher_events WHERE status='pending' "
+            "AND first_seen_at >= ? ORDER BY first_seen_at, event_id LIMIT ?",
+            (window_start, DELIVERY_MAX_EVENTS),
+        ).fetchall()
+        if not rows:
+            conn.commit()
+            return {"delivered": 0, "reason": "empty"}
+        summary = build_morning_briefing(rows)
+        if not summary:
+            conn.commit()
+            return {"delivered": 0, "reason": "empty"}
+        fingerprints = [str(row["fingerprint"]) for row in rows]
+        # Nur die tatsächlich im Text genutzten Events markieren wir delivered
+        # — Dedupe kann Zeilen verwerfen, die aber zur Night-Queue gehören.
+        # Alle Night-Pending gehen in die Karte (dedup nur im Text).
+        bundle_key = _fingerprint("briefing", day, *sorted(fingerprints))
+        turn_id = f"pa_briefing_{bundle_key[:24]}"
+        engine = BRIEFING_ENGINE
+        model = BRIEFING_MODEL
+        severity = max(
+            (str(row["severity"]) for row in rows),
+            key=lambda value: _SEVERITY_ORDER.get(value, 0),
+        )
+        lead = max(
+            rows,
+            key=lambda row: _SEVERITY_ORDER.get(str(row["severity"]), 0),
+        )
+        conn.execute(
+            "INSERT INTO pa_conversations(id, created_at, updated_at) "
+            "VALUES ('default', ?, ?) ON CONFLICT(id) DO UPDATE SET "
+            "updated_at=excluded.updated_at",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO pa_turns("
+            "id, conversation_id, status, reply, error, engine, model, "
+            "project_scope, attachments_json, ts, updated_ts"
+            ") VALUES (?, 'default', 'done', ?, NULL, ?, ?, NULL, '[]', ?, ?)",
+            (turn_id, summary, engine, model, now, now),
+        )
+        exists = conn.execute(
+            "SELECT 1 FROM pa_messages WHERE turn_id=? AND role='assistant' "
+            "AND engine=? LIMIT 1",
+            (turn_id, engine),
+        ).fetchone()
+        if exists is None:
+            conn.execute(
+                "INSERT INTO pa_messages("
+                "conversation_id, turn_id, role, content, engine, model, "
+                "attachments_json, ts"
+                ") VALUES ('default', ?, 'assistant', ?, ?, ?, '[]', ?)",
+                (turn_id, summary, engine, model, now),
+            )
+        conn.execute(
+            "INSERT INTO pa_feed(ts, kind, severity, title, ref, delivered_push) "
+            "VALUES (?, 'watcher_briefing', ?, ?, ?, 0)",
+            (
+                now,
+                severity,
+                _bounded_text(BRIEFING_HEADER, 240),
+                lead["ref"],
+            ),
+        )
+        placeholders = ",".join("?" for _ in fingerprints)
+        conn.execute(
+            "UPDATE pa_watcher_events SET status='delivered', delivered_at=? "
+            f"WHERE fingerprint IN ({placeholders}) AND status='pending'",
+            (now, *fingerprints),
+        )
+        _state_set(conn, "briefing_day", day, now=now)
+        _state_set(conn, "last_delivery_at", now, now=now)
+        _state_set(conn, "last_briefing_at", now, now=now)
+        conn.commit()
+    return {
+        "delivered": len(rows),
+        "reason": "delivered",
+        "turn_id": turn_id,
+        "model": BRIEFING_MODEL,
+    }
+
+
 def _bundle_summary(rows: list[sqlite3.Row]) -> str:
     lines = [f"Jarvis-Wächter: {len(rows)} signifikante Ereignisse gebündelt."]
     for row in rows[:12]:
@@ -980,6 +1257,13 @@ def run_watcher_tick(
             pa_store,
             now=observed_at,
             engine_runner=engine_runner,
+            zone=zone,
+        )
+        # S6: Morgen-Briefing vor den Tagsüber-Einzel-Bundles; leeres Fenster
+        # liefert keine Karte und blockiert die Tages-Bundles nicht.
+        result["briefing"] = deliver_morning_briefing(
+            pa_store,
+            now=observed_at,
             zone=zone,
         )
         result["delivery"] = deliver_pending_bundle(

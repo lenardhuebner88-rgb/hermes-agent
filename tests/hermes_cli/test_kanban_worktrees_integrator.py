@@ -966,3 +966,135 @@ def test_affected_pytest_module_selects_root_level_sibling(repo):
     mods = kwt._affected_pytest_modules(repo, ["hermes_cli/design_board_store.py"])
     assert mods == ["tests/test_design_board_store.py"]
 
+
+
+# ---------------------------------------------------------------------------
+# S6.6 Integrator-Härtung: Disk-Preflight + Validation-Hygiene
+# ---------------------------------------------------------------------------
+
+
+def test_check_disk_space_ok_and_raises_clear_enospace(repo, monkeypatch):
+    ok = kwt.check_disk_space_for_integration(repo, min_free=1)
+    assert ok["free"] >= 1
+    assert ok["min_free"] == 1
+
+    class _Usage:
+        free = 100
+        total = 1000
+        used = 900
+
+    monkeypatch.setattr(kwt.shutil, "disk_usage", lambda _p: _Usage())
+    with pytest.raises(kwt.DiskSpaceError) as excinfo:
+        kwt.check_disk_space_for_integration(repo, min_free=500)
+    msg = str(excinfo.value)
+    assert "Zu wenig freier Speicher vor Merge-Gate" in msg
+    assert "ENOSPC-Preflight" in msg
+    assert "kanban-validation" in msg
+
+
+def test_disk_space_error_is_transient_park_class():
+    assert (
+        kwt._integration_park_class(
+            "Zu wenig freier Speicher vor Merge-Gate: 100 B frei, mindestens 500 B nötig"
+        )
+        == "transient"
+    )
+
+
+def test_hygiene_sweep_removes_only_system_validation_worktrees(repo, tmp_path):
+    base = repo / kwt.WORKTREES_DIRNAME / kwt.VALIDATION_WORKTREES_NAMESPACE
+    base.mkdir(parents=True)
+    old = base / "old-token-123"
+    fresh = base / "fresh-token-456"
+    old.mkdir()
+    (old / "marker.txt").write_text("stale\n")
+    fresh.mkdir()
+    (fresh / "marker.txt").write_text("fresh\n")
+
+    # Fremde Pfade — dürfen NIE angefasst werden.
+    foreign_kanban = repo / kwt.WORKTREES_DIRNAME / kwt.WORKTREES_NAMESPACE / "t_foreign"
+    foreign_kanban.mkdir(parents=True)
+    (foreign_kanban / "keep.txt").write_text("chain\n")
+    foreign_other = repo / kwt.WORKTREES_DIRNAME / "bridges" / "manual-wt"
+    foreign_other.mkdir(parents=True)
+    (foreign_other / "keep.txt").write_text("bridge\n")
+
+    now = 1_000_000.0
+    # old = 2h alt, fresh = 60s alt; max_age = 30 min
+    import os
+
+    os.utime(old, (now - 7200, now - 7200))
+    os.utime(fresh, (now - 60, now - 60))
+
+    dry = kwt.hygiene_sweep_validation_worktrees(
+        repo, max_age_seconds=1800, now=now, dry_run=True
+    )
+    assert dry["scanned"] == 2
+    assert len(dry["removed"]) == 1
+    assert dry["removed"][0]["path"] == str(old)
+    assert old.exists() and fresh.exists()
+
+    applied = kwt.hygiene_sweep_validation_worktrees(
+        repo, max_age_seconds=1800, now=now, dry_run=False
+    )
+    assert not old.exists()
+    assert fresh.exists()
+    assert foreign_kanban.exists()
+    assert foreign_other.exists()
+    assert any(item["path"] == str(fresh) for item in applied["skipped"])
+    assert (foreign_kanban / "keep.txt").read_text() == "chain\n"
+    assert (foreign_other / "keep.txt").read_text() == "bridge\n"
+
+
+def test_is_system_validation_worktree_predicate(repo):
+    base = repo / kwt.WORKTREES_DIRNAME / kwt.VALIDATION_WORKTREES_NAMESPACE
+    token = base / "pid-1-2-3"
+    token.mkdir(parents=True)
+    assert kwt._is_system_validation_worktree(repo, token) is True
+    chain = repo / kwt.WORKTREES_DIRNAME / kwt.WORKTREES_NAMESPACE / "t_abc"
+    chain.mkdir(parents=True)
+    assert kwt._is_system_validation_worktree(repo, chain) is False
+    assert kwt._is_system_validation_worktree(repo, repo / "elsewhere") is False
+
+
+def test_integrate_chain_parks_on_disk_preflight(repo, monkeypatch):
+    info = _provisioned_chain(repo, "t_disk")
+
+    def _boom(_path, min_free=None):
+        raise kwt.DiskSpaceError(
+            "Zu wenig freier Speicher vor Merge-Gate: 0 B frei, "
+            "mindestens 2.0 GiB nötig (ENOSPC-Preflight)."
+        )
+
+    monkeypatch.setattr(kwt, "check_disk_space_for_integration", _boom)
+    monkeypatch.setattr(
+        kwt,
+        "hygiene_sweep_validation_worktrees",
+        lambda *a, **k: {"scanned": 0, "removed": [], "skipped": [], "errors": []},
+    )
+    out = kwt.integrate_chain(
+        repo, info["path"], info["branch"], "main", gate_runner=_ok_gate
+    )
+    assert out["action"] == "parked"
+    assert "Zu wenig freier Speicher vor Merge-Gate" in out["reason"]
+    assert "ENOSPC-Preflight" in out["reason"]
+    # Chain-Worktree bleibt stehen (kein destruktives Cleanup bei Preflight-Park).
+    assert info["path"].exists()
+
+
+def test_prepare_integration_disk_runs_hygiene_then_preflight(repo, monkeypatch):
+    calls: list[str] = []
+
+    def _hygiene(root, **_kwargs):
+        calls.append("hygiene")
+        return {"scanned": 0, "removed": [], "skipped": [], "errors": []}
+
+    def _disk(root, min_free=None):
+        calls.append("disk")
+        return {"free": 9_999_999_999, "total": 10_000_000_000, "min_free": 1}
+
+    monkeypatch.setattr(kwt, "hygiene_sweep_validation_worktrees", _hygiene)
+    monkeypatch.setattr(kwt, "check_disk_space_for_integration", _disk)
+    out = kwt.prepare_integration_disk(repo)
+    assert calls == ["hygiene", "disk"]
+    assert out["disk"]["free"] == 9_999_999_999

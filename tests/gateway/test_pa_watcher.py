@@ -562,3 +562,313 @@ def test_config_defaults_enabled_and_can_disable(monkeypatch: pytest.MonkeyPatch
         "enabled": False,
         "interval_seconds": 75,
     }
+
+
+# ---------------------------------------------------------------------------
+# S6.3 Morgen-Briefing
+# ---------------------------------------------------------------------------
+
+
+def _pending_row(
+    name: str,
+    *,
+    kind: str,
+    source: str = "kanban_status",
+    severity: str = "info",
+    ref: str | None = None,
+    title: str | None = None,
+    first_seen_at: int = 1,
+) -> watcher.WatchEvent:
+    """Hilfs-Event mit realistischem Kanban-Titel (inkl. Task-ID im Rohtext)."""
+    fingerprint = watcher._fingerprint("briefing", name, kind, first_seen_at)
+    task_ref = ref if ref is not None else f"t_{name}"
+    raw_title = title or f"Task {task_ref}: {name} — {kind}"
+    return watcher.WatchEvent(
+        event_id=watcher._event_id(fingerprint),
+        source=source,
+        kind=kind,
+        severity=severity,
+        title=raw_title,
+        ref=task_ref,
+        occurred_at=first_seen_at,
+        detail=f"detail-{name}",
+        fingerprint=fingerprint,
+    )
+
+
+def test_night_window_start_is_previous_day_21_when_before_21() -> None:
+    # 2024-01-02 08:00 UTC → Fensterstart 2024-01-01 21:00 UTC
+    morning = int(
+        __import__("datetime")
+        .datetime(2024, 1, 2, 8, 0, tzinfo=timezone.utc)
+        .timestamp()
+    )
+    start = watcher.night_window_start(morning, zone=timezone.utc)
+    expected = int(
+        __import__("datetime")
+        .datetime(2024, 1, 1, 21, 0, tzinfo=timezone.utc)
+        .timestamp()
+    )
+    assert start == expected
+    # Nach 21:00 zählt der heutige 21:00-Punkt als Fensterstart.
+    evening = int(
+        __import__("datetime")
+        .datetime(2024, 1, 2, 22, 0, tzinfo=timezone.utc)
+        .timestamp()
+    )
+    assert watcher.night_window_start(evening, zone=timezone.utc) == int(
+        __import__("datetime")
+        .datetime(2024, 1, 2, 21, 0, tzinfo=timezone.utc)
+        .timestamp()
+    )
+
+
+def test_briefing_dedupe_keeps_latest_stand_per_task() -> None:
+    older = _pending_row(
+        "build",
+        kind="blocked",
+        severity="warning",
+        ref="t_same",
+        first_seen_at=100,
+        title="Task t_same: Build — blocked",
+    )
+    newer = _pending_row(
+        "build-done",
+        kind="completed",
+        severity="info",
+        ref="t_same",
+        first_seen_at=200,
+        title="Task t_same: Build — completed",
+    )
+    # Als Row-ähnliche Dicts (dedupe arbeitet über Mapping-Zugriff).
+    rows = [
+        {
+            "fingerprint": older.fingerprint,
+            "source": older.source,
+            "kind": older.kind,
+            "severity": older.severity,
+            "title": older.title,
+            "ref": older.ref,
+            "first_seen_at": 100,
+        },
+        {
+            "fingerprint": newer.fingerprint,
+            "source": newer.source,
+            "kind": newer.kind,
+            "severity": newer.severity,
+            "title": newer.title,
+            "ref": newer.ref,
+            "first_seen_at": 200,
+        },
+    ]
+    deduped = watcher.dedupe_briefing_rows(rows)
+    assert len(deduped) == 1
+    assert deduped[0]["kind"] == "completed"
+    assert "t_same" not in watcher.briefing_title(deduped[0]["title"])
+
+
+def test_briefing_section_order_waiting_blocker_done() -> None:
+    rows = [
+        {
+            "fingerprint": "a",
+            "source": "kanban_status",
+            "kind": "completed",
+            "severity": "info",
+            "title": "Task t_a: Fertig — completed",
+            "ref": "t_a",
+            "first_seen_at": 1,
+        },
+        {
+            "fingerprint": "b",
+            "source": "red_gate",
+            "kind": "worker_gate_blocked",
+            "severity": "critical",
+            "title": "Gate bei Task t_b: Gate-Fail — worker_gate_blocked",
+            "ref": "t_b",
+            "first_seen_at": 2,
+        },
+        {
+            "fingerprint": "c",
+            "source": "red_gate",
+            "kind": "operator_release_required",
+            "severity": "warning",
+            "title": "Gate bei Task t_c: Freigabe — operator_release_required",
+            "ref": "t_c",
+            "first_seen_at": 3,
+        },
+    ]
+    text = watcher.build_morning_briefing(rows)
+    assert text.startswith(watcher.BRIEFING_HEADER)
+    waiting_i = text.index("👁 Wartet auf dich")
+    blocker_i = text.index("⚠ Blocker")
+    done_i = text.index("✓ Abschlüsse")
+    assert waiting_i < blocker_i < done_i
+    assert "t_a" not in text and "t_b" not in text and "t_c" not in text
+    assert "Freigabe" in text
+    assert "Gate-Fail" in text or "Gate" in text
+    assert "Fertig" in text
+    assert len(text.splitlines()) <= watcher.BRIEFING_MAX_LINES
+
+
+def test_briefing_respects_max_eight_lines() -> None:
+    rows = [
+        {
+            "fingerprint": f"f{i}",
+            "source": "kanban_status",
+            "kind": "completed" if i % 3 == 0 else "blocked",
+            "severity": "info" if i % 3 == 0 else "warning",
+            "title": f"Task t_{i}: Item {i} — completed",
+            "ref": f"t_{i}",
+            "first_seen_at": i,
+        }
+        for i in range(20)
+    ]
+    # Mischung mit Waiting-Kinds damit alle Sektionen gefüllt sind.
+    rows[0]["kind"] = "operator_release_required"
+    rows[0]["source"] = "red_gate"
+    rows[0]["severity"] = "warning"
+    text = watcher.build_morning_briefing(rows)
+    assert len(text.splitlines()) <= watcher.BRIEFING_MAX_LINES
+
+
+def test_morning_briefing_quiet_hours_and_empty_no_card(
+    isolated_watcher: dict[str, object],
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    quiet = watcher.deliver_morning_briefing(
+        store, now=23 * 3_600, zone=timezone.utc
+    )
+    assert quiet == {"delivered": 0, "reason": "quiet_hours"}
+
+    morning = 24 * 3_600 + 7 * 3_600 + 31 * 60  # 07:31 UTC Tag 2
+    empty = watcher.deliver_morning_briefing(
+        store, now=morning, zone=timezone.utc
+    )
+    assert empty == {"delivered": 0, "reason": "empty"}
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pa_messages").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM pa_feed").fetchone()[0] == 0
+
+
+def test_morning_briefing_delivers_one_card_with_briefing_model(
+    isolated_watcher: dict[str, object],
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    # Nacht-Fenster: Events nach 21:00 Vortag, Zustellung 07:31.
+    # first_seen_at in der DB = ingest-now (nicht event.occurred_at).
+    night = 21 * 3_600 + 30 * 60  # 21:30 UTC Tag 1
+    morning = 24 * 3_600 + 7 * 3_600 + 31 * 60  # 07:31 UTC Tag 2
+    waiting = _pending_row(
+        "freigabe",
+        kind="operator_release_required",
+        source="red_gate",
+        severity="warning",
+        ref="t_wait",
+        title="Gate bei Task t_wait: Operator-Freigabe nötig — operator_release_required",
+    )
+    blocked = _pending_row(
+        "fail",
+        kind="worker_gate_blocked",
+        source="red_gate",
+        severity="critical",
+        ref="t_block",
+        title="Gate bei Task t_block: Roter Gate — worker_gate_blocked",
+    )
+    done = _pending_row(
+        "ship",
+        kind="completed",
+        severity="info",
+        ref="t_done",
+        title="Task t_done: Slice gelandet — completed",
+    )
+    # Älteres Duplikat derselben Task — nur letzter Stand zählt im Text.
+    done_older = _pending_row(
+        "ship-old",
+        kind="blocked",
+        severity="warning",
+        ref="t_done",
+        title="Task t_done: Slice gelandet — blocked",
+    )
+    _ingest_and_accept(
+        store, [waiting, blocked, done_older, done], now=night
+    )
+    # Reihenfolge in DB: done_older vor done bei gleichem now — Dedupe
+    # nimmt den zuletzt gesehenen Fingerprint mit gleichem first_seen_at.
+    # Explizit first_seen_at staffeln, damit „letzter Stand" greift.
+    with store.connect() as conn:
+        conn.execute(
+            "UPDATE pa_watcher_events SET first_seen_at=? WHERE fingerprint=?",
+            (night + 5, done_older.fingerprint),
+        )
+        conn.execute(
+            "UPDATE pa_watcher_events SET first_seen_at=? WHERE fingerprint=?",
+            (night + 20, done.fingerprint),
+        )
+
+    first = watcher.deliver_morning_briefing(
+        store, now=morning, zone=timezone.utc
+    )
+    assert first["reason"] == "delivered"
+    assert first["delivered"] == 4
+    assert first["model"] == "briefing-v1"
+
+    again = watcher.deliver_morning_briefing(
+        store, now=morning + 120, zone=timezone.utc
+    )
+    assert again == {"delivered": 0, "reason": "already_delivered"}
+
+    with store.connect() as conn:
+        messages = conn.execute(
+            "SELECT engine, model, content FROM pa_messages "
+            "WHERE engine='pa-watcher' ORDER BY id"
+        ).fetchall()
+        assert len(messages) == 1
+        assert messages[0]["model"] == "briefing-v1"
+        content = messages[0]["content"]
+        assert "seit gestern Abend" in content
+        assert content.index("👁 Wartet auf dich") < content.index("⚠ Blocker")
+        assert content.index("⚠ Blocker") < content.index("✓ Abschlüsse")
+        assert "t_wait" not in content
+        assert "t_block" not in content
+        assert "t_done" not in content
+        assert "Operator-Freigabe" in content or "Freigabe" in content
+        # Dedupe: completed gewinnt gegen älteres blocked derselben Task.
+        assert "Slice gelandet" in content
+        feed = conn.execute(
+            "SELECT kind, title FROM pa_feed ORDER BY id"
+        ).fetchall()
+        assert len(feed) == 1
+        assert feed[0]["kind"] == "watcher_briefing"
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM pa_watcher_events WHERE status='pending'"
+            ).fetchone()[0]
+            == 0
+        )
+
+    # Tagsüber: neues Event nutzt den unveränderten Einzel-Bundle-Pfad.
+    daytime = _pending_row(
+        "day",
+        kind="completed",
+        severity="info",
+        ref="t_day",
+        title="Task t_day: Tages-Event — completed",
+    )
+    day_now = morning + watcher.DELIVERY_RATE_LIMIT_SECONDS
+    _ingest_and_accept(store, [daytime], now=day_now)
+    day_delivery = watcher.deliver_pending_bundle(
+        store,
+        now=day_now,
+        zone=timezone.utc,
+    )
+    assert day_delivery["delivered"] == 1
+    with store.connect() as conn:
+        models = [
+            row["model"]
+            for row in conn.execute(
+                "SELECT model FROM pa_messages WHERE engine='pa-watcher' ORDER BY id"
+            )
+        ]
+        assert models == ["briefing-v1", "significance-v1"]

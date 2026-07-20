@@ -13,11 +13,15 @@
  *  4. Stop / system-stop / error: full teardown, stop_screen_capture echoed only
  *     when WE initiate; no frame uploads after a visible stop; restart works.
  */
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { __resetNativeCaptureBridgeForTest } from "./nativeCaptureBridge";
 import { useLiveShare } from "./useLiveShare";
+
+// S6: Native-Capture-Pfad unter Voll-Suite-Last — scoped Timeouts (t_1ccb0734).
+configure({ asyncUtilTimeout: 5000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const startLiveShareMock = vi.hoisted(() => vi.fn());
 const uploadLiveShareFrameMock = vi.hoisted(() => vi.fn());

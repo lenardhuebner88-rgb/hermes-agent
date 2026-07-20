@@ -38,6 +38,7 @@ Module layout (section order)::
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import errno
 import inspect
 import json
 import logging
@@ -365,6 +366,16 @@ MERGE_TIMEOUT_SECONDS = 300
 # on pure lock contention.
 LOCK_TIMEOUT_SECONDS = 2400
 
+# S6: Disk-Preflight vor Merge-Gate — klare Meldung statt kryptischem ENOSPC.
+# Default 2 GiB: Validation-Worktree + Vitest/tsc-Scratch unter Last.
+INTEGRATION_MIN_FREE_BYTES = 2 * 1024 * 1024 * 1024
+INTEGRATION_MIN_FREE_ENV = "HERMES_INTEGRATION_MIN_FREE_BYTES"
+# S6: Nur vom System angelegte Validation-Worktrees (kanban-validation/<token>).
+VALIDATION_WORKTREES_NAMESPACE = "kanban-validation"
+# S6: Hygiene-Alter für verwaiste Validation-Worktrees (Crash mitten im Gate).
+VALIDATION_HYGIENE_MAX_AGE_SECONDS = 30 * 60
+VALIDATION_HYGIENE_MAX_AGE_ENV = "HERMES_VALIDATION_HYGIENE_MAX_AGE_SECONDS"
+
 # In-process serialization (the file lock below serializes across processes).
 _PROCESS_LOCK = threading.Lock()
 
@@ -380,6 +391,10 @@ class WorktreeTimeout(WorktreeError):
     working, but the dispatcher can isinstance-check it to re-queue instead
     of permanently blocking.
     """
+
+
+class DiskSpaceError(WorktreeError):
+    """S6: Zu wenig freier Speicher vor Merge-Gate (ENOSPC-Preflight)."""
 
 
 RESOLVE_EXISTING_WORKSPACE = "resolve_existing"
@@ -461,6 +476,10 @@ def _integration_park_class(reason: str) -> str:
         # code that was never broken — the chain-blame this park exists to
         # avoid).
         "foreign dirty checkout (",
+        # S6: ENOSPC-Preflight — self-clears sobald Platz da ist / Hygiene lief.
+        "Zu wenig freier Speicher vor Merge-Gate:",
+        "Zu wenig freier Speicher beim Validation-Worktree",
+        "Disk-Preflight fehlgeschlagen",
     )
     if text.startswith(transient_prefixes):
         return "transient"
@@ -4335,6 +4354,196 @@ def _cleanup_validation_worktree(repo_root: Path, worktree: Path) -> None:
             break
 
 
+def _integration_min_free_bytes() -> int:
+    """S6: Konfigurierbares Disk-Budget vor dem Merge-Gate."""
+    raw = os.environ.get(INTEGRATION_MIN_FREE_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value > 0:
+                return value
+        except ValueError:
+            pass
+    return INTEGRATION_MIN_FREE_BYTES
+
+
+def _validation_hygiene_max_age_seconds() -> int:
+    raw = os.environ.get(VALIDATION_HYGIENE_MAX_AGE_ENV, "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass
+    return VALIDATION_HYGIENE_MAX_AGE_SECONDS
+
+
+def _format_bytes(num: int) -> str:
+    """Menschliche Größenangabe für Preflight-Meldungen."""
+    value = float(max(0, int(num)))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{int(num)} B"
+
+
+def check_disk_space_for_integration(
+    path: Path | str,
+    *,
+    min_free: int | None = None,
+) -> dict[str, int]:
+    """S6: Disk-Preflight — wirft ``DiskSpaceError`` statt späterem ENOSPC.
+
+    *path* ist der Repo-Root (oder ein Pfad auf dem Zielfilesystem). Rückgabe
+    bei Erfolg: ``{"free": …, "total": …, "min_free": …}``.
+    """
+    target = Path(path)
+    try:
+        usage = shutil.disk_usage(str(target if target.exists() else target.parent))
+    except OSError as exc:
+        raise DiskSpaceError(
+            f"Disk-Preflight fehlgeschlagen (Filesystem nicht lesbar): {exc}"
+        ) from exc
+    required = int(min_free) if min_free is not None else _integration_min_free_bytes()
+    free = int(usage.free)
+    if free < required:
+        raise DiskSpaceError(
+            "Zu wenig freier Speicher vor Merge-Gate: "
+            f"{_format_bytes(free)} frei, mindestens {_format_bytes(required)} nötig "
+            f"(ENOSPC-Preflight auf {target}). "
+            "Bitte verwaiste Validation-Worktrees bereinigen "
+            f"({WORKTREES_DIRNAME}/{VALIDATION_WORKTREES_NAMESPACE}/) "
+            "oder Platz freigeben — nicht erneut mergen bis genügend Speicher da ist."
+        )
+    return {"free": free, "total": int(usage.total), "min_free": required}
+
+
+def _is_system_validation_worktree(repo_root: Path, candidate: Path) -> bool:
+    """S6: True nur für vom Integrator angelegte kanban-validation/<token>-Pfade.
+
+    Fremde Worktrees (bridges, operator, codex-*, kanban/t_*) werden NIE
+    angefasst — auch nicht, wenn sie unter ``.worktrees/`` liegen.
+    """
+    try:
+        repo = Path(repo_root).resolve()
+        path = Path(candidate).resolve()
+    except OSError:
+        return False
+    base = (repo / WORKTREES_DIRNAME / VALIDATION_WORKTREES_NAMESPACE).resolve()
+    try:
+        rel = path.relative_to(base)
+    except ValueError:
+        return False
+    # Genau eine Ebene unter kanban-validation (Token-Ordner), keine Nested-Pfade.
+    return len(rel.parts) == 1 and bool(rel.parts[0]) and rel.parts[0] not in {".", ".."}
+
+
+def _validation_worktree_age_seconds(path: Path, *, now: float | None = None) -> float:
+    observed = time.time() if now is None else float(now)
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return 0.0
+    return max(0.0, observed - float(stamp))
+
+
+def hygiene_sweep_validation_worktrees(
+    repo_root: Path | str,
+    *,
+    max_age_seconds: int | None = None,
+    now: float | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """S6: Verwaiste Validation-Worktrees entfernen (nur System-eigene).
+
+    Ziel: ``.worktrees/kanban-validation/<token>`` älter als *max_age_seconds*
+    (Default 30 min) — typische Reste nach Gate-Crash/ENOSPC. Chain-Worktrees
+    unter ``kanban/t_*``, Bridges und fremde Pfade werden strikt übersprungen.
+    """
+    repo_root = Path(repo_root)
+    age_limit = (
+        int(max_age_seconds)
+        if max_age_seconds is not None
+        else _validation_hygiene_max_age_seconds()
+    )
+    base = repo_root / WORKTREES_DIRNAME / VALIDATION_WORKTREES_NAMESPACE
+    result: dict[str, Any] = {
+        "scanned": 0,
+        "removed": [],
+        "skipped": [],
+        "errors": [],
+        "dry_run": bool(dry_run),
+        "base": str(base),
+    }
+    if not base.is_dir():
+        return result
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: p.name)
+    except OSError as exc:
+        result["errors"].append(str(exc))
+        return result
+    for entry in entries:
+        result["scanned"] += 1
+        if not _is_system_validation_worktree(repo_root, entry):
+            result["skipped"].append({"path": str(entry), "reason": "not_system_owned"})
+            continue
+        age = _validation_worktree_age_seconds(entry, now=now)
+        if age < age_limit:
+            result["skipped"].append(
+                {
+                    "path": str(entry),
+                    "reason": "too_fresh",
+                    "age_seconds": int(age),
+                }
+            )
+            continue
+        if dry_run:
+            result["removed"].append(
+                {"path": str(entry), "age_seconds": int(age), "dry_run": True}
+            )
+            continue
+        try:
+            _cleanup_validation_worktree(repo_root, entry)
+            if entry.exists():
+                # Hartnäckige Reste (z. B. nicht registrierte Ordner) — nur
+                # unter dem Validation-Namespace force-rmtree.
+                shutil.rmtree(entry, ignore_errors=True)
+            result["removed"].append(
+                {"path": str(entry), "age_seconds": int(age), "dry_run": False}
+            )
+        except Exception as exc:  # Hygiene darf den Integrator nie killen
+            detail = f"{entry}: {exc}"
+            result["errors"].append(detail)
+            _log.warning("validation worktree hygiene failed: %s", detail)
+    return result
+
+
+def prepare_integration_disk(
+    repo_root: Path | str,
+    *,
+    min_free: int | None = None,
+    hygiene: bool = True,
+) -> dict[str, Any]:
+    """S6: Hygiene + Disk-Preflight vor dem Merge-Gate (klare Park-Reasons)."""
+    repo_root = Path(repo_root)
+    outcome: dict[str, Any] = {"hygiene": None, "disk": None}
+    if hygiene:
+        try:
+            outcome["hygiene"] = hygiene_sweep_validation_worktrees(repo_root)
+        except Exception as exc:
+            # Hygiene ist best-effort; Preflight läuft trotzdem.
+            outcome["hygiene"] = {"errors": [str(exc)]}
+            _log.warning("integration hygiene sweep failed: %s", exc)
+    outcome["disk"] = check_disk_space_for_integration(
+        repo_root, min_free=min_free
+    )
+    return outcome
+
+
 def _run_gate_in_validation_worktree(
     repo_root: Path,
     commit: str,
@@ -4348,8 +4557,13 @@ def _run_gate_in_validation_worktree(
     on green, red, timeout, or a crashing injected runner.
     """
     repo_root = Path(repo_root)
+    # S6: Vor worktree-add Platz schaffen und ENOSPC früh, lesbar parken.
+    try:
+        prepare_integration_disk(repo_root)
+    except DiskSpaceError as exc:
+        return False, str(exc)
     expected = _git(repo_root, "rev-parse", f"{commit}^{{commit}}")
-    base = repo_root / WORKTREES_DIRNAME / "kanban-validation"
+    base = repo_root / WORKTREES_DIRNAME / VALIDATION_WORKTREES_NAMESPACE
     base.mkdir(parents=True, exist_ok=True)
     token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
     worktree = base / token
@@ -4363,7 +4577,23 @@ def _run_gate_in_validation_worktree(
             )
         _link_shared_dependencies(repo_root, worktree)
         return gate(worktree, diff_files)
+    except DiskSpaceError as exc:
+        return False, str(exc)
+    except OSError as exc:
+        # S6: ENOSPC/EDQUOT aus git worktree add → lesbare Preflight-Meldung.
+        if getattr(exc, "errno", None) in {errno.ENOSPC, getattr(errno, "EDQUOT", 122)}:
+            return False, (
+                f"Zu wenig freier Speicher beim Validation-Worktree (ENOSPC): {exc}. "
+                "Bitte Platz freigeben und erneut integrieren."
+            )
+        return False, f"validation worktree gate failed: {exc}"
     except Exception as exc:  # a broken gate must not pass silently
+        text = str(exc)
+        if "No space left" in text or "ENOSPC" in text:
+            return False, (
+                f"Zu wenig freier Speicher beim Validation-Worktree (ENOSPC): {exc}. "
+                "Bitte Platz freigeben und erneut integrieren."
+            )
         return False, f"validation worktree gate failed: {exc}"
     finally:
         _cleanup_validation_worktree(repo_root, worktree)
@@ -4963,6 +5193,12 @@ def integrate_chain(
             if not _branch_exists(repo_root, branch):
                 return {"action": "clean", "branch": branch,
                         "reason": "chain branch does not exist (nothing to merge)"}
+
+            # S6: Disk-Preflight + Validation-Hygiene vor jedem Merge-Versuch.
+            try:
+                prepare_integration_disk(repo_root)
+            except DiskSpaceError as exc:
+                return _integrate_parked(branch, str(exc))
 
             # (0) live checkout in a clean operation state + frozen target.
             parked, cur = _integrate_precheck_live(
