@@ -97,9 +97,9 @@ export type ProjectsResponse = z.infer<typeof ProjectsResponseSchema>;
 // only for a genuinely invalid type; an unrecognised-but-valid string needs an
 // explicit narrowing step so it doesn't leak an arbitrary label into the UI.
 const KNOWN_PROJECT_AGENT_KINDS = new Set([
-  "claude", "codex", "kimi", "grok", "hermes", "kanban", "loop", "unknown",
+  "claude", "codex", "kimi", "grok", "qwen", "hermes", "kanban", "loop", "unknown",
 ]);
-export type ProjectAgentKind = "claude" | "codex" | "kimi" | "grok" | "hermes" | "kanban" | "loop" | "unknown";
+export type ProjectAgentKind = "claude" | "codex" | "kimi" | "grok" | "qwen" | "hermes" | "kanban" | "loop" | "unknown";
 const ProjectAgentKindSchema: z.ZodType<ProjectAgentKind> = z
   .string()
   .catch("unknown")

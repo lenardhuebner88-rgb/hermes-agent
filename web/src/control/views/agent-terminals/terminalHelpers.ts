@@ -29,7 +29,7 @@ export const AGENT_IDENTITY_DOT_CLASS: Record<AgentTerminalKind, string> = {
   codex: "bg-data-4",
   kimi: "bg-data-5",
   grok: "bg-data-3",
-  qwen: "bg-data-6",
+  qwen: "bg-data-7",
 };
 const AGENT_KINDS = new Set<AgentTerminalKind>(AGENTS.map((agent) => agent.kind));
 

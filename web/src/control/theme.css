@@ -63,6 +63,7 @@
    * | data-4 | #9d8bc4 violett | 5.95:1 | 5.56:1 |
    * | data-5 | #c47d92 rose    | 5.76:1 | 5.38:1 |
    * | data-6 | #96938a neutral | 5.88:1 | 5.49:1 |
+   * | data-7 | #c4955f amber   | 6.72:1 | 6.27:1 |
    */
   --color-data-1: #a8ad6a;
   --color-data-2: #7ba89d;
@@ -70,6 +71,7 @@
   --color-data-4: #9d8bc4;
   --color-data-5: #c47d92;
   --color-data-6: #96938a;
+  --color-data-7: #c4955f;
 
   /* text hierarchy */
   --color-ink: #ebe7de; /* primary */

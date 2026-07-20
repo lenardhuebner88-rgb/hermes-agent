@@ -9,6 +9,7 @@ import {
   Server,
   Sparkles,
   Terminal,
+  Wind,
   Zap,
 } from "lucide-react";
 import type { ProjectAgent, ProjectAgentKind } from "../../lib/schemas";
@@ -30,6 +31,7 @@ export const PROJECT_AGENT_KIND_ORDER: readonly ProjectAgentKind[] = [
   "codex",
   "kimi",
   "grok",
+  "qwen",
   "hermes",
   "kanban",
   "loop",
@@ -46,6 +48,7 @@ export const AGENT_KIND_STYLES: Record<ProjectAgentKind, AgentKindStyle> = {
   codex: { label: labels.codex, icon: Terminal, tone: "text-data-4" },
   kimi: { label: labels.kimi, icon: Bot, tone: "text-data-5" },
   grok: { label: labels.grok, icon: Zap, tone: "text-data-3" },
+  qwen: { label: labels.qwen, icon: Wind, tone: "text-data-7" },
   hermes: { label: labels.hermes, icon: Server, tone: "text-data-2" },
   kanban: { label: labels.kanban, icon: KanbanSquare, tone: "text-data-6" },
   loop: { label: labels.loop, icon: RefreshCw, tone: "text-ink-2" },

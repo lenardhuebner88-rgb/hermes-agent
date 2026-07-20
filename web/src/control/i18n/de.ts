@@ -790,6 +790,7 @@ export const de = {
       codex: "Codex",
       kimi: "Kimi",
       grok: "Grok",
+      qwen: "Qwen",
       hermes: "Hermes",
       kanban: "Kanban",
       loop: "Loop",
