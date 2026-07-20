@@ -100,11 +100,11 @@ def test_reject_answers_without_executing(
     assert event["action_result"]["result"]["executed"] is False
 
 
-def test_double_confirm_http_is_409_and_does_not_execute_twice(
+def test_double_confirm_endpoint_is_409_and_does_not_execute_twice(
     question_db: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from fastapi.testclient import TestClient
+    from fastapi import HTTPException
 
     import hermes_cli.web_server as web_server
 
@@ -118,22 +118,17 @@ def test_double_confirm_http_is_409_and_does_not_execute_twice(
 
     monkeypatch.setattr(aq, "question_events_db_path", lambda: question_db)
     monkeypatch.setitem(pa_actions.ACTION_HANDLERS, "tmux.send_keys", fake_handler)
-    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
-    with TestClient(web_server.app) as client:
-        first = client.post(
-            f"/api/agent-questions/{event_id}/answer",
-            json={"answer": "1", "answered_by": "operator"},
-            headers=headers,
-        )
-        second = client.post(
-            f"/api/agent-questions/{event_id}/answer",
-            json={"answer": "1", "answered_by": "operator"},
-            headers=headers,
-        )
+    request = web_server.AgentQuestionAnswerRequest(
+        answer="1", answered_by="operator"
+    )
 
-    assert first.status_code == 200
-    assert second.status_code == 409
-    assert second.json()["detail"] == {"ok": False, "reason": "not-open"}
+    first = web_server.agent_questions_answer(event_id, request)
+    with pytest.raises(HTTPException) as raised:
+        web_server.agent_questions_answer(event_id, request)
+
+    assert first["ok"] is True
+    assert raised.value.status_code == 409
+    assert raised.value.detail == {"ok": False, "reason": "not-open"}
     assert calls == 1
 
 
@@ -244,6 +239,7 @@ def test_registry_covers_every_v1_category() -> None:
         "planspec.ingest",
         "loops.start_pack",
         "loops.status",
+        "reminders.create",
     }
     assert set(pa_actions.ACTION_HANDLERS) == expected
     assert set(aq._PA_ACTION_SCHEMAS) == expected

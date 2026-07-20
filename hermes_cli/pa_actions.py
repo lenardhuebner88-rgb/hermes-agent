@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from hermes_cli import agent_questions
 
@@ -212,6 +213,26 @@ def _handle_loops_status(payload: dict[str, Any]) -> dict[str, Any]:
     return status(payload)
 
 
+def _handle_reminders_create(payload: dict[str, Any]) -> dict[str, Any]:
+    from hermes_cli.pa_reminders import create_reminder
+
+    reminder_id = create_reminder(
+        due_at_utc=payload["due_at"],
+        title=payload["title"],
+        body=payload.get("body", ""),
+    )
+    return {
+        "ok": True,
+        "exit": 0,
+        "payload": {
+            "reminder_id": reminder_id,
+            "status": "pending",
+            "due_at_utc": payload["due_at"],
+            "title": payload["title"],
+        },
+    }
+
+
 ACTION_HANDLERS: dict[str, ActionHandler] = {
     "tmux.send_keys": _handle_tmux_send_keys,
     "tmux.interrupt": _handle_tmux_interrupt,
@@ -224,6 +245,7 @@ ACTION_HANDLERS: dict[str, ActionHandler] = {
     "planspec.ingest": _handle_planspec_ingest,
     "loops.start_pack": _handle_loops_start_pack,
     "loops.status": _handle_loops_status,
+    "reminders.create": _handle_reminders_create,
 }
 
 
@@ -239,10 +261,30 @@ def _build_loops_question(envelope: dict[str, Any]) -> str:
     return build_action_question(str(envelope.get("category") or ""), envelope)
 
 
+def _build_reminders_question(envelope: dict[str, Any]) -> str:
+    payload = envelope.get("payload") if isinstance(envelope, dict) else None
+    if not isinstance(payload, dict):
+        raise ValueError("reminders.create braucht ein Payload-Objekt")
+    due_at = datetime.fromisoformat(str(payload["due_at"]).replace("Z", "+00:00"))
+    local_due = due_at.astimezone(ZoneInfo("Europe/Berlin"))
+    lines = [
+        "Einmalige Erinnerung anlegen?",
+        f"Zeit: {local_due:%d.%m.%Y um %H:%M Uhr}",
+        f"Titel: {payload['title']}",
+    ]
+    if payload.get("body"):
+        lines.append(f"Text: {payload['body']}")
+    reason = payload.get("reason") or envelope.get("reason")
+    if reason:
+        lines.append(f"Grund: {str(reason)[:500]}")
+    return "\n".join(lines)
+
+
 ACTION_QUESTION_BUILDERS: dict[str, ActionQuestionBuilder] = {
     "planspec.ingest": _build_planspec_question,
     "loops.start_pack": _build_loops_question,
     "loops.status": _build_loops_question,
+    "reminders.create": _build_reminders_question,
 }
 
 

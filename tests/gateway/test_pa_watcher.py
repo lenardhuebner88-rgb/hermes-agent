@@ -10,6 +10,7 @@ import pytest
 
 import gateway.pa_watcher as watcher
 from hermes_cli.pa_chat import PAStore
+from hermes_cli.pa_reminders import create_reminder
 
 
 @pytest.fixture
@@ -460,6 +461,91 @@ def test_full_tick_baselines_all_sources_and_records_health_timestamp(
         assert watcher._state_int(conn, "last_tick_at") == 1_700_000_000
         assert watcher._state_int(conn, "interval_seconds") == 60
         assert watcher._state_int(conn, "enabled") == 1
+
+
+def test_due_reminders_fire_once_outside_quiet_hours_and_skip_future(
+    isolated_watcher: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = isolated_watcher["store"]
+    assert isinstance(store, PAStore)
+    quiet_now = 23 * 3_600
+    due_id = create_reminder(
+        due_at_utc="1970-01-01T22:59:00Z",
+        title="Medikament",
+        body="Jetzt einnehmen",
+        store=store,
+    )
+    future_id = create_reminder(
+        due_at_utc="1970-01-02T00:00:00Z",
+        title="Morgen",
+        store=store,
+    )
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "hermes_cli.pa_push.send_pa_push",
+        lambda **kwargs: calls.append(kwargs) or {"sent": 1},
+    )
+
+    first = watcher.fire_due_reminders(store, now=quiet_now)
+    second = watcher.fire_due_reminders(store, now=quiet_now)
+
+    assert watcher.is_quiet_time(quiet_now, zone=timezone.utc) is True
+    assert first == {"fired": 1, "errors": []}
+    assert second == {"fired": 0, "errors": []}
+    assert calls == [
+        {
+            "title": "Medikament",
+            "body": "Jetzt einnehmen",
+            "tag": f"reminder:{due_id}",
+            "url": "/control/projekte?inbox=open",
+        }
+    ]
+    with store.connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute("SELECT id, status FROM reminders")
+        }
+    assert statuses == {due_id: "fired", future_id: "pending"}
+
+
+def test_reminder_push_failure_does_not_kill_tick_or_mark_fired(
+    isolated_watcher: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = isolated_watcher["store"]
+    db_path = isolated_watcher["db_path"]
+    receipts_root = isolated_watcher["receipts_root"]
+    assert isinstance(store, PAStore)
+    assert isinstance(db_path, Path)
+    assert isinstance(receipts_root, Path)
+    reminder_id = create_reminder(
+        due_at_utc="2023-11-14T22:12:00Z",
+        title="Fehlerfall",
+        store=store,
+    )
+
+    def explode(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("push down")
+
+    monkeypatch.setattr("hermes_cli.pa_push.send_pa_push", explode)
+    outcome = watcher.run_watcher_tick(
+        now=1_700_000_000,
+        store=store,
+        engine_runner=lambda *args, **kwargs: '{"significant":[],"reason":"none"}',
+        zone=timezone.utc,
+        agents_builder=lambda: {"agents": [], "errors": []},
+        receipts_root=receipts_root,
+        board_paths=[("default", db_path)],
+    )
+
+    assert outcome["reminders"]["fired"] == 0
+    assert "push down" in outcome["reminders"]["errors"][0]
+    assert outcome["collected"] == 0
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT status, fired_at FROM reminders WHERE id=?", (reminder_id,)
+        ).fetchone()
+        assert dict(row) == {"status": "pending", "fired_at": None}
+        assert watcher._state_int(conn, "last_tick_at") == 1_700_000_000
 
 
 def test_config_defaults_enabled_and_can_disable(monkeypatch: pytest.MonkeyPatch) -> None:
