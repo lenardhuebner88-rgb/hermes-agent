@@ -20,6 +20,12 @@ NO_EFFECT_TOOL_NAMES = frozenset({
 
 
 def tool_may_have_side_effect(tool_name: str) -> bool:
+    """Return True unless *tool_name* is a known no-effect (read-only) tool.
+
+    Conservative default: any tool not in ``NO_EFFECT_TOOL_NAMES`` — including
+    unknown, plugin and MCP tools — is treated as capable of side effects, so
+    its interrupted or dangling results are NOT auto-discarded.
+    """
     return tool_name not in NO_EFFECT_TOOL_NAMES
 
 
