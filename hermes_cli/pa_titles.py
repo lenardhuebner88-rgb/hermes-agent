@@ -20,7 +20,10 @@ _BRIEFING_KIND_SUFFIX = re.compile(
     re.IGNORECASE,
 )
 _BRIEFING_TASK_PREFIX = re.compile(
-    r"^(?:Task|Gate bei Task)\s+\S+\s*[:：]\s*",
+    # S7.6-Fix: PlanSpec-Slug-Präfixe („PlanSpec GATE-…-FIX:") ebenfalls
+    # strippen — sonst bleibt der laengste, nichtssagende Titelteil stehen
+    # (Spiegel von control/jarvis/decisionTitle.ts).
+    r"^(?:Task|Gate bei Task|PlanSpec)\s+\S+\s*[:：]\s*",
     re.IGNORECASE,
 )
 _BRIEFING_TASK_ID = re.compile(r"\bt_[0-9a-f]{6,}\b", re.IGNORECASE)

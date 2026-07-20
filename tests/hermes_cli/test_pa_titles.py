@@ -41,3 +41,16 @@ def test_briefing_title_uses_120_cap() -> None:
 def test_empty_falls_back_to_ereignis() -> None:
     assert distill_title("") == "Ereignis"
     assert distill_title(None) == "Ereignis"
+
+
+def test_distill_strips_planspec_slug_prefix() -> None:
+    # S7.6-Fix: das PlanSpec-Slug-Präfix ist der längste, nichtssagende
+    # Titelteil — es muss wie Task-/Gate-Präfixe verschwinden.
+    raw = (
+        "PlanSpec GATE-GREEN-KANBAN-LIFECYCLE-REGRESSION-FIX: "
+        "Green-Gate-Ursachenfix: kanban chain-lifecycle-Regressionen"
+    )
+    out = distill_title(raw)
+    assert not out.startswith("PlanSpec")
+    assert "GATE-GREEN" not in out
+    assert out.startswith("Green-Gate-Ursachenfix")
