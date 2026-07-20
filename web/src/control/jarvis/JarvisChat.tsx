@@ -283,7 +283,6 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     event.preventDefault();
     const value = text.trim();
     if (!value || chat.sending) return;
-    setText("");
     // Jeder neue Submit nimmt einen etwaigen /plan-Usage-Hinweis wieder weg
     // (gleiche Klebrigkeits-Regel wie die Chat-Composer-Fehler).
     planspec.clearUsageError();
@@ -291,20 +290,28 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     // nicht in einen Chat-Turn. „/plan" ohne Idee → Usage-Hinweis im Hook.
     const planMatch = PLAN_PREFIX_RE.exec(value);
     if (planMatch) {
+      setText("");
       void planspec.submitIdea(planMatch[1] ?? "");
       return;
     }
-    // Live-Screen-Share aktiv + Vision-Engine + kein manueller Anhang: den
-    // aktuellen Bildschirm-Frame materialisieren und mit senden, damit Jarvis
-    // wirklich den Live-Bildschirm sieht. Scheitert das Materialisieren, geht
-    // die Nachricht ohne Frame raus (keine Vortäuschung).
-    if (liveShare.active && imagesOk && !chat.attachment) {
-      const assetId = await liveShare.attachCurrentFrame();
-      if (assetId) {
+    if (liveShare.active) {
+      // A selected text-only engine must never silently bypass the live frame.
+      if (!imagesOk) {
+        setLiveShareNotice(t.engineNoImagesTitle);
+        return;
+      }
+      // Without an explicit static attachment, materialise the freshest uploaded
+      // live frame. Failure is fail-closed in useLiveShare: preserve the question
+      // so the user can retry instead of sending a misleading text-only turn.
+      if (!chat.attachment) {
+        const assetId = await liveShare.attachCurrentFrame();
+        if (!assetId) return;
+        setText("");
         void chat.send(value, { attachmentAssetId: assetId });
         return;
       }
     }
+    setText("");
     void chat.send(value);
   };
 

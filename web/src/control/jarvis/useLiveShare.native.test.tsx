@@ -55,7 +55,7 @@ function setUserAgent(ua: string): void {
   Object.defineProperty(navigator, "userAgent", { configurable: true, value: ua });
 }
 
-/** Render, announce native capability, start, confirm capture → "sharing". */
+/** Render, announce native capability, start, confirm capture + first frame → "sharing". */
 async function reachSharing(errorText = "boom") {
   const rendered = renderHook(() => useLiveShare({ errorText }));
   const { result } = rendered;
@@ -67,6 +67,9 @@ async function reachSharing(errorText = "boom") {
     emit({ v: 1, type: "screen_capture_started" });
     await Promise.resolve();
     await Promise.resolve();
+  });
+  await act(async () => {
+    emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
   });
   await waitFor(() => expect(result.current.active).toBe(true));
   return rendered;
@@ -103,7 +106,7 @@ describe("native capability gate", () => {
 });
 
 describe("native capture lifecycle", () => {
-  it("start requests native capture and opens the backend session only after confirmation", async () => {
+  it("start requests native capture but reports sharing only after a usable uploaded frame", async () => {
     const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
     act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
 
@@ -120,8 +123,44 @@ describe("native capture lifecycle", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    await waitFor(() => expect(result.current.active).toBe(true));
     expect(startLiveShareMock).toHaveBeenCalledTimes(1);
+    expect(result.current.active).toBe(false);
+
+    act(() => emit({ v: 1, type: "screen_frame", data: "QUJDRA==" }));
+    await waitFor(() => expect(result.current.active).toBe(true));
+    expect(uploadLiveShareFrameMock).toHaveBeenCalledWith("live_native01", expect.any(Blob));
+  });
+
+  it("buffers a frame that races ahead of the backend session and uploads it once ready", async () => {
+    let resolveSession!: (value: { session_id: string }) => void;
+    startLiveShareMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSession = resolve;
+      }),
+    );
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+    await act(async () => result.current.start());
+
+    act(() => {
+      emit({ v: 1, type: "screen_capture_started" });
+      emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
+    });
+    expect(uploadLiveShareFrameMock).not.toHaveBeenCalled();
+    expect(result.current.active).toBe(false);
+
+    await act(async () => resolveSession({ session_id: "live_native01" }));
+    await waitFor(() => expect(uploadLiveShareFrameMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.active).toBe(true));
+  });
+
+  it("duplicate start while native permission is pending requests capture only once", async () => {
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+    await act(async () => {
+      await Promise.all([result.current.start(), result.current.start()]);
+    });
+    expect(posted.filter((message) => message.type === "start_screen_capture")).toHaveLength(1);
   });
 
   it("native screen_frame JPEGs are decoded and streamed to the backend /frame", async () => {
@@ -198,6 +237,47 @@ describe("native capture lifecycle", () => {
     expect(startLiveShareMock).not.toHaveBeenCalled();
   });
 
+  it("an upload failure fails closed instead of showing a frame-less active share", async () => {
+    uploadLiveShareFrameMock.mockRejectedValueOnce(new Error("upload down"));
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+    await act(async () => result.current.start());
+    await act(async () => {
+      emit({ v: 1, type: "screen_capture_started" });
+      await Promise.resolve();
+      await Promise.resolve();
+      emit({ v: 1, type: "screen_frame", data: "QUJDRA==" });
+    });
+
+    await waitFor(() => expect(result.current.error).toBe("boom"));
+    expect(result.current.active).toBe(false);
+    expect(posted).toContainEqual({ v: 1, type: "stop_screen_capture" });
+    expect(stopLiveShareMock).toHaveBeenCalledWith("live_native01");
+  });
+
+  it("times out a backend session that never receives a usable first frame", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+      act(() => emit({ v: 1, type: "native_capabilities", screen_capture: true }));
+      await act(async () => result.current.start());
+      await act(async () => {
+        emit({ v: 1, type: "screen_capture_started" });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.active).toBe(false);
+
+      act(() => vi.advanceTimersByTime(8_001));
+      expect(result.current.error).toBe("boom");
+      expect(result.current.active).toBe(false);
+      expect(posted).toContainEqual({ v: 1, type: "stop_screen_capture" });
+      expect(stopLiveShareMock).toHaveBeenCalledWith("live_native01");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("restart after stop works (fresh capture + backend session)", async () => {
     const { result } = await reachSharing();
     act(() => result.current.stop());
@@ -212,6 +292,7 @@ describe("native capture lifecycle", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
+    act(() => emit({ v: 1, type: "screen_frame", data: "QUJDRA==" }));
     await waitFor(() => expect(result.current.active).toBe(true));
     expect(stopLiveShareMock).toHaveBeenCalledWith("live_native01");
 
@@ -229,5 +310,38 @@ describe("native capture lifecycle", () => {
     });
     expect(attachLiveShareFrameMock).toHaveBeenCalledWith("live_native01");
     expect(assetId).toBe("asset_native.jpg");
+  });
+
+  it("attach failure fails closed and surfaces the bounded error", async () => {
+    const { result } = await reachSharing();
+    attachLiveShareFrameMock.mockRejectedValueOnce(new Error("no current frame"));
+    let assetId: string | null = "not-null";
+    await act(async () => {
+      assetId = await result.current.attachCurrentFrame();
+    });
+    expect(assetId).toBeNull();
+    expect(result.current.active).toBe(false);
+    expect(result.current.error).toBe("boom");
+    expect(stopLiveShareMock).toHaveBeenCalledWith("live_native01");
+  });
+
+  it("attach waits for an in-flight newer frame before materialising the asset", async () => {
+    const { result } = await reachSharing();
+    let finishUpload!: () => void;
+    uploadLiveShareFrameMock.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finishUpload = resolve;
+      }),
+    );
+    act(() => emit({ v: 1, type: "screen_frame", data: "RkVSU0g=" }));
+
+    let attached!: Promise<string | null>;
+    act(() => {
+      attached = result.current.attachCurrentFrame();
+    });
+    expect(attachLiveShareFrameMock).not.toHaveBeenCalled();
+    await act(async () => finishUpload());
+    await expect(attached).resolves.toBe("asset_native.jpg");
+    expect(attachLiveShareFrameMock).toHaveBeenCalledWith("live_native01");
   });
 });

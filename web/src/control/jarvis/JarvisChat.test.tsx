@@ -493,6 +493,7 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
 
     fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
     await vi.waitFor(() => expect(startLiveShareMock).toHaveBeenCalledTimes(1));
+    await screen.findByText("Teilt Bildschirm");
 
     const input = await screen.findByLabelText("Nachricht an Jarvis");
     fireEvent.change(input, { target: { value: "was siehst du?" } });
@@ -507,6 +508,42 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
         undefined,
       ),
     );
+  });
+
+  it("Attach-Fehler sendet während Live-Sharing niemals still als Text-only", async () => {
+    armFrameSampling();
+    attachLiveShareFrameMock.mockRejectedValueOnce(new Error("no current frame"));
+    renderChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
+    await screen.findByText("Teilt Bildschirm");
+
+    const input = (await screen.findByLabelText("Nachricht an Jarvis")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "was siehst du?" } });
+    fireEvent.click(screen.getByLabelText("Nachricht senden"));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Bildschirmteilen fehlgeschlagen",
+    );
+    expect(sendPaMessageMock).not.toHaveBeenCalled();
+    expect(input.value).toBe("was siehst du?");
+  });
+
+  it("Nicht-Vision-Engine blockiert einen Live-Share-Turn mit explizitem Hinweis", async () => {
+    armFrameSampling();
+    renderChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm live teilen" }));
+    await screen.findByText("Teilt Bildschirm");
+    setEngineChoice({ engine: "kimi", model: "k3" });
+
+    const input = (await screen.findByLabelText("Nachricht an Jarvis")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "was siehst du?" } });
+    fireEvent.click(screen.getByLabelText("Nachricht senden"));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "Diese Engine unterstützt keine Bilder",
+    );
+    expect(sendPaMessageMock).not.toHaveBeenCalled();
+    expect(input.value).toBe("was siehst du?");
   });
 
   it("Message-POST-Fehler → Composer-Fehlerzeile (role=alert), kein stiller Fehler", async () => {

@@ -49,6 +49,7 @@ export const LIVE_SHARE_SAMPLE_INTERVAL_MS = 1_000;
 /** Downscale target so a 4K screen never streams multi-MiB frames. */
 export const LIVE_SHARE_MAX_EDGE_PX = 1280;
 const LIVE_SHARE_JPEG_QUALITY = 0.7;
+const LIVE_SHARE_FIRST_FRAME_TIMEOUT_MS = 8_000;
 
 export type LiveShareStatus = "idle" | "starting" | "sharing";
 
@@ -127,6 +128,12 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
   // upload is running overwrites any older pending frame (latest wins).
   const uploadingRef = useRef(false);
   const pendingRef = useRef<Blob | null>(null);
+  const uploadWaitersRef = useRef<Array<() => void>>([]);
+  const firstFrameReadyRef = useRef(false);
+  const firstFrameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // React state is not synchronous: this closes the double-tap window before
+  // status="starting" has rendered and prevents duplicate native capture starts.
+  const startInFlightRef = useRef(false);
   // Native capture: bumped on every start/teardown so a native frame or lifecycle
   // callback from a superseded capture is ignored (no upload after a visible stop).
   const captureGenRef = useRef(0);
@@ -163,10 +170,33 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     }
     videoRef.current = null;
     pendingRef.current = null;
+    uploadingRef.current = false;
+    firstFrameReadyRef.current = false;
+    startInFlightRef.current = false;
+    if (firstFrameTimerRef.current !== null) {
+      clearTimeout(firstFrameTimerRef.current);
+      firstFrameTimerRef.current = null;
+    }
+    for (const resolve of uploadWaitersRef.current.splice(0)) resolve();
     const sid = sessionIdRef.current;
     sessionIdRef.current = null;
     if (sid) void api.stopLiveShare(sid).catch(() => {});
   }, []);
+
+  const failClosed = useCallback(() => {
+    teardown();
+    if (mountedRef.current) {
+      setStatus("idle");
+      setError(errorText);
+    }
+  }, [errorText, teardown]);
+
+  const armFirstFrameTimeout = useCallback(() => {
+    if (firstFrameTimerRef.current !== null) clearTimeout(firstFrameTimerRef.current);
+    firstFrameTimerRef.current = setTimeout(() => {
+      if (!firstFrameReadyRef.current) failClosed();
+    }, LIVE_SHARE_FIRST_FRAME_TIMEOUT_MS);
+  }, [failClosed]);
 
   const stop = useCallback(() => {
     teardown();
@@ -178,22 +208,42 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
       pendingRef.current = first; // latest wins — drop the older pending frame
       return;
     }
+    const generation = captureGenRef.current;
     uploadingRef.current = true;
     let current: Blob | null = first;
     try {
       while (current && sessionIdRef.current && mountedRef.current) {
+        const sid = sessionIdRef.current;
         try {
-          await api.uploadLiveShareFrame(sessionIdRef.current, current);
+          await api.uploadLiveShareFrame(sid, current);
         } catch {
-          // A dropped frame must not kill the session — keep sharing.
+          // A green share without a usable backend frame is actively misleading.
+          // Fail closed on every upload error instead of swallowing it forever.
+          if (generation === captureGenRef.current && sessionIdRef.current === sid) {
+            failClosed();
+          }
+          return;
+        }
+        if (generation !== captureGenRef.current || sessionIdRef.current !== sid) return;
+        if (!firstFrameReadyRef.current) {
+          firstFrameReadyRef.current = true;
+          startInFlightRef.current = false;
+          if (firstFrameTimerRef.current !== null) {
+            clearTimeout(firstFrameTimerRef.current);
+            firstFrameTimerRef.current = null;
+          }
+          setStatus("sharing");
         }
         current = pendingRef.current;
         pendingRef.current = null;
       }
     } finally {
-      uploadingRef.current = false;
+      if (generation === captureGenRef.current) {
+        uploadingRef.current = false;
+        for (const resolve of uploadWaitersRef.current.splice(0)) resolve();
+      }
     }
-  }, []);
+  }, [failClosed]);
 
   const sampleTick = useCallback(() => {
     const video = videoRef.current;
@@ -243,25 +293,32 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
               return;
             }
             sessionIdRef.current = session.session_id;
-            setStatus("sharing");
+            armFirstFrameTimeout();
+            const pending = pendingRef.current;
+            pendingRef.current = null;
+            if (pending) void drainUpload(pending);
           } catch {
             // No backend session → do not pretend we are sharing; stop native.
-            teardown();
-            if (mountedRef.current) {
-              setStatus("idle");
-              setError(errorText);
-            }
+            failClosed();
           }
         })();
       },
       onFrame: (base64) => {
-        // Discard stale frames (superseded generation) and any frame arriving
-        // before the session exists or after teardown — nothing uploads post-stop.
-        if (gen !== captureGenRef.current || !sessionIdRef.current || !mountedRef.current) {
+        // Discard stale/post-stop frames. A valid first frame may race ahead of
+        // startLiveShare(); retain only the latest until the session is ready.
+        if (gen !== captureGenRef.current || !mountedRef.current) {
           return;
         }
         const blob = base64ToJpegBlob(base64);
-        if (blob) void drainUpload(blob);
+        if (!blob) {
+          failClosed();
+          return;
+        }
+        if (!sessionIdRef.current) {
+          pendingRef.current = blob;
+          return;
+        }
+        void drainUpload(blob);
       },
       onStopped: () => {
         // Native already stopped (system stop / user cancel) — tear down without
@@ -279,10 +336,16 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         }
       },
     });
-  }, [drainUpload, teardown, errorText]);
+  }, [armFirstFrameTimeout, drainUpload, errorText, failClosed, teardown]);
 
   const start = useCallback(async () => {
-    if (!supported || sessionIdRef.current || status !== "idle") return;
+    if (
+      !supported
+      || sessionIdRef.current
+      || status !== "idle"
+      || startInFlightRef.current
+    ) return;
+    startInFlightRef.current = true;
     setError(null);
     setStatus("starting");
     if (nativeAvailable) {
@@ -296,6 +359,7 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         audio: false,
       });
     } catch (err) {
+      startInFlightRef.current = false;
       if (mountedRef.current) setStatus("idle");
       // User cancelled the OS picker → silent, no error banner.
       if (!isCancel(err) && mountedRef.current) setError(errorText);
@@ -330,30 +394,33 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         return;
       }
       sessionIdRef.current = session.session_id;
+      armFirstFrameTimeout();
     } catch {
       // No backend session → do not pretend we are sharing.
-      teardown();
-      if (mountedRef.current) {
-        setStatus("idle");
-        setError(errorText);
-      }
+      failClosed();
       return;
     }
     timerRef.current = setInterval(sampleTick, LIVE_SHARE_SAMPLE_INTERVAL_MS);
     sampleTick(); // first frame immediately, don't wait a full interval
-    if (mountedRef.current) setStatus("sharing");
-  }, [supported, nativeAvailable, startNative, status, errorText, sampleTick, stop, teardown]);
+  }, [armFirstFrameTimeout, errorText, failClosed, nativeAvailable, sampleTick, startNative, status, stop, supported]);
 
   const attachCurrentFrame = useCallback(async (): Promise<string | null> => {
     const sid = sessionIdRef.current;
-    if (!sid) return null;
+    if (!sid || !firstFrameReadyRef.current) return null;
     try {
+      // If a newer frame is already being uploaded, materialise only after the
+      // latest-wins drain finishes so the turn receives the freshest usable frame.
+      if (uploadingRef.current || pendingRef.current) {
+        await new Promise<void>((resolve) => uploadWaitersRef.current.push(resolve));
+      }
+      if (sessionIdRef.current !== sid || !firstFrameReadyRef.current) return null;
       const result = await api.attachLiveShareFrame(sid);
       return result.asset_id;
     } catch {
+      failClosed();
       return null;
     }
-  }, []);
+  }, [failClosed]);
 
   useEffect(() => {
     mountedRef.current = true;
