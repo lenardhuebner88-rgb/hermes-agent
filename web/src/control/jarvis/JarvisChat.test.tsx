@@ -391,6 +391,26 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
   });
 
+  it("Android/PWA-Screenshare öffnet den Bild-Picker und hängt die Auswahl genau einmal an", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+      "Mozilla/5.0 (Linux; Android 15; SM-S928B) AppleWebKit/537.36 Mobile Safari/537.36",
+    );
+    const { container } = renderChat();
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const pickerClick = vi.spyOn(fileInput, "click").mockImplementation(() => undefined);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
+
+    expect(pickerClick).toHaveBeenCalledTimes(1);
+    expect(getDisplayMediaMock).not.toHaveBeenCalled();
+
+    const file = new File(["mobile-photo"], "display.jpg", { type: "image/jpeg" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    await vi.waitFor(() => expect(uploadPaImageMock).toHaveBeenCalledTimes(1));
+    expect(uploadPaImageMock).toHaveBeenCalledWith(file);
+  });
+
   it("abgebrochener Screenshare-Picker bleibt still und hängt kein Bild an", async () => {
     getDisplayMediaMock.mockRejectedValueOnce(new DOMException("cancelled", "NotAllowedError"));
     renderChat();
@@ -424,7 +444,7 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     fireEvent.click(await screen.findByRole("button", { name: "Bildschirm teilen" }));
 
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "Bildschirmaufnahme fehlgeschlagen",
+      "Bildschirmaufnahme ist hier nicht verfügbar. Bitte wähle stattdessen über „Bild anhängen“ ein Bild oder Foto aus.",
     );
     expect(uploadPaImageMock).not.toHaveBeenCalled();
     expect(displayTrackStopMock).toHaveBeenCalledTimes(1);
