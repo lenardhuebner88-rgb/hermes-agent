@@ -6,6 +6,8 @@ from agent.account_usage import (
     AccountUsageSnapshot,
     AccountUsageWindow,
     _fetch_xai_account_usage,
+    _format_anthropic_plan,
+    _resolve_anthropic_plan_label,
     fetch_account_usage,
     render_account_usage_lines,
 )
@@ -915,3 +917,43 @@ def test_render_account_usage_lines_shows_detail_alongside_reset():
     scoped_line = next(line for line in lines if line.startswith("Modell-Limit"))
     assert "resets" in scoped_line
     assert "Fable" in scoped_line
+
+
+# --- Claude subscription plan label (B: "Max 20×") ---------------------------
+
+
+def test_format_anthropic_plan_max_20x():
+    # Real live values: subscriptionType="max", rateLimitTier="default_claude_max_20x".
+    assert _format_anthropic_plan("max", "default_claude_max_20x") == "Max 20×"
+
+
+def test_format_anthropic_plan_base_only_when_no_multiplier():
+    assert _format_anthropic_plan("pro", None) == "Pro"
+
+
+def test_format_anthropic_plan_infers_base_from_tier():
+    # subscriptionType missing → derive base + multiplier from the tier alone.
+    assert _format_anthropic_plan(None, "default_claude_max_5x") == "Max 5×"
+
+
+def test_format_anthropic_plan_none_when_empty():
+    assert _format_anthropic_plan(None, None) is None
+    assert _format_anthropic_plan("", "") is None
+
+
+def test_resolve_anthropic_plan_label_reads_credentials_file(tmp_path, monkeypatch):
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / ".credentials.json").write_text(
+        '{"claudeAiOauth": {"accessToken": "x", '
+        '"subscriptionType": "max", "rateLimitTier": "default_claude_max_20x"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent.account_usage.Path.home", lambda: tmp_path)
+    assert _resolve_anthropic_plan_label() == "Max 20×"
+
+
+def test_resolve_anthropic_plan_label_fail_soft_when_missing(tmp_path, monkeypatch):
+    # No credential files at all → None, never raises.
+    monkeypatch.setattr("agent.account_usage.Path.home", lambda: tmp_path)
+    assert _resolve_anthropic_plan_label() is None

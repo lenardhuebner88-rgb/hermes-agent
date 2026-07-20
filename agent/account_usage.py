@@ -827,6 +827,75 @@ def redeem_codex_reset_credit(
     )
 
 
+def _format_anthropic_plan(
+    subscription_type: Optional[str], rate_limit_tier: Optional[str]
+) -> Optional[str]:
+    """Render a Claude subscription label like ``"Max 20×"`` from the raw fields.
+
+    ``subscription_type`` is the base plan (``max`` / ``pro`` / ``free`` / ``team``);
+    ``rate_limit_tier`` (e.g. ``default_claude_max_20x``) carries the multiplier and,
+    as a fallback, the base plan. Returns None when neither yields anything usable.
+    """
+    base: Optional[str] = None
+    if isinstance(subscription_type, str) and subscription_type.strip():
+        base = subscription_type.strip().title()
+    multiplier: Optional[str] = None
+    if isinstance(rate_limit_tier, str) and rate_limit_tier.strip():
+        tier = rate_limit_tier.strip().lower()
+        for part in tier.replace("-", "_").split("_"):
+            if len(part) >= 2 and part.endswith("x") and part[:-1].isdigit():
+                multiplier = f"{part[:-1]}×"
+                break
+        if base is None:
+            if "max" in tier:
+                base = "Max"
+            elif "pro" in tier:
+                base = "Pro"
+            elif "team" in tier:
+                base = "Team"
+    if base and multiplier:
+        return f"{base} {multiplier}"
+    return base or multiplier
+
+
+def _resolve_anthropic_plan_label() -> Optional[str]:
+    """Best-effort Claude subscription tier for display (e.g. ``"Max 20×"``).
+
+    The OAuth usage API carries no plan/tier field, so read it from the local
+    Claude Code credentials (the same store ``resolve_anthropic_token`` uses):
+    ``~/.claude/.credentials.json`` → ``claudeAiOauth.{subscriptionType,rateLimitTier}``,
+    falling back to ``~/.claude.json`` → ``oauthAccount.organizationRateLimitTier``.
+    Fail-soft: any missing file or parse error returns None (the card just omits
+    the plan line, exactly as before this change).
+    """
+    subscription_type: Optional[str] = None
+    rate_limit_tier: Optional[str] = None
+    try:
+        cred_path = Path.home() / ".claude" / ".credentials.json"
+        if cred_path.exists():
+            data = json.loads(cred_path.read_text(encoding="utf-8")) or {}
+            oauth = data.get("claudeAiOauth")
+            if isinstance(oauth, dict):
+                subscription_type = oauth.get("subscriptionType") or None
+                rate_limit_tier = oauth.get("rateLimitTier") or None
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+    if rate_limit_tier is None or subscription_type is None:
+        try:
+            cfg_path = Path.home() / ".claude.json"
+            if cfg_path.exists():
+                data = json.loads(cfg_path.read_text(encoding="utf-8")) or {}
+                account = data.get("oauthAccount")
+                if isinstance(account, dict):
+                    rate_limit_tier = rate_limit_tier or account.get(
+                        "organizationRateLimitTier"
+                    ) or account.get("userRateLimitTier") or None
+                    subscription_type = subscription_type or account.get("seatTier") or None
+        except (json.JSONDecodeError, OSError, ValueError):
+            pass
+    return _format_anthropic_plan(subscription_type, rate_limit_tier)
+
+
 def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
     """Fetch Anthropic OAuth usage. Fail-soft with specific reasons (Kimi pattern)."""
     token = (resolve_anthropic_token() or "").strip()
@@ -962,6 +1031,7 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
         provider="anthropic",
         source="oauth_usage_api",
         fetched_at=_utc_now(),
+        plan=_resolve_anthropic_plan_label(),
         windows=tuple(windows),
         details=tuple(details),
     )
