@@ -69,6 +69,43 @@ Vitest-Timeout-Flakes unter Last isolieren — killt den Revert/Re-land-Churn
 (t_1ccb0734 ×4). Akzeptanz: Gate läuft unter Last stabil; Churn-Historie im
 Receipt referenziert.
 
+## Änderung 2026-07-20 (Piet): inline-Orchestrierung statt Kanban-Lanes
+Piet: „hier inline bauen — du orchestrierst, GPT 5.6 und Grok und Qwen 3.8
+Preview bauen (teste ihn)". Builder-Smoke-Tests (kimi, live):
+`qwen -p -m qwen3.8-max-preview` ✅ One-Shot + ✅ Datei-Schreiben im cwd;
+`grok -p -m grok-4.5` ✅; `hermes chat -Q -q -m gpt-5.6-sol` (eigene CLI).
+Neue Partitionierung (datei-disjunkt, damit die drei Branches konfliktfrei
+integrierbar sind):
+- **GPT 5.6** (Worktree codex-jarvis-s6-gpt): S6.1 Voice-Pipeline +
+  S6.2 Tap-Actions + S6.5-Frontend-Anteil (Engine am Composer, Bubble-Datum,
+  Focus-Trap) — Dateien: web_server/audio-Tests, JarvisChat.tsx, InboxPanel.tsx,
+  jarvis.css (Approval-/Composer-Abschnitt).
+- **Grok 4.5** (Worktree codex-jarvis-s6-grok): S6.3 Wächter-Briefing +
+  S6.6 Integrator-Härtung — Dateien: gateway/pa_watcher.py, scripts/,
+  hermes_cli/kanban_worktrees.py (+Tests). Rein Backend/Infra.
+- **Qwen 3.8 Preview** (Worktree codex-jarvis-s6-qwen): S6.4 Panels live +
+  Frame-Age (S6.5-Rest) — Dateien: JarvisShellView.tsx, mockContent.ts,
+  neuer Feed-Hook, useLiveShare.ts, jarvis.css (Panel-Abschnitt).
+  Explizit auch als **Builder-Test** (Piet): kann Qwen 3.8 Preview produktiv
+  Frontend bauen? Ergebnis ins Receipt.
+
+## Was noch fehlt für „den wirklichen Jarvis" (Plan-Ergänzung kimi)
+Über S6 hinaus, priorisiert — Kandidaten für Sprint 7:
+1. **S7.1 Kontext-Tiefe:** Tagebuch (S3.9, memsearch) ins Kontextpack — Jarvis
+   beantwortet „was war letzte Woche" aus eigenem Gedächtnis, nicht nur aus
+   Live-Quellen (answer_source-Proof aus S2-Rest gleich mit).
+2. **S7.2 Voice UX II:** PTT-Auto-Send-Option (Diktat → direkt Turn, ohne
+   Send-Tap) + Vorlesen unterbrechbar (Barge-in); später VAD/Duplex.
+3. **S7.3 Proaktiv II:** Abend-Rückblick + eskalierende Erinnerung bei
+   alternden Inbox-Items (👁 >24h → Push). Baut auf S6.3 auf.
+4. **S7.4 Erreichbarkeit:** PWA-Install-Führung auf dem Phone + Push-Aktivierung
+   prüfen (S3.2-Kanal scharf schalten); Desktop: Deeplink/Global-Shortcut prüfen.
+5. **S7.5 Asset-Bilder im Thread:** Token-sichere Asset-URLs (Folge-Fix aus
+   Integrations-Receipt: `<img>` ohne Cookie zeigt „Bild nicht mehr verfügbar").
+Briefing-Qualität (Piet: „sinnvoller und guter Report") ist Teil der S6.3-
+Akzeptanz: kuratierte Reihenfolge (👁 wartet auf dich → ⚠ Blocker → ✓ Abschlüsse),
+max 8 Zeilen, Klartext-Titel ohne IDs, Datumskontext („seit gestern").
+
 ## Prozess pro Task
 Worktree-Disziplin (canonical root `/home/piet/.hermes/worktrees/`), Koordinations-
 Check-IN vor erstem Write, nur affected Tests (`scripts/run-affected.sh`), Frontend-
