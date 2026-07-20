@@ -526,7 +526,9 @@ _QUERY_TOKEN_API_PATHS: frozenset[str] = frozenset({"/api/files/download"})
 
 # Prefix variant for routes with a path parameter (artifact downloads open in a plain
 # browser tab / Android download manager, which cannot set the session header).
-_QUERY_TOKEN_API_PREFIXES: tuple[str, ...] = ("/api/artifacts/",)
+# S7.5: /api/pa/asset/ dazu — <img>-Tags im Jarvis-Thread können den
+# Session-Header nicht setzen (gleiche Query-Token-Tradeoff-Abwägung).
+_QUERY_TOKEN_API_PREFIXES: tuple[str, ...] = ("/api/artifacts/", "/api/pa/asset/")
 
 
 def _has_valid_query_token(request: Request, path: str) -> bool:
