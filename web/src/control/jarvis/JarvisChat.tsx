@@ -40,11 +40,7 @@ import { PlanspecCard } from "./PlanspecCard";
 import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
-import {
-  captureScreenFrame,
-  isScreenCaptureCancelled,
-  shouldUseImagePickerForScreenshare,
-} from "./useScreenshotCapture";
+import { useLiveShare } from "./useLiveShare";
 import { useSpeechPlayback } from "./useSpeechPlayback";
 
 const t = de.jarvis;
@@ -141,8 +137,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   } = useSpeechPlayback();
   const [transcribing, setTranscribing] = useState(false);
   const [micTranscribeError, setMicTranscribeError] = useState<string | null>(null);
-  const [capturingScreen, setCapturingScreen] = useState(false);
-  const [screenshareError, setScreenshareError] = useState<string | null>(null);
+  // Live-Screen-Share (S-live): eine echte, fortlaufende Bildschirmteilung mit
+  // sichtbarem Aktivzustand — nie der Bild-Picker. liveShareNotice trägt den
+  // ehrlichen „hier nicht verfügbar"-Hinweis für nicht unterstützte Browser.
+  const liveShare = useLiveShare({ errorText: t.liveShareError });
+  const [liveShareNotice, setLiveShareNotice] = useState<string | null>(null);
 
   // Bild-Fähigkeit der Engine für den NÄCHSTEN Turn (Switcher-Wahl +
   // Roster-Default): Nicht-Vision-Engines deaktivieren den Attach-Button
@@ -263,28 +262,24 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     void mic.start();
   };
 
-  const onScreenshareClick = async () => {
-    if (capturingScreen) return;
-    if (shouldUseImagePickerForScreenshare()) {
-      setScreenshareError(null);
-      fileRef.current?.click();
+  // Screenshare-Button: echter Live-Share-Toggle. Nie den Bild-Picker öffnen.
+  // Unsupported-Browser (mobiles Chrome/Samsung/iOS): ehrlicher Hinweis statt
+  // Erfolgssimulation. Bild anhängen bleibt eine davon getrennte Aktion.
+  const onScreenshareClick = () => {
+    setLiveShareNotice(null);
+    liveShare.clearError();
+    if (!liveShare.supported) {
+      setLiveShareNotice(t.liveShareUnsupported);
       return;
     }
-    setCapturingScreen(true);
-    setScreenshareError(null);
-    try {
-      const file = await captureScreenFrame();
-      await chat.attachFile(file);
-    } catch (error) {
-      if (!isScreenCaptureCancelled(error)) {
-        setScreenshareError(t.screenshareError);
-      }
-    } finally {
-      setCapturingScreen(false);
+    if (liveShare.active) {
+      liveShare.stop();
+      return;
     }
+    void liveShare.start();
   };
 
-  const onSubmit = (event: FormEvent) => {
+  const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     const value = text.trim();
     if (!value || chat.sending) return;
@@ -298,6 +293,17 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     if (planMatch) {
       void planspec.submitIdea(planMatch[1] ?? "");
       return;
+    }
+    // Live-Screen-Share aktiv + Vision-Engine + kein manueller Anhang: den
+    // aktuellen Bildschirm-Frame materialisieren und mit senden, damit Jarvis
+    // wirklich den Live-Bildschirm sieht. Scheitert das Materialisieren, geht
+    // die Nachricht ohne Frame raus (keine Vortäuschung).
+    if (liveShare.active && imagesOk && !chat.attachment) {
+      const assetId = await liveShare.attachCurrentFrame();
+      if (assetId) {
+        void chat.send(value, { attachmentAssetId: assetId });
+        return;
+      }
     }
     void chat.send(value);
   };
@@ -388,9 +394,23 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           {mic.error ?? micTranscribeError}
         </div>
       ) : null}
-      {screenshareError ? (
+      {liveShare.error || liveShareNotice ? (
         <div className="jv-composer-error" role="alert">
-          {screenshareError}
+          {liveShare.error ?? liveShareNotice}
+        </div>
+      ) : null}
+
+      {liveShare.active ? (
+        <div className="jv-liveshare-status" role="status">
+          <span className="jv-live-dot" aria-hidden="true" />
+          <span className="jv-live-label">{t.liveShareActive}</span>
+          <button
+            type="button"
+            className="jv-live-stop"
+            onClick={() => liveShare.stop()}
+          >
+            {t.liveShareStopAction}
+          </button>
         </div>
       ) : null}
 
@@ -425,25 +445,25 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
             className="jv-ic"
             aria-label={t.attachLabel}
             title={imagesOk ? undefined : t.engineNoImagesTitle}
-            disabled={chat.sending || chat.uploading || capturingScreen || !imagesOk}
+            disabled={chat.sending || chat.uploading || !imagesOk}
             onClick={() => fileRef.current?.click()}
           >
             <ImagePlus aria-hidden className="h-4 w-4" />
           </button>
+          {/* S-live — Live-Screen-Share-Toggle (echtes fortlaufendes Teilen,
+              nie der Bild-Picker). Aktiv-Zustand sichtbar über .jv-live-on und
+              die Status-Zeile; nicht unterstützte Browser bleiben klickbar, um
+              den ehrlichen Hinweis zu zeigen. */}
           <button
             type="button"
-            className={capturingScreen ? "jv-ic jv-screenshare jv-capturing" : "jv-ic jv-screenshare"}
-            aria-label={t.screenshareLabel}
-            aria-busy={capturingScreen}
-            title={imagesOk ? t.screenshareLabel : t.engineNoImagesTitle}
-            disabled={chat.sending || chat.uploading || capturingScreen || !imagesOk}
-            onClick={() => void onScreenshareClick()}
+            className={liveShare.active ? "jv-ic jv-screenshare jv-live-on" : "jv-ic jv-screenshare"}
+            aria-label={liveShare.active ? t.liveShareStop : t.liveShareStart}
+            aria-pressed={liveShare.active}
+            title={liveShare.active ? t.liveShareStop : t.liveShareStart}
+            disabled={chat.sending}
+            onClick={onScreenshareClick}
           >
-            {capturingScreen ? (
-              <Loader2 aria-hidden className="h-4 w-4 jv-spin" />
-            ) : (
-              <MonitorUp aria-hidden className="h-4 w-4" />
-            )}
+            <MonitorUp aria-hidden className="h-4 w-4" />
           </button>
           {/* S3.6 — Push-to-Talk: idle → recording (Puls) → transcribing
               (Spinner); das Transkript landet im Input, kein Auto-Send. */}
