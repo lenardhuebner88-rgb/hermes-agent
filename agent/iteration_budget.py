@@ -50,11 +50,13 @@ class IterationBudget:
 
     @property
     def used(self) -> int:
+        """Number of iterations consumed so far."""
         with self._lock:
             return self._used
 
     @property
     def remaining(self) -> int:
+        """Iterations left before the cap (never negative)."""
         with self._lock:
             return max(0, self.max_total - self._used)
 
