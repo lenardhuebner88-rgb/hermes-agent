@@ -204,7 +204,13 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     });
     try {
       const session = await api.startLiveShare();
-      if (!mountedRef.current || streamRef.current !== stream) return;
+      if (!mountedRef.current || streamRef.current !== stream) {
+        // The share ended (track.onended / stop / unmount) while startLiveShare()
+        // was still in flight: teardown() already ran but could not know this
+        // session id yet, so the server session would leak. Close it best-effort.
+        void api.stopLiveShare(session.session_id).catch(() => {});
+        return;
+      }
       sessionIdRef.current = session.session_id;
     } catch {
       // No backend session → do not pretend we are sharing.

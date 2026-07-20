@@ -209,6 +209,80 @@ describe("useLiveShare session lifecycle", () => {
     expect(result.current.active).toBe(false);
   });
 
+  it("track.onended before startLiveShare resolves still stops the leaked backend session", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    // Hang the backend start so the share can end while it is still in flight.
+    let resolveStart: (() => void) | null = null;
+    startLiveShareMock.mockImplementation(
+      () =>
+        new Promise<{ session_id: string }>((resolve) => {
+          resolveStart = () => resolve({ session_id: "live_session01" });
+        }),
+    );
+
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    let startPromise: Promise<void> = Promise.resolve();
+    await act(async () => {
+      startPromise = result.current.start();
+      // Let start() progress up to (and park on) the pending startLiveShare().
+      for (let i = 0; i < 10 && startLiveShareMock.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(startLiveShareMock).toHaveBeenCalledTimes(1);
+
+    // The browser/user ends the share BEFORE the backend session id is known:
+    // teardown runs with sessionId still null, so it cannot stop anything yet.
+    expect(typeof track.onended).toBe("function");
+    act(() => track.onended?.());
+    expect(stopLiveShareMock).not.toHaveBeenCalled();
+
+    // startLiveShare now resolves → the orphaned server session must be closed.
+    await act(async () => {
+      resolveStart?.();
+      await startPromise;
+    });
+
+    expect(stopLiveShareMock).toHaveBeenCalledWith("live_session01");
+    expect(result.current.active).toBe(false);
+  });
+
+  it("unmount before startLiveShare resolves still stops the leaked backend session", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    let resolveStart: (() => void) | null = null;
+    startLiveShareMock.mockImplementation(
+      () =>
+        new Promise<{ session_id: string }>((resolve) => {
+          resolveStart = () => resolve({ session_id: "live_session01" });
+        }),
+    );
+
+    const { result, unmount } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    let startPromise: Promise<void> = Promise.resolve();
+    await act(async () => {
+      startPromise = result.current.start();
+      for (let i = 0; i < 10 && startLiveShareMock.mock.calls.length === 0; i++) {
+        await Promise.resolve();
+      }
+    });
+    expect(startLiveShareMock).toHaveBeenCalledTimes(1);
+
+    // Unmount while the backend session id is still unknown.
+    unmount();
+    expect(stopLiveShareMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveStart?.();
+      await startPromise;
+    });
+
+    expect(stopLiveShareMock).toHaveBeenCalledWith("live_session01");
+  });
+
   it("unmount tears the session down (no leaked stream / interval)", async () => {
     vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
       cb(new Blob(["frame"], { type: "image/jpeg" })),
