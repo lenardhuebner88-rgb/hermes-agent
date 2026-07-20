@@ -44,15 +44,6 @@ export function isScreenCaptureCancelled(error: unknown): boolean {
   );
 }
 
-/** Mobile browsers do not expose a usable display-capture flow. Keep the
- * decision synchronous so the originating click can open the native image
- * picker without losing browser user activation. */
-export function shouldUseImagePickerForScreenshare(): boolean {
-  const getDisplayMedia = navigator.mediaDevices?.getDisplayMedia;
-  if (typeof getDisplayMedia !== "function") return true;
-  return /\b(Android|iPhone|iPad|iPod|Mobile)\b/i.test(navigator.userAgent);
-}
-
 export async function captureScreenFrame(): Promise<File> {
   let stream: MediaStream | null = null;
   const video = document.createElement("video") as VideoWithFrameCallback;
