@@ -2,6 +2,7 @@ package net.hermes.voice
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -76,6 +77,74 @@ class VoiceAppConfigTest {
         // A null launch component (share/dictation intent, cold relaunch) must not
         // silently switch surfaces — the voice flow stays the safe default.
         assertEquals(VoiceAppConfig.VOICE_URL, VoiceAppConfig.startUrlForComponent(null))
+    }
+
+    @Test
+    fun `warm voice activity switches to jarvis when the jarvis alias relaunches it`() {
+        // The bug this guards: MainActivity is singleTop, so tapping Hermes Jarvis
+        // while a warm Voice activity is on top delivers the intent to onNewIntent.
+        // The surface must be re-derived to JARVIS_URL, not left on /voice.
+        assertEquals(
+            VoiceAppConfig.JARVIS_URL,
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = true,
+                launchClass = "net.hermes.voice.JarvisActivity",
+                currentUrl = VoiceAppConfig.VOICE_URL,
+            ),
+        )
+    }
+
+    @Test
+    fun `re-tapping the already-visible surface does not reload`() {
+        // No wasteful reload — and, crucially, no navigation that would tear down a
+        // live MediaProjection — when the user re-taps the icon they are already on.
+        assertNull(
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = true,
+                launchClass = "net.hermes.voice.JarvisActivity",
+                currentUrl = VoiceAppConfig.JARVIS_URL,
+            ),
+        )
+        assertNull(
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = true,
+                launchClass = "net.hermes.voice.MainActivity",
+                currentUrl = VoiceAppConfig.VOICE_URL,
+            ),
+        )
+    }
+
+    @Test
+    fun `jarvis surface switches back to voice when the voice launcher relaunches it`() {
+        assertEquals(
+            VoiceAppConfig.VOICE_URL,
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = true,
+                launchClass = "net.hermes.voice.MainActivity",
+                currentUrl = VoiceAppConfig.JARVIS_URL,
+            ),
+        )
+    }
+
+    @Test
+    fun `a non-launcher dictation intent never switches the surface`() {
+        // ACTION_SEND dictation drafts must keep their existing behavior: stash the
+        // draft only, never navigate — even if their component would map to voice
+        // while Jarvis is showing.
+        assertNull(
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = false,
+                launchClass = "net.hermes.voice.MainActivity",
+                currentUrl = VoiceAppConfig.JARVIS_URL,
+            ),
+        )
+        assertNull(
+            VoiceAppConfig.relaunchSurfaceTarget(
+                isLauncherEntry = false,
+                launchClass = "net.hermes.voice.JarvisActivity",
+                currentUrl = VoiceAppConfig.VOICE_URL,
+            ),
+        )
     }
 
     @Test

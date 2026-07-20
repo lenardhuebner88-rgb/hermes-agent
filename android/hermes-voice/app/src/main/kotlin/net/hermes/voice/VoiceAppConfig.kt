@@ -22,6 +22,31 @@ object VoiceAppConfig {
     fun startUrlForComponent(className: String?): String =
         if (className != null && className.endsWith("JarvisActivity")) JARVIS_URL else VOICE_URL
 
+    /**
+     * Which surface a *re-delivered* launch intent must (re)load, or null to keep
+     * the current one. Because [MainActivity] is `singleTop`, tapping the Jarvis
+     * alias while a warm Voice activity is already on top delivers the intent to
+     * `onNewIntent` instead of recreating the activity — so the surface has to be
+     * re-derived here or the shell silently stays on `/voice`.
+     *
+     * Rules:
+     *  - Only a launcher entry ([isLauncherEntry], i.e. ACTION_MAIN) may switch the
+     *    surface. A share/dictation ACTION_SEND intent keeps its existing behavior
+     *    of only stashing a draft, never navigating.
+     *  - A launcher re-entry that already points at the visible surface returns
+     *    null, so re-tapping the same icon triggers no wasteful reload — and, just
+     *    as importantly, no capture-killing navigation.
+     */
+    fun relaunchSurfaceTarget(
+        isLauncherEntry: Boolean,
+        launchClass: String?,
+        currentUrl: String?,
+    ): String? {
+        if (!isLauncherEntry) return null
+        val target = startUrlForComponent(launchClass)
+        return if (target == currentUrl) null else target
+    }
+
     /** Origin comparison that tolerates a trailing slash on either side. */
     fun originMatches(candidate: String?): Boolean {
         if (candidate == null) return false

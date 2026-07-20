@@ -38,6 +38,11 @@ class MainActivity : ComponentActivity() {
     private val phoneActionGate = PhoneActionExecutionGate()
     private var pendingDictationDraft: String? = null
 
+    /** The in-origin surface currently loaded, so a warm singleTop relaunch can
+     *  tell whether it needs to switch surfaces (Jarvis vs voice) or leave the
+     *  page untouched. */
+    private var currentSurfaceUrl: String? = null
+
     private val webPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             val request = pendingWebPermissionRequest
@@ -90,12 +95,36 @@ class MainActivity : ComponentActivity() {
         // The launcher-alias that started us decides the surface (Jarvis vs voice);
         // both are the same origin-pinned hull sharing one capture bridge.
         val launchClass = intent?.component?.className ?: componentName.className
-        webView.loadUrl(VoiceAppConfig.startUrlForComponent(launchClass))
+        loadSurface(VoiceAppConfig.startUrlForComponent(launchClass))
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        // Keep getIntent() consistent with the intent that just re-entered a warm
+        // singleTop activity, matching the standard onNewIntent contract.
+        setIntent(intent)
         captureDictationDraft(intent)
+        // A warm relaunch (e.g. tapping the Jarvis alias while the Voice surface is
+        // already on top) is delivered here instead of recreating the activity, so
+        // the surface must be re-derived — otherwise the shell stays on whatever it
+        // showed before. relaunchSurfaceTarget returns null for non-launcher intents
+        // (dictation is left untouched) and for a re-tap of the visible surface.
+        val target = VoiceAppConfig.relaunchSurfaceTarget(
+            isLauncherEntry = intent.action == Intent.ACTION_MAIN,
+            launchClass = intent.component?.className,
+            currentUrl = currentSurfaceUrl,
+        )
+        if (target != null) {
+            // Never carry a live MediaProjection across a surface switch — stop it
+            // first so no capture keeps running behind the newly loaded page.
+            stopCaptureIfActive()
+            loadSurface(target)
+        }
+    }
+
+    private fun loadSurface(url: String) {
+        currentSurfaceUrl = url
+        webView.loadUrl(url)
     }
 
     private fun captureDictationDraft(intent: Intent?) {
