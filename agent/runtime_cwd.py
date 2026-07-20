@@ -26,6 +26,7 @@ def set_session_cwd(cwd: str | None) -> Token:
 
 
 def clear_session_cwd() -> None:
+    """Reset the session cwd to empty (falls through to TERMINAL_CWD/launch dir)."""
     _SESSION_CWD.set("")
 
 
@@ -37,6 +38,12 @@ def _session_cwd_override() -> str:
 
 
 def resolve_agent_cwd() -> Path:
+    """Resolve the agent's working directory.
+
+    Precedence: the per-context session override, then ``TERMINAL_CWD``, then
+    ``os.getcwd()`` — the first that resolves to an existing directory wins.
+    Always returns a concrete ``Path`` (never ``None``).
+    """
     override = _session_cwd_override()
     if override:
         p = Path(override).expanduser()
@@ -51,6 +58,13 @@ def resolve_agent_cwd() -> Path:
 
 
 def resolve_context_cwd() -> Path | None:
+    """Resolve the cwd used for context-file discovery, or ``None`` if unconfigured.
+
+    Precedence: the per-context session override, then ``HERMES_CONTEXT_CWD``
+    (lets kanban workers scan the project root while tools stay in the scratch
+    workspace), then ``TERMINAL_CWD``. ``None`` tells the caller to fall back to
+    the launch dir (``os.getcwd()``).
+    """
     # None means "no configured cwd": build_context_files_prompt then falls back
     # to the launch dir (os.getcwd()) — correct for the local CLI. The gateway
     # avoids slurping its install dir by setting TERMINAL_CWD (see system_prompt.py)
