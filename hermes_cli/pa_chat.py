@@ -45,6 +45,13 @@ CLAUDE_OPUS_CLI_MODEL = "claude-opus-4-8"
 CLAUDE_FABLE_CLI_MODEL = "claude-fable-5"
 KIMI_MODEL = "k3"
 KIMI_CLI_MODEL = "kimi-code/k3"
+# Sprint-5 Task A (2026-07-20): Qwen als 4. PA-Engine, opt-in. Beste
+# Kosten/Qualitaet fuer Jarvis: qwen3.7-plus (1M Kontext, Vision, ~$0.0027/Turn
+# ueber Piets Alibaba-Token-Plan). Auth laeuft ueber die Qwen-CLI
+# (~/.qwen/settings.json, BAILIAN_TOKEN_PLAN_API_KEY), nicht ueber Hermes-
+# Provider — One-Shot + Vision sind gegen die installierte CLI live
+# verifiziert (rotes PNG korrekt erkannt).
+QWEN_MODEL = "qwen3.7-plus"
 # ``context_engine`` is a valid, statically empty built-in toolset.  Keeping an
 # explicit -t value is load-bearing: omitting/emptying -t makes the CLI fall
 # back to configured defaults.  If a local context engine is active it may add
@@ -78,6 +85,9 @@ ENGINE_REGISTRY: dict[str, EngineSpec] = {
     ),
     "kimi": EngineSpec(
         models=(KIMI_MODEL,), default_model=KIMI_MODEL, supports_images=False
+    ),
+    "qwen": EngineSpec(
+        models=(QWEN_MODEL,), default_model=QWEN_MODEL, supports_images=True
     ),
 }
 
@@ -859,6 +869,20 @@ def _kimi_bin() -> str:
     return "kimi"
 
 
+def _qwen_bin() -> str:
+    """Resolve the qwen CLI binary (same candidates as agent_terminals.py)."""
+    path = shutil.which("qwen")
+    if path:
+        return path
+    for candidate in (
+        Path.home() / ".npm-global" / "bin" / "qwen",
+        Path.home() / ".local" / "bin" / "qwen",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    return "qwen"
+
+
 def build_sol_argv(
     prompt: str, *, model: str, image_paths: list[Path]
 ) -> list[str]:
@@ -926,10 +950,39 @@ def build_kimi_argv(
     ]
 
 
+def build_qwen_argv(
+    prompt: str, *, model: str, image_paths: list[Path]
+) -> list[str]:
+    if model != QWEN_MODEL:
+        raise PAEngineError("PA-Modell passt nicht zur Engine")
+    # Die Qwen-CLI (gemini-cli-Fork) hat kein --image-Flag; Bilder gehen als
+    # @/abs/pfad-Referenz im Prompt (live verifiziert 2026-07-20 ueber den
+    # Token-Plan-Endpunkt: rotes Test-PNG korrekt als "Rot" erkannt).
+    full_prompt = prompt
+    if image_paths:
+        refs = " ".join(f"@{path}" for path in image_paths)
+        full_prompt = f"{prompt}\n\nBilder: {refs}"
+    # --safe-mode deaktiviert Hooks/Skills/MCP/QWEN.md im One-Shot (determinis-
+    # tisch, keine Konsolen-Interaktion); die Safe-Mode-Warnung geht auf
+    # stderr, stdout bleibt die reine Antwort. Kein --resume/--continue:
+    # jeder PA-Turn ist stateless, Kontext kommt aus dem Kontextpack.
+    return [
+        _qwen_bin(),
+        "-p",
+        full_prompt,
+        "-m",
+        model,
+        "-o",
+        "text",
+        "--safe-mode",
+    ]
+
+
 _ENGINE_ARGV_BUILDERS = {
     "sol": build_sol_argv,
     "claude": build_claude_argv,
     "kimi": build_kimi_argv,
+    "qwen": build_qwen_argv,
 }
 
 
@@ -949,9 +1002,20 @@ def run_engine(
     argv = _ENGINE_ARGV_BUILDERS[engine](
         prompt, model=model, image_paths=image_paths
     )
+    # Qwen-CLI (gemini-cli-Fork) erlaubt Dateizugriff nur im Workspace (cwd):
+    # @bild-Refs ausserhalb des cwd werden flaky/verweigert (gemessen
+    # 2026-07-20: 5/5 im Bild-Verzeichnis vs. Mehrheit Dateinamen-Gewuerfel
+    # ausserhalb). PA-Uploads liegen alle in einem Verzeichnis — als cwd
+    # setzen, damit Vision-Turns zuverlaessig sind.
+    cwd = (
+        str(image_paths[0].parent)
+        if engine == "qwen" and image_paths
+        else None
+    )
     try:
         result = subprocess.run(
             argv,
+            cwd=cwd,
             capture_output=True,
             text=True,
             timeout=TURN_TIMEOUT_SECONDS,
