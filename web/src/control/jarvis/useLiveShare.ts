@@ -238,9 +238,10 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         pendingRef.current = null;
       }
     } finally {
-      if (generation !== captureGenRef.current) return;
-      uploadingRef.current = false;
-      for (const resolve of uploadWaitersRef.current.splice(0)) resolve();
+      if (generation === captureGenRef.current) {
+        uploadingRef.current = false;
+        for (const resolve of uploadWaitersRef.current.splice(0)) resolve();
+      }
     }
   }, [failClosed]);
 
@@ -401,7 +402,7 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     }
     timerRef.current = setInterval(sampleTick, LIVE_SHARE_SAMPLE_INTERVAL_MS);
     sampleTick(); // first frame immediately, don't wait a full interval
-  }, [armFirstFrameTimeout, failClosed, nativeAvailable, sampleTick, startNative, status, stop, supported]);
+  }, [armFirstFrameTimeout, errorText, failClosed, nativeAvailable, sampleTick, startNative, status, stop, supported]);
 
   const attachCurrentFrame = useCallback(async (): Promise<string | null> => {
     const sid = sessionIdRef.current;
