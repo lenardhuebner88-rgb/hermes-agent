@@ -25,7 +25,7 @@
  * Historie beim Mount, nie doppelt bei Re-Render/Verlauf-Reload.
  */
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
-import { ImagePlus, Loader2, Mic, MicOff, Send, Volume2, VolumeX, X } from "lucide-react";
+import { ImagePlus, Loader2, Mic, MicOff, MonitorUp, Send, Volume2, VolumeX, X } from "lucide-react";
 
 import { api, type PaChatMessage } from "@/lib/api";
 import { de } from "../i18n/de";
@@ -40,6 +40,7 @@ import { PlanspecCard } from "./PlanspecCard";
 import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
+import { captureScreenFrame, isScreenCaptureCancelled } from "./useScreenshotCapture";
 import { useSpeechPlayback } from "./useSpeechPlayback";
 
 const t = de.jarvis;
@@ -136,6 +137,8 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   } = useSpeechPlayback();
   const [transcribing, setTranscribing] = useState(false);
   const [micTranscribeError, setMicTranscribeError] = useState<string | null>(null);
+  const [capturingScreen, setCapturingScreen] = useState(false);
+  const [screenshareError, setScreenshareError] = useState<string | null>(null);
 
   // Bild-Fähigkeit der Engine für den NÄCHSTEN Turn (Switcher-Wahl +
   // Roster-Default): Nicht-Vision-Engines deaktivieren den Attach-Button
@@ -256,6 +259,22 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     void mic.start();
   };
 
+  const onScreenshareClick = async () => {
+    if (capturingScreen) return;
+    setCapturingScreen(true);
+    setScreenshareError(null);
+    try {
+      const file = await captureScreenFrame();
+      await chat.attachFile(file);
+    } catch (error) {
+      if (!isScreenCaptureCancelled(error)) {
+        setScreenshareError(t.screenshareError);
+      }
+    } finally {
+      setCapturingScreen(false);
+    }
+  };
+
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
     const value = text.trim();
@@ -360,6 +379,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           {mic.error ?? micTranscribeError}
         </div>
       ) : null}
+      {screenshareError ? (
+        <div className="jv-composer-error" role="alert">
+          {screenshareError}
+        </div>
+      ) : null}
 
       <form className="jv-ask" onSubmit={onSubmit} aria-label={t.composerLabel}>
         {chat.attachment ? (
@@ -392,10 +416,25 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
             className="jv-ic"
             aria-label={t.attachLabel}
             title={imagesOk ? undefined : t.engineNoImagesTitle}
-            disabled={chat.sending || chat.uploading || !imagesOk}
+            disabled={chat.sending || chat.uploading || capturingScreen || !imagesOk}
             onClick={() => fileRef.current?.click()}
           >
             <ImagePlus aria-hidden className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            className={capturingScreen ? "jv-ic jv-screenshare jv-capturing" : "jv-ic jv-screenshare"}
+            aria-label={t.screenshareLabel}
+            aria-busy={capturingScreen}
+            title={imagesOk ? t.screenshareLabel : t.engineNoImagesTitle}
+            disabled={chat.sending || chat.uploading || capturingScreen || !imagesOk}
+            onClick={() => void onScreenshareClick()}
+          >
+            {capturingScreen ? (
+              <Loader2 aria-hidden className="h-4 w-4 jv-spin" />
+            ) : (
+              <MonitorUp aria-hidden className="h-4 w-4" />
+            )}
           </button>
           {/* S3.6 — Push-to-Talk: idle → recording (Puls) → transcribing
               (Spinner); das Transkript landet im Input, kein Auto-Send. */}

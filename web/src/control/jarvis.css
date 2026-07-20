@@ -525,6 +525,10 @@ button.jv-ok { cursor: pointer; }
 .jv-mic-rec, .jv-mic-rec:hover, .jv-mic-rec:focus-visible {
   color: var(--rot); border-color: rgba(255, 92, 105, .65);
 }
+.jv-screenshare.jv-capturing {
+  color: var(--cyan); border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(56, 216, 255, .35);
+}
 .jv-speak.jv-on, .jv-speak.jv-on:hover, .jv-speak.jv-on:focus-visible {
   color: var(--cyan); border-color: var(--cyan);
   box-shadow: 0 0 12px rgba(56, 216, 255, .35);
