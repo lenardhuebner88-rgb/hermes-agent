@@ -40,11 +40,7 @@ import { PlanspecCard } from "./PlanspecCard";
 import { blobToDataUrl, useMicRecorder } from "./useMicRecorder";
 import { PA_UPLOAD_ACCEPT, usePaChat } from "./usePaChat";
 import { PLAN_PREFIX_RE, usePlanspecDraft } from "./usePlanspecDraft";
-import {
-  captureScreenFrame,
-  isScreenCaptureCancelled,
-  shouldUseImagePickerForScreenshare,
-} from "./useScreenshotCapture";
+import { captureScreenFrame, isScreenCaptureCancelled } from "./useScreenshotCapture";
 import { useSpeechPlayback } from "./useSpeechPlayback";
 
 const t = de.jarvis;
@@ -265,11 +261,6 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
 
   const onScreenshareClick = async () => {
     if (capturingScreen) return;
-    if (shouldUseImagePickerForScreenshare()) {
-      setScreenshareError(null);
-      fileRef.current?.click();
-      return;
-    }
     setCapturingScreen(true);
     setScreenshareError(null);
     try {

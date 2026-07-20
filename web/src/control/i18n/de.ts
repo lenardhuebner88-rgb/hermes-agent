@@ -939,8 +939,7 @@ export const de = {
     inputLabel: "Nachricht an Jarvis",
     attachLabel: "Bild anhängen",
     screenshareLabel: "Bildschirm teilen",
-    screenshareError:
-      "Bildschirmaufnahme ist hier nicht verfügbar. Bitte wähle stattdessen über „Bild anhängen“ ein Bild oder Foto aus.",
+    screenshareError: "Bildschirmaufnahme fehlgeschlagen",
     removeAttachment: "Bild entfernen",
     sendLabel: "Nachricht senden",
     // S3.6 — Push-to-Talk (Mic-Button) + Vorlese-Toggle
