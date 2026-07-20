@@ -81,6 +81,48 @@ Quellen: Schwachstellen-Analyse + Receipts
   welche Schalter existieren (Config, Timer, Flags).
 - **Owner:** Grok (Backend-Endpoint) + Qwen (UI).
 
+## 🔵 Prio 2 — Strategen-/Entscheidungs-Pipeline (Befund 2026-07-20, Live-
+Analyse der 4 wartenden freigabe_gates; Empfehlung an Piet: t_c35430a7
+freigeben, t_e28ab9bb nach Gusto, beide GATE-TRIAGE-Duplikate ablehnen)
+
+### F9 Duplikat-Erkennung auf Themen-Ebene
+- **Befund (live):** Zwei identische GATE-TRIAGE-PYTHON-PlanSpecs held
+  (`t_79001b8a` dc5ed369, 0,7d + `t_3d396ebd` a57e7ba8, 1,7d). Die
+  Fingerprint-Dedup greift nicht, weil sich das rote Test-Datei-Set ändert
+  → neuer Fingerprint → neue Spec. Ironie: die neuere Spec verlangt selbst
+  „Duplicate-PlanSpec-Rate muss 0 bleiben".
+- **Maßnahme:** Dedup auf Thema/Slice-Präfix (z.B. `GATE-TRIAGE-PYTHON`)
+  statt nur Content-Fingerprint; bei wechselnder Ursache bestehende HELD-
+  Spec aktualisieren statt neue zu öffnen.
+- **Owner:** Grok (strategist/triage-check Pipeline).
+
+### F10 Supersede-/Withdraw-Logik für Strategen-Vorschläge
+- **Befund:** Der Stratege zieht überholte eigene HELD-Vorschläge nicht
+  zurück. Die ältere Triage-Spec war durch die neuere (und durch die
+  konkrete gate-green-Spec) faktisch ersetzt, blieb aber 1,7d in der Inbox.
+- **Maßnahme:** Beim Propose prüfen: existiert eine HELD-Spec zum selben
+  Thema? → alte als `status: ersetzt` markieren (aus Inbox nehmen) oder
+  in-place aktualisieren. Nie zwei HELD zum selben Thema.
+- **Owner:** Grok.
+
+### F11 Entscheidungs-Ranking in der Inbox
+- **Befund:** Alle 4 Items standen gleichwertig da (Sortierung nur
+  block_radius + ts). Die Kern-Vertrauens-Entscheidung (green-gate streak=0,
+  22 Fail-Nächte) war von Duplikat-Rauschen nicht unterscheidbar.
+- **Maßnahme:** Ranking-Signal: `strategist_meta.roi`/`target_metric` in
+  Score übersetzen (Kern-Signal betroffen > Verbesserung > Meta-Arbeit),
+  Inbox sortiert/badged danach. Hängt an F6 (WHY auf der Karte).
+- **Owner:** Grok (Score) + Qwen (Badge/Sortierung).
+
+### F12 Evidence-Frische auf Decision-Cards
+- **Befund:** Die gate-green-Spec behauptete 3 rote Tests (Grounding
+  20.07.); Nachmessung: 2 noch rot, 1 zwischenzeitlich grün. Karten zeigen
+  weder Alter der Beweislage noch deren Halbwertszeit.
+- **Maßnahme:** Card zeigt „Beleg vom <datum>" + Verfallshinweis ab N
+  Tagen („Evidence älter als 3d — vor Freigabe neu prüfen?"). Optional:
+  Re-Verify-Button (führt die Grounding-Kommandos erneut aus).
+- **Owner:** Grok (Backend-Feld) + Qwen (Anzeige).
+
 ## Erledigt heute (Referenz, nicht mehr offen)
 S6: Groq-STT live, Morgen-Briefing, Integrator-Härtung, Panels live,
 Frame-Age, Voice-Pipeline-E2E, Tap-Actions, Datums-Trenner.
