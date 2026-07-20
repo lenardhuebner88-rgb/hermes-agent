@@ -144,21 +144,35 @@ afterEach(() => {
 });
 
 describe("InboxPanel (/api/pa/inbox-Items)", () => {
-  it("Approval-Card: Kategorie, Ziel aus action_payload, Keys, reason, Buttons", async () => {
+  it("Approval-Card: Ziel sichtbar, Payload und reason erst hinter Details", async () => {
     renderPanel();
 
     const card = await screen.findByTestId("jv-appr-q77");
     expect(card.textContent).toContain("PA-AKTION");
     expect(card.textContent).toContain("tmux.send_keys");
-    // Ziel lesbar aus dem Payload (Brief-Beispiel), keine Pane-Annahmen.
+    // S6: Ziel bleibt für die schnelle Daumen-Entscheidung direkt sichtbar.
     expect(screen.getByTestId("jv-appr-target-q77").textContent).toBe(
       "tmux.send_keys → work:kimi",
     );
-    expect(card.textContent).toContain("Tasten: mach weiter mit dem Gate");
-    // reason steckt schon im Backend-Titel → keine doppelte Zeile.
-    expect(card.querySelectorAll(".jv-appr-reason")).toHaveLength(0);
+    const details = screen.getByText("Grund & Payload").closest("details");
+    expect(details?.open).toBe(false);
+
+    fireEvent.click(screen.getByText("Grund & Payload"));
+    expect(details?.open).toBe(true);
+    expect(screen.getByText("Tasten: mach weiter mit dem Gate")).toBeTruthy();
+    expect(screen.getByText("Kimi-Window wartet seit 20 min")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ausführen" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Ablehnen" })).toBeTruthy();
+  });
+
+  it("fokussiert den Schließen-Button und hält Tab-Fokus im Drawer", async () => {
+    renderPanel();
+
+    const close = await screen.findByRole("button", { name: "Inbox-Ansicht schließen" });
+    expect(document.activeElement).toBe(close);
+
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Ablehnen" }));
   });
 
   it("S3.3-FE: planspec.ingest-Card — PLANSPEC-Chip, Zielzeile = draft_id, gleicher Flow", async () => {

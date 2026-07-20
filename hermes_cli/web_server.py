@@ -1492,6 +1492,8 @@ _AUDIO_MIME_EXTENSIONS: Dict[str, str] = {
     "video/webm": ".webm",
 }
 _MAX_TRANSCRIPTION_UPLOAD_BYTES = 25 * 1024 * 1024
+_AUDIO_TRANSCRIPTION_TIMEOUT_SECONDS = 90
+_AUDIO_SPEAK_TIMEOUT_SECONDS = 90
 
 
 def _audio_extension_for_mime(mime_type: str) -> str:
@@ -5189,14 +5191,22 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
         transcribe_kwargs = {"language": language} if language else {}
         if initial_prompt:
             transcribe_kwargs["initial_prompt"] = initial_prompt
-        result = await loop.run_in_executor(
-            None, functools.partial(transcribe_audio, temp_path, **transcribe_kwargs)
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None, functools.partial(transcribe_audio, temp_path, **transcribe_kwargs)
+            ),
+            timeout=_AUDIO_TRANSCRIPTION_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Transcription provider timed out",
         )
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=safe_detail(exc, "Transcription failed", log=_log),
         )
     finally:
@@ -5209,7 +5219,7 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
     if not result.get("success"):
         error = scrub_detail(str(result.get("error") or ""))
         raise HTTPException(
-            status_code=400,
+            status_code=502,
             detail=error or "Transcription failed",
         )
 
@@ -5357,28 +5367,36 @@ async def speak_text(payload: TTSSpeakRequest):
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+        result_json = await asyncio.wait_for(
+            loop.run_in_executor(None, text_to_speech_tool, text),
+            timeout=_AUDIO_SPEAK_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Speech provider timed out",
+        )
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=safe_detail(exc, "Speech synthesis failed", log=_log),
         )
 
     try:
         result = json.loads(result_json) if isinstance(result_json, str) else result_json
     except Exception:
-        raise HTTPException(status_code=500, detail="Invalid TTS response")
+        raise HTTPException(status_code=502, detail="Invalid TTS response")
 
     if not result.get("success"):
         error = scrub_detail(str(result.get("error") or ""))
         raise HTTPException(
-            status_code=400,
+            status_code=502,
             detail=error or "Speech synthesis failed",
         )
 
     file_path = result.get("file_path")
     if not file_path or not os.path.isfile(file_path):
-        raise HTTPException(status_code=500, detail="Audio file missing")
+        raise HTTPException(status_code=502, detail="Audio file missing")
 
     ext = os.path.splitext(file_path)[1].lower()
     mime_type = {
@@ -5394,7 +5412,7 @@ async def speak_text(payload: TTSSpeakRequest):
             audio_bytes = fh.read()
     except OSError as exc:
         raise HTTPException(
-            status_code=500,
+            status_code=502,
             detail=safe_detail(exc, "Could not read audio", log=_log),
         )
     finally:
