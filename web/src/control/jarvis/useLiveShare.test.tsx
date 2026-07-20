@@ -417,4 +417,36 @@ describe("useLiveShare session lifecycle", () => {
     expect(result.current.active).toBe(false);
     expect(stopLiveShareMock).toHaveBeenCalledWith("live_session01");
   });
+
+  // ── S6.5: Frame-Age-Indikator (lastFrameAt)
+
+  it("lastFrameAt is null before start and set after a successful frame upload", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    expect(result.current.lastFrameAt).toBeNull();
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    await waitFor(() => expect(result.current.lastFrameAt).not.toBeNull());
+    expect(typeof result.current.lastFrameAt).toBe("number");
+  });
+
+  it("lastFrameAt resets to null after stop()", async () => {
+    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation((cb) =>
+      cb(new Blob(["frame"], { type: "image/jpeg" })),
+    );
+    const { result } = renderHook(() => useLiveShare({ errorText: "boom" }));
+    await act(async () => {
+      await result.current.start();
+    });
+    await waitFor(() => expect(result.current.lastFrameAt).not.toBeNull());
+
+    act(() => result.current.stop());
+
+    expect(result.current.lastFrameAt).toBeNull();
+  });
 });

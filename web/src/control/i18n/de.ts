@@ -1077,6 +1077,9 @@ export const de = {
       "Maschinenraum: Wächter-Zusammenfassung — tippen öffnet das Aktivitäts-Log",
     peripheryLast: "zuletzt:",
     hudToggle: "HUD-Panels (Mock-Statik) ein-/ausblenden",
+    // S6.5 — Frame-Age-Indikator in der Live-Share-Statuszeile
+    frameAge: (n: number) => `Frame vor ${n} s`,
+    frameAgeStale: (n: number) => `Frame vor ${n} s — eingefroren?`,
   },
   loops: {
     // "Nachtschicht" = dunklere warm-graphitene Tiefenvariation des Sheet-Skins (siehe LoopsView.tsx).

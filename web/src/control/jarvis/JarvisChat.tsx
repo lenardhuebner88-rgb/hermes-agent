@@ -132,6 +132,26 @@ function MessageBubble({
   );
 }
 
+/** S6.5: Frame-Alter in der Live-Share-Statuszeile — tickt jede Sekunde,
+ *  warnend ab 5 s (eingefrorener „grüner" Share wird sichtbar). */
+function FrameAgeLabel({ lastFrameAt }: { lastFrameAt: number | null }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (lastFrameAt == null) return;
+    setNowMs(Date.now());
+    const id = setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => clearInterval(id);
+  }, [lastFrameAt]);
+  if (lastFrameAt == null) return null;
+  const ageSec = Math.max(0, Math.round((nowMs - lastFrameAt) / 1_000));
+  const stale = ageSec > 5;
+  return (
+    <span className={stale ? "jv-frame-age jv-frame-stale" : "jv-frame-age"}>
+      {stale ? t.frameAgeStale(ageSec) : t.frameAge(ageSec)}
+    </span>
+  );
+}
+
 export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number } = {}) {
   // turnPollIntervalMs ist eine Di/Test-Naht (kürzere Turn-Poll-Kadenz in
   // Komponententests); Produktiv Default: PA_TURN_POLL_INTERVAL_MS.
@@ -488,6 +508,7 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
         <div className="jv-liveshare-status" role="status">
           <span className="jv-live-dot" aria-hidden="true" />
           <span className="jv-live-label">{t.liveShareActive}</span>
+          <FrameAgeLabel lastFrameAt={liveShare.lastFrameAt} />
           <button
             type="button"
             className="jv-live-stop"

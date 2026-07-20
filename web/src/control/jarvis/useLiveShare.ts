@@ -105,6 +105,9 @@ export interface UseLiveShareResult {
   stop: () => void;
   /** asset_id of the current live frame, or null if unavailable. */
   attachCurrentFrame: () => Promise<string | null>;
+  /** S6.5: Epoch-ms des letzten erfolgreichen Frame-Uploads (null = noch kein
+   *  Frame). Macht einen eingefrorenen „grünen" Share sichtbar. */
+  lastFrameAt: number | null;
 }
 
 export interface UseLiveShareOptions {
@@ -115,6 +118,8 @@ export interface UseLiveShareOptions {
 export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareResult {
   const [status, setStatus] = useState<LiveShareStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  // S6.5: Zeitpunkt des letzten erfolgreichen Frame-Uploads (Epoch-ms).
+  const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
   const displaySupported = screenShareSupported();
   // Native capability is discovered asynchronously (bridge_ready → capabilities).
   // The bridge is an external store; subscribe with the tear-safe primitive so the
@@ -188,6 +193,7 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     uploadFailuresRef.current = 0;
     firstFrameReadyRef.current = false;
     startInFlightRef.current = false;
+    setLastFrameAt(null);
     if (firstFrameTimerRef.current !== null) {
       clearTimeout(firstFrameTimerRef.current);
       firstFrameTimerRef.current = null;
@@ -284,6 +290,8 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
         }
         if (generation !== captureGenRef.current || sessionIdRef.current !== sid) return;
         uploadFailuresRef.current = 0;
+        // S6.5: Frame-Upload-Zeitpunkt für den Frame-Age-Indikator.
+        setLastFrameAt(Date.now());
         if (!firstFrameReadyRef.current) {
           firstFrameReadyRef.current = true;
           startInFlightRef.current = false;
@@ -505,5 +513,6 @@ export function useLiveShare({ errorText }: UseLiveShareOptions): UseLiveShareRe
     start,
     stop,
     attachCurrentFrame,
+    lastFrameAt,
   };
 }

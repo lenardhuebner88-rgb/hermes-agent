@@ -832,6 +832,26 @@ export interface PaGraphResponse {
   errors?: PaInboxError[];
 }
 
+// S6.4a — PA-Feed (GET /api/pa/feed, hermes_cli/pa_chat.py PAStore.feed_page):
+// aufsteigende, bounded Feed-Page für das KI-LAGE-Panel. since_id-Cursor für
+// Polling-Clients; das Panel zeigt die letzten ~5 Einträge (Titel + Alter).
+export interface PaFeedItem {
+  id: number;
+  /** Unix-Sekunden. */
+  ts: number;
+  kind: string;
+  severity: string;
+  title: string;
+  ref: string | null;
+  delivered_push: number;
+}
+
+export interface PaFeedPage {
+  items: PaFeedItem[];
+  next_since_id: number;
+  has_more: boolean;
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -928,6 +948,9 @@ export const api = {
   getPaEngines: () => fetchJSON<PaEnginesResponse>("/api/pa/engines"),
   getPaInbox: () => fetchJSON<PaInboxResponse>("/api/pa/inbox"),
   getPaGraph: () => fetchJSON<PaGraphResponse>("/api/pa/graph"),
+  // S6.4a: PA-Feed für das KI-LAGE-Panel (aufsteigend, bounded).
+  getPaFeed: (limit = 50) =>
+    fetchJSON<PaFeedPage>(`/api/pa/feed?limit=${limit}`),
   // S3.3-FE PlanSpec-Draft + Propose (pa_planspec.py). engine/model folgen der
   // S2.2-Switcher-Wahl (weg gelassen → Backend-Default sol); project ist
   // optionaler Kontext. 422 = Engine-Ausgabe ohne PlanSpec-Frontmatter
