@@ -99,6 +99,10 @@ function AccountProviderCard({
   const primary = [session, weekly].filter((w): w is AccountUsageWindow => Boolean(w));
   const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
   const unavailable = !provider.available;
+  // Ausgaben-Karte (OpenRouter = Pay-as-you-go, kein Fenster-Limit): keine
+  // session/weekly-Balken, aber echte $-Details → als Karten-Körper statt als
+  // muter „keine Fensterdaten"-Leerzustand rendern.
+  const spendCard = !unavailable && primary.length === 0 && others.length === 0 && provider.details.length > 0;
   const tone: SignalTone = unavailable
     ? "neutral"
     : provider.windows.some((w) => (w.used_percent ?? 0) >= 90)
@@ -120,7 +124,9 @@ function AccountProviderCard({
       chipTone = ageH >= 24 ? "warn" : "neutral";
     }
   }
-  const hasExtras = others.length > 0 || provider.details.length > 0;
+  // Details-Collapse nur für Nebenfenster + Details, die NICHT schon als
+  // Ausgaben-Körper gerendert werden (sonst doppelt).
+  const hasExtras = others.length > 0 || (provider.details.length > 0 && !spendCard);
   return (
     <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
@@ -138,6 +144,11 @@ function AccountProviderCard({
       {primary.length ? (
         <div className="mt-3 space-y-1.5">
           {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}
+        </div>
+      ) : spendCard ? (
+        // Ausgaben-Karte (OpenRouter): $-Zeilen als Karten-Körper.
+        <div className="mt-3 space-y-1 text-xs text-ink-2">
+          {provider.details.map((detail) => <p key={detail}>{detail}</p>)}
         </div>
       ) : (
         // Gleichwertige Abo-Karte auch ohne Provider-Fenster (Kimi = lokale
@@ -204,13 +215,18 @@ export function AccountUsageTile({
   // xai ohne Fenster fällt bewusst in die Fußzeile (im Gegensatz zu Lane-Abos).
   const isAbo = (p: AccountUsageProvider) =>
     providerToLane(p.provider, config) != null || p.windows.length > 0;
+  // Ausgaben-Provider (OpenRouter = Pay-as-you-go): kein Fenster, keine Lane,
+  // aber echte $-Details → eigene Karte im Cockpit statt Fußzeile.
+  const isSpend = (p: AccountUsageProvider) =>
+    p.available && p.windows.length === 0 && providerToLane(p.provider, config) == null && p.details.length > 0;
   // Kimi = lokale Schätzung, kein hartes Provider-Limit → zählt nie als Engpass (§8).
   const bottleneck = pickBottleneck(
     providers.filter((p) => providerToLane(p.provider, config) !== "kimi"),
   );
-  // Cockpit: Lane-Abos (auch offline) + Provider mit echtem Fenster (Grok).
-  // Fußzeile: fensterlose Nicht-Abos (OpenRouter, offline window-less xai, …).
-  const cockpit = providers.filter((p) => isAbo(p));
+  // Cockpit: Lane-Abos (auch offline) + Provider mit echtem Fenster (Grok) +
+  // Ausgaben-Karten (OpenRouter). Fußzeile: nur noch offline window-lose Nicht-
+  // Abos ohne Lane und ohne Details.
+  const cockpit = providers.filter((p) => isAbo(p) || isSpend(p));
   const footer = providers.filter((p) => !cockpit.includes(p));
   // Engpass-Ton: rot ab 90 %, gelb ab 75 %, sonst neutral (kein ⚠) — §3.
   const bnTone: SignalTone =

@@ -121,7 +121,7 @@ describe("AccountUsageTile", () => {
     expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
-  it("hält OpenRouter (kein Abo-Fenster, $-Guthaben) in der ehrlich beschrifteten Fußzeile", () => {
+  it("rendert OpenRouter (kein Abo-Fenster, $-Guthaben) als eigene Ausgaben-Karte im Cockpit", () => {
     const u: AccountUsageResponse = {
       cache_ttl_seconds: 60,
       providers: [
@@ -135,13 +135,40 @@ describe("AccountUsageTile", () => {
           cached: false,
           unavailable_reason: null,
           windows: [],
-          details: ["Guthaben: 12.00 USD"],
+          details: ["Credits balance: $0.00", "API key usage: $173.38 total • $5.08 this month"],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
+    // Eigene Karte (article) im Cockpit, $-Details als Körper — nicht in der Fußzeile.
+    expect(html).toContain("OpenRouter");
+    expect(html).toContain("Credits balance: $0.00");
+    expect(html).toContain("API key usage: $173.38 total • $5.08 this month");
+    expect(html).not.toContain("Ohne Fenster-Limit");
+    expect(html).not.toContain("keine Fensterdaten vom Provider");
+  });
+
+  it("hält einen offline/leeren Nicht-Abo-Provider weiterhin in der Fußzeile", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "openrouter",
+          available: false,
+          source: "credits",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "OpenRouter",
+          plan: null,
+          cached: false,
+          unavailable_reason: "kein API-Key",
+          windows: [],
+          details: [],
         },
       ],
     };
     const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
     expect(html).toContain("Ohne Fenster-Limit");
-    expect(html).toContain("OpenRouter");
+    expect(html).toContain("kein API-Key");
   });
 
   it("paart das Provider-% mit dem Worker-Run-Abgleich, wenn laneUsage durchgereicht wird", () => {
