@@ -40,7 +40,7 @@ _QUESTION_NUMBERED_RE = _agent_terminals._QUESTION_NUMBERED_RE
 _OPTION_LINE_RE = re.compile(r"^\s*(?:[❯›]\s*)?(\d+)\.\s+(.*)$")
 _RECOMMENDED_MARKER_RE = re.compile(r"^\s*[❯›]\s*\d+\.")
 
-_KIND_HINTS = ("claude", "codex", "kimi", "grok")
+_KIND_HINTS = ("claude", "codex", "kimi", "grok", "qwen")
 
 # kind -> how an option answer is delivered (select digit vs y/n).
 # Central table so live CLI dialect differences have one audit point.

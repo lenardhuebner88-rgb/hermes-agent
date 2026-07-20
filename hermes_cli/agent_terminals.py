@@ -49,7 +49,7 @@ _TMUX_GONE_MARKERS: tuple[str, ...] = (
     "no server running",
 )
 
-_AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi", "grok")
+_AGENT_KINDS: tuple[str, ...] = ("hermes", "claude", "codex", "kimi", "grok", "qwen")
 
 # ----- ANSI stripping --------------------------------------------------------
 # Order matters: OSC sequences also start with ESC, so they must be stripped
@@ -449,6 +449,11 @@ class TmuxAgentSessionService:
             return ("grok",), (
                 home / ".npm-global" / "bin" / "grok",
                 home / ".local" / "bin" / "grok",
+            )
+        if kind == "qwen":
+            return ("qwen",), (
+                home / ".npm-global" / "bin" / "qwen",
+                home / ".local" / "bin" / "qwen",
             )
         raise InvalidTarget(f"unknown agent kind: {kind}")
 

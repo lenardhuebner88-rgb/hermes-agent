@@ -19,6 +19,7 @@ export const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: strin
   { kind: "codex", label: "Codex", hint: "codex-cli" },
   { kind: "kimi", label: "Kimi", hint: "kimi-cli" },
   { kind: "grok", label: "Grok", hint: "grok-build / Grok 4.5" },
+  { kind: "qwen", label: "Qwen", hint: "Qwen Code / qwen3.8-max-preview" },
 ];
 
 export const AGENT_LABELS: Record<AgentTerminalKind, string> = Object.fromEntries(AGENTS.map((agent) => [agent.kind, agent.label])) as Record<AgentTerminalKind, string>;
@@ -28,6 +29,7 @@ export const AGENT_IDENTITY_DOT_CLASS: Record<AgentTerminalKind, string> = {
   codex: "bg-data-4",
   kimi: "bg-data-5",
   grok: "bg-data-3",
+  qwen: "bg-data-6",
 };
 const AGENT_KINDS = new Set<AgentTerminalKind>(AGENTS.map((agent) => agent.kind));
 
