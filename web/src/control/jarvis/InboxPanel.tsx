@@ -20,6 +20,11 @@
  *    Klassik-Tab (S1-Muster, keine neue Antwort-Mechanik).
  *  - held_task / freigabe_gate → Karte mit Status/Freigabe + Board-Link.
  *
+ * S7.6: Decision-Cards — Zeile 1 ist die Entscheidung (Server-`summary`,
+ * Fallback: clientseitige Destillation), Badges zeigen 🔑 Operator-Freigabe,
+ * Alter und Blockradius auf einen Blick; Roh-Titel und Details bleiben bis
+ * zum Expand verborgen. Aktionen (PRÜFEN/Ausführen/Links) unverändert.
+ *
  * ESC oder × schließt die Ansicht.
  */
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -28,8 +33,16 @@ import { Link } from "react-router-dom";
 import { api, type PaInboxActionItem, type PaInboxItem } from "@/lib/api";
 import { extractDetail } from "../hooks/internal";
 import { de } from "../i18n/de";
+import { decisionAge, decisionHeadline, needsOperatorKey } from "./decisionTitle";
 
 const t = de.jarvis;
+
+/** S7.6: Roh-Titel hinter dem Expand zeigen, wenn er sich von der
+ *  Headline unterscheidet (leere Titel haben nichts zu zeigen). */
+function rawTitleDiffers(item: PaInboxItem, headline: string): boolean {
+  const raw = item.title.trim();
+  return raw !== "" && raw !== headline;
+}
 
 /** Board-Deep-Link für Kanban-Items (Fleet-Board, task-Parameter wie die
  *  bestehenden Klassik-Links). */
@@ -155,6 +168,10 @@ function ApprovalCard({
   const target = actionTarget(item);
   const keys = item.action_payload?.payload.keys ?? null;
   const reason = item.action_payload?.reason ?? null;
+  // S7.6: Decision-Headline statt Roh-Titel (summary > Destillation).
+  const headline = decisionHeadline(item);
+  const showRawTitle = rawTitleDiffers(item, headline);
+  const age = decisionAge(item.ts);
   // S3.3-FE: planspec.ingest-Cards tragen den PLANSPEC-Chip statt des
   // generischen PA-AKTION-Chips; der Ausführen/Ablehnen-Flow ist derselbe.
   const isPlanspec = category === "planspec.ingest";
@@ -199,9 +216,13 @@ function ApprovalCard({
           {isPlanspec ? t.inboxPlanspecChip : t.inboxActionChip}
         </span>
         {category ? <span className="jv-appr-cat">{category}</span> : null}
+        {age ? <span className="jv-badge jv-badge-age">{age}</span> : null}
+        {item.block_radius > 0 ? (
+          <span className="jv-badge jv-badge-blocked">{t.inboxBlocked(item.block_radius)}</span>
+        ) : null}
       </p>
 
-      <p className="jv-frage-text">{item.title}</p>
+      <p className="jv-frage-text">{headline}</p>
 
       {category && target ? (
         <p className="jv-appr-target" data-testid={`jv-appr-target-${item.id}`}>
@@ -209,9 +230,14 @@ function ApprovalCard({
         </p>
       ) : null}
 
-      {keys || reason ? (
+      {showRawTitle || keys || reason ? (
         <details className="jv-appr-details">
           <summary>{t.inboxDetails}</summary>
+          {showRawTitle ? (
+            <p className="jv-appr-raw" data-testid={`jv-appr-raw-${item.id}`}>
+              {item.title}
+            </p>
+          ) : null}
           {keys ? (
             <p className="jv-appr-keys" title={keys}>
               {t.inboxKeysLabel} {keys.length > 120 ? `${keys.slice(0, 120)}…` : keys}
@@ -250,12 +276,26 @@ function ApprovalCard({
 }
 
 function QuestionCard({ item }: { item: Extract<PaInboxItem, { type: "question" }> }) {
+  // S7.6: Decision-Headline + Alter/Blockradius als Badges.
+  const headline = decisionHeadline(item);
+  const showRawTitle = rawTitleDiffers(item, headline);
+  const age = decisionAge(item.ts);
   return (
     <div className="jv-frage" data-testid={`jv-inbox-q-${item.id}`}>
       <p className="jv-frage-meta">
         <span className="jv-frage-kind">{item.kind?.trim() || "agent"}</span>
+        {age ? <span className="jv-badge jv-badge-age">{age}</span> : null}
+        {item.block_radius > 0 ? (
+          <span className="jv-badge jv-badge-blocked">{t.inboxBlocked(item.block_radius)}</span>
+        ) : null}
       </p>
-      <p className="jv-frage-text">{item.title}</p>
+      <p className="jv-frage-text">{headline}</p>
+      {showRawTitle ? (
+        <details className="jv-appr-details">
+          <summary>{t.inboxRawDetails}</summary>
+          <p className="jv-appr-raw">{item.title}</p>
+        </details>
+      ) : null}
       {item.options.length > 0 ? (
         <div className="jv-fopts" role="group" aria-label={t.inboxOptionsLabel}>
           {item.options.map((opt) => (
@@ -284,16 +324,47 @@ function TaskCard({
   item: Extract<PaInboxItem, { type: "held_task" | "freigabe_gate" }>;
 }) {
   const isGate = item.type === "freigabe_gate";
+  // S7.6: Decision-Card — Headline (summary > Destillation), Badges für
+  // 🔑 Operator-Freigabe / Alter / Blockradius; Roh-Titel und Status bleiben
+  // bis zum Expand verborgen.
+  const headline = decisionHeadline(item);
+  const showRawTitle = rawTitleDiffers(item, headline);
+  const age = decisionAge(item.ts);
+  const statusLine = [item.status, item.freigabe ? `freigabe: ${item.freigabe}` : null]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div className="jv-frage" data-testid={`jv-inbox-t-${item.id}`}>
       <p className="jv-frage-meta">
         <span className={isGate ? "jv-appr-chip jv-gate" : "jv-appr-chip jv-held"}>
           {isGate ? t.inboxGateChip : t.inboxHeldChip}
         </span>
-        {item.status ? <span>{item.status}</span> : null}
-        {item.freigabe ? <span> · freigabe: {item.freigabe}</span> : null}
+        {needsOperatorKey(item) ? (
+          <span
+            className="jv-badge jv-badge-key"
+            title={t.inboxKeyTitle}
+            data-testid={`jv-key-${item.id}`}
+          >
+            🔑
+          </span>
+        ) : null}
+        {age ? <span className="jv-badge jv-badge-age">{age}</span> : null}
+        {item.block_radius > 0 ? (
+          <span className="jv-badge jv-badge-blocked">{t.inboxBlocked(item.block_radius)}</span>
+        ) : null}
       </p>
-      <p className="jv-frage-text">{item.title}</p>
+      <p className="jv-frage-text">{headline}</p>
+      {showRawTitle || statusLine ? (
+        <details className="jv-appr-details">
+          <summary>{t.inboxTaskDetails}</summary>
+          {showRawTitle ? (
+            <p className="jv-appr-raw" data-testid={`jv-inbox-raw-${item.id}`}>
+              {item.title}
+            </p>
+          ) : null}
+          {statusLine ? <p className="jv-appr-reason">{statusLine}</p> : null}
+        </details>
+      ) : null}
       <Link
         className="jv-fanswer"
         to={boardLink(item.card_id)}

@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import type { PaInboxItem } from "@/lib/api";
+import type { PaInboxActionItem, PaInboxItem, PaInboxTaskItem } from "@/lib/api";
 
 configure({ asyncUtilTimeout: 5000 });
 
@@ -120,6 +120,45 @@ const GATE_ITEM: PaInboxItem = {
   freigabe: "operator",
   block_radius: 2,
   ts: 1752970000,
+};
+
+/** S7.6: Gate mit Server-`summary` (Feld aus dem S7.6-Backend) und rohem
+ *  PlanSpec-Langtitel — die Decision-Card zeigt die summary als Zeile 1. */
+const GATE_ITEM_WITH_SUMMARY: PaInboxTaskItem = {
+  type: "freigabe_gate",
+  id: "t_sum1",
+  card_id: "t_sum1",
+  title:
+    "PlanSpec GATE-GREEN-KANBAN-LIFECYCLE-REGRESSION-FIX: Green-Gate-Ursachenfix: die live-reproduzierten Fehler",
+  summary: "  grünes Gate freigeben  ",
+  status: "scheduled",
+  freigabe: "operator",
+  block_radius: 3,
+  ts: 1752970000,
+};
+
+/** S7.6: Approval mit summary — Roh-Titel und Grund bleiben hinter dem
+ *  bestehenden „Grund & Payload"-Expand. */
+const ACTION_ITEM_WITH_SUMMARY: PaInboxActionItem = {
+  type: "pa_action",
+  id: "q99",
+  question_id: 99,
+  title: "PlanSpec GATE-DEPLOY: Deploy-Kette auf den Homeserver: 14 Slices, 3 Gates",
+  summary: "Deploy-Kette freigeben",
+  kind: "pa_action",
+  category: "planspec.ingest",
+  action_payload: {
+    version: 1,
+    category: "planspec.ingest",
+    payload: { draft_id: "draft_9999999999999999999999aa" },
+    reason: "Deploy-Kette wartet auf Freigabe",
+  },
+  options: [
+    { nr: 1, label: "Ausführen", recommended: false },
+    { nr: 2, label: "Ablehnen", recommended: false },
+  ],
+  block_radius: 2,
+  ts: 1753000000,
 };
 
 function renderPanel(items: PaInboxItem[] = [PA_ACTION_ITEM]) {
@@ -308,5 +347,97 @@ describe("InboxPanel (/api/pa/inbox-Items)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Inbox-Ansicht schließen" }));
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("S7.6: Decision-Cards (summary-first, Badges, Roh-Titel im Expand)", () => {
+  it("Task-Card: summary ist Zeile 1, Roh-Titel + Status hinter „Roh-Titel & Status“", async () => {
+    renderPanel([GATE_ITEM_WITH_SUMMARY]);
+
+    const card = await screen.findByTestId("jv-inbox-t-t_sum1");
+    // Zeile 1 = getrimmte Server-summary, nicht der rohe Langtitel.
+    expect(screen.getByText("grünes Gate freigeben")).toBeTruthy();
+    // Badges: 🔑 (freigabe=operator), Alter, Blockradius.
+    expect(screen.getByTestId("jv-key-t_sum1").textContent).toBe("🔑");
+    expect(card.textContent).toMatch(/seit \d+d/);
+    expect(card.textContent).toContain("blockiert 3");
+
+    // Roh-Titel + Status bleiben bis zum Expand verborgen.
+    const details = screen.getByText("Roh-Titel & Status").closest("details");
+    expect(details?.open).toBe(false);
+    expect(screen.getByTestId("jv-inbox-raw-t_sum1").textContent).toBe(
+      GATE_ITEM_WITH_SUMMARY.title,
+    );
+    expect(details?.textContent).toContain("scheduled · freigabe: operator");
+    fireEvent.click(screen.getByText("Roh-Titel & Status"));
+    expect(details?.open).toBe(true);
+    // Board-Link unverändert.
+    expect(screen.getByRole("link", { name: /Zum Board:/ }).getAttribute("href")).toBe(
+      "/control/fleet?task=t_sum1",
+    );
+  });
+
+  it("Task-Card ohne summary → clientseitige Destillation (PlanSpec-Präfix weg)", async () => {
+    renderPanel([{ ...GATE_ITEM_WITH_SUMMARY, id: "t_sum2", card_id: "t_sum2", summary: undefined }]);
+
+    await screen.findByTestId("jv-inbox-t-t_sum2");
+    expect(screen.getByText("Green-Gate-Ursachenfix: die live-reproduzierten Fehler")).toBeTruthy();
+    // Der rohe Langtitel steht hinter dem Expand.
+    expect(screen.getByTestId("jv-inbox-raw-t_sum2").textContent).toBe(
+      GATE_ITEM_WITH_SUMMARY.title,
+    );
+  });
+
+  it("🔑 nur bei freigabe=operator; kein blockiert-Badge bei Radius 0", async () => {
+    renderPanel([
+      HELD_ITEM,
+      {
+        ...GATE_ITEM_WITH_SUMMARY,
+        id: "t_sum3",
+        card_id: "t_sum3",
+        freigabe: null,
+        block_radius: 0,
+        summary: "Kette läuft durch",
+      },
+    ]);
+
+    const held = await screen.findByTestId("jv-inbox-t-t_abc123");
+    expect(held.textContent).toContain("blockiert 4");
+    expect(screen.queryByTestId("jv-key-t_abc123")).toBeNull();
+
+    const plain = await screen.findByTestId("jv-inbox-t-t_sum3");
+    expect(screen.queryByTestId("jv-key-t_sum3")).toBeNull();
+    expect(plain.textContent).not.toContain("blockiert");
+  });
+
+  it("Approval-Card: summary als Zeile 1, Roh-Titel + Grund hinter „Grund & Payload“", async () => {
+    renderPanel([ACTION_ITEM_WITH_SUMMARY]);
+
+    const card = await screen.findByTestId("jv-appr-q99");
+    expect(screen.getByText("Deploy-Kette freigeben")).toBeTruthy();
+    expect(card.textContent).toContain("blockiert 2");
+    // Zielzeile bleibt direkt sichtbar (S6), Roh-Titel wandert in den Expand.
+    expect(screen.getByTestId("jv-appr-target-q99").textContent).toBe(
+      "planspec.ingest → draft_9999999999999999999999aa",
+    );
+    const details = screen.getByText("Grund & Payload").closest("details");
+    expect(screen.getByTestId("jv-appr-raw-q99").textContent).toBe(ACTION_ITEM_WITH_SUMMARY.title);
+    expect(details?.textContent).toContain("Deploy-Kette wartet auf Freigabe");
+  });
+
+  it("Approval-Card ohne summary → Destillation, identischer Titel ohne Doppel-Expand", async () => {
+    renderPanel([
+      { ...ACTION_ITEM_WITH_SUMMARY, id: "q98", question_id: 98, summary: undefined },
+    ]);
+
+    await screen.findByTestId("jv-appr-q98");
+    // PlanSpec-Präfix gefallen, Rest bleibt die Headline.
+    expect(
+      screen.getByText("Deploy-Kette auf den Homeserver: 14 Slices, 3 Gates"),
+    ).toBeTruthy();
+    // Headline ≠ Roh-Titel → der Roh-Titel steht im Expand.
+    expect(screen.getByTestId("jv-appr-raw-q98").textContent).toBe(
+      ACTION_ITEM_WITH_SUMMARY.title,
+    );
   });
 });

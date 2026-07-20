@@ -704,6 +704,10 @@ interface PaInboxItemBase {
   /** "q<event_id>" for question rows, the card id for kanban rows. */
   id: string;
   title: string;
+  /** S7.6: serverseitig destillierter Kurztitel (≤80 Z., pa_titles.py) für
+   *  die Decision-Card; optional — ohne ihn fällt das Frontend auf die
+   *  clientseitige Destillation (control/jarvis/decisionTitle.ts) zurück. */
+  summary?: string;
   block_radius: number;
   /** Unix seconds. */
   ts: number;
@@ -996,10 +1000,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     }),
-  /** Authenticated asset URL (cookie/session like every other same-origin
-   *  request). 404 = pruned upload → the bubble shows a broken-attachment
-   *  state instead of losing the thread. */
-  paAssetUrl: (assetId: string) => `/api/pa/asset/${encodeURIComponent(assetId)}`,
+  /** Authenticated asset URL. 404 = pruned upload → the bubble shows a
+   *  broken-attachment state instead of losing the thread.
+   *  S7.5: ein ``<img>`` kann den Session-Token-Header nicht mitsenden —
+   *  darum den Token (dieselbe Quelle wie fetchJSON, derselbe ``?token=``-
+   *  Parameter wie die /api/files/download- und /api/artifacts/-Flows) als
+   *  Query-Param anhängen, wenn er gesetzt ist. Ohne Token (Gated-Mode mit
+   *  Cookie-Auth, Loopback ohne injizierten Token) bleibt die URL unverändert. */
+  paAssetUrl: (assetId: string) => {
+    const path = `/api/pa/asset/${encodeURIComponent(assetId)}`;
+    const token = window.__HERMES_SESSION_TOKEN__;
+    return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+  },
   uploadPaImage: (file: File) => {
     // Same raw multipart/form-data pattern as uploadAgentTerminalFile — no
     // Content-Type header, the browser sets the multipart boundary itself.
