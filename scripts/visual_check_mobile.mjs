@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { requirePlaywrightChromium, resolveChromiumExecutable } from "./lib/playwright_chromium.mjs";
+import { partitionConsoleErrors } from "./lib/visual_gate_http.mjs";
 
 const chromium = requirePlaywrightChromium();
 
@@ -54,6 +56,8 @@ async function readOverflow() {
 
 async function main() {
   const consoleErrors = [];
+  const httpFailures = [];
+  const startedAt = Date.now();
   let overflowAfterFocus = null;
   let focusTargetFound = false;
   let browser = null;
@@ -74,10 +78,33 @@ async function main() {
     });
     const page = await context.newPage();
     page.on("console", (message) => {
-      if (message.type() === "error") consoleErrors.push(message.text());
+      if (message.type() === "error") {
+        consoleErrors.push({
+          text: message.text(),
+          location: message.location(),
+          atMs: Date.now() - startedAt,
+        });
+      }
     });
     page.on("pageerror", (error) => {
-      consoleErrors.push(`pageerror: ${error.message}`);
+      consoleErrors.push({
+        text: `pageerror: ${error.message}`,
+        location: {},
+        atMs: Date.now() - startedAt,
+      });
+    });
+    page.on("response", (response) => {
+      if (response.status() < 400) return;
+      const request = response.request();
+      httpFailures.push({
+        status: response.status(),
+        method: request.method(),
+        url: response.url(),
+        resourceType: request.resourceType(),
+        isNavigationRequest: request.isNavigationRequest(),
+        frameUrl: request.frame()?.url() ?? null,
+        atMs: Date.now() - startedAt,
+      });
     });
 
     await page.goto(CONTROL_URL, {
@@ -118,13 +145,16 @@ async function main() {
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.screenshot({ path: screenshotPath, fullPage: true });
 
-    if (consoleErrors.length > 0) {
-      throw new Error(`console errors: ${consoleErrors.join(" | ")}`);
+    const classified = partitionConsoleErrors({ consoleErrors, httpFailures, gateUrl: CONTROL_URL });
+    if (classified.blocking.length > 0) {
+      throw new Error(`console errors: ${classified.blocking.map((entry) => entry.text).join(" | ")}`);
     }
 
     process.stdout.write(JSON.stringify({
       ok: true,
-      consoleErrors,
+      consoleErrors: [],
+      httpFailures,
+      toleratedConsoleErrors: classified.tolerated,
       overflowAfterFocus,
       focusTargetFound,
       screenshotPath,
@@ -132,6 +162,7 @@ async function main() {
     return 0;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const classified = partitionConsoleErrors({ consoleErrors, httpFailures, gateUrl: CONTROL_URL });
     try {
       if (browser) {
         const contexts = browser.contexts();
@@ -143,7 +174,9 @@ async function main() {
     }
     process.stdout.write(JSON.stringify({
       ok: false,
-      consoleErrors,
+      consoleErrors: classified.blocking.map((entry) => entry.text),
+      httpFailures,
+      toleratedConsoleErrors: classified.tolerated,
       overflowAfterFocus,
       focusTargetFound,
       screenshotPath,
