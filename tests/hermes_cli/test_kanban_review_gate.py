@@ -500,6 +500,18 @@ def test_review_stages_for_tier(monkeypatch):
     monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
     assert kb._review_stages_for_tier("bogus", cfg) == ["verifier"]
 
+    # The WALKED critical chain (_review_chain_for_tier) layers the explicit
+    # adversarial critic lane on top of the automatic tier topology, so the
+    # canonical critical chain is verifier → reviewer → critic. The critic is
+    # appended only for the critical tier; standard/review are unchanged.
+    assert kb._review_chain_for_tier("standard", cfg) == ["verifier"]
+    assert kb._review_chain_for_tier("review", cfg) == ["verifier"]
+    assert kb._review_chain_for_tier("critical", cfg) == [
+        "verifier",
+        "reviewer",
+        "critic",
+    ]
+
 
 # ---------------------------------------------------------------------------
 # B-T7: submit stamps the frozen tier + stage 0 + target profile into the event
@@ -557,7 +569,14 @@ def test_review_chain_target_reads_event(kanban_home, gate_on):
 # ---------------------------------------------------------------------------
 
 
-def test_critical_chain_walks_verifier_then_reviewer(kanban_home, gate_on):
+def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on):
+    """The canonical critical chain is three stages: verifier → reviewer → critic.
+
+    The critic is the terminal adversarial stage for the critical tier (when the
+    critic profile exists), so after the reviewer approves the task is re-parked
+    in ``review`` for the critic and only reaches ``done`` once the critic
+    approves.
+    """
     with kb.connect() as conn:
         tid = kb.create_task(
             conn,
@@ -584,13 +603,27 @@ def test_critical_chain_walks_verifier_then_reviewer(kanban_home, gate_on):
             kb._review_chain_target(conn, tid, kb._review_gate_config()) == "reviewer"
         )
 
-        # stage 1: reviewer APPROVED → terminal done. Critic remains an
-        # explicit adversarial lane, not an automatic critical-tier stage.
+        # stage 1: reviewer APPROVED → re-park for stage 2 (critic), the
+        # terminal adversarial stage of the canonical critical chain.
         kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
         kb.complete_task(
             conn,
             tid,
             summary="reviewer ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+        assert kb.get_task(conn, tid).status == "review"
+        assert (
+            kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
+        )
+
+        # stage 2: critic APPROVED → terminal done.
+        kb.claim_review_task(conn, tid, reviewer_profile="critic")
+        kb.complete_task(
+            conn,
+            tid,
+            summary="critic ok",
             metadata={"review_verdict": "APPROVED"},
             review_gate=True,
         )
@@ -1117,10 +1150,10 @@ def test_zero_diff_auto_tier_uses_single_verifier_without_fake_adjustment(
 def test_final_review_completion_writes_review_released_event(kanban_home, gate_on):
     """Live t_92528385 event gap: final review approve gets an explicit release verb.
 
-    ``critical`` is the two-stage tier (verifier → reviewer); the final reviewer
-    approval must emit the explicit ``review_released`` release verb. ``review``
-    is single-stage (verifier only), so the reviewer final stage lives on the
-    critical tier under the new topology.
+    ``critical`` is the three-stage tier (verifier → reviewer → critic); the
+    terminal critic approval must emit the explicit ``review_released`` release
+    verb. The intermediate verifier/reviewer approvals advance the chain and do
+    NOT release, so the single release verb carries the critic's terminal stage.
     """
     with kb.connect() as conn:
         tid = kb.create_task(
@@ -1153,13 +1186,23 @@ def test_final_review_completion_writes_review_released_event(kanban_home, gate_
             metadata={"review_verdict": "APPROVED"},
             review_gate=True,
         )
+        # Terminal stage: the critic approval closes the canonical critical
+        # chain and emits the release verb.
+        kb.claim_review_task(conn, tid, reviewer_profile="critic")
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="critic ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
 
         releases = [e for e in kb.list_events(conn, tid) if e.kind == "review_released"]
         assert len(releases) == 1
         assert releases[0].payload["verdict"] == "APPROVED"
         assert releases[0].payload["review_tier"] == "critical"
-        assert releases[0].payload["review_stage"] == 1
-        assert releases[0].payload["target_profile"] == "reviewer"
+        assert releases[0].payload["review_stage"] == 2
+        assert releases[0].payload["target_profile"] == "critic"
 
 
 def test_verdict_spawn_lane_resolver_error_fails_closed(

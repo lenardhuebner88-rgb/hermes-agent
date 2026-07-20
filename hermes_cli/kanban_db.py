@@ -10905,6 +10905,25 @@ def _review_stages_for_tier(tier: str, cfg: dict) -> list[str]:
     return [str(profile).strip() for profile in seq if str(profile).strip()]
 
 
+def _review_chain_for_tier(tier: str, cfg: dict) -> list[str]:
+    """Return the full ordered review chain for *tier*, including the critic.
+
+    Builds on :func:`_review_stages_for_tier` (the automatic tier topology,
+    which deliberately excludes the critic) and appends the configured critic
+    profile as the terminal adversarial stage for the ``critical`` tier. This is
+    the chain :func:`_maybe_advance_review_chain` walks
+    (verifier→reviewer→critic): the critic is an explicit adversarial lane
+    layered on top of the tier stages, never an automatic tier stage in its own
+    right, so it lives here rather than in ``_review_stages_for_tier``.
+    """
+    chain = list(_review_stages_for_tier(tier, cfg))
+    if tier == "critical":
+        critic = str(cfg.get("critic_profile") or _DEFAULT_CRITIC_PROFILE).strip()
+        if critic and critic not in chain:
+            chain.append(critic)
+    return chain
+
+
 def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     """Return the latest staged-review payload, including its reviewed commit."""
     row = conn.execute(
@@ -12392,7 +12411,7 @@ def _maybe_advance_review_chain(
     tier = str(payload.get("review_tier") or "standard")
     stage = int(payload.get("review_stage") or 0)
     cfg = _review_gate_config()
-    stages = _review_stages_for_tier(tier, cfg)
+    stages = _review_chain_for_tier(tier, cfg)
     if stage + 1 >= len(stages):
         return None  # final stage → terminal done (normal path)
     next_stage = stage + 1
