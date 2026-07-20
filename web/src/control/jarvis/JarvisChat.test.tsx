@@ -47,7 +47,10 @@ import { _resetEngineChoice, setEngineChoice } from "./engineSelection";
 
 // Voll-Suite-Last kann waitFor über den Default (1s) hinaus bouncen
 // (gleiche Vorsicht wie projekte/FragenSection.test.tsx).
+// S6: sequentielle waitFors (Screenshare/PTT) summieren sich unter Last über
+// den Default-testTimeout (5s) — scoped erhöhen, keine Pauschale.
 configure({ asyncUtilTimeout: 5000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const listPaMessagesMock = vi.hoisted(() => vi.fn());
 const sendPaMessageMock = vi.hoisted(() => vi.fn());

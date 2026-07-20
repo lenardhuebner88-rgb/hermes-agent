@@ -12,10 +12,15 @@
  *     Track, melden dem Backend stop und kehren in den Ruhezustand zurück.
  *  5. attachCurrentFrame() materialisiert den Server-Frame → asset_id.
  */
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { screenShareSupported, useLiveShare } from "./useLiveShare";
+
+// S6: Live-Share-Hooks flaky unter Merge-Gate-Last (t_1ccb0734-Churn) —
+// nur asyncUtilTimeout/testTimeout scoped anheben.
+configure({ asyncUtilTimeout: 5000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const startLiveShareMock = vi.hoisted(() => vi.fn());
 const uploadLiveShareFrameMock = vi.hoisted(() => vi.fn());
