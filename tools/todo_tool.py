@@ -15,7 +15,10 @@ Design:
 """
 
 import json
+import logging
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Valid status values for todo items
@@ -164,20 +167,37 @@ class TodoStore:
         Returns a clean dict with only {id, content, status}.
         """
         if not isinstance(item, dict):
+            logger.warning(
+                "TodoStore._validate: coerced non-dict item of type %s to a "
+                "placeholder; input was malformed",
+                type(item).__name__,
+            )
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
 
         item_id = str(item.get("id", "")).strip()
         if not item_id:
+            logger.warning("TodoStore._validate: todo item missing 'id'; defaulted to '?'")
             item_id = "?"
 
         content = str(item.get("content", "")).strip()
         if not content:
+            logger.warning(
+                "TodoStore._validate: todo item id=%s missing 'content'; "
+                "defaulted to '(no description)'",
+                item_id,
+            )
             content = "(no description)"
         else:
             content = TodoStore._cap_content(content)
 
         status = str(item.get("status", "pending")).strip().lower()
         if status not in VALID_STATUSES:
+            logger.warning(
+                "TodoStore._validate: todo item id=%s had invalid status %r; "
+                "defaulted to 'pending'",
+                item_id,
+                status,
+            )
             status = "pending"
 
         return {"id": item_id, "content": content, "status": status}
