@@ -31,17 +31,22 @@
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
  * siehe DESIGN.md „Jarvis-Zone".
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import "../jarvis.css";
 import { de } from "../i18n/de";
+import { fmtRelativeTime, nowSec } from "../lib/derive";
 import { AktivitaetPanel } from "./AktivitaetPanel";
 import { JARVIS_OPEN_AKTIVITAET_EVENT, JarvisChat } from "./JarvisChat";
 import { JarvisGraph, JarvisGraphStatsTag, JarvisGraphTag } from "./JarvisGraph";
+import { deriveFilterRows, deriveTopHubs } from "./graphHubs";
 import { ProjektePanel } from "./ProjektePanel";
 import { SessionsPanel } from "./SessionsPanel";
 import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
+import { usePaFeed } from "./usePaFeed";
+import { usePaGraphView } from "./usePaGraph";
+import { sparkAreaPath, sparkLinePath, useSystemStats } from "./useSystemStats";
 import { WartetPanel } from "./WartetPanel";
 import {
   JARVIS_BRAIN_STATS,
@@ -117,6 +122,49 @@ export function JarvisShellView() {
     return () => window.removeEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, onOpenAktivitaet);
   }, []);
 
+  // S6.4a: KI-LAGE live (GET /api/pa/feed) — die letzten ~5 Feed-Einträge.
+  const feed = usePaFeed();
+  const feedItems = useMemo(() => {
+    const items = feed.data?.items ?? [];
+    return items.slice(-5);
+  }, [feed.data]);
+  const feedLive = feedItems.length > 0;
+
+  // S6.4b: Top-Hubs/Filter aus den Graph-Knoten ableiten (derselbe Poll wie
+  // JarvisGraph — pollingStore dedupliziert, kein zusätzlicher Fetch).
+  const graphView = usePaGraphView();
+  const topHubs = useMemo(
+    () => (graphView.isLive ? deriveTopHubs(graphView.graph) : JARVIS_TOP_HUBS),
+    [graphView.isLive, graphView.graph],
+  );
+  const filterRows = useMemo(
+    () => (graphView.isLive ? deriveFilterRows(graphView.graph) : JARVIS_FILTER_ROWS),
+    [graphView.isLive, graphView.graph],
+  );
+
+  // S6.4c: Sparklines aus GET /api/system/stats (Punkt-Werte, keine Zeitreihe).
+  const sysStats = useSystemStats();
+  const sparks = useMemo(() => {
+    const s = sysStats.data;
+    if (!s || (s.cpu_percent == null && !s.memory && !s.disk)) return JARVIS_SPARKS;
+    const rows = [
+      { label: "CPU", value: s.cpu_percent != null ? `${Math.round(s.cpu_percent)} %` : "–", tone: "cyan" as const, pct: s.cpu_percent ?? 0 },
+      { label: "RAM", value: s.memory ? `${Math.round(s.memory.percent)} %` : "–", tone: "amber" as const, pct: s.memory?.percent ?? 0 },
+      { label: "DISK", value: s.disk ? `${Math.round(s.disk.percent)} %` : "–", tone: "grau" as const, pct: s.disk?.percent ?? 0 },
+    ];
+    return rows.map((r) => ({
+      label: r.label,
+      value: r.value,
+      tone: r.tone,
+      areaPath: sparkAreaPath(r.pct),
+      linePath: sparkLinePath(r.pct),
+    }));
+  }, [sysStats.data]);
+  const sparksLive = sysStats.data != null && (sysStats.data.cpu_percent != null || sysStats.data.memory != null || sysStats.data.disk != null);
+
+  // S6: relativer Jetzt-Punkt für die Feed-Altersanzeige (einmal pro Render).
+  const now = nowSec();
+
   return (
     <div className="jv" ref={rootRef}>
       <div className={hud ? "jv-stage" : "jv-stage jv-hud-off"}>
@@ -136,7 +184,7 @@ export function JarvisShellView() {
             <div className="jv-ptitle" style={{ marginBottom: 5 }}>
               TOP-HUBS
             </div>
-            {JARVIS_TOP_HUBS.map((hub) => (
+            {topHubs.map((hub) => (
               <div className="jv-hub" key={hub.name}>
                 <span className={`jv-d jv-tone-${hub.tone}`} aria-hidden="true" />
                 <span className="jv-nm">{hub.name}</span>
@@ -154,12 +202,12 @@ export function JarvisShellView() {
           </Link>
         </div>
 
-        {/* ══ Rechts oben: Filter ══ */}
+        {/* ══ Rechts oben: Filter (S6: live aus Graph-Knoten) ══ */}
         <div className="jv-float jv-filter">
           <div className="jv-ptitle">
-            FILTER <MockTag />
+            FILTER{graphView.isLive ? null : <MockTag />}
           </div>
-          {JARVIS_FILTER_ROWS.map((row) => (
+          {filterRows.map((row) => (
             <div className="jv-frow" key={row.name}>
               <span className={`jv-d jv-tone-${row.tone}`} aria-hidden="true" />
               {row.name} <span className="jv-n">{row.count}</span>
@@ -167,24 +215,31 @@ export function JarvisShellView() {
           ))}
         </div>
 
-        {/* ══ Rechts: KI-LAGE (statischer A4-Mock, S1) ══ */}
+        {/* ══ Rechts: KI-LAGE (S6: live aus GET /api/pa/feed) ══ */}
         <div className="jv-float jv-news">
           <div className="jv-ptitle">
-            KI-LAGE <MockTag /> <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
+            KI-LAGE{feedLive ? null : <MockTag />} <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
           </div>
-          {JARVIS_NEWS_ITEMS.map((item) => (
-            <div className={item.lead ? "jv-item jv-lead" : "jv-item"} key={item.text}>
-              {item.text}
-              <span className="jv-src">{item.source}</span>
-            </div>
-          ))}
+          {feedLive
+            ? feedItems.map((item, index) => (
+                <div className={index === feedItems.length - 1 ? "jv-item jv-lead" : "jv-item"} key={item.id}>
+                  {item.title}
+                  <span className="jv-src">{fmtRelativeTime(item.ts, now)}</span>
+                </div>
+              ))
+            : JARVIS_NEWS_ITEMS.map((item) => (
+                <div className={item.lead ? "jv-item jv-lead" : "jv-item"} key={item.text}>
+                  {item.text}
+                  <span className="jv-src">{item.source}</span>
+                </div>
+              ))}
         </div>
 
-        {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (Mock) ══ */}
+        {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (S6: live) ══ */}
         <div className="jv-float jv-quiet">
           <WartetPanel />
           <div className="jv-sys">
-            {JARVIS_SPARKS.map((spark) => (
+            {sparks.map((spark) => (
               <div className="jv-spark" key={spark.label}>
                 <div className="jv-lb">
                   {spark.label} <b>{spark.value}</b>
@@ -195,9 +250,11 @@ export function JarvisShellView() {
                 </svg>
               </div>
             ))}
-            <span className="jv-sysmock">
-              <MockTag />
-            </span>
+            {sparksLive ? null : (
+              <span className="jv-sysmock">
+                <MockTag />
+              </span>
+            )}
           </div>
         </div>
 

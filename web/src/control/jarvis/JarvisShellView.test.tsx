@@ -34,6 +34,24 @@ vi.mock("./AktivitaetPanel", () => ({
   },
 }));
 vi.mock("./SessionsPanel", () => ({ SessionsPanel: () => null }));
+// S6: die neuen Live-Hooks der Shell — im Mock-Fallback (keine Daten).
+vi.mock("./usePaFeed", () => ({
+  usePaFeed: () => ({ data: null, error: null, loading: false }),
+}));
+vi.mock("./usePaGraph", () => ({
+  usePaGraphView: () => ({
+    graph: { nodes: [], clusters: [], edges: [] },
+    isLive: false,
+    isStale: false,
+    error: null,
+    sourceErrors: [],
+  }),
+}));
+vi.mock("./useSystemStats", () => ({
+  useSystemStats: () => ({ data: null, error: null, loading: false }),
+  sparkAreaPath: (p: number) => `area-${p}`,
+  sparkLinePath: (p: number) => `line-${p}`,
+}));
 
 import { JarvisShellView } from "./JarvisShellView";
 import { JARVIS_OPEN_AKTIVITAET_EVENT } from "./JarvisChat";
