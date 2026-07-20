@@ -106,20 +106,18 @@ class MainActivity : ComponentActivity() {
         captureDictationDraft(intent)
         // A warm relaunch (e.g. tapping the Jarvis alias while the Voice surface is
         // already on top) is delivered here instead of recreating the activity, so
-        // the surface must be re-derived — otherwise the shell stays on whatever it
-        // showed before. relaunchSurfaceTarget returns null for non-launcher intents
-        // (dictation is left untouched) and for a re-tap of the visible surface.
-        val target = VoiceAppConfig.relaunchSurfaceTarget(
+        // the surface must be re-derived AND reloaded — otherwise the shell stays on
+        // whatever it showed before (the original AC1 defect). SurfaceRelaunch.route
+        // owns that decision and drives the load (stopping any live capture first),
+        // so the warm-relaunch behaviour is unit-tested off-device; see
+        // SurfaceRelaunchTest.
+        SurfaceRelaunch.route(
             isLauncherEntry = intent.action == Intent.ACTION_MAIN,
             launchClass = intent.component?.className,
             currentUrl = currentSurfaceUrl,
+            stopCapture = ::stopCaptureIfActive,
+            loadSurface = ::loadSurface,
         )
-        if (target != null) {
-            // Never carry a live MediaProjection across a surface switch — stop it
-            // first so no capture keeps running behind the newly loaded page.
-            stopCaptureIfActive()
-            loadSurface(target)
-        }
     }
 
     private fun loadSurface(url: String) {
