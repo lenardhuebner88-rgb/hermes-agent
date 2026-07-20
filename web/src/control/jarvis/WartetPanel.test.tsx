@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, configure, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import type { PaInboxItem, PaInboxResponse } from "@/lib/api";
+import type { PaInboxItem, PaInboxResponse, PaInboxTaskItem } from "@/lib/api";
 import { _resetPollingStore } from "../hooks/pollingStore";
 
 configure({ asyncUtilTimeout: 5000 });
@@ -69,7 +69,7 @@ function questionItem(id: number, title: string): PaInboxItem {
   };
 }
 
-function heldItem(id: string, title: string): PaInboxItem {
+function heldItem(id: string, title: string): PaInboxTaskItem {
   return {
     type: "held_task",
     id,
@@ -199,5 +199,61 @@ describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
     renderPanel();
 
     expect(await screen.findByRole("dialog", { name: "WARTET AUF DICH" })).toBeTruthy();
+  });
+});
+
+describe("S7.6: dezente Zeilen entscheidungs-first", () => {
+  it("Destillation: Task-ID und Status-Suffix fliegen raus, Roh-Titel bleibt im title-Attribut", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([heldItem("t_fd072996", "Task t_fd072996: Release-Kette — blocked")]),
+    );
+    renderPanel();
+
+    const row = await screen.findByTestId("jv-wartet-row-t_fd072996");
+    expect(screen.getByText("Release-Kette")).toBeTruthy();
+    expect(row.querySelector(".jv-tx")?.getAttribute("title")).toBe(
+      "Task t_fd072996: Release-Kette — blocked",
+    );
+    // Badges: Alter + Blockradius (heldItem hat block_radius 3).
+    expect(row.textContent).toMatch(/seit \d+d/);
+    expect(row.textContent).toContain("blockiert 3");
+    // Board-Link und Ziel unverändert.
+    expect(
+      screen.getByRole("link", { name: /Zum Board: Task t_fd072996/ }).getAttribute("href"),
+    ).toBe("/control/fleet?task=t_fd072996");
+  });
+
+  it("Server-summary gewinnt vor der Destillation", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([
+        {
+          ...heldItem("t_sum9", "Task t_sum9abcdef: Kette — blocked"),
+          summary: "Kette jetzt freigeben",
+        },
+      ]),
+    );
+    renderPanel();
+
+    expect(await screen.findByText("Kette jetzt freigeben")).toBeTruthy();
+    expect(screen.queryByText("Kette")).toBeNull();
+  });
+
+  it("🔑-Badge bei freigabe=operator, sonst keines", async () => {
+    getPaInboxMock.mockResolvedValue(
+      inboxResponse([
+        {
+          ...heldItem("t_key1", "Landung Sprint 3"),
+          type: "freigabe_gate",
+          freigabe: "operator",
+        },
+        heldItem("t_key2", "Kette hält auf Review"),
+      ]),
+    );
+    renderPanel();
+
+    const gateRow = await screen.findByTestId("jv-wartet-row-t_key1");
+    expect(gateRow.textContent).toContain("🔑");
+    const heldRow = await screen.findByTestId("jv-wartet-row-t_key2");
+    expect(heldRow.textContent).not.toContain("🔑");
   });
 });

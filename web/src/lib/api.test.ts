@@ -382,3 +382,23 @@ describe("answerAgentQuestion via_suggestion (Feature A Slice 2)", () => {
     );
   });
 });
+
+describe("paAssetUrl (S7.5 — Token für <img> ohne Header-Auth)", () => {
+  it("hängt den Session-Token als ?token= an, wenn gesetzt", () => {
+    // beforeEach stubbt window.__HERMES_SESSION_TOKEN__ = "tok-123".
+    expect(api.paAssetUrl("asset_abc123.png")).toBe(
+      "/api/pa/asset/asset_abc123.png?token=tok-123",
+    );
+  });
+
+  it("URL-codiert Asset-ID und Token", () => {
+    expect(api.paAssetUrl("asset a+b.png")).toBe(
+      "/api/pa/asset/asset%20a%2Bb.png?token=tok-123",
+    );
+  });
+
+  it("ohne Token bleibt die URL unverändert (Cookie-Auth / Loopback)", () => {
+    vi.stubGlobal("window", { __HERMES_SESSION_TOKEN__: undefined });
+    expect(api.paAssetUrl("asset_abc123.png")).toBe("/api/pa/asset/asset_abc123.png");
+  });
+});

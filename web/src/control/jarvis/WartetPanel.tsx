@@ -13,6 +13,10 @@
  * gezeigt (ReceiptsFeed-Idiom), Teilquellen-Ausfälle (errors[]) dezent —
  * nie still, nie ein Crash.
  *
+ * S7.6: die Zeilen rendern entscheidungs-first — Decision-Headline statt
+ * Roh-Titel (summary > clientseitige Destillation) plus 🔑/Alter/Blockradius-
+ * Badges; der Roh-Titel bleibt im title-Attribut der Zeile.
+ *
  * `?inbox=open` öffnet den Drawer initial (Deep-Link/Screenshot-Naht).
  */
 import { useEffect, useState } from "react";
@@ -20,6 +24,7 @@ import { Link } from "react-router-dom";
 
 import type { PaInboxItem } from "@/lib/api";
 import { de } from "../i18n/de";
+import { decisionAge, decisionHeadline, needsOperatorKey } from "./decisionTitle";
 import { InboxPanel } from "./InboxPanel";
 import { usePaInbox } from "./usePaInbox";
 
@@ -38,13 +43,33 @@ function initialOpen(): boolean {
 
 /** Dezente Zeile je Item-Typ (Dot-Ton + Aktions-Affordanz rechts). */
 function QuietRow({ item, onReview }: { item: PaInboxItem; onReview: () => void }) {
+  // S7.6: entscheidungs-first — Zeilentext ist die Decision-Headline
+  // (Server-`summary`, Fallback: Destillation), der Roh-Titel bleibt im
+  // title-Attribut; Badges (🔑 Operator-Freigabe, Alter, Blockradius)
+  // sitzen kompakt zwischen Text und Aktion.
+  const headline = decisionHeadline(item);
+  const age = decisionAge(item.ts);
+  const badges = (
+    <>
+      {needsOperatorKey(item) ? (
+        <span className="jv-qbadge jv-qbadge-key" title={t.inboxKeyTitle}>
+          🔑
+        </span>
+      ) : null}
+      {age ? <span className="jv-qbadge">{age}</span> : null}
+      {item.block_radius > 0 ? (
+        <span className="jv-qbadge jv-qbadge-blocked">{t.inboxBlocked(item.block_radius)}</span>
+      ) : null}
+    </>
+  );
   if (item.type === "pa_action") {
     return (
       <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
         <span className="jv-rd jv-rd-amber" aria-hidden="true" />
         <span className="jv-tx" title={item.title}>
-          {item.title}
+          {headline}
         </span>
+        {badges}
         <button
           type="button"
           className="jv-ok jv-review"
@@ -61,8 +86,9 @@ function QuietRow({ item, onReview }: { item: PaInboxItem; onReview: () => void 
       <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
         <span className="jv-rd" aria-hidden="true" />
         <span className="jv-tx" title={item.title}>
-          {item.title}
+          {headline}
         </span>
+        {badges}
         <Link
           className="jv-ok"
           to="/control/projekte-klassisch"
@@ -78,8 +104,9 @@ function QuietRow({ item, onReview }: { item: PaInboxItem; onReview: () => void 
     <div className="jv-qrow" data-testid={`jv-wartet-row-${item.id}`}>
       <span className={isGate ? "jv-rd jv-rd-violett" : "jv-rd jv-rd-blau"} aria-hidden="true" />
       <span className="jv-tx" title={item.title}>
-        {item.title}
+        {headline}
       </span>
+      {badges}
       <Link className="jv-ok" to={`/control/fleet?task=${encodeURIComponent(item.card_id)}`} aria-label={t.inboxBoardAria(item.title)}>
         BOARD
       </Link>

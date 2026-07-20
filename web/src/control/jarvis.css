@@ -205,6 +205,15 @@
 .jv-qrow .jv-rd-amber { background: var(--amber); box-shadow: 0 0 5px rgba(255, 179, 71, .6); }
 .jv-qrow .jv-rd-blau { background: var(--blau); box-shadow: 0 0 5px rgba(91, 140, 255, .6); }
 .jv-qrow .jv-rd-violett { background: var(--violett); box-shadow: 0 0 5px rgba(183, 140, 255, .6); }
+/* S7.6: Decision-Badges der dezenten Zeile — so klein wie möglich, damit
+   Titel und Aktions-Button auf 360 px Platz behalten. */
+.jv-qrow .jv-qbadge {
+  flex: none; font-family: var(--mono); font-size: 8px; letter-spacing: .06em;
+  color: var(--faint); border: 1px solid var(--line2); border-radius: 999px;
+  padding: 1px 6px; white-space: nowrap;
+}
+.jv-qrow .jv-qbadge-key { color: var(--amber); border-color: rgba(255, 179, 71, .4); }
+.jv-qrow .jv-qbadge-blocked { color: var(--rot); border-color: rgba(255, 92, 105, .4); }
 button.jv-ok { cursor: pointer; }
 .jv-srcerr { font-size: 10.5px; color: var(--amber); padding: 5px 0 0; line-height: 1.5; }
 .jv-hint {
@@ -373,6 +382,18 @@ button.jv-ok { cursor: pointer; }
 .jv-appr-chip.jv-gate { color: var(--violett); border-color: rgba(183, 140, 255, .45); background: rgba(183, 140, 255, .08); }
 /* S3.3-FE: planspec.ingest-Cards tragen den PLANSPEC-Chip in cyan. */
 .jv-appr-chip.jv-planspec { color: var(--cyan); border-color: rgba(56, 216, 255, .45); background: rgba(56, 216, 255, .08); }
+/* S7.6: Decision-Badges in der Karten-Metazeile (🔑 Operator-Freigabe,
+   Alter „seit Xh", „blockiert N") — Chip-Idiom, aber eine Stufe leiser. */
+.jv-badge {
+  display: inline-flex; align-items: center; font-family: var(--mono); font-size: 8px;
+  letter-spacing: .1em; color: var(--faint); border: 1px solid var(--line2);
+  border-radius: 999px; padding: 2px 7px; margin-right: 6px; background: rgba(4, 7, 15, .35);
+  white-space: nowrap;
+}
+.jv-badge-key { color: var(--amber); border-color: rgba(255, 179, 71, .45); background: rgba(255, 179, 71, .08); }
+.jv-badge-blocked { color: var(--rot); border-color: rgba(255, 92, 105, .4); background: rgba(255, 92, 105, .07); }
+/* S7.6: Roh-Titel hinter dem Expand — kleiner und blasser als die Headline. */
+.jv-appr-raw { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--faint); white-space: pre-wrap; overflow-wrap: anywhere; }
 .jv-appr-cat { color: var(--dim); }
 .jv-appr-target {
   margin-top: 6px; font-family: var(--mono); font-size: 10px; letter-spacing: .04em;

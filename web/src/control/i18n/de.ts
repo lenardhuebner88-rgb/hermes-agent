@@ -986,6 +986,12 @@ export const de = {
     inboxKeysLabel: "Tasten:",
     // S6: mobile Approval-Details und Gesprächs-Kontext.
     inboxDetails: "Grund & Payload",
+    // S7.6: Decision-Cards — Badges (🔑 Operator-Freigabe, Alter,
+    // Blockradius) und Roh-Titel hinter dem Expand.
+    inboxBlocked: (n: number) => `blockiert ${n}`,
+    inboxKeyTitle: "Freigabe durch Operator erforderlich",
+    inboxTaskDetails: "Roh-Titel & Status",
+    inboxRawDetails: "Roh-Titel",
     nextTurnEngine: (engine: string) => `Nächster Turn: ${engine}`,
     chatDate: (timestamp: number) =>
       new Date(timestamp * 1000).toLocaleDateString("de-DE", {
