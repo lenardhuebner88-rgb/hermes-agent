@@ -407,26 +407,30 @@ def fast_safe_load(stream: Any) -> Any:
 # ─── Environment Variable Helpers ─────────────────────────────────────────────
 
 
-def env_int(key: str, default: int = 0) -> int:
-    """Read an environment variable as an integer, with fallback."""
+def _env_cast(key: str, default: Any, cast: type) -> Any:
+    """Read an env var, strip it, and cast it with *cast*, falling back to *default*.
+
+    Shared implementation for :func:`env_int` / :func:`env_float`: a missing or
+    blank variable, or a cast failure (``ValueError``/``TypeError``), yields
+    ``default``. Behavior is identical to the previous per-function bodies.
+    """
     raw = os.getenv(key, "").strip()
     if not raw:
         return default
     try:
-        return int(raw)
+        return cast(raw)
     except (ValueError, TypeError):
         return default
+
+
+def env_int(key: str, default: int = 0) -> int:
+    """Read an environment variable as an integer, with fallback."""
+    return _env_cast(key, default, int)
 
 
 def env_float(key: str, default: float = 0.0) -> float:
     """Read an environment variable as a float, with fallback."""
-    raw = os.getenv(key, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except (ValueError, TypeError):
-        return default
+    return _env_cast(key, default, float)
 
 
 def env_bool(key: str, default: bool = False) -> bool:
