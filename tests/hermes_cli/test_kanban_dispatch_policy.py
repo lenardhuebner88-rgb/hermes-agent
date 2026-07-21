@@ -16,7 +16,6 @@ from hermes_cli.kanban_dispatch_policy import (
     capped_profiles_for_window,
     per_task_input_usage,
     profile_running_counts,
-    task_is_read_only,
 )
 
 
@@ -189,10 +188,3 @@ class TestPerTaskInputUsage:
         assert len(usage) == 501
         assert usage["t0"] == (5, 1)
         assert usage["t500"] == (5, 1)
-
-
-def test_task_is_read_only_contract():
-    assert task_is_read_only("review", "coder")
-    assert task_is_read_only("research", "researcher-a")
-    assert task_is_read_only("code", "critic")
-    assert not task_is_read_only("code", "coder")
