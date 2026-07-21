@@ -999,10 +999,16 @@ def derive_persistent_red_triage(
 
     Orthogonal to :func:`derive_consecutive_red_cause` (which requires the SAME
     first_fail fingerprint on consecutive nights): this fires when the head is
-    red AND >= ``min_reds`` of the last ``window`` recorded nights are red —
-    regardless of whether the first_fail cause changed between nights. The
-    changing-cause case is exactly what the same-cause path deliberately skips,
-    leaving the operator with a persistent red head and no triage item.
+    red AND >= ``min_reds`` of the last ``window`` recorded nights are red on
+    the **same head/anchor gate** — regardless of whether the first_fail cause
+    changed between nights of that gate. The changing-cause case is exactly
+    what the same-cause path deliberately skips, leaving the operator with a
+    persistent red head and no triage item.
+
+    Gate-local honesty (2026-07-21 RCA): red nights of a *different* gate must
+    never pad the N-of-M count or supply the anchor file set. A Vitest head
+    without extractable ``tests/*.py`` paths therefore cannot fall back onto an
+    older Python night and mint a false ``GATE-TRIAGE-PYTHON-*`` PlanSpec.
 
     Leaker-only nights (GATE-LEAKER-STREAK-HONESTY-V2) are NEUTRAL and fully
     transparent here: they are excluded from the window, never counted toward
@@ -1014,39 +1020,40 @@ def derive_persistent_red_triage(
     Returns ``None`` (idle) when:
       - the most recent meaningful night is green (no red head to triage), or
       - there is no meaningful night at all (empty / all leaker-only), or
-      - fewer than ``min_reds`` red nights in the window (isolated flake —
-        AC-2 guard).
+      - fewer than ``min_reds`` red nights of the head gate in the window
+        (isolated flake / mixed-gate window — AC-2 / gate-local guard).
 
     When triggered, returns::
 
         {
             "gate": <str>,                  # the ANCHOR night's gate (head's own,
-                                             # or the fallback night's — see below)
+                                             # or same-gate unknown fallback — see below)
             "red_files": set[str],          # the ANCHOR night's failing test files
-                                             # (head night's, or — when the head is
-                                             # leaker/unknown — the most recent
-                                             # window night that HAS concrete files)
-            "red_files_window_union": set[str],  # UNION across every red night in
-                                             # the window (additive; dashboards)
+                                             # (head night's, or — only when head gate
+                                             # is un-attributed 'unknown' — the most
+                                             # recent SAME-GATE window night that HAS
+                                             # concrete files)
+            "red_files_window_union": set[str],  # UNION across every same-gate red
+                                             # night in the window (additive; dashboards)
             "red_files_by_night": [
                 {"date": <str>, "files": [<str>, ...], "suspect_range": <str|None>},
                 ...
-            ],                               # one entry per red night in the
+            ],                               # one entry per same-gate red night in the
                                               # window, oldest-to-newest order
             "fingerprint": <str>,     # sha1 of the ANCHOR night's red-file set (dedup key)
-            "red_count": <int>,       # reds in the window
+            "red_count": <int>,       # same-gate reds in the window
             "window": <int>,          # M
-            "dates": [<str>, ...],    # dates of the red nights in the window
+            "dates": [<str>, ...],    # dates of the same-gate red nights in the window
         }
 
-    Actionable-anchor (leaker/unknown head): the operator-facing ``red_files``
+    Actionable-anchor (unknown head only): the operator-facing ``red_files``
     and ``gate`` — and the fingerprint that keys the PlanSpec — anchor on the
-    HEAD night when it carries concrete failing files. When the head is a
-    leaker-only night (harness noise, no product cause) or an un-attributed
-    'unknown' gate, its own file set is empty, so the anchor falls back to the
-    most RECENT red night in the window that DOES carry concrete files. This
-    keeps the auto-opened triage actionable — it always lists real red files —
-    instead of rendering "(unbekannt)" for a persistently-red-but-noisy head.
+    HEAD night when it carries concrete failing files. When the head gate is
+    un-attributed ``unknown`` and its own file set is empty, the anchor falls
+    back to the most RECENT **same-gate** red night in the window that DOES
+    carry concrete files. An *attributed* head (e.g. ``vitest``) with no
+    extractable product files keeps its own gate and empty file set — never
+    steals files or gate identity from a different older gate.
 
     ``red_files``-honesty (S3): with chronic drift (a DIFFERENT test broke each
     red night — the common case per the 2026-07-05 log forensics), the
@@ -1084,13 +1091,6 @@ def derive_persistent_red_triage(
     if nights[head_date] != NIGHT_RED:
         return None  # head is green (or only leaker-noise since) — nothing to triage
     recent_dates = meaningful_dates[-window:] if window > 0 else meaningful_dates
-    # ``min_reds`` counts distinct RED nights only — leaker-only nights are
-    # already filtered out, so test-isolation debt is never part of the count
-    # (AC-2). This preserves the pre-existing "distinct NIGHTS, not fail records"
-    # semantics: a single noisy night with multiple fail records is still one.
-    red_dates = [d for d in recent_dates if nights[d] == NIGHT_RED]
-    if len(red_dates) < max(1, int(min_reds)):
-        return None
     # Group the RED nights' fail records (index preserved for suspect_range sha
     # lookup). A leaker-only fail that shares a RED night carries no first_fail,
     # so it contributes no files — harmless, and never a phantom cause.
@@ -1111,41 +1111,57 @@ def derive_persistent_red_triage(
             key=lambda ir: (_record_epoch(ir[1]) is None, _record_epoch(ir[1]) or 0),
         )
 
+    def _night_gate_and_files(date: str) -> tuple[str, set[str]]:
+        """Representative gate + extractable files for one red night.
+
+        Gate is the earliest non-empty ``first_fail.gate`` on that night
+        (unknown when nothing is attributed). Files are the union of
+        extractable failing test paths across that night's fail records.
+        """
+        files: set[str] = set()
+        gate = "unknown"
+        for _idx, rec in _night_records(date):
+            ff = rec.get("first_fail") or {}
+            files |= _extract_failing_test_files(ff.get("detail"))
+            g = str(ff.get("gate") or "").strip().lower()
+            if g and gate == "unknown":
+                gate = g
+        return gate, files
+
+    # Head gate first: N-of-M and window surfaces are gate-local to this gate.
+    head_gate, head_files = _night_gate_and_files(head_date)
+
+    # ``min_reds`` counts distinct SAME-GATE RED nights only — leaker-only
+    # nights are already filtered out, and other-gate reds never pad the count
+    # (AC-2 / gate-local). Distinct NIGHTS, not fail records: a single noisy
+    # night with multiple fail records is still one.
+    window_red_dates = [d for d in recent_dates if nights[d] == NIGHT_RED]
+    red_dates = [
+        d for d in window_red_dates if _night_gate_and_files(d)[0] == head_gate
+    ]
+    if len(red_dates) < max(1, int(min_reds)):
+        return None
+
     # Codex review 2026-07-06 finding 2: ``min_reds`` counts distinct red
     # NIGHTS (UTC dates), not fail records — a single noisy night with
     # multiple recorded fails must not satisfy an N-of-M *nights* trigger.
-    if len(red_records_by_date) < min_reds:
+    # Gate-local: only nights that match the head gate participate.
+    if len(red_dates) < min_reds:
         return None
 
-    # Collect the HEAD night's own red-file set (anti-flood: ``red_files`` is
-    # what strategist renders into the PlanSpec body; window-wide honesty lives
-    # in the ADDITIVE ``red_files_window_union`` / ``red_files_by_night``).
-    head_files: set[str] = set()
-    head_gate = "unknown"
-    for _idx, rec in _night_records(head_date):
-        ff = rec.get("first_fail") or {}
-        head_files |= _extract_failing_test_files(ff.get("detail"))
-        g = str(ff.get("gate") or "").strip().lower()
-        if g and head_gate == "unknown":
-            head_gate = g
-
-    # AC-1 actionability at an unattributed head. When the HEAD night carries no
-    # extractable product files — an un-attributed 'unknown' gate — anchor on
-    # the most RECENT red night in the window that DOES carry concrete red files,
-    # so the surfaced triage is always actionable. The attributed-head case is
-    # untouched: head_files non-empty -> anchor == head, exactly as before.
+    # AC-1 actionability at an unattributed head only. When the HEAD gate is
+    # un-attributed ``unknown`` and carries no extractable product files,
+    # anchor on the most RECENT *same-gate* red night in the window that DOES
+    # carry concrete red files. Attributed heads (e.g. vitest) keep their own
+    # gate + empty file set — never steal an older different gate's files.
     # NEUTRAL nights never reach this path (excluded by NIGHT_RED filter above).
     anchor_files, anchor_gate = head_files, head_gate
-    if not anchor_files:
+    if not anchor_files and head_gate == "unknown":
         for date in reversed(red_dates):
-            for _idx, rec in _night_records(date):
-                ff = rec.get("first_fail") or {}
-                files = _extract_failing_test_files(ff.get("detail"))
-                if files:
-                    anchor_files = files
-                    anchor_gate = str(ff.get("gate") or "unknown")
-                    break
-            if anchor_files:
+            _g, files = _night_gate_and_files(date)
+            if files:
+                anchor_files = files
+                anchor_gate = _g
                 break
 
     fingerprint_source = "|".join(sorted(anchor_files)) if anchor_files else anchor_gate
@@ -1156,9 +1172,7 @@ def derive_persistent_red_triage(
     red_files_by_night: list[dict] = []
     for date in sorted(red_dates):
         recs = _night_records(date)
-        files: set[str] = set()
-        for _idx, rec in recs:
-            files |= _extract_failing_test_files((rec.get("first_fail") or {}).get("detail"))
+        _g, files = _night_gate_and_files(date)
         red_files_window_union |= files
         rng = None
         if recs:
