@@ -67,9 +67,29 @@
   min-height: 0;
   overflow: hidden;
 }
+.jv-brain-wrap {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+}
 .jv-brain {
   position: absolute; inset: 0; width: 100%; height: 100%;
   opacity: .25;
+  display: block;
+  touch-action: none;
+  cursor: grab;
+  outline: none;
+}
+.jv-brain:focus-visible {
+  outline: 1px solid rgba(56, 216, 255, .45);
+  outline-offset: -1px;
+}
+/* Screenreader-only aria-live region (F2 canvas a11y). */
+.jv .sr-only,
+.jv-brain-wrap .sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0);
+  white-space: nowrap; border: 0;
 }
 .jv-chipzone {
   position: absolute; top: 58px; left: 16px; z-index: 6;

@@ -9,10 +9,10 @@
  * Fetch-Fehler („Projekte · –" + Fehlerzeile, bleibt bedienbar).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, configure, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { _resetPollingStore } from "../hooks/pollingStore";
+import { _resetPollingStore, getSnapshot } from "../hooks/pollingStore";
 
 configure({ asyncUtilTimeout: 5000 });
 
@@ -99,6 +99,22 @@ function renderChip() {
   );
 }
 
+/** Deterministisches Settle-Await (KEIN sleep): wartet über den pollingStore,
+ *  bis alle drei Projekte-Endpoints resolved sind (loading=false im Snapshot).
+ *  Erst dann ist der abgeleitete Chip-Text (buildProjectsOverview +
+ *  computeAttention) stabil — vorher zeigt der Chip den Loading-Platzhalter
+ *  „Projekte · –" bzw. einen Zwischenzustand der drei asynchronen Promises. */
+async function awaitProjectsSettled() {
+  await waitFor(() => {
+    for (const key of ["projects/list", "projects/agents", "projects/sessions"]) {
+      const snap = getSnapshot(key);
+      if (snap === null || snap.loading) {
+        throw new Error(`${key} noch nicht settled`);
+      }
+    }
+  });
+}
+
 /** Drei Projekte, genau eines davon alert (blockiert + Frage). */
 function mixedProjects() {
   return [
@@ -151,7 +167,14 @@ describe("ProjekteChip (echte Daten über die Bestands-Hooks)", () => {
     });
     renderChip();
 
-    const button = await screen.findByRole("button");
+    // Race (war flaky): findByRole("button") resolved sofort, weil der Button
+    // schon im Loading-Zustand existiert („Projekte · –"). Die synchrone
+    // textContent-Assertion lief damit sporadisch VOR dem Resolve der drei
+    // Endpoint-Promises + React-Commit (projects/list noch loading). Fix:
+    // deterministisch auf den finalen Store-Zustand warten (alle drei Endpoints
+    // settled), dann den committed Chip-Text lesen — kein sleep.
+    await awaitProjectsSettled();
+    const button = await screen.findByRole("button", { name: /Projekte · 2/ });
     expect(button.textContent).toContain("Projekte · 2");
     expect(button.textContent).not.toContain("⚠");
   });
