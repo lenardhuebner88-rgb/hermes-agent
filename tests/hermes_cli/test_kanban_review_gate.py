@@ -2536,6 +2536,66 @@ _LIVE_CAPABILITY_FINDING = (
 )
 
 
+def test_review_capability_park_carries_candidate_across_commitless_stage(
+    kanban_home, gate_on
+):
+    """A verifier verdict must not drop the coder's candidate identity.
+
+    Reviewer runs normally report only their verdict.  The candidate commit
+    therefore has to survive the verifier-to-reviewer stage transition so a
+    later capability-only reviewer block remains evidence-bound and parked.
+    """
+    commit = "757cffa2b02a9710ed12599eb0b8580417e86ae4"
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical implementation",
+            assignee="coder",
+            review_tier="critical",
+        )
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.block_task(
+            conn, tid, reason="parallel writer owns the worktree", kind="needs_input"
+        )
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="candidate",
+            metadata={"commit": commit},
+            review_gate=True,
+        )
+
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+        submission = kb._latest_review_submission(conn, tid)
+        assert submission is not None
+        assert submission["reviewed_commit"] == commit
+
+        assert kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        assert kb.block_task(
+            conn,
+            tid,
+            reason=_LIVE_CAPABILITY_REASON,
+            kind="needs_input",
+            reviewer_metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": [_LIVE_CAPABILITY_FINDING],
+            },
+        )
+        assert kb.get_task(conn, tid).status == "triage"
+        park = kb.review_capability_park(conn, tid)
+        assert park is not None
+        assert park["reviewed_commit"] == commit
+
+
 @pytest.mark.parametrize(
     ("reason", "findings", "is_capability_park"),
     [

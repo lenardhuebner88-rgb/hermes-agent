@@ -11024,8 +11024,19 @@ def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optiona
         except (TypeError, ValueError):
             run_metadata = {}
         if isinstance(run_metadata, dict):
-            reviewed_commit = run_metadata.get("commit")
-    payload["reviewed_commit"] = reviewed_commit or payload.get("diff_base_commit")
+            reviewed_commit = (
+                run_metadata.get("commit")
+                or run_metadata.get("reviewed_commit")
+                or run_metadata.get("candidate_commit")
+            )
+    payload["reviewed_commit"] = (
+        reviewed_commit
+        or payload.get("reviewed_commit")
+        or payload.get("candidate_commit")
+        or payload.get("diff_candidate_commit")
+        or payload.get("commit")
+        or payload.get("diff_base_commit")
+    )
     payload["event_id"] = int(row["id"])
     return payload
 
@@ -11122,7 +11133,12 @@ def _approved_review_run_for_commit(
             continue
         if not isinstance(metadata, dict):
             continue
-        if _commits_refer_to_same_candidate(metadata.get("commit"), commit):
+        run_commit = (
+            metadata.get("commit")
+            or metadata.get("reviewed_commit")
+            or metadata.get("candidate_commit")
+        )
+        if _commits_refer_to_same_candidate(run_commit, commit):
             return int(row["id"])
     return None
 
@@ -12913,16 +12929,8 @@ def _maybe_advance_review_chain(
     # a coder's own completion is never re-parked here.
     if not _run_originated_from_review(conn, task_id, run_id):
         return None
-    row = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? "
-        "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    if not (row and row["payload"]):
-        return None
-    try:
-        payload = json.loads(row["payload"]) or {}
-    except Exception:
+    payload = _latest_review_submission(conn, task_id)
+    if not payload:
         return None
     tier = str(payload.get("review_tier") or "standard")
     stage = int(payload.get("review_stage") or 0)
@@ -12943,13 +12951,17 @@ def _maybe_advance_review_chain(
         )
         if cur.rowcount != 1:
             return None
+        reviewed_commit = str(payload.get("reviewed_commit") or "").strip()
+        stage_metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        if reviewed_commit:
+            stage_metadata.setdefault("reviewed_commit", reviewed_commit)
         rid = _end_run(
             conn,
             task_id,
             outcome="completed",
             status="review",
             summary=summary if summary is not None else result,
-            metadata=metadata,
+            metadata=stage_metadata or None,
         )
         if rid is not None:
             _set_run_verdict(conn, rid, verdict)
@@ -12960,6 +12972,8 @@ def _maybe_advance_review_chain(
             "target_profile": next_profile,
             "advanced_from_stage": stage,
         }
+        if reviewed_commit:
+            next_payload["reviewed_commit"] = reviewed_commit
         # Carry forward the B1 diff-snapshot keys from the event we just read
         # so the next stage's reviewer context still renders the changed-files
         # evidence instead of the "no snapshot captured" fallback. The
@@ -12970,7 +12984,9 @@ def _maybe_advance_review_chain(
             "diff_stat",
             "diff_text",
             "diff_base_commit",
+            "diff_candidate_commit",
             "diff_baseline",
+            "diff_truncated",
         ):
             if _snap_key in payload:
                 next_payload[_snap_key] = payload[_snap_key]
