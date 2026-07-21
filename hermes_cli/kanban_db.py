@@ -10989,6 +10989,179 @@ def _pending_review_revision(conn: sqlite3.Connection, task_id: str) -> Optional
     return None if newer_submission else revision
 
 
+def _commits_refer_to_same_candidate(left: object, right: object) -> bool:
+    """True when two recorded commit strings denote the same candidate.
+
+    Runs persist either the abbreviated or the full SHA (workers report what
+    ``git rev-parse`` gave them), so compare prefix-wise with a length floor
+    that keeps accidental matches out.
+    """
+    a = str(left or "").strip().lower()
+    b = str(right or "").strip().lower()
+    if len(a) < 7 or len(b) < 7:
+        return False
+    return a.startswith(b) or b.startswith(a)
+
+
+def _approved_review_run_for_commit(
+    conn: sqlite3.Connection,
+    task_id: str,
+    commit: str,
+    *,
+    before_run_id: Optional[int] = None,
+) -> Optional[int]:
+    """Return the id of an earlier review run that APPROVED exactly ``commit``."""
+    rows = conn.execute(
+        "SELECT id, metadata FROM task_runs "
+        "WHERE task_id = ? AND verdict = 'APPROVED' ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        if before_run_id is not None and int(row["id"]) >= int(before_run_id):
+            continue
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        if _commits_refer_to_same_candidate(metadata.get("commit"), commit):
+            return int(row["id"])
+    return None
+
+
+# Markers of a review block that reports MISSING REVIEW EVIDENCE (truncated
+# diff, no read-only file/git access, "no code change requested") rather than a
+# finding about the code. Verbatim shapes taken from the RCA incident block
+# (jarvis-b3-orchestration-2026-07-21). Matched case-insensitively as
+# substrings — same house style as `_blocked_kind_for_auto_retry`.
+_REVIEW_CAPABILITY_MARKERS = (
+    "review-evidenz fehlt",
+    "review evidenz fehlt",
+    "missing review evidence",
+    "review evidence is missing",
+    "review evidence unavailable",
+    "diff truncated",
+    "per-file cap",
+    "per file cap",
+    "per-file-truncation",
+    "per-file truncation",
+    "tooloberfläche",
+    "tooloberflaeche",
+    "tool surface",
+    "keine codeänderung",
+    "keine codeaenderung",
+    "no code change is requested",
+    "no code change requested",
+    "kein read-only",
+    "keinen read-only",
+    "no read-only",
+)
+
+
+def _review_block_is_capability_only(
+    reason: object, findings: object
+) -> bool:
+    """True when a review block reports missing evidence, not a code finding."""
+    parts: list[str] = []
+    if reason:
+        parts.append(str(reason))
+    if isinstance(findings, (list, tuple)):
+        parts.extend(str(item) for item in findings)
+    haystack = "\n".join(parts).casefold()
+    if not haystack.strip():
+        return False
+    return any(marker in haystack for marker in _REVIEW_CAPABILITY_MARKERS)
+
+
+def review_capability_park(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict]:
+    """Evidence that a ``triage`` root only lacks review evidence, not work.
+
+    RCA jarvis-b3-orchestration-2026-07-21 (RC2): a reviewer that cannot obtain
+    its read-only diff/caller evidence must block, but that block is an
+    operator/tooling park — not an order to fan the card out again. Because the
+    block carried an operator-attention kind, the loop breaker escalated the
+    already-verified root to ``triage`` and the auto-decomposer created two
+    duplicate writers in the same chain worktree.
+
+    Returns a structured evidence dict (never a persisted status) when ALL of:
+
+    * the card currently sits in ``triage``;
+    * the newest ``blocked`` event is the one that escalated it there
+      (``payload["status"] == "triage"``) and carries the structured
+      ``review_revision`` class — i.e. the block came out of the review lane;
+    * that revision names a ``reviewed_commit`` (a candidate exists);
+    * no newer ``submitted_for_review`` superseded the park;
+    * the block reports missing review evidence rather than a code finding
+      (:func:`_review_block_is_capability_only`);
+    * an earlier review run already recorded ``APPROVED`` for that very commit.
+
+    The last two conditions keep this narrow and fail-open: a substantive
+    review escalation still decomposes, and so does one over a candidate no
+    stage ever approved. Only the "work is verified, the review LANE failed"
+    shape is withheld from the auto-decompose scan.
+    """
+    try:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if row is None or row["status"] != "triage":
+            return None
+        blocked = conn.execute(
+            "SELECT id, run_id, payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if blocked is None:
+            return None
+        try:
+            payload = json.loads(blocked["payload"] or "{}")
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("status") != "triage":
+            return None
+        revision = payload.get("review_revision")
+        if not isinstance(revision, dict):
+            return None
+        reviewed_commit = str(revision.get("reviewed_commit") or "").strip()
+        if not reviewed_commit:
+            return None
+        if not _review_block_is_capability_only(
+            payload.get("reason"), revision.get("blocking_findings")
+        ):
+            return None
+        newer_submission = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' AND id > ? LIMIT 1",
+            (task_id, int(blocked["id"])),
+        ).fetchone()
+        if newer_submission is not None:
+            return None
+        approved_run_id = _approved_review_run_for_commit(
+            conn,
+            task_id,
+            reviewed_commit,
+            before_run_id=blocked["run_id"],
+        )
+    except sqlite3.Error:
+        # Never let an audit read change dispatch behaviour: on any schema or
+        # read error fall back to the historical (unfiltered) path.
+        return None
+    if approved_run_id is None:
+        return None
+    return {
+        "blocked_event_id": int(blocked["id"]),
+        "blocked_run_id": blocked["run_id"],
+        "block_kind": payload.get("kind"),
+        "reviewed_commit": reviewed_commit,
+        "approved_run_id": approved_run_id,
+        "review_tier": revision.get("review_tier"),
+        "resume_stage": revision.get("resume_stage"),
+    }
+
+
 def _review_profile_availability(profile: Optional[str]) -> tuple[bool, str]:
     """Resolve review profile liveness without ever granting review authority.
 
@@ -16016,7 +16189,67 @@ def decompose_triage_task(
     return child_ids
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def archive_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    signal_fn=None,
+    probe_fn=None,
+) -> bool:
+    """Archive a task, fencing any still-running worker process group first.
+
+    RCA jarvis-b3-orchestration-2026-07-21 (RC1): archiving used to clear
+    ``claim_lock``/``worker_pid`` and close the run as ``reclaimed`` while the
+    worker process was still alive. The orphaned writer kept mutating the
+    shared chain worktree after the board already treated the card as
+    terminal, which fail-closed every following review start.
+
+    A running card with a persisted pid therefore goes through the existing
+    process-group terminator (:func:`_terminate_reclaimed_worker`, SIGTERM →
+    SIGKILL → absence probe) BEFORE any ownership is released. When absence
+    cannot be confirmed inside that bounded window (survivor, or a claim owned
+    by another host), the archive is refused fail-closed and the card keeps its
+    claim via the existing ``reclaim_deferred`` park — so no second writer can
+    be dispatched onto the same workspace. Cards without a live run keep the
+    historical no-op-successful behaviour.
+    """
+    fence_row = conn.execute(
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if (
+        fence_row is not None
+        and fence_row["status"] == "running"
+        and fence_row["worker_pid"]
+    ):
+        worker_pid = int(fence_row["worker_pid"])
+        claim_lock = fence_row["claim_lock"]
+        # Runs OUTSIDE any txn: the SIGTERM→grace→SIGKILL wait must not hold
+        # the write lock (same contract as the complete/reclaim reap paths).
+        termination = _terminate_reclaimed_worker(
+            worker_pid,
+            claim_lock,
+            signal_fn=signal_fn,
+            probe_fn=probe_fn,
+        )
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn,
+                task_id,
+                claim_lock,
+                int(time.time()),
+                termination,
+                reason="archive_worker_alive",
+            )
+            return False
+        with write_txn(conn):
+            _append_event(
+                conn,
+                task_id,
+                "worker_reaped",
+                {"pid": worker_pid, "source": "archive_task", **termination},
+                run_id=_current_run_id(conn, task_id),
+            )
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "

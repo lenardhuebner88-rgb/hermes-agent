@@ -1876,3 +1876,173 @@ def test_normalize_leaves_existing_anti_scope_untouched():
     assert body.count("anti_scope:") == 1
     assert "only touch the payment module" in body
     assert "no unrelated cleanup" not in body
+
+
+# ---------------------------------------------------------------------------
+# Capability-only review block must not trigger auto-decomposition
+# (RCA jarvis-b3-orchestration-2026-07-21, RC2): a reviewer that cannot obtain
+# its read-only diff evidence blocks the ALREADY verified candidate. The second
+# same-kind block escalated the root to `triage`, and the auto-decomposer read
+# that status as a fresh fan-out order — spawning two duplicate writers into
+# the same chain worktree.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def review_gate_on(monkeypatch):
+    from hermes_cli import profiles as profiles_mod
+
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            "enabled": True,
+            "code_roles": frozenset({"coder", "premium"}),
+            "verifier_profile": "verifier",
+            "review_profile": "reviewer",
+            "critic_profile": "critic",
+            "auto_tier": False,
+        },
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    return True
+
+
+_CANDIDATE_SHA = "757cffa2b02a9710ed12599eb0b8580417e86ae4"
+
+
+def _escalate_review_block_to_triage(
+    conn,
+    *,
+    verifier_approves: bool,
+    reason: str,
+    findings: list,
+    commit: str = _CANDIDATE_SHA,
+) -> str:
+    """Drive the real transitions of the RCA timeline up to the triage root.
+
+    Block #1 (needs_input) -> unblock -> coder candidate -> review stage 0.
+    Review-gated completions emit `submitted_for_review` (never `completed`),
+    so the unblocked recurrence memory survives the whole review round trip and
+    the SECOND same-kind block escalates the root to `triage`.
+    """
+    tid = kb.create_task(
+        conn,
+        title="Jarvis B3: brain search + node preview",
+        assignee="coder",
+        review_tier="critical",
+    )
+    assert kb.claim_task(conn, tid) is not None
+    assert kb.block_task(
+        conn, tid, reason="parallel writer owns the worktree", kind="needs_input"
+    )
+    assert kb.unblock_task(conn, tid)
+    assert kb.claim_task(conn, tid) is not None
+    assert kb.complete_task(
+        conn, tid, summary="candidate", metadata={"commit": commit}, review_gate=True
+    )
+    assert kb.get_task(conn, tid).status == "review"
+
+    assert kb.claim_review_task(conn, tid, reviewer_profile="verifier") is not None
+    if verifier_approves:
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED", "commit": commit},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="reviewer") is not None
+    assert kb.block_task(
+        conn,
+        tid,
+        reason=reason,
+        kind="needs_input",
+        reviewer_metadata={
+            "review_verdict": "REQUEST_CHANGES",
+            "blocking_findings": findings,
+            "required_verification": ["read the full diff"],
+        },
+    )
+    assert kb.get_task(conn, tid).status == "triage"
+    return tid
+
+
+def test_auto_decompose_skips_capability_block_on_verified_candidate(
+    kanban_home, review_gate_on
+):
+    """AC-5 repro: the capability-parked, already-approved root fans out 0 children."""
+    with kb.connect_closing() as conn:
+        tid = _escalate_review_block_to_triage(
+            conn,
+            verifier_approves=True,
+            reason=(
+                "Urteil: BLOCKED — die adversarielle Diff-Pruefung ist mit der "
+                "Reviewer-Tooloberflaeche nicht moeglich (per-file cap)."
+            ),
+            findings=[
+                "Review-Evidenz fehlt: kein read-only Datei-/Git-Zugriff fuer den "
+                "verpflichtenden Diff- und Caller-Check."
+            ],
+        )
+        park = kb.review_capability_park(conn, tid)
+        assert park is not None
+        assert park["reviewed_commit"] == _CANDIDATE_SHA
+        assert park["block_kind"] == "needs_input"
+
+    assert tid not in decomp.list_triage_ids()
+
+
+def test_auto_decompose_still_lists_content_review_escalation(
+    kanban_home, review_gate_on
+):
+    """AC-6: a review escalation WITHOUT a verified candidate stays decomposable."""
+    with kb.connect_closing() as conn:
+        tid = _escalate_review_block_to_triage(
+            conn,
+            verifier_approves=False,
+            reason="Urteil: BLOCKED — die Suche liefert bei leerem Graph 500 statt 200.",
+            findings=["empty-graph path raises instead of returning the empty result"],
+        )
+        assert kb.review_capability_park(conn, tid) is None
+
+    assert tid in decomp.list_triage_ids()
+
+
+def test_auto_decompose_still_lists_plain_manual_triage(kanban_home, review_gate_on):
+    """AC-6: ordinary manual triage keeps its fan-out behaviour."""
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="fresh spec", assignee="coder", triage=True)
+        assert kb.get_task(conn, tid).status == "triage"
+        assert kb.review_capability_park(conn, tid) is None
+
+    assert tid in decomp.list_triage_ids()
+
+
+def test_review_capability_park_reopens_after_a_fresh_candidate(
+    kanban_home, review_gate_on
+):
+    """AC-6/AC-7: the park is evidence-scoped, not a persisted terminal state."""
+    with kb.connect_closing() as conn:
+        tid = _escalate_review_block_to_triage(
+            conn,
+            verifier_approves=True,
+            reason="Urteil: BLOCKED — Diff nicht vollstaendig lesbar.",
+            findings=["Review-Evidenz fehlt"],
+        )
+        assert kb.review_capability_park(conn, tid) is not None
+
+        # A newer candidate submission supersedes the stale park.
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', block_kind = NULL WHERE id = ?",
+            (tid,),
+        )
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="revised candidate",
+            metadata={"commit": "a67006406"},
+            review_gate=True,
+        )
+        assert kb.review_capability_park(conn, tid) is None

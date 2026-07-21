@@ -276,7 +276,9 @@ def test_i6_done_and_archived_tasks_release_runtime_identity(kanban_home):
 
         archived_id = kb.create_task(conn, title="archive cleanup")
         _claim_and_spawn(conn, archived_id, 810002)
-        assert kb.archive_task(conn, archived_id)
+        # The archive fence probes the worker group before releasing runtime
+        # identity; pin the probe so no real host pid is signalled here.
+        assert kb.archive_task(conn, archived_id, probe_fn=lambda _pid: False)
         archived = kb.get_task(conn, archived_id)
         assert archived.status == "archived"
         _assert_runtime_cleared(archived)
@@ -438,3 +440,49 @@ def test_i15_claim_gate_demotes_child_with_undone_parent(kanban_home):
         assert kb.get_task(conn, child).status == "todo"
         payload = _event_payloads(conn, child, "claim_rejected")[-1]
         assert payload["reason"] == "parents_not_done"
+
+
+def test_i23_archive_never_outruns_the_worker_process_group(kanban_home, monkeypatch):
+    """I23: a terminal board state may not precede the worker's actual death.
+
+    RCA jarvis-b3-orchestration-2026-07-21 (RC1): the archived card released
+    claim + pid + worktree ownership while its premium worker kept writing.
+    The fence is self-correcting — once the group is confirmed absent the very
+    same archive call succeeds and the runtime identity is released.
+    """
+    survivor = {
+        "prev_pid": 880001,
+        "host_local": True,
+        "termination_attempted": True,
+        "terminated": False,
+        "sigkill": True,
+    }
+    alive = {"value": True}
+    monkeypatch.setattr(
+        kb,
+        "_terminate_reclaimed_worker",
+        lambda *_a, **_k: dict(survivor) if alive["value"] else _absent_worker(),
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="archived live writer")
+        claimed = _claim_and_spawn(conn, task_id, 880001)
+        workspace_before = kb.get_task(conn, task_id).workspace_path
+
+        assert kb.archive_task(conn, task_id) is False
+        held = kb.get_task(conn, task_id)
+        assert held.status == "running"
+        assert held.claim_lock is not None
+        assert held.worker_pid == 880001
+        assert held.current_run_id == claimed.current_run_id
+        assert held.workspace_path == workspace_before
+        assert _event_payloads(conn, task_id, "reclaim_deferred")[-1]["reason"] == (
+            "archive_worker_alive"
+        )
+
+        alive["value"] = False
+        assert kb.archive_task(conn, task_id) is True
+        archived = kb.get_task(conn, task_id)
+        assert archived.status == "archived"
+        _assert_runtime_cleared(archived)
+        assert _event_payloads(conn, task_id, "worker_reaped")[-1]["pid"] == 880001

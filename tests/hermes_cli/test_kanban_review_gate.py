@@ -2510,3 +2510,152 @@ def test_max_runtime_reviewer_run_reclaims_to_review(
         task = kb.get_task(conn, tid)
         assert task.status == "review"
         assert task.claim_lock is None
+
+
+# ---------------------------------------------------------------------------
+# Review capability park (RCA jarvis-b3-orchestration-2026-07-21, RC2)
+# ---------------------------------------------------------------------------
+
+
+# Verbatim block text of the RCA incident (t_65d1768e, run 7564): the reviewer
+# could not obtain the full diff and explicitly requested NO code change.
+_LIVE_CAPABILITY_REASON = (
+    "Urteil: BLOCKED\nWarum:\nDie verpflichtende adversarielle Diff-Prüfung ist "
+    "mit der verfügbaren Reviewer-Tooloberfläche nicht möglich: `kanban_show` "
+    "liefert `hermes_cli/pa_search.py` ausdrücklich nur als "
+    "`... [diff truncated: per-file cap]`; zugleich stehen weder "
+    "`read_file`/`search_files` noch ein zulässiges read-only `terminal` bereit.\n"
+    "Fix:\nReviewer erneut mit read-only Datei-/Git-/`rg`-Zugriff dispatchen. "
+    "Keine Codeänderung ist aufgrund dieses Runs angefordert."
+)
+_LIVE_CAPABILITY_FINDING = (
+    "Review-Evidenz fehlt: `kanban_show` schneidet den Hauptdiff von "
+    "`hermes_cli/pa_search.py` per file cap ab, und die Reviewer-Lane bietet "
+    "keinen read-only Datei-/Git-/`rg`-Zugriff für den verpflichtenden Diff- "
+    "und Caller-Check."
+)
+
+
+@pytest.mark.parametrize(
+    ("reason", "findings", "is_capability_park"),
+    [
+        (_LIVE_CAPABILITY_REASON, [_LIVE_CAPABILITY_FINDING], True),
+        (
+            "Urteil: BLOCKED\nWarum:\nDie Suche liefert bei leerem Graph 500 "
+            "statt einer leeren Trefferliste.",
+            ["empty-graph path raises instead of returning the empty result"],
+            False,
+        ),
+    ],
+    ids=["capability_block", "content_verdict"],
+)
+def test_review_capability_park_separates_tooling_block_from_content_verdict(
+    kanban_home, gate_on, reason, findings, is_capability_park
+):
+    """AC-5/AC-6: only the missing-evidence block over an APPROVED candidate parks.
+
+    Both cases run the identical transition sequence and both land in
+    ``triage`` — the discriminator is the block's own structured evidence, not
+    the status.
+    """
+    commit = "757cffa2b02a9710ed12599eb0b8580417e86ae4"
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical implementation",
+            assignee="coder",
+            review_tier="critical",
+        )
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.block_task(
+            conn, tid, reason="parallel writer owns the worktree", kind="needs_input"
+        )
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn, tid, summary="candidate", metadata={"commit": commit},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED", "commit": commit},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        assert kb.block_task(
+            conn,
+            tid,
+            reason=reason,
+            kind="needs_input",
+            reviewer_metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": findings,
+            },
+        )
+        assert kb.get_task(conn, tid).status == "triage"
+
+        park = kb.review_capability_park(conn, tid)
+        if is_capability_park:
+            assert park is not None
+            assert park["reviewed_commit"] == commit
+            assert park["approved_run_id"] is not None
+        else:
+            assert park is None
+
+
+def test_review_capability_park_needs_a_recorded_candidate_commit(
+    kanban_home, gate_on
+):
+    """AC-7: the guard is evidence-bound — no candidate commit, no suppression.
+
+    Without a recorded commit there is nothing to tie an APPROVED verdict to,
+    so the card keeps the historical (decomposable) behaviour rather than
+    silently disappearing from the auto-decompose scan.
+    """
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="critical implementation",
+            assignee="coder",
+            review_tier="critical",
+        )
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.block_task(
+            conn, tid, reason="parallel writer owns the worktree", kind="needs_input"
+        )
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(conn, tid, summary="candidate", review_gate=True)
+        assert kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        assert kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+        assert kb.claim_review_task(conn, tid, reviewer_profile="reviewer")
+        assert kb.block_task(
+            conn,
+            tid,
+            reason="review evidence unavailable in this lane",
+            kind="needs_input",
+            reviewer_metadata={
+                "review_verdict": "REQUEST_CHANGES",
+                "blocking_findings": ["no read-only diff access"],
+            },
+        )
+        assert kb.get_task(conn, tid).status == "triage"
+
+        blocked_payload = json.loads(
+            conn.execute(
+                "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+                "ORDER BY id DESC LIMIT 1",
+                (tid,),
+            ).fetchone()["payload"]
+        )
+        assert not blocked_payload["review_revision"]["reviewed_commit"]
+        assert kb.review_capability_park(conn, tid) is None
