@@ -35,6 +35,14 @@ def _iter_fallback_entries(raw: Any) -> list[dict[str, Any]]:
         base_url = _normalized_base_url(entry.get("base_url"))
         if base_url:
             normalized["base_url"] = base_url
+        else:
+            # An invalid base_url (non-str / whitespace, which normalizes to "")
+            # must NOT leak the raw value copied by ``dict(entry)`` above into the
+            # chain: a consumer trusting ``entry["base_url"]`` is a str would break
+            # (e.g. int 123). Drop the key so, when present, it is always a valid
+            # normalized str. Valid base_url and the absent case are unchanged, and
+            # the dedup identity is unaffected (both invalid forms normalize to "").
+            normalized.pop("base_url", None)
 
         entries.append(normalized)
     return entries

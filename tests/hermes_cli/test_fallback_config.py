@@ -80,21 +80,23 @@ def test_base_url_is_normalized_when_present_and_omitted_when_absent():
     assert "base_url" not in entries[1]
 
 
-def test_invalid_base_url_passes_through_un_normalized():
-    # CHARACTERIZATION / latent edge (flagged in RISK-MAP): `dict(entry)` copies
-    # the raw base_url first, and the `if base_url:` guard only OVERWRITES with
-    # the normalized value when that is truthy. A non-str / whitespace base_url
-    # normalizes to "" (falsy) → the invalid ORIGINAL survives in the output.
-    # A downstream consumer that trusts entry["base_url"] is a string would get
-    # an int here — worth Piet's attention, but pinned as-is (no behavior change).
+def test_invalid_base_url_is_dropped_not_leaked():
+    # BUG FIX (R4): previously `dict(entry)` copied the raw base_url first and the
+    # `if base_url:` guard only OVERWROTE with the normalized value when that was
+    # truthy — so a non-str / whitespace base_url (normalizes to "", falsy) leaked
+    # the raw ORIGINAL into the chain (e.g. int 123), and a downstream consumer that
+    # trusts entry["base_url"] is a string would break. Now an invalid base_url is
+    # DROPPED so entry["base_url"], when present, is always a valid normalized str.
+    # Valid base_url and the no-base_url case are unchanged (see the tests above),
+    # and the dedup identity is unaffected (both invalid forms normalize to "").
     entries = _iter_fallback_entries(
         [
             {"provider": "c", "model": "m", "base_url": 123},
             {"provider": "d", "model": "m", "base_url": "   "},
         ]
     )
-    assert entries[0]["base_url"] == 123
-    assert entries[1]["base_url"] == "   "
+    assert "base_url" not in entries[0]
+    assert "base_url" not in entries[1]
 
 
 def test_extra_keys_survive_normalization():
