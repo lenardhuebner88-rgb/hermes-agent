@@ -66,7 +66,7 @@ export function OfflineStaleBanner({ health }: {
 
   return (
     <div
-      className="sticky top-0 z-50 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100 backdrop-blur"
+      className="sticky top-0 z-50 border-b border-status-warn/30 bg-status-warn/10 px-4 py-2 text-sm text-status-warn backdrop-blur"
       data-offline-banner=""
     >
       <div className="mx-auto flex max-w-6xl items-center gap-2">

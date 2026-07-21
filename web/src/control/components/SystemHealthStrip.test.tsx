@@ -79,9 +79,9 @@ describe("SystemHealthStrip", () => {
     expect(html).toContain("connection refused");
   });
 
-  it("renders gray unknown fallback without data", () => {
+  it("renders neutral unknown fallback without data", () => {
     const html = renderToStaticMarkup(<SystemHealthStrip data={null} />);
-    expect(html).toContain("border-zinc-600/25");
+    expect(html).toContain("border-line bg-surface-2 text-ink-2");
     expect(html).toContain("Status unbekannt");
   });
 
@@ -118,7 +118,7 @@ describe("SystemHealthStrip", () => {
       />,
     );
     expect(html).toContain("Erhöhte Fehlerquote");
-    expect(html).toContain("text-red-300");
+    expect(html).toContain("text-status-alert");
   });
 
   it("degrades the metrics tile without breaking subsystem lights when metrics is null", () => {

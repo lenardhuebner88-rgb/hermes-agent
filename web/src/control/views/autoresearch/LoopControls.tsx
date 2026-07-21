@@ -68,7 +68,7 @@ export function LoopControls({
       <Panel className="p-4 sm:p-5" eyebrow="Iterativer Research-Loop" title={loop.running ? `Iteration ${loop.iterationLabel}` : "kein Lauf aktiv"} actions={<span className="font-data tabular-nums text-xs text-ink-2">Heartbeat {loop.heartbeatLabel}</span>}>
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0 flex-1 space-y-3">
-          <div className="h-2 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-live" style={{ width: `${loop.progressPercent}%` }} /></div>
+          <div className="h-2 overflow-hidden rounded-full bg-surface-2"><div className="h-full rounded-full bg-live" style={{ width: `${loop.progressPercent}%` }} /></div>
           <div className="grid gap-3 text-sm sm:grid-cols-3">
             <Metric label="Letzter Schritt" value={loop.stepLabel} />
             <Metric label="Letzte Bewertung" value={loop.evalLabel} />

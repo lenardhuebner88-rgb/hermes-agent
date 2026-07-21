@@ -136,14 +136,14 @@ function formatInline(text: string, keyPrefix = ""): React.ReactNode[] {
       if (!/^(https?:|mailto:|#)/i.test(href)) {
         parts.push(m[1]);
       } else {
-        parts.push(<a key={key} href={href} className="text-cyan-300 underline underline-offset-2" target="_blank" rel="noreferrer">{m[1]}</a>);
+        parts.push(<a key={key} href={href} className="text-live underline underline-offset-2" target="_blank" rel="noreferrer">{m[1]}</a>);
       }
     } else if (m[3]) {
-      parts.push(<code key={key} className="rounded bg-white/10 px-1 font-mono text-xs text-amber-200">{m[3]}</code>);
+      parts.push(<code key={key} className="rounded bg-white/10 px-1 font-mono text-xs text-ink">{m[3]}</code>);
     } else if (m[4] ?? m[6]) {
       parts.push(<strong key={key} className="font-semibold text-white">{m[4] ?? m[6]}</strong>);
     } else if (m[5] ?? m[7]) {
-      parts.push(<em key={key} className="italic text-zinc-300">{m[5] ?? m[7]}</em>);
+      parts.push(<em key={key} className="italic text-ink-2">{m[5] ?? m[7]}</em>);
     }
     last = m.index + m[0].length;
   }
@@ -154,10 +154,10 @@ function formatInline(text: string, keyPrefix = ""): React.ReactNode[] {
 const H_CLASS: Record<number, string> = {
   1: "mt-5 mb-2 text-base font-bold text-white",
   2: "mt-4 mb-2 text-sm font-semibold text-white",
-  3: "mt-3 mb-1 text-sm font-medium text-zinc-200",
-  4: "mt-3 mb-1 text-xs font-medium text-zinc-300",
-  5: "mt-2 mb-1 text-xs text-zinc-400",
-  6: "mt-2 mb-1 text-xs text-zinc-500",
+  3: "mt-3 mb-1 text-sm font-medium text-ink",
+  4: "mt-3 mb-1 text-xs font-medium text-ink-2",
+  5: "mt-2 mb-1 text-xs text-ink-3",
+  6: "mt-2 mb-1 text-xs text-ink-3",
 };
 
 export function Markdown({ body, className }: { body: string; className?: string }) {
@@ -166,7 +166,7 @@ export function Markdown({ body, className }: { body: string; className?: string
   }
   const blocks = parseMd(body);
   return (
-    <div className={cn("space-y-2 text-sm text-zinc-200", className)}>
+    <div className={cn("space-y-2 text-sm text-ink-2", className)}>
       {blocks.map((block, idx) => {
         switch (block.type) {
           case "hr":
@@ -179,13 +179,13 @@ export function Markdown({ body, className }: { body: string; className?: string
             return <p key={idx} className="leading-relaxed">{formatInline(block.text, String(idx))}</p>;
           case "code":
             return (
-              <pre key={idx} className="overflow-x-auto rounded-lg bg-black/40 px-3 py-2 text-xs leading-5 text-amber-100/90 hc-mono">
+              <pre key={idx} className="overflow-x-auto rounded-lg bg-black/40 px-3 py-2 text-xs leading-5 text-ink hc-mono">
                 <code>{block.text}</code>
               </pre>
             );
           case "blockquote":
             return (
-              <blockquote key={idx} className="border-l-2 border-cyan-400/40 pl-3 italic text-zinc-400">
+              <blockquote key={idx} className="border-l-2 border-line pl-3 italic text-ink-2">
                 {block.lines.map((l, j) => <span key={j} className="block">{formatInline(l, `${idx}-${j}`)}</span>)}
               </blockquote>
             );
@@ -208,7 +208,7 @@ export function Markdown({ body, className }: { body: string; className?: string
                   <thead>
                     <tr className="border-b border-white/10 bg-white/5">
                       {block.headers.map((h, j) => (
-                        <th key={j} className="px-3 py-2 text-left font-semibold text-zinc-300">{h}</th>
+                        <th key={j} className="px-3 py-2 text-left font-semibold text-ink">{h}</th>
                       ))}
                     </tr>
                   </thead>
@@ -216,7 +216,7 @@ export function Markdown({ body, className }: { body: string; className?: string
                     {block.rows.map((row, j) => (
                       <tr key={j} className={cn("border-b border-white/5", j % 2 === 1 && "bg-white/[.02]")}>
                         {row.map((cell, k) => (
-                          <td key={k} className="px-3 py-1.5 text-zinc-400">{formatInline(cell, `${idx}-${j}-${k}`)}</td>
+                          <td key={k} className="px-3 py-1.5 text-ink-2">{formatInline(cell, `${idx}-${j}-${k}`)}</td>
                         ))}
                       </tr>
                     ))}

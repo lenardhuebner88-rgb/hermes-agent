@@ -225,7 +225,7 @@ function CaptureSheet({ onClose, onCreated }: { onClose: () => void; onCreated?:
         />
       ) : null}
 
-      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
+      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-status-alert"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
 
       <div className="mt-4 flex items-center justify-end gap-2">
         <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.capture.cancel}</button>
