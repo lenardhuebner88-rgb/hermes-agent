@@ -239,6 +239,16 @@ async def _lifespan(app: "FastAPI"):
 
     _start_agent_questions_poller()
 
+    # Jarvis-Vitals (Slice B1): 15 s CPU/RAM sampler for /api/system/stats/
+    # history. Idempotent start; skipped under pytest unless forced (no
+    # thread leak in TestClient instances).
+    from hermes_cli.system_stats_history import (
+        start_sampler as _start_system_stats_sampler,
+        stop_sampler as _stop_system_stats_sampler,
+    )
+
+    _start_system_stats_sampler()
+
     try:
         yield
     finally:
@@ -247,6 +257,7 @@ async def _lifespan(app: "FastAPI"):
         if cron_stop is not None:
             cron_stop.set()
         _stop_agent_questions_poller()
+        _stop_system_stats_sampler()
 
 
 def _get_event_state(app: "FastAPI"):
@@ -19535,6 +19546,18 @@ register_projects_routes(app)
 
 from hermes_cli.pa_chat import register_pa_routes  # noqa: E402
 register_pa_routes(app)
+
+# KI-News (Slice B2): read-only Frontier-Digest-Feed aus den Research-Cron-
+# Outputs (pa-news/v1, 60 s-Cache, leerer Zustand = 200 items:[]). Additiv —
+# die KiLageTicker-Umschaltung folgt in einem Folge-Slice.
+from hermes_cli.pa_news import register_pa_news_routes  # noqa: E402
+register_pa_news_routes(app)
+
+# Jarvis-Vitals (Slice B1): in-process CPU/RAM history ring for the G4
+# sparklines. Additive — /api/system/stats stays untouched. The sampler
+# thread is started/stopped in _lifespan below.
+from hermes_cli.system_stats_history import register_system_stats_history  # noqa: E402
+register_system_stats_history(app)
 
 from hermes_cli.operator_inventory import register_operator_inventory_routes  # noqa: E402
 register_operator_inventory_routes(app)

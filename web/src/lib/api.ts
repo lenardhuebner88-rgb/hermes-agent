@@ -856,6 +856,22 @@ export interface PaFeedPage {
   has_more: boolean;
 }
 
+/** pa-news/v1 — Frontier Desk/Flash digests for the KI-LAGE ticker (B2). */
+export interface PaNewsItem {
+  title: string;
+  /** Unix-Sekunden. */
+  ts: number;
+  tag: string;
+  summary: string;
+  markdown: string;
+}
+
+export interface PaNewsResponse {
+  version: string;
+  items: PaNewsItem[];
+  errors?: string[];
+}
+
 /** Build a ``?profile=<name>`` query suffix, or "" when unset.
  *
  * Used by the skills/toolsets endpoints so the dashboard can manage a
@@ -955,6 +971,10 @@ export const api = {
   // S6.4a: PA-Feed für das KI-LAGE-Panel (aufsteigend, bounded).
   getPaFeed: (limit = 50) =>
     fetchJSON<PaFeedPage>(`/api/pa/feed?limit=${limit}`),
+  // B2: Frontier-News für den KI-LAGE-Ticker (pa_news.py). skipStaleTokenReload
+  // via opts — loopback/stale-token darf den Ticker nicht hard-reloaden.
+  getPaNews: (limit = 5, opts?: FetchJSONOptions) =>
+    fetchJSON<PaNewsResponse>(`/api/pa/news?limit=${limit}`, undefined, opts),
   // S3.3-FE PlanSpec-Draft + Propose (pa_planspec.py). engine/model folgen der
   // S2.2-Switcher-Wahl (weg gelassen → Backend-Default sol); project ist
   // optionaler Kontext. 422 = Engine-Ausgabe ohne PlanSpec-Frontmatter
