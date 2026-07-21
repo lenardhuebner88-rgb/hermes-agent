@@ -131,6 +131,8 @@ const GATE_ITEM_WITH_SUMMARY: PaInboxTaskItem = {
   title:
     "PlanSpec GATE-GREEN-KANBAN-LIFECYCLE-REGRESSION-FIX: Green-Gate-Ursachenfix: die live-reproduzierten Fehler",
   summary: "  grünes Gate freigeben  ",
+  why: "Die verifizierte Kette kann jetzt kontrolliert landen.",
+  consequence_on_decline: "Die Release-Kette bleibt geparkt.",
   status: "scheduled",
   freigabe: "operator",
   block_radius: 3,
@@ -183,6 +185,30 @@ afterEach(() => {
 });
 
 describe("InboxPanel (/api/pa/inbox-Items)", () => {
+  it("S8: Decision-WHY steht unter der Summary und verweist per title auf die Rohquelle", async () => {
+    renderPanel([GATE_ITEM_WITH_SUMMARY]);
+
+    const card = await screen.findByTestId("jv-inbox-task-t_sum1");
+    const why = card.querySelector(".jv-decision-why");
+    expect(why).toBeTruthy();
+    expect(why?.textContent).toContain("Warum");
+    expect(why?.textContent).toContain(
+      "Die verifizierte Kette kann jetzt kontrolliert landen.",
+    );
+    expect(why?.textContent).toContain("Bei Ablehnung");
+    expect(why?.textContent).toContain("Die Release-Kette bleibt geparkt.");
+    expect(why?.getAttribute("title")).toBe(GATE_ITEM_WITH_SUMMARY.title);
+  });
+
+  it("S8: fehlende WHY-Felder erzeugen clientseitig keine erfundene Begründung", async () => {
+    renderPanel([GATE_ITEM]);
+
+    const card = await screen.findByTestId("jv-inbox-task-t_def456");
+    expect(card.querySelector(".jv-decision-why")).toBeNull();
+    expect(card.textContent).not.toContain("Warum");
+    expect(card.textContent).not.toContain("Bei Ablehnung");
+  });
+
   it("Approval-Card: Ziel sichtbar, Payload und reason erst hinter Details", async () => {
     renderPanel();
 
