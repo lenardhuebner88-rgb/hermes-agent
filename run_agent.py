@@ -261,6 +261,11 @@ _MAX_TOOL_WORKERS = 8
 # this never reaches a strict OpenAI-compatible gateway.
 _DB_PERSISTED_MARKER = "_db_persisted"
 
+# Conventional message-bearing keys a structured provider error field may use,
+# in priority order. Shared by both passes of _coerce_api_error_detail so the
+# two loops cannot drift apart if a key is added/removed.
+_API_ERROR_DETAIL_KEYS = ("message", "detail", "error", "code", "type")
+
 
 # Guard so the OpenRouter metadata pre-warm thread is only spawned once per
 # process, not once per AIAgent instantiation.  Without this, long-running
@@ -2173,11 +2178,11 @@ class AIAgent:
         if isinstance(value, str):
             return value
         if isinstance(value, dict):
-            for key in ("message", "detail", "error", "code", "type"):
+            for key in _API_ERROR_DETAIL_KEYS:
                 nested = value.get(key)
                 if isinstance(nested, str) and nested.strip():
                     return nested
-            for key in ("message", "detail", "error", "code", "type"):
+            for key in _API_ERROR_DETAIL_KEYS:
                 if key in value:
                     nested_detail = AIAgent._coerce_api_error_detail(value[key])
                     if nested_detail:
