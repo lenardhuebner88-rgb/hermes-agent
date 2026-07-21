@@ -141,3 +141,32 @@ def test_vetoed_extracts_prefixed_signals_normalized(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", _write_vetoed(tmp_path, payload))
     assert _suppressed_autoresearch_signals() == {"lever_one", "lever_two"}
+
+
+def test_vetoed_empty_list_returns_empty_set(tmp_path, monkeypatch):
+    # An empty veto file (operator cleared all vetoes) yields an empty set —
+    # guards against a regression that returns None/errors on a falsy list.
+    monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", _write_vetoed(tmp_path, "[]"))
+    assert _suppressed_autoresearch_signals() == set()
+
+
+def test_vetoed_deduplicates_case_and_whitespace_variants(tmp_path, monkeypatch):
+    # Three surface forms of the SAME signal must collapse to ONE set member.
+    # The caller tests `signal_key in suppressed`; a missed collapse would let a
+    # vetoed lever be re-filed under a differently-cased/spaced key (operator
+    # veto lost).
+    payload = json.dumps(
+        ["autoresearch:foo", "AUTORESEARCH:FOO", "  Autoresearch: Foo  "]
+    )
+    monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", _write_vetoed(tmp_path, payload))
+    assert _suppressed_autoresearch_signals() == {"foo"}
+
+
+def test_vetoed_coerces_non_string_items_without_crashing(tmp_path, monkeypatch):
+    # Non-string items (numbers, bools, dicts, lists) are coerced via
+    # `str(item or "")` and — lacking the prefix — dropped. The item loop is NOT
+    # wrapped in try/except, so this pins that coercion keeps a heterogeneous
+    # veto file from raising; only the real prefixed string survives.
+    payload = json.dumps([42, False, {"k": "v"}, [1, 2], "autoresearch:real", None])
+    monkeypatch.setenv("HERMES_STRATEGIST_VETOED_PATH", _write_vetoed(tmp_path, payload))
+    assert _suppressed_autoresearch_signals() == {"real"}
