@@ -307,6 +307,12 @@ def _stringify_tool_content(content: Any) -> str:
     return str(content)
 
 
+# First-line markers that classify a tool-result preview as an error. Note the
+# deliberate trailing space on "traceback " so the classic Python traceback line
+# matches but "Traceback:" / "Tracebacks" do not.
+_ERROR_LINE_MARKERS = ("error:", "failed:", "traceback ", "exception:")
+
+
 def _looks_like_error_output(content: Any) -> bool:
     """Conservative stderr/error detector for tool-result previews.
 
@@ -335,12 +341,7 @@ def _looks_like_error_output(content: Any) -> bool:
             pass
 
     first = content.splitlines()[0].strip().lower() if content.splitlines() else ""
-    return (
-        first.startswith("error:")
-        or first.startswith("failed:")
-        or first.startswith("traceback ")
-        or first.startswith("exception:")
-    )
+    return any(first.startswith(marker) for marker in _ERROR_LINE_MARKERS)
 
 
 def _normalize_role(r: Optional[str]) -> str:
