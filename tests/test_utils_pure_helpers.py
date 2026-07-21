@@ -13,6 +13,7 @@ the protection of this suite.
 
 from utils import (
     env_bool,
+    env_float,
     env_int,
     normalize_proxy_env_vars,
     normalize_proxy_url,
@@ -92,6 +93,45 @@ def test_env_int_returns_default_when_not_an_int(monkeypatch):
     # A float string is not a valid int() literal → default.
     monkeypatch.setenv("HERMES_TEST_INT", "3.5")
     assert env_int("HERMES_TEST_INT", default=3) == 3
+
+
+# ─── env_float ──────────────────────────────────────────────────────────────
+
+
+def test_env_float_reads_valid_float(monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "3.5")
+    assert env_float("HERMES_TEST_FLOAT") == 3.5
+
+
+def test_env_float_strips_surrounding_whitespace(monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "  2.5  ")
+    assert env_float("HERMES_TEST_FLOAT") == 2.5
+
+
+def test_env_float_handles_negative_and_scientific(monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "-1.5")
+    assert env_float("HERMES_TEST_FLOAT") == -1.5
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "1e3")
+    assert env_float("HERMES_TEST_FLOAT") == 1000.0
+
+
+def test_env_float_accepts_integer_string(monkeypatch):
+    # Unlike env_int, a bare integer string is a valid float literal.
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "42")
+    assert env_float("HERMES_TEST_FLOAT") == 42.0
+
+
+def test_env_float_returns_default_when_unset(monkeypatch):
+    monkeypatch.delenv("HERMES_TEST_FLOAT", raising=False)
+    assert env_float("HERMES_TEST_FLOAT") == 0.0
+    assert env_float("HERMES_TEST_FLOAT", default=9.9) == 9.9
+
+
+def test_env_float_returns_default_when_blank_or_invalid(monkeypatch):
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "   ")
+    assert env_float("HERMES_TEST_FLOAT", default=1.5) == 1.5
+    monkeypatch.setenv("HERMES_TEST_FLOAT", "abc")
+    assert env_float("HERMES_TEST_FLOAT", default=1.5) == 1.5
 
 
 # ─── env_bool ───────────────────────────────────────────────────────────────
