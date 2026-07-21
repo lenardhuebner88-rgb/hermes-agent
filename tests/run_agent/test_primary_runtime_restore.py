@@ -605,6 +605,93 @@ class TestTryRecoverPrimaryTransport:
 
         assert result is False
 
+    def test_recovery_restores_primary_config_not_fallback_contamination(self):
+        """BR4 pin (the exact named misfire): recovery MUST rebuild from the
+        ``_primary_runtime`` snapshot, not the agent's CURRENT state. If an
+        earlier fallback activation overwrote model/provider/base_url/api_key,
+        a recovery that read the live fields would rebuild the "primary"
+        transport with FALLBACK credentials — fallback contamination. We
+        contaminate every live field, leave the snapshot pristine, and assert
+        each field is restored to the snapshot value and the rebuilt client is
+        constructed from the snapshot's client_kwargs.
+        """
+        agent = _make_agent(provider="custom", base_url="https://my-llm.example.com/v1")
+        rt = agent._primary_runtime
+        primary_model = rt["model"]
+        primary_provider = rt["provider"]
+        primary_url = rt["base_url"]
+        primary_key = rt["api_key"]
+
+        # Simulate fallback contamination of the LIVE agent state (non-openrouter
+        # / non-nous values so the recovery guards don't short-circuit).
+        agent.model = "fallback-model"
+        agent.provider = "fallback-provider"
+        agent.base_url = "https://fallback.example.com/v1"
+        agent.api_key = "fallback-key"
+
+        error = _make_transport_error("ReadTimeout")
+        sentinel_client = MagicMock(name="rebuilt_primary_client")
+        with patch.object(
+            agent, "_create_openai_client", return_value=sentinel_client
+        ) as mock_create, patch("time.sleep"):
+            result = agent._try_recover_primary_transport(
+                error, retry_count=3, max_retries=3,
+            )
+
+        assert result is True
+        # Every config field restored from the snapshot, NOT the contaminated state.
+        assert agent.model == primary_model, "model not restored from snapshot"
+        assert agent.provider == primary_provider, "provider not restored from snapshot"
+        assert agent.base_url == primary_url, "base_url not restored from snapshot"
+        assert agent.api_key == primary_key, "api_key not restored from snapshot"
+        # The rebuilt client is installed and built from the snapshot's kwargs.
+        assert agent.client is sentinel_client
+        (passed_kwargs,) = mock_create.call_args.args
+        assert passed_kwargs == rt["client_kwargs"]
+
+    def test_recovery_anthropic_branch_rebuilds_with_primary_anthropic_config(self):
+        """BR4 pin / coverage gap: the anthropic_messages branch
+        (agent_runtime_helpers.py:1011-1020) was entirely untested. It must
+        rebuild the anthropic client from the snapshot's anthropic key/url (not
+        contaminated live values), restore the oauth flag, install the client on
+        ``_anthropic_client`` and set ``client = None``.
+        """
+        agent = _make_agent(provider="anthropic", base_url="https://api.anthropic.com")
+        # The snapshot only carries anthropic keys when api_mode was
+        # anthropic_messages at init; force that path and pin pristine values.
+        rt = agent._primary_runtime
+        rt["api_mode"] = "anthropic_messages"
+        rt["anthropic_api_key"] = "primary-anth-key"
+        rt["anthropic_base_url"] = "https://api.anthropic.com"
+        rt["is_anthropic_oauth"] = False
+
+        # Simulate fallback contamination of the live anthropic credentials.
+        agent._anthropic_api_key = "fb-anth-key"
+        agent._anthropic_base_url = "https://fallback.anthropic.example.com"
+
+        error = _make_transport_error("ReadTimeout")
+        sentinel = MagicMock(name="rebuilt_anthropic_client")
+        with patch(
+            "agent.anthropic_adapter.build_anthropic_client", return_value=sentinel
+        ) as mock_build, patch(
+            "agent.agent_runtime_helpers.get_provider_request_timeout",
+            return_value=42.0,
+        ), patch("time.sleep"):
+            result = agent._try_recover_primary_transport(
+                error, retry_count=3, max_retries=3,
+            )
+
+        assert result is True
+        (key, url), kw = mock_build.call_args
+        assert key == "primary-anth-key", "anthropic client built with non-primary key"
+        assert url == "https://api.anthropic.com"
+        assert kw.get("timeout") == 42.0
+        assert agent._anthropic_api_key == "primary-anth-key"
+        assert agent._anthropic_base_url == "https://api.anthropic.com"
+        assert agent._is_anthropic_oauth is False
+        assert agent._anthropic_client is sentinel
+        assert agent.client is None
+
 
 # =============================================================================
 # Integration: restore_primary_runtime called from run_conversation
