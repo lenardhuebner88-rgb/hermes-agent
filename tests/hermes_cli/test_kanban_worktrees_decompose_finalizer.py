@@ -284,6 +284,72 @@ def test_commitless_decompose_root_direct_completes_at_dispatch(
     assert receipt and all(cid in receipt[-1]["body"] for cid in child_ids)
 
 
+def test_decompose_root_finalizer_ignores_external_dependency(
+    kanban_home, repo, monkeypatch,
+):
+    """Nacht M5.3: ordinary root→dependent links are not chain membership."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    spawned = []
+
+    def recording_spawn(task, workspace, *args, **kwargs):
+        spawned.append(task.id)
+        return 1001
+
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="decompose root with external dependent",
+            triage=True,
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {
+                    "title": "scratch chain child",
+                    "assignee": "coder",
+                    "workspace_kind": "scratch",
+                    "parents": [],
+                },
+            ],
+            author="decomposer",
+        )
+        assert child_ids is not None
+        external = kb.create_task(
+            conn,
+            title="external follow-up",
+            assignee="coder",
+            workspace_kind="scratch",
+        )
+        kb.link_tasks(conn, root, external)
+
+        child_id = child_ids[0]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running', workspace_path = ? WHERE id = ?",
+                (str(kanban_home / "kanban" / "workspaces" / child_id), child_id),
+            )
+        assert kb.complete_task(conn, child_id, result="chain child done")
+        assert kb.get_task(conn, root).status == "ready"
+        assert kb.get_task(conn, external).status == "todo"
+
+        res = kb.dispatch_once(
+            conn,
+            spawn_fn=recording_spawn,
+            default_assignee="coder",
+        )
+        root_task = kb.get_task(conn, root)
+        external_task = kb.get_task(conn, external)
+
+    assert (root, "auto_completed_commitless") in res.decompose_root_finalized
+    assert root_task.status == "done"
+    assert external_task.status == "ready"
+    assert root not in spawned
+
+
 def test_decompose_root_with_open_child_not_finalized(
     kanban_home, repo, monkeypatch,
 ):
@@ -1673,4 +1739,3 @@ def test_missing_binary_failure_never_foreign_attributed(repo):
     assert out["action"] == "parked"
     assert out.get("park_class") != kwt.FOREIGN_DIRTY_CHECKOUT_CLASS
     assert out["reason"].startswith("post-merge gate failed")
-

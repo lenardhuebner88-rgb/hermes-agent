@@ -300,6 +300,11 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # Config wiring is intentionally deferred; task-level max_continuations wins.
 DEFAULT_ITERATION_BUDGET_CONTINUATION_LIMIT = 3
 
+# Nacht 2026-07-22, M5.4: three medium premium/code runs exhausted the
+# inherited 30-turn profile budget (runs 7595, 7615, 7622). Stamp a visible
+# per-task budget so the worker CLI override wins over profile drift.
+DEFAULT_PREMIUM_BUILD_MAX_ITERATIONS = 90
+
 # HEILER-BUDGET-BOUNDED-EXTEND-S1: hard, NON-configurable cap on how many
 # progress-gated extensions a single task may ever receive beyond its
 # continuation limit. Progress-only recovery remains structurally bounded to
@@ -4573,6 +4578,42 @@ def ensure_code_task_contract_before_pickup(
         return _ensure_code_task_contract_in_txn(conn, task_id, source=source)
 
 
+def _default_max_iterations_for_task(
+    assignee: Optional[str],
+    kind: Optional[str],
+    *,
+    kanban_cfg: Optional[dict] = None,
+) -> Optional[int]:
+    """Resolve the board default only for otherwise-unbounded premium builds."""
+    if str(assignee or "").strip().casefold() != "premium" or str(
+        kind or ""
+    ).strip().casefold() != "code":
+        return None
+    if kanban_cfg is None:
+        try:
+            import yaml
+            from hermes_constants import get_default_hermes_root
+
+            cfg_path = get_default_hermes_root() / "config.yaml"
+            if cfg_path.is_file():
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    root_cfg = yaml.safe_load(fh) or {}
+                candidate = root_cfg.get("kanban") or {}
+                kanban_cfg = candidate if isinstance(candidate, dict) else {}
+            else:
+                kanban_cfg = {}
+        except Exception:
+            kanban_cfg = {}
+    raw = (kanban_cfg or {}).get(
+        "premium_build_max_iterations", DEFAULT_PREMIUM_BUILD_MAX_ITERATIONS
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PREMIUM_BUILD_MAX_ITERATIONS
+    return value if value >= 1 else DEFAULT_PREMIUM_BUILD_MAX_ITERATIONS
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -4655,6 +4696,8 @@ def create_task(
     role_misuse = role_misuse_reason(assignee=assignee, kind=kind)
     if role_misuse is not None:
         raise ValueError(role_misuse)
+    if max_iterations is None:
+        max_iterations = _default_max_iterations_for_task(assignee, kind)
     project = None
     project_ref = str(project_id or "").strip()
     resolved_project_id: Optional[str] = None
@@ -11106,7 +11149,10 @@ _REVIEW_CAPABILITY_MARKERS = (
     "no code change requested",
     "kein read-only",
     "keinen read-only",
+    "zulässiges read-only",
+    "zulaessiges read-only",
     "no read-only",
+    "reviewer erneut mit read-only",
 )
 
 # Explicitly incidental capability mentions are evidence that the structured
@@ -11148,11 +11194,49 @@ def _review_block_is_capability_only(
         all(
             any(marker in clause for marker in _REVIEW_CAPABILITY_MARKERS)
             for clause in re.split(
-                r";+|\n(?=\s*(?:[-*]\s+|\d+[.)]\s+))", part
+                r";+|\s+/\s+|(?<=[.!?])\s+|"
+                r"\n(?=\s*(?:[-*]\s+|\d+[.)]\s+))",
+                part,
             )
             if clause.strip()
         )
         for part in normalized_parts
+    )
+
+
+def _latest_review_block_is_substantive(
+    conn: sqlite3.Connection,
+    task_id: str,
+    candidate_sha: str,
+) -> bool:
+    """Whether the current triage block requests code work on this candidate."""
+    blocked = conn.execute(
+        "SELECT id, payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if blocked is None:
+        return False
+    try:
+        payload = json.loads(blocked["payload"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("status") != "triage":
+        return False
+    revision = payload.get("review_revision")
+    if not isinstance(revision, dict) or not _commits_refer_to_same_candidate(
+        revision.get("reviewed_commit"), candidate_sha
+    ):
+        return False
+    newer_submission = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? "
+        "AND kind = 'submitted_for_review' AND id > ? LIMIT 1",
+        (task_id, int(blocked["id"])),
+    ).fetchone()
+    if newer_submission is not None:
+        return False
+    return not _review_block_is_capability_only(
+        payload.get("reason"), revision.get("blocking_findings")
     )
 
 
@@ -11219,6 +11303,11 @@ def decompose_candidate_state(
 
     if not candidate_sha:
         return None
+    # Nacht 2026-07-22: an older APPROVED run is not a veto after the latest
+    # review stage has requested substantive changes for that same candidate.
+    # Capability-only blocks remain parked by review_capability_park.
+    if _latest_review_block_is_substantive(conn, task_id, candidate_sha):
+        return None
     for run in conn.execute(
         "SELECT verdict, metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC",
         (task_id,),
@@ -11251,6 +11340,53 @@ def _auto_decompose_idempotency_key(
     body = " ".join(str(child.get("body") or "").split())
     body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
     return f"auto-decompose:{root_id}:{base_sha.lower()}:{role}:{body_hash}"
+
+
+def _prior_decomposition_child_ids(
+    conn: sqlite3.Connection,
+    root_id: str,
+    base_sha: str,
+) -> Optional[list[str]]:
+    """Return live children from the latest decomposition of this impulse.
+
+    Child text is LLM output and may vary across retries. The stable impulse is
+    ``(root_id, idempotency_base_sha)``; replay must reuse the event's exact
+    child set rather than hashing freshly worded bodies into another fan-out.
+    """
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'decomposed' ORDER BY id DESC",
+        (root_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or str(
+            payload.get("idempotency_base_sha") or ""
+        ).strip().casefold() != str(base_sha).strip().casefold():
+            continue
+        raw_ids = payload.get("child_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return None
+        child_ids = [str(child_id).strip() for child_id in raw_ids]
+        if any(not child_id for child_id in child_ids) or len(set(child_ids)) != len(
+            child_ids
+        ):
+            return None
+        placeholders = ",".join("?" for _ in child_ids)
+        live_rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            tuple(child_ids),
+        ).fetchall()
+        live_by_id = {str(item["id"]): str(item["status"]) for item in live_rows}
+        if len(live_by_id) == len(child_ids) and all(
+            live_by_id.get(child_id) != "archived" for child_id in child_ids
+        ):
+            return child_ids
+        return None
+    return None
 
 
 def review_capability_park(
@@ -16174,6 +16310,17 @@ def decompose_triage_task(
                 {"idempotency_base_sha": idempotency_base_sha},
             )
             return []
+        children_to_create = children
+        if idempotency_base_sha:
+            prior_child_ids = _prior_decomposition_child_ids(
+                conn, task_id, idempotency_base_sha
+            )
+            if prior_child_ids is not None:
+                child_ids.extend(prior_child_ids)
+                reused_child_ids.extend(prior_child_ids)
+                # Do not reinterpret a retried LLM plan. The first atomic
+                # decomposed event is the durable child graph for this impulse.
+                children_to_create = []
         tenant = root_row["tenant"]
         # N-E3: children inherit the triage root's epic so a whole decomposed
         # tree rolls up under one epic. NULL root epic_id (the common case) =
@@ -16192,7 +16339,7 @@ def decompose_triage_task(
         # promotes parent-free children to 'ready'. When the caller asks
         # for 'scheduled' (gate-hold) the children are parked instead and
         # recompute_ready never touches them until an explicit release.
-        for idx, child in enumerate(children):
+        for idx, child in enumerate(children_to_create):
             new_id = _new_task_id()
             title = child["title"].strip()
             body = child.get("body")
@@ -16260,6 +16407,10 @@ def decompose_triage_task(
                 )
             except (TypeError, ValueError):
                 child_max_iterations = None
+            if child_max_iterations is None:
+                child_max_iterations = _default_max_iterations_for_task(
+                    assignee, kind
+                )
             conn.execute(
                 "INSERT INTO tasks "
                 "(id, title, body, assignee, status, workspace_kind, "
@@ -16311,7 +16462,7 @@ def decompose_triage_task(
             child_ids.append(new_id)
 
         # Link children to their sibling parents (within the decomposed graph).
-        for idx, child in enumerate(children):
+        for idx, child in enumerate(children_to_create):
             for p_idx in child.get("parents") or []:
                 parent_id = child_ids[p_idx]
                 child_id = child_ids[idx]

@@ -2032,10 +2032,10 @@ def test_auto_decompose_still_lists_content_review_escalation(
         "no_separator_finding_only",
     ],
 )
-def test_auto_decompose_skips_mixed_content_review_with_verified_candidate(
+def test_auto_decompose_still_lists_mixed_content_review_with_verified_candidate(
     kanban_home, review_gate_on, reason, findings
 ):
-    """P2 AC-4: any verified candidate wins over mixed review findings."""
+    """A substantive latest review block must supersede an older approval."""
     with kb.connect_closing() as conn:
         tid = _escalate_review_block_to_triage(
             conn,
@@ -2045,7 +2045,7 @@ def test_auto_decompose_skips_mixed_content_review_with_verified_candidate(
         )
         assert kb.review_capability_park(conn, tid) is None
 
-    assert tid not in decomp.list_triage_ids()
+    assert tid in decomp.list_triage_ids()
 
 
 def test_auto_decompose_still_lists_plain_manual_triage(kanban_home, review_gate_on):
@@ -2121,8 +2121,15 @@ def test_decompose_idempotency_reuses_auto_children_for_same_candidate(
             root_id,
             root_assignee="planner",
             children=[
-                {**children[0], "body": "Add the endpoint. Keep compatibility."},
-                children[1],
+                {
+                    **children[0],
+                    "title": "Implement the compatible endpoint",
+                    "body": "Use the new handler while preserving legacy callers.",
+                },
+                {
+                    **children[1],
+                    "body": "Exercise both the new and legacy request paths.",
+                },
             ],
             idempotency_base_sha=_CANDIDATE_SHA,
         )

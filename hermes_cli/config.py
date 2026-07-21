@@ -2995,6 +2995,13 @@ DEFAULT_CONFIG = {
         # decomposer prompt, model, or skills; configure that LLM path under
         # auxiliary.kanban_decomposer.
         "orchestrator_profile": "",
+        # Per-task turn budget stamped onto premium code/build cards when the
+        # creator supplied no explicit max_iterations. Nacht 2026-07-22 M5.4:
+        # runs 7595, 7615, and 7622 each exhausted a drifting 30-turn profile
+        # default and forced operator salvage. 90 matches agent.max_turns while
+        # remaining visible/overridable on the individual task; non-code cards
+        # and explicit task budgets are unchanged.
+        "premium_build_max_iterations": 90,
         # Where a child task lands if the orchestrator can't match an
         # assignee to any installed profile. When unset, falls back to the
         # default profile. A task never ends up with assignee=None.

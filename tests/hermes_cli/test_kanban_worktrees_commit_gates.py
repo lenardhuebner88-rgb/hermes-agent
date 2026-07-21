@@ -485,6 +485,37 @@ def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch)
     assert not any("tsc --noEmit" in cmd for cmd in flattened)
 
 
+def test_default_quick_gate_ruff_uses_main_repo_venv_before_runtime_python(
+    repo, monkeypatch,
+):
+    """Nacht M5.2: the gate follows the worker-gate/run-tests repo venv."""
+    repo_ruff = repo / "venv" / "bin" / "ruff"
+    repo_ruff.parent.mkdir(parents=True)
+    repo_ruff.write_text("#!/bin/sh\nexit 0\n")
+    repo_ruff.chmod(0o755)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    notes = []
+    error = kwt._default_quick_gate_ruff(repo, ["feature.py"], notes)
+
+    assert error is None
+    assert notes == ["ruff ok"]
+    assert calls == [[
+        str(repo_ruff),
+        "check",
+        "feature.py",
+        "--extend-exclude",
+        kwt.WORKTREES_DIRNAME,
+    ]]
+
+
 def test_default_quick_gate_frontend_failure_fails_closed(repo, monkeypatch):
     _install_fake_web_bins(repo)
 

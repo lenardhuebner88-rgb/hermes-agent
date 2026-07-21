@@ -315,6 +315,29 @@ def test_finalreview_parks_on_ambiguous_approved_chain_commits(repo, kanban_home
     assert card["path"].exists()
 
 
+def test_rebased_review_stamps_resolve_to_chain_tip(repo):
+    """Nacht M5.1: pre-rebase stamps replaced patch-for-patch are not divergent."""
+    info = _provisioned_chain(
+        repo, "t_rebased_stamps", relpath="first.py", content="FIRST = 1\n",
+    )
+    first_pre_rebase = _git(info["path"], "rev-parse", "HEAD")
+    _commit_in(info["path"], "second.py", "SECOND = 2\n", msg="second candidate")
+    second_pre_rebase = _git(info["path"], "rev-parse", "HEAD")
+
+    # Advance main so rebasing replaces both stamped SHAs without changing
+    # either patch. This is the t_6fd680c4 / runs 7612+7616 incident shape.
+    _commit_in(repo, "unrelated.txt", "main advanced\n", msg="advance main")
+    _git(info["path"], "rebase", "main")
+
+    assert not kwt._branch_is_ancestor(repo, first_pre_rebase, info["branch"])
+    assert not kwt._branch_is_ancestor(repo, second_pre_rebase, info["branch"])
+    assert kwt._select_override_source(
+        repo,
+        info["branch"],
+        [{"commit": second_pre_rebase}, {"commit": first_pre_rebase}],
+    ) is None
+
+
 def test_approved_commit_resolution_fails_closed_for_ambiguous_branches(repo):
     approved_commit = _git(repo, "rev-parse", "HEAD")
     for root_id in ("t_ambiguous_a", "t_ambiguous_b"):

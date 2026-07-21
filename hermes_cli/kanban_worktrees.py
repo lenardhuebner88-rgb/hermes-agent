@@ -1483,9 +1483,54 @@ def _direct_decompose_root_for_child(
     return row["child_id"] if row is not None else None
 
 
+def _decompose_event_child_ids(
+    conn: sqlite3.Connection,
+    root_id: str,
+) -> set[str]:
+    """Read canonical child membership from the latest decomposed event."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'decomposed' ORDER BY id DESC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        return set()
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set()
+    raw_ids = payload.get("child_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw_ids, list):
+        return set()
+    return {
+        str(child_id).strip()
+        for child_id in raw_ids
+        if str(child_id).strip()
+    }
+
+
 def _chain_member_ids(conn: sqlite3.Connection, root_id: str) -> set[str]:
-    """All task ids reachable from *root_id* via ``task_links`` (incl. the
-    root itself). BFS over child links, cycle-safe."""
+    """Return members of an ordinary dependency chain or decomposed graph.
+
+    Nacht 2026-07-22 M5.3 (foreign dependency ``t_b6670fc2``): ``task_links``
+    also contains ordinary root→dependent edges. A decomposed root therefore
+    uses its durable ``decomposed.child_ids`` provenance (recursing only into
+    nested decompose events), never a generic link BFS that can swallow an
+    unrelated follow-up task.
+    """
+    if _is_decompose_root(conn, root_id):
+        ids = {root_id}
+        queue = [root_id]
+        while queue:
+            current = queue.pop()
+            for child_id in _decompose_event_child_ids(conn, current):
+                if child_id in ids:
+                    continue
+                ids.add(child_id)
+                if _is_decompose_root(conn, child_id):
+                    queue.append(child_id)
+        return ids
+
     ids = {root_id}
     queue = [root_id]
     while queue:
@@ -1498,12 +1543,6 @@ def _chain_member_ids(conn: sqlite3.Connection, root_id: str) -> set[str]:
             if child not in ids:
                 ids.add(child)
                 queue.append(child)
-    if _is_decompose_root(conn, root_id):
-        rows = conn.execute(
-            "SELECT parent_id FROM task_links WHERE child_id = ?",
-            (root_id,),
-        ).fetchall()
-        ids.update(r["parent_id"] for r in rows)
     return ids
 
 
@@ -3870,6 +3909,9 @@ def _direct_complete_decompose_root(
         )
     if stamp_after_commit:
         kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
+        # The direct path bypasses complete_task(), so wake any ordinary
+        # dependents now that their decompose-root parent is terminal.
+        kb.recompute_ready(conn)
     # Evidence comment is written OUTSIDE the txn above — add_comment opens its
     # own write_txn (nesting would fail).
     evidence = "\n".join(f"- `{cid}` — {status}" for cid, status in children)
@@ -4763,11 +4805,55 @@ def _quick_gate_run_cmd(
     return None
 
 
+def _resolve_ruff_command(repo_root: Path) -> list[str]:
+    """Resolve Ruff with the same worktree-aware venv order as worker gates."""
+    # Check the supplied checkout first. Besides avoiding a git subprocess on
+    # main, this covers worktrees whose venv is linked in by provisioning.
+    for candidate in (
+        repo_root.resolve() / "venv" / "bin" / "ruff",
+        repo_root.resolve() / ".venv" / "bin" / "ruff",
+    ):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return [str(candidate)]
+
+    candidate_roots: list[Path] = []
+    try:
+        common_raw = _git(
+            repo_root,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        )
+        common_dir = Path(common_raw)
+        if not common_dir.is_absolute():
+            common_dir = (repo_root / common_dir).resolve()
+        if common_dir.name == ".git":
+            candidate_roots.append(common_dir.parent)
+    except WorktreeError:
+        pass
+    seen: set[Path] = set()
+    for root in candidate_roots:
+        resolved_root = root.resolve()
+        if resolved_root in seen:
+            continue
+        seen.add(resolved_root)
+        # Match scripts/worker-gate-ruff.sh: installed venv first, then .venv.
+        for candidate in (
+            resolved_root / "venv" / "bin" / "ruff",
+            resolved_root / ".venv" / "bin" / "ruff",
+        ):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return [str(candidate)]
+    ruff_bin = shutil.which("ruff")
+    if ruff_bin:
+        return [ruff_bin]
+    return [sys.executable, "-m", "ruff"]
+
+
 def _default_quick_gate_ruff(
     repo_root: Path, changed_files: list[str], notes: list[str],
 ) -> Optional[str]:
     """Ruff over changed .py files only; return error or None."""
-    ruff_bin = shutil.which("ruff")
     # #3-C: run ruff only over the changed .py files, not the whole repo.
     # Uses the same diff source (changed_files) already computed by the caller
     # for the affected-pytest-modules logic — no extra git subprocess needed.
@@ -4777,7 +4863,10 @@ def _default_quick_gate_ruff(
     # always force a full gate manually.
     _changed_py: list[str] = [f for f in changed_files if f.endswith(".py")]
     if _changed_py:
-        ruff_base = [ruff_bin, "check"] if ruff_bin else [sys.executable, "-m", "ruff", "check"]
+        # Nacht 2026-07-22 M5.2: the .venv-without-Ruff drift led to revert
+        # d2e4f24b7. Do not inherit that partial interpreter when the installed
+        # repository venv owns Ruff.
+        ruff_base = _resolve_ruff_command(repo_root) + ["check"]
         ruff_cmd = ruff_base + _changed_py + ["--extend-exclude", WORKTREES_DIRNAME]
         return _quick_gate_run_cmd("ruff", ruff_cmd, repo_root, 300, notes)
     # No .py files in diff — skip ruff entirely (non-Python-only change).
@@ -5778,6 +5867,19 @@ def _completion_source_metadata(
     return distinct
 
 
+def _branch_has_patch_equivalent_commit(
+    repo_root: Path,
+    branch: str,
+    commit: str,
+) -> bool:
+    """True when *branch* contains a patch-id equivalent replacement commit."""
+    try:
+        lines = _git(repo_root, "cherry", branch, commit, f"{commit}^").splitlines()
+    except WorktreeError:
+        return False
+    return any(line.startswith("- ") for line in lines)
+
+
 def _select_override_source(
     repo_root: Path,
     default_branch: str,
@@ -5789,10 +5891,11 @@ def _select_override_source(
 
     *candidates* are the newest-first distinct approved-commit metadata dicts
     from :func:`_completion_source_metadata`.  A candidate whose commit is
-    already an ancestor of *default_branch*'s tip needs no override (a parent
-    that committed to the same chain branch, or a superseded earlier commit on
-    it).  Only commits that live OFF the chain branch require redirecting the
-    merge to the approved code's own worktree.
+    already an ancestor of *default_branch*'s tip — or was replaced there by a
+    patch-equivalent rebase commit — needs no override (a parent that committed
+    to the same chain branch, or a superseded earlier commit on it). Only truly
+    off-branch commits require redirecting the merge to the approved code's own
+    worktree.
 
     Fail-closed (Restfix 3): more than one DISTINCT off-branch approved commit
     is genuine ambiguity — raise :class:`WorktreeError` so the caller parks
@@ -5815,6 +5918,14 @@ def _select_override_source(
             continue
         if branch_present and _branch_is_ancestor(
             repo_root, resolved, default_branch
+        ):
+            continue
+        # Nacht 2026-07-22 M5.1, t_6fd680c4 runs 7612/7616: review gates stamp
+        # the pre-rebase SHA. Git rebase replaces that object even when its
+        # patch survives unchanged; ``git cherry`` identifies the equivalent
+        # branch commit by patch-id.
+        if branch_present and _branch_has_patch_equivalent_commit(
+            repo_root, default_branch, resolved
         ):
             continue
         if resolved in seen:

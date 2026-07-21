@@ -2541,13 +2541,28 @@ _LIVE_CAPABILITY_FINDING = (
     [
         (_LIVE_CAPABILITY_REASON, [_LIVE_CAPABILITY_FINDING], True),
         (
+            "Die API-Validierung fehlt. Review-Evidenz fehlt: per-file cap.",
+            [],
+            False,
+        ),
+        (
+            "Die API-Validierung fehlt / Review-Evidenz fehlt: per-file cap.",
+            [],
+            False,
+        ),
+        (
             "Urteil: BLOCKED\nWarum:\nDie Suche liefert bei leerem Graph 500 "
             "statt einer leeren Trefferliste.",
             ["empty-graph path raises instead of returning the empty result"],
             False,
         ),
     ],
-    ids=["capability_block", "content_verdict"],
+    ids=[
+        "capability_block",
+        "period_separated_content_finding",
+        "slash_separated_content_finding",
+        "content_verdict",
+    ],
 )
 def test_review_capability_park_separates_tooling_block_from_content_verdict(
     kanban_home, gate_on, reason, findings, is_capability_park

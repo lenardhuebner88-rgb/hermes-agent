@@ -90,6 +90,65 @@ def test_create_task_default_max_iterations_is_none(kanban_home):
     assert task.max_iterations is None
 
 
+def test_premium_code_task_gets_documented_default_budget(kanban_home):
+    """Nacht M5.4: premium build work no longer inherits a 30-turn profile cap."""
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    expected = DEFAULT_CONFIG["kanban"]["premium_build_max_iterations"]
+    assert expected == 90
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="medium premium build",
+            assignee="premium",
+            kind="code",
+        )
+        task = kb.get_task(conn, tid)
+    assert task.max_iterations == expected
+
+
+def test_premium_code_explicit_budget_wins_and_non_code_stays_unset(kanban_home):
+    with kb.connect() as conn:
+        explicit_id = kb.create_task(
+            conn,
+            title="bounded premium build",
+            assignee="premium",
+            kind="code",
+            max_iterations=45,
+        )
+        research_id = kb.create_task(
+            conn,
+            title="premium research",
+            assignee="premium",
+            kind="research",
+        )
+        explicit = kb.get_task(conn, explicit_id)
+        research = kb.get_task(conn, research_id)
+    assert explicit.max_iterations == 45
+    assert research.max_iterations is None
+
+
+def test_decompose_defaults_premium_code_child_budget(kanban_home):
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="premium fanout", triage=True)
+        child_ids = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {
+                    "title": "premium implementation",
+                    "assignee": "premium",
+                    "kind": "code",
+                    "parents": [],
+                },
+            ],
+        )
+        assert child_ids is not None
+        child = kb.get_task(conn, child_ids[0])
+    assert child.max_iterations == 90
+
+
 def test_cli_create_flag_parses():
     parser = argparse.ArgumentParser(prog="hermes")
     sub = parser.add_subparsers(dest="command")
