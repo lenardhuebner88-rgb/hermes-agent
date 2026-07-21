@@ -2998,6 +2998,61 @@ class TestConcurrentToolExecution:
         assert "real-a" in messages[0]["content"]
         assert "real-b" in messages[1]["content"]
 
+    def test_concurrent_deadline_abandons_wedged_worker_and_fabricates_timeout(
+        self, agent, monkeypatch
+    ):
+        """BR5 pin (deterministic): a wedged worker must be ABANDONED at the
+        deadline and surface a fabricated "timed out" message with
+        ``effect_disposition == "unknown"`` plus a ``tool_timeout`` post-hook —
+        instead of hanging the whole batch.
+
+        Determinism without wall-clock coupling: the worker blocks on an event
+        that is only released AFTER the batch returns, so at every poll its
+        future is not-done and ``results[i]`` is None. A tiny (1 ms) deadline is
+        reliably crossed by executor-submit overhead (and, worst case, by one
+        ``concurrent.futures.wait`` of the remaining slice), so the abandon
+        branch fires within ≤2 polls. We deliberately do NOT patch
+        ``time.monotonic`` globally — that would freeze ``threading`` internals
+        (``Event.wait`` deadlines) in the worker. The interrupt fan-out to live
+        worker tids is a thread-registration race and is logged in RISK-MAP as
+        not-deterministically-pinnable, so it is not asserted here.
+        """
+        import threading
+        import time as _time
+
+        monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.001")
+        blocker = threading.Event()
+        tc1 = _mock_tool_call(name="web_search", arguments='{"q": "wedged"}', call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1])
+        messages = []
+
+        def fake_handle(name, args, task_id, **kwargs):
+            blocker.wait(3)  # bounded; released by the finally on the success path
+            return "late-result"
+
+        emitted = []
+        start = _time.perf_counter()
+        try:
+            with patch(
+                "agent.tool_executor._emit_terminal_post_tool_call",
+                side_effect=lambda *a, **k: emitted.append(k),
+            ), patch("run_agent.handle_function_call", side_effect=fake_handle):
+                agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+        finally:
+            blocker.set()
+        elapsed = _time.perf_counter() - start
+
+        assert elapsed < 1.5, (
+            f"wedged worker was not abandoned at the deadline (took {elapsed:.2f}s)"
+        )
+        assert len(messages) == 1
+        assert "timed out after" in messages[0]["content"]
+        assert messages[0]["effect_disposition"] == "unknown"
+        assert any(
+            e.get("status") == "timeout" and e.get("error_type") == "tool_timeout"
+            for e in emitted
+        ), f"no tool_timeout post-hook emitted; got {emitted!r}"
+
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
