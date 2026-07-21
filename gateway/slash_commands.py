@@ -395,6 +395,69 @@ class GatewaySlashCommandsMixin:
             f"Slash commands you can run: {runnable_str}"
         )
 
+    async def _handle_curator_command(self, event: MessageEvent) -> str:
+        """Handle /curator — delegate to the shared curator CLI.
+
+        Mirrors the classic-CLI handler (``hermes_cli.cli_commands_mixin.
+        _handle_curator_command``): both funnel into ``hermes_cli.curator.
+        cli_main`` so the subcommand set (status, run, pin, archive,
+        list-archived, ...) stays identical across surfaces.  ``cli_main``
+        prints to stdout, so capture stdout+stderr and feed an empty stdin:
+        any interactive confirmation (``prune``/``rollback`` without ``-y``)
+        hits EOF and aborts cleanly instead of blocking a gateway worker
+        thread.  Blocking work runs in a thread pool to keep the event loop
+        responsive (same pattern as /kanban).
+        """
+        import asyncio
+        import contextlib
+        import io
+        import shlex
+
+        text = (event.text or "").strip()
+        if text.startswith("/"):
+            text = text.lstrip("/")
+        if text.startswith("curator"):
+            text = text[len("curator"):].lstrip()
+
+        tokens = shlex.split(text) if text else []
+        if not tokens:
+            tokens = ["status"]
+
+        def _run() -> str:
+            from hermes_cli.curator import cli_main
+
+            buf = io.StringIO()
+            # Feed an empty stdin so interactive confirmations
+            # (prune/rollback without -y) hit EOF and abort cleanly instead
+            # of blocking the worker thread. Swap manually rather than via
+            # contextlib.redirect_stdin for compatibility with the oldest
+            # supported interpreter.
+            old_stdin = sys.stdin
+            sys.stdin = io.StringIO("")
+            try:
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    cli_main(tokens)
+            except SystemExit:
+                # argparse calls sys.exit() on --help or bad args; the
+                # captured usage/error text becomes the reply.
+                pass
+            except Exception as exc:  # pragma: no cover - defensive
+                return f"(._.) curator: {exc}"
+            finally:
+                sys.stdin = old_stdin
+            return buf.getvalue().rstrip()
+
+        try:
+            output = await asyncio.to_thread(_run)
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"(._.) curator: {exc}"
+
+        if not output:
+            return "curator: no output"
+        # Monospace block preserves the indented status table on chat
+        # platforms that would otherwise collapse the alignment.
+        return f"```\n{output}\n```"
+
     async def _handle_kanban_command(self, event: MessageEvent) -> str:
         """Handle /kanban — delegate to the shared kanban CLI.
 

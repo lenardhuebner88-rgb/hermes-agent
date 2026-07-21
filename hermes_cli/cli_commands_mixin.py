@@ -2466,6 +2466,57 @@ class CLICommandsMixin:
         else:
             _cprint("  Failed to save timestamps setting to config.yaml")
 
+    def _handle_indicator_command(self, cmd_original: str) -> None:
+        """Set or inspect ``display.tui_status_indicator`` from the CLI.
+
+        Mirrors the TUI-gateway ``config.set indicator`` RPC (same valid
+        styles and default) so the classic CLI and the Ink TUI agree on the
+        rendered value.
+
+        Usage:
+            /indicator              → show current style
+            /indicator status       → show current style
+            /indicator <style>      → set (ascii | emoji | kaomoji | unicode)
+        """
+        from cli import _cprint, save_config_value
+        from hermes_cli.config import load_config
+        from hermes_cli.colors import Colors as _Colors
+
+        # Keep in sync with tui_gateway.server._INDICATOR_STYLES/_DEFAULT.
+        styles = ("ascii", "emoji", "kaomoji", "unicode")
+        default = "kaomoji"
+
+        arg = ""
+        try:
+            parts = (cmd_original or "").strip().split(None, 1)
+            if len(parts) > 1:
+                arg = parts[1].strip().lower()
+        except Exception:
+            arg = ""
+
+        cfg = load_config() or {}
+        raw = (cfg.get("display") or {}).get("tui_status_indicator", "")
+        norm = str(raw).strip().lower()
+        current = norm if norm in styles else default
+
+        if arg in {"", "status", "?"}:
+            _cprint(
+                f"  {_Colors.BOLD}Status indicator:{_Colors.RESET} {current}\n"
+                f"  Styles: {' | '.join(styles)}"
+            )
+            return
+
+        if arg not in styles:
+            _cprint(
+                f"  Unknown indicator {arg!r} — pick one of: {' | '.join(styles)}"
+            )
+            return
+
+        if save_config_value("display.tui_status_indicator", arg):
+            _cprint(f"  Status indicator: {_Colors.GREEN}{arg}{_Colors.RESET}")
+        else:
+            _cprint("  Failed to save tui_status_indicator setting to config.yaml")
+
     def _handle_reasoning_command(self, cmd: str):
         """Handle /reasoning — manage effort level and display toggle.
 

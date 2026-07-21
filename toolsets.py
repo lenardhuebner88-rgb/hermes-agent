@@ -560,7 +560,6 @@ TOOLSETS = {
             "yb_search_sticker",
             "yb_send_sticker",
         ],
-        "module": "tools.yuanbao_tools",
         "includes": []
     },
 

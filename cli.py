@@ -8771,6 +8771,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._toggle_verbose()
         elif canonical == "footer":
             self._handle_footer_command(cmd_original)
+        elif canonical == "indicator":
+            self._handle_indicator_command(cmd_original)
         elif canonical == "yolo":
             self._toggle_yolo()
         elif canonical == "reasoning":

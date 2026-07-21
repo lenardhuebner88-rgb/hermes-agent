@@ -368,7 +368,22 @@ def main():
             continue
 
         method = req.get("method") if isinstance(req, dict) else None
-        resp = dispatch(req)
+        req_id = req.get("id") if isinstance(req, dict) else None
+        try:
+            resp = dispatch(req)
+        except Exception:
+            # Mirror the WebSocket path (ws.py): a raising inline/fast
+            # handler must not take down the whole gateway subprocess.
+            # Log the crash and answer with a JSON-RPC internal error so
+            # the TUI surfaces a failed request instead of "gateway exited".
+            logger.exception(
+                "stdio dispatch crash id=%s method=%s", req_id, method
+            )
+            resp = {
+                "jsonrpc": "2.0",
+                "error": {"code": -32603, "message": "internal error"},
+                "id": req_id,
+            }
         if resp is not None:
             if not write_json(resp):
                 _log_exit(f"response write failed for method={method!r} (broken stdout pipe)")

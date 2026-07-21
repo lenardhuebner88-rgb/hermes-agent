@@ -10129,6 +10129,9 @@ class GatewayRunner(
         if canonical == "skills":
             return await self._handle_skills_command(event)
 
+        if canonical == "curator":
+            return await self._handle_curator_command(event)
+
         if canonical == "learn":
             # Open-ended: rewrite the turn to a standards-guided prompt and fall
             # through to normal agent processing. The live agent gathers the
