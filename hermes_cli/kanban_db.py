@@ -11042,6 +11042,9 @@ _REVIEW_CAPABILITY_MARKERS = (
     "review evidence is missing",
     "review evidence unavailable",
     "diff truncated",
+    "diff nicht vollständig lesbar",
+    "diff nicht vollstaendig lesbar",
+    "diff not fully readable",
     "per-file cap",
     "per file cap",
     "per-file-truncation",
@@ -11068,10 +11071,16 @@ def _review_block_is_capability_only(
         parts.append(str(reason))
     if isinstance(findings, (list, tuple)):
         parts.extend(str(item) for item in findings)
-    haystack = "\n".join(parts).casefold()
-    if not haystack.strip():
+    normalized_parts = [part.casefold() for part in parts if part.strip()]
+    if not normalized_parts:
         return False
-    return any(marker in haystack for marker in _REVIEW_CAPABILITY_MARKERS)
+    # Fail open for decomposition unless every structured reason/finding unit
+    # explicitly describes a capability gap. A marker mentioned incidentally
+    # must not hide a separate substantive review finding.
+    return all(
+        any(marker in part for marker in _REVIEW_CAPABILITY_MARKERS)
+        for part in normalized_parts
+    )
 
 
 def review_capability_park(

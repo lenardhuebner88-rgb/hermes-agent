@@ -2009,6 +2009,25 @@ def test_auto_decompose_still_lists_content_review_escalation(
     assert tid in decomp.list_triage_ids()
 
 
+def test_auto_decompose_still_lists_mixed_content_review_escalation(
+    kanban_home, review_gate_on
+):
+    """AC-6: an incidental capability marker cannot hide a code finding."""
+    with kb.connect_closing() as conn:
+        tid = _escalate_review_block_to_triage(
+            conn,
+            verifier_approves=True,
+            reason=(
+                "Urteil: BLOCKED — die Suche liefert bei leerem Graph 500; "
+                "per-file cap ist nur ein zusaetzlicher Lane-Hinweis."
+            ),
+            findings=["empty-graph path raises instead of returning the empty result"],
+        )
+        assert kb.review_capability_park(conn, tid) is None
+
+    assert tid in decomp.list_triage_ids()
+
+
 def test_auto_decompose_still_lists_plain_manual_triage(kanban_home, review_gate_on):
     """AC-6: ordinary manual triage keeps its fan-out behaviour."""
     with kb.connect_closing() as conn:
