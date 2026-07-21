@@ -19553,6 +19553,10 @@ register_pa_routes(app)
 from hermes_cli.pa_news import register_pa_news_routes  # noqa: E402
 register_pa_news_routes(app)
 
+# Jarvis B3: brain search + node preview (normalized contract)
+from hermes_cli.pa_search import register_pa_search_routes  # noqa: E402
+register_pa_search_routes(app)
+
 # Jarvis-Vitals (Slice B1): in-process CPU/RAM history ring for the G4
 # sparklines. Additive — /api/system/stats stays untouched. The sampler
 # thread is started/stopped in _lifespan below.
