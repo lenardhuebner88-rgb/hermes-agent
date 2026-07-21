@@ -130,10 +130,9 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
         for key, value in msg.items():
             if key in {"content", "name", "tool_calls", "role"}:
                 continue
-            if isinstance(value, str):
-                if _SURROGATE_RE.search(value):
-                    msg[key] = _SURROGATE_RE.sub('\ufffd', value)
-                    found = True
+            if isinstance(value, str) and _SURROGATE_RE.search(value):
+                msg[key] = _SURROGATE_RE.sub('\ufffd', value)
+                found = True
             elif isinstance(value, (dict, list)):
                 if _sanitize_structure_surrogates(value):
                     found = True
