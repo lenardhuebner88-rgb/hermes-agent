@@ -2202,6 +2202,11 @@ class AIAgent:
         return str(value)
 
     @staticmethod
+    def _http_error_prefix(status_code: Optional[int]) -> str:
+        """Shared 'HTTP <code>: ' prefix for error summaries ('' when absent)."""
+        return f"HTTP {status_code}: " if status_code else ""
+
+    @staticmethod
     def _summarize_api_error(error: Exception) -> str:
         """Extract a human-readable one-liner from an API error.
 
@@ -2239,7 +2244,7 @@ class AIAgent:
             msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
             if msg:
                 status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
+                prefix = AIAgent._http_error_prefix(status_code)
                 msg = AIAgent._coerce_api_error_detail(msg)
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
@@ -2256,7 +2261,7 @@ class AIAgent:
                 snippet = ""
             if snippet:
                 status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
+                prefix = AIAgent._http_error_prefix(status_code)
                 try:
                     payload = json.loads(snippet)
                 except (json.JSONDecodeError, TypeError):
@@ -2271,7 +2276,7 @@ class AIAgent:
 
         # Fallback: truncate the raw string but give more room than 200 chars
         status_code = getattr(error, "status_code", None)
-        prefix = f"HTTP {status_code}: " if status_code else ""
+        prefix = AIAgent._http_error_prefix(status_code)
         return AIAgent._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
 
     def _mask_api_key_for_logs(self, key: Any) -> Optional[str]:
