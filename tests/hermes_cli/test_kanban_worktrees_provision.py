@@ -1080,8 +1080,8 @@ def test_repo_cap_two_allows_two_then_serializes(
             serialize_by_repo=True, max_concurrent_per_repo=2,
         )
 
-    assert len([t for t in ids if t in spawned]) == 2
-    assert len(res.skipped_repo_serialized) == 1
+    assert len([t for t in ids if t in spawned]) == 1
+    assert len(res.skipped_worktree_writer_active) == 2
 
 
 def test_conflict_fixer_exempt_under_full_cap(
@@ -1140,8 +1140,9 @@ def test_serialize_off_ignores_cap(
             serialize_by_repo=False, max_concurrent_per_repo=2,
         )
 
-    assert len([t for t in ids if t in spawned]) == 3
+    assert len([t for t in ids if t in spawned]) == 1
     assert res.skipped_repo_serialized == []
+    assert len(res.skipped_worktree_writer_active) == 2
 
 
 def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):

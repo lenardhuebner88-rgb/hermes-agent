@@ -58,6 +58,19 @@ def repo_inflight_counts(
     return counts
 
 
+_READ_ONLY_TASK_KINDS = frozenset({"analysis", "research", "review"})
+_READ_ONLY_PROFILE_PREFIXES = ("reviewer", "verifier", "critic", "research", "scout")
+
+
+def task_is_read_only(kind: Optional[str], assignee: Optional[str]) -> bool:
+    """Return whether a dispatch candidate is contractually non-writing."""
+    normalized_kind = (kind or "").strip().casefold()
+    normalized_assignee = (assignee or "").strip().casefold()
+    return normalized_kind in _READ_ONLY_TASK_KINDS or normalized_assignee.startswith(
+        _READ_ONLY_PROFILE_PREFIXES
+    )
+
+
 def chain_worktree_inflight_counts(
     conn: sqlite3.Connection,
     chain_root_for_task: Callable[[str], Optional[str]],
@@ -82,10 +95,14 @@ def chain_worktree_inflight_counts(
     """
     counts: dict[str, int] = {}
     for row in conn.execute(
-        "SELECT id FROM tasks "
+        "SELECT id, kind, assignee, status FROM tasks "
         "WHERE workspace_kind = 'dir' "
         "AND status NOT IN ('done', 'archived', 'todo', 'ready', 'scheduled')"
     ):
+        if row["status"] == "review" or task_is_read_only(
+            row["kind"], row["assignee"]
+        ):
+            continue
         root = chain_root_for_task(row["id"])
         if root is not None:
             counts[root] = counts.get(root, 0) + 1
