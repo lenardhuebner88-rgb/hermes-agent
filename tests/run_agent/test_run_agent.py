@@ -3053,6 +3053,59 @@ class TestConcurrentToolExecution:
             for e in emitted
         ), f"no tool_timeout post-hook emitted; got {emitted!r}"
 
+    def test_concurrent_deadline_fans_interrupt_out_to_registered_worker_tids(
+        self, agent, monkeypatch
+    ):
+        """BR5 pin (deterministic subset): on deadline abandon the executor must
+        fan ``_set_interrupt(True, tid)`` out to EVERY registered worker tid, so
+        wedged tools that DO poll the interrupt bit (terminal, execute_code)
+        abort instead of running detached forever after ``shutdown(wait=False)``.
+
+        The worker-REGISTRATION race (whether a real worker registered its tid
+        before the fan-out snapshot at tool_executor.py:777) is timing-dependent
+        and logged in RISK-MAP as not-deterministically-pinnable. Here we
+        pre-register sentinel tids so the fan-out LOOP itself is pinned without
+        any scheduling dependency; assertions cover only the sentinels.
+        """
+        import threading
+
+        monkeypatch.setenv("HERMES_CONCURRENT_TOOL_TIMEOUT_S", "0.001")
+        blocker = threading.Event()
+        tc1 = _mock_tool_call(name="web_search", arguments='{"q": "wedged"}', call_id="c1")
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1])
+        messages = []
+
+        def fake_handle(name, args, task_id, **kwargs):
+            blocker.wait(3)  # bounded; released by the finally below
+            return "late"
+
+        sentinel_tids = (999001, 999002)
+        with agent._tool_worker_threads_lock:
+            for tid in sentinel_tids:
+                agent._tool_worker_threads.add(tid)
+
+        interrupted = []
+
+        def fake_set_interrupt(active, thread_id=None, *a, **k):
+            interrupted.append((active, thread_id))
+
+        try:
+            with patch("run_agent._set_interrupt", side_effect=fake_set_interrupt), \
+                 patch("run_agent.handle_function_call", side_effect=fake_handle):
+                agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
+        finally:
+            blocker.set()
+            with agent._tool_worker_threads_lock:
+                for tid in sentinel_tids:
+                    agent._tool_worker_threads.discard(tid)
+
+        fanned_true = {tid for active, tid in interrupted if active is True}
+        for tid in sentinel_tids:
+            assert tid in fanned_true, (
+                f"abandon did not fan _set_interrupt(True, {tid}) out to a "
+                f"registered worker tid; fanned={sorted(fanned_true)}"
+            )
+
     def test_concurrent_interrupt_before_start(self, agent):
         """If interrupt is requested before concurrent execution, all tools are skipped."""
         tc1 = _mock_tool_call(name="web_search", arguments='{}', call_id="c1")
