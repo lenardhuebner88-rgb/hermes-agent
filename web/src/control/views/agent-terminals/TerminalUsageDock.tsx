@@ -4,15 +4,9 @@ import type { AccountUsageProvider } from "../../lib/types";
 import { useAccountUsage } from "../../hooks/costsUsage";
 import { Eyebrow } from "../../components/primitives";
 
-import { providerUsageSummary, sortTerminalUsageProviders, TERMINAL_USAGE_PROVIDER_ORDER } from "./usageModel";
+import { providerUsageMeters, sortTerminalUsageProviders, usageProviderLabel } from "./usageModel";
 
-const PROVIDER_TITLES: Record<(typeof TERMINAL_USAGE_PROVIDER_ORDER)[number], string> = {
-  "openai-codex": "ChatGPT",
-  anthropic: "Claude",
-  kimi: "Kimi",
-};
-
-function UsageMeter({ label, percent }: { label: string; percent: number | null }) {
+function UsageMeter({ label, percent, detail }: { label: string; percent: number | null; detail: string | null }) {
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.12em] text-ink-3">
@@ -27,14 +21,14 @@ function UsageMeter({ label, percent }: { label: string; percent: number | null 
           />
         ) : null}
       </div>
+      {detail ? <p className="truncate text-[10px] text-ink-3">{detail}</p> : null}
     </div>
   );
 }
 
 function ProviderCard({ provider }: { provider: AccountUsageProvider }) {
-  const summary = providerUsageSummary(provider);
-  const knownId = TERMINAL_USAGE_PROVIDER_ORDER.includes(provider.provider as (typeof TERMINAL_USAGE_PROVIDER_ORDER)[number]);
-  const title = knownId ? PROVIDER_TITLES[provider.provider as (typeof TERMINAL_USAGE_PROVIDER_ORDER)[number]] : provider.title;
+  const meters = providerUsageMeters(provider);
+  const title = usageProviderLabel(provider);
   return (
     <article
       data-provider={provider.provider}
@@ -51,11 +45,10 @@ function ProviderCard({ provider }: { provider: AccountUsageProvider }) {
         </span>
       </div>
       <div className="space-y-2.5">
-        <UsageMeter label="5h" percent={summary.sessionPercent} />
-        <UsageMeter label="Woche" percent={summary.weeklyPercent} />
+        {meters.map((meter) => <UsageMeter key={meter.key} label={meter.label} percent={meter.percent} detail={meter.detail} />)}
       </div>
-      {!provider.available ? (
-        <p className="mt-2 text-[10px] text-ink-2">Aktuell keine verlässlichen Limitdaten.</p>
+      {meters.length === 0 ? (
+        <p className="mt-2 text-[10px] text-ink-2">{provider.available ? "Provider liefert aktuell kein Zeitfenster." : provider.unavailable_reason ?? "Aktuell keine verlässlichen Limitdaten."}</p>
       ) : null}
     </article>
   );
@@ -88,7 +81,7 @@ export function TerminalUsageDock({ open, onClose }: { open: boolean; onClose: (
         {usage.error ? <p className="rounded-card border border-status-alert/20 bg-status-alert/10 p-3 text-xs text-status-alert">Usage konnte nicht geladen werden.</p> : null}
         {usage.loading && providers.length === 0 ? (
           <div className="space-y-3" aria-label="Usage wird geladen">
-            {[0, 1, 2].map((index) => <div key={index} className="hc-skeleton h-28 rounded-card" />)}
+            {[0, 1, 2, 3].map((index) => <div key={index} className="hc-skeleton h-28 rounded-card" />)}
           </div>
         ) : null}
         {!usage.loading && !usage.error && providers.length === 0 ? (

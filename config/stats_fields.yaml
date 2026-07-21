@@ -19,27 +19,34 @@ providers:
   - id: anthropic
     label: Claude
     lane: claude
+    usage_role: subscription
     visible: true
   - id: openai-codex
     label: ChatGPT / Codex
     lane: chatgpt
+    usage_role: subscription
     visible: true
   - id: kimi
     label: Kimi
     lane: kimi
+    usage_role: subscription
     visible: true
   - id: xai
     label: Grok
     lane: null
+    usage_role: subscription
     visible: true
   - id: openrouter
     label: OpenRouter
     lane: null
+    usage_role: spend
     visible: true
 
-# Provider usage windows. `kind` drives layout: session/weekly render as the two
-# primary horizontal bars; `other` collapses into the per-card "Details" disclosure.
-# `label` is the German display label shown next to the bar.
+# Provider usage windows. `kind` drives layout: every session/weekly window
+# renders as a primary horizontal bar (one bar per window — 5h-Fenster, Diese
+# Woche and the model-scoped cap are three bars); `other` collapses into the
+# per-card "Details" disclosure. `label` is the German display label shown next
+# to the bar (the window `detail`, e.g. the model name, is appended as " · …").
 windows:
   - key: session
     label: 5-Std-Fenster
@@ -54,10 +61,11 @@ windows:
     label: Sonnet-Woche
     kind: other
   # Model-scoped weekly cap (Anthropic `limits[].weekly_scoped`); the model name
-  # rides in the window `detail`, rendered alongside this label in the Details.
+  # rides in the window `detail`, appended to the label ("Modell-Limit · Fable").
+  # kind=weekly → own primary bar (Operator-Spec 2026-07-21: Fable explizit).
   - key: scoped_week
     label: Modell-Limit
-    kind: other
+    kind: weekly
 
 # Subscription token buckets (Abo-Token panel + per-card worker-run reconciliation).
 # `key` must match a provider `lane` above. Order = display order; `visible: false`

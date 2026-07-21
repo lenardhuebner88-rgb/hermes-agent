@@ -15,6 +15,7 @@ export const StatsProviderFieldSchema = z.object({
   id: z.string().catch(""),
   label: z.string().catch(""),
   lane: z.string().nullable().catch(null),
+  usage_role: z.enum(["subscription", "spend"]).optional().catch(undefined),
   visible: z.boolean().catch(true),
 });
 
@@ -49,18 +50,18 @@ export type StatsFieldConfig = z.infer<typeof StatsFieldConfigSchema>;
 export const DEFAULT_STATS_CONFIG: StatsFieldConfig = {
   version: 1,
   providers: [
-    { id: "anthropic", label: "Claude", lane: "claude", visible: true },
-    { id: "openai-codex", label: "ChatGPT / Codex", lane: "chatgpt", visible: true },
-    { id: "kimi", label: "Kimi", lane: "kimi", visible: true },
-    { id: "xai", label: "Grok", lane: null, visible: true },
-    { id: "openrouter", label: "OpenRouter", lane: null, visible: true },
+    { id: "anthropic", label: "Claude", lane: "claude", usage_role: "subscription", visible: true },
+    { id: "openai-codex", label: "ChatGPT / Codex", lane: "chatgpt", usage_role: "subscription", visible: true },
+    { id: "kimi", label: "Kimi", lane: "kimi", usage_role: "subscription", visible: true },
+    { id: "xai", label: "Grok", lane: null, usage_role: "subscription", visible: true },
+    { id: "openrouter", label: "OpenRouter", lane: null, usage_role: "spend", visible: true },
   ],
   windows: [
     { key: "session", label: "5-Std-Fenster", kind: "session" },
     { key: "weekly", label: "Diese Woche", kind: "weekly" },
     { key: "opus_week", label: "Opus-Woche", kind: "other" },
     { key: "sonnet_week", label: "Sonnet-Woche", kind: "other" },
-    { key: "scoped_week", label: "Modell-Limit", kind: "other" },
+    { key: "scoped_week", label: "Modell-Limit", kind: "weekly" },
   ],
   subscription_lanes: [
     { key: "chatgpt", label: "ChatGPT/Codex Abo", visible: true },
@@ -83,6 +84,17 @@ export function providerLabel(cfg: StatsFieldConfig, id: string): string {
 export function laneForProvider(cfg: StatsFieldConfig, id: string): string | null {
   const field = providerField(cfg, id);
   return field ? field.lane : null;
+}
+
+/** Account-limit role: subscriptions have quota windows; spend providers show money. */
+export function usageRoleForProvider(cfg: StatsFieldConfig, id: string): "subscription" | "spend" {
+  const field = providerField(cfg, id);
+  if (field?.usage_role) return field.usage_role;
+  // Backward-compatible fallback for older runtime config payloads.
+  if (field) return field.lane != null || id === "xai" ? "subscription" : "spend";
+  // A newly introduced API provider must remain visible until the declarative
+  // config catches up. Known spend providers are declared explicitly above.
+  return "subscription";
 }
 
 /** True unless the provider is explicitly hidden in config (undeclared = visible). */

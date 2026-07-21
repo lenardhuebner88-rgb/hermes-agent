@@ -15,7 +15,11 @@
 import type { AccountUsageProvider, AccountUsageWindow } from "./types";
 import {
   DEFAULT_STATS_CONFIG,
+  isProviderVisible,
   laneForProvider,
+  providerLabel,
+  providerOrder,
+  usageRoleForProvider,
   windowField,
   windowLabelForKind,
   type StatsFieldConfig,
@@ -29,6 +33,8 @@ export type WindowKind = "session" | "weekly" | "other";
  * String statt einer festen Union.
  */
 export type SubscriptionLane = string;
+
+export type UsageProviderRole = "subscription" | "spend";
 
 export interface Bottleneck {
   providerId: string;
@@ -135,4 +141,53 @@ export function providerToLane(
   cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
 ): SubscriptionLane | null {
   return laneForProvider(cfg, provider);
+}
+
+/** Canonical provider name; never trust generic backend titles such as "Account limits". */
+export function usageProviderLabel(
+  provider: AccountUsageProvider,
+  cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
+): string {
+  const configured = providerLabel(cfg, provider.provider);
+  if (configured !== provider.provider) return configured;
+  return provider.title && provider.title !== "Account limits" ? provider.title : provider.provider;
+}
+
+/** Visible providers in declarative config order, optionally restricted by account role. */
+export function sortUsageProviders(
+  providers: AccountUsageProvider[],
+  cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
+  role?: UsageProviderRole,
+): AccountUsageProvider[] {
+  return providers
+    .filter((provider) => isProviderVisible(cfg, provider.provider))
+    .filter((provider) => role == null || usageRoleForProvider(cfg, provider.provider) === role)
+    .sort((a, b) => providerOrder(cfg, a.provider) - providerOrder(cfg, b.provider));
+}
+
+/** All provider-supplied windows, ordered session → weekly → other without dropping duplicates. */
+export function sortedUsageWindows(
+  provider: AccountUsageProvider,
+  cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG,
+): AccountUsageWindow[] {
+  const rank = (window: AccountUsageWindow) => {
+    const kind = classifyWindow(window, cfg);
+    return kind === "session" ? 0 : kind === "weekly" ? 1 : 2;
+  };
+  return provider.windows
+    .map((window, index) => ({ window, index }))
+    .sort((a, b) => rank(a.window) - rank(b.window) || a.index - b.index)
+    .map(({ window }) => window);
+}
+
+/** Human-readable age only when a provider signal is older than the live threshold. */
+export function staleUsageSignalLabel(
+  provider: AccountUsageProvider,
+  nowMs: number,
+  maxAgeMs = 60 * 60 * 1000,
+): string | null {
+  const signalMs = Date.parse(provider.signal_at ?? provider.fetched_at ?? "");
+  if (!Number.isFinite(signalMs) || nowMs - signalMs <= maxAgeMs) return null;
+  const ageHours = Math.max(1, Math.floor((nowMs - signalMs) / (60 * 60 * 1000)));
+  return ageHours < 24 ? `Stand ${ageHours}h` : `Stand ${Math.floor(ageHours / 24)}d`;
 }

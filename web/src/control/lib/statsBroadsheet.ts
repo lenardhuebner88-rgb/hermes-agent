@@ -11,6 +11,7 @@
  * harness-lifecycle endstates, never product-logic bugs.
  */
 import { profileLabel } from "./tones";
+import { staleUsageSignalLabel, usageProviderLabel, windowLabelDe } from "./accountUsage";
 import type {
   AccountUsageProvider,
   AccountUsageWindow,
@@ -325,17 +326,6 @@ export function germanDate(epochSec: number): string {
 // Fenster-Zeile. Claude (anthropic) / ChatGPT (openai-codex) liefern echte
 // OAuth-Fenster (session/weekly); Kimi ist geschätzt (source=
 // kanban_subscription_tokens, kein Provider-Limit) und wird so markiert.
-const PROVIDER_LABEL: Record<string, string> = {
-  anthropic: "Claude",
-  "openai-codex": "ChatGPT",
-  kimi: "Kimi",
-};
-const WINDOW_LABEL: Record<string, string> = {
-  session: "Session",
-  weekly: "Woche",
-  opus_week: "Opus · Woche",
-  sonnet_week: "Sonnet · Woche",
-};
 /** source-Wert, der eine geschätzte (kein-Provider-Limit) Bilanz markiert. */
 export const ESTIMATED_SOURCE = "kanban_subscription_tokens";
 
@@ -352,6 +342,7 @@ export interface LedgerEntry {
   resetAt: string | null;
   available: boolean;
   unavailableReason: string | null;
+  staleLabel: string | null;
 }
 
 /** Auslastungs-Status: je näher am Limit, desto kritischer. */
@@ -374,20 +365,21 @@ function tightestWindow(windows: AccountUsageWindow[]): AccountUsageWindow | nul
 }
 
 /** Eine Ledger-Zeile je Provider (knappste Auslastung), Engpass zuerst. */
-export function budgetLedger(providers: AccountUsageProvider[]): LedgerEntry[] {
+export function budgetLedger(providers: AccountUsageProvider[], nowMs = Date.now()): LedgerEntry[] {
   const entries: LedgerEntry[] = providers.map((p) => {
     const top = tightestWindow(p.windows);
     const usedPercent = top?.used_percent ?? null;
     return {
       provider: p.provider,
-      label: PROVIDER_LABEL[p.provider] ?? p.provider,
-      window: top ? WINDOW_LABEL[top.window_key ?? ""] ?? top.label : "",
+      label: usageProviderLabel(p),
+      window: top ? `${windowLabelDe(top)}${top.detail ? ` · ${top.detail}` : ""}` : "",
       usedPercent,
       status: budgetStatus(usedPercent),
       estimated: p.source === ESTIMATED_SOURCE,
       resetAt: top?.reset_at ?? null,
       available: p.available,
       unavailableReason: p.unavailable_reason,
+      staleLabel: staleUsageSignalLabel(p, nowMs),
     };
   });
   // Engpass zuerst: höchstes used_percent oben, unbekannte (null) ans Ende.

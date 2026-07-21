@@ -5,6 +5,10 @@ import {
   formatReset,
   pickBottleneck,
   providerToLane,
+  sortUsageProviders,
+  sortedUsageWindows,
+  staleUsageSignalLabel,
+  usageProviderLabel,
   windowLabelDe,
 } from "./accountUsage";
 import { DEFAULT_STATS_CONFIG, type StatsFieldConfig } from "./statsFields";
@@ -168,6 +172,39 @@ describe("providerToLane", () => {
     expect(providerToLane("kimi")).toBe("kimi");
     expect(providerToLane("openrouter")).toBeNull();
     expect(providerToLane("whatever")).toBeNull();
+  });
+});
+
+describe("shared provider presentation", () => {
+  it("uses canonical config labels instead of generic backend titles", () => {
+    expect(usageProviderLabel(provider({ provider: "anthropic", title: "Account limits" }))).toBe("Claude");
+    expect(usageProviderLabel(provider({ provider: "xai", title: "Grok" }))).toBe("Grok");
+  });
+
+  it("sorts the four subscriptions and excludes the spend-only provider", () => {
+    const rows = sortUsageProviders([
+      provider({ provider: "openrouter" }),
+      provider({ provider: "xai" }),
+      provider({ provider: "kimi" }),
+      provider({ provider: "anthropic" }),
+      provider({ provider: "openai-codex" }),
+    ], DEFAULT_STATS_CONFIG, "subscription");
+    expect(rows.map((row) => row.provider)).toEqual(["anthropic", "openai-codex", "kimi", "xai"]);
+  });
+
+  it("keeps every supplied window and orders session before weekly caps", () => {
+    const rows = sortedUsageWindows(provider({ windows: [
+      win({ window_key: "weekly", used_percent: 40 }),
+      win({ window_key: "scoped_week", used_percent: 99, detail: "Fable" }),
+      win({ window_key: "session", used_percent: 5 }),
+    ] }));
+    expect(rows.map((row) => row.window_key)).toEqual(["session", "weekly", "scoped_week"]);
+  });
+
+  it("reports only genuinely stale signals", () => {
+    const now = Date.parse("2026-07-21T20:00:00Z");
+    expect(staleUsageSignalLabel(provider({ fetched_at: "2026-07-21T19:30:00Z" }), now)).toBeNull();
+    expect(staleUsageSignalLabel(provider({ signal_at: "2026-07-20T18:00:00Z" }), now)).toBe("Stand 1d");
   });
 });
 

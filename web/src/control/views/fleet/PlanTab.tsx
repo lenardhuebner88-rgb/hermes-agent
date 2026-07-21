@@ -12,10 +12,10 @@ import {
   derivePlanLanes,
   buildApproveRequest,
   fmtResetAt,
-  normalizeUsageWindowLabel,
   deriveEffectivePlanPath,
   extractIngestError,
 } from "../../lib/fleetHub";
+import { sortedUsageWindows, staleUsageSignalLabel, usageProviderLabel, windowLabelDe } from "../../lib/accountUsage";
 import { de } from "../../i18n/de";
 import { usePlanSpecDetail } from "../../hooks/planSpecsLanes";
 import type { RunsCostsResponse, LanesCatalogResponse } from "../../lib/schemas";
@@ -558,14 +558,21 @@ function TokenBudgetBlock({
   costs: RunsCostsResponse | null;
 }) {
   const providers = accountUsage?.providers ?? [];
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Pro Provider eine Gruppe — nur Fenster mit verwertbarem used_percent;
   // Provider ohne einen einzigen solchen Fenster fallen ganz raus.
   const groups = providers
     .map((prov) => ({
-      title: prov.title || prov.provider,
+      provider: prov.provider,
+      title: usageProviderLabel(prov),
       plan: prov.plan,
-      windows: prov.windows.filter((w) => w.used_percent != null),
+      staleLabel: staleUsageSignalLabel(prov, nowMs),
+      windows: sortedUsageWindows(prov).filter((w) => w.used_percent != null),
     }))
     .filter((g) => g.windows.length > 0);
 
@@ -593,11 +600,12 @@ function TokenBudgetBlock({
             : null;
 
           return (
-            <div key={gi} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: gi > 0 ? 4 : 0 }}>
+            <div key={group.provider} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: gi > 0 ? 4 : 0 }}>
               <div className="fleet-bg-head">
                 <Eyebrow>
                   {group.title}
                   {group.plan ? <span className="normal-case tracking-normal opacity-75"> · {group.plan}</span> : null}
+                  {group.staleLabel ? <span className="normal-case tracking-normal text-status-warn"> · {group.staleLabel}</span> : null}
                 </Eyebrow>
                 {earliestReset ? (
                   <code className="font-data text-micro text-ink-3">
@@ -609,7 +617,7 @@ function TokenBudgetBlock({
               {group.windows.map((w, i) => {
                 const pct = w.used_percent ?? 0;
                 const tone = budgetTone(w.used_percent);
-                const windowLabel = normalizeUsageWindowLabel(w.label, w.window_key);
+                const windowLabel = windowLabelDe(w);
                 const barColor = tone === "danger"
                   ? "linear-gradient(90deg,color-mix(in srgb, var(--fleet-rot) 50%, transparent),var(--fleet-rot))"
                   : tone === "warn"
@@ -617,16 +625,23 @@ function TokenBudgetBlock({
                   : "linear-gradient(90deg,color-mix(in srgb, var(--fleet-gruen) 50%, transparent),var(--fleet-gruen))";
 
                 return (
-                  <div key={i} className="fleet-bg-row">
-                    <span className="fleet-bg-bl" title={windowLabel}>{windowLabel}</span>
-                    <div className="fleet-bg-bar">
-                      <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
+                  <div key={i}>
+                    <div className="fleet-bg-row">
+                      <span className="fleet-bg-bl" title={windowLabel}>{windowLabel}</span>
+                      <div className="fleet-bg-bar">
+                        <i style={{ width: `${Math.min(100, pct)}%`, background: barColor }} />
+                      </div>
+                      <span className="fleet-bg-bv" style={{
+                        color: tone === "danger" ? "var(--fleet-rot)" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
+                      }}>
+                        {Math.round(pct)} %
+                      </span>
                     </div>
-                    <span className="fleet-bg-bv" style={{
-                      color: tone === "danger" ? "var(--fleet-rot)" : tone === "warn" ? "var(--fleet-signal)" : "var(--fleet-t1)",
-                    }}>
-                      {Math.round(pct)} %
-                    </span>
+                    {w.detail ? (
+                      <div className="font-data text-micro text-ink-3" style={{ marginLeft: 96, marginTop: 3 }}>
+                        {w.detail}
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}

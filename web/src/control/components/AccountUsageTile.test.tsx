@@ -41,7 +41,7 @@ const usage: AccountUsageResponse = {
     {
       provider: "kimi",
       available: true,
-      source: "kanban_subscription_tokens",
+      source: "usage_api",
       fetched_at: "2026-01-01T00:00:00+00:00",
       title: "Kimi subscription tokens",
       plan: null,
@@ -56,7 +56,7 @@ const usage: AccountUsageResponse = {
 };
 
 describe("AccountUsageTile", () => {
-  it("rendert das Zwei-Balken-Cockpit mit Engpass, deutschen Labels und Fußzeile", () => {
+  it("rendert das Abo-Cockpit (session+weekly) mit Engpass, deutschen Labels und Fußzeile", () => {
     const html = renderToStaticMarkup(<AccountUsageTile usage={usage} loading={false} error={null} />);
 
     // Header + Engpass (knappstes echtes Fenster = ChatGPT-Woche 96 %, rot → ⚠)
@@ -88,8 +88,8 @@ describe("AccountUsageTile", () => {
     expect(html).toContain("Sonnet-Woche");
     expect(html).toContain("Extra usage: 417.00 / 2500.00 EUR");
 
-    // Operator-Direktive: alle drei Abos als gleichwertige Karten — Kimi ist jetzt
-    // eine eigene Karte (kein Engpass, §8), nicht mehr in einer Strichel-Fußzeile.
+    // Alle Abos werden als gleichwertige Karten dargestellt; Kimi kommt aus der
+    // Provider-API und bleibt nicht in einer Strichel-Fußzeile hängen.
     expect(html).toContain("Kimi");
     // Kimi trägt hier ein weekly-Fenster (5 %) → wird als Karte gerendert.
     expect(html).toContain("5 %");
@@ -97,7 +97,119 @@ describe("AccountUsageTile", () => {
     expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
-  it("gibt Kimi ohne Provider-Fenster eine ehrliche Leerzustand-Karte (Operator-Direktive: 3 gleichwertige Abos)", () => {
+  it("rendert ALLE session/weekly-Fenster als Primärbalken — inkl. modell-spezifischem Fable-Limit (Operator-Spec: 3 Balken)", () => {
+    // Exakt die Fenster, die die Live-Anthropic-API (Max 20×) liefert:
+    // 5h-Session, Woche, plus das modell-spezifische Wochenlimit (detail "Fable").
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "anthropic",
+          available: true,
+          source: "oauth_usage_api",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Account limits",
+          plan: "Max 20×",
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "Current session", window_key: "session", used_percent: 5, reset_at: "2026-07-21T18:59:59+00:00", detail: null },
+            { label: "Current week", window_key: "weekly", used_percent: 89, reset_at: "2026-07-24T03:59:59+00:00", detail: null },
+            { label: "Modell-Limit", window_key: "scoped_week", used_percent: 99, reset_at: "2026-07-24T03:59:59+00:00", detail: "Fable" },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={DEFAULT_STATS_CONFIG} />,
+    );
+
+    // Drei Primärbalken (role="meter") statt zweier — das Fable-Limit ist kein
+    // Details-Collapse-Eintrag, sondern ein eigener Balken mit Modellnamen im Label.
+    expect(html).toContain('aria-label="5-Std-Fenster: 5 % genutzt"');
+    expect(html).toContain('aria-label="Diese Woche: 89 % genutzt"');
+    expect(html).toContain('aria-label="Modell-Limit · Fable: 99 % genutzt"');
+    expect(html).toContain('>Modell-Limit · Fable</span>');
+    expect((html.match(/>Fable<\/span>/g) ?? []).length).toBe(0);
+    expect(html).toContain("99 %");
+    // Keine Nebenfenster (alles session/weekly) → kein Details-Collapse für diesen Provider.
+    expect(html).not.toContain("<details");
+    // Exakt drei Primärbalken — Regressionstest gegen ein 4. spurioses Meter oder
+    // ein im Collapse verlorenes Fenster (Codex-Review-Fund #3).
+    expect((html.match(/role="meter"/g) ?? []).length).toBe(3);
+    // Das knappe Fable-Fenster (99 %) treibt den Engpass (alert) → Footer benennt es.
+    expect(html).toContain("Engpass:");
+  });
+
+  it("sortiert Primärbalken session-vor-weekly auch bei umgekehrter Backend-Reihenfolge (Codex-Review-Fund #1)", () => {
+    // Backend-Reihenfolge absichtlich verdreht (weekly, session, scoped) — wie Kimi
+    // sie zeitweise liefert. Der alte `.find`-Code erzwang session→weekly; das neue
+    // `.filter` muss das via stabilem Sort erhalten, sonst kippt die Balkenfolge.
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "anthropic",
+          available: true,
+          source: "oauth",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Account limits",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "Current week", window_key: "weekly", used_percent: 60, reset_at: null, detail: null },
+            { label: "Current session", window_key: "session", used_percent: 10, reset_at: null, detail: null },
+            { label: "Modell-Limit", window_key: "scoped_week", used_percent: 80, reset_at: null, detail: "Fable" },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} config={DEFAULT_STATS_CONFIG} />);
+    const iS = html.indexOf('aria-label="5-Std-Fenster: 10 % genutzt"');
+    const iW = html.indexOf('aria-label="Diese Woche: 60 % genutzt"');
+    const iF = html.indexOf('aria-label="Modell-Limit · Fable: 80 % genutzt"');
+    expect(iS).toBeGreaterThan(-1);
+    expect(iS).toBeLessThan(iW); // session vor weekly — trotz umgekehrter Backend-Reihenfolge
+    expect(iW).toBeLessThan(iF); // weekly vor scoped — Backend-Reihenfolge innerhalb non-session erhalten
+  });
+
+  it("bricht window.detail NIE ab: eigene volle-Breite-Zeile, Label-Spalte bleibt kurz (Operator-Bug: 24/100 nicht weg)", () => {
+    // Kimi-artiges Fenster: langes detail (verbleibende Tokens). Inline an der
+    // 7rem-Spalte würde es auf Desktop zu "24/…" kürzen → eigener Sub-Line-Test.
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "kimi",
+          available: true,
+          source: "kanban_subscription_tokens",
+          fetched_at: "2026-01-01T00:00:00+00:00",
+          title: "Kimi subscription tokens",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "Kimi 7d", window_key: "weekly", used_percent: 76, reset_at: null, detail: "24/100 verbleibend" },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} config={DEFAULT_STATS_CONFIG} />);
+    // detail landet in einer dedizierten Zeile (nicht inline am kurzen Label) …
+    expect(html).toContain("js-window-detail");
+    expect(html).toContain("24/100 verbleibend");
+    // … und die sichtbare Label-Spalte trägt NUR den Fensternamen (nicht die gekürzte Kombi).
+    expect(html).toContain(">Diese Woche</span>");
+    expect(html).not.toContain(">Diese Woche · 24/100 verbleibend<");
+    // Der Accessible-Name behält den Qualifier (a11y).
+    expect(html).toContain('aria-label="Diese Woche · 24/100 verbleibend: 76 % genutzt"');
+  });
+
+  it("gibt Kimi ohne geliefertes Fenster eine ehrliche gleichwertige Abo-Karte", () => {
     const u: AccountUsageResponse = {
       cache_ttl_seconds: 60,
       providers: [
@@ -281,7 +393,7 @@ describe("AccountUsageTile", () => {
         {
           provider: "xai",
           available: true,
-          source: "grok_log",
+          source: "billing_api",
           fetched_at: "2026-07-16T09:47:00+00:00",
           title: "Grok usage",
           plan: "SuperGrok",
@@ -348,7 +460,7 @@ describe("AccountUsageTile", () => {
     expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
-  it("unavailable xai ohne Fenster fällt in die Fußzeile (dokumentierter Tradeoff)", () => {
+  it("hält Grok auch ohne Fenster als gleichwertige Abo-Karte sichtbar", () => {
     const cfg: StatsFieldConfig = {
       ...DEFAULT_STATS_CONFIG,
       providers: [
@@ -362,12 +474,12 @@ describe("AccountUsageTile", () => {
         {
           provider: "xai",
           available: false,
-          source: "grok_log",
+          source: "billing_api",
           fetched_at: "2026-07-16T09:47:00+00:00",
           title: "Grok usage",
           plan: null,
           cached: false,
-          unavailable_reason: "grok log missing",
+          unavailable_reason: "Grok OAuth nicht angemeldet",
           windows: [],
           details: [],
         },
@@ -376,10 +488,10 @@ describe("AccountUsageTile", () => {
     const html = renderToStaticMarkup(
       <AccountUsageTile usage={u} loading={false} error={null} config={cfg} />,
     );
-    expect(html).toContain("Ohne Fenster-Limit");
     expect(html).toContain("Grok");
-    expect(html).toContain("grok log missing");
-    expect(html).not.toContain("<article");
+    expect(html).toContain("Grok OAuth nicht angemeldet");
+    expect(html).toContain("<article");
+    expect(html).not.toContain("Ohne Fenster-Limit");
   });
 
   // REAL xai payload shape (SuperGrok weekly) + signal_at age chip semantics.
@@ -390,7 +502,7 @@ describe("AccountUsageTile", () => {
         {
           provider: "xai",
           available: true,
-          source: "grok_log",
+          source: "billing_api",
           fetched_at: fetchedAtIso ?? new Date().toISOString(),
           signal_at: signalAtIso,
           title: "Grok usage",
@@ -454,7 +566,7 @@ describe("AccountUsageTile", () => {
     expect(html).not.toContain(">Live</");
   });
 
-  it("rendert scoped_week (Modell-Limit) mit Modellname im Detail; detail=null ohne Trenner", () => {
+  it("rendert scoped_week (Modell-Limit) als Primärbalken mit Modellname im Label; detail=null ohne Trenner", () => {
     const u: AccountUsageResponse = {
       cache_ttl_seconds: 60,
       providers: [
@@ -478,10 +590,15 @@ describe("AccountUsageTile", () => {
       ],
     };
     const html = renderToStaticMarkup(<AccountUsageTile usage={u} loading={false} error={null} />);
-    // Model-scoped cap renders in the Details with its model name …
-    expect(html).toContain("Modell-Limit · Fable 94 %");
-    // … and the detail=null path renders without a dangling " · " separator.
-    expect(html).toContain("Modell-Limit 50 %");
-    expect(html).not.toContain("Modell-Limit ·  50");
+    // Operator-Spec 2026-07-21: model-scoped caps sind Primärbalken (nicht Details-
+    // Collapse) — Modellname im Label, beide scoped-Fenster gleichzeitig sichtbar.
+    expect(html).toContain('aria-label="Modell-Limit · Fable: 94 % genutzt"');
+    expect(html).toContain("94 %");
+    // … und der detail=null-Pfad rendert ohne hängenden " · "-Trenner.
+    expect(html).toContain('aria-label="Modell-Limit: 50 % genutzt"');
+    expect(html).toContain("50 %");
+    expect(html).not.toContain("Modell-Limit · :");
+    // Alle vier Fenster sind Primärbalken → kein Details-Collapse.
+    expect(html).not.toContain("<details");
   });
 });

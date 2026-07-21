@@ -13,28 +13,6 @@ from agent.account_usage import (
 )
 from hermes_cli.auth import AuthError
 
-# Real Grok CLI billing line captured 2026-07-16 (verbatim).
-_XAI_BILLING_FIXTURE_LINE = (
-    '{"ts":"2026-07-16T09:47:14.767Z","src":"shell","pid":3418557,"lvl":"info",'
-    '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":21.0,'
-    '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-    '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
-    '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true,'
-    '"billingPeriodStart":"2026-07-12T17:58:33.973068+00:00",'
-    '"billingPeriodEnd":"2026-07-19T17:58:33.973068+00:00","historyLen":0},'
-    '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-)
-
-_XAI_BILLING_OLDER_LINE = (
-    '{"ts":"2026-07-16T08:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
-    '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":32.0,'
-    '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-    '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
-    '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true},'
-    '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-)
-
-
 class _Response:
     def __init__(self, payload, status_code=200):
         self._payload = payload
@@ -60,6 +38,15 @@ class _Client:
 
     def get(self, url, headers=None):
         return _Response(self._payload)
+
+
+class _ClientWithStatus(_Client):
+    def __init__(self, payload, status_code):
+        super().__init__(payload)
+        self._status_code = status_code
+
+    def get(self, url, headers=None):
+        return _Response(self._payload, self._status_code)
 
 
 class _RoutingClient:
@@ -450,6 +437,10 @@ def test_fetch_account_usage_kimi_maps_live_usages_shape(monkeypatch):
                 },
                 "limits": [
                     {
+                        "window": {"duration": 60, "timeUnit": "TIME_UNIT_MINUTE"},
+                        "detail": {"limit": "10", "used": "9", "remaining": "1"},
+                    },
+                    {
                         "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
                         "detail": {
                             "limit": "100",
@@ -522,28 +513,39 @@ def test_fetch_account_usage_kimi_rejected_api_key_returns_unavailable(monkeypat
     assert snapshot.unavailable_reason == "Kimi API key rejected."
 
 
-def test_fetch_xai_account_usage_latest_billing_line_wins(tmp_path):
-    log_path = tmp_path / "unified.jsonl"
-    log_path.write_text(
-        "\n".join(
-            [
-                '{"ts":"2026-07-16T07:00:00Z","msg":"noise line one","lvl":"info"}',
-                _XAI_BILLING_OLDER_LINE,
-                '{"ts":"2026-07-16T09:00:00Z","msg":"noise line two","lvl":"debug"}',
-                _XAI_BILLING_FIXTURE_LINE,
-                '{"msg":"unrelated shell event"}',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+def test_fetch_xai_account_usage_uses_live_billing_api(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_xai_oauth_runtime_credentials",
+        lambda **kwargs: {"api_key": "oauth-token"},
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "subscriptionTier": "SuperGrok",
+                "config": {
+                    "creditUsagePercent": 21.0,
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-07-19T17:58:33.973068+00:00",
+                        "end": "2026-07-26T17:58:33.973068+00:00",
+                    },
+                    "productUsage": [
+                        {"product": "GrokBuild", "usagePercent": 18.0},
+                        {"product": "Api", "usagePercent": 3.0},
+                        {"product": "GrokChat"},
+                    ],
+                }
+            }
+        ),
     )
 
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
     assert snapshot.available is True
     assert snapshot.provider == "xai"
-    assert snapshot.source == "grok_cli_log"
+    assert snapshot.source == "billing_api"
     assert snapshot.title == "Grok"
     assert snapshot.plan == "SuperGrok"
     assert len(snapshot.windows) == 1
@@ -551,72 +553,62 @@ def test_fetch_xai_account_usage_latest_billing_line_wins(tmp_path):
     assert window.label == "Diese Woche"
     assert window.used_percent == 21.0
     assert window.window_key == "weekly"
-    assert window.reset_at == datetime(2026, 7, 19, 17, 58, 33, 973068, tzinfo=timezone.utc)
-    assert snapshot.details
-    assert snapshot.details[0].startswith("Stand: 2026-07-16")
-    assert len(snapshot.details) == 1
-    assert snapshot.signal_at == datetime(2026, 7, 16, 9, 47, 14, 767000, tzinfo=timezone.utc)
+    assert window.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
+    assert snapshot.details == ("Grok Build: 18 %", "API: 3 %")
+    assert snapshot.signal_at is None
 
 
-def test_fetch_xai_account_usage_missing_file(tmp_path):
-    missing = tmp_path / "does-not-exist.jsonl"
+def test_fetch_xai_account_usage_missing_oauth_is_explicit(monkeypatch):
+    def _missing(**kwargs):
+        raise AuthError("missing", provider="xai-oauth")
 
-    snapshot = _fetch_xai_account_usage(log_path=missing)
+    monkeypatch.setattr("agent.account_usage.resolve_xai_oauth_runtime_credentials", _missing)
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
     assert snapshot.available is False
     assert snapshot.provider == "xai"
-    assert snapshot.source == "grok_cli_log"
-    assert snapshot.unavailable_reason is not None
-    assert "nicht gefunden" in snapshot.unavailable_reason
+    assert snapshot.source == "billing_api"
+    assert "OAuth nicht angemeldet" in (snapshot.unavailable_reason or "")
     assert snapshot.windows == ()
 
 
-def test_fetch_xai_account_usage_noise_only(tmp_path):
-    log_path = tmp_path / "unified.jsonl"
-    log_path.write_text(
-        "\n".join(
-            [
-                '{"ts":"2026-07-16T07:00:00Z","msg":"shell start","lvl":"info"}',
-                "not even json",
-                '{"msg":"some other event","ctx":{}}',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+def test_fetch_xai_account_usage_rejected_oauth_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_xai_oauth_runtime_credentials",
+        lambda **kwargs: {"api_key": "oauth-token"},
     )
-
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _ClientWithStatus({}, 403),
+    )
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
     assert snapshot.available is False
-    assert snapshot.unavailable_reason == "Keine Billing-Daten im Grok-CLI-Log."
+    assert "abgelehnt" in (snapshot.unavailable_reason or "")
 
 
-def test_fetch_xai_account_usage_malformed_newest_falls_back_to_older(tmp_path):
-    log_path = tmp_path / "unified.jsonl"
-    # Newest line contains the marker but is truncated JSON; older valid line wins.
-    malformed = (
-        '{"ts":"2026-07-16T10:00:00Z","msg":"billing: fetched credits config",'
-        '"ctx":{"config":{"creditUsagePercent":99.0'
+def test_fetch_xai_account_usage_missing_config_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_xai_oauth_runtime_credentials",
+        lambda **kwargs: {"api_key": "oauth-token"},
     )
-    log_path.write_text(
-        "\n".join([_XAI_BILLING_FIXTURE_LINE, malformed]) + "\n",
-        encoding="utf-8",
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client({}),
     )
-
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
-    assert snapshot.available is True
-    assert snapshot.windows[0].used_percent == 21.0
-    assert snapshot.plan == "SuperGrok"
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason == "Grok billing response is missing config."
 
 
 def test_fetch_account_usage_dispatches_xai_and_grok(monkeypatch):
     sentinel = AccountUsageSnapshot(
         provider="xai",
-        source="grok_cli_log",
+        source="billing_api",
         fetched_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
         title="Grok",
         plan="SuperGrok",
@@ -630,8 +622,8 @@ def test_fetch_account_usage_dispatches_xai_and_grok(monkeypatch):
     )
     calls = []
 
-    def _fake_fetch(log_path=None):
-        calls.append(log_path)
+    def _fake_fetch():
+        calls.append(True)
         return sentinel
 
     monkeypatch.setattr("agent.account_usage._fetch_xai_account_usage", _fake_fetch)
@@ -682,48 +674,43 @@ def test_fetch_account_usage_codex_seven_day_primary_window_is_weekly(monkeypatc
     assert snapshot.windows[0].used_percent == 83.0
 
 
-def test_fetch_xai_account_usage_new_period_without_pct_reports_unknown(tmp_path):
-    """Period boundary: the newest line (fresh period, new unified-billing format)
-    omits ``creditUsagePercent``. The fetcher must NOT resurrect the previous
-    period's stale value — it reports an honest unknown with the fresh reset."""
-    new_period_line = (
-        '{"ts":"2026-07-19T17:58:45.928Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{'
-        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-19T17:58:33.973068+00:00",'
-        '"end":"2026-07-26T17:58:33.973068+00:00"},"onDemandCap":{"val":0},"onDemandUsed":{"val":0},'
-        '"prepaidBalance":{"val":0},"isUnifiedBillingUser":true},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
+def test_fetch_xai_account_usage_current_period_without_percent_is_unknown(monkeypatch):
+    """A fresh period without a percentage stays unknown; there is no stale fallback."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_xai_oauth_runtime_credentials",
+        lambda **kwargs: {"api_key": "oauth-token"},
     )
-    old_period_line = (
-        '{"ts":"2026-07-19T17:58:15.949Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":100.0,'
-        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-        '"end":"2026-07-19T17:58:33.973068+00:00"},"isUnifiedBillingUser":true},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-    )
-    log_path = tmp_path / "unified.jsonl"
-    log_path.write_text(
-        "\n".join([old_period_line, new_period_line]) + "\n",
-        encoding="utf-8",
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "config": {
+                    "currentPeriod": {
+                        "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                        "start": "2026-07-19T17:58:33.973068+00:00",
+                        "end": "2026-07-26T17:58:33.973068+00:00",
+                    }
+                }
+            }
+        ),
     )
 
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
     assert snapshot.available is True
-    assert snapshot.plan == "SuperGrok"
     assert len(snapshot.windows) == 1
     window = snapshot.windows[0]
     assert window.window_key == "weekly"
-    # Honest unknown for the just-started period — not the stale previous 100 %.
     assert window.used_percent is None
     assert window.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
 
 
 def test_fetch_account_usage_anthropic_maps_scoped_weekly_limit(monkeypatch):
     """The structured ``limits[]`` carries a model-scoped weekly cap the flat
-    top-level fields don't expose; it becomes a secondary ``scoped_week`` window
-    with the model name in ``detail``."""
+    top-level fields don't expose; it becomes a model-scoped ``scoped_week``
+    window with the model name in ``detail`` (whether the stats tab renders it as
+    a primary bar or in the details fold is decided by the config ``kind``)."""
     monkeypatch.setattr(
         "agent.account_usage.resolve_anthropic_token",
         lambda: "sk-ant-oat01-test-oauth-token",
@@ -831,67 +818,29 @@ def test_fetch_account_usage_codex_ambiguous_window_falls_back_to_position(monke
     assert snapshot.windows[0].window_key == "session"
 
 
-def test_fetch_xai_account_usage_no_period_anchor_uses_newest_only(tmp_path):
-    """Newest billing line has no ``currentPeriod`` (no period anchor): trust only
-    that newest record — never fall back to an arbitrary older percent."""
-    newest_no_period = (
-        '{"ts":"2026-07-19T18:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{'
-        '"onDemandCap":{"val":0},"onDemandUsed":{"val":0},"prepaidBalance":{"val":0}},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-    )
-    older_with_pct = (
-        '{"ts":"2026-07-19T17:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":77.0,'
-        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-        '"end":"2026-07-19T17:58:33.973068+00:00"}},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-    )
-    log_path = tmp_path / "unified.jsonl"
-    log_path.write_text(
-        "\n".join([older_with_pct, newest_no_period]) + "\n",
-        encoding="utf-8",
-    )
+def test_fetch_xai_account_usage_does_not_rotate_credentials_after_billing_401(monkeypatch):
+    resolver_calls: list[tuple[bool, bool]] = []
 
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
+    def _resolve(*, force_refresh=False, refresh_if_expiring=True, **kwargs):
+        resolver_calls.append((force_refresh, refresh_if_expiring))
+        return {"api_key": "current-token"}
+
+    responses = [_Response({}, 401)]
+
+    class _SequenceClient(_Client):
+        def get(self, url, headers=None):
+            return responses.pop(0)
+
+    monkeypatch.setattr("agent.account_usage.resolve_xai_oauth_runtime_credentials", _resolve)
+    monkeypatch.setattr("agent.account_usage.httpx.Client", lambda timeout=15.0: _SequenceClient({}))
+
+    snapshot = _fetch_xai_account_usage()
 
     assert snapshot is not None
-    assert snapshot.available is True
-    # No stale 77 % resurrected from the older line — honest unknown.
-    assert snapshot.windows[0].used_percent is None
-    assert snapshot.signal_at == datetime(2026, 7, 19, 18, 0, 0, tzinfo=timezone.utc)
-
-
-def test_fetch_xai_account_usage_same_period_older_pct_metadata_from_newest(tmp_path):
-    """Newest line of the current period lacks pct but an older line of the SAME
-    period has it: use that percent, but take signal/plan/reset from the newest line."""
-    newest_no_pct = (
-        '{"ts":"2026-07-16T10:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{'
-        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-        '"end":"2026-07-19T17:58:33.973068+00:00"},"onDemandCap":{"val":0}},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-    )
-    older_same_period_pct = (
-        '{"ts":"2026-07-16T08:00:00.000Z","src":"shell","pid":1,"lvl":"info",'
-        '"msg":"billing: fetched credits config","ctx":{"config":{"creditUsagePercent":42.0,'
-        '"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-07-12T17:58:33.973068+00:00",'
-        '"end":"2026-07-19T17:58:33.973068+00:00"}},'
-        '"onDemandEnabled":null,"subscriptionTier":"SuperGrok"}}'
-    )
-    log_path = tmp_path / "unified.jsonl"
-    log_path.write_text(
-        "\n".join([older_same_period_pct, newest_no_pct]) + "\n",
-        encoding="utf-8",
-    )
-
-    snapshot = _fetch_xai_account_usage(log_path=log_path)
-
-    assert snapshot is not None
-    assert snapshot.windows[0].used_percent == 42.0  # pct from older same-period line
-    # Signal comes from the NEWEST line, not the older pct line.
-    assert snapshot.signal_at == datetime(2026, 7, 16, 10, 0, 0, tzinfo=timezone.utc)
-    assert snapshot.windows[0].reset_at == datetime(2026, 7, 19, 17, 58, 33, 973068, tzinfo=timezone.utc)
+    assert snapshot.available is False
+    assert snapshot.unavailable_reason == "Grok OAuth wurde vom Billing-Endpunkt abgelehnt."
+    assert resolver_calls == [(False, False)]
+    assert responses == []
 
 
 def test_render_account_usage_lines_shows_detail_alongside_reset():

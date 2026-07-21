@@ -117,8 +117,8 @@ function installCommandHomeFixtures() {
   }));
   hooks.useAccountUsage.mockReturnValue(hooks.poll({
     providers: [{
-      provider: "openai",
-      title: "OpenAI",
+      provider: "openai-codex",
+      title: "Account limits",
       plan: "pro",
       available: true,
       source: "fixture",
@@ -211,6 +211,8 @@ describe("CommandHome", () => {
     expect(html).toContain("Kanban");
     expect(html).toContain("Dispatcher");
     expect(html).toContain("Max Limit");
+    expect(html).toContain("ChatGPT / Codex: Limit im Blick behalten.");
+    expect(html).not.toContain("Account limits: Limit im Blick behalten.");
     expect(html).toContain("Hermes Diktat");
     expect(html).toContain("Quick-Jumps");
     expect(html).toContain("Fleet");

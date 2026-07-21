@@ -29,18 +29,18 @@ from hermes_cli.config import get_project_root
 DEFAULT_STATS_CONFIG: dict[str, Any] = {
     "version": 1,
     "providers": [
-        {"id": "anthropic", "label": "Claude", "lane": "claude", "visible": True},
-        {"id": "openai-codex", "label": "ChatGPT / Codex", "lane": "chatgpt", "visible": True},
-        {"id": "kimi", "label": "Kimi", "lane": "kimi", "visible": True},
-        {"id": "xai", "label": "Grok", "lane": None, "visible": True},
-        {"id": "openrouter", "label": "OpenRouter", "lane": None, "visible": True},
+        {"id": "anthropic", "label": "Claude", "lane": "claude", "usage_role": "subscription", "visible": True},
+        {"id": "openai-codex", "label": "ChatGPT / Codex", "lane": "chatgpt", "usage_role": "subscription", "visible": True},
+        {"id": "kimi", "label": "Kimi", "lane": "kimi", "usage_role": "subscription", "visible": True},
+        {"id": "xai", "label": "Grok", "lane": None, "usage_role": "subscription", "visible": True},
+        {"id": "openrouter", "label": "OpenRouter", "lane": None, "usage_role": "spend", "visible": True},
     ],
     "windows": [
         {"key": "session", "label": "5-Std-Fenster", "kind": "session"},
         {"key": "weekly", "label": "Diese Woche", "kind": "weekly"},
         {"key": "opus_week", "label": "Opus-Woche", "kind": "other"},
         {"key": "sonnet_week", "label": "Sonnet-Woche", "kind": "other"},
-        {"key": "scoped_week", "label": "Modell-Limit", "kind": "other"},
+        {"key": "scoped_week", "label": "Modell-Limit", "kind": "weekly"},
     ],
     "subscription_lanes": [
         {"key": "chatgpt", "label": "ChatGPT/Codex Abo", "visible": True},
@@ -50,6 +50,7 @@ DEFAULT_STATS_CONFIG: dict[str, Any] = {
 }
 
 _WINDOW_KINDS = ("session", "weekly", "other")
+_USAGE_ROLES = ("subscription", "spend")
 _CACHE_TTL_S = 30.0
 
 _lock = threading.Lock()
@@ -75,10 +76,16 @@ def _normalize_provider(raw: Any) -> Optional[dict[str, Any]]:
     pid = _coerce_str(raw.get("id"))
     if not pid:
         return None
+    lane = _coerce_str(raw.get("lane"))
+    fallback_usage_role = "subscription" if lane or pid == "xai" else "spend"
+    usage_role = _coerce_str(raw.get("usage_role")) or fallback_usage_role
+    if usage_role not in _USAGE_ROLES:
+        usage_role = fallback_usage_role
     return {
         "id": pid,
         "label": _coerce_str(raw.get("label")) or pid,
-        "lane": _coerce_str(raw.get("lane")),  # None when absent/blank → API-billed
+        "lane": lane,  # None when absent/blank → no worker-run reconciliation
+        "usage_role": usage_role,
         "visible": bool(raw.get("visible", True)),
     }
 

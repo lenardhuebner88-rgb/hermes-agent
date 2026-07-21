@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any, Optional
 import httpx
 
 from agent.anthropic_adapter import _is_oauth_token, resolve_anthropic_token
-from hermes_cli.auth import AuthError, _read_codex_tokens, resolve_codex_runtime_credentials
+from hermes_cli.auth import (
+    AuthError,
+    _read_codex_tokens,
+    resolve_codex_runtime_credentials,
+    resolve_xai_oauth_runtime_credentials,
+)
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
 if TYPE_CHECKING:
@@ -983,8 +988,10 @@ def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
         )
     # Newer OAuth payloads additionally carry a structured ``limits`` list that
     # includes model-scoped weekly caps (``weekly_scoped``) the flat top-level
-    # fields don't expose. Surface them as secondary ("other") windows so a tight
-    # model-scoped cap shows up in the details instead of being silently dropped.
+    # fields don't expose. Surface them as model-scoped weekly windows
+    # (window_key ``scoped_week``); whether they render as a primary bar or in the
+    # details fold is decided by the stats-tab config ``kind`` (default: primary
+    # bar — Operator-Spec 2026-07-21, so a tight cap like Fable is never hidden).
     limits = payload.get("limits")
     if isinstance(limits, list):
         for entry in limits:
@@ -1268,26 +1275,45 @@ def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
             )
         )
 
-    # 5-hour sliding window from the live API: payload["limits"][0]["detail"].
-    session: dict[str, Any] = {}
+    # Sliding windows from the live API. Do not assume the first entry is the
+    # 5-hour bucket: the provider may reorder or add limit kinds. Only an
+    # explicitly evidenced 5-hour duration is labelled as the session window.
     limits = payload.get("limits")
-    if isinstance(limits, list) and limits:
-        first_limit = limits[0]
-        if isinstance(first_limit, dict):
-            detail = first_limit.get("detail")
-            if isinstance(detail, dict):
-                session = detail
-    session_used = _used_percent_from_quota(session)
-    if session_used is not None:
-        windows.append(
-            AccountUsageWindow(
-                label="5-Std-Fenster",
-                used_percent=float(session_used),
-                reset_at=_parse_dt(session.get("resetTime") or session.get("resets_at") or session.get("reset_at")),
-                detail=_remaining_detail(session),
-                window_key="session",
+    if isinstance(limits, list):
+        for limit_entry in limits:
+            if not isinstance(limit_entry, dict):
+                continue
+            window = limit_entry.get("window")
+            detail = limit_entry.get("detail")
+            if not isinstance(window, dict) or not isinstance(detail, dict):
+                continue
+            duration = _numeric(window.get("duration"))
+            unit = str(window.get("timeUnit") or window.get("time_unit") or "").upper()
+            seconds: Optional[float] = None
+            if duration is not None:
+                if "MINUTE" in unit:
+                    seconds = duration * 60
+                elif "HOUR" in unit:
+                    seconds = duration * 3600
+                elif "SECOND" in unit:
+                    seconds = duration
+            # Kimi's documented/live session bucket is exactly 300 minutes.
+            # Unknown durations stay unlabelled rather than being invented as 5h.
+            if seconds is None or abs(seconds - 5 * 3600) > 60:
+                continue
+            session_used = _used_percent_from_quota(detail)
+            if session_used is None:
+                continue
+            windows.append(
+                AccountUsageWindow(
+                    label="5-Std-Fenster",
+                    used_percent=float(session_used),
+                    reset_at=_parse_dt(detail.get("resetTime") or detail.get("resets_at") or detail.get("reset_at")),
+                    detail=_remaining_detail(detail),
+                    window_key="session",
+                )
             )
-        )
+            break
 
     plan_parts: list[str] = []
     user = payload.get("user")
@@ -1330,176 +1356,110 @@ def _fetch_kimi_account_usage() -> Optional[AccountUsageSnapshot]:
     )
 
 
-_XAI_BILLING_MARKER = "billing: fetched credits config"
-_XAI_LOG_TAIL_BYTES = 4 * 1024 * 1024  # last 4 MiB only
+_XAI_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 
 
-def _fetch_xai_account_usage(log_path: Optional[Path] = None) -> Optional[AccountUsageSnapshot]:
-    """Fetch Grok/xAI plan usage from the local Grok CLI billing log.
+def _fetch_xai_account_usage() -> Optional[AccountUsageSnapshot]:
+    """Fetch the current Grok subscription pool from the official CLI API.
 
-    Pure local file read (no network). Scans ~/.grok/logs/unified.jsonl for the
-    latest ``billing: fetched credits config`` line and maps
-    ``ctx.config.creditUsagePercent`` into an AccountUsageSnapshot.
-    Fail-soft: missing/unreadable log or no valid billing line returns a
-    snapshot with unavailable_reason set; never raises.
+    The endpoint and headers are the same consumer billing contract used by the
+    official Grok CLI. Hermes reuses its managed xAI OAuth grant (same
+    ``grok-cli:access`` scope), but the monitoring read is credential-read-only:
+    it never refreshes, rotates, or quarantines OAuth state. There is deliberately
+    no CLI-log fallback: an old log line is not live usage data.
     """
-    path = log_path if log_path is not None else Path.home() / ".grok" / "logs" / "unified.jsonl"
 
     def _unavailable(reason: str) -> AccountUsageSnapshot:
         return AccountUsageSnapshot(
             provider="xai",
-            source="grok_cli_log",
+            source="billing_api",
             fetched_at=_utc_now(),
+            title="Grok",
             unavailable_reason=reason,
         )
 
+    def _request(token: str):
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "grok-cli",
+            "x-grok-client-mode": "cli",
+        }
+        with httpx.Client(timeout=15.0) as client:
+            return client.get(_XAI_BILLING_URL, headers=headers)
+
     try:
-        if not path.is_file():
-            return _unavailable(
-                "Grok-CLI-Log nicht gefunden (~/.grok/logs/unified.jsonl)."
-            )
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            if size > _XAI_LOG_TAIL_BYTES:
-                fh.seek(size - _XAI_LOG_TAIL_BYTES)
-                raw = fh.read()
-                # Mid-line seek: drop the partial first line.
-                nl = raw.find(b"\n")
-                if nl != -1:
-                    raw = raw[nl + 1 :]
-            else:
-                raw = fh.read()
-    except OSError:
-        return _unavailable(
-            "Grok-CLI-Log nicht gefunden (~/.grok/logs/unified.jsonl)."
-        )
+        credentials = resolve_xai_oauth_runtime_credentials(refresh_if_expiring=False)
+    except AuthError:
+        return _unavailable("Grok OAuth nicht angemeldet (hermes auth add xai-oauth).")
+    token = str(credentials.get("api_key") or "").strip()
+    if not token:
+        return _unavailable("Grok OAuth nicht angemeldet (hermes auth add xai-oauth).")
 
-    text = raw.decode("utf-8", errors="replace")
+    try:
+        response = _request(token)
+        status_code = getattr(response, "status_code", None)
+        if status_code is not None and status_code >= 400:
+            if status_code in (401, 403):
+                return _unavailable("Grok OAuth wurde vom Billing-Endpunkt abgelehnt.")
+            return _unavailable(f"Grok Billing API error ({status_code}).")
+        response.raise_for_status()
+    except Exception as exc:
+        logger.debug("Grok billing API request failed", exc_info=True)
+        return _unavailable(f"Grok Billing API unreachable ({type(exc).__name__}).")
 
-    def _parse_record(line: str) -> Optional[dict]:
-        if _XAI_BILLING_MARKER not in line:
-            return None
-        try:
-            record_payload = json.loads(line)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return None
-        if not isinstance(record_payload, dict):
-            return None
-        record_ctx = record_payload.get("ctx")
-        if not isinstance(record_ctx, dict):
-            return None
-        record_config = record_ctx.get("config")
-        if not isinstance(record_config, dict):
-            return None
-        return {"payload": record_payload, "ctx": record_ctx, "config": record_config}
+    try:
+        payload = response.json() or {}
+    except Exception as exc:
+        return _unavailable(f"Invalid Grok billing response ({type(exc).__name__}).")
+    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(config, dict):
+        return _unavailable("Grok billing response is missing config.")
 
-    def _period_start(record: dict) -> Any:
-        current = record["config"].get("currentPeriod")
-        if isinstance(current, dict):
-            return current.get("start")
-        return None
-
-    def _valid_pct(record: dict) -> Optional[float]:
-        pct = record["config"].get("creditUsagePercent")
-        # bool is a subclass of int — reject it.
-        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
-            return None
-        return float(pct)
-
-    records = [
-        record
-        for record in (_parse_record(line) for line in reversed(text.splitlines()))
-        if record is not None
-    ]
-    if not records:
-        return _unavailable("Keine Billing-Daten im Grok-CLI-Log.")
-
-    # Plan/reset/signal always come from the NEWEST billing line (the current
-    # period). The percentage is bound to that same period: at a period boundary
-    # the newest line (just-started period, new unified-billing format) can omit
-    # ``creditUsagePercent`` — accept a percentage only from the newest line's own
-    # period, otherwise report an honest "unknown" instead of resurrecting the
-    # previous period's stale value (often 100 % with an already-passed reset).
-    reference = records[0]
-    reference_start = _period_start(reference)
-    credit_pct: Optional[float] = None
-    if reference_start is None:
-        # No reliable period anchor: trust only the newest record — never fall back
-        # to an arbitrarily old percentage (that is exactly the stale path the
-        # period binding exists to prevent).
-        credit_pct = _valid_pct(reference)
-    else:
-        for record in records:
-            if _period_start(record) != reference_start:
-                continue
-            candidate = _valid_pct(record)
-            if candidate is not None:
-                credit_pct = candidate
-                break
-
-    ctx = reference["ctx"]
-    config = reference["config"]
-    payload = reference["payload"]
-
-    plan_raw = ctx.get("subscriptionTier")
-    plan: Optional[str] = None
-    if plan_raw not in {None, ""}:
-        cleaned = str(plan_raw).strip()
-        if cleaned:
-            plan = cleaned
-
-    period_end: Any = None
     current_period = config.get("currentPeriod")
-    if isinstance(current_period, dict):
-        period_end = current_period.get("end")
+    current_period = current_period if isinstance(current_period, dict) else {}
+    used_percent = _numeric(config.get("creditUsagePercent"))
+    if used_percent is not None:
+        used_percent = max(0.0, min(100.0, used_percent))
+    reset_at = _parse_dt(current_period.get("end") or config.get("billingPeriodEnd"))
 
-    windows = (
-        AccountUsageWindow(
-            label="Diese Woche",
-            used_percent=credit_pct,
-            reset_at=_parse_dt(period_end),
-            window_key="weekly",
-        ),
-    )
-
-    details: list[str] = []
-    ts = _parse_dt(payload.get("ts"))
-    if ts is not None:
-        details.append(
-            f"Stand: {ts.astimezone().strftime('%Y-%m-%d %H:%M %Z')}"
+    windows: list[AccountUsageWindow] = []
+    if used_percent is not None or current_period or reset_at is not None:
+        windows.append(
+            AccountUsageWindow(
+                label="Diese Woche",
+                used_percent=used_percent,
+                reset_at=reset_at,
+                window_key="weekly",
+            )
         )
 
-    def _nested_val(obj: Any) -> Optional[float]:
-        if not isinstance(obj, dict):
-            return None
-        raw_val = obj.get("val")
-        if raw_val in {None, ""}:
-            return None
-        try:
-            return float(raw_val)
-        except (TypeError, ValueError):
-            return None
+    product_labels = {"GrokBuild": "Grok Build", "GrokChat": "Grok Chat", "Api": "API"}
+    details: list[str] = []
+    product_usage = config.get("productUsage")
+    if isinstance(product_usage, list):
+        for item in product_usage:
+            if not isinstance(item, dict):
+                continue
+            product = str(item.get("product") or "").strip()
+            product_percent = _numeric(item.get("usagePercent"))
+            if not product or product_percent is None:
+                continue
+            label = product_labels.get(product, _title_case_slug(product) or product)
+            details.append(f"{label}: {max(0.0, min(100.0, product_percent)):g} %")
 
-    on_demand_cap = _nested_val(config.get("onDemandCap"))
-    on_demand_used = _nested_val(config.get("onDemandUsed"))
-    if on_demand_cap is not None and on_demand_cap > 0:
-        used_disp = int(on_demand_used) if on_demand_used is not None and on_demand_used == int(on_demand_used) else (on_demand_used if on_demand_used is not None else 0)
-        cap_disp = int(on_demand_cap) if on_demand_cap == int(on_demand_cap) else on_demand_cap
-        details.append(f"On-Demand: {used_disp}/{cap_disp}")
+    raw_plan = payload.get("subscriptionTier") or config.get("subscriptionTier")
+    plan = str(raw_plan).strip() if isinstance(raw_plan, str) else None
 
-    prepaid = _nested_val(config.get("prepaidBalance"))
-    if prepaid is not None and prepaid > 0:
-        prepaid_disp = int(prepaid) if prepaid == int(prepaid) else prepaid
-        details.append(f"Prepaid-Guthaben: {prepaid_disp}")
-
+    if not windows and not details:
+        return _unavailable("Grok billing data empty or unrecognized shape.")
     return AccountUsageSnapshot(
         provider="xai",
-        source="grok_cli_log",
+        source="billing_api",
         fetched_at=_utc_now(),
-        signal_at=ts,
         title="Grok",
-        plan=plan,
-        windows=windows,
+        plan=plan or None,
+        windows=tuple(windows),
         details=tuple(details),
     )
 

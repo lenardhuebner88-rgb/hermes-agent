@@ -7,6 +7,7 @@ import {
   providerField,
   providerLabel,
   providerOrder,
+  usageRoleForProvider,
   visibleSubscriptionLanes,
   windowField,
   windowLabelForKind,
@@ -26,6 +27,14 @@ describe("config lookups (default config)", () => {
     expect(laneForProvider(cfg, "anthropic")).toBe("claude");
     expect(laneForProvider(cfg, "openrouter")).toBeNull();
     expect(laneForProvider(cfg, "mystery")).toBeNull();
+  });
+
+  it("distinguishes four subscription providers from the spend account", () => {
+    expect(cfg.providers.filter((p) => usageRoleForProvider(cfg, p.id) === "subscription").map((p) => p.id)).toEqual([
+      "anthropic", "openai-codex", "kimi", "xai",
+    ]);
+    expect(usageRoleForProvider(cfg, "openrouter")).toBe("spend");
+    expect(usageRoleForProvider(cfg, "new-live-provider")).toBe("subscription");
   });
 
   it("windowField + windowLabelForKind resolve from config", () => {

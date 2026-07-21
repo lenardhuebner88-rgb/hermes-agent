@@ -31,6 +31,19 @@ describe("PlanTab profile approvals", () => {
   });
 });
 
+describe("PlanTab provider usage wiring", () => {
+  it("uses the shared provider/window model and keeps detail plus freshness", () => {
+    expect(src).toContain("usageProviderLabel(prov)");
+    expect(src).toContain("sortedUsageWindows(prov)");
+    expect(src).toContain("windowLabelDe(w)");
+    expect(src).toContain("w.detail");
+    expect(src).toContain("staleUsageSignalLabel(prov");
+    expect(src).toContain("setInterval(() => setNowMs(Date.now()), 60_000)");
+    expect(src).not.toContain("renderedAtMs");
+    expect(src).not.toContain("prov.title || prov.provider");
+  });
+});
+
 describe("PlanTab composer collapse", () => {
   afterEach(() => {
     cleanup();

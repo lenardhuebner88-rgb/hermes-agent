@@ -402,12 +402,12 @@ describe("budgetLedger", () => {
     // anthropic 92 % (weekly) is the Engpass → first; label + window mapped.
     expect(rows.map((r) => r.provider)).toEqual(["anthropic", "openai-codex"]);
     expect(rows[0].label).toBe("Claude");
-    expect(rows[0].window).toBe("Woche");
+    expect(rows[0].window).toBe("Diese Woche");
     expect(rows[0].usedPercent).toBe(92);
     expect(rows[0].status).toBe("crit");
     expect(rows[0].resetAt).toBe("2026-06-19T00:00:00Z");
     // openai-codex tightest window is weekly 55 %.
-    expect(rows[1].label).toBe("ChatGPT");
+    expect(rows[1].label).toBe("ChatGPT / Codex");
     expect(rows[1].usedPercent).toBe(55);
     expect(rows[1].status).toBe("ok");
   });
@@ -434,6 +434,19 @@ describe("budgetLedger", () => {
     expect(rows[0].available).toBe(false);
     expect(rows[0].unavailableReason).toBe("no oauth token");
     expect(rows[0].usedPercent).toBeNull();
+  });
+
+  it("keeps scoped model detail and exposes stale provider signals", () => {
+    const rows = budgetLedger([
+      provider({
+        provider: "anthropic",
+        fetched_at: "2026-07-21T18:00:00Z",
+        signal_at: "2026-07-20T18:00:00Z",
+        windows: [uwindow({ window_key: "scoped_week", used_percent: 99, detail: "Fable" })],
+      }),
+    ], Date.parse("2026-07-21T20:00:00Z"));
+    expect(rows[0].window).toBe("Modell-Limit · Fable");
+    expect(rows[0].staleLabel).toBe("Stand 1d");
   });
 });
 

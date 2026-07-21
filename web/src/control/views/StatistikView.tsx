@@ -414,7 +414,7 @@ export function BudgetLedgerSection({ providers }: { providers: AccountUsageProv
               status={r.status}
               pct={r.usedPercent ?? null}
               footLeft={ledgerFoot(r)}
-              footRight={r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined}
+              footRight={r.staleLabel ?? (r.resetAt ? de.stats.budgetReset(fmtClockTime(r.resetAt)) : undefined)}
             />
           ))}
         </div>

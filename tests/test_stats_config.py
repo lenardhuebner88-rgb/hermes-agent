@@ -56,14 +56,16 @@ def test_valid_yaml_is_parsed_and_normalized(config_file):
         "id": "anthropic",
         "label": "Claude Custom",
         "lane": "claude",
+        "usage_role": "subscription",
         "visible": False,
     }
     # Omitted lane normalizes to None; visible defaults to True.
     assert cfg["providers"][1] == {
-        "id": "openrouter",
-        "label": "OpenRouter",
-        "lane": None,
-        "visible": True,
+            "id": "openrouter",
+            "label": "OpenRouter",
+            "lane": None,
+            "usage_role": "spend",
+            "visible": True,
     }
     assert cfg["windows"] == [{"key": "session", "label": "5h", "kind": "session"}]
     assert cfg["subscription_lanes"] == [{"key": "claude", "label": "Claude Abo", "visible": True}]
@@ -104,6 +106,21 @@ def test_malformed_entries_are_dropped(config_file):
     cfg = load_stats_config(force=True)
     assert [p["id"] for p in cfg["providers"]] == ["anthropic"]
     assert cfg["windows"][0]["kind"] == "other"
+
+
+def test_invalid_usage_role_uses_same_provider_heuristic_as_missing_role(config_file):
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            providers:
+              - {id: anthropic, label: Claude, lane: claude, usage_role: typo}
+              - {id: openrouter, label: OpenRouter, lane: null, usage_role: typo}
+            """
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_stats_config(force=True)
+    assert [provider["usage_role"] for provider in cfg["providers"]] == ["subscription", "spend"]
 
 
 def test_mtime_change_reflects_without_force(config_file):

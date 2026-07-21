@@ -36,6 +36,7 @@ import { useBoard, useHermesWorkers } from "../hooks/workersBoard";
 import { useOperatorDigest } from "../hooks/operatorDigest";
 import type { Density } from "../hooks/useDensity";
 import type { AccountUsageResponse, BoardTask, ToneName, Worker } from "../lib/types";
+import { sortUsageProviders, usageProviderLabel } from "../lib/accountUsage";
 import type { InboxItem, InboxSurface } from "../lib/decisionInbox";
 import { heroAccent, severitySpine } from "../lib/tones";
 import { flowCounts, roleChip } from "../lib/fleet";
@@ -311,12 +312,13 @@ function OperatorDigestCard() {
 }
 
 function AccountUsagePulse({ usage, loading, error }: { usage?: AccountUsageResponse | null; loading: boolean; error?: string | null }) {
-  const providers = usage?.providers ?? [];
+  const providers = sortUsageProviders(usage?.providers ?? [], undefined, "subscription");
   const available = providers.filter((provider) => provider.available).length;
   const percents = providers.flatMap((provider) => provider.windows.map((window) => window.used_percent).filter((value): value is number => value != null));
   const maxPercent = percents.length ? Math.max(...percents) : null;
   const limited = providers.find((provider) => provider.windows.some((window) => (window.used_percent ?? 0) >= 80));
-  const status = error ? "Fehler" : loading ? "lädt" : limited ? limited.title : `${available}/${providers.length || 0}`;
+  const limitedLabel = limited ? usageProviderLabel(limited) : null;
+  const status = error ? "Fehler" : loading ? "lädt" : limitedLabel ?? `${available}/${providers.length || 0}`;
   return (
     <div className="ch-panel space-y-3 p-3">
       <ChSection label="Kosten" meta={status} />
@@ -324,7 +326,7 @@ function AccountUsagePulse({ usage, loading, error }: { usage?: AccountUsageResp
         <KpiTile label="Accounts" value={loading ? "…" : available} suffix={providers.length ? `/ ${providers.length}` : undefined} dot={error ? "error" : limited ? "warn" : "live"} />
         <KpiTile label="Max Limit" value={maxPercent == null ? "—" : Math.round(maxPercent)} suffix={maxPercent == null ? undefined : "%"} dot={maxPercent != null && maxPercent >= 80 ? "warn" : "idle"} />
       </div>
-      <p className="line-clamp-2 text-xs text-ink-2">{error ? error : limited ? `${limited.title}: Limit im Blick behalten.` : "Abo-/Provider-Puls ohne den alten Detail-Tiefgang; Details bleiben im Statistik-Tab."}</p>
+      <p className="line-clamp-2 text-xs text-ink-2">{error ? error : limitedLabel ? `${limitedLabel}: Limit im Blick behalten.` : "Abo-/Provider-Puls ohne den alten Detail-Tiefgang; Details bleiben im Statistik-Tab."}</p>
     </div>
   );
 }

@@ -715,7 +715,7 @@ describe("BudgetLedgerSection", () => {
     expect(html).toContain("st-led-row");
     // Engpass lead names the tightest window (Claude · Woche · 92 %).
     expect(html).toContain("st-lead");
-    expect(html).toContain("Claude Woche bei 92 %");
+    expect(html).toContain("Claude Diese Woche bei 92 %");
     // Claude (92 %) sorts before ChatGPT (40 %); both render.
     expect(html.indexOf("ChatGPT")).toBeGreaterThan(0);
     expect(html).toContain("st-fig text-status-alert"); // 92 % → crit ink

@@ -90,6 +90,32 @@ describe("TerminalUsageDock", () => {
     expect(dot?.className).not.toContain("white/20");
   });
 
+  it("renders Grok and Fable while omitting a 5h row the APIs did not supply", () => {
+    useAccountUsageMock.mockReturnValue(
+      loadState({
+        cache_ttl_seconds: 60,
+        providers: [
+          provider({ provider: "anthropic", title: "Account limits", windows: [
+            { label: "Model", window_key: "scoped_week", used_percent: 91, reset_at: null, detail: "Fable" },
+          ] }),
+          provider({ provider: "kimi", title: "Kimi", windows: [
+            { label: "Weekly", window_key: "weekly", used_percent: 76, reset_at: null, detail: "24/100 verbleibend" },
+          ] }),
+          provider({ provider: "xai", title: "Grok", windows: [
+            { label: "Weekly", window_key: "weekly", used_percent: 21, reset_at: null, detail: null },
+          ] }),
+        ],
+      }),
+    );
+
+    render(<TerminalUsageDock open onClose={() => {}} />);
+
+    expect(screen.getByText("Grok")).toBeTruthy();
+    expect(screen.getByText("Fable")).toBeTruthy();
+    expect(screen.getByText("24/100 verbleibend")).toBeTruthy();
+    expect(screen.queryByText("5-Std-Fenster")).toBeNull();
+  });
+
   it("renders the Usage eyebrow via the shared Eyebrow primitive, not the mono hc-eyebrow compat class", () => {
     useAccountUsageMock.mockReturnValue(loadState({ cache_ttl_seconds: 60, providers: [] }));
 
@@ -106,7 +132,7 @@ describe("TerminalUsageDock", () => {
     const { container } = render(<TerminalUsageDock open onClose={() => {}} />);
 
     expect(screen.getByLabelText("Usage wird geladen")).toBeTruthy();
-    expect(container.querySelectorAll(".hc-skeleton")).toHaveLength(3);
+    expect(container.querySelectorAll(".hc-skeleton")).toHaveLength(4);
 
     const html = container.innerHTML;
     for (const legacy of ["cyan-300", "cyan-200", "emerald-300", "amber-300", "red-400", "ink-dim", "hc-eyebrow", "rounded-[16px]"]) {

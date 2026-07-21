@@ -1,10 +1,11 @@
 /**
  * Abo-Limits-Cockpit — die geteilte Kachel für /control (Start) und den Stats-Tab.
  *
- * Eine Zeile pro Abo mit genau zwei waagerechten Balken (5-Std-Fenster + Diese
- * Woche), eine Engpass-Zeile (knappstes echtes Fenster über alle Abos) und eine
- * Fußzeile für Provider ohne hartes Limit (Kimi = lokale Schätzung, OpenRouter =
- * $-Guthaben). Daten = `/api/account-usage` (echte OAuth-Fenster, deckt sich
+ * Eine Zeile pro Abo mit den Primärbalken (alle session/weekly-Fenster: 5-Std-
+ * Fenster, Diese Woche und ggf. das modell-spezifische Wochenlimit, z. B. Fable),
+ * eine Engpass-Zeile (knappstes echtes Fenster über alle Abos) und eine Fußzeile
+ * für reine Ausgaben-Provider (OpenRouter = $-Guthaben). Daten =
+ * `/api/account-usage` (echte Provider-Fenster, deckt sich
  * zahlengenau mit den Provider-Apps); reine Darstellung/Klassifikation.
  */
 import type {
@@ -18,23 +19,18 @@ import {
   formatReset,
   pickBottleneck,
   providerToLane,
+  sortUsageProviders,
+  sortedUsageWindows,
+  staleUsageSignalLabel,
+  usageProviderLabel,
   windowLabelDe,
   type SubscriptionLane,
 } from "../lib/accountUsage";
 import { fmtTokens, nowSec } from "../lib/derive";
-import { DEFAULT_STATS_CONFIG, isProviderVisible, providerLabel as configuredProviderLabel, providerOrder, type StatsFieldConfig } from "../lib/statsFields";
+import { DEFAULT_STATS_CONFIG, usageRoleForProvider, type StatsFieldConfig } from "../lib/statsFields";
 import { SignalChip, SignalLabel, type SignalTone } from "./leitstand";
 import { Eyebrow } from "./primitives";
 import { RateBar } from "./charts/charts";
-
-function fallbackProviderLabel(provider: string): string {
-  if (provider === "openai-codex") return "ChatGPT / Codex";
-  if (provider === "anthropic") return "Claude";
-  if (provider === "kimi") return "Kimi";
-  if (provider === "xai") return "Grok";
-  if (provider === "openrouter") return "OpenRouter";
-  return provider;
-}
 
 function limitColor(value: number | null): string {
   if (value == null) return "var(--color-line)";
@@ -53,7 +49,13 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
   // Accessible-Name + role="meter": der RateBar ist aria-hidden (rein dekorativ),
   // also trägt die Zeile die Gauge-Semantik — Screenreader (und der control-smoke-
   // e2e) lesen "<Fenster>: <N> % genutzt" bzw. "<Fenster>: unbekannt".
-  const label = windowLabelDe(window, config);
+  const baseLabel = windowLabelDe(window, config);
+  // Ein Modellname wie "Fable" qualifiziert das scoped weekly limit und gehört
+  // sichtbar ins Balkenlabel. Quota-Details wie "24/100 verbleibend" kommen auf
+  // eine eigene volle-Breite-Zeile UNTER dem Balken; inline an der 7rem-Spalte
+  // würden sie auf Desktop abschneiden (Operator-Bug 2026-07-21: "24/100 nicht weg").
+  const label = window.detail ? `${baseLabel} · ${window.detail}` : baseLabel;
+  const detailInLabel = window.window_key === "scoped_week";
   const meterName = `${label}: ${used == null ? "unbekannt" : `${Math.round(used)} % genutzt`}`;
   return (
     <div
@@ -65,7 +67,7 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
       aria-valuenow={used == null ? undefined : Math.round(used)}
       aria-valuetext={used == null ? "unbekannt" : undefined}
     >
-      <span className="order-1 min-w-0 truncate text-ink-2">{label}</span>
+      <span className="order-1 min-w-0 truncate text-ink-2">{detailInLabel ? label : baseLabel}</span>
       <span className="order-2 whitespace-nowrap tabular-nums text-ink sm:order-3">
         {used == null ? "?" : `${Math.round(used)} %`}
         {reset ? <span className="text-ink-3"> · {reset}</span> : null}
@@ -73,12 +75,18 @@ function AccountWindowRow({ window, nowMs, config }: { window: AccountUsageWindo
       <div className="order-3 col-span-2 sm:order-2 sm:col-span-1">
         <RateBar rate={used == null ? null : used / 100} color={limitColor(used)} />
       </div>
+      {window.detail && !detailInLabel ? (
+        <span className="order-4 col-span-2 text-ink-3 js-window-detail sm:col-span-3">
+          {window.detail}
+        </span>
+      ) : null}
     </div>
   );
 }
 
 /**
- * Eine Abo-Karte: zwei waagerechte Balken (5-Std-Fenster + Diese Woche), darunter
+ * Eine Abo-Karte: die Primärbalken (alle session/weekly-Fenster — 5-Std-Fenster,
+ * Diese Woche und ggf. das modell-spezifische Wochenlimit, z. B. Fable), darunter
  * optional der Worker-Run-Abgleich (nur im Stats-Tab durchgereicht), und ein
  * Details-Collapse für Nebenfenster (Opus/Sonnet) + Extra-Usage. Wird nur für
  * verfügbare Provider mit echtem session/weekly-Fenster gerendert.
@@ -94,9 +102,14 @@ function AccountProviderCard({
   align?: { tokens: number; runs: number } | null;
   config: StatsFieldConfig;
 }) {
-  const session = provider.windows.find((w) => classifyWindow(w, config) === "session");
-  const weekly = provider.windows.find((w) => classifyWindow(w, config) === "weekly");
-  const primary = [session, weekly].filter((w): w is AccountUsageWindow => Boolean(w));
+  // ALLE session/weekly-Fenster werden Primärbalken (Operator-Spec 2026-07-21:
+  // drei Balken — 5h-Fenster, Woche UND das modell-spezifische Wochenlimit).
+  // `find` würde nur das erste Weekly-Fenster erwischen; weitere Weekly-Fenster
+  // fielen weder primär noch ins Details-Collapse → stiller Datenverlust.
+  const primary = sortedUsageWindows(provider, config).filter((w) => {
+    const kind = classifyWindow(w, config);
+    return kind === "session" || kind === "weekly";
+  });
   const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
   const unavailable = !provider.available;
   // Ausgaben-Karte (OpenRouter = Pay-as-you-go, kein Fenster-Limit): keine
@@ -110,18 +123,13 @@ function AccountProviderCard({
       : provider.windows.some((w) => (w.used_percent ?? 0) >= 75)
         ? "warn"
         : "ok";
-  // Non-xai providers leave signal_at null; their fetched_at is always fresh
-  // (≤ HTTP cache TTL), so the 60min guard keeps them on Cache/Live —
-  // byte-identical chip behavior for non-xai.
   let chipLabel = unavailable ? "offline" : provider.cached ? "Cache" : "Live";
   let chipTone: SignalTone = tone;
   if (!unavailable) {
-    const signalMs = Date.parse(provider.signal_at ?? provider.fetched_at ?? "");
-    if (Number.isFinite(signalMs) && nowMs - signalMs > 60 * 60 * 1000) {
-      const ageH = Math.floor((nowMs - signalMs) / (60 * 60 * 1000));
-      const rel = ageH < 24 ? `${ageH}h` : `${Math.floor(ageH / 24)}d`;
-      chipLabel = `Stand ${rel}`;
-      chipTone = ageH >= 24 ? "warn" : "neutral";
+    const staleLabel = staleUsageSignalLabel(provider, nowMs);
+    if (staleLabel) {
+      chipLabel = staleLabel;
+      chipTone = staleLabel.endsWith("d") ? "warn" : "neutral";
     }
   }
   // Details-Collapse nur für Nebenfenster + Details, die NICHT schon als
@@ -131,7 +139,7 @@ function AccountProviderCard({
     <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-ink">{configuredProviderLabel(config, provider.provider) || fallbackProviderLabel(provider.provider)}</p>
+          <p className="truncate text-sm font-semibold text-ink">{usageProviderLabel(provider, config)}</p>
           {provider.plan ? <p className="text-xs text-ink-3">{provider.plan}</p> : null}
         </div>
         <div className="justify-self-end">
@@ -143,7 +151,7 @@ function AccountProviderCard({
       </div>
       {primary.length ? (
         <div className="mt-3 space-y-1.5">
-          {primary.map((w) => <AccountWindowRow key={w.window_key ?? w.label} window={w} nowMs={nowMs} config={config} />)}
+          {primary.map((w, i) => <AccountWindowRow key={`${w.window_key ?? w.label}-${w.detail ?? ""}-${i}`} window={w} nowMs={nowMs} config={config} />)}
         </div>
       ) : spendCard ? (
         // Ausgaben-Karte (OpenRouter): $-Zeilen als Karten-Körper.
@@ -184,7 +192,7 @@ function AccountProviderCard({
 
 /**
  * Abo-Limits-Cockpit: Engpass-Zeile (knappstes Fenster über alle echten Abos) +
- * eine Zwei-Balken-Karte pro Abo. Provider ohne Provider-Limit (Kimi = lokale
+ * eine Primärbalken-Karte pro Abo (alle session/weekly-Fenster). Provider ohne Provider-Limit (Kimi = lokale
  * Schätzung, OpenRouter = $-Guthaben) landen in der „Ohne Fenster-Limit"-Fußzeile,
  * nie als gleichwertige Limit-Karte (§8). `laneUsage` ist optional — nur der
  * Stats-Tab reicht den Worker-Run-Abgleich durch.
@@ -202,27 +210,16 @@ export function AccountUsageTile({
   laneUsage?: Partial<Record<SubscriptionLane, { tokens: number; runs: number }>>;
   config?: StatsFieldConfig;
 }) {
-  const providers = (usage?.providers ?? [])
-    .filter((p) => isProviderVisible(config, p.provider))
-    .sort((a, b) => providerOrder(config, a.provider) - providerOrder(config, b.provider));
-  const available = providers.filter((p) => p.available).length;
+  const providers = sortUsageProviders(usage?.providers ?? [], config);
   const nowMs = nowSec() * 1000;
-  // Abo-Karte = Provider mit Subscription-Lane ODER echtem Provider-Fenster
-  // (Grok: Fenster ohne Lane — xai hat lane:null by design, kein Worker-Run-
-  // Reconciliation). Lane-Abos (Claude/Codex/Kimi) behalten die Karte auch offline
-  // (ehrlicher Leerzustand). Fußzeile = nur fensterlose Nicht-Abos (OpenRouter-
-  // $-Guthaben, offline Provider ohne Lane und ohne Fenster). Tradeoff: unavailable
-  // xai ohne Fenster fällt bewusst in die Fußzeile (im Gegensatz zu Lane-Abos).
-  const isAbo = (p: AccountUsageProvider) =>
-    providerToLane(p.provider, config) != null || p.windows.length > 0;
+  const isAbo = (p: AccountUsageProvider) => usageRoleForProvider(config, p.provider) === "subscription";
+  const subscriptions = providers.filter(isAbo);
+  const availableSubscriptions = subscriptions.filter((p) => p.available).length;
   // Ausgaben-Provider (OpenRouter = Pay-as-you-go): kein Fenster, keine Lane,
   // aber echte $-Details → eigene Karte im Cockpit statt Fußzeile.
   const isSpend = (p: AccountUsageProvider) =>
-    p.available && p.windows.length === 0 && providerToLane(p.provider, config) == null && p.details.length > 0;
-  // Kimi = lokale Schätzung, kein hartes Provider-Limit → zählt nie als Engpass (§8).
-  const bottleneck = pickBottleneck(
-    providers.filter((p) => providerToLane(p.provider, config) !== "kimi"),
-  );
+    p.available && usageRoleForProvider(config, p.provider) === "spend" && p.details.length > 0;
+  const bottleneck = pickBottleneck(subscriptions, config);
   // Cockpit: Lane-Abos (auch offline) + Provider mit echtem Fenster (Grok) +
   // Ausgaben-Karten (OpenRouter). Fußzeile: nur noch offline window-lose Nicht-
   // Abos ohne Lane und ohne Details.
@@ -238,14 +235,17 @@ export function AccountUsageTile({
           ? "warn"
           : "neutral";
   const bnReset = bottleneck ? formatReset(bottleneck.resetAt, nowMs) : "";
+  const bottleneckProviderLabel = bottleneck
+    ? usageProviderLabel(subscriptions.find((p) => p.provider === bottleneck.providerId)!, config)
+    : "";
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Eyebrow>Abo-Limits</Eyebrow>
           <SignalChip
-            tone={error ? "warn" : providers.length === 0 ? "neutral" : available === providers.length ? "ok" : "warn"}
-            label={loading ? "lädt…" : error ? "teilweise unbekannt" : providers.length === 0 ? "Limit unbekannt" : `${available}/${providers.length} live`}
+            tone={error ? "warn" : subscriptions.length === 0 ? "neutral" : availableSubscriptions === subscriptions.length ? "ok" : "warn"}
+            label={loading ? "lädt…" : error ? "teilweise unbekannt" : subscriptions.length === 0 ? "Limit unbekannt" : `${availableSubscriptions}/${subscriptions.length} Abos live`}
           />
         </div>
         {usage ? <span className="text-xs text-ink-3">TTL {usage.cache_ttl_seconds}s</span> : null}
@@ -253,7 +253,7 @@ export function AccountUsageTile({
       {bottleneck ? (
         <div role={bnTone === "neutral" ? undefined : "alert"} className={`flex items-start gap-2 rounded-card border px-3 py-2 text-sec ${bnTone === "alert" ? "border-status-alert/30 bg-status-alert/10 text-status-alert" : bnTone === "warn" ? "border-status-warn/30 bg-status-warn/10 text-status-warn" : "border-line bg-surface-2 text-ink-2"}`}>
           {bnTone === "neutral" ? <SignalLabel tone="neutral" label="Höchste Auslastung" className="mt-0.5 shrink-0" /> : <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />}
-          <span>{bnTone === "neutral" ? "" : "Engpass: "}{configuredProviderLabel(config, bottleneck.providerId) || fallbackProviderLabel(bottleneck.providerId)}-{bottleneck.windowLabel} {Math.round(bottleneck.usedPercent)} %{bnReset ? ` — Reset ${bnReset}` : ""}</span>
+          <span>{bnTone === "neutral" ? "" : "Engpass: "}{bottleneckProviderLabel}-{bottleneck.windowLabel} {Math.round(bottleneck.usedPercent)} %{bnReset ? ` — Reset ${bnReset}` : ""}</span>
         </div>
       ) : null}
       {loading ? (
@@ -275,7 +275,7 @@ export function AccountUsageTile({
           {footer.map((p, i) => (
             <span key={p.provider}>
               {i > 0 ? " · " : ""}
-              <span className="text-ink">{configuredProviderLabel(config, p.provider) || fallbackProviderLabel(p.provider)}</span>{" "}
+              <span className="text-ink">{usageProviderLabel(p, config)}</span>{" "}
               {p.available
                 ? p.details.length
                   ? p.details.join(", ")
