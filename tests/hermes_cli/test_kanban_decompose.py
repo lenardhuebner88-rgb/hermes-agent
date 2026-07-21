@@ -2014,8 +2014,23 @@ def test_auto_decompose_still_lists_content_review_escalation(
     [
         ("BLOCKED: empty graph raises 500; per-file cap noted incidentally", []),
         (None, ["BLOCKED: empty graph raises 500; per-file cap noted incidentally"]),
+        ("BLOCKED: empty graph raises 500. per-file cap noted incidentally", []),
+        (None, ["BLOCKED: empty graph raises 500. per-file cap noted incidentally"]),
+        ("BLOCKED: empty graph raises 500, per-file cap noted incidentally", []),
+        (None, ["BLOCKED: empty graph raises 500, per-file cap noted incidentally"]),
+        ("BLOCKED: empty graph raises 500 per-file cap noted incidentally", []),
+        (None, ["BLOCKED: empty graph raises 500 per-file cap noted incidentally"]),
     ],
-    ids=["mixed_reason_only", "mixed_finding_only"],
+    ids=[
+        "semicolon_reason_only",
+        "semicolon_finding_only",
+        "period_reason_only",
+        "period_finding_only",
+        "comma_reason_only",
+        "comma_finding_only",
+        "no_separator_reason_only",
+        "no_separator_finding_only",
+    ],
 )
 def test_auto_decompose_still_lists_mixed_content_review_escalation(
     kanban_home, review_gate_on, reason, findings

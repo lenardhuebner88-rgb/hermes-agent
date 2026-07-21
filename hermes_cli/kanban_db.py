@@ -11061,6 +11061,18 @@ _REVIEW_CAPABILITY_MARKERS = (
     "no read-only",
 )
 
+# Explicitly incidental capability mentions are evidence that the structured
+# reason/finding is about something else. Keep this semantic guard independent
+# of punctuation so commas, periods, or free-form prose cannot hide the defect.
+_REVIEW_CAPABILITY_INCIDENTAL_MARKERS = (
+    "incidentally",
+    "incidental",
+    "beiläufig",
+    "beilaeufig",
+    "lane-hinweis",
+    "lane hint",
+)
+
 
 def _review_block_is_capability_only(
     reason: object, findings: object
@@ -11075,9 +11087,15 @@ def _review_block_is_capability_only(
     if not normalized_parts:
         return False
     # Fail open for decomposition unless every structured reason/finding unit
-    # and every independent clause explicitly describes a capability gap. A
-    # marker in a sibling clause (for example, ``code raises 500; per-file cap
-    # noted incidentally``) must not hide the substantive review finding.
+    # and every independent clause explicitly describes a capability gap. An
+    # explicitly incidental marker is not capability evidence at all, regardless
+    # of punctuation, and therefore cannot hide a substantive review finding.
+    if any(
+        incidental in part
+        for part in normalized_parts
+        for incidental in _REVIEW_CAPABILITY_INCIDENTAL_MARKERS
+    ):
+        return False
     return all(
         all(
             any(marker in clause for marker in _REVIEW_CAPABILITY_MARKERS)
