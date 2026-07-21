@@ -391,6 +391,16 @@ button.jv-ok { cursor: pointer; }
   white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .jv-appr-reason { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--dim); }
+.jv-decision-why {
+  margin-top: 8px; padding: 8px 10px; border-left: 2px solid rgba(125, 211, 252, .45);
+  border-radius: 0 6px 6px 0; background: rgba(4, 7, 15, .32);
+}
+.jv-decision-why p { margin: 0; font-size: 11px; line-height: 1.5; color: var(--dim); }
+.jv-decision-why p + p { margin-top: 5px; }
+.jv-decision-why span {
+  display: block; margin-bottom: 1px; font-family: var(--mono); font-size: 9px;
+  letter-spacing: .08em; text-transform: uppercase; color: var(--cyan);
+}
 .jv-appr-details { margin-top: 5px; color: var(--dim); }
 .jv-appr-details summary {
   min-height: 48px; display: flex; align-items: center; cursor: pointer;
