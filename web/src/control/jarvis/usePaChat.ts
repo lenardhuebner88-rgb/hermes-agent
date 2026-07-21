@@ -344,6 +344,25 @@ export function usePaChat(options: UsePaChatOptions = {}) {
     [activeTurn?.phase, attachment, imagesAllowed, messagesPoll, projectScope, turnPollIntervalMs, turnMaxWaitMs],
   );
 
+  /** Vollständiger lokaler Reset (G2b-Controller-Naht): Alt-Seiten + Cursor,
+   *  Pending-/Fehlerzustände, Scroll-Prepend-Schutz; in-flight Turn-Polls
+   *  über den Generation-Counter invalidieren; danach frisch vom Server. */
+  const resetState = useCallback(() => {
+    generationRef.current += 1;
+    prependingRef.current = false;
+    setOlderMessages([]);
+    setOlderCursor(undefined);
+    setLoadingOlder(false);
+    setActiveTurn(null);
+    setComposerError(null);
+    setUploading(false);
+    setAttachment((current) => {
+      if (current) URL.revokeObjectURL(current.previewUrl);
+      return null;
+    });
+    void messagesPoll.reload().catch(() => {});
+  }, [messagesPoll]);
+
   return {
     messages,
     messagesLoading: messagesPoll.loading && messagesPoll.data === null,
@@ -360,5 +379,6 @@ export function usePaChat(options: UsePaChatOptions = {}) {
     attachFile,
     removeAttachment,
     send,
+    resetState,
   };
 }

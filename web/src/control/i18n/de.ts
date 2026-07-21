@@ -1028,11 +1028,19 @@ export const de = {
     loadOlder: "ÄLTERE LADEN",
     loadOlderBusy: "LADE …",
     loadOlderFailed: "Ältere Nachrichten konnten nicht geladen werden.",
-    // S2.6 — Projekte-Panel (ProjectCards im Jarvis-Look, echte Daten)
-    projekteTitle: "PROJEKTE",
+    // S2.6/G3 — Projekte-Chip (eingeklappte Ampel, Popover nur Alarme).
+    // Loading/Error/OpenAria stammen vom früheren ProjektePanel und werden vom
+    // Chip weiterverwendet (derselbe Datenpfad/dieselben Gründe wie die Klassik).
     projekteLoading: "Lade Projekte …",
     projekteError: "Projekte konnten nicht geladen werden.",
     projekteOpenAria: (name: string) => `Projekt öffnen: ${name} — klassische Ansicht`,
+    projekteChip: {
+      label: (count: number | string) => `Projekte · ${count}`,
+      warn: (k: number) => ` · ⚠ ${k}`,
+      popoverLabel: "Projekt-Eingriffe",
+      showAll: "alle zeigen",
+      empty: "Keine Eingriffe nötig",
+    },
     // S2.7 — Estate-Graph live (/api/pa/graph): Zustands-Tags + aria-Labels
     graphStateLive: "LIVE",
     graphStateMock: "VORSCHAU",

@@ -1,15 +1,11 @@
 // @vitest-environment jsdom
 /**
- * JarvisShellView — S4-Härtung: die statischen A4-Mock-Panels (Brain-Stats/
- * Top-Hubs, Filter, KI-LAGE, System-Sparklines) tragen denselben sichtbaren
- * Mock-Tag wie der Graph-Fallback (JARVIS_BRAIN_MOCKTAG) — Mock-Inhalte
- * gehen nie als live durch. S5-Design: die Mock-Panels stehen hinter dem
- * HUD-Toggle (jv-hud-off am Stage-Root, Default aus, localStorage
- * hermes.jarvis.hud) und das Periphery-Event des Chats öffnet den
- * Aktivitaet-Drawer. Die Live-Kinder (Graph, Panels, Chat) sind hier
- * bewusst gestubbt: getestet wird ausschließlich das Shell-Markup.
+ * JarvisShellView — G2: Desktop-Grid (Graph | Säule), TopBar mit Klassik-
+ * Link, Drawer öffnet weiter über das Periphery-Event. HUD/Mock-Floats
+ * entfallen. Live-Kinder sind gestubbt: getestet wird das Shell-Markup.
+ * G6-Sheet-Details: siehe JarvisSheet.test.tsx.
  */
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -23,10 +19,33 @@ vi.mock("./JarvisGraph", () => ({
 }));
 vi.mock("./JarvisChat", async () => {
   const actual = await vi.importActual<typeof import("./JarvisChat")>("./JarvisChat");
-  return { ...actual, JarvisChat: () => null };
+  return {
+    ...actual,
+    JarvisChat: (props: {
+      aboveThread?: React.ReactNode;
+      belowThread?: React.ReactNode;
+      headerExtra?: React.ReactNode;
+    }) => (
+      <div data-testid="chat">
+        {props.headerExtra}
+        {props.aboveThread}
+        {props.belowThread}
+      </div>
+    ),
+  };
 });
-vi.mock("./ProjektePanel", () => ({ ProjektePanel: () => null }));
-vi.mock("./WartetPanel", () => ({ WartetPanel: () => null }));
+vi.mock("./ProjekteChip", () => ({
+  ProjekteChip: () => <div data-testid="projekte-chip" />,
+}));
+vi.mock("./WartetPanel", () => ({
+  WartetPanel: () => <div data-testid="wartet" />,
+}));
+vi.mock("./KiLageTicker", () => ({
+  KiLageTicker: () => <div data-testid="ticker" />,
+}));
+vi.mock("./SystemVitals", () => ({
+  SystemVitals: () => <div data-testid="vitals" />,
+}));
 vi.mock("./AktivitaetPanel", () => ({
   AktivitaetPanel: (props: { open: boolean }) => {
     aktivitaetProps.open = props.open;
@@ -34,28 +53,9 @@ vi.mock("./AktivitaetPanel", () => ({
   },
 }));
 vi.mock("./SessionsPanel", () => ({ SessionsPanel: () => null }));
-// S6: die neuen Live-Hooks der Shell — im Mock-Fallback (keine Daten).
-vi.mock("./usePaFeed", () => ({
-  usePaFeed: () => ({ data: null, error: null, loading: false }),
-}));
-vi.mock("./usePaGraph", () => ({
-  usePaGraphView: () => ({
-    graph: { nodes: [], clusters: [], edges: [] },
-    isLive: false,
-    isStale: false,
-    error: null,
-    sourceErrors: [],
-  }),
-}));
-vi.mock("./useSystemStats", () => ({
-  useSystemStats: () => ({ data: null, error: null, loading: false }),
-  sparkAreaPath: (p: number) => `area-${p}`,
-  sparkLinePath: (p: number) => `line-${p}`,
-}));
 
 import { JarvisShellView } from "./JarvisShellView";
 import { JARVIS_OPEN_AKTIVITAET_EVENT } from "./JarvisChat";
-import { JARVIS_MOCK_TAG } from "./mockContent";
 
 function renderShell() {
   return render(
@@ -68,77 +68,59 @@ function renderShell() {
 beforeEach(() => {
   window.localStorage.clear();
   aktivitaetProps.open = undefined;
+  // Desktop-Default: keine Mobile-Sheet-Mechanik (matchMedia false / absent).
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn(() => ({
+      matches: false,
+      media: "(max-width: 759px)",
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  );
 });
 
-afterEach(() => cleanup());
-
-describe("JarvisShellView — Mock-Tags an den statischen A4-Panels", () => {
-  it("markiert Brain-Panel, Filter, KI-LAGE und Sparklines sichtbar als Mock", () => {
-    const { container } = render(
-      <MemoryRouter>
-        <JarvisShellView />
-      </MemoryRouter>,
-    );
-
-    const tags = Array.from(container.querySelectorAll(".jv-panelmock"));
-    expect(tags).toHaveLength(4);
-    for (const tag of tags) {
-      expect(tag.textContent).toBe(JARVIS_MOCK_TAG);
-      // Dasselbe Label-Muster wie der Graph-Fallback-Tag.
-      expect(tag.className).toContain("jv-mocktag");
-    }
-
-    // Brain-Panel (Stats + Top-Hubs): Tag am Panel-Titel.
-    expect(container.querySelector(".jv-brainpanel h1 .jv-panelmock")).toBeTruthy();
-    // Filter-Panel.
-    expect(container.querySelector(".jv-filter .jv-ptitle .jv-panelmock")).toBeTruthy();
-    // KI-LAGE-Panel.
-    expect(container.querySelector(".jv-news .jv-ptitle .jv-panelmock")).toBeTruthy();
-    // System-Sparklines im Wartet-Panel-Float.
-    expect(container.querySelector(".jv-sys .jv-panelmock")).toBeTruthy();
-  });
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
 });
 
-describe("JarvisShellView — S5-Design (HUD-Toggle + Periphery-Event)", () => {
-  it("rendert das alte S1-Emblem nicht mehr (Engine-Wahl nur am Orb-Header)", () => {
+describe("JarvisShellView — G2 Grid + TopBar + Drawer", () => {
+  it("rendert Desktop-Grid-Struktur (Graph-Zone + Säule) und montiert Slot-Inhalte", () => {
     const { container } = renderShell();
 
-    // Kein zweiter Orb/Switcher neben dem JarvisOrb im Chat — das schwebende
-    // Emblem rechts unten ist mit S5 entfallen.
+    expect(container.querySelector(".jv-stage")).toBeTruthy();
+    expect(container.querySelector(".jv-graphzone")).toBeTruthy();
+    expect(container.querySelector(".jv-column")).toBeTruthy();
+    expect(screen.getByTestId("graph")).toBeTruthy();
+    expect(screen.getByTestId("projekte-chip")).toBeTruthy();
+    expect(screen.getByTestId("vitals")).toBeTruthy();
+    expect(screen.getByTestId("chat")).toBeTruthy();
+    expect(screen.getByTestId("wartet")).toBeTruthy();
+    expect(screen.getByTestId("ticker")).toBeTruthy();
+
+    // Alte Floats/HUD sind weg.
+    expect(container.querySelector(".jv-brainpanel")).toBeNull();
+    expect(container.querySelector(".jv-filter")).toBeNull();
+    expect(container.querySelector(".jv-news")).toBeNull();
+    expect(container.querySelector(".jv-quiet")).toBeNull();
+    expect(container.querySelector(".jv-hudtoggle")).toBeNull();
+    expect(container.querySelector(".jv-strips")).toBeNull();
     expect(container.querySelector(".jv-emblem")).toBeNull();
-    expect(container.querySelector(".jv-ering")).toBeNull();
   });
 
-  it("HUD ist Default aus (jv-hud-off am Stage-Root), Panels bleiben im DOM", () => {
-    const { container } = renderShell();
+  it("TopBar trägt ← Dashboard und Klassik-Link", () => {
+    renderShell();
 
-    expect(container.querySelector(".jv-stage.jv-hud-off")).toBeTruthy();
-    // Die Mock-Panels werden per CSS ausgeblendet, nicht aus dem DOM gerissen
-    // (Mock-Tags der S4-Härtung bleiben am Code).
-    expect(container.querySelectorAll(".jv-panelmock")).toHaveLength(4);
-  });
+    const dash = screen.getByRole("link", { name: "← Dashboard" });
+    expect(dash.getAttribute("href")).toBe("/control");
 
-  it("HUD-Toggle blendet die Panels ein und persistiert in localStorage", () => {
-    const { container, getByRole } = renderShell();
-
-    const toggle = getByRole("button", { name: /HUD-Panels/ });
-    expect(toggle.getAttribute("aria-pressed")).toBe("false");
-
-    fireEvent.click(toggle);
-    expect(container.querySelector(".jv-stage.jv-hud-off")).toBeNull();
-    expect(toggle.getAttribute("aria-pressed")).toBe("true");
-    expect(window.localStorage.getItem("hermes.jarvis.hud")).toBe("1");
-
-    fireEvent.click(toggle);
-    expect(container.querySelector(".jv-stage.jv-hud-off")).toBeTruthy();
-    expect(window.localStorage.getItem("hermes.jarvis.hud")).toBe("0");
-  });
-
-  it("persistierter HUD-Stand wird beim Mount gelesen", () => {
-    window.localStorage.setItem("hermes.jarvis.hud", "1");
-    const { container } = renderShell();
-
-    expect(container.querySelector(".jv-stage.jv-hud-off")).toBeNull();
+    const klassik = screen.getByRole("link", { name: "Klassik" });
+    expect(klassik.getAttribute("href")).toBe("/control/projekte-klassisch");
   });
 
   it("Periphery-Event des Chats öffnet den Aktivitaet-Drawer", () => {

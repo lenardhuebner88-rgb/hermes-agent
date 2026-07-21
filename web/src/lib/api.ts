@@ -2014,6 +2014,8 @@ export const api = {
       body: JSON.stringify({ event, command }),
     }),
   getSystemStats: () => fetchJSON<SystemStats>("/api/system/stats"),
+  getSystemStatsHistory: (opts?: FetchJSONOptions) =>
+    fetchJSON<SystemStatsHistory>("/api/system/stats/history?minutes=120&step=1", undefined, opts),
 
   // ── Admin: Curator ──────────────────────────────────────────────────
   getCurator: () => fetchJSON<CuratorStatus>("/api/curator"),
@@ -2522,6 +2524,18 @@ export interface UpdateCheckResponse {
   can_apply: boolean;
   update_command: string;
   message: string | null;
+}
+
+export interface SystemStatsHistorySample {
+  ts: number;
+  cpu_percent: number;
+  mem_percent: number;
+}
+
+export interface SystemStatsHistory {
+  interval_s: number;
+  window_s: number;
+  samples: SystemStatsHistorySample[];
 }
 
 export interface SystemStats {

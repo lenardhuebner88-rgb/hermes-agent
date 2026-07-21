@@ -1,78 +1,42 @@
 /**
- * JarvisShellView — die Jarvis-Zone auf /control/projekte (Sprint 1, Karte e;
- * Sprint 2, Karten S2.2/S2.4/S2.6/M3).
+ * JarvisShellView — die Jarvis-Zone auf /control/projekte.
  *
- * Dunkles Command-Center-HUD nach dem Piet-freigegebenen A4-Mockup
- * (Design-Board c_8c6f034b): Estate-Graph als Vollbild-Canvas (S2.7: live an
- * /api/pa/graph — Zustands-Tag live vs. Mock-Fallback), schwebende Panels,
- * KI-Lage + Sparklines als statischer A4-Mock (S1; S4-Härtung: alle Statik-
- * Panels tragen denselben sichtbaren Mock-Tag wie der Graph-Fallback), Wartet-dezent an der
- * echten Entscheidungs-Inbox (S2.4: /api/pa/inbox — Expand zur Inbox-Ansicht
- * mit Approval-Cards für pa_action), PROJEKTE-Panel mit den echten
- * ProjectCards (S2.6 — gleiche Hooks/Ableitung wie die Klassik, Tap →
- * Klassik-Drilldown per Link), funktionale Frag-Leiste mit Bubble-Chat gegen
- * die LIVE-PA-Endpoints. M3: die Höhe des OfflineStaleBanner reist als
- * --jv-banner-h in die Stage-Höhe (Frag-Leiste clippt nicht mehr). S3.10:
- * AKTIVITÄT (Receipts+Commits) und SESSIONS (Spawn-Baum) als HUD-Strips im
- * Band zwischen PROJEKTE und Chat — der Expand öffnet je einen Overlay-
- * Drawer (Tabs/Filter-Chips), Lese- und Kill-Sheet kommen unverändert aus
- * der Klassik. S5-Design („JARVIS OS"): die S1-Mock-Panels (Brain/Filter/
- * KI-LAGE/Sparklines) stehen hinter einem HUD-Toggle (localStorage
- * hermes.jarvis.hud, Default aus; Mobile zeigt sie gar nicht), die Graph-
- * Ambience ist stärker gedimmt, und der Chat trägt Orb + Periphery-Zeile —
- * deren Tap öffnet den Aktivitaet-Drawer über das Window-Event
- * JARVIS_OPEN_AKTIVITAET_EVENT. Das alte S1-Emblem (rechts unten) ist mit S5
- * entfallen — einzige Engine-Wahl ist der Switcher im Orb-Header des Chats
- * (JarvisOrb), es gibt nur noch EINEN Orb pro Bildschirm.
- * Der bisherige Projekte-Tab bleibt als
- * /control/projekte-klassisch erreichbar (Fallback bis S2/S3 migrieren).
+ * G2 (Produktreife E1): Desktop-Grid statt Floats — Graph-Zone links
+ * (`minmax(0,1fr)`), rechte Chat-Säule 380px (Orb · Wartet · Thread ·
+ * KiLageTicker · Composer). G6 mobil (≤759px): Graph-first + Chat als
+ * Bottom-Sheet (closed | half | full). Alte Float-Panels (Brain/Filter/
+ * KI-LAGE/Sparklines), HUD-Toggle und Strip-Band entfallen; der
+ * Aktivitaet-/Sessions-Drawer bleibt als Overlay und öffnet weiter über
+ * JARVIS_OPEN_AKTIVITAET_EVENT.
+ * G3: statt des Interims-ProjektePanels sitzt der eingeklappte ProjekteChip
+ * oben links unter der TopBar (Popover nur Alarme + „alle zeigen" → Klassik).
  *
  * Styles kommen ausschließlich aus ../jarvis.css (unter `.jv` gescopet,
  * lazy mit diesem Chunk geladen) — die einzige Route mit Ratchet-Ausnahme,
  * siehe DESIGN.md „Jarvis-Zone".
  */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import "../jarvis.css";
-import { de } from "../i18n/de";
-import { fmtRelativeTime, nowSec } from "../lib/derive";
 import { AktivitaetPanel } from "./AktivitaetPanel";
 import { JARVIS_OPEN_AKTIVITAET_EVENT, JarvisChat } from "./JarvisChat";
-import { JarvisGraph, JarvisGraphStatsTag, JarvisGraphTag } from "./JarvisGraph";
-import { deriveFilterRows, deriveTopHubs } from "./graphHubs";
-import { ProjektePanel } from "./ProjektePanel";
+import { JarvisGraph } from "./JarvisGraph";
+import { JarvisTopBar } from "./JarvisTopBar";
+import { KiLageTicker } from "./KiLageTicker";
+import { ProjekteChip } from "./ProjekteChip";
 import { SessionsPanel } from "./SessionsPanel";
+import { SystemVitals } from "./SystemVitals";
 import { useOfflineBannerHeight } from "./useOfflineBannerHeight";
-import { usePaFeed } from "./usePaFeed";
-import { usePaGraphView } from "./usePaGraph";
-import { sparkAreaPath, sparkLinePath, useSystemStats } from "./useSystemStats";
 import { WartetPanel } from "./WartetPanel";
-import {
-  JARVIS_BRAIN_STATS,
-  JARVIS_FILTER_ROWS,
-  JARVIS_MOCK_TAG,
-  JARVIS_NEWS_CRON,
-  JARVIS_NEWS_ITEMS,
-  JARVIS_SEARCH_HINT,
-  JARVIS_SPARKS,
-  JARVIS_TOP_HUBS,
-} from "./mockContent";
 
-const t = de.jarvis;
-
-/** S4-Härtung: sichtbarer Mock-Tag an den statischen A4-Panels — dasselbe
- *  Label-Muster (.jv-mocktag) wie der Graph-Fallback in JarvisGraph, plus
- *  .jv-panelmock für die Pill-Optik am Panel-Titel. */
-function MockTag() {
-  return <span className="jv-mocktag jv-panelmock">{JARVIS_MOCK_TAG}</span>;
-}
-
-/** Welcher S3.10-Drawer offen ist (höchstens einer gleichzeitig — die
- *  Drawer teilen sich dieselbe Overlay-Zone mittig über dem Graphen).
- *  `?aktivitaet=open` / `?sessions=open` öffnen initial (Deep-Link/
- *  Screenshot-Naht wie ?inbox=open bei S2.4). */
+/** Welcher Drawer offen ist (höchstens einer gleichzeitig).
+ *  `?aktivitaet=open` / `?sessions=open` öffnen initial (Deep-Link). */
 type ShellPanel = "aktivitaet" | "sessions";
+
+/** G6 Mobile-Sheet: zu / halb / voll. Desktop rendert die Mechanik nicht. */
+export type MobileSheetState = "closed" | "half" | "full";
+
+const MOBILE_MQ = "(max-width: 759px)";
 
 function initialOpenPanel(): ShellPanel | null {
   if (typeof window === "undefined") return null;
@@ -82,188 +46,172 @@ function initialOpenPanel(): ShellPanel | null {
   return null;
 }
 
-/** S5-Design („JARVIS OS"): die S1-Mock-Panels (Brain/Filter/KI-LAGE/
- *  Sparklines) stehen hinter einem HUD-Toggle — Default AUS (persistiert in
- *  localStorage), Mobile zeigt sie gar nicht (CSS). Der Mock-Tag aus der
- *  S4-Härtung bleibt am Code für den HUD-Modus. */
-const HUD_STORAGE_KEY = "hermes.jarvis.hud";
-
-function initialHud(): boolean {
-  try {
-    return window.localStorage.getItem(HUD_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
+/** matchMedia-Guard: SSR-/jsdom-sicher, Default false (Desktop-Pfad). */
+function useMobileJarvisViewport(): boolean {
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(MOBILE_MQ);
+    const apply = () => setMobile(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+  return mobile;
 }
 
 export function JarvisShellView() {
   const rootRef = useRef<HTMLDivElement | null>(null);
   useOfflineBannerHeight(rootRef);
+  const isMobile = useMobileJarvisViewport();
+  const [sheet, setSheet] = useState<MobileSheetState>("closed");
   const [openPanel, setOpenPanel] = useState<ShellPanel | null>(initialOpenPanel);
   const togglePanel = (panel: ShellPanel) =>
     setOpenPanel((current) => (current === panel ? null : panel));
-  const [hud, setHud] = useState<boolean>(initialHud);
-  const toggleHud = () =>
-    setHud((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(HUD_STORAGE_KEY, next ? "1" : "0");
-      } catch {
-        // Privatmodus/Quota: Toggle wirkt dann eben nur sitzungslokal.
-      }
-      return next;
-    });
 
-  // S5-Design: Tap auf die Periphery-Zeile im Chat öffnet den Aktivitaet-
-  // Drawer (kleines Window-Event statt Prop-Bohrung durch die Shell).
+  // Periphery-Zeile im Chat öffnet den Aktivitaet-Drawer (Window-Event,
+  // keine Prop-Bohrung durch die Shell).
   useEffect(() => {
     const onOpenAktivitaet = () => setOpenPanel("aktivitaet");
     window.addEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, onOpenAktivitaet);
     return () => window.removeEventListener(JARVIS_OPEN_AKTIVITAET_EVENT, onOpenAktivitaet);
   }, []);
 
-  // S6.4a: KI-LAGE live (GET /api/pa/feed) — die letzten ~5 Feed-Einträge.
-  const feed = usePaFeed();
-  const feedItems = useMemo(() => {
-    const items = feed.data?.items ?? [];
-    return items.slice(-5);
-  }, [feed.data]);
-  const feedLive = feedItems.length > 0;
+  // G6: Composer-Fokus öffnet das Sheet (closed → half) und hält es offen
+  // (kein Zuklappen unter der Tastatur).
+  useEffect(() => {
+    if (!isMobile) return;
+    const root = rootRef.current;
+    if (!root) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (!target.closest(".jv-column")) return;
+      // Input/Textarea im Sheet (Composer) oder sonstige Editables.
+      if (
+        target.matches("input, textarea, [contenteditable='true']") ||
+        target.closest("input, textarea")
+      ) {
+        setSheet((current) => (current === "closed" ? "half" : current));
+      }
+    };
+    root.addEventListener("focusin", onFocusIn);
+    return () => root.removeEventListener("focusin", onFocusIn);
+  }, [isMobile]);
 
-  // S6.4b: Top-Hubs/Filter aus den Graph-Knoten ableiten (derselbe Poll wie
-  // JarvisGraph — pollingStore dedupliziert, kein zusätzlicher Fetch).
-  const graphView = usePaGraphView();
-  const topHubs = useMemo(
-    () => (graphView.isLive ? deriveTopHubs(graphView.graph) : JARVIS_TOP_HUBS),
-    [graphView.isLive, graphView.graph],
-  );
-  const filterRows = useMemo(
-    () => (graphView.isLive ? deriveFilterRows(graphView.graph) : JARVIS_FILTER_ROWS),
-    [graphView.isLive, graphView.graph],
-  );
+  // G6: visualViewport → --jv-kb (Tastatur-Offset), S7-Verhalten nicht
+  // verschlechtern: Composer bleibt über der Tastatur.
+  useEffect(() => {
+    if (!isMobile) return;
+    const root = rootRef.current;
+    const vv = window.visualViewport;
+    if (!root || !vv) return;
+    const sync = () => {
+      const kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      root.style.setProperty("--jv-kb", `${Math.round(kb)}px`);
+    };
+    sync();
+    vv.addEventListener("resize", sync);
+    vv.addEventListener("scroll", sync);
+    return () => {
+      vv.removeEventListener("resize", sync);
+      vv.removeEventListener("scroll", sync);
+      root.style.removeProperty("--jv-kb");
+    };
+  }, [isMobile]);
 
-  // S6.4c: Sparklines aus GET /api/system/stats (Punkt-Werte, keine Zeitreihe).
-  const sysStats = useSystemStats();
-  const sparks = useMemo(() => {
-    const s = sysStats.data;
-    if (!s || (s.cpu_percent == null && !s.memory && !s.disk)) return JARVIS_SPARKS;
-    const rows = [
-      { label: "CPU", value: s.cpu_percent != null ? `${Math.round(s.cpu_percent)} %` : "–", tone: "cyan" as const, pct: s.cpu_percent ?? 0 },
-      { label: "RAM", value: s.memory ? `${Math.round(s.memory.percent)} %` : "–", tone: "amber" as const, pct: s.memory?.percent ?? 0 },
-      { label: "DISK", value: s.disk ? `${Math.round(s.disk.percent)} %` : "–", tone: "grau" as const, pct: s.disk?.percent ?? 0 },
-    ];
-    return rows.map((r) => ({
-      label: r.label,
-      value: r.value,
-      tone: r.tone,
-      areaPath: sparkAreaPath(r.pct),
-      linePath: sparkLinePath(r.pct),
-    }));
-  }, [sysStats.data]);
-  const sparksLive = sysStats.data != null && (sysStats.data.cpu_percent != null || sysStats.data.memory != null || sysStats.data.disk != null);
+  // Griff/Leiste: closed ↔ half; aus full zurück auf half (Brief: closed↔half).
+  const onHandleClick = useCallback(() => {
+    setSheet((current) => {
+      if (current === "closed") return "half";
+      if (current === "half") return "closed";
+      return "half"; // full → half
+    });
+  }, []);
 
-  // S6: relativer Jetzt-Punkt für die Feed-Altersanzeige (einmal pro Render).
-  const now = nowSec();
+  // Expand-Steuer bzw. weiterer Tap-Pfad: half ↔ full.
+  const onExpandClick = useCallback(() => {
+    setSheet((current) => {
+      if (current === "full") return "half";
+      if (current === "half") return "full";
+      return "half"; // closed → half, dann expand zu full
+    });
+  }, []);
 
   return (
-    <div className="jv" ref={rootRef}>
-      <div className={hud ? "jv-stage" : "jv-stage jv-hud-off"}>
-        <JarvisGraph />
-
-        {/* ══ Links: Brain-Panel ══ */}
-        <div className="jv-float jv-brainpanel">
-          <h1>
-            PIET-ESTATE <b>OS</b> <MockTag />
-          </h1>
-          <div className="jv-stats">
-            {JARVIS_BRAIN_STATS}
-            <JarvisGraphStatsTag />
+    <div
+      className="jv"
+      ref={rootRef}
+      data-mobile-sheet={isMobile ? sheet : undefined}
+    >
+      <JarvisTopBar />
+      <div className="jv-stage">
+        <div className="jv-graphzone">
+          <JarvisGraph />
+          {/* G3: Projekte-Chip oben links unter der TopBar (Popover nur Alarme). */}
+          <div className="jv-chipzone">
+            <ProjekteChip />
           </div>
-          <div className="jv-search">{JARVIS_SEARCH_HINT}</div>
-          <div className="jv-hubs">
-            <div className="jv-ptitle" style={{ marginBottom: 5 }}>
-              TOP-HUBS
+          {/* G4: System-Vitals-Pille unten links (echte Microsparks). */}
+          <SystemVitals />
+        </div>
+
+        <div
+          className={isMobile ? "jv-column jv-chatsheet" : "jv-column"}
+          data-sheet={isMobile ? sheet : undefined}
+          id="jv-chat-sheet"
+        >
+          {isMobile ? (
+            <div className="jv-sheet-chrome">
+              <button
+                type="button"
+                className="jv-sheet-handle"
+                onClick={onHandleClick}
+                aria-expanded={sheet !== "closed"}
+                aria-controls="jv-chat-sheet"
+                data-testid="jv-sheet-handle"
+                aria-label={
+                  sheet === "closed" ? "Chat öffnen" : "Chat einklappen"
+                }
+              >
+                <span className="jv-sheet-grip" aria-hidden="true" />
+                <span className="jv-sheet-peek">
+                  <span className="jv-sheet-orbdot" aria-hidden="true" />
+                  <span className="jv-sheet-peek-label">Chat · Jarvis</span>
+                </span>
+              </button>
+              {sheet !== "closed" ? (
+                <button
+                  type="button"
+                  className="jv-sheet-expand"
+                  onClick={onExpandClick}
+                  data-testid="jv-sheet-expand"
+                  aria-label={
+                    sheet === "full" ? "Chat verkleinern" : "Chat maximieren"
+                  }
+                >
+                  {sheet === "full" ? "▾" : "▴"}
+                </button>
+              ) : null}
             </div>
-            {topHubs.map((hub) => (
-              <div className="jv-hub" key={hub.name}>
-                <span className={`jv-d jv-tone-${hub.tone}`} aria-hidden="true" />
-                <span className="jv-nm">{hub.name}</span>
-                <span className="jv-n">{hub.count}</span>
-              </div>
-            ))}
-          </div>
-          <div className="jv-inspector">
-            <b>Knoten antippen</b> → fokussiert ihn samt Verbindungen. <b>Erneut tippen</b> →
-            Ziel öffnen (Tasks/Receipts); vault://- und memory://-Refs sind reine Anzeige. Jarvis
-            nutzt denselben Graphen als Gedächtnis.
-          </div>
-          <Link className="jv-klassisch" to="/control/projekte-klassisch">
-            {t.klassischLink}
-          </Link>
-        </div>
+          ) : null}
 
-        {/* ══ Rechts oben: Filter (S6: live aus Graph-Knoten) ══ */}
-        <div className="jv-float jv-filter">
-          <div className="jv-ptitle">
-            FILTER{graphView.isLive ? null : <MockTag />}
-          </div>
-          {filterRows.map((row) => (
-            <div className="jv-frow" key={row.name}>
-              <span className={`jv-d jv-tone-${row.tone}`} aria-hidden="true" />
-              {row.name} <span className="jv-n">{row.count}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* ══ Rechts: KI-LAGE (S6: live aus GET /api/pa/feed) ══ */}
-        <div className="jv-float jv-news">
-          <div className="jv-ptitle">
-            KI-LAGE{feedLive ? null : <MockTag />} <span className="jv-fresh">{JARVIS_NEWS_CRON}</span>
-          </div>
-          {feedLive
-            ? feedItems.map((item, index) => (
-                <div className={index === feedItems.length - 1 ? "jv-item jv-lead" : "jv-item"} key={item.id}>
-                  {item.title}
-                  <span className="jv-src">{fmtRelativeTime(item.ts, now)}</span>
+          <div className="jv-sheet-body">
+            <JarvisChat
+              aboveThread={
+                <div className="jv-warte-slot">
+                  <WartetPanel />
                 </div>
-              ))
-            : JARVIS_NEWS_ITEMS.map((item) => (
-                <div className={item.lead ? "jv-item jv-lead" : "jv-item"} key={item.text}>
-                  {item.text}
-                  <span className="jv-src">{item.source}</span>
-                </div>
-              ))}
-        </div>
-
-        {/* ══ Links unten: Wartet · dezent (echte Fragen) + System (S6: live) ══ */}
-        <div className="jv-float jv-quiet">
-          <WartetPanel />
-          <div className="jv-sys">
-            {sparks.map((spark) => (
-              <div className="jv-spark" key={spark.label}>
-                <div className="jv-lb">
-                  {spark.label} <b>{spark.value}</b>
-                </div>
-                <svg viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">
-                  <path d={spark.areaPath} className={`jv-sparkarea-${spark.tone}`} />
-                  <path d={spark.linePath} className={`jv-sparkline-${spark.tone}`} />
-                </svg>
-              </div>
-            ))}
-            {sparksLive ? null : (
-              <span className="jv-sysmock">
-                <MockTag />
-              </span>
-            )}
+              }
+              belowThread={<KiLageTicker />}
+            />
           </div>
         </div>
 
-        {/* ══ Mitte oben: PROJEKTE (S2.6 — echte ProjectCards im A4-Look) ══ */}
-        <ProjektePanel />
-
-        {/* ══ Band unter PROJEKTE: AKTIVITÄT + SESSIONS (S3.10 — HUD-Strips,
-            Expand öffnet den Overlay-Drawer; Daten/Sheets der Klassik) ══ */}
-        <div className="jv-strips">
+        {/* Drawer-Host: Strip-Band entfällt; Panel-Komponenten bleiben für den
+            Overlay-Drawer (Periphery-Event / Deep-Link). Strips per CSS hidden.
+            z-Index über dem Mobile-Sheet (G6). */}
+        <div className="jv-drawers" aria-live="polite" data-testid="jv-drawers">
           <AktivitaetPanel
             open={openPanel === "aktivitaet"}
             onToggle={() => togglePanel("aktivitaet")}
@@ -273,25 +221,6 @@ export function JarvisShellView() {
             onToggle={() => togglePanel("sessions")}
           />
         </div>
-
-        {/* ══ Graph-Zustands-Tag (Desktop; mobil: inline in .jv-stats) ══ */}
-        <JarvisGraphTag />
-
-        {/* ══ S5-Design: HUD-Toggle für die S1-Mock-Panels (Desktop; Default
-            aus, persistiert — Mobile zeigt die Panels gar nicht) ══ */}
-        <button
-          type="button"
-          className={hud ? "jv-hudtoggle jv-on" : "jv-hudtoggle"}
-          aria-pressed={hud}
-          aria-label={t.hudToggle}
-          title={t.hudToggle}
-          onClick={toggleHud}
-        >
-          HUD
-        </button>
-
-        {/* ══ Chat: Bubble-Verlauf + Frag-Leiste (LIVE PA-Endpoints) ══ */}
-        <JarvisChat />
       </div>
     </div>
   );

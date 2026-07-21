@@ -228,6 +228,7 @@ export default function ControlPage() {
   const commandButtonRef = useRef<HTMLButtonElement | null>(null);
   const gPendingRef = useRef<number>(0);
   const active = activeFromPath(location.pathname);
+  const isChromelessJarvis = /^\/control\/projekte\/?$/.test(location.pathname);
   useLiveEvents();
 
   // Puls-Leiste data contract (SHELL-SPEC.md W2-b): WORKER = running-filtered
@@ -269,75 +270,85 @@ export default function ControlPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [navigate]);
 
+  const routedContent = (
+    <RouteTransition pathname={active}>
+      <ErrorBoundary>
+      <Suspense fallback={<ControlViewFallback />}>
+      <Routes location={location}>
+        <Route index element={<CommandHome density={density.density} />} />
+        <Route path="fleet" element={<FleetView />} />
+        <Route path="inbox" element={<CommandHome density={density.density} />} />
+        {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
+        <Route path="overview" element={<QueryPreservingRedirect to="/control/bibliothek" />} />
+        {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
+        <Route path="pulse" element={<QueryPreservingRedirect to="/control/system" />} />
+        <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
+        <Route path="agent-terminals" element={<AgentTerminalsView />} />
+        {/* hermes wurde in Fleet absorbiert (Phase 2) */}
+        <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
+        <Route path="statistik" element={<StatistikView />} />
+        {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
+        <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
+        {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
+        <Route path="ketten" element={<QueryPreservingRedirect to="/control/fleet" />} />
+        <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
+        <Route path="backlog" element={<BacklogView density={density.density} />} />
+        <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
+        <Route path="crons" element={<CronView density={density.density} />} />
+        <Route path="loops" element={<LoopsView />} />
+        <Route path="projekte" element={<JarvisShellView />} />
+        {/* Klassik-Fallback (Sprint 1 Karte e): bisheriger Projekte-Tab
+            bleibt ohne Inhaltsänderung erreichbar, bis S2/S3 migrieren. */}
+        <Route path="projekte-klassisch" element={<ProjekteView />} />
+        <Route path="lanes" element={<LanesView density={density.density} />} />
+        <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
+        {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
+        <Route path="pressure" element={<QueryPreservingRedirect to="/control/system" />} />
+        <Route path="ops" element={<QueryPreservingRedirect to="/control/system" />} />
+        <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
+        <Route path="issues" element={<IssuesView density={density.density} />} />
+        <Route path="research" element={<ResearchView density={density.density} />} />
+        <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
+        <Route path="design-board" element={<DesignBoardView density={density.density} />} />
+        <Route path="design-board/:cardId" element={<DesignBoardCardDetail density={density.density} />} />
+        <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
+        <Route path="stratege" element={<StrategistView density={density.density} />} />
+        <Route path="diktat" element={<DiktatView />} />
+        <Route path="*" element={<Navigate to="/control" replace />} />
+      </Routes>
+      </Suspense>
+      </ErrorBoundary>
+    </RouteTransition>
+  );
+
   return (
     <LazyMotion features={domAnimation} strict>
       <div data-control>
         <OfflineStaleBanner health={{ ...health, pollIntervalMs: HEALTH_POLL_INTERVAL_MS }} />
-        <ControlShell
-          active={active}
-          density={density.density}
-          inbox={inbox}
-          openProposals={proposals.openSkillProposals.length}
-          inboxTotal={inbox.summary.total}
-          inboxTone={inbox.worstTone}
-          libraryUnread={active === "bibliothek" ? 0 : libraryUnread}
-          strategistCount={strat.data?.count ?? 0}
-          health={health}
-          pulse={{ workers: pulseWorkers, fragen: inbox.summary.total, fragenTone: inbox.worstTone, kostenUsd: pulseKosten.value, kostenIsEquivalent: pulseKosten.isEquivalent }}
-          onNavigate={(tab) => navigate(tabPath[tab])}
-          onPrefetch={prefetchControlView}
-          commandButtonRef={commandButtonRef}
-          onOpenCommand={() => setPaletteOpen(true)}
-        >
-          <RouteTransition pathname={active}>
-            <ErrorBoundary>
-            <Suspense fallback={<ControlViewFallback />}>
-            <Routes location={location}>
-              <Route index element={<CommandHome density={density.density} />} />
-              <Route path="fleet" element={<FleetView />} />
-              <Route path="inbox" element={<CommandHome density={density.density} />} />
-              {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}
-              <Route path="overview" element={<QueryPreservingRedirect to="/control/bibliothek" />} />
-              {/* Abriss S5: Puls → System (48h-Puls lebt in der fusionierten System-View). */}
-              <Route path="pulse" element={<QueryPreservingRedirect to="/control/system" />} />
-              <Route path="workstreams" element={<AgentOpsView density={density.density} />} />
-              <Route path="agent-terminals" element={<AgentTerminalsView />} />
-              {/* hermes wurde in Fleet absorbiert (Phase 2) */}
-              <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
-              <Route path="statistik" element={<StatistikView />} />
-              {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
-              <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
-              {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
-              <Route path="ketten" element={<QueryPreservingRedirect to="/control/fleet" />} />
-              <Route path="autoresearch" element={<AutoresearchView density={density.density} store={proposals} />} />
-              <Route path="backlog" element={<BacklogView density={density.density} />} />
-              <Route path="orchestrator" element={<OrchestratorBacklogView density={density.density} />} />
-              <Route path="crons" element={<CronView density={density.density} />} />
-              <Route path="loops" element={<LoopsView />} />
-              <Route path="projekte" element={<JarvisShellView />} />
-              {/* Klassik-Fallback (Sprint 1 Karte e): bisheriger Projekte-Tab
-                  bleibt ohne Inhaltsänderung erreichbar, bis S2/S3 migrieren. */}
-              <Route path="projekte-klassisch" element={<ProjekteView />} />
-              <Route path="lanes" element={<LanesView density={density.density} />} />
-              <Route path="system" element={<SystemView proposals={proposals.proposals} proposalsLastUpdated={proposals.lastUpdated} />} />
-              {/* Abriss S5: Pressure/Ops → System (Content in die fusionierte System-View evakuiert). */}
-              <Route path="pressure" element={<QueryPreservingRedirect to="/control/system" />} />
-              <Route path="ops" element={<QueryPreservingRedirect to="/control/system" />} />
-              <Route path="runs/:runId" element={<RunTimelineView density={density.density} />} />
-              <Route path="issues" element={<IssuesView density={density.density} />} />
-              <Route path="research" element={<ResearchView density={density.density} />} />
-              <Route path="bibliothek" element={<BibliothekView density={density.density} />} />
-              <Route path="design-board" element={<DesignBoardView density={density.density} />} />
-              <Route path="design-board/:cardId" element={<DesignBoardCardDetail density={density.density} />} />
-              <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
-              <Route path="stratege" element={<StrategistView density={density.density} />} />
-              <Route path="diktat" element={<DiktatView />} />
-              <Route path="*" element={<Navigate to="/control" replace />} />
-            </Routes>
-            </Suspense>
-            </ErrorBoundary>
-          </RouteTransition>
-        </ControlShell>
+        {isChromelessJarvis ? (
+          <div className="hc-chromeless -mx-3 -mt-2 sm:-mx-6 sm:-mt-4 lg:-mt-6">
+            {routedContent}
+          </div>
+        ) : (
+          <ControlShell
+            active={active}
+            density={density.density}
+            inbox={inbox}
+            openProposals={proposals.openSkillProposals.length}
+            inboxTotal={inbox.summary.total}
+            inboxTone={inbox.worstTone}
+            libraryUnread={active === "bibliothek" ? 0 : libraryUnread}
+            strategistCount={strat.data?.count ?? 0}
+            health={health}
+            pulse={{ workers: pulseWorkers, fragen: inbox.summary.total, fragenTone: inbox.worstTone, kostenUsd: pulseKosten.value, kostenIsEquivalent: pulseKosten.isEquivalent }}
+            onNavigate={(tab) => navigate(tabPath[tab])}
+            onPrefetch={prefetchControlView}
+            commandButtonRef={commandButtonRef}
+            onOpenCommand={() => setPaletteOpen(true)}
+          >
+            {routedContent}
+          </ControlShell>
+        )}
         <CommandPalette
           open={paletteOpen}
           workers={workers.data?.workers ?? []}

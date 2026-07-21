@@ -32,7 +32,7 @@
  * lebt der JarvisOrb (idle/listening/thinking/speaking/error) mit dem
  * Engine-Switcher.
  */
-import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
 import { ImagePlus, Loader2, Mic, MicOff, MonitorUp, Send, Volume2, VolumeX, X } from "lucide-react";
 
 import { api, type PaChatMessage, type PaEnginesResponse } from "@/lib/api";
@@ -63,6 +63,21 @@ const t = de.jarvis;
  *  Shell. Der Drawer lebt in JarvisShellView — statt Prop-Bohrung durch die
  *  Shell hört sie auf dieses kleine Window-Event. */
 export const JARVIS_OPEN_AKTIVITAET_EVENT = "jarvis:open-aktivitaet";
+
+/**
+ * G2b — typisierte Controller-Naht für die Shell (Voice-Transkripte, Session-
+ * Reset, Voice-Modus ohne Doppel-Audio). Ohne gesetzte Props unverändert.
+ */
+export interface JarvisChatController {
+  /** Externer Sendepfad — identisch zum Composer-Submit (aktuelle Engine,
+   *  Attachment-/Live-Share-Regeln bleiben). Für Voice-Transkripte. */
+  submitQuestion(text: string): void;
+  /** Setzt den lokalen Chat-Zustand vollständig zurück — inkl. bereits
+   *  nachgeladener älterer Seiten (olderMessages), Pagination-Cursor und
+   *  Pending-/Fehlerzuständen. Laufende Turn-Polls werden invalidiert
+   *  (Generation-Counter), späte Antworten erzeugen keine Bubbles mehr. */
+  resetState(): void;
+}
 
 function formatBubbleTime(ts: number): string {
   const d = new Date(ts * 1000);
@@ -158,7 +173,29 @@ function FrameAgeLabel({ lastFrameAt }: { lastFrameAt: number | null }) {
   );
 }
 
-export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number } = {}) {
+export function JarvisChat({
+  turnPollIntervalMs,
+  headerExtra,
+  aboveThread,
+  belowThread,
+  onController,
+  voiceMode,
+  sessionEpoch,
+}: {
+  turnPollIntervalMs?: number;
+  /** Optional: Slot vor dem Orb-Header (`.jv-orbhead`). */
+  headerExtra?: ReactNode;
+  /** Optional: Slot zwischen Header und Thread (z. B. Wartet-kompakt). */
+  aboveThread?: ReactNode;
+  /** Optional: Slot nach Thread-Ende, vor Fehlerzeilen/Composer (z. B. KI-Lage-Ticker). */
+  belowThread?: ReactNode;
+  /** G2b: Parent erhält den Controller bei Mount, null bei Unmount. */
+  onController?: (controller: JarvisChatController | null) => void;
+  /** G2b: bei true kein Auto-TTS neuer Assistant-Antworten; manueller Toggle bleibt. */
+  voiceMode?: boolean;
+  /** G2b: Wechsel (definiert → neuer Wert) = resetState(); Erst-Render ohne Reset. */
+  sessionEpoch?: number;
+} = {}) {
   // turnPollIntervalMs ist eine Di/Test-Naht (kürzere Turn-Poll-Kadenz in
   // Komponententests); Produktiv Default: PA_TURN_POLL_INTERVAL_MS.
   const chat = usePaChat({ turnPollIntervalMs });
@@ -170,6 +207,11 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
   const threadRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const seenCountRef = useRef(0);
+  // G2b: stabile Controller-Refs, damit onController nur bei Mount/Unmount
+  // (bzw. Callback-Identität) feuert — nicht bei jedem Render.
+  const submitQuestionRef = useRef<(rawValue: string) => Promise<void>>(async () => {});
+  const resetStateRef = useRef<() => void>(() => {});
+  const sessionEpochSeenRef = useRef<number | undefined>(undefined);
 
   // S3.6 — Push-to-Talk + Vorlesen. mic.error hält Recorder-/Permission-
   // Fehler, micTranscribeError die des Transkribierens; beide erscheinen als
@@ -305,13 +347,16 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     }
     if (!lastAssistantMessage || lastSpokenIdRef.current === lastAssistantMessage.id) return;
     lastSpokenIdRef.current = lastAssistantMessage.id;
-    if (speakEnabled) {
+    // voiceMode: Auto-TTS aus (Shell steuert Audio); Toggle/play bleiben nutzbar.
+    if (speakEnabled && !voiceMode) {
       void speakPlay(lastAssistantMessage.content);
     }
-  }, [chat.messages, lastAssistantMessage, speakEnabled, speakPlay]);
+  }, [chat.messages, lastAssistantMessage, speakEnabled, speakPlay, voiceMode]);
 
   // S7: gemeinsame Submit-Funktion für Formular und PTT-Auto-Send. Ein direktes
   // Diktat durchläuft damit exakt dieselben /plan-, Live-Share- und Senderegeln.
+  // G2b: auch der externe Controller-Pfad (submitQuestion) nutzt genau diese
+  // Funktion — keine Code-Duplikation.
   const submitQuestion = async (rawValue: string) => {
     const value = rawValue.trim();
     if (!value || chat.sending) return;
@@ -338,6 +383,41 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
     setText("");
     void chat.send(value);
   };
+
+  // G2b: Refs nur in Effects pflegen (kein Ref-Schreiben währends Render).
+  useEffect(() => {
+    submitQuestionRef.current = submitQuestion;
+    resetStateRef.current = chat.resetState;
+  });
+
+  // G2b: Controller an Parent — Mount → Controller, Unmount → null.
+  useEffect(() => {
+    if (!onController) return;
+    onController({
+      submitQuestion: (textValue: string) => {
+        void submitQuestionRef.current(textValue);
+      },
+      resetState: () => {
+        resetStateRef.current();
+      },
+    });
+    return () => {
+      onController(null);
+    };
+  }, [onController]);
+
+  // G2b: sessionEpoch-Wechsel (definiert → neuer Wert) = resetState.
+  // Erst-Render mit gesetztem Epoch löst keinen Reset aus.
+  useEffect(() => {
+    if (sessionEpoch === undefined) return;
+    if (sessionEpochSeenRef.current === undefined) {
+      sessionEpochSeenRef.current = sessionEpoch;
+      return;
+    }
+    if (sessionEpochSeenRef.current === sessionEpoch) return;
+    sessionEpochSeenRef.current = sessionEpoch;
+    resetStateRef.current();
+  }, [sessionEpoch]);
 
   // S7: Push-to-Talk setzt das Transkript standardmäßig weiter nur in den
   // Input. Auto-Send ist opt-in; Fehler senden nie. Mic-Start unterbricht TTS.
@@ -415,12 +495,15 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
 
   return (
     <div className="jv-chatcol">
+      {headerExtra}
       {/* S5-Design: Identität (Orb + Engine-Wahl) und Maschinenraum
           (Periphery-Zeile) ÜBER dem Gespräch. */}
       <div className="jv-orbhead">
         <JarvisOrb state={orbState} engineLabel={engineLabel} />
         <PeripheryStrip digest={watcherDigest} inboxCount={inboxCount} onOpenLog={onOpenLog} />
       </div>
+
+      {aboveThread}
 
       {hasThread ? (
         <div className="jv-chat" ref={threadRef} role="log" aria-label={t.chatRegion}>
@@ -493,6 +576,8 @@ export function JarvisChat({ turnPollIntervalMs }: { turnPollIntervalMs?: number
           ))}
         </div>
       ) : null}
+
+      {belowThread}
 
       {chat.composerError ? (
         <div className="jv-composer-error" role="alert">
