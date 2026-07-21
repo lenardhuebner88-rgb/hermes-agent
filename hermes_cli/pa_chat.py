@@ -21,7 +21,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -57,6 +57,33 @@ KIMI_CLI_MODEL = "kimi-code/k3"
 # Provider — One-Shot + Vision sind gegen die installierte CLI live
 # verifiziert (rotes PNG korrekt erkannt).
 QWEN_MODEL = "qwen3.7-plus"
+
+# USD per one million input/output tokens. Source: provider pricing recorded in
+# llm-wiki/model-landscape.md on 2026-07-21; entries without a reliable billed
+# token price (notably the Qwen token-plan route) deliberately stay absent.
+_MODEL_TOKEN_PRICES_USD: dict[str, tuple[float, float]] = {
+    SOL_MODEL: (1.75, 14.0),
+    CLAUDE_OPUS_MODEL: (10.0, 50.0),
+    CLAUDE_FABLE_MODEL: (10.0, 50.0),
+    KIMI_MODEL: (0.57, 2.85),
+}
+
+
+def _approx_token_count(text: str) -> int:
+    """Return a deterministic fallback token estimate for persisted text."""
+    return max(1, (len(text) + 3) // 4)
+
+
+def estimate_turn_cost_usd(
+    model: str, prompt_tokens: int, completion_tokens: int
+) -> float | None:
+    """Estimate one turn's USD token cost, or ``None`` for unknown pricing."""
+    price = _MODEL_TOKEN_PRICES_USD.get(model)
+    if price is None:
+        return None
+    return (max(0, prompt_tokens) * price[0] + max(0, completion_tokens) * price[1]) / 1_000_000
+
+
 # ``context_engine`` is a valid, statically empty built-in toolset.  Keeping an
 # explicit -t value is load-bearing: omitting/emptying -t makes the CLI fall
 # back to configured defaults.  If a local context engine is active it may add
@@ -149,6 +176,9 @@ CREATE TABLE IF NOT EXISTS pa_turns (
     model           TEXT NOT NULL,
     project_scope   TEXT,
     attachments_json TEXT NOT NULL DEFAULT '[]',
+    rating          INTEGER CHECK(rating IN (-1, 1)),
+    prompt_tokens   INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
     ts              INTEGER NOT NULL,
     updated_ts      INTEGER NOT NULL
 );
@@ -245,6 +275,10 @@ class AttachmentIn(BaseModel):
     asset_id: str
 
 
+class RatingIn(BaseModel):
+    rating: Literal[-1, 1]
+
+
 class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=32_000)
     project_scope: str | None = Field(default=None, max_length=128)
@@ -275,6 +309,45 @@ class PAStore:
             from hermes_state import apply_wal_with_fallback
 
             apply_wal_with_fallback(conn, db_label="pa/pa.db")
+            # Create core tables before indexes, then minimally migrate legacy
+            # pa_turns rows. Old databases may not have ``ts`` yet, so the full
+            # schema index must only be created after these columns exist.
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS pa_conversations (
+                    id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS pa_turns (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES pa_conversations(id),
+                    status TEXT NOT NULL,
+                    reply TEXT, error TEXT, engine TEXT NOT NULL, model TEXT NOT NULL,
+                    project_scope TEXT, attachments_json TEXT NOT NULL DEFAULT '[]',
+                    rating INTEGER CHECK(rating IN (-1, 1)),
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    ts INTEGER NOT NULL, updated_ts INTEGER NOT NULL
+                );
+            """)
+            turn_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(pa_turns)").fetchall()
+            }
+            legacy_columns = {
+                "reply": "reply TEXT",
+                "project_scope": "project_scope TEXT",
+                "attachments_json": "attachments_json TEXT NOT NULL DEFAULT '[]'",
+                "rating": "rating INTEGER CHECK(rating IN (-1, 1))",
+                "prompt_tokens": "prompt_tokens INTEGER NOT NULL DEFAULT 0",
+                "completion_tokens": "completion_tokens INTEGER NOT NULL DEFAULT 0",
+                "ts": "ts INTEGER",
+                "updated_ts": "updated_ts INTEGER",
+            }
+            for column, definition in legacy_columns.items():
+                if column not in turn_columns:
+                    add_column_if_missing(conn, "pa_turns", column, definition)
+            if "created_at" in turn_columns:
+                conn.execute("UPDATE pa_turns SET ts=COALESCE(ts, created_at)")
+                conn.execute("UPDATE pa_turns SET updated_ts=COALESCE(updated_ts, created_at)")
             conn.executescript(_SCHEMA_SQL)
             # Live Sprint-1 databases predate message attachment persistence.
             add_column_if_missing(
@@ -291,12 +364,12 @@ class PAStore:
 
     def create_turn(
         self,
-        *,
         text: str,
+        *,
         engine: str,
         model: str,
-        project_scope: str | None,
-        attachments: list[str],
+        project_scope: str | None = None,
+        attachments: list[str] | None = None,
         now: int | None = None,
     ) -> str:
         self._ensure_schema()
@@ -310,15 +383,16 @@ class PAStore:
             )
             conn.execute(
                 "INSERT INTO pa_turns(id, conversation_id, status, engine, model, "
-                "project_scope, attachments_json, ts, updated_ts) "
-                "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                "project_scope, attachments_json, prompt_tokens, ts, updated_ts) "
+                "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
                 (
                     turn_id,
                     _DEFAULT_CONVERSATION_ID,
                     engine,
                     model,
                     project_scope,
-                    json.dumps(attachments),
+                    json.dumps(attachments or []),
+                    _approx_token_count(text),
                     ts,
                     ts,
                 ),
@@ -333,7 +407,7 @@ class PAStore:
                     text,
                     engine,
                     model,
-                    json.dumps(attachments),
+                    json.dumps(attachments or []),
                     ts,
                 ),
             )
@@ -375,8 +449,9 @@ class PAStore:
             if row is None:
                 return
             conn.execute(
-                "UPDATE pa_turns SET status=?, reply=?, error=?, updated_ts=? WHERE id=?",
-                (status, reply, error, ts, turn_id),
+                "UPDATE pa_turns SET status=?, reply=?, error=?, completion_tokens=?, "
+                "updated_ts=? WHERE id=?",
+                (status, reply, error, _approx_token_count(reply), ts, turn_id),
             )
             conn.execute(
                 "INSERT INTO pa_messages(conversation_id, turn_id, role, content, "
@@ -479,7 +554,7 @@ class PAStore:
         self._ensure_schema()
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT id, status, reply, engine, model, ts, error "
+                "SELECT id, status, reply, engine, model, ts, error, rating "
                 "FROM pa_turns WHERE id=?",
                 (turn_id,),
             ).fetchone()
@@ -493,7 +568,75 @@ class PAStore:
             "model": row["model"],
             "ts": int(row["ts"]),
             "error": row["error"],
+            "rating": row["rating"],
         }
+
+    def set_rating(self, turn_id: str, rating: int) -> bool:
+        self._ensure_schema()
+        if rating not in (-1, 1):
+            raise ValueError("rating muss -1 oder 1 sein")
+        with self.connect() as conn:
+            cursor = conn.execute(
+                "UPDATE pa_turns SET rating=?, updated_ts=? WHERE id=?",
+                (rating, int(time.time()), turn_id),
+            )
+        return cursor.rowcount == 1
+
+    def engine_stats(self) -> list[dict[str, Any]]:
+        """Aggregate quality and estimated token cost by PA engine."""
+        self._ensure_schema()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT engine, model, COUNT(*) AS turns_total, "
+                "COUNT(rating) AS rated_turns, "
+                "SUM(CASE WHEN rating=1 THEN 1 ELSE 0 END) AS thumbs_up, "
+                "SUM(prompt_tokens) AS prompt_tokens, "
+                "SUM(completion_tokens) AS completion_tokens "
+                "FROM pa_turns GROUP BY engine, model ORDER BY engine, model"
+            ).fetchall()
+        combined: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = combined.setdefault(
+                str(row["engine"]),
+                {
+                    "turns_total": 0,
+                    "rated_turns": 0,
+                    "thumbs_up": 0,
+                    "estimated_cost_usd": 0.0,
+                    "cost_known": True,
+                },
+            )
+            item["turns_total"] += int(row["turns_total"])
+            item["rated_turns"] += int(row["rated_turns"])
+            item["thumbs_up"] += int(row["thumbs_up"] or 0)
+            cost = estimate_turn_cost_usd(
+                str(row["model"]),
+                int(row["prompt_tokens"] or 0),
+                int(row["completion_tokens"] or 0),
+            )
+            if cost is None:
+                item["cost_known"] = False
+            else:
+                item["estimated_cost_usd"] += cost
+        result: list[dict[str, Any]] = []
+        for engine, item in sorted(combined.items()):
+            rated = item["rated_turns"]
+            result.append(
+                {
+                    "engine": engine,
+                    "turns_total": item["turns_total"],
+                    "rated_turns": rated,
+                    "thumbs_up_rate": (
+                        round(item["thumbs_up"] * 100 / rated, 1) if rated else None
+                    ),
+                    "estimated_cost_usd": (
+                        round(item["estimated_cost_usd"], 6)
+                        if item["cost_known"]
+                        else None
+                    ),
+                }
+            )
+        return result
 
     def recent_messages(
         self, *, exclude_turn_id: str | None = None
@@ -555,7 +698,7 @@ class PAStore:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT m.id, m.turn_id, m.role, m.content, m.engine, m.model, "
-                "m.attachments_json, m.ts, t.status, t.error "
+                "m.attachments_json, m.ts, t.status, t.error, t.rating "
                 "FROM pa_messages AS m JOIN pa_turns AS t ON t.id=m.turn_id "
                 f"WHERE {where} ORDER BY m.id DESC LIMIT ?",
                 params,
@@ -586,6 +729,7 @@ class PAStore:
                     "ts": int(row["ts"]),
                     "status": row["status"],
                     "error": row["error"],
+                    "rating": row["rating"],
                 }
             )
         return {
@@ -1423,9 +1567,14 @@ def build_inbox() -> dict[str, Any]:
     }
 
 
+def get_pa_store() -> PAStore:
+    """Return the profile-aware PA store used by the dashboard route group."""
+    return PAStore()
+
+
 def register_pa_routes(app: FastAPI) -> None:
     """Register authenticated PA endpoints before the SPA catch-all."""
-    store = PAStore()
+    store = get_pa_store()
     # Ephemeral live-screen-share sessions (S-live). Process-local by design:
     # screen frames must not survive a restart and are never persisted by
     # default — only the frame the user actually asks about is materialised
@@ -1500,6 +1649,16 @@ def register_pa_routes(app: FastAPI) -> None:
         if turn is None:
             raise HTTPException(status_code=404, detail="Unbekannter PA-Turn")
         return turn
+
+    @app.post("/api/pa/turns/{turn_id}/rating")
+    async def pa_turn_rating(turn_id: str, payload: RatingIn) -> dict[str, Any]:
+        if not await _run_sync(store.set_rating, turn_id, payload.rating):
+            raise HTTPException(status_code=404, detail="Unbekannter PA-Turn")
+        return {"turn_id": turn_id, "rating": payload.rating}
+
+    @app.get("/api/pa/engine-stats")
+    async def pa_engine_stats() -> dict[str, Any]:
+        return {"engines": await _run_sync(store.engine_stats)}
 
     @app.get("/api/pa/history")
     async def pa_history(limit: int = 30) -> dict[str, Any]:

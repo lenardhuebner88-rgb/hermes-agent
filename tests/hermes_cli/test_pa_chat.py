@@ -75,6 +75,7 @@ def test_store_wal_busy_timeout_roundtrip_and_idempotent_schema(
         "model": pa.SOL_MODEL,
         "ts": 1_700_000_000,
         "error": None,
+        "rating": None,
     }
     assert [(row["role"], row["content"]) for row in store.recent_messages()] == [
         ("user", "Was ist offen?"),
@@ -1301,3 +1302,75 @@ def test_engines_endpoint_exposes_roster(isolated_pa_home: Path) -> None:
     assert engines["qwen"]["models"] == ["qwen3.7-plus"]
     assert engines["qwen"]["default_model"] == "qwen3.7-plus"
     assert engines["qwen"]["supports_images"] is True
+
+
+def test_turn_rating_endpoint_persists_and_engine_stats_aggregate(
+    isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = pa.PAStore(isolated_pa_home / "pa.db")
+    known_turn = store.create_turn(
+        "bekannte frage", engine="sol", model="gpt-5.6-sol"
+    )
+    store.finish_turn(known_turn, "bekannte antwort")
+    unknown_turn = store.create_turn(
+        "unbekannte frage", engine="qwen", model="qwen3.7-plus"
+    )
+    store.finish_turn(unknown_turn, "unbekannte antwort")
+    monkeypatch.setattr(pa, "get_pa_store", lambda: store)
+    app = FastAPI()
+    pa.register_pa_routes(app)
+
+    with TestClient(app) as client:
+        rated = client.post(
+            f"/api/pa/turns/{known_turn}/rating", json={"rating": 1}
+        )
+        assert rated.status_code == 200
+        assert rated.json() == {"turn_id": known_turn, "rating": 1}
+        assert client.post(
+            f"/api/pa/turns/{known_turn}/rating", json={"rating": 0}
+        ).status_code == 422
+        assert client.post(
+            "/api/pa/turns/missing/rating", json={"rating": -1}
+        ).status_code == 404
+
+        turn = client.get(f"/api/pa/turns/{known_turn}").json()
+        assert turn["rating"] == 1
+        stats = client.get("/api/pa/engine-stats")
+        assert stats.status_code == 200
+        by_engine = {row["engine"]: row for row in stats.json()["engines"]}
+        assert by_engine["sol"]["turns_total"] == 1
+        assert by_engine["sol"]["rated_turns"] == 1
+        assert by_engine["sol"]["thumbs_up_rate"] == 100.0
+        assert by_engine["sol"]["estimated_cost_usd"] is not None
+        assert by_engine["qwen"]["estimated_cost_usd"] is None
+
+
+def test_schema_upgrade_tolerates_legacy_turn_rows_without_rating(
+    isolated_pa_home: Path,
+) -> None:
+    db_path = isolated_pa_home / "legacy-pa.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE pa_turns (
+                id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
+                engine TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+                error TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO pa_turns VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("legacy", "default", "sol", "gpt-5.6-sol", "done", None, 1.0, 1.0),
+        )
+
+    store = pa.PAStore(db_path)
+    turn = store.get_turn("legacy")
+    assert turn is not None
+    assert turn["rating"] is None
+    assert "rating" in {row[1] for row in sqlite3.connect(db_path).execute("PRAGMA table_info(pa_turns)")}
+
+
+def test_turn_cost_estimator_known_and_unknown_prices() -> None:
+    assert pa.estimate_turn_cost_usd("gpt-5.6-sol", 1_000_000, 1_000_000) == pytest.approx(15.75)
+    assert pa.estimate_turn_cost_usd("qwen3.7-plus", 1_000, 1_000) is None

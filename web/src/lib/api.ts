@@ -652,6 +652,7 @@ export interface PaChatMessage {
   ts: number;
   status: "pending" | "running" | "done" | "error";
   error: string | null;
+  rating?: 1 | -1 | null;
 }
 
 /** Turn state from GET /api/pa/turns/{id}. On error the poll stays HTTP 200
@@ -664,6 +665,20 @@ export interface PaTurn {
   model: string;
   ts: number;
   error: string | null;
+  rating?: 1 | -1 | null;
+}
+
+export interface PaEngineStat {
+  engine: string;
+  turns_total: number;
+  rated_turns_total: number;
+  thumbs_up: number;
+  thumbs_up_rate: number | null;
+  estimated_cost_usd: number | null;
+}
+
+export interface PaEngineStatsResponse {
+  engines: PaEngineStat[];
 }
 
 /** Attachment reference accepted by POST /api/pa/message (max 1 per turn). */
@@ -967,6 +982,16 @@ export const api = {
     }),
   getPaTurn: (turnId: string) =>
     fetchJSON<PaTurn>(`/api/pa/turns/${encodeURIComponent(turnId)}`),
+  ratePaTurn: (turnId: string, rating: 1 | -1) =>
+    fetchJSON<{ turn_id: string; rating: 1 | -1 }>(
+      `/api/pa/turns/${encodeURIComponent(turnId)}/rating`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating }),
+      },
+    ),
+  getPaEngineStats: () => fetchJSON<PaEngineStatsResponse>("/api/pa/engine-stats"),
   // S2.2 switcher roster + S2.4 decision inbox + S2.7 estate graph.
   getPaEngines: () => fetchJSON<PaEnginesResponse>("/api/pa/engines"),
   getPaInbox: () => fetchJSON<PaInboxResponse>("/api/pa/inbox"),

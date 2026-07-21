@@ -33,9 +33,26 @@
  * Engine-Switcher.
  */
 import { Fragment, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { ImagePlus, Loader2, Mic, MicOff, MonitorUp, Send, Volume2, VolumeX, X } from "lucide-react";
+import {
+  ImagePlus,
+  Loader2,
+  Mic,
+  MicOff,
+  MonitorUp,
+  Send,
+  ThumbsDown,
+  ThumbsUp,
+  Volume2,
+  VolumeX,
+  X,
+} from "lucide-react";
 
-import { api, type PaChatMessage, type PaEnginesResponse } from "@/lib/api";
+import {
+  api,
+  type PaChatMessage,
+  type PaEngineStat,
+  type PaEnginesResponse,
+} from "@/lib/api";
 import { de } from "../i18n/de";
 import {
   effectiveEngine,
@@ -109,14 +126,71 @@ function AttachmentThumb({ assetId }: { assetId: string }) {
   );
 }
 
+function MessageRating({
+  message,
+  onRated,
+}: {
+  message: PaChatMessage;
+  onRated: () => void;
+}) {
+  const [optimisticRating, setOptimisticRating] = useState<1 | -1>();
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const rating = optimisticRating ?? message.rating ?? null;
+
+  const save = async (nextRating: 1 | -1) => {
+    const previous = rating;
+    setOptimisticRating(nextRating);
+    setSaving(true);
+    setFailed(false);
+    try {
+      await api.ratePaTurn(message.turn_id, nextRating);
+      onRated();
+    } catch {
+      setOptimisticRating(previous ?? undefined);
+      setFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="jv-rating" aria-label={t.ratingLabel}>
+      <button
+        type="button"
+        className={rating === 1 ? "jv-rating-btn is-active" : "jv-rating-btn"}
+        aria-label={t.ratingUp}
+        aria-pressed={rating === 1}
+        disabled={saving}
+        onClick={() => void save(1)}
+      >
+        <ThumbsUp size={13} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className={rating === -1 ? "jv-rating-btn is-active" : "jv-rating-btn"}
+        aria-label={t.ratingDown}
+        aria-pressed={rating === -1}
+        disabled={saving}
+        onClick={() => void save(-1)}
+      >
+        <ThumbsDown size={13} aria-hidden="true" />
+      </button>
+      {failed ? <span className="jv-rating-error" role="status">{t.ratingFailed}</span> : null}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   roster,
+  onRated,
 }: {
   message: PaChatMessage;
   /** Roster für den MAX-Marker (isClaudeModel); null = Roster noch nicht da
    *  → kein Marker (dezent, kein Crash). */
   roster: PaEnginesResponse | null;
+  onRated: () => void;
 }) {
   const attachments = message.attachments ?? [];
   if (message.role === "user") {
@@ -149,7 +223,69 @@ function MessageBubble({
         ) : null}{" "}
         · {formatBubbleTime(message.ts)}
       </span>
+      <MessageRating message={message} onRated={onRated} />
     </div>
+  );
+}
+
+function EngineQualityCard({ refreshKey }: { refreshKey: string }) {
+  const [stats, setStats] = useState<PaEngineStat[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    api.getPaEngineStats()
+      .then((result) => {
+        if (active) {
+          setStats(result.engines);
+          setFailed(false);
+        }
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [refreshKey]);
+
+  let body: ReactNode;
+  if (stats === null && !failed) {
+    body = <span className="jv-engine-empty">{t.engineStatsLoading}</span>;
+  } else if (failed) {
+    body = <span className="jv-engine-empty">{t.engineStatsUnavailable}</span>;
+  } else if (stats?.length === 0) {
+    body = <span className="jv-engine-empty">{t.engineStatsEmpty}</span>;
+  } else {
+    body = (
+      <div className="jv-engine-rows">
+        {stats?.map((item) => (
+          <div className="jv-engine-row" key={item.engine}>
+            <strong>{item.engine}</strong>
+            <span>{t.engineStatsTurns(item.turns_total)}</span>
+            <span>
+              {item.thumbs_up_rate === null
+                ? t.engineStatsRatingNone
+                : t.engineStatsRating(Math.round(item.thumbs_up_rate))}
+            </span>
+            <span>
+              {t.engineStatsCost(
+                item.estimated_cost_usd === null
+                  ? "n/a"
+                  : `$${item.estimated_cost_usd.toFixed(6)}`,
+              )}
+            </span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <section className="jv-engine-stats" aria-label={t.engineStatsAria}>
+      <span className="jv-engine-title">{t.engineStatsTitle}</span>
+      {body}
+    </section>
   );
 }
 
@@ -204,6 +340,7 @@ export function JarvisChat({
   const inbox = usePaInbox();
   const choice = useEngineChoice();
   const [text, setText] = useState("");
+  const [engineStatsVersion, setEngineStatsVersion] = useState(0);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const seenCountRef = useRef(0);
@@ -501,6 +638,7 @@ export function JarvisChat({
       <div className="jv-orbhead">
         <JarvisOrb state={orbState} engineLabel={engineLabel} />
         <PeripheryStrip digest={watcherDigest} inboxCount={inboxCount} onOpenLog={onOpenLog} />
+        <EngineQualityCard refreshKey={`${engineStatsVersion}:${chat.messages?.length ?? 0}`} />
       </div>
 
       {aboveThread}
@@ -532,7 +670,11 @@ export function JarvisChat({
                     <span>{t.chatDate(message.ts)}</span>
                   </div>
                 ) : null}
-                <MessageBubble message={message} roster={roster.data ?? null} />
+                <MessageBubble
+                  message={message}
+                  roster={roster.data ?? null}
+                  onRated={() => setEngineStatsVersion((version) => version + 1)}
+                />
               </Fragment>
             );
           })}
