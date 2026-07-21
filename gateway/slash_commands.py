@@ -398,54 +398,43 @@ class GatewaySlashCommandsMixin:
     async def _handle_curator_command(self, event: MessageEvent) -> str:
         """Handle /curator — delegate to the shared curator CLI.
 
-        Mirrors the classic-CLI handler (``hermes_cli.cli_commands_mixin.
-        _handle_curator_command``): both funnel into ``hermes_cli.curator.
-        cli_main`` so the subcommand set (status, run, pin, archive,
-        list-archived, ...) stays identical across surfaces.  ``cli_main``
-        prints to stdout, so capture stdout+stderr and feed an empty stdin:
-        any interactive confirmation (``prune``/``rollback`` without ``-y``)
-        hits EOF and aborts cleanly instead of blocking a gateway worker
-        thread.  Blocking work runs in a thread pool to keep the event loop
-        responsive (same pattern as /kanban).
+        Surfaces the same curator subcommand set as the classic CLI (status,
+        run, pin, archive, list-archived, ...), backed by
+        ``hermes_cli.curator.cli_main``.
+
+        The curator runs in a subprocess so its stdout/stderr/stdin are fully
+        isolated from the gateway process.  Redirecting the gateway's
+        process-global streams from a worker thread races concurrent requests
+        (different chats are handled in parallel) and can leave a global
+        stream pointed at a buffer — mixing replies and swallowing later
+        output until restart.  ``stdin=DEVNULL`` makes interactive
+        confirmations (prune/rollback without -y) hit EOF and abort cleanly
+        instead of blocking.  Arguments come from ``event.get_command_args()``
+        so gateway-canonicalized forms like ``/curator@Bot status`` or
+        ``/Curator status`` parse correctly.  The subprocess runs in a thread
+        pool to keep the event loop responsive (same pattern as /kanban).
         """
         import asyncio
-        import contextlib
-        import io
         import shlex
+        import subprocess
 
-        text = (event.text or "").strip()
-        if text.startswith("/"):
-            text = text.lstrip("/")
-        if text.startswith("curator"):
-            text = text[len("curator"):].lstrip()
-
-        tokens = shlex.split(text) if text else []
+        args_str = event.get_command_args()
+        tokens = shlex.split(args_str) if args_str else []
         if not tokens:
             tokens = ["status"]
 
         def _run() -> str:
-            from hermes_cli.curator import cli_main
-
-            buf = io.StringIO()
-            # Feed an empty stdin so interactive confirmations
-            # (prune/rollback without -y) hit EOF and abort cleanly instead
-            # of blocking the worker thread. Swap manually rather than via
-            # contextlib.redirect_stdin for compatibility with the oldest
-            # supported interpreter.
-            old_stdin = sys.stdin
-            sys.stdin = io.StringIO("")
             try:
-                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                    cli_main(tokens)
-            except SystemExit:
-                # argparse calls sys.exit() on --help or bad args; the
-                # captured usage/error text becomes the reply.
-                pass
+                proc = subprocess.run(
+                    [sys.executable, "-m", "hermes_cli.curator", *tokens],
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 return f"(._.) curator: {exc}"
-            finally:
-                sys.stdin = old_stdin
-            return buf.getvalue().rstrip()
+            # argparse usage/errors land on stderr; normal output on stdout.
+            return ((proc.stdout or "") + (proc.stderr or "")).rstrip()
 
         try:
             output = await asyncio.to_thread(_run)

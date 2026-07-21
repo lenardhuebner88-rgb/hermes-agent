@@ -3,14 +3,18 @@
 ``/curator`` was advertised to gateway users (registered without
 ``cli_only``) but had no gateway handler, so it slipped past the
 unknown-command guard and fell through to the LLM as literal text. The
-handler now delegates to the shared ``hermes_cli.curator.cli_main`` (the
-same entry point the classic CLI uses), capturing its stdout/stderr and
-returning it as a monospace reply. These tests stub ``cli_main`` to verify
-argument parsing, default-to-status, output capture + code-fence wrapping,
-and that an argparse ``SystemExit`` is contained instead of crashing the
-gateway worker.
+handler now runs the shared ``hermes_cli.curator`` module in an isolated
+subprocess (so its stdout/stderr/stdin can't race the gateway's
+process-global streams) and returns the captured output as a monospace
+reply. These tests stub ``subprocess.run`` to verify the subprocess
+invocation, argument parsing via ``get_command_args()`` (including the
+gateway-canonicalized ``/curator@Bot …`` form), the default-to-status
+behavior, output capture + code-fence wrapping, and that a failing curator
+exit (usage on stderr) is surfaced rather than crashing the gateway.
 """
 
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -26,84 +30,86 @@ def _event(text):
         thread_id="th1",
         user_id="u1",
     )
-    return SimpleNamespace(text=text, source=source)
+    # Mirror MessageEvent.get_command_args(): everything after the first
+    # whitespace-delimited token (the command, which get_command() already
+    # canonicalized — stripping any ``@bot`` suffix and case).
+    parts = text.split(maxsplit=1)
+    args = parts[1] if len(parts) > 1 else ""
+    return SimpleNamespace(text=text, source=source, get_command_args=lambda: args)
 
 
 def _runner():
     return object.__new__(GatewayRunner)
 
 
+def _patch_run(monkeypatch, seen, stdout="curator: DISABLED\n  runs:           0\n",
+               stderr="", returncode=0):
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
 @pytest.mark.asyncio
 async def test_curator_status_captures_and_wraps(monkeypatch):
-    import hermes_cli.curator as curator_mod
-
     seen = {}
-
-    def fake_cli_main(argv=None):
-        seen["argv"] = argv
-        print("curator: DISABLED")
-        print("  runs:           0")
-        return 0
-
-    monkeypatch.setattr(curator_mod, "cli_main", fake_cli_main)
+    _patch_run(monkeypatch, seen)
 
     out = await GatewayRunner._handle_curator_command(_runner(), _event("/curator status"))
 
-    assert seen["argv"] == ["status"]
+    assert seen["cmd"] == [sys.executable, "-m", "hermes_cli.curator", "status"]
+    # stdin must be DEVNULL so interactive confirms abort instead of blocking
+    assert seen["kwargs"]["stdin"] == subprocess.DEVNULL
     assert out == "```\ncurator: DISABLED\n  runs:           0\n```"
 
 
 @pytest.mark.asyncio
 async def test_curator_defaults_to_status(monkeypatch):
-    import hermes_cli.curator as curator_mod
-
     seen = {}
-
-    def fake_cli_main(argv=None):
-        seen["argv"] = argv
-        print("curator: DISABLED")
-        return 0
-
-    monkeypatch.setattr(curator_mod, "cli_main", fake_cli_main)
+    _patch_run(monkeypatch, seen)
 
     await GatewayRunner._handle_curator_command(_runner(), _event("/curator"))
 
-    assert seen["argv"] == ["status"]
+    assert seen["cmd"] == [sys.executable, "-m", "hermes_cli.curator", "status"]
 
 
 @pytest.mark.asyncio
 async def test_curator_passes_subcommand_args(monkeypatch):
-    import hermes_cli.curator as curator_mod
-
     seen = {}
-
-    def fake_cli_main(argv=None):
-        seen["argv"] = argv
-        print("curator: pinned 'foo'")
-        return 0
-
-    monkeypatch.setattr(curator_mod, "cli_main", fake_cli_main)
+    _patch_run(monkeypatch, seen, stdout="curator: pinned 'foo'\n")
 
     await GatewayRunner._handle_curator_command(_runner(), _event("/curator pin foo"))
 
-    assert seen["argv"] == ["pin", "foo"]
+    assert seen["cmd"] == [sys.executable, "-m", "hermes_cli.curator", "pin", "foo"]
 
 
 @pytest.mark.asyncio
-async def test_curator_contains_argparse_systemexit(monkeypatch):
-    import sys
+async def test_curator_handles_bot_suffix_and_case(monkeypatch):
+    # The dispatcher canonicalizes `/curator@HermesBot status` and routes it
+    # here; the handler must read get_command_args() so the subcommand survives
+    # instead of leaking the command token into argparse (which would reject it).
+    seen = {}
+    _patch_run(monkeypatch, seen)
 
-    import hermes_cli.curator as curator_mod
+    await GatewayRunner._handle_curator_command(_runner(), _event("/curator@HermesBot status"))
 
-    def fake_cli_main(argv=None):
-        # argparse on a bad subcommand prints usage to stderr then exits 2
-        print("usage: hermes curator [-h] ...", file=sys.stderr)
-        raise SystemExit(2)
+    assert seen["cmd"] == [sys.executable, "-m", "hermes_cli.curator", "status"]
 
-    monkeypatch.setattr(curator_mod, "cli_main", fake_cli_main)
+
+@pytest.mark.asyncio
+async def test_curator_surfaces_failed_exit_stderr(monkeypatch):
+    seen = {}
+    _patch_run(
+        monkeypatch,
+        seen,
+        stdout="",
+        stderr="usage: hermes curator [-h] ...\ncurator: error: invalid choice\n",
+        returncode=2,
+    )
 
     out = await GatewayRunner._handle_curator_command(_runner(), _event("/curator bogus"))
 
-    # SystemExit is caught; captured stderr usage becomes the reply
     assert "usage:" in out
     assert out.startswith("```")
