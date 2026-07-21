@@ -815,6 +815,37 @@ def _node_task(task_id: str, node_id: str) -> dict[str, Any]:
     }
 
 
+def _resolve_memory_file(root: Path, relative: str) -> Path | None:
+    """Map a memory id's path part back to its real file inside ``root``.
+
+    ``pa_graph._collect_memories`` mints ids as ``relative.casefold()``, so on a
+    case-sensitive filesystem the folded spelling often has no counterpart on
+    disk — the live ``~/.hermes/memories/MEMORY.md`` is addressed as
+    ``memory:hermes:memory.md``. Fall back to a case-insensitive match, but only
+    against entries actually enumerated *inside* ``root``, and re-run the escape
+    guard on the result: the fallback must not widen what may be read.
+    """
+    path = _guarded_join(root, relative)
+    if path is None:
+        return None
+    if path.is_file():
+        return path
+    # Ids only ever come from the top-level scan in `_collect_memories` /
+    # `_search_memory`, so a single bounded directory listing suffices.
+    wanted = relative.casefold()
+    try:
+        entries = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name.casefold() != wanted:
+            continue
+        guarded = _guarded_join(root, entry.name)
+        if guarded is not None and guarded.is_file():
+            return guarded
+    return None
+
+
 def _node_memory(rest: str, node_id: str) -> dict[str, Any]:
     source_name, _, relative = rest.partition(":")
     if not source_name or not relative:
@@ -823,15 +854,21 @@ def _node_memory(rest: str, node_id: str) -> dict[str, Any]:
     root = dict(_memory_roots()).get(source_name)
     if root is None:
         raise _bad_request("unknown memory root")
-    path = _guarded_join(root, relative)
-    if path is None:
+    if _guarded_join(root, relative) is None:
         raise _bad_request("invalid memory path")
-    if not path.is_file():
+    path = _resolve_memory_file(root, relative)
+    if path is None:
         raise _not_found()
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         raise _not_found() from None
+    # Report the note's real spelling (matching the graph's href), never the
+    # folded id spelling and never an absolute path.
+    try:
+        actual = path.relative_to(root.resolve(strict=False)).as_posix()
+    except ValueError:
+        actual = relative
     heading = pa_graph._HEADING_RE.search(raw)
     return {
         "id": node_id,
@@ -839,7 +876,7 @@ def _node_memory(rest: str, node_id: str) -> dict[str, Any]:
         "cluster": "memories",
         "body": _body_text(raw),
         "metadata": _sanitize_meta(
-            {"ref": f"memory://{source_name}/{relative}", "root": source_name}
+            {"ref": f"memory://{source_name}/{actual}", "root": source_name}
         ),
         "connections": _connections(node_id),
         "source": "memory",

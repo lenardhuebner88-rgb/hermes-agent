@@ -542,6 +542,53 @@ def test_node_memory_preview(wired):
     assert "Worker" in data["body"]
 
 
+def test_node_memory_preview_uppercase_filename(wired):
+    """Case-folded ids must still resolve to their real (mixed-case) file.
+
+    Regression: ``pa_graph`` mints memory ids as ``relative.casefold()``, so the
+    live notes ``~/.hermes/memories/MEMORY.md`` and ``USER.md`` become
+    ``memory:hermes:memory.md`` / ``memory:hermes:user.md``. Joining that folded
+    string straight onto a case-sensitive filesystem missed the file and made
+    every mixed-case memory node — i.e. both real Hermes memories — 404 in the
+    preview, even though search and the graph happily listed them.
+    """
+    (wired["memories"] / "MEMORY-Archiv.md").write_text(
+        "# Archiv\n\nÄltere Orchestrierung-Notizen.\n", encoding="utf-8"
+    )
+    node_id = "memory:memsearch:memory-archiv.md"
+    assert node_id in _graph_ids(), "graph mints the case-folded id"
+
+    hit = next(
+        item
+        for item in _client()
+        .get("/api/pa/search", params={"q": "Orchestrierung", "limit": 50})
+        .json()["items"]
+        if item["id"] == node_id
+    )
+    assert hit["source"] == "memory"
+
+    data = _client().get("/api/pa/node", params={"id": node_id}).json()
+    assert data["source"] == "memory"
+    assert data["title"] == "Archiv"
+    assert "Orchestrierung" in data["body"]
+    assert data["metadata"]["ref"] == "memory://memsearch/MEMORY-Archiv.md"
+    assert str(wired["memories"]) not in _client().get(
+        "/api/pa/node", params={"id": node_id}
+    ).text
+
+
+def test_node_memory_case_fold_cannot_escape_root(wired):
+    """The case-insensitive fallback must not become a traversal hole."""
+    (wired["tmp"] / "OUTSIDE.md").write_text("TOPSECRET", encoding="utf-8")
+    for node_id in (
+        "memory:memsearch:../outside.md",
+        "memory:memsearch:../OUTSIDE.md",
+    ):
+        response = _client().get("/api/pa/node", params={"id": node_id})
+        assert response.status_code == 400
+        assert "TOPSECRET" not in response.text
+
+
 @pytest.mark.parametrize(
     "node_id",
     [
