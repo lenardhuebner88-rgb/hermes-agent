@@ -2659,3 +2659,86 @@ def test_review_capability_park_needs_a_recorded_candidate_commit(
         )
         assert not blocked_payload["review_revision"]["reviewed_commit"]
         assert kb.review_capability_park(conn, tid) is None
+
+
+def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+    (repo / "caller.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "add", "caller.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+    ).stdout.strip()
+
+    spawned = {}
+    monkeypatch.setenv("HERMES_KANBAN_REVIEW_SNAPSHOT_MIN_FREE_BYTES", "0")
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn, title="candidate", assignee="coder", kind="code",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        kb.claim_task(conn, task_id)
+        (repo / "caller.py").write_text("VALUE = 2\n")
+        subprocess.run(["git", "add", "caller.py"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-m", "candidate"], cwd=repo, check=True, capture_output=True)
+        candidate = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        run_id = kb.get_task(conn, task_id).current_run_id
+        kb._submit_for_review(
+            conn, task_id, result=None, summary="implemented",
+            metadata={"commit": candidate}, verified_cards=[],
+            expected_run_id=run_id, diff_run_id=run_id,
+        )
+        assert kb.get_task(conn, task_id).status == "review"
+
+        (repo / "parallel.txt").write_text("dirty chain writer\n")
+
+        def fake_spawn(task, workspace):
+            spawned["task"] = task
+            spawned["workspace"] = Path(workspace)
+            spawned["head"] = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, text=True,
+                capture_output=True, check=True,
+            ).stdout.strip()
+            spawned["diff"] = subprocess.run(
+                ["git", "diff", "--no-ext-diff", f"{base}..{candidate}"],
+                cwd=workspace, text=True, capture_output=True, check=True,
+            ).stdout
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert task_id in [row[0] for row in result.spawned]
+        assert spawned["workspace"] != repo
+        assert spawned["task"].workspace_path == str(spawned["workspace"])
+        assert spawned["head"] == candidate
+        assert "VALUE = 2" in spawned["diff"]
+        assert not (spawned["workspace"] / "parallel.txt").exists()
+        assert (repo / "parallel.txt").exists()
+
+        run_id = kb.get_task(conn, task_id).current_run_id
+        kb._cleanup_review_snapshot_for_run(conn, task_id, run_id)
+        assert not spawned["workspace"].exists()
+        conn.execute("UPDATE task_runs SET status = 'completed', ended_at = 1 WHERE id = ?", (run_id,))
+        conn.execute("UPDATE tasks SET status = 'done', current_run_id = NULL, claim_lock = NULL WHERE id = ?", (task_id,))
+        conn.commit()
+
+        critic_id = kb.create_task(
+            conn, title="critic snapshot", assignee="critic", kind="review",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        conn.execute("UPDATE tasks SET status = 'ready' WHERE id = ?", (critic_id,))
+        conn.commit()
+        spawned.clear()
+        critic_result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert critic_id in [row[0] for row in critic_result.spawned], critic_result
+        assert spawned["workspace"] != repo
+        assert spawned["head"] == candidate
+        critic_run_id = kb.get_task(conn, critic_id).current_run_id
+        kb._cleanup_review_snapshot_for_run(conn, critic_id, critic_run_id)
+        assert not spawned["workspace"].exists()
