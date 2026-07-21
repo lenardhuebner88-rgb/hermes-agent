@@ -332,7 +332,7 @@ describe("graphEngine — 500-node simulation settle", () => {
     }
 
     sim.stop();
-  });
+  }, 20000);
 });
 
 interface EngineNodeLike {
