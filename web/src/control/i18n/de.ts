@@ -990,6 +990,8 @@ export const de = {
     // Blockradius) und Roh-Titel hinter dem Expand.
     inboxBlocked: (n: number) => `blockiert ${n}`,
     inboxKeyTitle: "Freigabe durch Operator erforderlich",
+    inboxWhyLabel: "Warum",
+    inboxDeclineLabel: "Bei Ablehnung",
     inboxTaskDetails: "Roh-Titel & Status",
     inboxRawDetails: "Roh-Titel",
     nextTurnEngine: (engine: string) => `Nächster Turn: ${engine}`,

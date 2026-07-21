@@ -933,12 +933,13 @@ def _insert_kanban_task(
     status: str,
     freigabe: str | None = None,
     block_kind: str | None = None,
+    body: str | None = None,
     created_at: int = 1000,
 ) -> None:
     conn.execute(
-        "INSERT INTO tasks (id, title, status, freigabe, block_kind, created_at, "
-        "workspace_kind) VALUES (?, ?, ?, ?, ?, ?, 'scratch')",
-        (task_id, f"Titel {task_id}", status, freigabe, block_kind, created_at),
+        "INSERT INTO tasks (id, title, status, freigabe, block_kind, body, created_at, "
+        "workspace_kind) VALUES (?, ?, ?, ?, ?, ?, ?, 'scratch')",
+        (task_id, f"Titel {task_id}", status, freigabe, block_kind, body, created_at),
     )
 
 
@@ -1002,7 +1003,17 @@ def test_inbox_kanban_held_tasks_block_radius_and_sorting(
         _insert_kanban_task(conn, "t_child1", status="todo")
         _insert_kanban_task(conn, "t_child2", status="done")
         _insert_kanban_task(conn, "t_grand", status="running")
-        _insert_kanban_task(conn, "t_gate", status="scheduled", freigabe="build")
+        _insert_kanban_task(
+            conn,
+            "t_gate",
+            status="scheduled",
+            freigabe="build",
+            body=(
+                "# PlanSpec\n\n## Ziel\nDas grüne Gate kontrolliert freigeben.\n\n"
+                "## Evidenz\nAlle fokussierten Tests sind grün.\n\n"
+                "## Rollback\nBei Ablehnung bleibt die Kette geparkt.\n"
+            ),
+        )
         _insert_kanban_task(conn, "t_noise", status="running")
         conn.execute(
             "INSERT INTO task_links (parent_id, child_id) VALUES ('t_root', 't_child1')"
@@ -1036,10 +1047,48 @@ def test_inbox_kanban_held_tasks_block_radius_and_sorting(
     assert "summary" in cards["t_gate"]
     assert len(cards["t_gate"]["summary"]) <= 80
     assert "operator_release_required" not in cards["t_gate"]["summary"]
+    assert cards["t_gate"]["why"] == (
+        "Das grüne Gate kontrolliert freigeben. "
+        "Alle fokussierten Tests sind grün."
+    )
+    assert cards["t_gate"]["consequence_on_decline"] == (
+        "Bei Ablehnung bleibt die Kette geparkt."
+    )
+    assert cards["t_root"]["why"] == pa.INBOX_WHY_FALLBACK
+    assert cards["t_root"]["consequence_on_decline"] == pa.INBOX_DECLINE_FALLBACK
     assert "t_noise" not in cards
     # block radius first: t_root (3) before t_gate (1)
     ordered = [item.get("card_id") for item in payload["items"] if "card_id" in item]
     assert ordered.index("t_root") < ordered.index("t_gate")
+
+
+def test_inbox_decision_why_failure_isolated_per_card(
+    isolated_pa_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hermes_cli import kanban_db as kb
+
+    with kb.connect_closing() as conn:
+        _insert_kanban_task(
+            conn,
+            "t_gate",
+            status="scheduled",
+            freigabe="operator",
+            body="# PlanSpec\n\n## Ziel\nFreigeben.",
+        )
+        conn.commit()
+
+    def broken_why(_body: object) -> tuple[str, str]:
+        raise ValueError("kaputter PlanSpec-Body")
+
+    monkeypatch.setattr(pa, "distill_decision_why", broken_why)
+
+    payload = pa.build_inbox()
+
+    assert payload["errors"] == []
+    assert len(payload["items"]) == 1
+    assert payload["items"][0]["card_id"] == "t_gate"
+    assert payload["items"][0]["why"] == pa.INBOX_WHY_FALLBACK
+    assert payload["items"][0]["consequence_on_decline"] == pa.INBOX_DECLINE_FALLBACK
 
 
 def test_inbox_kanban_failure_isolated(
