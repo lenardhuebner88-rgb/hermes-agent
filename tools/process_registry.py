@@ -2012,6 +2012,86 @@ def _format_age(seconds: float) -> str:
     return f"{h}h" if m == 0 else f"{h}h{m}m"
 
 
+def _format_batch_delegation(evt: dict, completed_at: float) -> str:
+    """Render a batch (fan-out) async-delegation completion as one consolidated block.
+
+    Extracted verbatim (behavior-preserving) from ``_format_async_delegation``.
+    ``completed_at`` is passed in so the ``time.time()`` fallback stays at the
+    original single call site. A whole ``delegate_task`` fan-out dispatched as
+    one background unit finishes together and carries a per-task ``results``
+    list; every subagent's summary is rendered in one block so the model gets
+    the consolidated outcome at once.
+    """
+    import time as _time
+
+    deleg_id = evt.get("delegation_id", "unknown")
+    context = evt.get("context")
+    toolsets = evt.get("toolsets")
+    role = evt.get("role") or "leaf"
+    model = evt.get("model") or "?"
+    dispatched_at = evt.get("dispatched_at")
+
+    results = evt.get("results") or []
+    goals = evt.get("goals") or []
+    n = len(results) if results else len(goals)
+    duration = evt.get("duration_seconds", "?")
+    total_dur = evt.get("total_duration_seconds", duration)
+    error = evt.get("error")
+    lines = [
+        f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
+        f"A background fan-out of {n} subagent(s) you dispatched earlier "
+        "has finished. All ran in parallel and waited on each other; their "
+        "consolidated results are below. You may have moved on since "
+        "dispatching — act on these or re-dispatch if things have changed.",
+        "",
+    ]
+    if isinstance(dispatched_at, (int, float)):
+        ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(dispatched_at))
+        age = f" ({_format_age(completed_at - dispatched_at)} ago)"
+        lines.append(f"Dispatched: {ts}{age}")
+    if context:
+        lines.append(f"Context you provided: {context}")
+    if toolsets:
+        lines.append(f"Toolsets: {', '.join(toolsets)}")
+    lines.append(f"Role: {role}   Model: {model}   Total duration: {total_dur}s")
+    if error and not results:
+        lines.append("--- ERROR ---")
+        lines.append(f"The batch did not complete successfully: {error}")
+        return "\n".join(lines)
+    for r in sorted(results, key=lambda x: x.get("task_index", 0)):
+        idx = r.get("task_index", 0)
+        r_status = r.get("status", "?")
+        r_summary = r.get("summary")
+        r_error = r.get("error")
+        r_goal = goals[idx] if idx < len(goals) else r.get("goal", "")
+        icon = "✓" if r_status in ("completed", "success") else "✗"
+        lines.append("")
+        header = f"--- {icon} TASK {idx + 1}/{n}"
+        if r_goal:
+            header += f": {r_goal}"
+        header += f"  (status={r_status}"
+        if r.get("api_calls"):
+            header += f", api_calls={r['api_calls']}"
+        if r.get("duration_seconds") is not None:
+            header += f", {r['duration_seconds']}s"
+        header += ") ---"
+        lines.append(header)
+        if r_status in ("completed", "success") and r_summary:
+            lines.append(r_summary)
+        elif r_summary:
+            if r_error:
+                lines.append(f"({r_status}: {r_error})")
+            lines.append("Partial output:")
+            lines.append(r_summary)
+        else:
+            lines.append(
+                f"(no summary — status={r_status}"
+                + (f": {r_error}" if r_error else "")
+                + ")"
+            )
+    return "\n".join(lines)
+
+
 def _format_async_delegation(evt: dict) -> str:
     """Format an async-delegation completion into a self-contained re-injection.
 
@@ -2040,67 +2120,11 @@ def _format_async_delegation(evt: dict) -> str:
 
     # ----- Batch (fan-out) completion: consolidated multi-task block -----
     # A whole delegate_task fan-out dispatched as one background unit finishes
-    # together and carries a per-task `results` list. Render every subagent's
-    # summary in one block so the model gets the consolidated outcome at once.
+    # together and carries a per-task `results` list — rendered by its own
+    # helper (_format_batch_delegation) so this function stays readable.
     batch_results = evt.get("results")
     if evt.get("is_batch") or isinstance(batch_results, list):
-        results = batch_results or []
-        goals = evt.get("goals") or []
-        n = len(results) if results else len(goals)
-        total_dur = evt.get("total_duration_seconds", duration)
-        lines = [
-            f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
-            f"A background fan-out of {n} subagent(s) you dispatched earlier "
-            "has finished. All ran in parallel and waited on each other; their "
-            "consolidated results are below. You may have moved on since "
-            "dispatching — act on these or re-dispatch if things have changed.",
-            "",
-        ]
-        if isinstance(dispatched_at, (int, float)):
-            ts = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(dispatched_at))
-            age = f" ({_format_age(completed_at - dispatched_at)} ago)"
-            lines.append(f"Dispatched: {ts}{age}")
-        if context:
-            lines.append(f"Context you provided: {context}")
-        if toolsets:
-            lines.append(f"Toolsets: {', '.join(toolsets)}")
-        lines.append(f"Role: {role}   Model: {model}   Total duration: {total_dur}s")
-        if error and not results:
-            lines.append("--- ERROR ---")
-            lines.append(f"The batch did not complete successfully: {error}")
-            return "\n".join(lines)
-        for r in sorted(results, key=lambda x: x.get("task_index", 0)):
-            idx = r.get("task_index", 0)
-            r_status = r.get("status", "?")
-            r_summary = r.get("summary")
-            r_error = r.get("error")
-            r_goal = goals[idx] if idx < len(goals) else r.get("goal", "")
-            icon = "✓" if r_status in ("completed", "success") else "✗"
-            lines.append("")
-            header = f"--- {icon} TASK {idx + 1}/{n}"
-            if r_goal:
-                header += f": {r_goal}"
-            header += f"  (status={r_status}"
-            if r.get("api_calls"):
-                header += f", api_calls={r['api_calls']}"
-            if r.get("duration_seconds") is not None:
-                header += f", {r['duration_seconds']}s"
-            header += ") ---"
-            lines.append(header)
-            if r_status in ("completed", "success") and r_summary:
-                lines.append(r_summary)
-            elif r_summary:
-                if r_error:
-                    lines.append(f"({r_status}: {r_error})")
-                lines.append("Partial output:")
-                lines.append(r_summary)
-            else:
-                lines.append(
-                    f"(no summary — status={r_status}"
-                    + (f": {r_error}" if r_error else "")
-                    + ")"
-                )
-        return "\n".join(lines)
+        return _format_batch_delegation(evt, completed_at)
 
     age = ""
     if isinstance(dispatched_at, (int, float)):
