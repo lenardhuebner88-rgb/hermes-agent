@@ -473,3 +473,132 @@ def test_skill_patch_off_silent_verbose_shows_diff():
     )
     assert len(verbose) == 1
     assert "demo" in verbose[0] and "→" in verbose[0]
+
+
+# =============================================================================
+# Exception-path teardown (BR4): the outer except/finally safety net
+# =============================================================================
+# The happy-path teardown runs INSIDE the outer try (agent/background_review.py
+# ~866-880) and sets review_agent = None. If run_conversation RAISES, that
+# teardown is skipped and review_agent stays non-None, so the outer `finally`
+# safety net (~929-953) must still shut the fork down — otherwise the review
+# agent's memory/session providers leak and can corrupt the shared session DB.
+# `_emit_auxiliary_failure` (outer except, ~928) was never mocked in any test,
+# so this whole path had ZERO coverage. These tests drive it deterministically
+# via ImmediateThread (the target runs inline — no real thread timing).
+
+
+def _raising_review_agent(events, *, run_exc=None, shutdown_exc=None):
+    """FakeReviewAgent whose run_conversation (and optionally
+    shutdown_memory_provider) raise, to drive the exception-path teardown."""
+
+    class FakeReviewAgent:
+        def __init__(self, **kwargs):
+            events.append(("init", None))
+            self._session_messages = []
+
+        def run_conversation(self, **kwargs):
+            events.append(("run_conversation", None))
+            if run_exc is not None:
+                raise run_exc
+
+        def shutdown_memory_provider(self):
+            events.append(("shutdown_memory_provider", None))
+            if shutdown_exc is not None:
+                raise shutdown_exc
+
+        def close(self):
+            events.append(("close", None))
+
+    return FakeReviewAgent
+
+
+def _spawn_raising(monkeypatch, events, **fake_kwargs):
+    """Spawn a background review whose fork raises, running inline. The parent
+    agent gets a recording _emit_auxiliary_failure (the real one is never mocked
+    elsewhere). Returns nothing; assert on ``events``."""
+    import tools.terminal_tool as tt
+
+    monkeypatch.setattr(
+        run_agent_module, "AIAgent", _raising_review_agent(events, **fake_kwargs)
+    )
+    monkeypatch.setattr(run_agent_module.threading, "Thread", ImmediateThread)
+    tt.set_approval_callback(None)  # start from a clean TLS slot
+
+    agent = _bare_agent()
+    agent._emit_auxiliary_failure = (
+        lambda task, exc: events.append(("emit_auxiliary_failure", task))
+    )
+    AIAgent._spawn_background_review(
+        agent,
+        messages_snapshot=[{"role": "user", "content": "hello"}],
+        review_memory=True,
+    )
+
+
+def test_background_review_teardown_runs_when_review_raises(monkeypatch):
+    """BR4 pin: when run_conversation raises, the outer finally safety net must
+    STILL shut the fork down (shutdown_memory_provider + close) and the outer
+    except must emit the auxiliary-failure signal — otherwise the review agent's
+    providers leak / corrupt the shared session DB."""
+    import tools.terminal_tool as tt
+
+    events = []
+    _spawn_raising(monkeypatch, events, run_exc=RuntimeError("LLM blew up"))
+
+    names = [name for name, _ in events]
+    assert names == [
+        "init",
+        "run_conversation",
+        "emit_auxiliary_failure",     # outer except (runs before finally)
+        "shutdown_memory_provider",   # outer finally safety net
+        "close",                      # outer finally safety net
+    ], f"exception-path teardown order wrong: {names}"
+    assert ("emit_auxiliary_failure", "background review") in events
+    # Approval callback cleared even on the exception path.
+    assert tt._get_approval_callback() is None
+
+
+def test_background_review_finally_step_raising_does_not_skip_close(monkeypatch):
+    """BR4 pin: each outer-finally cleanup step is independently wrapped — if
+    shutdown_memory_provider raises (e.g. a Honcho/Hindsight flush failure),
+    close() must STILL run. A single try around both would leak the client."""
+    events = []
+    _spawn_raising(
+        monkeypatch,
+        events,
+        run_exc=RuntimeError("LLM blew up"),
+        shutdown_exc=RuntimeError("honcho flush failed"),
+    )
+
+    names = [name for name, _ in events]
+    assert "close" in names, (
+        f"close() skipped because shutdown_memory_provider() raised; finally "
+        f"steps must be independently wrapped. events={names}"
+    )
+    assert names.count("shutdown_memory_provider") == 1
+    assert names.index("close") > names.index("shutdown_memory_provider")
+
+
+def test_background_review_inner_finally_clears_whitelist_on_exception(monkeypatch):
+    """BR4 pin: clear_thread_tool_whitelist (inner finally, ~861) must run even
+    when run_conversation raises, or the thread-local tool whitelist leaks into
+    a recycled worker thread (a later task on the same thread id would be
+    wrongly limited to memory/skill tools)."""
+    from hermes_cli import plugins as _plugins
+
+    cleared = {"n": 0}
+
+    events = []
+    # Patch the lazy-import source (from hermes_cli.plugins import ...).
+    monkeypatch.setattr(_plugins, "set_thread_tool_whitelist", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _plugins, "clear_thread_tool_whitelist", lambda: cleared.__setitem__("n", cleared["n"] + 1)
+    )
+
+    _spawn_raising(monkeypatch, events, run_exc=RuntimeError("LLM blew up"))
+
+    assert cleared["n"] == 1, (
+        f"clear_thread_tool_whitelist called {cleared['n']}x; inner finally must "
+        f"clear the thread-local whitelist exactly once even on exception"
+    )
