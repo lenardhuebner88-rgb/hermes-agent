@@ -202,11 +202,8 @@ def test_cross_tick_sibling_in_review_deferred(
             max_concurrent_per_repo=10,
         )
 
-    assert s3 not in spawned, "s3 must be deferred while s2 holds the chain slot"
-    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
-    assert s3 in skipped_ids, (
-        f"s3 must appear in skipped_chain_worktree_serialized; got {res.skipped_chain_worktree_serialized}"
-    )
+    assert s3 in spawned, "read-only review work must bypass writer serialization"
+    assert res.skipped_worktree_writer_active == []
 
 
 def test_chain_root_lookup_error_defers_candidate_and_logs(
@@ -312,11 +309,9 @@ def test_two_chains_same_repo_both_dispatch(
             max_concurrent_per_repo=10,
         )
 
-    assert a1 in spawned, "chain-A dir task must dispatch"
-    assert b1 in spawned, "chain-B dir task must dispatch (different chain, no guard)"
-    assert res.skipped_chain_worktree_serialized == [], (
-        "no chain-worktree skip expected for tasks from different chains"
-    )
+    assert len(spawned) == 1, "same physical worktree admits only one writer"
+    skipped = [item[0] for item in res.skipped_worktree_writer_active]
+    assert set(spawned) | set(skipped) == {a1, b1}
 
 
 # ---------------------------------------------------------------------------
@@ -415,15 +410,9 @@ def test_review_same_tick_two_dir_siblings_only_one_dispatched(
             max_concurrent_per_repo=10,
         )
 
-    assert len(res.spawned) == 1, f"expected 1 spawn, got {res.spawned}"
-    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
-    assert len(skipped_ids) == 1, (
-        f"expected 1 chain-worktree-serialized skip, got "
-        f"{res.skipped_chain_worktree_serialized}"
-    )
-    dispatched_id = res.spawned[0][0]
-    assert set([dispatched_id] + skipped_ids) == {s2, s3}
-    assert set([dispatched_id] + skipped_ids) & set(spawned) == {dispatched_id}
+    assert len(res.spawned) == 2, f"read-only reviews should run in parallel: {res.spawned}"
+    assert set(spawned) == {s2, s3}
+    assert res.skipped_worktree_writer_active == []
 
 
 def test_review_sibling_running_deferred(
@@ -451,11 +440,8 @@ def test_review_sibling_running_deferred(
             max_concurrent_per_repo=10,
         )
 
-    assert s3 not in spawned, "s3 must be deferred while s2 (running) holds the chain slot"
-    skipped_ids = [t[0] for t in res.skipped_chain_worktree_serialized]
-    assert s3 in skipped_ids, (
-        f"s3 must appear in skipped_chain_worktree_serialized; got {res.skipped_chain_worktree_serialized}"
-    )
+    assert s3 in spawned, "read-only review must bypass an active writer"
+    assert res.skipped_worktree_writer_active == []
 
 
 def test_review_single_task_not_self_blocked(

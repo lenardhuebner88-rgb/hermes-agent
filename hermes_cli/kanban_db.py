@@ -2265,6 +2265,22 @@ CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task_id        ON task_events(task_id, id);
+CREATE TABLE IF NOT EXISTS worktree_writer_leases (
+    worktree_key   TEXT PRIMARY KEY,
+    root_task_id   TEXT NOT NULL,
+    task_id        TEXT NOT NULL,
+    run_id         INTEGER NOT NULL,
+    claim_lock     TEXT NOT NULL,
+    worker_pid     INTEGER,
+    workspace_path TEXT NOT NULL,
+    candidate_sha TEXT,
+    acquired_at   INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_writer_leases_task ON worktree_writer_leases(task_id, run_id);
+
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 -- idx_runs_started: the budget preflight SUMs tokens/cost over a started_at>=?
@@ -2301,7 +2317,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 7  # Run-bound provider/model route telemetry
+_SCHEMA_GENERATION = 8  # Persistent per-worktree writer leases
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -10965,6 +10981,38 @@ def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optiona
     return payload
 
 
+def _cleanup_review_snapshot_for_run(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int]
+) -> None:
+    if run_id is None:
+        return
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'review_snapshot_provisioned' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, int(run_id)),
+    ).fetchone()
+    if row is None:
+        return
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError):
+        return
+    workspace_path = payload.get("workspace_path")
+    repo_root = payload.get("repo_root")
+    if not workspace_path or not repo_root:
+        return
+    from hermes_cli import kanban_worktrees as _kwt
+    _kwt.cleanup_review_snapshot(
+        repo_root=Path(str(repo_root)),
+        workspace_path=Path(str(workspace_path)),
+    )
+    _append_event(
+        conn, task_id, "review_snapshot_cleaned",
+        {"workspace_path": str(workspace_path)}, run_id=int(run_id),
+    )
+
+
 def _pending_review_revision(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     """Return an unconsumed same-card review revision request, if present."""
     row = conn.execute(
@@ -11880,6 +11928,9 @@ def _capture_review_diff_snapshot(
         return {}
 
     snapshot: dict = {}
+    candidate_commit = _git("rev-parse", "--verify", "HEAD")
+    if candidate_commit and candidate_commit.strip():
+        snapshot["diff_candidate_commit"] = candidate_commit.strip()
     changed: list = []
     if pre_run_sha:
         committed_and_worktree = _git("diff", "--name-only", pre_run_sha)
@@ -12157,6 +12208,16 @@ def _submit_for_review(
         task_id,
         expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
     )
+    if int(stage or 0) > 0:
+        previous_submission = _latest_review_submission(conn, task_id) or {}
+        previous_candidate = previous_submission.get("diff_candidate_commit")
+        if previous_candidate:
+            for key in (
+                "diff_candidate_commit", "diff_base_commit", "changed_files",
+                "diff_stat", "diff_text", "diff_truncated",
+            ):
+                if key in previous_submission:
+                    diff_snapshot[key] = previous_submission[key]
     # A workspace can disappear between review stages.  Preserve the most
     # recent handoff's evidence when that makes the fresh capture empty, so the
     # new submitted_for_review event remains self-contained for its verifier.
@@ -12941,6 +13002,8 @@ def complete_task(
     else:
         verified_cards = []
 
+    _refresh_worktree_writer_candidate(conn, task_id, expected_run_id)
+
     # K8 workflow-step routing (D7 L2): when the task is opted into a workflow
     # template and its current step is NOT the last, advance to the next step
     # (back to 'ready', re-assigned to the next role) instead of completing.
@@ -13081,6 +13144,7 @@ def complete_task(
         metadata=metadata,
         verdict=_review_verdict,
     ):
+        _cleanup_review_snapshot_for_run(conn, task_id, _review_run_id)
         return True
 
     # Worker-isolation integrator (kanban_worktrees, Phase 3): when this
@@ -13234,6 +13298,7 @@ def complete_task(
             summary=summary if summary is not None else result,
             metadata=metadata,
         )
+        _cleanup_review_snapshot_for_run(conn, task_id, run_id)
         # If complete_task was called on a never-claimed task (ready or
         # blocked → done with no run in flight), synthesize a
         # zero-duration run so the handoff fields are persisted in
@@ -14500,6 +14565,7 @@ def block_task(
     into ``task_runs.metadata`` so the auto-retry feedback can render them for
     the coder. Default ``None`` → byte-identical to today (no metadata written).
     """
+    _refresh_worktree_writer_candidate(conn, task_id, expected_run_id)
     block_kind = _normalize_block_kind(kind)
     with write_txn(conn):
         if _reject_code_worker_review_required_block(
@@ -14620,6 +14686,7 @@ def block_task(
         # B2: only the review lane writes structured verdicts; ordinary blocks
         # (a coder hitting a wall) leave task_runs.verdict NULL.
         review_originated = _run_originated_from_review(conn, task_id, run_id)
+        _cleanup_review_snapshot_for_run(conn, task_id, run_id)
         if review_originated:
             # The block action itself is explicit negative review authority.
             # Metadata can carry findings, but can never turn a blocked run
@@ -17004,6 +17071,148 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 )
 
 
+def _dispatch_row_value(row: Any, name: str) -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[name]
+    return getattr(row, name)
+
+
+def _worktree_writer_lease_identity(
+    conn: sqlite3.Connection, row: Any
+) -> Optional[tuple[str, str, str]]:
+    from hermes_cli import kanban_worktrees as _kwt
+
+    kind = (_dispatch_row_value(row, "workspace_kind") or "").strip()
+    raw_path = (_dispatch_row_value(row, "workspace_path") or "").strip()
+    if kind not in {"dir", "worktree"} or not raw_path:
+        return None
+    task_id = str(_dispatch_row_value(row, "id"))
+    path = Path(raw_path).expanduser().resolve()
+    root_id = _kwt.chain_root_id(conn, task_id)
+    provisioned = _kwt.split_provisioned_path(path)
+    if provisioned is not None:
+        _, provisioned_root, worktree_path = provisioned
+        return f"chain:{provisioned_root}", provisioned_root, str(worktree_path)
+    if _kwt.isolation_mode() == "worktree" and _git_common_dir(path) is not None:
+        return f"chain:{root_id}", root_id, str(path)
+    worktree_path = _git_toplevel(path) or path
+    return f"path:{worktree_path}", root_id, str(worktree_path)
+
+
+def _workspace_release_state(workspace_path: str) -> tuple[Optional[str], bool]:
+    path = Path(workspace_path)
+    head = _git_head_sha_for_workspace(workspace_path)
+    if head is None:
+        return None, path.exists()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return head, False
+    return head, proc.returncode == 0 and not proc.stdout.strip()
+
+
+def _refresh_worktree_writer_candidate(
+    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int]
+) -> None:
+    if expected_run_id is None:
+        return
+    lease = conn.execute(
+        "SELECT l.worktree_key, l.claim_lock, l.workspace_path "
+        "FROM worktree_writer_leases l JOIN tasks t ON t.id = l.task_id "
+        "WHERE l.task_id = ? AND l.run_id = ? "
+        "AND t.current_run_id = l.run_id AND t.claim_lock = l.claim_lock",
+        (task_id, expected_run_id),
+    ).fetchone()
+    if lease is None:
+        return
+    head, clean = _workspace_release_state(lease["workspace_path"])
+    if not clean:
+        return
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE worktree_writer_leases SET candidate_sha = ?, updated_at = ? "
+            "WHERE worktree_key = ? AND task_id = ? AND run_id = ? AND claim_lock = ?",
+            (head, int(time.time()), lease["worktree_key"], task_id,
+             expected_run_id, lease["claim_lock"]),
+        )
+
+
+def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
+    released: list[str] = []
+    rows = conn.execute(
+        "SELECT * FROM worktree_writer_leases ORDER BY acquired_at, worktree_key"
+    ).fetchall()
+    for lease in rows:
+        pid = lease["worker_pid"]
+        if pid is None:
+            owner = conn.execute(
+                "SELECT status, current_run_id, claim_lock FROM tasks WHERE id = ?",
+                (lease["task_id"],),
+            ).fetchone()
+            if (
+                owner is not None
+                and owner["status"] == "running"
+                and owner["current_run_id"] == lease["run_id"]
+                and owner["claim_lock"] == lease["claim_lock"]
+            ):
+                continue
+        else:
+            if _pid_alive(int(pid)):
+                continue
+            termination = _terminate_reclaimed_worker(int(pid), lease["claim_lock"])
+            if not bool(termination.get("process_group_terminated")):
+                continue
+        observed_head, clean = _workspace_release_state(lease["workspace_path"])
+        recovered_wip = False
+        if not clean:
+            try:
+                from hermes_cli import kanban_worktrees as _kwt
+
+                owner_task = get_task(conn, lease["task_id"])
+                if owner_task is not None:
+                    _kwt.prepare_reused_task_worktree(
+                        conn, owner_task, Path(lease["workspace_path"])
+                    )
+                    observed_head, clean = _workspace_release_state(
+                        lease["workspace_path"]
+                    )
+                    recovered_wip = clean
+            except Exception as exc:
+                _log.warning(
+                    "dead writer recovery failed for task %s: %s",
+                    lease["task_id"], exc,
+                )
+        if not clean:
+            _append_event(conn, lease["task_id"], "worktree_writer_release_deferred", {
+                "reason_class": "worktree_state_unverified",
+                "worktree_key": lease["worktree_key"],
+                "candidate_sha": lease["candidate_sha"],
+                "observed_sha": observed_head,
+            })
+            conn.commit()
+            continue
+        deleted = conn.execute(
+            "DELETE FROM worktree_writer_leases WHERE worktree_key = ? AND run_id = ? AND claim_lock = ?",
+            (lease["worktree_key"], lease["run_id"], lease["claim_lock"]),
+        ).rowcount
+        if deleted:
+            _append_event(conn, lease["task_id"], "worktree_writer_released", {
+                "reason_class": "process_group_ended",
+                "worktree_key": lease["worktree_key"],
+                "candidate_sha": lease["candidate_sha"],
+                "observed_sha": observed_head,
+                "clean": True,
+                "recovered_wip": recovered_wip,
+            })
+            released.append(lease["task_id"])
+    if released:
+        conn.commit()
+    return released
+
+
 @dataclass
 class DispatchResult:
     """Outcome of a single ``dispatch`` pass."""
@@ -17044,6 +17253,10 @@ class DispatchResult:
     skipped_chain_worktree_serialized: list[tuple[str, str]] = field(
         default_factory=list
     )
+    skipped_worktree_writer_active: list[tuple[str, str, str]] = field(
+        default_factory=list
+    )
+    reaped_worktree_writer_leases: list[str] = field(default_factory=list)
     """Ready ``dir`` tasks deferred this tick because another in-flight ``dir``
     task from the same chain is occupying the shared provisioned worktree
     (Befund 4, 2026-07-02 chain-worktree-serialization guard).  Each entry is
@@ -19852,7 +20065,8 @@ def _record_spawn_failure(
     failure_limit: int = None,
     force_failure_limit: bool = False,
 ) -> bool:
-    return _record_task_failure(
+    run_id = _current_run_id(conn, task_id)
+    blocked = _record_task_failure(
         conn,
         task_id,
         error,
@@ -19862,6 +20076,8 @@ def _record_spawn_failure(
         end_run=True,
         force_failure_limit=force_failure_limit,
     )
+    _cleanup_review_snapshot_for_run(conn, task_id, run_id)
+    return blocked
 
 
 def _count_spawn_retries(conn: sqlite3.Connection, task_id: str) -> int:
@@ -23736,6 +23952,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
 _DISPATCH_HOLD_BUCKETS: tuple[tuple[str, str], ...] = (
     ("repo_serialized", "skipped_repo_serialized"),
     ("chain_worktree_serialized", "skipped_chain_worktree_serialized"),
+    ("worktree_writer_active", "skipped_worktree_writer_active"),
     ("respawn_guarded", "respawn_guarded"),
     ("budget_held", "budget_held"),
     ("role_mismatch", "held_role_mismatch"),
@@ -25338,6 +25555,7 @@ def _dispatch_once_locked(
             conn,
             stale_timeout_seconds=stale_timeout_seconds,
         )
+        result.reaped_worktree_writer_leases = _reap_worktree_writer_leases(conn)
         result.crashed = detect_crashed_workers(conn)
         _crash_auto_blocked = getattr(
             detect_crashed_workers, "_last_auto_blocked", []
@@ -25377,7 +25595,7 @@ def _dispatch_once_locked(
 
     ready_rows = conn.execute(
         "SELECT id, assignee, workflow_template_id, current_step_key, "
-        "workspace_kind, workspace_path, created_by, idempotency_key FROM tasks "
+        "workspace_kind, workspace_path, kind, created_by, idempotency_key FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -25506,6 +25724,13 @@ def _dispatch_once_locked(
             # bucket it as nonspawnable if the profile genuinely isn't
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
+    _active_writer_leases = {
+        lease["worktree_key"]: lease["task_id"]
+        for lease in conn.execute(
+            "SELECT worktree_key, task_id FROM worktree_writer_leases"
+        ).fetchall()
+    }
+
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -25833,7 +26058,47 @@ def _dispatch_once_locked(
         # Performance: _chain_count is seeded once per tick above (O(in-flight)).
         # Per-candidate cost here is one _chain_root_for_task() call (≤2 DB
         # queries) ONLY for dir candidates that pass the repo guard above.
-        if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
+        _cand_read_only = _dispatch_policy.task_is_read_only(row["kind"], row_assignee)
+        try:
+            _cand_writer_identity = (
+                None if _cand_read_only else _worktree_writer_lease_identity(conn, row)
+            )
+        except Exception as exc:
+            _log.warning(
+                "chain-root lookup failed for task %s; deferring: %s",
+                row["id"], exc,
+            )
+            result.skipped_chain_worktree_serialized.append((row["id"], None))
+            continue
+        if _cand_writer_identity is not None:
+            _writer_key, _writer_root, _writer_path = _cand_writer_identity
+            _writer_owner = _active_writer_leases.get(_writer_key)
+            if _writer_owner is not None and _writer_owner != row["id"]:
+                result.skipped_worktree_writer_active.append((
+                    row["id"], "worktree_writer_active", _writer_owner
+                ))
+                result.skipped_chain_worktree_serialized.append(
+                    (row["id"], _writer_root)
+                )
+                if not dry_run:
+                    latest = conn.execute(
+                        "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                        (row["id"],),
+                    ).fetchone()
+                    if latest is None or latest["kind"] != "worktree_writer_active":
+                        _append_event(conn, row["id"], "worktree_writer_active", {
+                            "reason_class": "worktree_writer_active",
+                            "owner_task_id": _writer_owner,
+                            "worktree_key": _writer_key,
+                        })
+                        conn.commit()
+                continue
+
+        if (
+            row["workspace_kind"] == "dir"
+            and not _is_conflict_fixer
+            and not _cand_read_only
+        ):
             _cand_chain_root = _chain_root_for_task(row["id"])
             if row["id"] in _chain_root_lookup_failed:
                 result.skipped_chain_worktree_serialized.append((
@@ -26003,7 +26268,9 @@ def _dispatch_once_locked(
             # Befund 4 same-tick race: if this dir task belongs to a chain,
             # increment the chain slot so any subsequent sibling in this
             # tick's ready_rows sees the slot as occupied and is deferred.
-            if row["workspace_kind"] == "dir":
+            if _cand_writer_identity is not None:
+                _active_writer_leases[_cand_writer_identity[0]] = row["id"]
+            if row["workspace_kind"] == "dir" and not _cand_read_only:
                 _ctr = _chain_root_for_task(row["id"])
                 if _ctr is not None:
                     _chain_count[_ctr] = _chain_count.get(_ctr, 0) + 1
@@ -26064,8 +26331,28 @@ def _dispatch_once_locked(
         # resolved one, so it must run before that field is overwritten below
         # (otherwise the comparison is tautological and drift is never caught).
         try:
-            _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
-        except _kwt.WorktreeError as exc:
+            if _cand_read_only:
+                source_workspace = Path(workspace)
+                candidate_sha = _git_head_sha_for_workspace(str(source_workspace))
+                if candidate_sha:
+                    review_snapshot = _kwt.provision_review_snapshot(
+                        source_workspace=source_workspace,
+                        task_id=claimed.id,
+                        run_id=int(claimed.current_run_id or 0),
+                        candidate_commit=candidate_sha,
+                    )
+                    workspace = Path(review_snapshot["workspace_path"])
+                    claimed.workspace_kind = "worktree"
+                    claimed.workspace_path = str(workspace)
+                    claimed.branch_name = None
+                    with write_txn(conn):
+                        _append_event(
+                            conn, claimed.id, "review_snapshot_provisioned",
+                            review_snapshot, run_id=claimed.current_run_id,
+                        )
+            else:
+                _kwt.prepare_reused_task_worktree(conn, claimed, workspace)
+        except (OSError, RuntimeError, _kwt.WorktreeError) as exc:
             reason = f"worker base preparation: {exc}"
             with write_txn(conn):
                 _append_event(
@@ -26097,10 +26384,53 @@ def _dispatch_once_locked(
             continue
         # Persist and refresh the claim object consumed by the immediate spawn
         # only now that the drift guard above has passed.
-        _apply_materialized_dispatch_workspace(
-            conn, claimed, workspace, resolved_branch_name
-        )
+        if not _cand_read_only:
+            _apply_materialized_dispatch_workspace(
+                conn, claimed, workspace, resolved_branch_name
+            )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        if _cand_writer_identity is not None:
+            _writer_key, _writer_root, _writer_path = _cand_writer_identity
+            now = int(time.time())
+            candidate_sha = _git_head_sha_for_workspace(str(workspace))
+            _lease_owner = conn.execute(
+                "SELECT current_run_id, claim_lock FROM tasks WHERE id = ?",
+                (claimed.id,),
+            ).fetchone()
+            if _lease_owner is None or _lease_owner["current_run_id"] is None or not _lease_owner["claim_lock"]:
+                raise RuntimeError("writer lease owner lost its claim before lease acquisition")
+            existing_writer = conn.execute(
+                "SELECT task_id FROM worktree_writer_leases WHERE worktree_key = ?",
+                (_writer_key,),
+            ).fetchone()
+            if existing_writer is not None:
+                if existing_writer["task_id"] != claimed.id:
+                    raise RuntimeError(
+                        f"writer lease changed owners before acquisition: {_writer_key}"
+                    )
+                conn.execute(
+                    "DELETE FROM worktree_writer_leases WHERE worktree_key = ? "
+                    "AND task_id = ?",
+                    (_writer_key, claimed.id),
+                )
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (_writer_key, _writer_root, claimed.id, _lease_owner["current_run_id"],
+                 _lease_owner["claim_lock"], None, str(workspace),
+                 candidate_sha, now, now),
+            )
+            _append_event(conn, claimed.id, "worktree_writer_acquired", {
+                "reason_class": "worktree_writer_acquired",
+                "worktree_key": _writer_key,
+                "root_task_id": _writer_root,
+                "run_id": _lease_owner["current_run_id"],
+                "worker_pid": None,
+                "candidate_sha": candidate_sha,
+            })
+            conn.commit()
+            _active_writer_leases[_writer_key] = claimed.id
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -26118,6 +26448,14 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid and not _attach_or_reap_spawned_worker(conn, claimed, int(pid)):
                 continue
+            if _cand_writer_identity is not None and pid:
+                conn.execute(
+                    "UPDATE worktree_writer_leases SET worker_pid = ?, updated_at = ? "
+                    "WHERE worktree_key = ? AND task_id = ? AND run_id = ?",
+                    (int(pid), int(time.time()), _writer_key, claimed.id,
+                     _lease_owner["current_run_id"]),
+                )
+                conn.commit()
             # PlanSpec B: stamp the expanded scope-contract trace onto the run
             # so it is permanently auditable WHAT contract the worker saw. Only
             # the in-process worker path reads it (via build_worker_context);
@@ -26216,12 +26554,6 @@ def _dispatch_once_locked(
     # per-candidate guard below then re-occupies the slot via the same
     # same-tick counter the ready path uses, so the first of several
     # unclaimed siblings to spawn blocks the rest within this tick.
-    for _rr in review_rows:
-        if _rr["workspace_kind"] != "dir":
-            continue
-        _rr_root = _chain_root_for_task(_rr["id"])
-        if _rr_root is not None:
-            _chain_count[_rr_root] = _chain_count.get(_rr_root, 0) - 1
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -26266,7 +26598,11 @@ def _dispatch_once_locked(
             row["idempotency_key"]
             and str(row["idempotency_key"]).startswith(CONFLICT_FIXER_IDEM_PREFIX)
         )
-        if row["workspace_kind"] == "dir" and not _is_conflict_fixer:
+        if (
+            row["workspace_kind"] == "dir"
+            and not _is_conflict_fixer
+            and not _dispatch_policy.task_is_read_only("review", _spawn_profile)
+        ):
             _cand_chain_root = _chain_root_for_task(row["id"])
             if row["id"] in _chain_root_lookup_failed:
                 result.skipped_chain_worktree_serialized.append((
@@ -26316,10 +26652,42 @@ def _dispatch_once_locked(
         )
         if claimed is None:
             continue
+        review_snapshot: Optional[dict] = None
+        source_workspace: Optional[Path] = None
         try:
-            workspace, resolved_branch_name = _resolve_dispatch_workspace(
+            source_workspace, resolved_branch_name = _resolve_dispatch_workspace(
                 conn, claimed, board=board
             )
+            workspace = source_workspace
+            submission = _latest_review_submission(conn, claimed.id) or {}
+            candidate_commit = str(submission.get("diff_candidate_commit") or "").strip()
+            if not candidate_commit:
+                candidate_commit = subprocess.run(
+                    ["git", "-C", str(source_workspace), "rev-parse", "--verify", "HEAD"],
+                    text=True, capture_output=True, timeout=5, check=False,
+                ).stdout.strip()
+            if candidate_commit:
+                base_commit = str(
+                    submission.get("diff_base_commit") or ""
+                ).strip() or None
+                from hermes_cli import kanban_worktrees as _kwt
+
+                review_snapshot = _kwt.provision_review_snapshot(
+                    source_workspace=source_workspace,
+                    task_id=claimed.id,
+                    run_id=int(claimed.current_run_id or 0),
+                    candidate_commit=candidate_commit,
+                    base_commit=base_commit,
+                )
+                workspace = Path(review_snapshot["workspace_path"])
+                claimed.workspace_kind = "worktree"
+                claimed.workspace_path = str(workspace)
+                claimed.branch_name = None
+                with write_txn(conn):
+                    _append_event(
+                        conn, claimed.id, "review_snapshot_provisioned",
+                        review_snapshot, run_id=claimed.current_run_id,
+                    )
         except Exception as exc:
             _phase, auto = _spawn_failure_or_transient_retry(
                 conn,
@@ -26331,13 +26699,13 @@ def _dispatch_once_locked(
             if auto:
                 result.auto_blocked.append(claimed.id)
             continue
-        # Persist the resolved workspace path so the worker can cd there.
-        # NOTE: resolve_workspace() above is task-keyed (not assignee-keyed),
-        # so the verifier inherits the coder's preserved workspace and can
-        # inspect the real changes.
-        _apply_materialized_dispatch_workspace(
-            conn, claimed, workspace, resolved_branch_name
-        )
+        # The detached snapshot is run-scoped; preserve the task's canonical
+        # chain workspace for any subsequent writer/fixer run. Legacy non-git
+        # review workspaces retain the existing materialization behavior.
+        if review_snapshot is None:
+            _apply_materialized_dispatch_workspace(
+                conn, claimed, workspace, resolved_branch_name
+            )
         # Worker isolation: surface uncommitted leftovers in a provisioned
         # worktree to the verifier as a task comment — the worker contract
         # requires committing on green gates, so leftovers are grounds for
@@ -26345,7 +26713,8 @@ def _dispatch_once_locked(
         try:
             from hermes_cli import kanban_worktrees as _kwt
 
-            _kwt.note_dirty_worktree(conn, claimed.id, str(workspace))
+            if source_workspace is not None:
+                _kwt.note_dirty_worktree(conn, claimed.id, str(source_workspace))
         except Exception:
             pass
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
@@ -27912,7 +28281,23 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
 
     # (b) changed-files snapshot from the submit event (B1)
     changed_files, diff_stat, diff_text = _latest_review_diff_snapshot(conn, task_id)
+    review_submission = _latest_review_submission(conn, task_id) or {}
+    diff_base_commit = str(review_submission.get("diff_base_commit") or "").strip()
+    diff_candidate_commit = str(
+        review_submission.get("diff_candidate_commit") or ""
+    ).strip()
     lines.append("")
+    if diff_base_commit and diff_candidate_commit:
+        lines.extend(
+            [
+                "## Immutable candidate snapshot",
+                "This run uses a detached read-only worktree at "
+                f"`{diff_candidate_commit}`; all caller source files are readable.",
+                "Complete untruncated diff:",
+                f"`git diff --no-ext-diff --unified=3 {diff_base_commit}..{diff_candidate_commit}`",
+                "",
+            ]
+        )
     lines.append("## Changed files at submit (caller check required)")
     if changed_files:
         for f in changed_files[:_CTX_REVIEW_MAX_CHANGED_FILES]:
@@ -27938,10 +28323,15 @@ def _render_review_verifier_section(conn: sqlite3.Connection, task_id: str) -> l
             "caller of a changed symbol is a blocking finding."
         )
     else:
-        lines.append(
-            "Kein Diff-Zugriff in diesem Run — prüfe gegen die vorliegende Evidenz "
-            "und benenne fehlende Evidenz als NEEDS_MORE_CONTEXT statt als Blocker."
-        )
+        if diff_base_commit and diff_candidate_commit:
+            lines.append(
+                "The inline preview is empty; use the complete local git diff command above."
+            )
+        else:
+            lines.append(
+                "Kein Diff-Zugriff in diesem Run — prüfe gegen die vorliegende Evidenz "
+                "und benenne fehlende Evidenz als NEEDS_MORE_CONTEXT statt als Blocker."
+            )
 
     # (c) #3-A: worker_gate stamp — one machine-readable line for the verifier
     # SOUL to match on. Format contract (must match exactly):
