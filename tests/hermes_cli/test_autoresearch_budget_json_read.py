@@ -56,6 +56,40 @@ def test_tolerant_corrupt_json_is_empty_dict_and_never_raises(tmp_path):
     assert _read_json(p) == {}  # must not raise
 
 
+def test_tolerant_whitespace_only_file_is_empty_dict(tmp_path):
+    # Non-zero size, so it bypasses the ``st_size == 0`` short-circuit and hits
+    # ``json.loads`` -> ValueError. Pins that a half-written/blanked cooldown
+    # file degrades to {} rather than raising.
+    p = tmp_path / "state.json"
+    p.write_text("   \n\t  ", encoding="utf-8")
+    assert _read_json(p) == {}
+
+
+def test_tolerant_binary_non_utf8_is_empty_dict(tmp_path):
+    # Raw bytes that are not valid UTF-8: ``read_text(encoding="utf-8")`` raises
+    # UnicodeDecodeError (a ValueError subclass). Pins the decode-error path —
+    # narrowing the except to json.JSONDecodeError would let this leak.
+    p = tmp_path / "state.json"
+    p.write_bytes(b"\x80\x81\x82\xff\xfe")
+    assert _read_json(p) == {}
+
+
+def test_tolerant_permission_error_is_empty_dict(tmp_path, monkeypatch):
+    # Pins the OSError arm (unreadable file), which no other test exercises.
+    # The file exists and is non-empty (passes the exists()/st_size guards) but
+    # the read itself is denied -> PermissionError (an OSError) -> fail-open {}.
+    import pathlib
+
+    p = tmp_path / "state.json"
+    p.write_text('{"cooldown_until": 1}', encoding="utf-8")
+
+    def _denied(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _denied)
+    assert _read_json(p) == {}  # must not raise
+
+
 # ─── _read_json_fail_closed: strict, raises BudgetExhausted on corruption ────
 
 
