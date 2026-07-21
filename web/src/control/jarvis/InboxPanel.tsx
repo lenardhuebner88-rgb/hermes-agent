@@ -23,8 +23,7 @@
  * S7.6: Decision-Cards — Zeile 1 ist die Entscheidung (Server-`summary`,
  * Fallback: clientseitige Destillation), Badges zeigen 🔑 Operator-Freigabe,
  * Alter und Blockradius auf einen Blick; Roh-Titel und Details bleiben bis
- * zum Expand verborgen. S8 ergänzt für Kanban-Cards ein rein informatives
- * WHY aus der Server-Antwort. Aktionen (PRÜFEN/Ausführen/Links) unverändert.
+ * zum Expand verborgen. Aktionen (PRÜFEN/Ausführen/Links) unverändert.
  *
  * ESC oder × schließt die Ansicht.
  */
@@ -330,8 +329,6 @@ function TaskCard({
   // bis zum Expand verborgen.
   const headline = decisionHeadline(item);
   const showRawTitle = rawTitleDiffers(item, headline);
-  const why = item.why?.trim();
-  const consequenceOnDecline = item.consequence_on_decline?.trim();
   const age = decisionAge(item.ts);
   const statusLine = [item.status, item.freigabe ? `freigabe: ${item.freigabe}` : null]
     .filter(Boolean)
@@ -357,22 +354,6 @@ function TaskCard({
         ) : null}
       </p>
       <p className="jv-frage-text">{headline}</p>
-      {why || consequenceOnDecline ? (
-        <div className="jv-decision-why" title={item.title}>
-          {why ? (
-            <p>
-              <span>{t.inboxWhyLabel}</span>
-              {why}
-            </p>
-          ) : null}
-          {consequenceOnDecline ? (
-            <p>
-              <span>{t.inboxDeclineLabel}</span>
-              {consequenceOnDecline}
-            </p>
-          ) : null}
-        </div>
-      ) : null}
       {showRawTitle || statusLine ? (
         <details className="jv-appr-details">
           <summary>{t.inboxTaskDetails}</summary>

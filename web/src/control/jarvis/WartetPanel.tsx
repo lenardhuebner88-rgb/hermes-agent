@@ -15,8 +15,7 @@
  *
  * S7.6: die Zeilen rendern entscheidungs-first — Decision-Headline statt
  * Roh-Titel (summary > clientseitige Destillation) plus 🔑/Alter/Blockradius-
- * Badges; der Roh-Titel bleibt im title-Attribut der Zeile. S8-WHY bleibt
- * bewusst im gemeinsamen Drawer-Expand (InboxPanel), nicht in der dezenten Zeile.
+ * Badges; der Roh-Titel bleibt im title-Attribut der Zeile.
  *
  * `?inbox=open` öffnet den Drawer initial (Deep-Link/Screenshot-Naht).
  */

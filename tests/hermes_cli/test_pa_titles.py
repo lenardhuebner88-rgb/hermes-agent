@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from hermes_cli.pa_titles import (
     BRIEFING_TITLE_LIMIT,
-    INBOX_DECLINE_FALLBACK,
     INBOX_SUMMARY_LIMIT,
-    INBOX_WHY_FALLBACK,
     briefing_title,
-    distill_decision_why,
     distill_title,
 )
 
@@ -57,36 +54,3 @@ def test_distill_strips_planspec_slug_prefix() -> None:
     assert not out.startswith("PlanSpec")
     assert "GATE-GREEN" not in out
     assert out.startswith("Green-Gate-Ursachenfix")
-
-
-def test_distill_decision_why_uses_goal_evidence_and_risk() -> None:
-    body = """# PlanSpec: sichere Landung
-
-## Ziel
-Die verifizierte Kette soll jetzt kontrolliert landen.
-
-## Evidenz
-Backend- und Frontend-Gates sind grün.
-
-## Risiko
-Bei Ablehnung bleibt die Release-Kette blockiert.
-"""
-
-    why, consequence = distill_decision_why(body)
-
-    assert why == (
-        "Die verifizierte Kette soll jetzt kontrolliert landen. "
-        "Backend- und Frontend-Gates sind grün."
-    )
-    assert consequence == "Bei Ablehnung bleibt die Release-Kette blockiert."
-
-
-def test_distill_decision_why_without_planspec_is_honest_fallback() -> None:
-    assert distill_decision_why("Nur ein freier Kartentext ohne PlanSpec-Sektionen") == (
-        INBOX_WHY_FALLBACK,
-        INBOX_DECLINE_FALLBACK,
-    )
-    assert distill_decision_why(None) == (
-        INBOX_WHY_FALLBACK,
-        INBOX_DECLINE_FALLBACK,
-    )

@@ -739,9 +739,6 @@ export interface PaInboxTaskItem extends PaInboxItemBase {
   card_id: string;
   status: string | null;
   freigabe: string | null;
-  /** S8: deterministic PlanSpec excerpts; absent for older API snapshots. */
-  why?: string | null;
-  consequence_on_decline?: string | null;
 }
 
 export type PaInboxItem = PaInboxActionItem | PaInboxQuestionItem | PaInboxTaskItem;

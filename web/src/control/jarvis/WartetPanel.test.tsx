@@ -108,29 +108,6 @@ function renderPanel() {
 }
 
 describe("WartetPanel (echtes /api/pa/inbox-Format)", () => {
-  it("S8: Drawer-Expand rendert WHY für eine gehaltene Decision-Card", async () => {
-    getPaInboxMock.mockResolvedValue(
-      inboxResponse([
-        {
-          ...heldItem("t_why1", "Verifizierte Kette freigeben"),
-          why: "Alle fokussierten Gates sind grün.",
-          consequence_on_decline: "Die Kette bleibt bis zur nächsten Prüfung geparkt.",
-        },
-      ]),
-    );
-    renderPanel();
-
-    fireEvent.click(await screen.findByRole("button", { name: /INBOX ÖFFNEN/ }));
-
-    const drawer = await screen.findByRole("dialog", { name: "WARTET AUF DICH" });
-    expect(drawer.textContent).toContain("Warum");
-    expect(drawer.textContent).toContain("Alle fokussierten Gates sind grün.");
-    expect(drawer.textContent).toContain("Bei Ablehnung");
-    expect(drawer.textContent).toContain(
-      "Die Kette bleibt bis zur nächsten Prüfung geparkt.",
-    );
-  });
-
   it("rendert typisierte dezente Zeilen: question → Klassik-Link, held → Board-Link", async () => {
     getPaInboxMock.mockResolvedValue(
       inboxResponse([
