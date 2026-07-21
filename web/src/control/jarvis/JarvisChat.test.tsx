@@ -58,6 +58,8 @@ const getPaTurnMock = vi.hoisted(() => vi.fn());
 const uploadPaImageMock = vi.hoisted(() => vi.fn());
 const getPaEnginesMock = vi.hoisted(() => vi.fn());
 const getPaInboxMock = vi.hoisted(() => vi.fn());
+const ratePaTurnMock = vi.hoisted(() => vi.fn());
+const getPaEngineStatsMock = vi.hoisted(() => vi.fn());
 const transcribeAudioMock = vi.hoisted(() => vi.fn());
 const speakTextMock = vi.hoisted(() => vi.fn());
 const startLiveShareMock = vi.hoisted(() => vi.fn());
@@ -77,6 +79,8 @@ vi.mock("@/lib/api", async () => {
       uploadPaImage: uploadPaImageMock,
       getPaEngines: getPaEnginesMock,
       getPaInbox: getPaInboxMock,
+      ratePaTurn: ratePaTurnMock,
+      getPaEngineStats: getPaEngineStatsMock,
       transcribeAudio: transcribeAudioMock,
       speakText: speakTextMock,
       startLiveShare: startLiveShareMock,
@@ -178,6 +182,7 @@ function makeMessage(overrides: Partial<PaChatMessage>): PaChatMessage {
     ts: 1700000000,
     status: "done",
     error: null,
+    rating: null,
     ...overrides,
   };
 }
@@ -220,6 +225,8 @@ beforeEach(() => {
   uploadPaImageMock.mockResolvedValue({ asset_id: "asset_ab12cd.png" });
   getPaEnginesMock.mockResolvedValue(ROSTER);
   getPaInboxMock.mockResolvedValue({ items: [], errors: [] });
+  ratePaTurnMock.mockResolvedValue({ turn_id: "turn_rate", rating: 1 });
+  getPaEngineStatsMock.mockResolvedValue({ engines: [] });
   transcribeAudioMock.mockResolvedValue({
     ok: true,
     transcript: "hallo welt",
@@ -600,6 +607,72 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     const badge = modelTexts.find((el) => el.closest(".jv-badge"));
     expect(badge).toBeTruthy();
     expect(badge?.textContent).toMatch(/· \d{2}:\d{2}/);
+  });
+
+  it("bewertet eine Assistant-Bubble per Daumen und persistiert den Turn", async () => {
+    serverMessages = [
+      assistantMessage("Hilfreiche Antwort", { turn_id: "turn_rate", rating: null }),
+    ];
+    renderChat();
+
+    await screen.findByText("Hilfreiche Antwort");
+    const good = screen.getByRole("button", { name: "Gute Antwort" });
+    fireEvent.click(good);
+
+    await vi.waitFor(() => expect(ratePaTurnMock).toHaveBeenCalledWith("turn_rate", 1));
+    expect(good.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("isoliert Rating-Fehler und lässt die Assistant-Bubble stehen", async () => {
+    ratePaTurnMock.mockRejectedValueOnce(new Error("rating offline"));
+    serverMessages = [assistantMessage("Antwort bleibt", { turn_id: "turn_rate" })];
+    renderChat();
+
+    const bad = await screen.findByRole("button", { name: "Schlechte Antwort" });
+    fireEvent.click(bad);
+
+    expect(await screen.findByText("Bewertung konnte nicht gespeichert werden.")).toBeTruthy();
+    expect(screen.getByText("Antwort bleibt")).toBeTruthy();
+    expect(bad.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("zeigt in der Peripherie ohne Statistikdaten ehrlich noch keine Bewertungen", async () => {
+    renderChat();
+
+    expect(await screen.findByText("Noch keine Bewertungen.")).toBeTruthy();
+  });
+
+  it("zeigt Turns, Daumenquote und bekannte wie unbekannte Kosten je Engine", async () => {
+    getPaEngineStatsMock.mockResolvedValue({
+      engines: [
+        {
+          engine: "sol",
+          turns_total: 4,
+          rated_turns: 2,
+          thumbs_up_rate: 50.0,
+          estimated_cost_usd: 0.000321,
+        },
+        {
+          engine: "qwen",
+          turns_total: 1,
+          rated_turns: 0,
+          thumbs_up_rate: null,
+          estimated_cost_usd: null,
+        },
+      ],
+    });
+    renderChat();
+
+    const card = await screen.findByRole("region", {
+      name: "Qualität und geschätzte Kosten je Engine",
+    });
+    expect(card.textContent).toContain("sol");
+    expect(card.textContent).toContain("4 Turns");
+    expect(card.textContent).toContain("Daumen: 50% positiv");
+    expect(card.textContent).toContain("Kosten: $0.000321");
+    expect(card.textContent).toContain("qwen");
+    expect(card.textContent).toContain("Daumen: n/a");
+    expect(card.textContent).toContain("Kosten: n/a");
   });
 
   it("zeigt die effektive Engine des nächsten Turns am Composer", async () => {

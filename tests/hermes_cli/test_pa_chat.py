@@ -75,6 +75,7 @@ def test_store_wal_busy_timeout_roundtrip_and_idempotent_schema(
         "model": pa.SOL_MODEL,
         "ts": 1_700_000_000,
         "error": None,
+        "rating": None,
     }
     assert [(row["role"], row["content"]) for row in store.recent_messages()] == [
         ("user", "Was ist offen?"),

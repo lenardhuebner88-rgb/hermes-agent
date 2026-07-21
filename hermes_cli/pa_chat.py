@@ -72,6 +72,18 @@ _MODEL_TOKEN_PRICES_USD: dict[str, tuple[float, float]] = {
 def _approx_token_count(text: str) -> int:
     """Return a deterministic fallback token estimate for persisted text."""
     return max(1, (len(text) + 3) // 4)
+
+
+def estimate_turn_cost_usd(
+    model: str, prompt_tokens: int, completion_tokens: int
+) -> float | None:
+    """Estimate one turn's USD token cost, or ``None`` for unknown pricing."""
+    price = _MODEL_TOKEN_PRICES_USD.get(model)
+    if price is None:
+        return None
+    return (max(0, prompt_tokens) * price[0] + max(0, completion_tokens) * price[1]) / 1_000_000
+
+
 # ``context_engine`` is a valid, statically empty built-in toolset.  Keeping an
 # explicit -t value is load-bearing: omitting/emptying -t makes the CLI fall
 # back to configured defaults.  If a local context engine is active it may add
@@ -597,14 +609,15 @@ class PAStore:
             item["turns_total"] += int(row["turns_total"])
             item["rated_turns"] += int(row["rated_turns"])
             item["thumbs_up"] += int(row["thumbs_up"] or 0)
-            price = _MODEL_TOKEN_PRICES_USD.get(str(row["model"]))
-            if price is None:
+            cost = estimate_turn_cost_usd(
+                str(row["model"]),
+                int(row["prompt_tokens"] or 0),
+                int(row["completion_tokens"] or 0),
+            )
+            if cost is None:
                 item["cost_known"] = False
             else:
-                item["estimated_cost_usd"] += (
-                    int(row["prompt_tokens"] or 0) * price[0]
-                    + int(row["completion_tokens"] or 0) * price[1]
-                ) / 1_000_000
+                item["estimated_cost_usd"] += cost
         result: list[dict[str, Any]] = []
         for engine, item in sorted(combined.items()):
             rated = item["rated_turns"]
@@ -1554,9 +1567,14 @@ def build_inbox() -> dict[str, Any]:
     }
 
 
+def get_pa_store() -> PAStore:
+    """Return the profile-aware PA store used by the dashboard route group."""
+    return PAStore()
+
+
 def register_pa_routes(app: FastAPI) -> None:
     """Register authenticated PA endpoints before the SPA catch-all."""
-    store = PAStore()
+    store = get_pa_store()
     # Ephemeral live-screen-share sessions (S-live). Process-local by design:
     # screen frames must not survive a restart and are never persisted by
     # default — only the frame the user actually asks about is materialised
@@ -1631,6 +1649,16 @@ def register_pa_routes(app: FastAPI) -> None:
         if turn is None:
             raise HTTPException(status_code=404, detail="Unbekannter PA-Turn")
         return turn
+
+    @app.post("/api/pa/turns/{turn_id}/rating")
+    async def pa_turn_rating(turn_id: str, payload: RatingIn) -> dict[str, Any]:
+        if not await _run_sync(store.set_rating, turn_id, payload.rating):
+            raise HTTPException(status_code=404, detail="Unbekannter PA-Turn")
+        return {"turn_id": turn_id, "rating": payload.rating}
+
+    @app.get("/api/pa/engine-stats")
+    async def pa_engine_stats() -> dict[str, Any]:
+        return {"engines": await _run_sync(store.engine_stats)}
 
     @app.get("/api/pa/history")
     async def pa_history(limit: int = 30) -> dict[str, Any]:

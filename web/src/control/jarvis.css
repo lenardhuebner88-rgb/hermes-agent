@@ -459,6 +459,16 @@ button.jv-ok { cursor: pointer; }
 }
 /* „MAX"-Marker auf claude-Assistant-Bubbles (Fork 19: Hinweis, kein Cap). */
 .jv-max { color: var(--violett); letter-spacing: .12em; }
+.jv-rating { display: flex; align-items: center; gap: 4px; min-height: 28px; margin-top: 6px; }
+.jv-rating-btn {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0;
+  color: var(--faint); border: 1px solid var(--line2); border-radius: 999px;
+  background: rgba(4, 7, 15, .45); cursor: pointer;
+}
+.jv-rating-btn:hover:not(:disabled), .jv-rating-btn:focus-visible { color: var(--cyan); border-color: var(--line); }
+.jv-rating-btn.is-active { color: var(--cyan); border-color: rgba(56, 216, 255, .55); background: rgba(56, 216, 255, .12); }
+.jv-rating-btn:disabled { cursor: wait; opacity: .65; }
+.jv-rating-error { margin-left: 4px; font-family: var(--mono); font-size: 8.5px; color: var(--rot); }
 /* M1: Broken-Attachment-State (gepruntes Asset, 404) — der Thread bleibt. */
 .jv-attbroken {
   display: inline-flex; align-items: center; min-height: 24px; margin-top: 8px;
@@ -1133,6 +1143,19 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   font-size: 11px; color: var(--faint);
 }
+.jv-engine-stats {
+  width: 100%; padding: 7px 10px; box-sizing: border-box;
+  border: 1px solid var(--line2); border-radius: 8px; background: rgba(4, 7, 15, .55);
+  backdrop-filter: blur(7px); font-family: var(--mono); font-size: 8.5px; color: var(--faint);
+}
+.jv-engine-title { display: block; margin-bottom: 5px; letter-spacing: .14em; color: var(--dim); }
+.jv-engine-empty { display: block; padding: 2px 0; }
+.jv-engine-rows { display: grid; gap: 3px; }
+.jv-engine-row {
+  display: grid; grid-template-columns: minmax(70px, 1fr) repeat(3, auto); gap: 10px;
+  align-items: center; min-width: 0;
+}
+.jv-engine-row strong { overflow: hidden; text-overflow: ellipsis; color: var(--cyan); font-weight: 600; }
 
 /* ── Orb-Animationen (zentraler Kill-Switch wie A4: nur no-preference) ── */
 @media (prefers-reduced-motion: no-preference) {
@@ -1158,6 +1181,10 @@ button.jv-rrow:focus-visible { outline: 1px solid var(--cyan); outline-offset: 1
   }
   .jv-chatsheet .jv-orbhead { margin: 0 0 8px; flex: none; }
   .jv-chatsheet .jv-periphery { min-height: 44px; margin: 4px 0 8px; }
+  .jv-chatsheet .jv-engine-stats { padding: 7px 9px; }
+  .jv-chatsheet .jv-engine-row { grid-template-columns: 1fr 1fr; gap: 2px 10px; }
+  .jv-chatsheet .jv-engine-row strong { grid-column: 1 / -1; }
+  .jv-rating-btn { width: 36px; height: 36px; }
   .jv-chatsheet .jv-warte-slot { flex: none; }
   .jv-chatsheet .jv-ticker { flex: none; }
   /* Thread: eigene Scroll-Region, Graph/Hintergrund scrollt nicht mit. */
