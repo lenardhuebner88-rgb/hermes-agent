@@ -11075,10 +11075,17 @@ def _review_block_is_capability_only(
     if not normalized_parts:
         return False
     # Fail open for decomposition unless every structured reason/finding unit
-    # explicitly describes a capability gap. A marker mentioned incidentally
-    # must not hide a separate substantive review finding.
+    # and every independent clause explicitly describes a capability gap. A
+    # marker in a sibling clause (for example, ``code raises 500; per-file cap
+    # noted incidentally``) must not hide the substantive review finding.
     return all(
-        any(marker in part for marker in _REVIEW_CAPABILITY_MARKERS)
+        all(
+            any(marker in clause for marker in _REVIEW_CAPABILITY_MARKERS)
+            for clause in re.split(
+                r";+|\n(?=\s*(?:[-*]\s+|\d+[.)]\s+))", part
+            )
+            if clause.strip()
+        )
         for part in normalized_parts
     )
 

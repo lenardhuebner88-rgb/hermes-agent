@@ -2009,19 +2009,24 @@ def test_auto_decompose_still_lists_content_review_escalation(
     assert tid in decomp.list_triage_ids()
 
 
+@pytest.mark.parametrize(
+    ("reason", "findings"),
+    [
+        ("BLOCKED: empty graph raises 500; per-file cap noted incidentally", []),
+        (None, ["BLOCKED: empty graph raises 500; per-file cap noted incidentally"]),
+    ],
+    ids=["mixed_reason_only", "mixed_finding_only"],
+)
 def test_auto_decompose_still_lists_mixed_content_review_escalation(
-    kanban_home, review_gate_on
+    kanban_home, review_gate_on, reason, findings
 ):
     """AC-6: an incidental capability marker cannot hide a code finding."""
     with kb.connect_closing() as conn:
         tid = _escalate_review_block_to_triage(
             conn,
             verifier_approves=True,
-            reason=(
-                "Urteil: BLOCKED — die Suche liefert bei leerem Graph 500; "
-                "per-file cap ist nur ein zusaetzlicher Lane-Hinweis."
-            ),
-            findings=["empty-graph path raises instead of returning the empty result"],
+            reason=reason,
+            findings=findings,
         )
         assert kb.review_capability_park(conn, tid) is None
 
