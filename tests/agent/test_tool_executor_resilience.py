@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from agent.tool_executor import (
     _flush_session_db_after_tool_progress,
     _is_interpreter_shutdown_submit_error,
@@ -59,6 +61,33 @@ def test_flush_swallows_missing_method(caplog):
     # tolerated — best-effort means best-effort.
     agent = SimpleNamespace()
     _flush_session_db_after_tool_progress(agent, [], stage="mid_tool")  # no raise
+
+
+def test_flush_lets_base_exception_propagate():
+    """The swallow is deliberately narrowed to ``Exception``: a
+    KeyboardInterrupt / SystemExit from the flush MUST propagate. Broadening it
+    to a bare ``except:`` (a tempting "best-effort" hardening) would silently eat
+    Ctrl-C during a wedged DB lock — the agent could no longer be interrupted."""
+
+    def _ctrl_c(messages):
+        raise KeyboardInterrupt()
+
+    agent = SimpleNamespace(_flush_messages_to_session_db=_ctrl_c)
+    with pytest.raises(KeyboardInterrupt):
+        _flush_session_db_after_tool_progress(agent, [], stage="mid_tool")
+
+
+def test_flush_stage_label_reaches_the_warning_log(caplog):
+    """The ``stage`` label tells operators WHICH tool step lost persistence; it
+    must appear in the warning, not just the generic 'persistence failed'."""
+
+    def _boom(messages):
+        raise RuntimeError("locked")
+
+    agent = SimpleNamespace(_flush_messages_to_session_db=_boom)
+    with caplog.at_level(logging.WARNING):
+        _flush_session_db_after_tool_progress(agent, [], stage="after_write_file")
+    assert any("after_write_file" in r.getMessage() for r in caplog.records)
 
 
 # ─── _is_interpreter_shutdown_submit_error ───────────────────────────────────
