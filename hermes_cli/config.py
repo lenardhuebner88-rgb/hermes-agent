@@ -3000,7 +3000,9 @@ DEFAULT_CONFIG = {
         # runs 7595, 7615, and 7622 each exhausted a drifting 30-turn profile
         # default and forced operator salvage. 90 matches agent.max_turns while
         # remaining visible/overridable on the individual task; non-code cards
-        # and explicit task budgets are unchanged.
+        # and explicit task budgets are unchanged. Legacy premium build cards
+        # with kind: null are included because all three incident cards use
+        # that pre-kind shape; explicit non-code kinds remain excluded.
         "premium_build_max_iterations": 90,
         # Where a child task lands if the orchestrator can't match an
         # assignee to any installed profile. When unset, falls back to the

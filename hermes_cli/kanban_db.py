@@ -4584,10 +4584,16 @@ def _default_max_iterations_for_task(
     *,
     kanban_cfg: Optional[dict] = None,
 ) -> Optional[int]:
-    """Resolve the board default only for otherwise-unbounded premium builds."""
-    if str(assignee or "").strip().casefold() != "premium" or str(
-        kind or ""
-    ).strip().casefold() != "code":
+    """Resolve the board default only for otherwise-unbounded premium builds.
+
+    Historical build cards predate ``tasks.kind`` and therefore carry NULL;
+    explicit non-code kinds stay excluded.
+    """
+    kind_value = str(kind or "").strip().casefold()
+    if (
+        str(assignee or "").strip().casefold() != "premium"
+        or kind_value not in {"", "code"}
+    ):
         return None
     if kanban_cfg is None:
         try:

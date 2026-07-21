@@ -107,6 +107,19 @@ def test_premium_code_task_gets_documented_default_budget(kanban_home):
     assert task.max_iterations == expected
 
 
+def test_legacy_kindless_premium_build_gets_default_budget(kanban_home):
+    """The three incident cards used the pre-kind ``kind=NULL`` task shape."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="legacy premium build",
+            assignee="premium",
+        )
+        task = kb.get_task(conn, tid)
+    assert task.kind is None
+    assert task.max_iterations == 90
+
+
 def test_premium_code_explicit_budget_wins_and_non_code_stays_unset(kanban_home):
     with kb.connect() as conn:
         explicit_id = kb.create_task(
