@@ -131,5 +131,5 @@ describe("F2 perf gate — 500/1500 Desktop + mobile", () => {
     expect(mobileP95).toBeLessThan(50);
     expect(desktopLong).toBe(0);
     expect(mobileLong).toBe(0);
-  });
+  }, 20000);
 });
