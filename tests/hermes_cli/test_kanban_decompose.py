@@ -2032,10 +2032,10 @@ def test_auto_decompose_still_lists_content_review_escalation(
         "no_separator_finding_only",
     ],
 )
-def test_auto_decompose_still_lists_mixed_content_review_escalation(
+def test_auto_decompose_skips_mixed_content_review_with_verified_candidate(
     kanban_home, review_gate_on, reason, findings
 ):
-    """AC-6: an incidental capability marker cannot hide a code finding."""
+    """P2 AC-4: any verified candidate wins over mixed review findings."""
     with kb.connect_closing() as conn:
         tid = _escalate_review_block_to_triage(
             conn,
@@ -2045,7 +2045,7 @@ def test_auto_decompose_still_lists_mixed_content_review_escalation(
         )
         assert kb.review_capability_park(conn, tid) is None
 
-    assert tid in decomp.list_triage_ids()
+    assert tid not in decomp.list_triage_ids()
 
 
 def test_auto_decompose_still_lists_plain_manual_triage(kanban_home, review_gate_on):
@@ -2085,3 +2085,94 @@ def test_review_capability_park_reopens_after_a_fresh_candidate(
             review_gate=True,
         )
         assert kb.review_capability_park(conn, tid) is None
+
+
+def test_decompose_idempotency_reuses_auto_children_for_same_candidate(
+    kanban_home,
+):
+    children = [
+        {
+            "title": "Implement API",
+            "body": "  Add the endpoint.\n\nKeep compatibility.  ",
+            "assignee": "Coder",
+            "kind": "code",
+        },
+        {
+            "title": "Verify API",
+            "body": "Run focused integration tests.",
+            "assignee": "Reviewer",
+            "kind": "review",
+        },
+    ]
+    with kb.connect_closing() as conn:
+        root_id = kb.create_task(
+            conn, title="Idempotent root", assignee="planner", triage=True
+        )
+        first = kb.decompose_triage_task(
+            conn,
+            root_id,
+            root_assignee="planner",
+            children=children,
+            idempotency_base_sha=_CANDIDATE_SHA,
+        )
+        conn.execute("UPDATE tasks SET status = 'triage' WHERE id = ?", (root_id,))
+        second = kb.decompose_triage_task(
+            conn,
+            root_id,
+            root_assignee="planner",
+            children=[
+                {**children[0], "body": "Add the endpoint. Keep compatibility."},
+                children[1],
+            ],
+            idempotency_base_sha=_CANDIDATE_SHA,
+        )
+        auto_rows = conn.execute(
+            "SELECT id, idempotency_key FROM tasks WHERE id != ? AND status != 'archived'",
+            (root_id,),
+        ).fetchall()
+        event = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'decomposed' ORDER BY id DESC LIMIT 1",
+            (root_id,),
+        ).fetchone()
+
+    assert second == first
+    assert len(auto_rows) == 2
+    assert all(row["idempotency_key"].startswith("auto-decompose:") for row in auto_rows)
+    assert jsonlib.loads(event["payload"])["reused_child_ids"] == first
+
+
+def test_auto_decompose_skips_integration_pending_candidate(kanban_home, monkeypatch):
+    with kb.connect_closing() as conn:
+        root_id = kb.create_task(
+            conn, title="Pending candidate", assignee="coder", triage=True
+        )
+        kb.add_event(
+            conn,
+            root_id,
+            "submitted_for_review",
+            {"reviewed_commit": _CANDIDATE_SHA},
+        )
+        kb.add_event(
+            conn,
+            root_id,
+            "integration_parked",
+            {"candidate_commit": _CANDIDATE_SHA, "reason": "writer lease active"},
+        )
+        state = kb.decompose_candidate_state(conn, root_id)
+
+    assert state == {
+        "state": "integration_pending",
+        "candidate_sha": _CANDIDATE_SHA,
+        "event_kind": "integration_parked",
+    }
+    assert root_id not in decomp.list_triage_ids()
+
+    def fail_if_invoked(*_args, **_kwargs):
+        raise AssertionError("decomposer model must not run for a pending candidate")
+
+    monkeypatch.setattr(decomp, "_invoke_decomposer", fail_if_invoked)
+    outcome = decomp.decompose_task(root_id)
+    assert outcome.ok is True
+    assert outcome.fanout is False
+    assert outcome.child_ids == []
