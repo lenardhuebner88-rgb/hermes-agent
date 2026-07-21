@@ -515,14 +515,7 @@ def model_forces_max_completion_tokens(model: str) -> bool:
         return False
     if "/" in m:
         m = m.rsplit("/", 1)[-1]
-    return (
-        m.startswith("gpt-4o")
-        or m.startswith("gpt-4.1")
-        or m.startswith("gpt-5")
-        or m.startswith("o1")
-        or m.startswith("o3")
-        or m.startswith("o4")
-    )
+    return m.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"))
 
 
 def base_url_host_matches(base_url: str, domain: str) -> bool:
