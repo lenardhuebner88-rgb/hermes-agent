@@ -795,6 +795,27 @@ def invalidate_graph_cache() -> None:
         _cache_payload = None
 
 
+def cached_graph() -> dict[str, Any] | None:
+    """Return the cached graph snapshot, or ``None`` when nothing is cached.
+
+    Read-only companion to :func:`build_graph`: callers that only want to
+    *annotate* results against the graph (e.g. the B3 search's ``in_graph``
+    flag and node connections) must never trigger a multi-second rebuild.
+    """
+    with _cache_lock:
+        if _cache_payload is None or _clock() - _cache_created_at >= CACHE_TTL_SECONDS:
+            return None
+        return copy.deepcopy(_cache_payload)
+
+
+def graph_node_ids() -> set[str]:
+    """IDs of the currently cached graph nodes (empty when the cache is cold)."""
+    payload = cached_graph()
+    if not payload:
+        return set()
+    return {str(node["id"]) for node in payload.get("nodes", []) if node.get("id")}
+
+
 def build_graph(*, force_refresh: bool = False) -> dict[str, Any]:
     """Return a deep-copied cached graph, rebuilding after the 60-second TTL."""
     global _cache_created_at, _cache_payload
