@@ -16214,16 +16214,31 @@ def archive_task(
     historical no-op-successful behaviour.
     """
     fence_row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
+        "SELECT status, claim_lock, worker_pid, current_run_id "
+        "FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
-    if (
-        fence_row is not None
-        and fence_row["status"] == "running"
-        and fence_row["worker_pid"]
-    ):
+    if fence_row is None or fence_row["status"] == "archived":
+        return False
+    archive_snapshot = (
+        fence_row["status"],
+        fence_row["claim_lock"],
+        fence_row["worker_pid"],
+        fence_row["current_run_id"],
+    )
+    fenced_owner: Optional[tuple[Optional[str], int, Optional[int]]] = None
+    if fence_row["status"] == "running" and fence_row["worker_pid"]:
         worker_pid = int(fence_row["worker_pid"])
         claim_lock = fence_row["claim_lock"]
+        fenced_owner = (
+            claim_lock,
+            worker_pid,
+            (
+                int(fence_row["current_run_id"])
+                if fence_row["current_run_id"] is not None
+                else None
+            ),
+        )
         # Runs OUTSIDE any txn: the SIGTERM→grace→SIGKILL wait must not hold
         # the write lock (same contract as the complete/reclaim reap paths).
         termination = _terminate_reclaimed_worker(
@@ -16242,23 +16257,44 @@ def archive_task(
                 reason="archive_worker_alive",
             )
             return False
-        with write_txn(conn):
+    with write_txn(conn):
+        if fenced_owner is not None:
+            claim_lock, worker_pid, run_id = fenced_owner
+            # The process barrier ran outside the transaction. Revalidate the
+            # exact ownership generation before clearing board state: a stale
+            # reclaim can race the barrier and dispatch generation N+1. The
+            # archive request must lose that race rather than orphan the new
+            # worker.
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', "
+                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status = 'running' "
+                "  AND claim_lock IS ? AND worker_pid IS ? "
+                "  AND current_run_id IS ?",
+                (task_id, claim_lock, worker_pid, run_id),
+            )
+        else:
+            # Even a pid-less ready/review task can be claimed between the
+            # initial read and this transaction. Archive only the generation
+            # that the caller observed; a concurrent claim must win intact.
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'archived', "
+                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                "WHERE id = ? AND status IS ? "
+                "  AND claim_lock IS ? AND worker_pid IS ? "
+                "  AND current_run_id IS ?",
+                (task_id, *archive_snapshot),
+            )
+        if cur.rowcount != 1:
+            return False
+        if fenced_owner is not None:
             _append_event(
                 conn,
                 task_id,
                 "worker_reaped",
                 {"pid": worker_pid, "source": "archive_task", **termination},
-                run_id=_current_run_id(conn, task_id),
+                run_id=run_id,
             )
-    with write_txn(conn):
-        cur = conn.execute(
-            "UPDATE tasks SET status = 'archived', "
-            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'",
-            (task_id,),
-        )
-        if cur.rowcount != 1:
-            return False
         # If archive happened while a run was still in flight (e.g. user
         # archived a running task from the dashboard), close that run with
         # outcome='reclaimed' so attempt history isn't orphaned.

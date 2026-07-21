@@ -233,6 +233,73 @@ def test_archive_terminates_worker_group_before_releasing_ownership(kanban_home)
         assert run.outcome == "reclaimed"
 
 
+def test_archive_does_not_clear_a_new_claim_after_reaping_the_old_worker(
+    kanban_home, monkeypatch
+):
+    """Archive's final release is fenced to the worker generation it reaped."""
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="racy archive", assignee="premium")
+        old_claim = kb.claim_task(conn, task_id)
+        assert old_claim is not None
+        assert kb._set_worker_pid(
+            conn,
+            task_id,
+            43212,
+            expected_run_id=old_claim.current_run_id,
+            expected_claim_lock=old_claim.claim_lock,
+        )
+        replacement: dict[str, object] = {}
+
+        def reap_old_worker_then_reclaim(*_args, **_kwargs) -> dict:
+            # Model the precise race: the archive barrier confirms the old
+            # worker dead, then maintenance reclaims and dispatches generation
+            # N+1 before archive performs its final board update.
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_runs SET status = 'reclaimed', "
+                    "outcome = 'reclaimed', ended_at = 1 "
+                    "WHERE id = ? AND ended_at IS NULL",
+                    (old_claim.current_run_id,),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                    "WHERE id = ?",
+                    (task_id,),
+                )
+            new_claim = kb.claim_task(conn, task_id, claimer="host:new")
+            assert new_claim is not None
+            assert kb._set_worker_pid(
+                conn,
+                task_id,
+                54321,
+                expected_run_id=new_claim.current_run_id,
+                expected_claim_lock=new_claim.claim_lock,
+            )
+            replacement["claim"] = new_claim
+            return {
+                "prev_pid": 43212,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(
+            kb, "_terminate_reclaimed_worker", reap_old_worker_then_reclaim
+        )
+        assert kb.archive_task(conn, task_id) is False
+
+        new_claim = replacement["claim"]
+        task = kb.get_task(conn, task_id)
+        assert task.status == "running"
+        assert task.claim_lock == new_claim.claim_lock
+        assert task.current_run_id == new_claim.current_run_id
+        assert task.worker_pid == 54321
+        assert kb.get_run(conn, new_claim.current_run_id).ended_at is None
+        assert not _events(conn, task_id, "archived")
+
+
 def test_archive_of_already_dead_worker_sends_no_signal(kanban_home):
     """AC-4: an already-exited pid stays a no-op success (no signal at all)."""
     signalled: list[int] = []
