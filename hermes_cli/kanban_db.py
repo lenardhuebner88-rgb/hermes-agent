@@ -11156,6 +11156,103 @@ def _review_block_is_capability_only(
     )
 
 
+def decompose_candidate_state(
+    conn: sqlite3.Connection, task_id: str
+) -> Optional[dict[str, str]]:
+    """Return a candidate state that makes another automatic fan-out unsafe."""
+
+    revision = _latest_review_submission(conn, task_id)
+    candidate_sha = str((revision or {}).get("reviewed_commit") or "").strip()
+    if not candidate_sha:
+        submitted = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if submitted is not None:
+            try:
+                payload = json.loads(submitted["payload"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = {}
+            candidate_sha = str(
+                payload.get("reviewed_commit")
+                or payload.get("candidate_commit")
+                or payload.get("commit")
+                or ""
+            ).strip()
+
+    pending_kinds = (
+        "integration_pending",
+        "integration_parked",
+        "integration_retry_scheduled",
+        "children_approved_pending_root_integration",
+    )
+    placeholders = ",".join("?" for _ in pending_kinds)
+    pending = conn.execute(
+        f"SELECT id, kind, payload FROM task_events WHERE task_id = ? "
+        f"AND kind IN ({placeholders}) ORDER BY id DESC LIMIT 1",
+        (task_id, *pending_kinds),
+    ).fetchone()
+    if pending is not None:
+        merged = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? "
+            "AND kind = 'integration_merged' AND id > ? LIMIT 1",
+            (task_id, int(pending["id"])),
+        ).fetchone()
+        if merged is None:
+            try:
+                pending_payload = json.loads(pending["payload"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pending_payload = {}
+            pending_sha = str(
+                pending_payload.get("candidate_commit")
+                or pending_payload.get("reviewed_commit")
+                or pending_payload.get("commit")
+                or candidate_sha
+                or ""
+            ).strip()
+            return {
+                "state": "integration_pending",
+                "candidate_sha": pending_sha,
+                "event_kind": str(pending["kind"]),
+            }
+
+    if not candidate_sha:
+        return None
+    for run in conn.execute(
+        "SELECT verdict, metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC",
+        (task_id,),
+    ).fetchall():
+        metadata = _run_meta_dict(run["metadata"])
+        run_commit = str(
+            metadata.get("commit")
+            or metadata.get("reviewed_commit")
+            or metadata.get("candidate_commit")
+            or ""
+        ).strip()
+        if run_commit != candidate_sha:
+            continue
+        verdict = _normalize_review_verdict(run["verdict"] or metadata.get("review_verdict"))
+        if verdict == "APPROVED":
+            return {
+                "state": "verified",
+                "candidate_sha": candidate_sha,
+                "event_kind": "review_approved",
+            }
+        if verdict == "REQUEST_CHANGES":
+            break
+    return None
+
+
+def _auto_decompose_idempotency_key(
+    root_id: str, base_sha: str, child: Mapping[str, object]
+) -> str:
+    role = " ".join(str(child.get("assignee") or "unassigned").casefold().split())
+    body = " ".join(str(child.get("body") or "").split())
+    body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return f"auto-decompose:{root_id}:{base_sha.lower()}:{role}:{body_hash}"
+
+
 def review_capability_park(
     conn: sqlite3.Connection, task_id: str
 ) -> Optional[dict]:
@@ -15915,6 +16012,7 @@ def decompose_triage_task(
     initial_child_status: str = "todo",
     expected_root_status: str = "triage",
     validate_assignees: bool = False,
+    idempotency_base_sha: Optional[str] = None,
 ) -> Optional[list[str]]:
     """Fan a triage task out into child tasks and promote the root to ``todo``.
 
@@ -16056,6 +16154,7 @@ def decompose_triage_task(
     # _append_event calls.
     now = int(time.time())
     child_ids: list[str] = []
+    reused_child_ids: list[str] = []
     with write_txn(conn):
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path, epic_id, "
@@ -16067,6 +16166,14 @@ def decompose_triage_task(
             return None
         if root_row["status"] != expected_root_status:
             return None
+        if idempotency_base_sha and decompose_candidate_state(conn, task_id) is not None:
+            _append_event(
+                conn,
+                task_id,
+                "decompose_skipped_candidate",
+                {"idempotency_base_sha": idempotency_base_sha},
+            )
+            return []
         tenant = root_row["tenant"]
         # N-E3: children inherit the triage root's epic so a whole decomposed
         # tree rolls up under one epic. NULL root epic_id (the common case) =
@@ -16099,6 +16206,23 @@ def decompose_triage_task(
                 body=body if isinstance(body, str) else None,
                 kind=kind if isinstance(kind, str) else None,
             )
+            idempotency_key = None
+            if idempotency_base_sha:
+                key_child = dict(child)
+                key_child["assignee"] = assignee
+                idempotency_key = _auto_decompose_idempotency_key(
+                    task_id, idempotency_base_sha, key_child
+                )
+                existing = conn.execute(
+                    "SELECT id FROM tasks WHERE idempotency_key = ? "
+                    "AND status != 'archived' ORDER BY created_at, id LIMIT 1",
+                    (idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    existing_id = str(existing["id"])
+                    child_ids.append(existing_id)
+                    reused_child_ids.append(existing_id)
+                    continue
             # Per-child override wins; otherwise inherit the root's
             # workspace. A child that sets workspace_kind without a path
             # falls back to the root path only when kinds match (so a
@@ -16142,8 +16266,8 @@ def decompose_triage_task(
                 " workspace_path, tenant, created_at, created_by, "
                 " acceptance_criteria, epic_id, kind, "
                 " planspec_subtask_id, planspec_source, review_tier, "
-                " max_iterations) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " max_iterations, idempotency_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id,
                     title,
@@ -16168,6 +16292,7 @@ def decompose_triage_task(
                     if isinstance(child_review_tier, str)
                     else None,
                     child_max_iterations,
+                    idempotency_key,
                 ),
             )
             created_ev = {
@@ -16262,6 +16387,8 @@ def decompose_triage_task(
             "decomposed",
             {
                 "child_ids": child_ids,
+                "reused_child_ids": reused_child_ids,
+                "idempotency_base_sha": idempotency_base_sha,
                 "root_assignee": root_assignee,
             },
         )

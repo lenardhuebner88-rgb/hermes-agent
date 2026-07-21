@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import json
 import os
 import threading
 from pathlib import Path
@@ -221,6 +222,66 @@ def test_receipt_failure_retries_without_rerunning_release(kanban_home):
         assert second[0].state == "delivered"
         assert release_calls == [task_id]
         assert receipt_calls == [task_id, task_id]
+
+
+def test_final_receipt_supersedes_intermediate_with_final_runs_and_commits(
+    kanban_home, monkeypatch, tmp_path
+):
+    """A late successful root closeout must replace, but preserve, gave_up truth."""
+    receipt_dir = tmp_path / "receipts" / "auto"
+    monkeypatch.setenv("HERMES_AUTO_RECEIPT_DIR", str(receipt_dir))
+
+    with kb.connect_closing() as conn:
+        task_id = _queue_done(conn)
+        run_id = conn.execute(
+            "INSERT INTO task_runs(task_id, profile, status, started_at, ended_at, "
+            "outcome, summary, metadata) VALUES (?, 'integrator', 'done', 1, 2, "
+            "'completed', 'Integrated final candidate', ?) RETURNING id",
+            (task_id, json.dumps({"commit": "def456candidate"})),
+        ).fetchone()["id"]
+        kb.add_event(
+            conn,
+            task_id,
+            "integration_merged",
+            {"merge_commit": "abc123final", "candidate_commit": "def456candidate"},
+        )
+
+    receipt_dir.mkdir(parents=True)
+    intermediate = receipt_dir / f"{task_id}.md"
+    intermediate.write_text(
+        "---\ntask_id: %s\nstatus: gave_up\n---\n\nIntermediate gave_up receipt.\n"
+        % task_id,
+        encoding="utf-8",
+    )
+
+    with kb.connect_closing() as conn:
+        results = closeout.closeout_sweep(
+            conn, limit=10, release_runner=lambda _conn, _task_id: None
+        )
+    assert [result.state for result in results] == ["delivered"]
+
+    final_text = intermediate.read_text(encoding="utf-8")
+    assert 'status: "done"' in final_text
+    assert "finalized: true" in final_text
+    assert f"Run #{run_id}" in final_text
+    assert "abc123final" in final_text
+    assert "def456candidate" in final_text
+    assert "Supersedes intermediate receipt" in final_text
+
+    archives = list(receipt_dir.glob(f"{task_id}.superseded.*.md"))
+    assert len(archives) == 1
+    assert "status: gave_up" in archives[0].read_text(encoding="utf-8")
+    assert archives[0].name in final_text
+
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+            (task_id, closeout.CLOSEOUT_RECEIPT_WRITTEN),
+        ).fetchone()
+        payload = json.loads(row["payload"])
+    assert payload["supersedes"]["path"] == str(archives[0])
+    assert payload["supersedes"]["status"] == "gave_up"
 
 
 def test_unexpired_claim_holds_and_expired_lease_is_reclaimed(kanban_home):

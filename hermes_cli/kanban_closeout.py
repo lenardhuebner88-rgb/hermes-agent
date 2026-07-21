@@ -99,6 +99,9 @@ class CloseoutReceipt:
     result: str
     release_state: str
     release_payload: dict[str, Any]
+    runs: tuple[dict[str, Any], ...] = ()
+    integration_commits: tuple[str, ...] = ()
+    supersedes: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -713,6 +716,37 @@ def _receipt_context(conn: Any, task_id: str) -> CloseoutReceipt:
     pending = _latest_event(conn, task_id, {CLOSEOUT_PENDING})
     pending_payload = _json_payload(pending["payload"] if pending is not None else None)
     release_kind, release_payload = _release_state(conn, task_id)
+    runs: list[dict[str, Any]] = []
+    for run in conn.execute(
+        "SELECT id, profile, status, outcome, verdict, summary, metadata, "
+        "started_at, ended_at FROM task_runs WHERE task_id = ? ORDER BY id",
+        (task_id,),
+    ).fetchall():
+        metadata = _json_payload(run["metadata"])
+        runs.append(
+            {
+                "id": int(run["id"]),
+                "profile": run["profile"],
+                "status": run["status"],
+                "outcome": run["outcome"],
+                "verdict": run["verdict"],
+                "summary": run["summary"],
+                "commit": metadata.get("commit"),
+                "started_at": run["started_at"],
+                "ended_at": run["ended_at"],
+            }
+        )
+    integration_commits: list[str] = []
+    for event in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'integration_merged' ORDER BY id",
+        (task_id,),
+    ).fetchall():
+        payload = _json_payload(event["payload"])
+        for key in ("candidate_commit", "merge_commit", "commit"):
+            commit = str(payload.get(key) or "").strip()
+            if commit and commit not in integration_commits:
+                integration_commits.append(commit)
     return CloseoutReceipt(
         task_id=task_id,
         title=str(task.title or task_id),
@@ -723,6 +757,9 @@ def _receipt_context(conn: Any, task_id: str) -> CloseoutReceipt:
         result=str(task.result or ""),
         release_state=str(release_kind or "pending"),
         release_payload=release_payload,
+        runs=tuple(runs),
+        integration_commits=tuple(integration_commits),
+        supersedes=_superseded_receipt(task_id),
     )
 
 
@@ -739,6 +776,7 @@ def render_receipt(receipt: CloseoutReceipt) -> str:
         f"title: {_yaml_string(receipt.title)}",
         f"assignee: {_yaml_string(receipt.assignee)}",
         f"status: {_yaml_string(receipt.task_status)}",
+        "finalized: true",
         f"board: {_yaml_string(receipt.board)}",
         f"release_state: {_yaml_string(receipt.release_state)}",
         f"completed_at: {_yaml_string(timestamp)}",
@@ -759,8 +797,63 @@ def render_receipt(receipt: CloseoutReceipt) -> str:
         lines.extend(["", "## Summary", "", receipt.summary])
     if receipt.result:
         lines.extend(["", "## Result", "", receipt.result])
+    if receipt.runs:
+        lines.extend(["", "## Final runs", ""])
+        for run in receipt.runs:
+            details = [str(run.get("status") or "unknown")]
+            if run.get("outcome"):
+                details.append(str(run["outcome"]))
+            if run.get("verdict"):
+                details.append(str(run["verdict"]))
+            lines.append(f"- Run #{run['id']}: " + " / ".join(details))
+            if run.get("commit"):
+                lines.append(f"  - Commit: `{run['commit']}`")
+    if receipt.integration_commits:
+        lines.extend(["", "## Integration commits", ""])
+        lines.extend(f"- `{commit}`" for commit in receipt.integration_commits)
+    if receipt.supersedes:
+        path = Path(str(receipt.supersedes["path"]))
+        status = receipt.supersedes.get("status") or "unknown"
+        lines.extend(["", "## Supersedes intermediate receipt", ""])
+        lines.append(
+            f"- Replaced `{status}` receipt: [{path.name}]({path.name}) "
+            f"(`sha256:{receipt.supersedes['sha256']}`)"
+        )
     lines.append("")
     return "\n".join(lines)
+
+
+def _receipt_base_dir() -> Path:
+    return Path(os.environ.get("HERMES_AUTO_RECEIPT_DIR", str(AUTO_RECEIPT_DEFAULT_DIR)))
+
+
+def _receipt_status(content: str) -> Optional[str]:
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line.startswith("status:"):
+            return line.split(":", 1)[1].strip().strip("\"'") or None
+    return None
+
+
+def _superseded_receipt(task_id: str) -> Optional[dict[str, Any]]:
+    filename = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id)) + ".md"
+    target = _receipt_base_dir() / filename
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    if "finalized: true" in text:
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    archive = target.with_name(f"{target.stem}.superseded.{digest[:12]}.md")
+    return {
+        "source_path": str(target),
+        "path": str(archive),
+        "sha256": digest,
+        "size": len(raw),
+        "status": _receipt_status(text),
+    }
 
 
 def write_receipt_atomic(
@@ -768,6 +861,7 @@ def write_receipt_atomic(
     content: str,
     *,
     receipt_dir: Optional[Path | str] = None,
+    supersedes: Optional[dict[str, Any]] = None,
 ) -> ReceiptArtifact:
     """Durably replace ``<task_id>.md`` and return its content hash.
 
@@ -784,7 +878,41 @@ def write_receipt_atomic(
     digest = hashlib.sha256(data).hexdigest()
     fd = -1
     tmp_path: Optional[Path] = None
+    archive_tmp: Optional[Path] = None
     try:
+        if supersedes is not None:
+            current = target.read_bytes()
+            expected_hash = str(supersedes.get("sha256") or "")
+            current_hash = hashlib.sha256(current).hexdigest()
+            if current_hash != expected_hash:
+                raise RuntimeError(
+                    "receipt changed before finalization: "
+                    f"expected {expected_hash}, got {current_hash}"
+                )
+            archive = Path(str(supersedes["path"]))
+            expected_archive = target.with_name(
+                f"{target.stem}.superseded.{expected_hash[:12]}.md"
+            )
+            if archive != expected_archive:
+                raise RuntimeError(
+                    f"invalid superseded receipt archive path: {archive}"
+                )
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            if archive.exists():
+                archived_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+                if archived_hash != expected_hash:
+                    raise RuntimeError(f"superseded receipt hash mismatch: {archive}")
+            else:
+                archive_fd, archive_raw = tempfile.mkstemp(
+                    prefix=f".{archive.name}.", suffix=".tmp", dir=archive.parent
+                )
+                archive_tmp = Path(archive_raw)
+                with os.fdopen(archive_fd, "wb") as handle:
+                    handle.write(current)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(archive_tmp, archive)
+                archive_tmp = None
         fd, raw_path = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=base)
         tmp_path = Path(raw_path)
         with os.fdopen(fd, "wb") as handle:
@@ -802,17 +930,20 @@ def write_receipt_atomic(
     except Exception:
         if fd >= 0:
             os.close(fd)
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+        for pending_tmp in (tmp_path, archive_tmp):
+            if pending_tmp is not None:
+                try:
+                    pending_tmp.unlink()
+                except FileNotFoundError:
+                    pass
         raise
     return ReceiptArtifact(path=str(target), sha256=digest, size=len(data))
 
 
 def _default_receipt_writer(receipt: CloseoutReceipt) -> ReceiptArtifact:
-    return write_receipt_atomic(receipt.task_id, render_receipt(receipt))
+    return write_receipt_atomic(
+        receipt.task_id, render_receipt(receipt), supersedes=receipt.supersedes
+    )
 
 
 def _record_ambiguous(
@@ -1001,16 +1132,21 @@ def _drive_receipt(
         raise
 
     with _kb().write_txn(conn):
+        event_payload: dict[str, Any] = {
+            "path": artifact.path,
+            "sha256": artifact.sha256,
+            "size": artifact.size,
+            "release_event_id": release_event_id,
+        }
+        if receipt.supersedes:
+            event_payload["supersedes"] = {
+                "path": str(receipt.supersedes["path"]),
+                "sha256": receipt.supersedes["sha256"],
+                "size": receipt.supersedes["size"],
+                "status": receipt.supersedes.get("status"),
+            }
         _kb()._append_event(
-            conn,
-            claim.task_id,
-            CLOSEOUT_RECEIPT_WRITTEN,
-            {
-                "path": artifact.path,
-                "sha256": artifact.sha256,
-                "size": artifact.size,
-                "release_event_id": release_event_id,
-            },
+            conn, claim.task_id, CLOSEOUT_RECEIPT_WRITTEN, event_payload
         )
     return artifact
 

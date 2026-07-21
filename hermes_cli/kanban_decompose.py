@@ -36,10 +36,12 @@ Design notes
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1541,6 +1543,47 @@ def _invoke_decomposer(
     return parsed, None, None
 
 
+def _candidate_or_base_sha(
+    conn, task, candidate_state: Optional[dict[str, str]] = None
+) -> str:
+    candidate_sha = str((candidate_state or {}).get("candidate_sha") or "").strip()
+    if candidate_sha:
+        return candidate_sha
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'worker_base_prepared' ORDER BY id DESC LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if row is not None:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        for key in ("head", "merge_target_head", "previous_head"):
+            sha = str(payload.get(key) or "").strip()
+            if sha:
+                return sha
+    workspace = str(task.workspace_path or "").strip()
+    if workspace:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", workspace, "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            sha = completed.stdout.strip()
+            if sha:
+                return sha
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Non-project triage tasks have no Git base. A content-derived SHA keeps
+    # their retry key stable without pretending another repository's HEAD is relevant.
+    material = f"{task.id}\n{task.title}\n{task.body or ''}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def decompose_task(
     task_id: str,
     *,
@@ -1556,11 +1599,27 @@ def decompose_task(
     """
     with kb.connect_closing() as conn:
         task = kb.get_task(conn, task_id)
+        if task is not None:
+            candidate_state = kb.decompose_candidate_state(conn, task_id)
+            idempotency_base_sha = _candidate_or_base_sha(
+                conn, task, candidate_state
+            )
+        else:
+            candidate_state = None
+            idempotency_base_sha = ""
     if task is None:
         return DecomposeOutcome(task_id, False, "unknown task id")
     if task.status != "triage":
         return DecomposeOutcome(
             task_id, False, f"task is not in triage (status={task.status!r})"
+        )
+    if candidate_state is not None:
+        return DecomposeOutcome(
+            task_id,
+            True,
+            "existing " + candidate_state["state"] + " candidate; no auto-children",
+            fanout=False,
+            child_ids=[],
         )
 
     request = _prepare_decomposer_request(task, log_prefix="decompose")
@@ -1626,6 +1685,7 @@ def decompose_task(
                 author=audit_author,
                 auto_promote=auto_promote,
                 validate_assignees=True,
+                idempotency_base_sha=idempotency_base_sha,
             )
     except ValueError as exc:
         return DecomposeOutcome(task_id, False, f"DB rejected graph: {exc}")
@@ -1636,6 +1696,14 @@ def decompose_task(
     if child_ids is None:
         return DecomposeOutcome(
             task_id, False, "task moved out of triage before decomposition",
+        )
+    if not child_ids:
+        return DecomposeOutcome(
+            task_id,
+            True,
+            "candidate became verified or integration-pending; no auto-children",
+            fanout=False,
+            child_ids=[],
         )
 
     return DecomposeOutcome(
@@ -1656,8 +1724,8 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     bereits approved ist (``kb.review_capability_park``). Ein solcher Block ist
     ein Tool-/Operator-Park, kein neuer Fan-out-Auftrag — die automatische
     Zerlegung erzeugte dort zwei Doppel-Writer im selben Chain-Worktree (RCA
-    jarvis-b3-orchestration-2026-07-21). Manuelles ``decompose_task`` bleibt
-    unberührt.
+    jarvis-b3-orchestration-2026-07-21). Verifizierte oder bereits zur
+    Integration geparkte Candidates werden ebenfalls nicht erneut zerlegt.
     """
     keep: list[str] = []
     with kb.connect_closing() as conn:
@@ -1669,6 +1737,15 @@ def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
         )
         for row in rows:
             if (row.created_by or "") in kb.FUNNEL_CREATED_BY:
+                continue
+            candidate_state = kb.decompose_candidate_state(conn, row.id)
+            if candidate_state is not None:
+                logger.info(
+                    "kanban auto-decompose: skipping %s — %s candidate %s",
+                    row.id,
+                    candidate_state.get("state"),
+                    candidate_state.get("candidate_sha"),
+                )
                 continue
             park = kb.review_capability_park(conn, row.id)
             if park is not None:
