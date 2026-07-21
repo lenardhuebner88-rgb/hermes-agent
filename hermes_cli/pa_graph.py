@@ -89,9 +89,49 @@ class GraphPart:
     errors: list[dict[str, str]] = field(default_factory=list)
 
 
+# Absolute filesystem paths must never ride out through public API errors[].
+# Match multi-segment Unix paths and common home/root prefixes; leave short
+# tokens like "/api" alone.
+_ABS_FS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_+-])"
+    r"(?:"
+    r"/(?:home|Users|var|tmp|opt|etc|usr|root|mnt|media|data|private|Volumes)"
+    r"(?:/[^/\s,\"'`;)\]}>]+)+"
+    r"|/(?:[A-Za-z0-9._+-]+/){1,}[A-Za-z0-9._+-]+"
+    r")"
+)
+_WIN_ABS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_+-])"
+    r"[A-Za-z]:\\(?:[^\\/:*?\"<>|\r\n]+\\)*[^\\/:*?\"<>|\r\n]+"
+)
+
+
+def scrub_public_error_text(message: str) -> str:
+    """Strip absolute filesystem paths from a public-facing error string."""
+    text = str(message or "")
+    text = _ABS_FS_PATH_RE.sub("<path>", text)
+    text = _WIN_ABS_PATH_RE.sub("<path>", text)
+    return text
+
+
+def public_error_message(
+    exc: BaseException | str, *, include_type: bool = False
+) -> str:
+    """Format an exception/string for API errors[] without leaking abs paths."""
+    if isinstance(exc, BaseException):
+        detail = str(exc).strip()
+        name = type(exc).__name__
+        if include_type:
+            raw = f"{name}: {detail}" if detail else name
+        else:
+            raw = detail or name
+    else:
+        raw = str(exc).strip()
+    return scrub_public_error_text(raw)[:500]
+
+
 def _error(source: str, exc: BaseException | str) -> dict[str, str]:
-    message = str(exc).strip() or exc.__class__.__name__
-    return {"source": source, "error": message[:500]}
+    return {"source": source, "error": public_error_message(exc)}
 
 
 def _vault_root() -> Path:

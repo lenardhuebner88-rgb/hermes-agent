@@ -702,3 +702,127 @@ def test_cached_response_is_not_mutable_by_callers(wired):
     first["items"].clear()
     second = pa_search.search("Orchestrierung")
     assert second["items"], "cache must hand out copies, not shared state"
+
+
+# ---------------------------------------------------------------------------
+# Follow-up regressions (R1 path scrub, R2 targeted qmd lookup)
+# ---------------------------------------------------------------------------
+
+
+def test_missing_index_errors_do_not_leak_absolute_paths(wired, monkeypatch):
+    """R1: FileNotFound on qmd/kanban must not expose /home/... in errors[]."""
+    missing_qmd = Path("/home/not-a-real-user/.cache/qmd/index.sqlite")
+    missing_kanban = Path("/home/not-a-real-user/.hermes/kanban.db")
+    monkeypatch.setattr(pa_search, "_qmd_index_path", lambda: missing_qmd)
+    monkeypatch.setattr(
+        pa_search, "_kanban_location", lambda: (missing_kanban, "default")
+    )
+
+    response = _client().get("/api/pa/search", params={"q": "Orchestrierung"})
+    assert response.status_code == 200
+    payload = response.text
+    assert "/home/" not in payload
+    assert "not-a-real-user" not in payload
+
+    data = response.json()
+    by_source = {error["source"]: error["error"] for error in data["errors"]}
+    assert "vault" in by_source
+    assert "kanban" in by_source
+    # Diagnostic type/source still present; only the absolute path is scrubbed.
+    assert "FileNotFound" in by_source["vault"]
+    assert by_source["vault"].strip()
+    assert by_source["kanban"].strip()
+
+
+def test_public_error_scrub_keeps_non_path_detail():
+    """R1: scrub must preserve exception type + non-path messages."""
+    scrubbed = pa_graph.public_error_message(
+        RuntimeError("kanban kaputt"), include_type=True
+    )
+    assert "RuntimeError" in scrubbed
+    assert "kanban kaputt" in scrubbed
+    assert "/home/" not in scrubbed
+
+    path_err = pa_graph.public_error_message(
+        FileNotFoundError("/home/piet/.cache/qmd/index.sqlite"),
+        include_type=True,
+    )
+    assert "FileNotFoundError" in path_err
+    assert "/home/" not in path_err
+    assert "piet" not in path_err
+
+
+class _SpySqliteConn:
+    """Proxy — sqlite3.Connection.execute is read-only on this Python."""
+
+    def __init__(self, conn: sqlite3.Connection, sink: list[tuple[str, tuple]]):
+        self._conn = conn
+        self._sink = sink
+
+    def execute(self, sql, parameters=()):
+        params = tuple(parameters) if parameters is not None else ()
+        self._sink.append((str(sql), params))
+        return self._conn.execute(sql, parameters)
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def test_qmd_vault_note_loads_single_content_row(wired, monkeypatch):
+    """R2: node preview must not materialize the whole qmd content corpus."""
+    executed: list[tuple[str, tuple]] = []
+    path_calls = {"n": 0}
+    real_paths = pa_search._qmd_vault_paths
+    real_open = pa_graph._open_sqlite_ro
+
+    def counting_paths():
+        path_calls["n"] += 1
+        return real_paths()
+
+    def spy_open(path):
+        return _SpySqliteConn(real_open(path), executed)
+
+    monkeypatch.setattr(pa_search, "_qmd_vault_paths", counting_paths)
+    monkeypatch.setattr(pa_graph, "_open_sqlite_ro", spy_open)
+
+    hit = pa_search._qmd_vault_note("00-canon/uni-konzept.md")
+    assert hit is not None
+    indexed_path, body = hit
+    assert "uni-konzept" in indexed_path.lower().replace("_", "-")
+    assert "Uni-Konzept" in body or "Orchestrierung" in body
+    assert path_calls["n"] >= 1, "must resolve via _qmd_vault_paths before content load"
+
+    content_queries = [
+        (sql, params)
+        for sql, params in executed
+        if "doc" in sql.lower() and "content" in sql.lower()
+    ]
+    assert content_queries, f"expected a content load, saw: {executed!r}"
+    for sql, params in content_queries:
+        lowered = sql.lower()
+        assert "where" in lowered
+        assert "path" in lowered
+        assert "?" in sql
+        assert params, "content load must bind the resolved path"
+        # Must not pull the whole corpus via a bare metadata LIMIT alone.
+        assert "path = ?" in lowered.replace("  ", " ") or "d.path = ?" in lowered
+
+
+def test_qmd_vault_note_casefold_and_rewrite_still_resolve(wired):
+    """R2 correctness: qmd rewrite + casefold ids keep working after targeted lookup."""
+    hit = pa_search._qmd_vault_note("00-canon/uni-konzept.md")
+    assert hit is not None
+    assert "Orchestrierung" in hit[1]
+
+    unicode_id = pa_graph._normalize_vault_path("00-Canon/Übungs Notiz Größe.md")
+    unicode_hit = pa_search._qmd_vault_note(unicode_id)
+    assert unicode_hit is not None
+    assert "Unicode" in unicode_hit[1] or "Orchestrierung" in unicode_hit[1]
+
+    rewrite_id = pa_graph._normalize_vault_path(_UNDERSCORE_NOTE_INDEXED)
+    rewrite_hit = pa_search._qmd_vault_note(rewrite_id)
+    assert rewrite_hit is not None
+    assert rewrite_hit[0] == _UNDERSCORE_NOTE_INDEXED
+    assert "Orchestrierung" in rewrite_hit[1]
+
+    assert pa_search._qmd_vault_note("00-canon/does-not-exist.md") is None

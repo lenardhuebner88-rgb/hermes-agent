@@ -470,7 +470,12 @@ def _execute_search(query: str, limit: int) -> dict[str, Any]:
                 lambda fn=fn, cap=cap: fn(query, cap), SOURCE_TIMEOUT_SECONDS
             )
         except BaseException as exc:  # noqa: BLE001 — one source must not sink the request
-            errors.append({"source": name, "error": f"{type(exc).__name__}: {exc}"[:500]})
+            errors.append(
+                {
+                    "source": name,
+                    "error": pa_graph.public_error_message(exc, include_type=True),
+                }
+            )
             continue
         bucket: list[dict[str, Any]] = []
         for hit in hits or []:
@@ -678,31 +683,37 @@ def _qmd_vault_note(normalized: str) -> tuple[str, str] | None:
 
     The index is the authoritative bridge between an id and its note: qmd rewrites
     paths when indexing (leading ``_`` stripped, ``_`` -> ``-``), so the id spelling
-    frequently has no counterpart on disk. Reading the indexed content keeps node
-    preview O(1)-ish instead of walking a 90k-file vault, and never touches the
-    filesystem — so no path can escape the vault by construction.
+    frequently has no counterpart on disk. Path matching reuses the metadata-only
+    :func:`_qmd_vault_paths` scan; body content is then loaded with a single
+    ``WHERE d.path = ?`` probe so a miss never materializes the whole corpus.
     """
     target = _loose_vault_key(normalized)
-    try:
-        with contextlib.closing(pa_graph._open_sqlite_ro(_qmd_index_path())) as conn:
-            rows = conn.execute(
-                "SELECT d.path AS path, c.doc AS doc FROM documents d "
-                "JOIN content c ON c.hash = d.hash "
-                "WHERE d.collection = 'vault' AND d.active = 1 LIMIT ?",
-                (pa_graph.QMD_METADATA_ROW_LIMIT,),
-            ).fetchall()
-    except Exception:
-        return None
-    for row in rows:
-        indexed = str(row["path"] or "")
+    indexed_path: str | None = None
+    for indexed in _qmd_vault_paths():
         if not indexed:
             continue
         if (
             pa_graph._normalize_vault_path(indexed) == normalized
             or _loose_vault_key(indexed) == target
         ):
-            return indexed, str(row["doc"] or "")
-    return None
+            indexed_path = indexed
+            break
+    if indexed_path is None:
+        return None
+    try:
+        with contextlib.closing(pa_graph._open_sqlite_ro(_qmd_index_path())) as conn:
+            row = conn.execute(
+                "SELECT d.path AS path, c.doc AS doc FROM documents d "
+                "JOIN content c ON c.hash = d.hash "
+                "WHERE d.collection = 'vault' AND d.active = 1 AND d.path = ? "
+                "LIMIT 1",
+                (indexed_path,),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    return str(row["path"] or indexed_path), str(row["doc"] or "")
 
 
 def _resolve_vault_file(normalized: str, *, deep: bool = True) -> Path | None:
