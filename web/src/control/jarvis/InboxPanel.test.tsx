@@ -185,10 +185,10 @@ afterEach(() => {
 });
 
 describe("InboxPanel (/api/pa/inbox-Items)", () => {
-  it("S8: Decision-WHY steht unter der Summary und verweist per title auf die Rohquelle", async () => {
+  it("S8: Decision-WHY steht unter der Summary und verweist per title auf die Rohquelle", () => {
     renderPanel([GATE_ITEM_WITH_SUMMARY]);
 
-    const card = await screen.findByTestId("jv-inbox-task-t_sum1");
+    const card = screen.getByTestId("jv-inbox-t-t_sum1");
     const why = card.querySelector(".jv-decision-why");
     expect(why).toBeTruthy();
     expect(why?.textContent).toContain("Warum");
@@ -200,10 +200,10 @@ describe("InboxPanel (/api/pa/inbox-Items)", () => {
     expect(why?.getAttribute("title")).toBe(GATE_ITEM_WITH_SUMMARY.title);
   });
 
-  it("S8: fehlende WHY-Felder erzeugen clientseitig keine erfundene Begründung", async () => {
+  it("S8: fehlende WHY-Felder erzeugen clientseitig keine erfundene Begründung", () => {
     renderPanel([GATE_ITEM]);
 
-    const card = await screen.findByTestId("jv-inbox-task-t_def456");
+    const card = screen.getByTestId("jv-inbox-t-t_def456");
     expect(card.querySelector(".jv-decision-why")).toBeNull();
     expect(card.textContent).not.toContain("Warum");
     expect(card.textContent).not.toContain("Bei Ablehnung");

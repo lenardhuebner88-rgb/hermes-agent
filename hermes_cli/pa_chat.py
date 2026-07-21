@@ -813,7 +813,7 @@ def _context_memory_section(
 
 
 _PENDING_DECISION_SQL = (
-    "SELECT id, title, status, freigabe, block_kind, created_at "
+    "SELECT id, title, body, status, freigabe, block_kind, created_at "
     "FROM tasks WHERE "
     "(status = 'blocked' AND block_kind = 'needs_input') "
     "OR (freigabe IS NOT NULL AND status = 'scheduled')"
@@ -1341,8 +1341,10 @@ def build_inbox() -> dict[str, Any]:
     instead of hiding the other sources (same contract as the context pack).
     Sorted by block radius, then newest first.
 
-    S7.6: jedes Item bekommt ``summary`` (destillierter Titel ≤80 Zeichen);
-    ``pa_action``-Payload bleibt unberührt, Feld ist additiv.
+    S7.6: jedes Item bekommt ``summary`` (destillierter Titel ≤80 Zeichen).
+    S8: Kanban-Items bekommen zusätzlich ein deterministisch destilliertes WHY;
+    fehlende oder kaputte PlanSpec-Evidenz wird pro Karte ehrlich isoliert.
+    ``pa_action``-Payload bleibt unberührt, die Felder sind additiv.
     """
     from hermes_cli.pa_titles import INBOX_SUMMARY_LIMIT, distill_title
 
@@ -1385,6 +1387,14 @@ def build_inbox() -> dict[str, Any]:
             for row in conn.execute(_PENDING_DECISION_SQL).fetchall():
                 is_gate = row["freigabe"] is not None and row["status"] == "scheduled"
                 title = row["title"]
+                try:
+                    why, consequence_on_decline = distill_decision_why(row["body"])
+                except Exception as exc:
+                    _log.warning(
+                        "Decision-WHY extraction failed for %s: %s", row["id"], exc
+                    )
+                    why = INBOX_WHY_FALLBACK
+                    consequence_on_decline = INBOX_DECLINE_FALLBACK
                 items.append(
                     {
                         "type": "freigabe_gate" if is_gate else "held_task",
@@ -1392,6 +1402,8 @@ def build_inbox() -> dict[str, Any]:
                         "card_id": row["id"],
                         "title": title,
                         "summary": distill_title(title, limit=INBOX_SUMMARY_LIMIT),
+                        "why": why,
+                        "consequence_on_decline": consequence_on_decline,
                         "status": row["status"],
                         "freigabe": row["freigabe"],
                         "block_radius": _kanban_block_radius(conn, row["id"]),
