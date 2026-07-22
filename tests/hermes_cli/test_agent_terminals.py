@@ -486,10 +486,10 @@ def _fake_agent_cli(home: Path, name: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     version_line = {
         "claude": "2.1.217 (Claude Code)",
-        "codex": "codex-cli 0.144.6",
+        "codex": "codex-cli 0.145.0",
         "grok": "grok 0.2.106 (fake) [stable]",
         "qwen": "0.20.0",
-        "kimi": "0.28.1",
+        "kimi": "0.29.0",
     }.get(name, "0.0.0")
     help_text = {
         "claude": "  -r, --resume [value]\\n  --fork-session",
@@ -2292,10 +2292,10 @@ def _argv_logging_cli(home: Path, name: str) -> tuple[Path, Path]:
         log.unlink()
     version_line = {
         "claude": "2.1.217 (Claude Code)",
-        "codex": "codex-cli 0.144.6",
+        "codex": "codex-cli 0.145.0",
         "grok": "grok 0.2.106 (fake) [stable]",
         "qwen": "0.20.0",
-        "kimi": "0.28.1",
+        "kimi": "0.29.0",
     }.get(name, "0.0.0")
     help_text = {
         "claude": "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
@@ -2634,7 +2634,7 @@ def test_isolated_write_validates_binary_before_worktree(
     assert not service.terminal_runs_root().exists()
 
 
-def test_cli_probe_fail_closed_unknown_version_and_missing_help(tmp_path: Path) -> None:
+def test_cli_probe_fail_closed_incompatible_major_and_missing_help(tmp_path: Path) -> None:
     from hermes_cli import agent_terminals as at
 
     at.clear_cli_probe_cache()
@@ -2650,12 +2650,21 @@ def test_cli_probe_fail_closed_unknown_version_and_missing_help(tmp_path: Path) 
     unknown = tmp_path / "claude-unknown"
     unknown.write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then echo "2.1.218 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then echo "3.0.0 (Claude Code)"; exit 0; fi\n'
         'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n  --fork-session\\n"; exit 0; fi\n'
         "exit 0\n",
         encoding="utf-8",
     )
     unknown.chmod(0o755)
+    too_old = tmp_path / "claude-too-old"
+    too_old.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "2.1.216 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n  --fork-session\\n"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    too_old.chmod(0o755)
     no_fork = tmp_path / "claude-nofork"
     no_fork.write_text(
         "#!/bin/sh\n"
@@ -2678,6 +2687,7 @@ def test_cli_probe_fail_closed_unknown_version_and_missing_help(tmp_path: Path) 
     assert unknown_actions["fresh"] is False
     assert unknown_actions["resume"] is False
     assert unknown_actions["fork"] is False
+    assert at.probe_agent_cli_actions("claude", too_old)["fresh"] is False
     service = at.TmuxAgentSessionService(hermes_home=tmp_path / "hermes")
     with pytest.raises(at.CapabilityError, match="fresh start is not available"):
         service.build_agent_argv("claude", binary=unknown, action="fresh")
@@ -2693,6 +2703,66 @@ def test_cli_probe_fail_closed_unknown_version_and_missing_help(tmp_path: Path) 
     assert codex_on_claude_binary["fresh"] is False
     assert codex_on_claude_binary["resume"] is False
     assert codex_on_claude_binary["fork"] is False
+
+
+@pytest.mark.parametrize(
+    ("kind", "version_line", "help_text", "expected"),
+    [
+        (
+            "claude",
+            "2.9.0 (Claude Code)",
+            "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
+            {"resume": True, "fork": True, "session_id": True},
+        ),
+        (
+            "codex",
+            "codex-cli 0.999.0",
+            "  resume          Resume a previous session\\n  fork            Fork a previous session",
+            {"resume": True, "fork": True, "session_id": False},
+        ),
+        (
+            "grok",
+            "grok 0.99.0 (future) [stable]",
+            "  -r, --resume [<SESSION_ID>]\\n      --fork-session\\n  -s, --session-id <SESSION_ID>",
+            {"resume": True, "fork": True, "session_id": True},
+        ),
+        (
+            "qwen",
+            "0.99.0",
+            "  -r, --resume              Resume a specific session",
+            {"resume": True, "fork": False, "session_id": False},
+        ),
+        (
+            "kimi",
+            "0.99.0",
+            "Usage: kimi [OPTIONS]",
+            {"resume": False, "fork": False, "session_id": False},
+        ),
+    ],
+)
+def test_cli_probe_accepts_future_minor_updates_with_matching_help(
+    tmp_path: Path,
+    kind: str,
+    version_line: str,
+    help_text: str,
+    expected: dict[str, bool],
+) -> None:
+    from hermes_cli import agent_terminals as at
+
+    binary = tmp_path / kind
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "--version" ]; then echo "{version_line}"; exit 0; fi\n'
+        f'if [ "$1" = "--help" ]; then printf "%b\\n" "{help_text}"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+
+    actions = at.probe_agent_cli_actions(kind, binary)
+    assert actions["fresh"] is True
+    for action, available in expected.items():
+        assert actions[action] is available
 
 
 def test_resolve_workdir_rejects_non_manifest_terminal_path(tmp_path: Path) -> None:

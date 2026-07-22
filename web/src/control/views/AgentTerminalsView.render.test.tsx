@@ -1614,7 +1614,7 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
 
     expect((screen.getByRole("button", { name: "Session starten" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText(/installierte CLI-Version oder Hilfe/)).toBeTruthy();
+    expect(screen.getByText(/unterstützten Mindestversion.*Major-Version.*Hilfe-Signatur/)).toBeTruthy();
   });
 
   it("opens the create-session modal and resets a disappeared worktree localStorage key to home after capability load", async () => {

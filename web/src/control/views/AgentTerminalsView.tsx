@@ -2598,7 +2598,8 @@ export function AgentTerminalsView() {
       )}
       {!freshEnabled && (
         <div className="rounded-card border border-status-warn/30 bg-status-warn/10 p-2 text-micro text-status-warn" role="status">
-          Fresh ist für {createKind} disabled — installierte CLI-Version oder Hilfe entspricht nicht der serverseitigen Allowlist.
+          Fresh ist für {createKind} deaktiviert — CLI fehlt, liegt unter der unterstützten Mindestversion,
+          hat eine neue Major-Version oder ihre Hilfe-Signatur ist inkompatibel.
         </div>
       )}
       {leanPrerequisite && (

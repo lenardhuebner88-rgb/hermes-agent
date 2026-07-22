@@ -128,17 +128,20 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
     },
 }
 
-# Closed allowlist of installed CLI semantics. Unknown version, probe failure,
-# missing flag tokens, or changed help disables Resume/Fork. Lean/Compact are
-# intentionally absent — never inferred from help.
+# Forward-compatible policy for installed CLI semantics. Patch/minor updates
+# within the proven product major stay usable when their version/help contract
+# still matches. Older versions, major upgrades, probe failures, or changed
+# help signatures fail closed. Lean/Compact are intentionally absent — never
+# inferred from help.
 _CLI_PROBE_TIMEOUT_SECONDS = 1.5
-_CLI_CAPABILITY_ALLOWLIST: dict[str, dict[str, object]] = {
+_CLI_CAPABILITY_POLICIES: dict[str, dict[str, object]] = {
     "claude": {
         "version_re": re.compile(
             r"^\s*(?P<version>\d+\.\d+\.\d+)\s+\(Claude Code\)\s*$",
             re.IGNORECASE,
         ),
-        "versions": frozenset({"2.1.217"}),
+        "min_version": (2, 1, 217),
+        "compatible_major": 2,
         "help_patterns": {
             "resume": re.compile(r"^\s*-r,\s*--resume(?:\s|\[|<)", re.MULTILINE),
             "fork": re.compile(r"^\s*--fork-session\b", re.MULTILINE),
@@ -153,7 +156,8 @@ _CLI_CAPABILITY_ALLOWLIST: dict[str, dict[str, object]] = {
             r"^\s*codex-cli\s+(?P<version>\d+\.\d+\.\d+)\s*$",
             re.IGNORECASE,
         ),
-        "versions": frozenset({"0.144.6"}),
+        "min_version": (0, 144, 6),
+        "compatible_major": 0,
         "help_patterns": {
             "resume": re.compile(r"^\s*resume\s+", re.MULTILINE),
             "fork": re.compile(r"^\s*fork\s+", re.MULTILINE),
@@ -164,7 +168,8 @@ _CLI_CAPABILITY_ALLOWLIST: dict[str, dict[str, object]] = {
             r"^\s*grok\s+(?P<version>\d+\.\d+\.\d+)(?:\s+.*)?$",
             re.IGNORECASE,
         ),
-        "versions": frozenset({"0.2.106"}),
+        "min_version": (0, 2, 106),
+        "compatible_major": 0,
         "help_patterns": {
             "resume": re.compile(r"^\s*-r,\s*--resume(?:\s|\[|<)", re.MULTILINE),
             "fork": re.compile(r"^\s*--fork-session\b", re.MULTILINE),
@@ -176,14 +181,16 @@ _CLI_CAPABILITY_ALLOWLIST: dict[str, dict[str, object]] = {
     },
     "qwen": {
         "version_re": re.compile(r"^\s*(?P<version>\d+\.\d+\.\d+)\s*$"),
-        "versions": frozenset({"0.20.0"}),
+        "min_version": (0, 20, 0),
+        "compatible_major": 0,
         "help_patterns": {
             "resume": re.compile(r"^\s*-r,\s*--resume\b", re.MULTILINE),
         },
     },
     "kimi": {
         "version_re": re.compile(r"^\s*(?P<version>\d+\.\d+\.\d+)\s*$"),
-        "versions": frozenset({"0.28.1"}),
+        "min_version": (0, 28, 1),
+        "compatible_major": 0,
         "help_patterns": {},
     },
 }
@@ -229,8 +236,27 @@ def _run_cli_probe(binary: Path, flag: str) -> tuple[bool, str]:
     return completed.returncode == 0, output
 
 
+def _cli_version_is_compatible(version: str, policy: Mapping[str, object]) -> bool:
+    """Accept proven product majors without pinning every patch/minor release."""
+    try:
+        parsed = tuple(int(part) for part in version.split("."))
+    except ValueError:
+        return False
+    minimum = policy.get("min_version")
+    compatible_major = policy.get("compatible_major")
+    if (
+        len(parsed) != 3
+        or not isinstance(minimum, tuple)
+        or len(minimum) != 3
+        or not all(isinstance(part, int) for part in minimum)
+        or not isinstance(compatible_major, int)
+    ):
+        return False
+    return parsed[0] == compatible_major and parsed >= minimum
+
+
 def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
-    """Fail-closed Fresh/Resume/Fork availability from version+help allowlist."""
+    """Fail-closed Fresh/Resume/Fork availability from version/help policy."""
     base = {
         "fresh": kind == "hermes",
         "resume": False,
@@ -244,16 +270,16 @@ def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
     if not isinstance(static, dict):
         return base
     # Hermes is our own stable entrypoint. Every external CLI, including a
-    # plain Fresh launch, stays disabled until exact version+help semantics
-    # match the closed allowlist below.
+    # plain Fresh launch, stays disabled until the compatible version range and
+    # action-specific help signatures match the closed policy below.
     if kind == "hermes":
         base["fresh"] = bool(static.get("fresh", True))
         return base
     if binary is None:
         return base
-    allow = _CLI_CAPABILITY_ALLOWLIST.get(kind)
-    if not isinstance(allow, dict):
-        # Agents without a probe allowlist keep static resume/fork disabled
+    policy = _CLI_CAPABILITY_POLICIES.get(kind)
+    if not isinstance(policy, dict):
+        # Agents without a probe policy keep static resume/fork disabled
         # unless the static matrix already disables them (hermes/kimi).
         return base
     try:
@@ -275,26 +301,26 @@ def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
 
     version_ok, version_out = _run_cli_probe(resolved, "--version")
     help_ok, help_out = _run_cli_probe(resolved, "--help")
-    version_re = allow.get("version_re")
-    versions = allow.get("versions")
+    version_re = policy.get("version_re")
     if (
         not version_ok
         or not help_ok
         or not isinstance(version_re, re.Pattern)
-        or not isinstance(versions, frozenset)
         or not version_out.strip()
     ):
         _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
         return base
     first_line = next((ln.strip() for ln in version_out.splitlines() if ln.strip()), "")
     version_match = version_re.fullmatch(first_line)
-    if version_match is None or version_match.group("version") not in versions:
+    if version_match is None or not _cli_version_is_compatible(
+        version_match.group("version"), policy
+    ):
         _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
         return base
     base["fresh"] = bool(static.get("fresh", True))
     help_patterns = (
-        allow.get("help_patterns")
-        if isinstance(allow.get("help_patterns"), dict)
+        policy.get("help_patterns")
+        if isinstance(policy.get("help_patterns"), dict)
         else {}
     )
     assert isinstance(help_patterns, dict)
