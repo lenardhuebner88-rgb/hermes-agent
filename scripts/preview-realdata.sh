@@ -35,7 +35,7 @@
 # ui-shot.sh. PREVIEW_TOKEN wird fuer curl/API-Aufrufe zusaetzlich ausgegeben.
 #
 # Usage:
-#   scripts/preview-realdata.sh [--home <seed-home>] [--port <p>] [--no-build] [--keep]
+#   scripts/preview-realdata.sh [--home <seed-home>] [--port <p>] [--scenario realdata|terminal_bridge] [--route <route>] [--no-build] [--keep]
 #
 #   --home <dir>   Seed-Home (default: mktemp -d /tmp/hermes-preview-seed.XXXX).
 #                  Ein selbst angegebenes Home wird NIEMALS geloescht.
@@ -60,6 +60,9 @@ SEED_HOME=""
 PORT=""
 NO_BUILD=0
 KEEP=0
+SCENARIO=realdata
+ROUTE=control
+SEED_FIXTURE_DB=0
 
 usage() { sed -n '2,60p' "${BASH_SOURCE[0]}"; exit "${1:-0}"; }
 
@@ -67,6 +70,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --home) SEED_HOME="${2:?--home braucht ein Verzeichnis}"; shift 2 ;;
     --port) PORT="${2:?--port braucht eine Nummer}"; shift 2 ;;
+    --scenario) SCENARIO="${2:?--scenario braucht einen Namen}"; shift 2 ;;
+    --route) ROUTE="${2:?--route braucht einen Namen}"; shift 2 ;;
     --no-build) NO_BUILD=1; shift ;;
     --keep) KEEP=1; shift ;;
     -h|--help) usage 0 ;;
@@ -114,15 +119,29 @@ d.close(); s.close()
 PYEOF
 }
 
-log "Seed-Home: $SEED_HOME (Quelle: $SRC_HOME, read-only)"
-copy_db state.db
-copy_db kanban.db
-copy_db projects.db
+if [ "$SCENARIO" = "terminal_bridge" ]; then
+  # Fixture mode is intentionally disconnected from every live Hermes path.
+  # The branch server initializes this empty board in its own sandbox.
+  SEED_FIXTURE_DB=1
+  : >"$SEED_HOME/kanban.db"
+  chmod 600 "$SEED_HOME/kanban.db"
+  mkdir -p "$SEED_HOME/tmux"
+  chmod 700 "$SEED_HOME/tmux"
+  log "Terminal-Bridge-Fixture: isoliertes Home/Board/tmux"
+else
+  [ "$SCENARIO" = "realdata" ] || die "unbekanntes Scenario: $SCENARIO"
+  log "Seed-Home: $SEED_HOME (Quelle: $SRC_HOME, read-only)"
+  copy_db state.db
+  copy_db kanban.db
+  copy_db projects.db
 
-# ------------------------------------------------------- seed: YAML configs
-for f in projects.yaml profile.yaml config.yaml; do
-  if [ -f "$SRC_HOME/$f" ]; then cp -p "$SRC_HOME/$f" "$SEED_HOME/$f"; fi
-done
+  # Live-derived config is permitted only in explicit realdata mode.
+  for f in projects.yaml profile.yaml config.yaml; do
+    if [ -f "$SRC_HOME/$f" ]; then cp -p "$SRC_HOME/$f" "$SEED_HOME/$f"; fi
+  done
+fi
+mkdir -p "$SEED_HOME/tmux"
+chmod 700 "$SEED_HOME/tmux"
 
 # ------------------------------------------------------------------ build
 if [ "$NO_BUILD" = "0" ]; then
@@ -170,7 +189,10 @@ log "Starte Dashboard auf 127.0.0.1:$PORT (HERMES_HOME=$SEED_HOME) ..."
 # </dev/null: kein geerbter stdout/stdin-fd haelt die Pipe des Aufrufers offen
 # (sonst haengt $(preview-realdata.sh --keep) beim Command-Substitution).
 ( cd "$REPO_ROOT" && \
-  HERMES_HOME="$SEED_HOME" PYTHONPATH="$REPO_ROOT" \
+  env -u HERMES_KANBAN_TASK -u HERMES_KANBAN_WORKSPACE -u HERMES_KANBAN_BOARD \
+      -u HERMES_KANBAN_BRANCH -u HERMES_KANBAN_WORKTREE \
+      HERMES_HOME="$SEED_HOME" HERMES_KANBAN_DB="$SEED_HOME/kanban.db" \
+      HERMES_SANDBOX_MODE=1 TMUX_TMPDIR="$SEED_HOME/tmux" PYTHONPATH="$REPO_ROOT" \
   exec "$PY" -m hermes_cli.main dashboard \
     --host 127.0.0.1 --port "$PORT" --no-open --skip-build --isolated \
 ) >"$SEED_HOME/server.log" 2>&1 </dev/null &

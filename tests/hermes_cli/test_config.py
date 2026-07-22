@@ -2080,3 +2080,7 @@ def test_terminal_candidate_submit_is_default_off_with_empty_allowlist():
 
     assert candidate["enabled"] is False
     assert candidate["repo_allowlist"] == []
+
+
+def test_default_config_keeps_gate_evidence_reuse_record_only():
+    assert DEFAULT_CONFIG["kanban"]["gate_evidence_reuse"] is False

@@ -291,3 +291,7 @@ class TestResolveToolsetIncludeRegistry:
 
     def test_registry_only_toolset_static_view_is_empty(self):
         assert resolve_toolset("__definitely_not_a_real_toolset__", include_registry=False) == []
+
+
+def test_kanban_toolset_exposes_closed_verification_gate():
+    assert "verification_gate" in TOOLSETS["kanban"]["tools"]
