@@ -194,9 +194,10 @@ function isActiveExecutionCapsuleForWindow(
       candidate.correlation_id === window.correlation_id &&
       candidate.task_id === window.task_id &&
       candidate.run_id === window.run_id &&
-      terminal?.session === window.session &&
-      terminal.window === window.window &&
-      terminal.pane_id === window.pane_id &&
+      // Window names are mutable. The backend's rename-safe consistency
+      // contract deliberately joins on pane/server + task/correlation, while
+      // the persisted capsule keeps its original session/window provenance.
+      terminal?.pane_id === window.pane_id &&
       validProfile &&
       typeof context?.summary === "string" &&
       stringList(context.decisions) &&

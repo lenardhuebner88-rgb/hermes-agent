@@ -513,6 +513,41 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(handoff.textContent).toContain("Verified implementation can continue");
   });
 
+  it("keeps a persisted capsule valid after its tmux window is renamed", async () => {
+    const renamedWindow: AgentTerminalWindow = {
+      ...windows[0],
+      window: "review-renamed",
+      task_id: executionCapsuleFixture.task_id,
+      run_id: executionCapsuleFixture.run_id,
+      correlation_id: executionCapsuleFixture.correlation_id,
+    };
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [renamedWindow] });
+    apiMock.getAgentTerminalOverview.mockResolvedValue({
+      ...overviewFixture,
+      windows: [{ ...overviewFixture.windows[0], ...renamedWindow }],
+    });
+    apiMock.getAgentTerminalExecutionCapsule.mockResolvedValueOnce({
+      // Persisted provenance intentionally retains terminal.window="hermes".
+      capsule: executionCapsuleFixture,
+      window: renamedWindow,
+      consistent: true,
+      terminal_run_id: null,
+    });
+    await renderView();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Kanban-Run-Verknüpfung anzeigen" }),
+    );
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "Kanban-Run mit hermes-agents:review-renamed verknüpfen",
+      }),
+    ).toBeTruthy();
+    expect(await screen.findByText("Aktiv verknüpft")).toBeTruthy();
+    expect(screen.getByTestId("execution-capsule-context-handoff")).toBeTruthy();
+  });
+
   it.each([
     ["pending", { ...executionCapsuleFixture, state: "pending" }, true],
     ["inconsistent", executionCapsuleFixture, false],
@@ -637,9 +672,12 @@ describe("AgentTerminalsView desktop rendering", () => {
     });
     await renderView();
 
+    const openBinding = await screen.findByRole("button", {
+      name: "Mit Kanban-Run verknüpfen",
+    });
     fireEvent.click(screen.getByRole("button", { name: "Refresh agent terminals" }));
     await waitFor(() => expect(resolveStaleInventory).not.toBeNull());
-    fireEvent.click(screen.getByRole("button", { name: "Mit Kanban-Run verknüpfen" }));
+    fireEvent.click(openBinding);
     fireEvent.change(screen.getByLabelText("Execution Capsule Task-ID"), {
       target: { value: executionCapsuleFixture.task_id },
     });
@@ -682,7 +720,10 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.change(screen.getByLabelText("Execution Capsule Kurz-Handoff"), {
       target: { value: "Resume only if ownership is current" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Run verknüpfen" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Run verknüpfen" }));
+      await Promise.resolve();
+    });
 
     expect((await screen.findByRole("alert")).textContent).toContain(
       "run is not the active execution generation",
