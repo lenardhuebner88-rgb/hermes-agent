@@ -664,6 +664,281 @@ def test_stage_advance_carries_diff_snapshot_to_next_reviewer(kanban_home, tmp_p
 
 
 @requires_git
+def test_stage_resubmit_after_history_rewrite_recaptures_full_main_diff(
+    kanban_home, tmp_path
+):
+    repo = tmp_path / "rewritten-workspace"
+    repo.mkdir()
+
+    def run_git(*args: str) -> str:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return proc.stdout.strip()
+
+    run_git("init", "-b", "main")
+    run_git("config", "user.email", "t@t")
+    run_git("config", "user.name", "t")
+    (repo / "base.py").write_text("base = True\n", encoding="utf-8")
+    run_git("add", "base.py")
+    run_git("commit", "-m", "main base")
+    main_commit = run_git("rev-parse", "HEAD")
+    run_git("switch", "-c", "work")
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="history rewrite review",
+            assignee="coder",
+            kind="code",
+            review_tier="critical",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        first_claim = kb.claim_task(conn, task_id)
+        assert first_claim is not None
+        first_run = first_claim.current_run_id
+        assert first_run is not None
+
+        (repo / "old_wave.py").write_text("old = True\n", encoding="utf-8")
+        run_git("add", "old_wave.py")
+        run_git("commit", "-m", "old candidate")
+        old_candidate = run_git("rev-parse", "HEAD")
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="old done",
+            summary="old candidate",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=first_run,
+        )
+
+        assert kb.claim_review_task(conn, task_id) is not None
+        review_run = kb.get_task(conn, task_id).current_run_id
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="revision required",
+            expected_run_id=review_run,
+        )
+        promoted, message = kb.promote_task(conn, task_id, actor="test")
+        assert promoted, message
+        second_claim = kb.claim_task(conn, task_id)
+        assert second_claim is not None
+        second_run = second_claim.current_run_id
+        assert second_run is not None
+
+        run_git("reset", "--hard", "main")
+        (repo / "new_alpha.py").write_text("alpha = True\n", encoding="utf-8")
+        (repo / "new_beta.py").write_text("beta = True\n", encoding="utf-8")
+        run_git("add", "new_alpha.py", "new_beta.py")
+        run_git("commit", "-m", "rebased candidate")
+        new_candidate = run_git("rev-parse", "HEAD")
+        assert new_candidate != old_candidate
+        assert run_git("merge-base", "--is-ancestor", "main", "HEAD") == ""
+
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="new done",
+            summary="rewritten candidate",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=second_run,
+            stage=1,
+            effective_tier="critical",
+        )
+        payload = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "submitted_for_review"
+        ][-1]
+
+    assert payload is not None
+    assert payload["diff_candidate_commit"] == new_candidate
+    assert payload["diff_base_commit"] == main_commit
+    assert payload["diff_baseline"] == "main_ancestor_commit"
+    assert set(payload["changed_files"]) == {"new_alpha.py", "new_beta.py"}
+    assert "old_wave.py" not in payload["diff_stat"]
+    assert "new_alpha.py" in payload["diff_text"]
+    assert "new_beta.py" in payload["diff_text"]
+
+
+@requires_git
+def test_stage_resubmit_unchanged_candidate_carries_exact_snapshot(
+    kanban_home, tmp_path
+):
+    repo = tmp_path / "unchanged-workspace"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="unchanged review stage",
+            assignee="coder",
+            kind="code",
+            review_tier="critical",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            initial_status="running",
+        )
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="done",
+            summary="first stage",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        first = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "submitted_for_review"
+        ][-1]
+        assert first is not None
+
+        assert kb.claim_review_task(conn, task_id) is not None
+        review_run = kb.get_task(conn, task_id).current_run_id
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="approved",
+            summary="next stage",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=review_run,
+            stage=1,
+            effective_tier="critical",
+        )
+        second = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "submitted_for_review"
+        ][-1]
+
+    assert second is not None
+    snapshot_keys = {
+        "diff_candidate_commit",
+        "diff_base_commit",
+        "diff_baseline",
+        "changed_files",
+        "diff_stat",
+        "diff_text",
+        "diff_truncated",
+    }
+    assert {key: second.get(key) for key in snapshot_keys} == {
+        key: first.get(key) for key in snapshot_keys
+    }
+
+
+@requires_git
+def test_stage_resubmit_without_main_ancestor_keeps_fresh_snapshot(
+    kanban_home, tmp_path
+):
+    repo = tmp_path / "no-main-workspace"
+    repo.mkdir()
+    _init_git_repo_with_changes(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "branch", "-M", "topic"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="fresh fallback",
+            assignee="coder",
+            kind="code",
+            review_tier="critical",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            initial_status="running",
+        )
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="done",
+            summary="old stage",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=None,
+        )
+        first = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "submitted_for_review"
+        ][-1]
+        old_candidate = first["diff_candidate_commit"]
+
+        assert kb.claim_review_task(conn, task_id) is not None
+        review_run = kb.get_task(conn, task_id).current_run_id
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="revision required",
+            expected_run_id=review_run,
+        )
+        promoted, message = kb.promote_task(conn, task_id, actor="test")
+        assert promoted, message
+        second_claim = kb.claim_task(conn, task_id)
+        assert second_claim is not None
+        second_run = second_claim.current_run_id
+        assert second_run is not None
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "-A"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "new candidate"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        new_candidate = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).stdout.strip()
+
+        assert kb._submit_for_review(
+            conn,
+            task_id,
+            result="done again",
+            summary="new stage",
+            metadata=None,
+            verified_cards=[],
+            expected_run_id=second_run,
+            stage=1,
+            effective_tier="critical",
+        )
+        second = [
+            event.payload
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "submitted_for_review"
+        ][-1]
+
+    assert second is not None
+    assert second["diff_candidate_commit"] == new_candidate
+    assert second["diff_candidate_commit"] != old_candidate
+    assert second["diff_base_commit"] == old_candidate
+    assert second["diff_baseline"] == "pre_run_commit_sha"
+    assert set(second["changed_files"]) == {"tracked.py", "untracked.py"}
+
+
+@requires_git
 def test_review_context_recaptures_missing_submit_snapshot(
     kanban_home, tmp_path, monkeypatch
 ):

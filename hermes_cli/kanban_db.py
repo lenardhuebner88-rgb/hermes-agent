@@ -13918,7 +13918,12 @@ def _bounded_review_diff_text(diff_text: Optional[str]) -> Optional[str]:
 
 
 def _capture_review_diff_snapshot(
-    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int] = None
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int] = None,
+    *,
+    baseline_commit: Optional[str] = None,
+    baseline_kind: str = "pre_run_commit_sha",
 ) -> dict:
     """Best-effort diff snapshot for *task_id*'s workspace.
 
@@ -13939,8 +13944,8 @@ def _capture_review_diff_snapshot(
     if not ws or not os.path.isdir(ws):
         return {}
     run_id = expected_run_id or row["current_run_id"]
-    pre_run_sha = None
-    if run_id is not None:
+    pre_run_sha = (baseline_commit or "").strip() or None
+    if pre_run_sha is None and run_id is not None:
         try:
             run_row = conn.execute(
                 "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?",
@@ -13990,7 +13995,7 @@ def _capture_review_diff_snapshot(
         if stat and stat.strip():
             snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
         snapshot["diff_base_commit"] = pre_run_sha
-        snapshot["diff_baseline"] = "pre_run_commit_sha"
+        snapshot["diff_baseline"] = baseline_kind
     raw_diff = _git(
         "diff", "--no-ext-diff", "--unified=3", *((pre_run_sha,) if pre_run_sha else ())
     )
@@ -14022,6 +14027,57 @@ def _capture_review_diff_snapshot(
     diff_text = _bounded_review_diff_text(raw_diff)
     if diff_text:
         snapshot["diff_text"] = diff_text
+    return snapshot
+
+
+def _capture_review_diff_snapshot_against_main(
+    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int] = None
+) -> dict:
+    """Capture a revision snapshot against local main when it is HEADs ancestor."""
+    try:
+        row = conn.execute(
+            "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    ws = row["workspace_path"] if row else None
+    if not ws or not os.path.isdir(ws):
+        return {}
+
+    def _git(*args: str) -> Optional[subprocess.CompletedProcess[str]]:
+        try:
+            return subprocess.run(
+                ["git", "-C", ws, *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+
+    main = _git("rev-parse", "--verify", "main^{commit}")
+    head = _git("rev-parse", "--verify", "HEAD^{commit}")
+    if main is None or main.returncode != 0 or head is None or head.returncode != 0:
+        return {}
+    main_commit = main.stdout.strip()
+    head_commit = head.stdout.strip()
+    if not main_commit or not head_commit:
+        return {}
+    ancestor = _git("merge-base", "--is-ancestor", main_commit, head_commit)
+    if ancestor is None or ancestor.returncode != 0:
+        return {}
+
+    snapshot = _capture_review_diff_snapshot(
+        conn,
+        task_id,
+        expected_run_id,
+        baseline_commit=main_commit,
+        baseline_kind="main_ancestor_commit",
+    )
+    if snapshot.get("diff_candidate_commit") != head_commit:
+        return {}
     return snapshot
 
 
@@ -14253,41 +14309,62 @@ def _submit_for_review(
         task_id,
         expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
     )
+    previous_submission: dict = {}
     if int(stage or 0) > 0:
         previous_submission = _latest_review_submission(conn, task_id) or {}
         previous_candidate = previous_submission.get("diff_candidate_commit")
-        if previous_candidate:
-            for key in (
-                "diff_candidate_commit", "diff_base_commit", "changed_files",
-                "diff_stat", "diff_text", "diff_truncated",
-            ):
-                if key in previous_submission:
-                    diff_snapshot[key] = previous_submission[key]
+        fresh_candidate = diff_snapshot.get("diff_candidate_commit")
+        candidate_changed = (
+            isinstance(previous_candidate, str)
+            and isinstance(fresh_candidate, str)
+            and previous_candidate != fresh_candidate
+        )
+        if candidate_changed:
+            main_snapshot = _capture_review_diff_snapshot_against_main(
+                conn,
+                task_id,
+                expected_run_id=(
+                    diff_run_id if diff_run_id is not None else expected_run_id
+                ),
+            )
+            if main_snapshot:
+                diff_snapshot = main_snapshot
+        elif not fresh_candidate or fresh_candidate == previous_candidate:
+            diff_snapshot = {
+                key: previous_submission[key]
+                for key in (
+                    "diff_candidate_commit",
+                    "diff_base_commit",
+                    "diff_baseline",
+                    "changed_files",
+                    "diff_stat",
+                    "diff_text",
+                    "diff_truncated",
+                )
+                if key in previous_submission
+            }
     # A workspace can disappear between review stages.  Preserve the most
     # recent handoff's evidence when that makes the fresh capture empty, so the
     # new submitted_for_review event remains self-contained for its verifier.
     if not diff_snapshot.get("changed_files") and not diff_snapshot.get("diff_stat"):
-        try:
-            previous = conn.execute(
-                "SELECT payload FROM task_events "
-                "WHERE task_id = ? AND kind = 'submitted_for_review' "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-            previous_payload = json.loads(previous["payload"]) if previous else None
-        except (sqlite3.Error, ValueError, TypeError):
-            previous_payload = None
-        if isinstance(previous_payload, dict):
+        if not previous_submission:
+            previous_submission = _latest_review_submission(conn, task_id) or {}
+        previous_candidate = previous_submission.get("diff_candidate_commit")
+        fresh_candidate = diff_snapshot.get("diff_candidate_commit")
+        candidate_matches = not fresh_candidate or fresh_candidate == previous_candidate
+        if candidate_matches:
             carried_snapshot = {
-                key: previous_payload[key]
+                key: previous_submission[key]
                 for key in (
                     "changed_files",
                     "diff_stat",
                     "diff_text",
+                    "diff_truncated",
                     "diff_base_commit",
                     "diff_baseline",
+                    "diff_candidate_commit",
                 )
-                if key in previous_payload
+                if key in previous_submission
             }
             if carried_snapshot:
                 diff_snapshot = carried_snapshot
