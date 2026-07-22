@@ -16,6 +16,7 @@ import pytest
 import hermes_cli.agent_terminals as agent_terminals
 from hermes_cli.agent_terminals import (
     AgentTerminalError,
+    AgentWindowDefinition,
     CapabilityError,
     InvalidTarget,
     PaneCaptureCache,
@@ -1920,14 +1921,49 @@ def test_build_agent_argv_closed_matrix_exact(tmp_path: Path, monkeypatch: pytes
     assert service.build_agent_argv(
         "codex", binary=binary, action="resume", native_session_id="sess-1"
     ) == (str(binary), "resume", "sess-1")
+    assert service.build_agent_argv(
+        "codex", binary=binary, action="fork", native_session_id="sess-1"
+    ) == (str(binary), "fork", "sess-1")
 
     claude = tmp_path / "fake-claude"
     claude.write_text("#!/bin/sh\n")
     claude.chmod(0o755)
     assert service.build_agent_argv("claude", binary=claude, action="resume") == (str(claude), "--continue")
+    assert service.build_agent_argv(
+        "claude", binary=claude, action="resume", native_session_id="sess-c"
+    ) == (str(claude), "--resume", "sess-c")
+    assert service.build_agent_argv(
+        "claude", binary=claude, action="fork", native_session_id="sess-c"
+    ) == (str(claude), "--resume", "sess-c", "--fork-session")
+
+    grok = tmp_path / "fake-grok"
+    grok.write_text("#!/bin/sh\n")
+    grok.chmod(0o755)
+    assert service.build_agent_argv("grok", binary=grok, action="fresh") == (
+        str(grok),
+        "--model",
+        "grok-4.5",
+    )
+    assert service.build_agent_argv(
+        "grok", binary=grok, action="fork", native_session_id="g1"
+    ) == (str(grok), "--model", "grok-4.5", "--resume", "g1", "--fork-session")
+
+    qwen = tmp_path / "fake-qwen"
+    qwen.write_text("#!/bin/sh\n")
+    qwen.chmod(0o755)
+    assert service.build_agent_argv("qwen", binary=qwen, action="resume") == (
+        str(qwen),
+        "--continue",
+    )
 
     with pytest.raises(CapabilityError):
         service.build_agent_argv("kimi", binary=binary, action="resume")
+    with pytest.raises(CapabilityError):
+        service.build_agent_argv("claude", binary=claude, action="fork")
+    with pytest.raises(CapabilityError):
+        service.build_agent_argv("codex", binary=binary, action="fork")
+    with pytest.raises(CapabilityError):
+        service.build_agent_argv("qwen", binary=qwen, action="fork")
     with pytest.raises(CapabilityError):
         service.build_agent_argv("codex", binary=binary, context_profile="lean")
 
@@ -1980,6 +2016,248 @@ def test_capabilities_include_closed_actions(tmp_path: Path, monkeypatch: pytest
     caps = service.capabilities().to_dict()
     agents = caps["agents"]
     assert agents["claude"]["actions"]["resume"] is True
+    assert agents["claude"]["actions"]["fork"] is True
     assert agents["claude"]["actions"]["lean"] is False
+    assert agents["codex"]["actions"]["fork"] is True
+    assert agents["grok"]["actions"]["resume"] is True
+    assert agents["grok"]["actions"]["fork"] is True
+    assert agents["qwen"]["actions"]["resume"] is True
+    assert agents["qwen"]["actions"]["fork"] is False
     assert agents["kimi"]["actions"]["resume"] is False
+    assert agents["kimi"]["actions"]["fork"] is False
     assert agents["codex"]["actions"]["lean"] is False  # not allowlisted by default
+
+
+def _argv_logging_cli(home: Path, name: str) -> tuple[Path, Path]:
+    """Fake agent CLI that logs argv and stays alive for tmux capture."""
+    path = home / ".local" / "bin" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    log = home / f"{name}-argv.log"
+    if log.exists():
+        log.unlink()
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$0" "$@" >> "{log}"\n'
+        f"printf 'fake {name} ready\\n'\n"
+        "sleep 60\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return path, log
+
+
+def test_fake_cli_e2e_fresh_resume_fork_argv_matrix(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-8: Fake-CLI E2E proves Fresh/Resume/Fork argv per supported agent.
+
+    Claude fork is only resume+session-id+--fork-session. No pane-byte session
+    injection is performed for fork/resume (capture stays free of payload dumps).
+    """
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    for kind in ("claude", "codex", "grok", "qwen"):
+        binary, log = _argv_logging_cli(home, kind)
+        service = TmuxAgentSessionService(
+            socket_path=tmux_service.socket_path,
+            hermes_home=tmp_path,
+        )
+        # Fresh
+        definition, launch = service.definition_and_launch(kind, "home", action="fresh")
+        window = f"{kind}-fresh"
+        definition = AgentWindowDefinition(
+            kind=definition.kind,
+            session=definition.session,
+            window=window,
+            argv=definition.argv,
+            cwd=definition.cwd,
+            env=definition.env,
+            workdir_key=definition.workdir_key,
+        )
+        if log.exists():
+            log.unlink()
+        service._spawn_window(definition, launch)
+        # Give the fake CLI a moment to log argv.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and not log.exists():
+            time.sleep(0.05)
+        assert log.exists(), f"{kind} fresh did not log argv"
+        logged = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert logged[0] == str(binary)
+        assert logged[1:] == list(definition.argv[1:])
+        pane = service.capture("work", window)
+        # No session-id payload dump into the pane for fresh.
+        assert "sess-" not in pane
+        service.terminate_live("work", window)
+
+        # Resume (where supported)
+        actions = service.agent_context_actions(kind)
+        if actions.get("resume"):
+            if log.exists():
+                log.unlink()
+            sid = f"sess-{kind}-resume"
+            definition, launch = service.definition_and_launch(
+                kind, "home", action="resume", native_session_id=sid
+            )
+            window = f"{kind}-resume"
+            definition = AgentWindowDefinition(
+                kind=definition.kind,
+                session=definition.session,
+                window=window,
+                argv=definition.argv,
+                cwd=definition.cwd,
+                env=definition.env,
+                workdir_key=definition.workdir_key,
+            )
+            service._spawn_window(definition, launch)
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not log.exists():
+                time.sleep(0.05)
+            logged = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+            assert logged == list(definition.argv)
+            pane = service.capture("work", window)
+            # Resume uses argv flags only — no pane-byte session dump.
+            assert "SESSION_PAYLOAD" not in pane
+            service.terminate_live("work", window)
+
+        # Fork (where supported) — fail-closed without sid is unit-tested;
+        # with sid, Claude must pair --resume + --fork-session.
+        if actions.get("fork"):
+            if log.exists():
+                log.unlink()
+            sid = f"sess-{kind}-fork"
+            definition, launch = service.definition_and_launch(
+                kind, "home", action="fork", native_session_id=sid
+            )
+            window = f"{kind}-fork"
+            definition = AgentWindowDefinition(
+                kind=definition.kind,
+                session=definition.session,
+                window=window,
+                argv=definition.argv,
+                cwd=definition.cwd,
+                env=definition.env,
+                workdir_key=definition.workdir_key,
+            )
+            if kind == "claude":
+                assert definition.argv == (str(binary), "--resume", sid, "--fork-session")
+            service._spawn_window(definition, launch)
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not log.exists():
+                time.sleep(0.05)
+            logged = [line for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+            assert logged == list(definition.argv)
+            pane = service.capture("work", window)
+            # null pane-bytes contract: no injected session dump beyond CLI output
+            assert "SESSION_PAYLOAD" not in pane
+            assert "dumped-session-bytes" not in pane
+            service.terminate_live("work", window)
+
+    # kimi stays fail-closed for resume/fork
+    _argv_logging_cli(home, "kimi")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    with pytest.raises(CapabilityError):
+        service.definition_and_launch("kimi", "home", action="resume")
+    with pytest.raises(CapabilityError):
+        service.definition_and_launch("kimi", "home", action="fork", native_session_id="x")
+
+
+def test_isolated_write_temp_git_e2e_preserves_dirty_and_ahead_on_terminate_and_prune(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-9: full isolated-write path — worktree under .worktrees/terminal/,
+    manifest carries worktree/branch/base_sha, dirty+ahead survive terminate
+    and the prune script.
+    """
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+
+    # Make HOME itself a git repo so workdir=home is a valid isolated base.
+    subprocess.run(["git", "init", "-b", "main"], cwd=home, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=home, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=home, check=True)
+    (home / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=home, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=home, check=True, capture_output=True)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=home,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+
+    created = service.create_new("claude", "home", start_mode="isolated_write")
+    assert created.session == "work"
+    assert created.cwd is not None
+
+    # Read stamped terminal_run_id and verify worktree + manifest.
+    run_id = service._read_window_option("work", created.window, "@hermes_terminal_run_id")
+    assert run_id
+    manifest = service.read_terminal_manifest(run_id)
+    assert manifest is not None
+    assert manifest["start_mode"] == "isolated_write"
+    assert manifest["base_sha"] == base_sha
+    assert manifest["worktree_path"]
+    assert manifest["worktree_branch"]
+    wt = Path(str(manifest["worktree_path"]))
+    assert wt.is_dir()
+    assert wt == home / ".worktrees" / "terminal" / run_id
+    assert str(created.cwd) == str(wt)
+    assert (wt / "tracked.txt").read_text(encoding="utf-8") == "base\n"
+
+    # Make dirty + ahead commits in the isolated worktree.
+    (wt / "tracked.txt").write_text("dirty-ahead\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=wt, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "ahead-commit"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+    )
+    (wt / "untracked-note.txt").write_text("keep-me\n", encoding="utf-8")
+    ahead_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=wt,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert ahead_sha != base_sha
+
+    # Terminate must mark ended but keep the dirty/ahead worktree.
+    service.terminate_live("work", created.window)
+    ended = service.read_terminal_manifest(run_id)
+    assert ended is not None
+    assert ended["status"] == "ended"
+    assert wt.is_dir()
+    assert (wt / "untracked-note.txt").read_text(encoding="utf-8") == "keep-me\n"
+    assert (wt / "tracked.txt").read_text(encoding="utf-8") == "dirty-ahead\n"
+
+    # Prune script must also keep dirty/ahead terminal worktrees.
+    script = Path(__file__).resolve().parents[2] / "scripts" / "prune-stale-worktrees.sh"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PRUNE_REPOS": str(home),
+            "KANBAN_DB_PATH": str(tmp_path / "missing-kanban.db"),
+            "HERMES_HOME": str(tmp_path),
+            "MIN_AGE_HOURS": "0",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(script), "--apply"],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert wt.is_dir(), result.stdout + result.stderr
+    assert "kept" in result.stdout
+    assert (wt / "untracked-note.txt").exists()
+    assert (wt / "tracked.txt").read_text(encoding="utf-8") == "dirty-ahead\n"

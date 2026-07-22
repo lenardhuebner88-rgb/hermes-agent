@@ -274,7 +274,9 @@ export function AgentTerminalsView() {
   const [createBusy, setCreateBusy] = useState(false);
   const [createStartMode, setCreateStartMode] = useState<AgentTerminalStartMode>("free");
   const [createContextProfile, setCreateContextProfile] = useState<AgentTerminalContextProfile>("full");
-  const [respawnAction, setRespawnAction] = useState<AgentTerminalRespawnAction>("fresh");
+  // Default respawn action stays server-closed ("fresh"); UI selection is not
+  // wired yet, so keep a constant instead of an unused React setter.
+  const respawnAction: AgentTerminalRespawnAction = "fresh";
   const [createError, setCreateError] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);

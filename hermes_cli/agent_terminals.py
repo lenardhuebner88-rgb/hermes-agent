@@ -87,14 +87,16 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
     "claude": {
         "fresh": True,
         "resume": True,
-        "fork": False,
+        # Fork is only proven as resume+session-id + --fork-session.
+        "fork": True,
         "lean": False,
         "compact": False,
     },
     "codex": {
         "fresh": True,
         "resume": True,
-        "fork": False,
+        # Fork requires an unambiguous stamped native_session_id (no --last).
+        "fork": True,
         "lean": True,
         "compact": False,
     },
@@ -107,14 +109,15 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
     },
     "grok": {
         "fresh": True,
-        "resume": False,
-        "fork": False,
+        "resume": True,
+        # Fork is bound to resume/continue and requires a native session id.
+        "fork": True,
         "lean": False,
         "compact": False,
     },
     "qwen": {
         "fresh": True,
-        "resume": False,
+        "resume": True,
         "fork": False,
         "lean": False,
         "compact": False,
@@ -1224,16 +1227,48 @@ class TmuxAgentSessionService:
         if effective_action == _ACTION_RESUME:
             if not actions.get("resume"):
                 raise CapabilityError(f"resume is not available for agent {kind!r}")
+            sid = (native_session_id or "").strip() or None
             if kind == "claude":
+                # Prefer stamped session id when available; otherwise continue.
+                if sid:
+                    return (str(binary), "--resume", sid)
                 return (str(binary), "--continue")
             if kind == "codex":
-                if not native_session_id:
+                if not sid:
                     raise CapabilityError("codex resume requires a stamped native_session_id")
-                return (str(binary), "resume", native_session_id)
+                return (str(binary), "resume", sid)
+            if kind == "grok":
+                if sid:
+                    return (str(binary), "--model", "grok-4.5", "--resume", sid)
+                return (str(binary), "--model", "grok-4.5", "--continue")
+            if kind == "qwen":
+                if sid:
+                    return (str(binary), "--resume", sid)
+                return (str(binary), "--continue")
             raise CapabilityError(f"resume is not available for agent {kind!r}")
         if effective_action == _ACTION_FORK:
             if not actions.get("fork"):
                 raise CapabilityError(f"fork is not available for agent {kind!r}")
+            # Fail-closed: fork never uses picker/--last; needs unambiguous id.
+            sid = (native_session_id or "").strip() or None
+            if not sid:
+                raise CapabilityError(
+                    f"{kind} fork requires an unambiguous stamped native_session_id"
+                )
+            if kind == "claude":
+                # Claude fork is only proven together with resume + session id.
+                return (str(binary), "--resume", sid, "--fork-session")
+            if kind == "codex":
+                return (str(binary), "fork", sid)
+            if kind == "grok":
+                return (
+                    str(binary),
+                    "--model",
+                    "grok-4.5",
+                    "--resume",
+                    sid,
+                    "--fork-session",
+                )
             raise CapabilityError(f"fork is not available for agent {kind!r}")
         if effective_action == _ACTION_LEAN:
             if not actions.get("lean"):

@@ -700,7 +700,9 @@ describe("AgentTerminalsView desktop rendering", () => {
     await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
-    await waitFor(() => expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude"));
+    await waitFor(() =>
+      expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude", "fresh"),
+    );
   });
 
   // window.confirm() blocks the whole renderer thread; against a live tmux the
@@ -1281,7 +1283,12 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: /Grok/ }));
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
-    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "home"));
+    await waitFor(() =>
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "home", {
+        start_mode: "free",
+        context_profile: "full",
+      }),
+    );
   });
 
   it("creates a Qwen session via the desktop create modal", async () => {
@@ -1291,7 +1298,12 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: /Qwen/ }));
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
-    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("qwen", "home"));
+    await waitFor(() =>
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("qwen", "home", {
+        start_mode: "free",
+        context_profile: "full",
+      }),
+    );
   });
 
   it("renders empty and error states", async () => {
@@ -1437,7 +1449,12 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
-    await waitFor(() => expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home"));
+    await waitFor(() =>
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home", {
+        start_mode: "free",
+        context_profile: "full",
+      }),
+    );
   });
 
   it("surfaces the active pane cwd in the compact toolbar strip", async () => {
