@@ -41,7 +41,9 @@ _PROVIDER_LABELS = {
 }
 _CACHE_TTL_SECONDS = 45
 _CACHE_LOCK = threading.Lock()
+_CACHE_CONDITION = threading.Condition(_CACHE_LOCK)
 _CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+_CACHE_IN_FLIGHT: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -548,19 +550,41 @@ def build_host_usage(
 
 
 def get_host_usage(*, days: int = 7) -> dict[str, Any]:
-    """Cached dashboard accessor (45 s), keyed by the requested window."""
+    """Cached dashboard accessor (45 s), keyed by the requested window.
+
+    The cold collector walks several terminal-history trees. Multiple browser
+    tabs used to start the same scan concurrently after a dashboard restart,
+    amplifying disk I/O until the frontend request timeout fired. Coalesce cold
+    requests per window: one thread collects while the others reuse its result.
+    """
     resolved_days = max(1, min(14, int(days)))
     now = time.monotonic()
-    with _CACHE_LOCK:
+    with _CACHE_CONDITION:
         cached = _CACHE.get(resolved_days)
         if cached is not None and cached[0] > now:
             return {**cached[1], "cached": True}
-    payload = build_host_usage(days=resolved_days)
-    with _CACHE_LOCK:
+        while resolved_days in _CACHE_IN_FLIGHT:
+            _CACHE_CONDITION.wait()
+            cached = _CACHE.get(resolved_days)
+            if cached is not None and cached[0] > time.monotonic():
+                return {**cached[1], "cached": True}
+        _CACHE_IN_FLIGHT.add(resolved_days)
+    try:
+        payload = build_host_usage(days=resolved_days)
+    except BaseException:
+        with _CACHE_CONDITION:
+            _CACHE_IN_FLIGHT.discard(resolved_days)
+            _CACHE_CONDITION.notify_all()
+        raise
+    with _CACHE_CONDITION:
         _CACHE[resolved_days] = (time.monotonic() + _CACHE_TTL_SECONDS, payload)
+        _CACHE_IN_FLIGHT.discard(resolved_days)
+        _CACHE_CONDITION.notify_all()
     return {**payload, "cached": False}
 
 
 def _reset_host_usage_cache() -> None:
-    with _CACHE_LOCK:
+    with _CACHE_CONDITION:
         _CACHE.clear()
+        _CACHE_IN_FLIGHT.clear()
+        _CACHE_CONDITION.notify_all()

@@ -667,9 +667,11 @@ class TestAccountUsageEndpoint:
         first = self.client.get("/api/account-usage")
         assert first.status_code == 200
         assert all(row["fallback"] is False for row in first.json()["providers"])
+        assert ws._account_usage_last_good_path().is_file()
 
         monkeypatch.setattr(account_usage, "fetch_account_usage", lambda *_args, **_kwargs: None)
         ws._ACCOUNT_USAGE_CACHE.clear()
+        ws._ACCOUNT_USAGE_LAST_GOOD.clear()  # simulate a dashboard process restart
         second = self.client.get("/api/account-usage")
 
         assert second.status_code == 200

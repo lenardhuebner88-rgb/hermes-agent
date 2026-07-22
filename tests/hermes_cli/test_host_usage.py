@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from hermes_cli import host_usage
 from hermes_cli.host_usage import HostUsagePaths, build_host_usage
 
 
@@ -148,3 +151,29 @@ def test_build_host_usage_is_fail_soft_and_excludes_old_events(tmp_path: Path) -
     assert payload["total_tokens"] == 0
     assert payload["providers"] == []
     assert payload["errors"] == []
+
+
+def test_get_host_usage_coalesces_concurrent_cold_requests(monkeypatch) -> None:
+    host_usage._reset_host_usage_cache()
+    started = threading.Event()
+    release = threading.Event()
+    calls: list[int] = []
+
+    def fake_build(*, days: int):
+        calls.append(days)
+        started.set()
+        assert release.wait(timeout=2)
+        return {"days": days, "providers": []}
+
+    monkeypatch.setattr(host_usage, "build_host_usage", fake_build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(host_usage.get_host_usage, days=7)
+        assert started.wait(timeout=1)
+        second = pool.submit(host_usage.get_host_usage, days=7)
+        time.sleep(0.05)
+        assert calls == [7]
+        release.set()
+        results = [first.result(timeout=2), second.result(timeout=2)]
+
+    assert calls == [7]
+    assert sorted(row["cached"] for row in results) == [False, True]

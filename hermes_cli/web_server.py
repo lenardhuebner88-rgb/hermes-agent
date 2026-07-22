@@ -4422,6 +4422,59 @@ _ACCOUNT_USAGE_LAST_GOOD: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _ACCOUNT_USAGE_CACHE_LOCK = threading.Lock()
 
 
+def _account_usage_last_good_path() -> Path:
+    return get_hermes_home() / "state" / "account-usage-last-good.json"
+
+
+def _load_persisted_account_usage(
+    provider: str,
+    *,
+    now: float,
+) -> Optional[Tuple[float, Dict[str, Any]]]:
+    """Load one recent, sanitized provider snapshot across service restarts."""
+    try:
+        raw = json.loads(_account_usage_last_good_path().read_text(encoding="utf-8"))
+        row = raw.get("providers", {}).get(provider) if isinstance(raw, dict) else None
+        stored_at = row.get("stored_at") if isinstance(row, dict) else None
+        payload = row.get("payload") if isinstance(row, dict) else None
+        if (
+            not isinstance(stored_at, (int, float))
+            or isinstance(stored_at, bool)
+            or not isinstance(payload, dict)
+            or payload.get("provider") != provider
+            or now - float(stored_at) > _ACCOUNT_USAGE_LAST_GOOD_MAX_AGE_SECONDS
+            or not _account_usage_has_percent(payload)
+        ):
+            return None
+        return float(stored_at), payload
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _persist_account_usage(provider: str, stored_at: float, payload: Dict[str, Any]) -> None:
+    """Atomically persist quota metadata only; no credentials enter this file."""
+    path = _account_usage_last_good_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, TypeError, ValueError):
+        raw = {}
+    providers = raw.get("providers") if isinstance(raw, dict) else None
+    providers = dict(providers) if isinstance(providers, dict) else {}
+    providers[provider] = {"stored_at": stored_at, "payload": payload}
+    try:
+        from utils import atomic_json_write
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(
+            path,
+            {"version": 1, "providers": providers},
+            indent=2,
+            mode=0o600,
+        )
+    except OSError:
+        logger.debug("account usage last-good persistence failed", exc_info=True)
+
+
 def _isoformat_or_none(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -4488,6 +4541,7 @@ def _account_usage_has_percent(payload: Dict[str, Any]) -> bool:
 
 async def _cached_account_usage_payload(provider: str) -> Dict[str, Any]:
     now = time.monotonic()
+    now_wall = time.time()
     with _ACCOUNT_USAGE_CACHE_LOCK:
         cached = _ACCOUNT_USAGE_CACHE.get(provider)
         if cached is not None:
@@ -4509,12 +4563,17 @@ async def _cached_account_usage_payload(provider: str) -> Dict[str, Any]:
 
     with _ACCOUNT_USAGE_CACHE_LOCK:
         if _account_usage_has_percent(payload):
-            _ACCOUNT_USAGE_LAST_GOOD[provider] = (now, payload)
+            _ACCOUNT_USAGE_LAST_GOOD[provider] = (now_wall, payload)
+            _persist_account_usage(provider, now_wall, payload)
         else:
             last_good = _ACCOUNT_USAGE_LAST_GOOD.get(provider)
+            if last_good is None:
+                last_good = _load_persisted_account_usage(provider, now=now_wall)
+                if last_good is not None:
+                    _ACCOUNT_USAGE_LAST_GOOD[provider] = last_good
             if last_good is not None:
                 stored_at, stored_payload = last_good
-                if now - stored_at <= _ACCOUNT_USAGE_LAST_GOOD_MAX_AGE_SECONDS:
+                if now_wall - stored_at <= _ACCOUNT_USAGE_LAST_GOOD_MAX_AGE_SECONDS:
                     payload = {**stored_payload, "fallback": True}
                 else:
                     _ACCOUNT_USAGE_LAST_GOOD.pop(provider, None)
