@@ -2936,6 +2936,10 @@ DEFAULT_CONFIG = {
             "intake_assignee": "coder",
         },
 
+        # Gate evidence is record-only unless reuse is explicitly enabled.
+        # Production activation is deliberately outside Wave 3.
+        "gate_evidence_reuse": False,
+
         # Run the dispatcher inside the gateway process. On by default —
         # the cost is ~300µs every `dispatch_interval_seconds` when idle,
         # and gateway is the supervisor users already have. Set to false
