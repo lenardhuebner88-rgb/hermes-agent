@@ -1,11 +1,12 @@
 # hermes-hardening — Zwei-Linsen-Härtungs-Pipeline (UI-Design · Backend-Robustheit).
-# Vertrag (Operator 2026-07-18): Opus 4.8 wählt pro Nacht die am stärksten belegte
-# Schwäche aus einer der beiden Linsen, GPT-5.6 Sol baut, Opus 4.8 verifiziert.
-# Landung: --cmd land; Auto-Land erst mit Sprint-2-Vertrag nach 3 sauberen
-# manuellen Landungen (Plan 2026-07-18-projekt-loops-v2.md).
+# Rollenvertrag: Planner wählt pro Nacht die am stärksten belegte Schwäche aus
+# einer der beiden Linsen, Builder härtet, Verifier prüft adversarial.
+# Effektive Routen: pack.yaml + Overrides. Landung: --cmd land; Auto-Land erst
+# mit Sprint-2-Vertrag nach 3 sauberen manuellen Landungen
+# (Plan 2026-07-18-projekt-loops-v2.md).
 name: hermes-hardening
 type: pipeline
-description: Opus 4.8 findet die staerkste belegte Schwaeche (UI-Design-Ratchet oder FastAPI-Robustheit), GPT-5.6 Sol haertet, Opus 4.8 verifiziert adversarial
+description: Planner findet die staerkste belegte Schwaeche (UI-Design-Ratchet oder FastAPI-Robustheit), Builder haertet, Verifier prueft adversarial; Routen aus pack.yaml/Overrides
 stability: experimental
 repo: /home/piet/.hermes/hermes-agent
 phases:

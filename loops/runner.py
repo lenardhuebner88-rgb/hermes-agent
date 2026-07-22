@@ -161,8 +161,8 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
         safety_sha256="8940bc59f98cfdb9ae45c4fec67f39da364d59a2aa5be2e67f52292adb42585c",
         prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
-        "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
-        "VERIFIER-PROMPT.md": "05916a02da05f005c64407decb2468e296565e356d04c04da6ac5b3916ebd441",
+        "BUILDER-PROMPT.md": "4a6eb2e5e558901a0d3e06a0f5785b30295e56c84c51d3f0321a7eed06ec8d93",
+        "VERIFIER-PROMPT.md": "cc76ab3f0a602a0a54d3e8ce01f0df5c89ef9b929f23a2ef52133e0ee10fc2cb",
         },
         require_visual="always",
     ),
@@ -879,13 +879,34 @@ class LoopRunner:
         return self._int_override(key.upper(), self.pack.stop[key])
 
     def render_prompt(self, phase: str, **extra: str) -> str:
-        text = (self.pack.pack_dir / self.pack.phases[phase].prompt).read_text(encoding="utf-8")
+        """Render a pack prompt with effective route placeholders.
+
+        ``ENGINE``/``MODEL`` always come from ``phase_cfg(phase)`` after One-Shot
+        and Night overrides. When the pack has a ``build`` phase,
+        ``BUILD_ENGINE``/``BUILD_MODEL`` expose that same resolution for the
+        writer route (used by verifiers). Missing build-phase placeholders stay
+        unreplaced — never invent a fallback model name.
+        """
+        cfg = self.phase_cfg(phase)
+        text = (self.pack.pack_dir / cfg.prompt).read_text(encoding="utf-8")
         params = dict(self.pack.params)
         for key in params:
             if key.upper() in self.overrides:
                 params[key] = self.overrides[key.upper()]
         params_line = " ".join(f"{k.upper()}={v}" for k, v in sorted(params.items()))
-        subst = {"STATE_DIR": str(self.state), "WT": str(self.wt), "PARAMS": params_line, **extra}
+        subst: dict[str, str] = {
+            "STATE_DIR": str(self.state),
+            "WT": str(self.wt),
+            "PARAMS": params_line,
+            "PHASE": phase,
+            "ENGINE": cfg.engine,
+            "MODEL": cfg.model,
+            **extra,
+        }
+        if "build" in self.pack.phases:
+            build_cfg = self.phase_cfg("build")
+            subst.setdefault("BUILD_ENGINE", build_cfg.engine)
+            subst.setdefault("BUILD_MODEL", build_cfg.model)
         for key, val in subst.items():
             text = text.replace("{{" + key + "}}", str(val))
         return text

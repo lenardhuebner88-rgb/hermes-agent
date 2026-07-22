@@ -1,12 +1,12 @@
 # hermes-feature-forge — Epic-getriebene Feature-Pipeline fürs /control-Dashboard.
-# Vertrag (Operator 2026-07-18): Opus 4.8 plant ein Epic aus der SEED-Roadmap und
-# dekomponiert in bis zu 3 Kontrakt-Pläne, GPT-5.6 Sol baut je Plan einen Commit,
-# Opus 4.8 verifiziert adversarial. Landung: --cmd land (Morgen-Gate);
-# Auto-Land kommt erst mit dem Sprint-2-Runner-Vertrag nach 5 sauberen
-# manuellen Landungen (Leiter im Plan 2026-07-18-projekt-loops-v2.md).
+# Rollenvertrag: Planner plant ein Epic aus der SEED-Roadmap und dekomponiert in
+# bis zu 3 Kontrakt-Pläne, Builder baut je Plan einen Commit, Verifier prüft
+# adversarial. Effektive Routen: pack.yaml + Overrides. Landung: --cmd land
+# (Morgen-Gate); Auto-Land kommt erst mit dem Sprint-2-Runner-Vertrag nach 5
+# sauberen manuellen Landungen (Leiter im Plan 2026-07-18-projekt-loops-v2.md).
 name: hermes-feature-forge
 type: pipeline
-description: Opus 4.8 plant ein belegtes /control-Feature-Epic (1-3 Plaene), GPT-5.6 Sol baut Full-Stack, Opus 4.8 verifiziert mit Gates + Browser-Evidenz
+description: Planner plant ein belegtes /control-Feature-Epic (1-3 Plaene), Builder baut Full-Stack, Verifier prueft mit Gates + Browser-Evidenz; Routen aus pack.yaml/Overrides
 stability: experimental
 repo: /home/piet/.hermes/hermes-agent
 phases:

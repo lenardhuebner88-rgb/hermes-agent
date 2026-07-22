@@ -1,12 +1,12 @@
-# dashboard-experience — operator-authorisierte Opus→Sol→Opus-Pipeline
-# (Operator-Entscheid 2026-07-12: Fable raus, Opus 4.8 plant + verifiziert).
+# dashboard-experience — operator-authorisierte Planner→Builder→Verifier-Pipeline
+# (Operator-Entscheid 2026-07-12: Cross-Family; Modelle floaten via Katalog).
 # Auto-Landung ist im Runner an Repo-Pfad, Live-Repo, Engine-Rollen und die
 # SHA-256 der modellagnostischen Sicherheitsprojektion dieses Manifests sowie
 # aller drei Prompts gebunden. Das konkrete Modell floatet (Katalog-geprueft),
-# Rollen-/Prompt-/Scope-Drift ist fail-closed.
+# Rollen-/Prompt-/Scope-Drift ist fail-closed. Effektive Routen: pack.yaml + Overrides.
 name: dashboard-experience
 type: pipeline
-description: Opus 4.8 findet einen belegten Dashboard-UX-Slice, GPT-5.6 Sol baut ihn, Opus 4.8 verifiziert visuell; genau ein PASS-Commit darf automatisch landen
+description: Planner findet einen belegten Dashboard-UX-Slice, Builder implementiert ihn, Verifier prueft visuell; genau ein PASS-Commit darf automatisch landen; Routen aus pack.yaml/Overrides
 stability: experimental
 repo: /home/piet/.hermes/hermes-agent
 phases:

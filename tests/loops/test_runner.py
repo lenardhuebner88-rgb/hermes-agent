@@ -1327,6 +1327,202 @@ def test_night_overrides_partial_pair_resolves_from_pack(tmp_path, fake_engine):
     assert cfg.model == pack.phases["plan"].model
 
 
+def _write_route_aware_pipeline(packs_dir: Path, name: str, repo: Path) -> Path:
+    """Pipeline pack whose builder/verifier surfaces effective routes via templates."""
+    pack_dir = packs_dir / name
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "pack.yaml").write_text(
+        "\n".join(
+            [
+                f"name: {name}",
+                "type: pipeline",
+                "description: route-aware test pack",
+                "stability: experimental",
+                f"repo: {repo}",
+                "phases:",
+                "  plan:",
+                "    engine: claude",
+                "    model: claude-opus-4-6",
+                "    timeout: 60",
+                "    prompt: PLANNER-PROMPT.md",
+                "  build:",
+                "    engine: codex",
+                "    model: gpt-5.6-sol",
+                "    timeout: 60",
+                "    prompt: BUILDER-PROMPT.md",
+                "  verify:",
+                "    engine: claude",
+                "    model: claude-opus-4-6",
+                "    timeout: 60",
+                "    prompt: VERIFIER-PROMPT.md",
+                "stop:",
+                "  max_rounds: 1",
+                "  max_hours: 1",
+                "  fail_streak: 1",
+                "params: {}",
+                "notify:",
+                '  discord_channel: "0"',
+                "autoland: false",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (pack_dir / "PLANNER-PROMPT.md").write_text(
+        "PLAN route={{ENGINE}}/{{MODEL}} STATE={{STATE_DIR}}\n"
+        "Write {{STATE_DIR}}/last-status then stop. No push.\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "BUILDER-PROMPT.md").write_text(
+        "BUILD route={{ENGINE}}/{{MODEL}} STATE={{STATE_DIR}} PLAN={{PLAN_PATH}}\n"
+        "Write {{STATE_DIR}}/last-status then stop. No push.\n",
+        encoding="utf-8",
+    )
+    (pack_dir / "VERIFIER-PROMPT.md").write_text(
+        "VERIFY route={{ENGINE}}/{{MODEL}} writer={{BUILD_ENGINE}}/{{BUILD_MODEL}} "
+        "STATE={{STATE_DIR}} PLAN={{PLAN_PATH}} RANGE={{RANGE}} "
+        "PROV={{BUILD_PROVENANCE}}\n"
+        "Write {{STATE_DIR}}/last-status then stop. No push.\n",
+        encoding="utf-8",
+    )
+    return pack_dir
+
+
+def test_render_prompt_uses_pack_yaml_default_route(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    _write_route_aware_pipeline(tmp_path / "packs", "route-default", repo)
+    pack = load_pack(tmp_path / "packs", "route-default")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+
+    built = runner.render_prompt("build", PLAN_PATH="/tmp/plan.md")
+    assert "BUILD route=codex/gpt-5.6-sol" in built
+    assert "{{ENGINE}}" not in built and "{{MODEL}}" not in built
+
+    verified = runner.render_prompt(
+        "verify", PLAN_PATH="/tmp/plan.md", RANGE="abc..def"
+    )
+    assert "VERIFY route=claude/claude-opus-4-6" in verified
+    assert "writer=codex/gpt-5.6-sol" in verified
+    assert "{{BUILD_ENGINE}}" not in verified and "{{BUILD_MODEL}}" not in verified
+
+
+def test_render_prompt_uses_one_shot_override_route(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    _write_route_aware_pipeline(tmp_path / "packs", "route-oneshot", repo)
+    pack = load_pack(tmp_path / "packs", "route-oneshot")
+    state = tmp_path / "state" / "route-oneshot"
+    state.mkdir(parents=True)
+    (state / "overrides.env").write_text(
+        "PHASE_BUILD_ENGINE=kimi\n"
+        "PHASE_BUILD_MODEL=k3\n"
+        "PHASE_VERIFY_ENGINE=neuralwatt\n"
+        "PHASE_VERIFY_MODEL=kimi-k2.7-code\n",
+        encoding="utf-8",
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+
+    built = runner.render_prompt("build", PLAN_PATH="/tmp/plan.md")
+    assert "BUILD route=kimi/k3" in built
+    assert "gpt-5.6-sol" not in built
+
+    verified = runner.render_prompt(
+        "verify", PLAN_PATH="/tmp/plan.md", RANGE="abc..def"
+    )
+    assert "VERIFY route=neuralwatt/kimi-k2.7-code" in verified
+    assert "writer=kimi/k3" in verified
+    assert "gpt-5.6-sol" not in verified
+
+
+def test_render_prompt_uses_night_override_route(tmp_path, fake_engine):
+    repo = init_repo(tmp_path / "repo")
+    _write_route_aware_pipeline(tmp_path / "packs", "route-night", repo)
+    pack = load_pack(tmp_path / "packs", "route-night")
+    state = tmp_path / "state" / "route-night"
+    state.mkdir(parents=True)
+    (state / "night-overrides.env").write_text(
+        "PHASE_BUILD_ENGINE=alibaba-token-plan\n"
+        "PHASE_BUILD_MODEL=qwen3.8-max-preview\n"
+        "PHASE_VERIFY_ENGINE=xai\n"
+        "PHASE_VERIFY_MODEL=grok-4.5\n",
+        encoding="utf-8",
+    )
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    runner.consume_overrides()
+
+    built = runner.render_prompt("build", PLAN_PATH="/tmp/plan.md")
+    assert "BUILD route=alibaba-token-plan/qwen3.8-max-preview" in built
+
+    verified = runner.render_prompt(
+        "verify", PLAN_PATH="/tmp/plan.md", RANGE="abc..def"
+    )
+    assert "VERIFY route=xai/grok-4.5" in verified
+    assert "writer=alibaba-token-plan/qwen3.8-max-preview" in verified
+
+
+def test_render_prompt_missing_build_route_stays_neutral(tmp_path, fake_engine):
+    """Without a build phase, BUILD_* placeholders must not invent a model."""
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "sweep-route", "sweep", repo)
+    pack = load_pack(tmp_path / "packs", "sweep-route")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.ensure_dirs()
+    prompt_path = pack.pack_dir / pack.phases["round"].prompt
+    prompt_path.write_text(
+        "ROUND={{ENGINE}}/{{MODEL}} writer={{BUILD_ENGINE}}/{{BUILD_MODEL}} "
+        "STATE={{STATE_DIR}}\nNo push. last-status\n",
+        encoding="utf-8",
+    )
+    rendered = runner.render_prompt("round")
+    assert f"ROUND={pack.phases['round'].engine}/{pack.phases['round'].model}" in rendered
+    assert "{{ENGINE}}" not in rendered
+    assert "{{MODEL}}" not in rendered
+    assert "{{BUILD_ENGINE}}" in rendered
+    assert "{{BUILD_MODEL}}" in rendered
+    assert "gpt-5.6-sol" not in rendered
+
+
+def test_active_pipeline_prompts_and_descriptions_are_model_neutral():
+    """Live builder/verifier copy must not hardcode stale display model names."""
+    banned = (
+        "GPT-5.6 Sol",
+        "GPT-5.6-Sol",
+        "gpt-5.6-sol",  # only banned in prose prompts/descriptions, not pack.yaml models
+        "Opus 4.8",
+        "Writer war GPT",
+        "Writer was GPT",
+    )
+    targets = (
+        "dashboard-experience",
+        "hermes-feature-forge",
+        "hermes-hardening",
+        "builder-reviewer",
+    )
+    for name in targets:
+        pack = load_pack(PACKS_DIR, name)
+        # Descriptions are operator-visible; keep them role-based.
+        for token in ("GPT-5.6 Sol", "Opus 4.8", "GPT-5.6-Sol"):
+            assert token not in pack.description, f"{name}: description still names {token!r}"
+        for phase_name in ("build", "verify"):
+            phase = pack.phases[phase_name]
+            text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
+            for token in banned:
+                if token == "gpt-5.6-sol":
+                    # Allow only as template value docs like {{MODEL}}, not literal route claims.
+                    continue
+                assert token not in text, f"{name}/{phase.prompt}: still contains {token!r}"
+            if phase_name == "build":
+                assert "{{ENGINE}}" in text or "{{MODEL}}" in text, (
+                    f"{name}/build: missing ENGINE/MODEL placeholders"
+                )
+            if phase_name == "verify":
+                assert "{{BUILD_ENGINE}}" in text or "{{BUILD_MODEL}}" in text, (
+                    f"{name}/verify: missing BUILD_ENGINE/BUILD_MODEL placeholders"
+                )
+
+
 def test_night_overrides_not_consumed_on_cmd_night(tmp_path, fake_engine, monkeypatch):
     behaviors, _calls = fake_engine
     behaviors["plan"] = lambda kv, cwd: engines.EngineResult(rc=0, output="", usage_limit=False)
