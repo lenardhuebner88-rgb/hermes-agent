@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 
@@ -30,6 +32,44 @@ def kanban_home(tmp_path, monkeypatch):
     lv._receipt_dir_cache.clear()
     kb.init_db()
     return home
+
+
+def test_collect_all_serializes_shared_cache_rebuilds(monkeypatch, kanban_home):
+    """Parallel API workers must not race the process-global parse caches."""
+    start = Barrier(3)
+    active_guard = Lock()
+    active = 0
+    max_active = 0
+
+    def collector(*, with_bodies):
+        nonlocal active, max_active
+        assert with_bodies is False
+        with active_guard:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with active_guard:
+            active -= 1
+        return []
+
+    for name in (
+        "_collect_cron_items",
+        "_collect_research_items",
+        "_collect_deliverable_items",
+        "_collect_receipt_items",
+    ):
+        monkeypatch.setattr(lv, name, collector)
+
+    def collect_once():
+        start.wait(timeout=2)
+        return lv._collect_all(with_bodies=False)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(collect_once) for _ in range(2)]
+        start.wait(timeout=2)
+        assert [future.result(timeout=2) for future in futures] == [[], []]
+
+    assert max_active == 1
 
 
 def _write_cron_store(

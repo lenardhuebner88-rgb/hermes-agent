@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time as _time
 from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime
@@ -1220,6 +1221,16 @@ _receipt_parse_cache: dict[str, tuple[int, int, Optional[_Item]]] = {}
 # receipts_dir → ((dir_mtime_ns, subdir_mtimes), newest Dateinamen, mtime-absteigend).
 _receipt_dir_cache: dict[str, tuple[tuple[int, tuple[int | None, ...]], list[str]]] = {}
 
+# Mehrere Bibliothek-Regale werden absichtlich gleichzeitig gemountet. Ihre
+# Requests teilen sich die mtime-/Parse-Caches oben und in den Cron-Adaptern.
+# Ein kalter Dashboard-Start darf diese globalen Dicts deshalb nicht aus
+# mehreren ``asyncio.to_thread``-Workern gleichzeitig neu aufbauen: Das kostet
+# unter Hostlast ein Vielfaches und die jeweiligen stale-key-Sweeps können sich
+# gegenseitig Einträge entfernen. Nach dem ersten Collector-Lauf sind die
+# folgenden Aufrufe cache-warm; ein RLock serialisiert nur diesen kurzen,
+# gemeinsamen kritischen Abschnitt und bleibt bei verschachtelter Nutzung safe.
+_collect_lock = threading.RLock()
+
 
 def _receipts_root() -> Path:
     return Path.home() / "vault" / "03-Agents"
@@ -1485,23 +1496,24 @@ def _apply_correction_overlay(items: list[_Item]) -> list[_Item]:
 
 
 def _collect_all(*, with_bodies: bool) -> list[_Item]:
-    items: list[_Item] = []
-    for collector in (
-        lambda: _collect_cron_items(with_bodies=with_bodies),
-        lambda: _collect_research_items(with_bodies=with_bodies),
-        lambda: _collect_deliverable_items(with_bodies=with_bodies),
-        lambda: _collect_receipt_items(with_bodies=with_bodies),
-    ):
-        try:
-            items.extend(collector())
-        except Exception:
-            # Ein kaputter Adapter darf die Bibliothek nie leeren.
-            logger.debug("library: adapter failed", exc_info=True)
-    # P6b — Overlay nach der Ableitung, VOR Sortierung/Pagination: List- und
-    # Detailantwort teilen sich dieselbe Apply-Funktion (Parität).
-    _apply_correction_overlay(items)
-    items.sort(key=lambda i: -i.ts)
-    return items
+    with _collect_lock:
+        items: list[_Item] = []
+        for collector in (
+            lambda: _collect_cron_items(with_bodies=with_bodies),
+            lambda: _collect_research_items(with_bodies=with_bodies),
+            lambda: _collect_deliverable_items(with_bodies=with_bodies),
+            lambda: _collect_receipt_items(with_bodies=with_bodies),
+        ):
+            try:
+                items.extend(collector())
+            except Exception:
+                # Ein kaputter Adapter darf die Bibliothek nie leeren.
+                logger.debug("library: adapter failed", exc_info=True)
+        # P6b — Overlay nach der Ableitung, VOR Sortierung/Pagination: List- und
+        # Detailantwort teilen sich dieselbe Apply-Funktion (Parität).
+        _apply_correction_overlay(items)
+        items.sort(key=lambda i: -i.ts)
+        return items
 
 
 def _facet_counts(items: list[_Item], key: str) -> list[dict[str, Any]]:
