@@ -27,7 +27,11 @@ function focusableIn(container: HTMLElement): HTMLElement[] {
  * element is still attached to the document — it may have been removed by
  * the same state change that closed the dialog).
  */
-export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active: boolean): void {
+export function useFocusTrap(
+  containerRef: RefObject<HTMLElement | null>,
+  active: boolean,
+  restoreFocusRef?: RefObject<HTMLElement | null>,
+): void {
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -56,7 +60,19 @@ export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active
 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
-      const toRestore = previouslyFocused.current;
+      // Async dialog preparation can temporarily disable the trigger. Chromium
+      // then moves focus to BODY before the dialog mounts, so the captured
+      // active element is no longer a useful return target. Callers that know
+      // their trigger may provide it explicitly; otherwise preserve the
+      // existing previously-focused fallback.
+      // Resolve the explicit target at cleanup time on purpose: a completed
+      // workflow may need to return somewhere other than its now-disabled
+      // trigger (for example, to the editor's still-enabled close button).
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      const requestedTarget = restoreFocusRef?.current;
+      const toRestore = requestedTarget && document.contains(requestedTarget)
+        ? requestedTarget
+        : previouslyFocused.current;
       if (toRestore && document.contains(toRestore)) toRestore.focus();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

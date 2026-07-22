@@ -3,6 +3,112 @@
 // in Sibling-Modulen.
 import type { LibraryItem } from "./BibliothekView";
 
+// ---------------------------------------------------------------------------
+// P6a — Provenienz (Herkunft): Vertragstypen + verständliche Labels.
+// Spiegelt den Backend-Vertrag aus hermes_cli/library_view.py (_build_provenance).
+// ---------------------------------------------------------------------------
+
+export type ProvenanceStatus = "evidenced" | "partial" | "unknown";
+
+export interface LibraryProvenanceChain {
+  auftraggeber: string;
+  delegation: string;
+  autor: string;
+  review: string;
+  ablage: string;
+}
+
+export interface LibraryProvenance {
+  producer: string;
+  path: string;
+  status: ProvenanceStatus | string;
+  chain: LibraryProvenanceChain;
+  refs: string[];
+}
+
+// ---------------------------------------------------------------------------
+// P6b — Korrektur-Overlay: Original + aktive Felder + Audit. Spiegelt den
+// Backend-Vertrag aus hermes_cli/library_corrections.py (apply → correction-Block).
+// Der effektive Wert steht in `provenance` selbst; dieser Block hält den
+// Ursprung und die Historie additiv sichtbar.
+// ---------------------------------------------------------------------------
+
+/** Unveränderlicher Originalsnapshot des abgeleiteten Vertrags (vor Korrektur). */
+export interface CorrectionOriginal {
+  producer: string;
+  path: string;
+  status: ProvenanceStatus | string;
+  chain: LibraryProvenanceChain;
+}
+
+export interface CorrectionHistoryEntry {
+  at: number;
+  action: "set" | "revert";
+  fields: Record<string, string>;
+  reason: string;
+  actor: string;
+}
+
+export interface LibraryCorrection {
+  item_id: string;
+  active: boolean;
+  /** Aktive Overrides (kanonische Felder: path + die fünf Rollen). */
+  fields: Record<string, string>;
+  original: CorrectionOriginal;
+  reason: string;
+  actor: string;
+  created_at: number;
+  updated_at: number;
+  history: CorrectionHistoryEntry[];
+}
+
+/** Feste Weg-Werte für die Korrektur-Auswahl (keine freien Wegtypen). */
+export const PATH_OPTIONS = ["Cron", "Task", "Receipt", "Manuell", "Unbekannt"] as const;
+
+export interface FacetCount {
+  value: string;
+  count: number;
+}
+
+/** Weg → verständliches Label (technische Untertypen leben nur in den Refs). */
+export const PATH_LABEL: Record<string, string> = {
+  Cron: "Cron",
+  Task: "Task",
+  Receipt: "Receipt",
+  Manuell: "Manuell",
+  Unbekannt: "Unbekannt",
+};
+
+export const PROVENANCE_STATUS_LABEL: Record<string, string> = {
+  evidenced: "vollständig belegt",
+  partial: "teilweise belegt",
+  unknown: "unbekannt",
+};
+
+export const CHAIN_ROLE_LABEL: Record<string, string> = {
+  auftraggeber: "Auftraggeber",
+  delegation: "Delegation",
+  autor: "Autor",
+  review: "Review",
+  ablage: "Ablage",
+};
+
+export const CHAIN_ROLE_ORDER = ["auftraggeber", "delegation", "autor", "review", "ablage"] as const;
+
+export function pathLabel(path: string | undefined): string {
+  return PATH_LABEL[path ?? ""] ?? path ?? "Unbekannt";
+}
+
+export function provenanceStatusLabel(status: string | undefined): string {
+  return PROVENANCE_STATUS_LABEL[status ?? ""] ?? "unbekannt";
+}
+
+/** Kompaktes Zeilen-Label "Erzeuger · Weg" (null ohne Provenienz-Vertrag). */
+export function provenanceRowLabel(provenance: LibraryProvenance | undefined): string | null {
+  if (!provenance) return null;
+  return `${provenance.producer || "Unbekannt"} · ${pathLabel(provenance.path)}`;
+}
+
 export const CATEGORY_LABEL: Record<string, string> = {
   news: "News",
   briefings: "Briefings",

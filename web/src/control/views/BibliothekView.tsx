@@ -23,15 +23,24 @@ import type { VaultProvenanceResponse } from "../lib/types";
 import type { KnowledgeCatalog } from "./knowledge/knowledge.helpers";
 import {
   CATEGORY_LABEL,
+  CHAIN_ROLE_LABEL,
+  CHAIN_ROLE_ORDER,
   countByCategory,
   dedupeById,
   groupBySeries,
   newestPerCategory,
+  pathLabel,
   plainMarkdownPreview,
+  provenanceRowLabel,
+  provenanceStatusLabel,
   seriesNeighbors,
   sortItems,
+  type FacetCount,
   type LesesaalSort,
+  type LibraryCorrection,
+  type LibraryProvenance,
 } from "./BibliothekView.helpers";
+import { BibliothekCorrectionEditor } from "./BibliothekCorrectionEditor";
 import { KnowledgeShelf } from "./knowledge/KnowledgeShelf";
 import { BriefingsShelf } from "./briefings/BriefingsShelf";
 import { ModelleShelf } from "./models/ModelleShelf";
@@ -83,6 +92,32 @@ const t = {
   loadMore: "Mehr laden",
   loadingMore: "Lade …",
   toc: "Inhalt",
+  // P6a — Provenienz (Herkunft)
+  provenanceTitle: "Herkunft",
+  provenanceEyebrow: "Herkunft",
+  provenanceProducerFacet: "Erzeuger",
+  provenancePathFacet: "Weg",
+  provenanceReset: "Zurücksetzen",
+  provenanceRefs: "Technische Belege",
+  provenanceAria: (producer: string, path: string) => `Herkunft: ${producer} über ${path}`,
+  // P6b — Korrektur-Overlay (operator-bestätigt)
+  correctionBadge: "Korrigiert",
+  correctionOriginal: "Ursprünglich",
+  correctionEffective: "Korrigiert (wirksam)",
+  correctionEdit: "Herkunft korrigieren",
+  correctionEditTitle: "Korrektur bearbeiten",
+  correctionReasonLabel: "Grund (Pflicht)",
+  correctionReasonPlaceholder: "Warum wird diese Herkunft korrigiert?",
+  correctionConfirmLabel: "Ich bestätige diese Korrektur als Operator ausdrücklich.",
+  correctionPreview: "Vorschau",
+  correctionSave: "Korrektur speichern",
+  correctionRevoke: "Korrektur zurücknehmen",
+  correctionRevokeConfirm: "Ich bestätige die Rücknahme ausdrücklich.",
+  correctionCancel: "Abbrechen",
+  correctionSaving: "Speichern …",
+  correctionBy: (actor: string) => `durch ${actor}`,
+  correctionHistory: "Änderungsverlauf",
+  correctionNote: "Nur der Operator kann eine Herkunft endgültig korrigieren oder zurücknehmen.",
 };
 
 const ALL_CATEGORY_TAB = "__all";
@@ -99,6 +134,12 @@ export interface LibraryItem {
   series_meta: string;
   structured?: boolean;
   structured_brief?: StructuredModelBrief;
+  /** P6a — additive, read-only Herkunft (Erzeuger/Weg/Status/Kette/Belege).
+   *  Liste UND Detail liefern denselben Vertrag. */
+  provenance?: LibraryProvenance;
+  /** P6b — additives Korrektur-Overlay (Original + Audit); nur bei aktiver
+   *  Operator-Korrektur gesetzt. `provenance` trägt dann den wirksamen Wert. */
+  correction?: LibraryCorrection | null;
 }
 
 export interface StructuredBriefSource {
@@ -131,6 +172,12 @@ export interface LibraryListResponse {
   has_more: boolean;
   categories: string[];
   now?: number;
+  /** P6a — kontextuelle Provenienz-Facettenzahlen (über den vollständigen
+   *  gefilterten Bestand; Pagination verfälscht sie nicht). */
+  facets?: {
+    producer: FacetCount[];
+    path: FacetCount[];
+  };
 }
 
 type LibraryDetail = LibraryItem & { body_md: string };
@@ -191,6 +238,82 @@ const EMPTY_TAB_STATS: TabStats = {
 };
 
 
+/** P6a — kompakte Erzeuger+Weg-Badges einer Lesesaal-Zeile. Ohne Provenienz-
+ *  Vertrag (Altdaten) rendert nichts; unbekannte Werte werden sichtbar benannt. */
+export function ProvenanceBadges({ provenance, corrected = false }: {
+  provenance: LibraryProvenance | undefined;
+  corrected?: boolean;
+}) {
+  if (!provenance) return null;
+  const producer = provenance.producer || "Unbekannt";
+  const path = pathLabel(provenance.path);
+  return (
+    <span
+      role="group"
+      className="inline-flex max-w-full flex-wrap items-center gap-1"
+      aria-label={t.provenanceAria(producer, path)}
+      data-provenance-label={provenanceRowLabel(provenance) ?? ""}
+    >
+      <span className="max-w-full break-words rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{producer}</span>
+      <span className="break-words rounded-card border border-line px-1.5 py-0.5 text-micro text-ink-3">{path}</span>
+      {corrected ? (
+        <span className="break-words rounded-card border border-live/40 bg-live/10 px-1.5 py-0.5 text-micro text-bronze-hi">
+          {t.correctionBadge}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** P6a — standardmäßig zugeklappte Herkunft im geöffneten Dokument: Status,
+ *  die fünf Ketten-Rollen und technische Belege. Unbekannte Felder werden
+ *  sichtbar benannt (niemals geraten). */
+export function ProvenanceDisclosure({ provenance }: { provenance: LibraryProvenance | undefined }) {
+  if (!provenance) return null;
+  const producer = provenance.producer || "Unbekannt";
+  const path = pathLabel(provenance.path);
+  const status = provenanceStatusLabel(provenance.status);
+  const chain = provenance.chain;
+  const refs = provenance.refs ?? [];
+  return (
+    <details className="mb-3 rounded-card border border-line bg-surface-2 p-3">
+      <summary className="flex min-h-12 cursor-pointer list-none flex-wrap items-center justify-between gap-3 font-display text-micro font-semibold uppercase tracking-[0.08em] text-ink-3">
+        <span>{t.provenanceTitle}</span>
+        <span className="min-w-0 max-w-full break-words text-left font-data font-normal normal-case tracking-normal text-ink-2 sm:text-right">
+          {producer} · {path} · {status}
+        </span>
+      </summary>
+      <div className="mt-2 space-y-2">
+        <p className="text-sec text-ink-2" data-provenance-label={provenanceRowLabel(provenance) ?? ""}>
+          {producer} · {path} · <span data-provenance-status="">{status}</span>
+        </p>
+        <dl className="space-y-1">
+          {CHAIN_ROLE_ORDER.map((role) => {
+            const value = chain?.[role] || "Unbekannt";
+            const unknown = value === "Unbekannt";
+            return (
+              <div key={role} className="flex gap-2 text-sec">
+                <dt className="w-28 shrink-0 text-ink-3">{CHAIN_ROLE_LABEL[role]}</dt>
+                <dd className={`min-w-0 break-all ${unknown ? "text-ink-3 italic" : "text-ink-2"}`} data-role={role}>{value}</dd>
+              </div>
+            );
+          })}
+        </dl>
+        {refs.length > 0 ? (
+          <div className="text-micro text-ink-3">
+            <p className="font-data uppercase tracking-[0.08em]">{t.provenanceRefs}</p>
+            <ul className="mt-1 space-y-0.5">
+              {refs.map((ref) => (
+                <li key={ref} className="break-all font-data">{ref}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+    </details>
+  );
+}
+
 export function ItemRow({ item, unreadSince, onOpen, selected = false }: {
   item: LibraryItem;
   unreadSince: number;
@@ -219,7 +342,10 @@ export function ItemRow({ item, unreadSince, onOpen, selected = false }: {
           trailing={item.ts > unreadSince ? <SignalChip tone="neutral" label={t.newBadge} /> : null}
           className={selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:bg-surface-3"}
         >
-          {CATEGORY_LABEL[item.category] ?? item.category} · {item.series}
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+            <span>{CATEGORY_LABEL[item.category] ?? item.category} · {item.series}</span>
+            <ProvenanceBadges provenance={item.provenance} corrected={Boolean(item.correction)} />
+          </span>
         </ListRow>
       </div>
     </li>
@@ -304,11 +430,12 @@ export function SavedSearchShelf({ searches, counts, onApply }: { searches: Libr
   );
 }
 
-export function ReadingContent({ item, neighbors, onNavigate, onBack }: {
+export function ReadingContent({ item, neighbors, onNavigate, onBack, onCorrectionChanged }: {
   item: LibraryItem;
   neighbors: { prev: LibraryItem | null; next: LibraryItem | null };
   onNavigate: (item: LibraryItem) => void;
   onBack: () => void;
+  onCorrectionChanged?: (detail: LibraryDetail) => void | Promise<void>;
 }) {
   const [detail, setDetail] = useState<LibraryDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -336,6 +463,21 @@ export function ReadingContent({ item, neighbors, onNavigate, onBack }: {
     })();
     return () => { cancelled = true; };
   }, [item.id]);
+
+  const refreshAfterCorrection = useCallback(async () => {
+    try {
+      const updated = await fetchJSON<LibraryDetail>(
+        `/api/library/item?id=${encodeURIComponent(item.id)}`,
+      );
+      setDetail(updated);
+      setError(null);
+      await onCorrectionChanged?.(updated);
+    } catch (e) {
+      // Die Mutation ist bereits abgeschlossen. Ein fehlgeschlagener Refetch
+      // darf deshalb nicht fälschlich als fehlgeschlagene Korrektur erscheinen.
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [item.id, onCorrectionChanged]);
 
   // Inhaltsverzeichnis wie im Nachschlagewerk (KnowledgeReader): dieselbe
   // extractToc/TocNav-Kombination, hier mobil einklappbar statt sticky-aside
@@ -367,6 +509,18 @@ export function ReadingContent({ item, neighbors, onNavigate, onBack }: {
           </div>
         </details>
       ) : null}
+      <ProvenanceDisclosure provenance={detail?.provenance ?? item.provenance} />
+      {detail?.provenance ? (
+        <div className="mb-3">
+          <BibliothekCorrectionEditor
+            key={detail.id}
+            itemId={detail.id}
+            provenance={detail.provenance}
+            correction={detail.correction}
+            onChanged={refreshAfterCorrection}
+          />
+        </div>
+      ) : null}
       {detail ? <ProseMarkdown slugHeadings>{detail.body_md}</ProseMarkdown> : error ? null : <SkeletonCard rows={5} />}
     </FleetPanel>
   );
@@ -384,6 +538,14 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<LesesaalSort>("newest");
+  // P6a — Provenienz-Filterzustand (Erzeuger/Weg-Mehrfachauswahl) lebt in der
+  // URL: teilbar und über Reload/Back/Forward wiederherstellbar. Aus den
+  // Search-Params abgeleitet (memoisiert), damit die URL die einzige Quelle ist
+  // und keine Zustands-Drift entsteht.
+  const producerParamKey = JSON.stringify(searchParams.getAll("producer"));
+  const pathParamKey = JSON.stringify(searchParams.getAll("path"));
+  const producers = useMemo<string[]>(() => JSON.parse(producerParamKey), [producerParamKey]);
+  const paths = useMemo<string[]>(() => JSON.parse(pathParamKey), [pathParamKey]);
   // `data` trägt die Meta der zuletzt geladenen Seite (categories/has_more/
   // truncated/count); `items` akkumuliert über "Mehr laden" (S6) hinweg.
   const [data, setData] = useState<LibraryListResponse | null>(null);
@@ -464,10 +626,13 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
     const params = new URLSearchParams();
     if (category) params.set("category", category);
     if (q.trim()) params.set("q", q.trim());
+    // P6a — Mehrfachauswahl: je Wert ein wiederholter Query-Param.
+    for (const producer of producers) params.append("producer", producer);
+    for (const path of paths) params.append("path", path);
     params.set("limit", String(LESESAAL_PAGE_SIZE));
     params.set("offset", String(offset));
     return fetchJSON<LibraryListResponse>(`/api/library/items?${params.toString()}`);
-  }, [category, q]);
+  }, [category, q, producers, paths]);
 
   const load = useCallback(async () => {
     try {
@@ -479,6 +644,13 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [fetchPage]);
+
+  const handleCorrectionChanged = useCallback(async (updated: LibraryDetail) => {
+    setReading((current) => current?.id === updated.id ? updated : current);
+    // Korrigierte Werte treiben auch Zeilenbadges, Filter und Facetten. Der
+    // Listen-Reload bleibt im aktuellen Suche-/Kategorie-/Facettenkontext.
+    await load();
+  }, [load]);
 
   const loadMore = useCallback(async () => {
     setLoadingMore(true);
@@ -515,6 +687,31 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
     closeItem();
     setQ(search.query);
   }, [closeItem]);
+
+  // P6a — Facetten-Auswahl als URL-Zustand: ein Klick toggelt den Wert in der
+  // jeweiligen Facette (Mehrfachauswahl). Filterwechsel = replace (kein
+  // Verlaufseintrag), der Zustand bleibt über die URL trotzdem wiederherstellbar.
+  const toggleFacet = useCallback((facet: "producer" | "path", value: string) => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      const current = p.getAll(facet);
+      const next = current.includes(value)
+        ? current.filter((v) => v !== value)
+        : [...current, value];
+      p.delete(facet);
+      for (const v of next) p.append(facet, v);
+      return p;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  const resetFacets = useCallback(() => {
+    setSearchParams((prev) => {
+      const p = new URLSearchParams(prev);
+      p.delete("producer");
+      p.delete("path");
+      return p;
+    }, { replace: true });
+  }, [setSearchParams]);
 
   useEffect(() => {
     // Erst-Load per setTimeout(0) — Hauskonvention (TriageStrip): synchrones
@@ -606,7 +803,7 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
     return () => { cancelled = true; };
   }, [searchParams, items, reading]);
 
-  const isFrontpage = !category && !q.trim();
+  const isFrontpage = !category && !q.trim() && producers.length === 0 && paths.length === 0;
 
   const frontpage = useMemo(() => newestPerCategory(items), [items]);
   const shelves = useMemo(() => groupBySeries(items), [items]);
@@ -642,6 +839,33 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
         <div className="mt-2 flex items-center gap-2">
           <SortToggle sort={sort} onChange={setSort} />
         </div>
+        {data?.facets || producers.length > 0 || paths.length > 0 ? (
+          <div className="mt-2 space-y-2 border-t border-line pt-2">
+            <FacetFilterGroup
+              label={t.provenanceProducerFacet}
+              facets={data?.facets?.producer ?? []}
+              selected={producers}
+              renderLabel={(value) => value}
+              onToggle={(value) => toggleFacet("producer", value)}
+            />
+            <FacetFilterGroup
+              label={t.provenancePathFacet}
+              facets={data?.facets?.path ?? []}
+              selected={paths}
+              renderLabel={(value) => pathLabel(value)}
+              onToggle={(value) => toggleFacet("path", value)}
+            />
+            {producers.length > 0 || paths.length > 0 ? (
+              <button
+                type="button"
+                onClick={resetFacets}
+                className="inline-flex min-h-12 items-center rounded-card border border-line px-3 text-micro text-ink-2 transition hover:border-live/40 hover:bg-surface-3"
+              >
+                {t.provenanceReset}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
@@ -685,6 +909,9 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
                   >
                     <span className="line-clamp-3">{plainMarkdownPreview(item.preview)}</span>
                     <span className="mt-2 block font-data text-micro text-ink-3">{item.series}</span>
+                    <span className="mt-1 block">
+                      <ProvenanceBadges provenance={item.provenance} corrected={Boolean(item.correction)} />
+                    </span>
                   </ListRow>
                 </div>
               );
@@ -725,7 +952,13 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
       <TwoPane
         list={shelf}
         detail={isExpanded && reading ? (
-          <ReadingContent item={reading} neighbors={neighbors} onNavigate={navigateToItem} onBack={closePaneItem} />
+          <ReadingContent
+            item={reading}
+            neighbors={neighbors}
+            onNavigate={navigateToItem}
+            onBack={closePaneItem}
+            onCorrectionChanged={handleCorrectionChanged}
+          />
         ) : undefined}
         detailLabel={reading ? `${t.modeLesesaal}: ${reading.title}` : t.modeLesesaal}
         onCloseDetail={isExpanded && reading ? closePaneItem : undefined}
@@ -740,7 +973,13 @@ export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: n
           onClose={closeItem}
           widthClassName="tab:w-[min(900px,calc(100vw-2rem))]"
         >
-          <ReadingContent item={reading} neighbors={neighbors} onNavigate={navigateToItem} onBack={closeItem} />
+          <ReadingContent
+            item={reading}
+            neighbors={neighbors}
+            onNavigate={navigateToItem}
+            onBack={closeItem}
+            onCorrectionChanged={handleCorrectionChanged}
+          />
         </DrawerShell>
       ) : null}
     </>
@@ -760,6 +999,48 @@ function SortToggle({ sort, onChange }: { sort: LesesaalSort; onChange: (sort: L
       ariaLabelPrefix={t.sortLabel}
       className="[&_button]:min-h-12"
     />
+  );
+}
+
+/** P6a — Mehrfachauswahl-Filtergruppe einer Provenienz-Facette mit
+ *  kontextuellen Zahlen. Mobil umbrechend, Tastatur/ARIA (aria-pressed). */
+function FacetFilterGroup({ label, facets, selected, renderLabel, onToggle }: {
+  label: string;
+  facets: FacetCount[];
+  selected: string[];
+  renderLabel: (value: string) => string;
+  onToggle: (value: string) => void;
+}) {
+  const visibleFacets = [...facets];
+  for (const value of selected) {
+    if (!visibleFacets.some((facet) => facet.value === value)) {
+      visibleFacets.push({ value, count: 0 });
+    }
+  }
+  if (visibleFacets.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={label}>
+      <span className="font-data text-micro uppercase tracking-[0.08em] text-ink-3">{label}</span>
+      {visibleFacets.map((facet) => {
+        const active = selected.includes(facet.value);
+        return (
+          <button
+            key={facet.value}
+            type="button"
+            aria-pressed={active}
+            data-facet={label}
+            data-facet-value={facet.value}
+            onClick={() => onToggle(facet.value)}
+            className={`inline-flex min-h-12 items-center gap-1 rounded-card border px-2 text-micro transition ${
+              active ? "border-live/40 bg-live/10 text-bronze-hi" : "border-line text-ink-2 hover:bg-surface-3"
+            }`}
+          >
+            <span className="min-w-0 break-all text-left">{renderLabel(facet.value)}</span>
+            <span className="shrink-0 font-data tabular-nums text-ink-3">{facet.count}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

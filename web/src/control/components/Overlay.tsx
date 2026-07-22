@@ -15,7 +15,7 @@
  * unterhalb `tab` (600px) ein bottom-sheet mit `max-h`/innerem Scroll +
  * safe-area-Padding, ab `tab` ein rechtes side-sheet (SHELL-SPEC.md W2-c).
  */
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -26,15 +26,17 @@ export function Overlay({
   children,
   closeDisabled = false,
   maxWidthClassName = "max-w-md",
+  restoreFocusRef,
 }: {
   onClose: () => void;
   ariaLabel: string;
   children: ReactNode;
   closeDisabled?: boolean;
   maxWidthClassName?: string;
+  restoreFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
-  useFocusTrap(dialogRef, true);
+  useFocusTrap(dialogRef, true, restoreFocusRef);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !closeDisabled) onClose(); };

@@ -3,11 +3,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
-import { CATEGORY_LABEL, countByCategory, dedupeById, filterBriefings, groupBySeries, newestBriefing, newestPerCategory, seriesNeighbors, sortItems } from "./BibliothekView.helpers";
+import { CATEGORY_LABEL, countByCategory, dedupeById, filterBriefings, groupBySeries, newestBriefing, newestPerCategory, pathLabel, provenanceRowLabel, provenanceStatusLabel, seriesNeighbors, sortItems, type LibraryProvenance } from "./BibliothekView.helpers";
 import {
   BibliothekView,
   ItemRow,
   LesesaalBody,
+  ProvenanceBadges,
+  ProvenanceDisclosure,
   ReadingView,
   SavedSearchShelf,
   TopicFollowCard,
@@ -368,5 +370,150 @@ describe("ReadingView Lade-Platzhalter (B2)", () => {
     );
     expect(html).toContain('aria-busy="true"');
     expect(html).not.toContain(">…<");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P6a — Provenienz (Herkunft): Badges, Disclosure, Labels, URL-Wiring
+// ---------------------------------------------------------------------------
+
+const PROV: LibraryProvenance = {
+  producer: "Codex",
+  path: "Receipt",
+  status: "partial",
+  chain: {
+    auftraggeber: "Unbekannt",
+    delegation: "Unbekannt",
+    autor: "Codex",
+    review: "Unbekannt",
+    ablage: "receipt:Codex/2026-07-22-x.md",
+  },
+  refs: ["receipt:Codex/2026-07-22-x.md"],
+};
+
+describe("P6a Provenienz-Labels (Helper)", () => {
+  it("provenanceRowLabel bildet 'Erzeuger · Weg' und null ohne Vertrag", () => {
+    expect(provenanceRowLabel(PROV)).toBe("Codex · Receipt");
+    expect(provenanceRowLabel(undefined)).toBeNull();
+    expect(provenanceRowLabel({ ...PROV, producer: "" })).toBe("Unbekannt · Receipt");
+  });
+
+  it("pathLabel mappt bekannte Wege und fällt sicher zurück", () => {
+    expect(pathLabel("Cron")).toBe("Cron");
+    expect(pathLabel("Task")).toBe("Task");
+    expect(pathLabel("Manuell")).toBe("Manuell");
+    expect(pathLabel(undefined)).toBe("Unbekannt");
+    expect(pathLabel("Sonderweg")).toBe("Sonderweg");
+  });
+
+  it("provenanceStatusLabel übersetzt den Beleg-Status verständlich", () => {
+    expect(provenanceStatusLabel("evidenced")).toBe("vollständig belegt");
+    expect(provenanceStatusLabel("partial")).toBe("teilweise belegt");
+    expect(provenanceStatusLabel("unknown")).toBe("unbekannt");
+    expect(provenanceStatusLabel(undefined)).toBe("unbekannt");
+  });
+});
+
+describe("P6a ProvenanceBadges (Lesesaal-Zeile)", () => {
+  it("zeigt kompakt Erzeuger + Weg als Labels", () => {
+    const html = renderToStaticMarkup(<ProvenanceBadges provenance={PROV} />);
+    expect(html).toContain("Codex");
+    expect(html).toContain("Receipt");
+    expect(html).toContain('data-provenance-label="Codex · Receipt"');
+    expect(html).toContain('aria-label="Herkunft: Codex über Receipt"');
+    expect(html).toContain('role="group"');
+  });
+
+  it("kennzeichnet einen wirksam korrigierten Listeneintrag", () => {
+    const html = renderToStaticMarkup(
+      <ProvenanceBadges provenance={PROV} corrected />,
+    );
+    expect(html).toContain("Korrigiert");
+    expect(html).toContain("Codex");
+    expect(html).toContain("Receipt");
+  });
+
+  it("benennt unbekannte Werte sichtbar", () => {
+    const html = renderToStaticMarkup(
+      <ProvenanceBadges provenance={{ ...PROV, producer: "Unbekannt", path: "Unbekannt" }} />,
+    );
+    expect(html).toContain("Unbekannt");
+  });
+
+  it("rendert nichts ohne Provenienz-Vertrag (Altvertrag bleibt schlank)", () => {
+    expect(renderToStaticMarkup(<ProvenanceBadges provenance={undefined} />)).toBe("");
+  });
+});
+
+describe("P6a ProvenanceDisclosure (Herkunft im Dokument)", () => {
+  it("ist standardmäßig zugeklappt (details ohne open)", () => {
+    const html = renderToStaticMarkup(<ProvenanceDisclosure provenance={PROV} />);
+    expect(html).toContain("<details");
+    expect(html).not.toContain("<details open");
+    expect(html).toContain("Herkunft");
+    expect(html).toContain("Codex · Receipt · teilweise belegt");
+  });
+
+  it("zeigt Status, alle fünf Rollen und technische Belege", () => {
+    const html = renderToStaticMarkup(<ProvenanceDisclosure provenance={PROV} />);
+    expect(html).toContain("teilweise belegt");
+    for (const role of ["Auftraggeber", "Delegation", "Autor", "Review", "Ablage"]) {
+      expect(html).toContain(role);
+    }
+    expect(html).toContain("Codex");                       // Autor-Wert
+    expect(html).toContain("receipt:Codex/2026-07-22-x.md"); // Ablage + technischer Beleg
+    expect(html).toContain("Technische Belege");
+  });
+
+  it("benennt unbelegte Rollen sichtbar als Unbekannt", () => {
+    const html = renderToStaticMarkup(<ProvenanceDisclosure provenance={PROV} />);
+    // Drei Rollen (Auftraggeber/Delegation/Review) sind im Fixture unbelegt.
+    expect(html.match(/Unbekannt/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("rendert nichts ohne Provenienz-Vertrag", () => {
+    expect(renderToStaticMarkup(<ProvenanceDisclosure provenance={undefined} />)).toBe("");
+  });
+});
+
+describe("P6a ItemRow trägt die Provenienz-Badges", () => {
+  it("zeigt Erzeuger + Weg neben Kategorie/Serie", () => {
+    const html = renderToStaticMarkup(
+      <ItemRow
+        item={item({ category: "receipts", series: "Codex", title: "Receipt — Lauf", ts: 200, provenance: PROV })}
+        unreadSince={100}
+        onOpen={() => {}}
+      />,
+    );
+    expect(html).toContain("Receipt — Lauf");
+    expect(html).toContain('data-provenance-label="Codex · Receipt"');
+  });
+
+  it("bleibt ohne Provenienz unverändert (kompatibel mit Altdaten)", () => {
+    const html = renderToStaticMarkup(
+      <ItemRow item={item({ title: "Alt", ts: 50 })} unreadSince={100} onOpen={() => {}} />,
+    );
+    expect(html).not.toContain("data-provenance-label");
+  });
+});
+
+describe("P6a Lesesaal Facetten-URL-Wiring (Quelltext-Beweis)", () => {
+  it("liest Erzeuger/Weg als Mehrfachauswahl aus der URL", () => {
+    expect(src).toContain('searchParams.getAll("producer")');
+    expect(src).toContain('searchParams.getAll("path")');
+  });
+
+  it("sendet die Auswahl als wiederholte Query-Params an den Items-Endpunkt", () => {
+    expect(src).toContain('params.append("producer", producer)');
+    expect(src).toContain('params.append("path", path)');
+  });
+
+  it("toggelt/resettet Facetten und rendert kontextuelle Zahlen", () => {
+    expect(src).toContain("toggleFacet");
+    expect(src).toContain("resetFacets");
+    expect(src).toContain("data?.facets");
+    expect(src).toContain("FacetFilterGroup");
+    expect(src).toContain("aria-pressed");
+    expect(src).toContain("producers.length === 0 && paths.length === 0");
   });
 });

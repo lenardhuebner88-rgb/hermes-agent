@@ -20,7 +20,7 @@ vi.mock("@/lib/api", async () => {
   return { ...actual, fetchJSON: fetchJSONMock };
 });
 
-import { BibliothekView, type LibrarySavedSearch } from "./BibliothekView";
+import { BibliothekView, LesesaalBody, type LibrarySavedSearch } from "./BibliothekView";
 import { _resetPollingStore } from "../hooks/pollingStore";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
@@ -434,6 +434,310 @@ describe("BibliothekView: Fokus-Rückgabe nach Briefings→Lesesaal-Moduswechsel
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
       expect(document.activeElement).toBe(screen.getByRole("tab", { name: /Lesesaal/ }));
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P6a — Provenienz: Badges, Facetten (URL), Herkunft-Disclosure (interaktiv)
+// ---------------------------------------------------------------------------
+
+const PROV_RECEIPT = {
+  id: "receipt::Codex::2026-07-22-x.md",
+  category: "receipts",
+  series_id: "receipts/Codex",
+  series: "Codex",
+  title: "Receipt — Provenienz-Lauf",
+  ts: 1_749_540_669,
+  preview: "Inhalt.",
+  source_ref: "receipt:Codex/2026-07-22-x.md",
+  series_meta: "",
+  provenance: {
+    producer: "Codex", path: "Receipt", status: "partial",
+    chain: { auftraggeber: "Unbekannt", delegation: "Unbekannt", autor: "Codex", review: "Unbekannt", ablage: "receipt:Codex/2026-07-22-x.md" },
+    refs: ["receipt:Codex/2026-07-22-x.md"],
+  },
+};
+const PROV_CRON = {
+  ...ITEM,
+  provenance: {
+    producer: "Hermes-System", path: "Cron", status: "partial",
+    chain: { auftraggeber: "Unbekannt", delegation: "Unbekannt", autor: "Hermes-System", review: "Unbekannt", ablage: "cron:5a2a54ac3dae" },
+    refs: ["cron:5a2a54ac3dae", "2026-06-10_07-31-09.md"],
+  },
+};
+const PROV_ITEMS_RESPONSE = {
+  items: [PROV_RECEIPT, PROV_CRON],
+  count: 2,
+  truncated: false,
+  has_more: false,
+  categories: ["news", "briefings", "recherchen", "familie", "receipts", "wartung"],
+  facets: {
+    producer: [{ value: "Codex", count: 1 }, { value: "Hermes-System", count: 1 }],
+    path: [{ value: "Cron", count: 1 }, { value: "Receipt", count: 1 }],
+  },
+  now: 1_749_540_700,
+};
+
+function mockProvenanceFetch() {
+  fetchJSONMock.mockImplementation(async (url: string) => {
+    if (url.startsWith("/api/library/item?id=")) {
+      const id = decodeURIComponent(url.split("id=")[1] ?? "");
+      const base = id === PROV_RECEIPT.id ? PROV_RECEIPT : PROV_CRON;
+      return { ...base, body_md: "# Ausgabe\n\nLesetext ohne drei Überschriften." };
+    }
+    if (url.startsWith("/api/library/items")) return PROV_ITEMS_RESPONSE;
+    if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+    if (url.startsWith("/api/library/saved-searches")) return EMPTY_SAVED;
+    throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+  });
+}
+
+describe("P6a Lesesaal: Erzeuger+Weg-Badges und Facetten-Filter", () => {
+  it("zeigt an jeder Zeile kompakt Erzeuger + Weg", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    await screen.findByText("Receipt — Provenienz-Lauf");
+    // Default-Ansicht ist die Frontpage-Karte; das Badge trägt das kombinierte Label.
+    const badge = document.querySelector('[data-provenance-label="Codex · Receipt"]');
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toContain("Codex");
+    expect(badge?.textContent).toContain("Receipt");
+  });
+
+  it("rendert die Facetten-Filter mit kontextuellen Zahlen (unkomprimiert über den Bestand)", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    await screen.findByText("Receipt — Provenienz-Lauf");
+    const codex = document.querySelector('[data-facet="Erzeuger"][data-facet-value="Codex"]');
+    expect(codex?.textContent).toContain("Codex");
+    expect(codex?.textContent).toContain("1");
+    const receipt = document.querySelector('[data-facet="Weg"][data-facet-value="Receipt"]');
+    expect(receipt?.textContent).toContain("Receipt");
+    expect(receipt?.getAttribute("aria-pressed")).toBe("false");
+    // Rollen-Gruppen sind für Screenreader benannt
+    expect(document.querySelector('[role="group"][aria-label="Erzeuger"]')).not.toBeNull();
+    expect(document.querySelector('[role="group"][aria-label="Weg"]')).not.toBeNull();
+  });
+
+  it("Facetten-Klick setzt den URL-Param (Mehrfachauswahl) und triggert den Refetch", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    await screen.findByText("Receipt — Provenienz-Lauf");
+    const codex = document.querySelector('[data-facet="Erzeuger"][data-facet-value="Codex"]') as HTMLElement;
+    fireEvent.click(codex);
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(expect.stringContaining("producer=Codex"));
+    });
+    await waitFor(() => {
+      expect(document.querySelector('[data-facet-value="Codex"]')?.getAttribute("aria-pressed")).toBe("true");
+    });
+  });
+
+  it("URL-Roundtrip: ?producer=Codex stellt die Auswahl über Reload wieder her", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter initialEntries={["/bibliothek?producer=Codex"]}><LesesaalBody /></MemoryRouter>);
+    await screen.findByText("Receipt — Provenienz-Lauf");
+    expect(fetchJSONMock).toHaveBeenCalledWith(expect.stringContaining("producer=Codex"));
+    expect(document.querySelector('[data-facet-value="Codex"]')?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("Zurücksetzen entfernt die Facetten-Auswahl aus URL und Ansicht", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter initialEntries={["/bibliothek?producer=Codex"]}><LesesaalBody /></MemoryRouter>);
+    await screen.findByText("Receipt — Provenienz-Lauf");
+    fireEvent.click(screen.getByRole("button", { name: "Zurücksetzen" }));
+    await waitFor(() => {
+      expect(document.querySelector('[data-facet-value="Codex"]')?.getAttribute("aria-pressed")).toBe("false");
+    });
+    expect(screen.queryByRole("button", { name: "Zurücksetzen" })).toBeNull();
+  });
+
+  it("behält ausgewählte Nulltreffer-Facetten sichtbar und einzeln abschaltbar", async () => {
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/items")) {
+        return {
+          ...PROV_ITEMS_RESPONSE,
+          items: [],
+          count: 0,
+          facets: {
+            producer: [{ value: "Hermes-System", count: 1 }],
+            path: [{ value: "Receipt", count: 1 }],
+          },
+        };
+      }
+      if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+      if (url.startsWith("/api/library/saved-searches")) return EMPTY_SAVED;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+    render(
+      <MemoryRouter initialEntries={["/bibliothek?producer=Codex&path=Cron"]}>
+        <LesesaalBody />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector('[data-facet-value="Codex"]')?.getAttribute("aria-pressed")).toBe("true");
+    });
+    expect(document.querySelector('[data-facet-value="Codex"]')?.textContent).toContain("0");
+    expect(document.querySelector('[data-facet-value="Cron"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector('[data-facet-value="Cron"]')?.textContent).toContain("0");
+    fireEvent.click(document.querySelector('[data-facet-value="Codex"]') as HTMLElement);
+    await waitFor(() => {
+      expect(document.querySelector('[data-facet-value="Codex"]')).toBeNull();
+    });
+  });
+
+  it("bietet bei einem ungültigen Weg-Link trotz Ladefehler einen Reset an", async () => {
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/items") && url.includes("path=Manuel")) {
+        throw new Error("unknown path facet");
+      }
+      if (url.startsWith("/api/library/items")) return PROV_ITEMS_RESPONSE;
+      if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+      if (url.startsWith("/api/library/saved-searches")) return EMPTY_SAVED;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+    render(<MemoryRouter initialEntries={["/bibliothek?path=Manuel"]}><LesesaalBody /></MemoryRouter>);
+
+    expect((await screen.findByRole("alert")).textContent).toContain("unknown path facet");
+    fireEvent.click(screen.getByRole("button", { name: "Zurücksetzen" }));
+    expect(await screen.findByText("Receipt — Provenienz-Lauf")).toBeTruthy();
+  });
+
+  it("zeigt bei aktiver Provenienz-Facette die vollständige Trefferliste statt der Startseiten-Auswahl", async () => {
+    const secondReceipt = {
+      ...PROV_RECEIPT,
+      id: "receipt::Codex::2026-07-22-y.md",
+      title: "Receipt — Zweiter Lauf",
+      ts: PROV_RECEIPT.ts - 1,
+    };
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/items")) {
+        return { ...PROV_ITEMS_RESPONSE, items: [PROV_RECEIPT, secondReceipt], count: 2 };
+      }
+      if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+      if (url.startsWith("/api/library/saved-searches")) return EMPTY_SAVED;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+    render(<MemoryRouter initialEntries={["/bibliothek?producer=Codex"]}><LesesaalBody /></MemoryRouter>);
+
+    expect(await screen.findByText("Receipt — Provenienz-Lauf")).toBeTruthy();
+    expect(screen.getByText("Receipt — Zweiter Lauf")).toBeTruthy();
+  });
+
+  it("refetcht die paginierte Liste beim Öffnen eines Dokuments nicht", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    const card = await screen.findByText("Receipt — Provenienz-Lauf");
+    const itemCallsBefore = fetchJSONMock.mock.calls.filter(
+      ([url]) => typeof url === "string" && url.startsWith("/api/library/items"),
+    ).length;
+
+    fireEvent.click(card);
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(expect.stringContaining("/api/library/item?id="));
+    });
+    const itemCallsAfter = fetchJSONMock.mock.calls.filter(
+      ([url]) => typeof url === "string" && url.startsWith("/api/library/items"),
+    ).length;
+    expect(itemCallsAfter).toBe(itemCallsBefore);
+  });
+});
+
+describe("P6a Lesesaal: Herkunft-Disclosure im geöffneten Dokument", () => {
+  it("ist zugeklappt und zeigt Status, fünf Rollen, Belege und benennt Unbekanntes", async () => {
+    mockProvenanceFetch();
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    const card = await screen.findByText("Receipt — Provenienz-Lauf");
+    fireEvent.click(card);
+
+    const summary = await screen.findByText("Herkunft");
+    expect(summary.closest("details")?.hasAttribute("open")).toBe(false);
+    expect(screen.getAllByText("teilweise belegt").length).toBeGreaterThanOrEqual(1);
+    for (const role of ["Auftraggeber", "Delegation", "Autor", "Review", "Ablage"]) {
+      expect(screen.getByText(role)).toBeTruthy();
+    }
+    expect(screen.getAllByText("Unbekannt").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText("Technische Belege")).toBeTruthy();
+    expect(screen.getAllByText("receipt:Codex/2026-07-22-x.md").length).toBeGreaterThan(0);
+  });
+});
+
+describe("P6b Lesesaal: Korrektur aktualisiert Detail, Liste und Facetten", () => {
+  it("refetcht nach bestätigtem Speichern beide Lesewege und zeigt das Korrigiert-Badge", async () => {
+    let corrected = false;
+    const correction = {
+      item_id: PROV_RECEIPT.id,
+      active: true,
+      fields: { auftraggeber: "Piet" },
+      original: PROV_RECEIPT.provenance,
+      reason: "Auftraggeber belegt",
+      actor: "operator",
+      created_at: 1_753_200_000,
+      updated_at: 1_753_200_000,
+      history: [{
+        at: 1_753_200_000,
+        action: "set",
+        fields: { auftraggeber: "Piet" },
+        reason: "Auftraggeber belegt",
+        actor: "operator",
+      }],
+    };
+    const effective = {
+      ...PROV_RECEIPT.provenance,
+      chain: { ...PROV_RECEIPT.provenance.chain, auftraggeber: "Piet" },
+    };
+    const correctedItem = { ...PROV_RECEIPT, provenance: effective, correction };
+
+    fetchJSONMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === "/api/library/correction/preview" && init?.method === "POST") {
+        return { provenance: effective, fields: { auftraggeber: "Piet" } };
+      }
+      if (url === "/api/library/correction" && init?.method === "PUT") {
+        corrected = true;
+        return { correction, provenance: effective };
+      }
+      if (url.startsWith("/api/library/correction?id=")) {
+        return { correction: null };
+      }
+      if (url.startsWith("/api/library/item?id=")) {
+        const base = corrected ? correctedItem : PROV_RECEIPT;
+        return { ...base, body_md: "# Ausgabe\n\nLesetext." };
+      }
+      if (url.startsWith("/api/library/items")) {
+        return {
+          ...PROV_ITEMS_RESPONSE,
+          items: corrected ? [correctedItem, PROV_CRON] : [PROV_RECEIPT, PROV_CRON],
+        };
+      }
+      if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+      if (url.startsWith("/api/library/saved-searches")) return EMPTY_SAVED;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+
+    render(<MemoryRouter><LesesaalBody /></MemoryRouter>);
+    fireEvent.click(await screen.findByText("Receipt — Provenienz-Lauf"));
+    fireEvent.click(await screen.findByRole("button", { name: "Herkunft korrigieren" }));
+    await waitFor(() => expect((screen.getByLabelText(/^Auftraggeber/) as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText(/^Auftraggeber/), { target: { value: "Piet" } });
+    fireEvent.change(screen.getByLabelText("Begründung (Pflicht)"), {
+      target: { value: "Auftraggeber belegt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Korrektur prüfen" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Jetzt verbindlich speichern" }));
+
+    await screen.findByRole("status");
+    await waitFor(() => {
+      const listCalls = fetchJSONMock.mock.calls.filter(
+        ([url]) => typeof url === "string" && url.startsWith("/api/library/items"),
+      );
+      const detailCalls = fetchJSONMock.mock.calls.filter(
+        ([url]) => typeof url === "string" && url.startsWith("/api/library/item?id="),
+      );
+      expect(listCalls.length).toBeGreaterThanOrEqual(2);
+      expect(detailCalls.length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText("Korrigiert").length).toBeGreaterThanOrEqual(1);
     });
   });
 });

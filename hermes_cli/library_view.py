@@ -28,12 +28,12 @@ import json
 import logging
 import re
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,28 @@ class SavedSearchUpdate(BaseModel):
     query: Optional[str] = Field(None, min_length=1, max_length=1000)
     topic_tags: Optional[list[str]] = Field(None, max_length=50)
     person_tags: Optional[list[str]] = Field(None, max_length=50)
+
+
+# P6b — Korrektur-Overlay (operator-bestätigt, ADR 0002). `confirm` steht
+# bewusst auf False und muss ausdrücklich `true` sein (fail-closed); `reason`
+# ist Pflicht. Es gibt keinen Agent-/Tool-Automatismus auf diesem Pfad.
+class CorrectionSetPayload(BaseModel):
+    item_id: str = Field(..., min_length=1, max_length=320)
+    fields: dict[str, Optional[str]] = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1, max_length=600)
+    confirm: StrictBool = False
+
+
+class CorrectionPreviewPayload(BaseModel):
+    item_id: str = Field(..., min_length=1, max_length=320)
+    fields: dict[str, Optional[str]] = Field(..., min_length=1)
+
+
+class CorrectionRevokePayload(BaseModel):
+    item_id: str = Field(..., min_length=1, max_length=320)
+    reason: str = Field(..., min_length=1, max_length=600)
+    fields: Optional[list[str]] = Field(None, min_length=1, max_length=6)
+    confirm: StrictBool = False
 
 # ---------------------------------------------------------------------------
 # Kategorien (Grill-Entscheid §7.7: Backend-Dict, Fallback "briefings",
@@ -357,6 +379,145 @@ def _is_silent(item: _Item) -> bool:
     return _SILENT_MARKER in (item.body_md or item.preview or "").upper()
 
 
+# ---------------------------------------------------------------------------
+# P6a — Provenienz (read-only Herkunft-Overlay, ADR 0001)
+#
+# Beantwortet zwei Laien-Fragen: WER hat das Dokument erzeugt (Erzeuger) und
+# über welchen WEG kam es in die Bibliothek? Deterministisch und NUR aus
+# Metadaten abgeleitet (source_ref, Store/Profil, Task-Attribution, Receipt-
+# Agent) — niemals aus Body-Text, Prompt- oder Script-Inhalten. Mutiert keine
+# Quelle; unsichere Fälle bleiben "Unbekannt" (niemals geraten). List- und
+# Detailantwort liefern denselben Vertrag (as_dict hängt provenance immer an).
+# ---------------------------------------------------------------------------
+
+_UNKNOWN = "Unbekannt"
+
+# Weg — genau einer dieser Werte; technische Untertypen leben nur in den Refs.
+# "Manuell" und "Unbekannt" sind explizite Vertragswerte, auch wenn heute kein
+# sicherer Adapter sie liefert.
+PATH_VALUES = ("Cron", "Task", "Receipt", "Manuell", "Unbekannt")
+
+# Status — deterministisch aus der Anzahl belegter Ketten-Rollen.
+STATUS_EVIDENCED = "evidenced"      # vollständig belegt
+STATUS_PARTIAL = "partial"          # teilweise belegt
+STATUS_UNKNOWN = "unknown"          # unbekannt
+
+# Ketten-Rollen (jede braucht Beleg; Lücke = "Unbekannt").
+_CHAIN_ROLES = ("auftraggeber", "delegation", "autor", "review", "ablage")
+
+# Agent-Aliase → stabiler Anzeigename. Konkrete Modelle, Runtime-Varianten, IDs
+# und Dateipfade gehören in die technischen Refs, NICHT hierher. Unkuratierte,
+# aber konkrete Attributionen (z.B. ein Profilname) werden bereinigt durchgereicht
+# (deterministisch, kein Raten); nur leere/fehlende Werte werden "Unbekannt".
+_PRODUCER_ALIASES: dict[str, str] = {
+    "codex": "Codex",
+    "claude": "Claude",
+    "claude-code": "Claude",
+    "claude_code": "Claude",
+    "claude code": "Claude",
+    "hermes": "Hermes-System",
+    "hermes-system": "Hermes-System",
+    "default": "Hermes-System",
+    "main": "Hermes-System",
+    "system": "Hermes-System",
+    "research": "Research",
+    "scout": "Scout",
+    "kimi": "Kimi",
+    "grok": "Grok",
+    "qwen": "Qwen",
+    "fo-brain": "Familie",
+    "fo_brain": "Familie",
+    "fo": "Familie",
+    "familie": "Familie",
+}
+_PRODUCER_UNKNOWN_SENTINELS = frozenset({"unknown", "unbekannt", "none", "null", "-"})
+
+
+def normalize_producer(raw: Any) -> str:
+    """Normalize a raw attribution (agent alias / profile / assignee) to a
+    stable display name. Empty/missing → "Unbekannt". Known aliases collapse
+    onto their canonical name; an unknown but concrete value is passed through
+    cleaned (a leading ``profile:`` marker is dropped) — that is still solid
+    evidence, just not a curated alias."""
+    if raw is None:
+        return _UNKNOWN
+    cleaned = " ".join(str(raw).split())
+    if not cleaned:
+        return _UNKNOWN
+    key = cleaned.casefold()
+    if key in _PRODUCER_UNKNOWN_SENTINELS:
+        return _UNKNOWN
+    if key in _PRODUCER_ALIASES:
+        return _PRODUCER_ALIASES[key]
+    if key.startswith("profile:"):
+        stripped = cleaned.split(":", 1)[1].strip()
+        if not stripped:
+            return _UNKNOWN
+        stripped_key = stripped.casefold()
+        if stripped_key in _PRODUCER_UNKNOWN_SENTINELS:
+            return _UNKNOWN
+        if stripped_key in _PRODUCER_ALIASES:
+            return _PRODUCER_ALIASES[stripped_key]
+        return stripped
+    return cleaned
+
+
+def _provenance_status(chain: dict[str, str]) -> str:
+    evidenced = sum(1 for value in chain.values() if value != _UNKNOWN)
+    if evidenced == 0:
+        return STATUS_UNKNOWN
+    if evidenced == len(chain):
+        return STATUS_EVIDENCED
+    return STATUS_PARTIAL
+
+
+def _unknown_provenance() -> dict[str, Any]:
+    return {
+        "producer": _UNKNOWN,
+        "path": _UNKNOWN,
+        "status": STATUS_UNKNOWN,
+        "chain": {role: _UNKNOWN for role in _CHAIN_ROLES},
+        "refs": [],
+    }
+
+
+def _build_provenance(
+    *,
+    path: str,
+    autor_raw: Any = None,
+    auftraggeber_raw: Any = None,
+    delegation_raw: Any = None,
+    review_raw: Any = None,
+    ablage: Optional[str] = None,
+    refs: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Assemble the serializable provenance contract from metadata-only
+    evidence. ``producer`` is the actual author / responsible profile (the
+    ``autor`` role) — never the commissioner (``auftraggeber``) or reviewer."""
+    chain = {
+        "auftraggeber": normalize_producer(auftraggeber_raw),
+        "delegation": normalize_producer(delegation_raw),
+        "autor": normalize_producer(autor_raw),
+        "review": normalize_producer(review_raw),
+        "ablage": (ablage or _UNKNOWN),
+    }
+    return {
+        "producer": chain["autor"],
+        "path": path,
+        "status": _provenance_status(chain),
+        "chain": chain,
+        "refs": [ref for ref in (refs or []) if ref],
+    }
+
+
+def _cron_producer_raw(store_id: str) -> str:
+    """Responsible profile of a cron run: the profile store runs it; the main
+    store is the default Hermes system itself."""
+    if ":" in store_id:
+        return store_id.split(":", 1)[1]
+    return "main"
+
+
 @dataclass
 class _Item:
     id: str
@@ -371,6 +532,15 @@ class _Item:
     body_md: Optional[str] = field(default=None, repr=False)
     structured: bool = False
     structured_brief: Optional[dict[str, Any]] = field(default=None, repr=False)
+    # P6a: additive, serialisierbare Herkunft. Default = sicherer Unknown-
+    # Vertrag, damit jeder Item (auch ein ohne Explizit-Bau konstruierter)
+    # einen gültigen Vertrag trägt.
+    provenance: dict[str, Any] = field(default_factory=_unknown_provenance, repr=False)
+    # P6b: additives Korrektur-Overlay (Original + aktive Felder + Audit), NUR
+    # gesetzt wenn eine aktive Operator-Korrektur vorliegt. `provenance` trägt
+    # dann bereits den EFFEKTIVEN Wert (treibt Facetten/Filter/Badges); dieser
+    # Block hält Ursprung + Historie additiv sichtbar (ADR 0002).
+    correction: Optional[dict[str, Any]] = field(default=None, repr=False)
 
     def as_dict(self, *, with_body: bool) -> dict[str, Any]:
         d = {
@@ -383,6 +553,10 @@ class _Item:
             "preview": self.preview,
             "source_ref": self.source_ref,
             "series_meta": self.series_meta,
+            # List- UND Detailantwort liefern denselben Provenienz-Vertrag.
+            "provenance": self.provenance or _unknown_provenance(),
+            # P6b: additiver Korrektur-Block (null ohne aktive Korrektur).
+            "correction": self.correction,
         }
         if with_body:
             d["body_md"] = self.body_md or ""
@@ -447,7 +621,6 @@ def _is_trivial_test_cron_output(name: str, body: str, meta: dict) -> bool:
 
 
 def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
-    from dataclasses import replace as _dc_replace
     items: list[_Item] = []
     seen_paths: set[str] = set()
     for store_id, store_dir in _cron_stores():
@@ -507,6 +680,10 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                 ts = _output_ts(md_file.name, stat.st_mtime)
                 structured_brief = _parse_structured_model_brief(job_dir.name, body, ts)
                 day = _time.strftime("%d.%m. %H:%M", _time.localtime(ts))
+                source_ref = (
+                    f"cron:{profile}/{job_dir.name}" if profile
+                    else f"cron:{job_dir.name}"
+                )
                 item = _Item(
                     id=f"cron::{store_id}::{job_dir.name}::{md_file.name}",
                     category=category,
@@ -515,14 +692,17 @@ def _collect_cron_items(*, with_bodies: bool) -> list[_Item]:
                     title=f"{name} — Ausgabe {day}",
                     ts=ts,
                     preview=_preview(body),
-                    source_ref=(
-                        f"cron:{profile}/{job_dir.name}" if profile
-                        else f"cron:{job_dir.name}"
-                    ),
+                    source_ref=source_ref,
                     series_meta=series_meta,
                     body_md=body,
                     structured=structured_brief is not None,
                     structured_brief=structured_brief,
+                    provenance=_build_provenance(
+                        path="Cron",
+                        autor_raw=_cron_producer_raw(store_id),
+                        ablage=source_ref,
+                        refs=[source_ref, md_file.name],
+                    ),
                 )
                 _cron_parse_cache[cache_key] = (
                     stat.st_mtime_ns, stat.st_size, meta_fp, item,
@@ -560,6 +740,7 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
     ts = _output_ts(filename, target.stat().st_mtime)
     structured_brief = _parse_structured_model_brief(job_id, body, ts)
     profile = store_id.split(":", 1)[1] if ":" in store_id else None
+    source_ref = f"cron:{profile}/{job_id}" if profile else f"cron:{job_id}"
     item = _Item(
         id=f"cron::{store_id}::{job_id}::{filename}",
         category=_categorize_job(job_id, name),
@@ -568,11 +749,17 @@ def _read_cron_item(store_id: str, job_id: str, filename: str) -> Optional[_Item
         title=f"{name} — Ausgabe {_time.strftime('%d.%m. %H:%M', _time.localtime(ts))}",
         ts=ts,
         preview=_preview(body),
-        source_ref=f"cron:{profile}/{job_id}" if profile else f"cron:{job_id}",
+        source_ref=source_ref,
         series_meta=meta.get("schedule_display", ""),
         body_md=body,
         structured=structured_brief is not None,
         structured_brief=structured_brief,
+        provenance=_build_provenance(
+            path="Cron",
+            autor_raw=_cron_producer_raw(store_id),
+            ablage=source_ref,
+            refs=[source_ref, filename],
+        ),
     )
     # Consistent with _collect_cron_items: silent self-reports are not readable.
     return None if _is_silent(item) else item
@@ -592,7 +779,7 @@ def _collect_research_items(*, with_bodies: bool, limit: int = 200) -> list[_Ite
         return items
     try:
         rows = conn.execute(
-            "SELECT id, title, status, created_at, completed_at FROM tasks "
+            "SELECT id, title, status, created_at, completed_at, assignee, created_by FROM tasks "
             "WHERE tenant = 'research' AND status != 'archived' "
             "ORDER BY created_at DESC LIMIT ?",
             (int(limit),),
@@ -600,13 +787,16 @@ def _collect_research_items(*, with_bodies: bool, limit: int = 200) -> list[_Ite
         for row in rows:
             answer = None
             answer_ts = None
+            answer_author = None
             comments = kanban_db.list_comments(conn, row["id"])
             if comments:
                 answer = comments[-1].body
                 answer_ts = comments[-1].created_at
+                answer_author = comments[-1].author
             if not answer:
                 continue  # Bibliothek zeigt Lesbares; offene Fragen wohnen im Research-Tab
             ts = int(answer_ts or row["completed_at"] or row["created_at"])
+            source_ref = f"task:{row['id']}"
             items.append(_Item(
                 id=f"research::{row['id']}",
                 category="recherchen",
@@ -615,8 +805,16 @@ def _collect_research_items(*, with_bodies: bool, limit: int = 200) -> list[_Ite
                 title=row["title"],
                 ts=ts,
                 preview=_preview(answer),
-                source_ref=f"task:{row['id']}",
+                source_ref=source_ref,
                 body_md=answer if with_bodies else None,
+                provenance=_build_provenance(
+                    path="Task",
+                    autor_raw=answer_author,
+                    auftraggeber_raw=row["created_by"],
+                    delegation_raw=row["assignee"],
+                    ablage=source_ref,
+                    refs=[source_ref],
+                ),
             ))
     except Exception:
         logger.debug("library: research adapter failed", exc_info=True)
@@ -635,7 +833,7 @@ def _read_research_item(task_id: str) -> Optional[_Item]:
     conn = kanban_db.connect()
     try:
         row = conn.execute(
-            "SELECT id, title, body, created_at, completed_at FROM tasks "
+            "SELECT id, title, body, created_at, completed_at, assignee, created_by FROM tasks "
             "WHERE id = ? AND tenant = 'research'",
             (task_id,),
         ).fetchone()
@@ -655,6 +853,7 @@ def _read_research_item(task_id: str) -> Optional[_Item]:
             f"> **Frage:** {row['title']}\n\n{answer}" if not question
             else f"> **Frage:** {question.splitlines()[0]}\n\n{answer}"
         )
+        source_ref = f"task:{task_id}"
         return _Item(
             id=f"research::{task_id}",
             category="recherchen",
@@ -663,8 +862,16 @@ def _read_research_item(task_id: str) -> Optional[_Item]:
             title=row["title"],
             ts=ts,
             preview=_preview(answer),
-            source_ref=f"task:{task_id}",
+            source_ref=source_ref,
             body_md=body,
+            provenance=_build_provenance(
+                path="Task",
+                autor_raw=comments[-1].author,
+                auftraggeber_raw=row["created_by"],
+                delegation_raw=row["assignee"],
+                ablage=source_ref,
+                refs=[source_ref],
+            ),
         )
     finally:
         conn.close()
@@ -684,13 +891,18 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
     reports_root = _hermes_home() / "reports" / "by-task"
     from hermes_cli import kanban_db
     titles: dict[str, str] = {}
+    # P6a: task-Attribution (assignee=Autor, created_by=Auftraggeber) — reine
+    # Metadaten, kein Body. Einmalig im Bulk geladen (kein N+1 pro Deliverable).
+    task_attr: dict[str, tuple[Optional[str], Optional[str]]] = {}
     try:
         conn = kanban_db.connect()
         try:
             for row in conn.execute(
-                "SELECT id, title FROM tasks WHERE status IN ('done', 'review')",
+                "SELECT id, title, assignee, created_by FROM tasks "
+                "WHERE status IN ('done', 'review')",
             ).fetchall():
                 titles[row["id"]] = row["title"]
+                task_attr[row["id"]] = (row["assignee"], row["created_by"])
         finally:
             conn.close()
     except Exception:
@@ -721,6 +933,8 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
                 rel = md_file.relative_to(task_dir).as_posix()
                 task_title = titles.get(task_dir.name, task_dir.name)
                 suffix = "" if rel == "RESULT.md" else f" · {rel}"
+                source_ref = f"task:{task_dir.name}/{rel}"
+                assignee, created_by = task_attr.get(task_dir.name, (None, None))
                 items.append(_Item(
                     id=f"deliverable::{task_dir.name}::{rel}",
                     category=_DELIVERABLE_CATEGORY,
@@ -729,8 +943,16 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
                     title=f"{task_title}{suffix}",
                     ts=int(stat.st_mtime),
                     preview=_preview(body),
-                    source_ref=f"task:{task_dir.name}/{rel}",
+                    source_ref=source_ref,
                     body_md=body if with_bodies else None,
+                    provenance=_build_provenance(
+                        path="Task",
+                        autor_raw=assignee,
+                        auftraggeber_raw=created_by,
+                        delegation_raw=assignee,
+                        ablage=source_ref,
+                        refs=[source_ref],
+                    ),
                 ))
     receipt_paths = _receipt_file_paths()
     vault_root = (Path.home() / "vault").resolve()
@@ -739,7 +961,8 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
         try:
             rows = conn.execute(
                 """
-                SELECT DISTINCT tr.task_id, tr.metadata, t.title, t.completed_at
+                SELECT DISTINCT tr.task_id, tr.metadata, t.title, t.completed_at,
+                       t.assignee, t.created_by
                   FROM task_runs tr JOIN tasks t ON t.id = tr.task_id
                  WHERE t.status IN ("done", "review")
                    AND tr.metadata IS NOT NULL AND tr.metadata != ""
@@ -786,6 +1009,7 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
             if not body.strip():
                 continue
             task_title = row["title"] or titles.get(task_id, task_id)
+            source_ref = f"artifact:{task_id}/{name}"
             items.append(_Item(
                 id=f"deliverable::{task_id}::{name}",
                 category=_DELIVERABLE_CATEGORY,
@@ -794,8 +1018,16 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
                 title=f"{task_title} - {name}",
                 ts=int(stat.st_mtime),
                 preview=_preview(body),
-                source_ref=f"artifact:{task_id}/{name}",
+                source_ref=source_ref,
                 body_md=body if with_bodies else None,
+                provenance=_build_provenance(
+                    path="Task",
+                    autor_raw=row["assignee"],
+                    auftraggeber_raw=row["created_by"],
+                    delegation_raw=row["assignee"],
+                    ablage=source_ref,
+                    refs=[source_ref],
+                ),
             ))
             emitted += 1
             seen_names.add(name)
@@ -838,6 +1070,28 @@ def _receipt_file_paths() -> set[Path]:
     return receipt_paths
 
 
+def _task_attribution(task_id: str) -> tuple[Optional[str], Optional[str]]:
+    """(assignee, created_by) for a task — detail-path Provenienz-Beleg, reine
+    Metadaten. Fail-soft: kein DB-Zugriff/kein Task → (None, None)."""
+    from hermes_cli import kanban_db
+    try:
+        conn = kanban_db.connect()
+        try:
+            row = conn.execute(
+                "SELECT assignee, created_by FROM tasks "
+                "WHERE id = ? AND status IN ('done', 'review')",
+                (task_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("library: task attribution lookup failed", exc_info=True)
+        return None, None
+    if row is None:
+        return None, None
+    return row["assignee"], row["created_by"]
+
+
 def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
     if not _TASK_ID_RE.match(task_id):
         raise ValueError("invalid task id")
@@ -850,6 +1104,8 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
     if not target.is_file():
         return _read_artifact_deliverable_item(task_id, rel_path)
     body = target.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
+    source_ref = f"task:{task_id}/{rel_path}"
+    assignee, created_by = _task_attribution(task_id)
     return _Item(
         id=f"deliverable::{task_id}::{rel_path}",
         category=_DELIVERABLE_CATEGORY,
@@ -858,8 +1114,16 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
         title=f"{task_id} · {rel_path}",
         ts=int(target.stat().st_mtime),
         preview=_preview(body),
-        source_ref=f"task:{task_id}/{rel_path}",
+        source_ref=source_ref,
         body_md=body,
+        provenance=_build_provenance(
+            path="Task",
+            autor_raw=assignee,
+            auftraggeber_raw=created_by,
+            delegation_raw=assignee,
+            ablage=source_ref,
+            refs=[source_ref],
+        ),
     )
 
 
@@ -874,7 +1138,7 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
         try:
             rows = conn.execute(
                 """
-                SELECT tr.metadata, t.title
+                SELECT tr.metadata, t.title, t.assignee, t.created_by
                   FROM task_runs tr JOIN tasks t ON t.id = tr.task_id
                  WHERE tr.task_id = ?
                    AND t.status IN ("done", "review")
@@ -912,6 +1176,7 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
                 stat = p_resolved.stat()
             except OSError:
                 return None
+            source_ref = f"artifact:{task_id}/{name}"
             return _Item(
                 id=f"deliverable::{task_id}::{name}",
                 category=_DELIVERABLE_CATEGORY,
@@ -920,8 +1185,16 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
                 title=f"{row['title'] or task_id} - {name}",
                 ts=int(stat.st_mtime),
                 preview=_preview(body),
-                source_ref=f"artifact:{task_id}/{name}",
+                source_ref=source_ref,
                 body_md=body,
+                provenance=_build_provenance(
+                    path="Task",
+                    autor_raw=row["assignee"],
+                    auftraggeber_raw=row["created_by"],
+                    delegation_raw=row["assignee"],
+                    ablage=source_ref,
+                    refs=[source_ref],
+                ),
             )
     return None
 
@@ -1021,6 +1294,23 @@ def _newest_receipt_names(receipts_dir: Path) -> list[str]:
     return names
 
 
+# P6b — Receipt-Delegation aus eigenem Frontmatter (belegbare Unknown-Lücke).
+# Explizite Abwesenheits-Marker sind kein Delegationsbeleg und bleiben deshalb
+# sichtbar ``Unbekannt``; Body, Prompt und Script werden nie ausgewertet.
+_ABSENT_ASSIGNEE = frozenset({"", "none", "null", "unknown", "unbekannt", "-"})
+
+
+def _receipt_delegation_raw(meta: dict[str, str]) -> Optional[str]:
+    """Return an evidenced delegation from the receipt's ``assignee`` key."""
+    raw = meta.get("assignee")
+    if raw is None:
+        return None
+    cleaned = " ".join(raw.split())
+    if not cleaned or cleaned.lower() in _ABSENT_ASSIGNEE:
+        return None
+    return cleaned
+
+
 def _split_frontmatter(raw: str) -> tuple[dict[str, str], str]:
     """Flaches ``key: value``-Frontmatter, fail-soft: ohne öffnendes/
     schließendes ``---`` zählt alles als Body."""
@@ -1060,6 +1350,7 @@ def _parse_receipt_file(
     ) or md_file.stem
     meta_bits = [f"**{k}:** {meta[k]}" for k in ("status", "task", "date") if meta.get(k)]
     name = receipt_name or md_file.name
+    source_ref = f"receipt:{agent}/{name}"
     return _Item(
         id=f"receipt::{agent}::{name}",
         category="receipts",
@@ -1068,13 +1359,19 @@ def _parse_receipt_file(
         title=title,
         ts=int(stat.st_mtime),
         preview=_preview(body),
-        source_ref=f"receipt:{agent}/{name}",
+        source_ref=source_ref,
         body_md=f"> {' · '.join(meta_bits)}\n\n{body}" if meta_bits else body,
+        provenance=_build_provenance(
+            path="Receipt",
+            autor_raw=agent,
+            delegation_raw=_receipt_delegation_raw(meta),
+            ablage=source_ref,
+            refs=[source_ref],
+        ),
     )
 
 
 def _collect_receipt_items(*, with_bodies: bool) -> list[_Item]:
-    from dataclasses import replace as _dc_replace
     items: list[_Item] = []
     agents_root = _receipts_root()
     if not agents_root.is_dir():
@@ -1153,6 +1450,40 @@ def _read_receipt_item(agent: str, filename: str) -> Optional[_Item]:
 # Aggregation + Routen
 # ---------------------------------------------------------------------------
 
+def _apply_correction_overlay(items: list[_Item]) -> list[_Item]:
+    """P6b — lege das operator-bestätigte Korrektur-Overlay NACH der
+    deterministischen P6a-Ableitung an. Mutiert ``item.provenance`` auf den
+    EFFEKTIVEN Wert (treibt Facetten/Filter/Badges) und setzt ``item.correction``
+    (Original + aktive Felder + Audit). Ein Overlay-Store-Fehler darf die
+    Bibliothek nie leeren — fail-soft auf die reine P6a-Ableitung."""
+    from hermes_cli import library_corrections
+    try:
+        active = library_corrections.load_active()
+    except Exception:
+        logger.debug("library: correction overlay load failed", exc_info=True)
+        return items
+    if not active:
+        return items
+    for index, item in enumerate(items):
+        record = active.get(item.id)
+        if record is None:
+            continue
+        effective, block = library_corrections.apply(
+            item.provenance or _unknown_provenance(), record,
+        )
+        if block is None:
+            continue
+        # Collector-Caches halten dieselben _Item-Instanzen über Requests. Das
+        # Overlay darf diese abgeleiteten Originale nie mutieren, sonst bleiben
+        # entfernte/revertierte Werte bis zu einem Source-mtime-Wechsel hängen.
+        items[index] = _dc_replace(
+            item,
+            provenance=effective,
+            correction=block,
+        )
+    return items
+
+
 def _collect_all(*, with_bodies: bool) -> list[_Item]:
     items: list[_Item] = []
     for collector in (
@@ -1166,11 +1497,34 @@ def _collect_all(*, with_bodies: bool) -> list[_Item]:
         except Exception:
             # Ein kaputter Adapter darf die Bibliothek nie leeren.
             logger.debug("library: adapter failed", exc_info=True)
+    # P6b — Overlay nach der Ableitung, VOR Sortierung/Pagination: List- und
+    # Detailantwort teilen sich dieselbe Apply-Funktion (Parität).
+    _apply_correction_overlay(items)
     items.sort(key=lambda i: -i.ts)
     return items
 
 
-def _list_items(category: Optional[str], q: Optional[str], limit: int, offset: int = 0) -> dict:
+def _facet_counts(items: list[_Item], key: str) -> list[dict[str, Any]]:
+    """Deterministic facet counts over a (pre-pagination) item set: count desc,
+    then value asc. ``key`` selects the provenance field ("producer"/"path")."""
+    counts: dict[str, int] = {}
+    for item in items:
+        value = (item.provenance or _unknown_provenance()).get(key, _UNKNOWN)
+        counts[value] = counts.get(value, 0) + 1
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def _list_items(
+    category: Optional[str],
+    q: Optional[str],
+    limit: int,
+    offset: int = 0,
+    producers: Optional[list[str]] = None,
+    paths: Optional[list[str]] = None,
+) -> dict:
     needs_bodies = bool(q)
     items = _collect_all(with_bodies=needs_bodies)
     if category:
@@ -1182,19 +1536,49 @@ def _list_items(category: Optional[str], q: Optional[str], limit: int, offset: i
             if needle in i.title.casefold()
             or needle in (i.body_md or "").casefold()
         ]
-    total = len(items)
-    sliced = items[offset:offset + limit]
+    # `items` ist jetzt der vollständige, nach Suche/Kategorie gefilterte
+    # Bestand (vor Facetten-Filter und vor Pagination).
+    producer_set = set(producers) if producers else None
+    path_set = set(paths) if paths else None
+
+    def _prov(item: _Item) -> dict[str, Any]:
+        return item.provenance or _unknown_provenance()
+
+    # Kontextuelle Facettenzahlen über den VOLLSTÄNDIGEN gefilterten Bestand —
+    # Pagination darf sie nicht verfälschen. Innerhalb einer Facette gilt ODER,
+    # zwischen Erzeuger und Weg UND: die Erzeuger-Zahlen berücksichtigen den
+    # Weg-Filter (und Suche/Kategorie), die Weg-Zahlen den Erzeuger-Filter.
+    path_filtered = items if not path_set else [i for i in items if _prov(i)["path"] in path_set]
+    producer_filtered = items if not producer_set else [
+        i for i in items if _prov(i)["producer"] in producer_set
+    ]
+    facets = {
+        "producer": _facet_counts(path_filtered, "producer"),
+        "path": _facet_counts(producer_filtered, "path"),
+    }
+
+    filtered = items
+    if producer_set:
+        filtered = [i for i in filtered if _prov(i)["producer"] in producer_set]
+    if path_set:
+        filtered = [i for i in filtered if _prov(i)["path"] in path_set]
+    total = len(filtered)
+    sliced = filtered[offset:offset + limit]
     return {
         "items": [i.as_dict(with_body=False) for i in sliced],
         "count": total,
         "truncated": total > limit,
         "has_more": offset + len(sliced) < total,
         "categories": list(CATEGORIES),
+        "facets": facets,
         "now": int(_time.time()),
     }
 
 
-def _get_item(item_id: str) -> Optional[_Item]:
+def _get_item_derived(item_id: str) -> Optional[_Item]:
+    """Rohes P6a-Item OHNE Korrektur-Overlay — die deterministische Ableitung.
+    Dient dem Detail-Pfad (mit Overlay) UND dem Set-Pfad der Korrektur-Mutation
+    (der den unverfälschten Vertrag für den Originalsnapshot braucht)."""
     parts = item_id.split("::")
     if parts[0] == "cron" and len(parts) == 4:
         return _read_cron_item(parts[1], parts[2], parts[3])
@@ -1207,12 +1591,98 @@ def _get_item(item_id: str) -> Optional[_Item]:
     raise ValueError("unknown item kind")
 
 
+def _get_item(item_id: str) -> Optional[_Item]:
+    """Detail-Pfad: abgeleitetes Item + Korrektur-Overlay. Derselbe Apply-Schritt
+    wie die Liste → identischer effektiver Vertrag (List-/Detail-Parität)."""
+    item = _get_item_derived(item_id)
+    if item is None:
+        return None
+    overlaid = [item]
+    _apply_correction_overlay(overlaid)
+    return overlaid[0]
+
+
+# ---------------------------------------------------------------------------
+# P6b — Korrektur-Overlay: synchroner Orchestrierungskern der Mutation
+# (Blocking-FS; die Routen wrappen via asyncio.to_thread). Die Route hängt am
+# Session-Gate (/api/, nie PUBLIC_API_PATHS) und verlangt confirm=true + reason;
+# actor ist fest "operator" (Loopback = ein Operator, keine harte Identität).
+# ---------------------------------------------------------------------------
+
+def _correction_get(item_id: str) -> Optional[dict[str, Any]]:
+    from hermes_cli import library_corrections
+    record = library_corrections.read(item_id)  # validiert item_id (ValueError)
+    if record is None:
+        return None
+    item = _get_item_derived(item_id)
+    if item is None:
+        return record
+    return library_corrections.with_derived(
+        record, item.provenance or _unknown_provenance(),
+    )
+
+
+def _correction_set(
+    item_id: str, fields: dict[str, Any], reason: str, confirm: bool,
+) -> dict[str, Any]:
+    from hermes_cli import library_corrections
+    # Abgeleiteten (unkorrigierten) Vertrag holen: validiert die ID strukturell
+    # und liefert die Basis für den Originalsnapshot. Existiert das Item nicht,
+    # wird keine Korrektur angelegt (kein Overlay ins Leere).
+    item = _get_item_derived(item_id)
+    if item is None:
+        raise LookupError("item not found")
+    record = library_corrections.set_correction(
+        item_id, fields, reason,
+        confirm=confirm,
+        derived_provenance=item.provenance or _unknown_provenance(),
+    )
+    effective, _ = library_corrections.apply(
+        item.provenance or _unknown_provenance(), record,
+    )
+    response_record = library_corrections.with_derived(
+        record, item.provenance or _unknown_provenance(),
+    )
+    return {"correction": response_record, "provenance": effective}
+
+
+def _correction_preview(item_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Mutationsfreie, serverkanonische Vorschau für den Bestätigungsdialog."""
+    from hermes_cli import library_corrections
+    item = _get_item_derived(item_id)
+    if item is None:
+        raise LookupError("item not found")
+    validated = library_corrections.validate_fields(fields)
+    current_record = library_corrections.read(item_id)
+    effective = library_corrections.preview(
+        item.provenance or _unknown_provenance(), validated, current_record,
+    )
+    return {"provenance": effective, "fields": validated}
+
+
+def _correction_revoke(
+    item_id: str, reason: str, confirm: bool, fields: Optional[list[str]],
+) -> Optional[dict[str, Any]]:
+    from hermes_cli import library_corrections
+    item = _get_item_derived(item_id)
+    record = library_corrections.revert(
+        item_id, reason, fields=fields, confirm=confirm,
+    )
+    if record is None:
+        return None
+    if item is None:
+        return record
+    return library_corrections.with_derived(
+        record, item.provenance or _unknown_provenance(),
+    )
+
+
 def register_library_routes(app: Any) -> None:
     """Bibliothek-Routen. Unter /api/ → Session-Gate der Middleware;
     bewusst NIE in PUBLIC_API_PATHS."""
     from fastapi import Body, HTTPException, Query
 
-    from hermes_cli import library_knowledge, library_state
+    from hermes_cli import library_corrections, library_knowledge, library_state
 
     @app.get("/api/library/items")
     async def library_items(  # type: ignore[unused-variable]
@@ -1220,10 +1690,25 @@ def register_library_routes(app: Any) -> None:
         q: Optional[str] = Query(None, max_length=200),
         limit: int = Query(60, ge=1, le=200),
         offset: int = Query(0, ge=0),
+        producer: Optional[list[str]] = Query(None),
+        path: Optional[list[str]] = Query(None),
     ):
         if category and category not in CATEGORIES:
             raise HTTPException(status_code=400, detail="unknown category")
-        return await asyncio.to_thread(_list_items, category, q, limit, offset)
+        if producer and (
+            len(producer) > 50
+            or any(not value.strip() or len(value) > 160 for value in producer)
+        ):
+            raise HTTPException(status_code=400, detail="invalid producer facet")
+        if path:
+            if len(path) > len(PATH_VALUES):
+                raise HTTPException(status_code=400, detail="invalid path facet")
+            unknown = [value for value in path if value not in PATH_VALUES]
+            if unknown:
+                raise HTTPException(status_code=400, detail="unknown path facet")
+        return await asyncio.to_thread(
+            _list_items, category, q, limit, offset, producer, path,
+        )
 
     @app.get("/api/library/item")
     async def library_item(  # type: ignore[unused-variable]
@@ -1236,6 +1721,62 @@ def register_library_routes(app: Any) -> None:
         if item is None:
             raise HTTPException(status_code=404, detail="item not found")
         return item.as_dict(with_body=True)
+
+    # --- P6b — Korrektur-Overlay (operator-bestätigt, ADR 0002) -------------
+    @app.get("/api/library/correction")
+    async def library_correction_get(  # type: ignore[unused-variable]
+        id: str = Query(..., max_length=320),
+    ):
+        try:
+            record = await asyncio.to_thread(_correction_get, id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"correction": record}
+
+    @app.put("/api/library/correction")
+    async def library_correction_set(  # type: ignore[unused-variable]
+        payload: CorrectionSetPayload = Body(...),
+    ):
+        try:
+            return await asyncio.to_thread(
+                _correction_set,
+                payload.item_id, payload.fields, payload.reason, payload.confirm,
+            )
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except library_corrections.CorrectionStoreError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            # confirm-Gate, Pflicht-Grund und Feld-Validierung.
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/library/correction/preview")
+    async def library_correction_preview(  # type: ignore[unused-variable]
+        payload: CorrectionPreviewPayload = Body(...),
+    ):
+        try:
+            return await asyncio.to_thread(
+                _correction_preview, payload.item_id, payload.fields,
+            )
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.post("/api/library/correction/revoke")
+    async def library_correction_revoke(  # type: ignore[unused-variable]
+        payload: CorrectionRevokePayload = Body(...),
+    ):
+        try:
+            record = await asyncio.to_thread(
+                _correction_revoke,
+                payload.item_id, payload.reason, payload.confirm, payload.fields,
+            )
+        except library_corrections.CorrectionStoreError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"correction": record}
 
     # --- Wissen/Kanon (Nachschlagewerk) — kuratiertes Referenzwissen ---------
     @app.get("/api/library/knowledge")
