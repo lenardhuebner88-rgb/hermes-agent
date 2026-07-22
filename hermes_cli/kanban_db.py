@@ -5463,6 +5463,8 @@ def create_held_decompose_root(
     review_tier: Optional[str] = None,
     ui_impact: Optional[str] = None,
     acceptance_criteria: Optional[list | dict | str] = None,
+    initial_event_kind: Optional[str] = None,
+    initial_event_payload: Optional[dict] = None,
 ) -> str:
     """Atomically create a born-held root already in ``scheduled``.
 
@@ -5754,6 +5756,17 @@ def create_held_decompose_root(
                     marker_payload["artifact_digest"] = digest
                     marker_payload["sha256"] = digest
                 _append_event(conn, task_id, rk, marker_payload, run_id=hold_run_id)
+                if initial_event_kind:
+                    pending_payload = dict(initial_event_payload or {})
+                    for banned in ("raw", "content", "text", "body", "capture"):
+                        pending_payload.pop(banned, None)
+                    _append_event(
+                        conn,
+                        task_id,
+                        str(initial_event_kind),
+                        pending_payload,
+                        run_id=hold_run_id,
+                    )
                 if handoff_artifact_required:
                     desc = dict(handoff_artifact_descriptor or {})
                     # Fail-closed: never persist raw content fields.
