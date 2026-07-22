@@ -1303,3 +1303,91 @@ def test_parse_binding_planspec_blocks_outside_root(tmp_path: Path):
         planspecs.parse_binding_planspec(outside, plans_root=tmp_path / "03-Agents")
 
     assert "must be under" in str(exc.value)
+
+
+def test_ac_w2_s5_2_supersede_crash_between_archive_and_create_auto_recovers(
+    kanban_home, tmp_path: Path, monkeypatch
+):
+    """AC-W2-S5-2: crash after archive / before create leaves no orphan half-state.
+
+    A durable supersede intent is auto-drained on the next recovery pass so the
+    operator never needs manual board surgery to finish the create half.
+    """
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root, name="2026-07-22-w2s5.md")
+
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    assert first["ok"] is True
+    old_root = first["root_task_id"]
+    old_children = list(first["child_ids"])
+
+    # Mutate content so a new idempotency key is required.
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace('topic: "Planspec Hub"', 'topic: "Planspec Hub v2"'),
+        encoding="utf-8",
+    )
+
+    real_create = kb.create_task
+    calls = {"n": 0}
+
+    def boom_once(conn, *args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("injected crash between archive and create")
+        return real_create(conn, *args, **kwargs)
+
+    monkeypatch.setattr(kb, "create_task", boom_once)
+    monkeypatch.setattr(planspecs.kanban_db, "create_task", boom_once)
+
+    with pytest.raises(RuntimeError, match="injected crash"):
+        planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)
+
+    # Half-state: old chain archived, no live root for the new content, but a
+    # durable intent row must exist so recovery can finish the create.
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, old_root).status == "archived"
+        for cid in old_children:
+            assert kb.get_task(conn, cid).status == "archived"
+        open_intents = planspecs._list_open_planspec_mutation_intents(conn)
+        assert open_intents, "supersede intent must survive the crash"
+        assert open_intents[0]["kind"] == "supersede"
+        live_roots = _active_planspec_roots(conn)
+        assert live_roots == []
+
+    # Automatic recovery (no operator --supersede required).
+    actions = None
+    with kb.connect_closing() as conn:
+        actions = planspecs.recover_planspec_mutation_intents(
+            conn, plans_root=plans_root
+        )
+    assert actions and actions[0]["action"] == "recovered"
+    new_root = actions[0]["root_task_id"]
+    assert new_root and new_root != old_root
+
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, old_root).status == "archived"
+        assert kb.get_task(conn, new_root) is not None
+        assert kb.get_task(conn, new_root).status != "archived"
+        assert planspecs._list_open_planspec_mutation_intents(conn) == []
+        roots = _active_planspec_roots(conn)
+        assert [r["id"] for r in roots] == [new_root]
+
+
+def test_ac_w2_s5_2_happy_path_supersede_clears_intent(kanban_home, tmp_path: Path):
+    """AC-W2-S5-3 adjacent: normal supersede leaves no sticky intent row."""
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root, name="2026-07-22-w2s5-happy.md")
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace('topic: "Planspec Hub"', 'topic: "Planspec Hub happy"'),
+        encoding="utf-8",
+    )
+    second = planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)
+    assert second["ok"] is True
+    assert first["root_task_id"] in second["superseded"]
+    with kb.connect_closing() as conn:
+        assert planspecs._list_open_planspec_mutation_intents(conn) == []
+        assert kb.get_task(conn, first["root_task_id"]).status == "archived"
+        assert kb.get_task(conn, second["root_task_id"]).status != "archived"

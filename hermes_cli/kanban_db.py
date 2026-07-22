@@ -2469,6 +2469,24 @@ CREATE TABLE IF NOT EXISTS worktree_writer_leases (
 );
 CREATE INDEX IF NOT EXISTS idx_writer_leases_task ON worktree_writer_leases(task_id, run_id);
 
+CREATE TABLE IF NOT EXISTS planspec_mutation_intents (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    source_path     TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    plans_root      TEXT,
+    author          TEXT,
+    board           TEXT,
+    stale_root_ids  TEXT NOT NULL,
+    payload_json    TEXT,
+    phase           TEXT NOT NULL,
+    new_root_id     TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_planspec_intents_phase
+    ON planspec_mutation_intents(phase, updated_at);
+
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 -- idx_runs_started: the budget preflight SUMs tokens/cost over a started_at>=?
@@ -18003,6 +18021,109 @@ def decompose_triage_task(
     return child_ids
 
 
+def _reconcile_fenced_owner_after_archive_refusal_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    fenced_owner: tuple[Optional[str], int, Optional[int]],
+    wait_conflict: WaitMutationConflictInfo,
+    termination: Optional[dict[str, Any]] = None,
+) -> bool:
+    """End a fenced ownership generation after archive refuses on a late wait.
+
+    Archive stops the worker *outside* the final write txn. If a wait lands in
+    that fence window the graph mutation must still refuse, but leaving the
+    killed generation as ``status=running`` until stale reclaim is a
+    run-status hole (Wave-1 residual / AC-W2-S5-1). Generation-bound contract:
+    when the fenced ``(claim_lock, worker_pid, current_run_id)`` tuple is still
+    current, clear the claim, park the task back to ``ready``, and end the open
+    run as ``reclaimed``. A newer generation is never touched.
+    """
+    fenced_lock, fenced_pid, fenced_run_id = fenced_owner
+    row = conn.execute(
+        "SELECT status, claim_lock, worker_pid, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    row_run_id = row["current_run_id"] if "current_run_id" in row.keys() else None
+    if (
+        row["claim_lock"] != fenced_lock
+        or row["worker_pid"] != fenced_pid
+        or row_run_id != fenced_run_id
+    ):
+        return False
+    term = dict(termination or {})
+    cur = conn.execute(
+        "UPDATE tasks SET status = CASE WHEN status = 'running' THEN 'ready' ELSE status END, "
+        "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+        "continuation_pending_exit_run_id = NULL "
+        "WHERE id = ? AND claim_lock IS ? AND worker_pid IS ? AND current_run_id IS ?",
+        (task_id, fenced_lock, fenced_pid, fenced_run_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    run_id = _end_run(
+        conn,
+        task_id,
+        outcome="reclaimed",
+        status="reclaimed",
+        error=(
+            "archive_fence_wait_conflict: wait registered during external "
+            "worker fence after the fenced generation was stopped"
+        ),
+        metadata={
+            "reason": "archive_fence_wait_conflict",
+            "operation": wait_conflict.operation,
+            "wait_task_id": wait_conflict.wait_task_id,
+            "wait_reason": wait_conflict.reason,
+            "target_task_ids": list(wait_conflict.target_task_ids),
+            "prev_lock": fenced_lock,
+            **term,
+        },
+    )
+    _append_event(
+        conn,
+        task_id,
+        "worker_reaped",
+        {
+            "pid": fenced_pid,
+            "source": "archive_task",
+            "reason": "archive_fence_wait_conflict",
+            "prev_lock": fenced_lock,
+            **term,
+        },
+        run_id=run_id,
+    )
+    _append_event(
+        conn,
+        task_id,
+        "archive_fence_reconciled",
+        {
+            "reason": "archive_fence_wait_conflict",
+            "wait_task_id": wait_conflict.wait_task_id,
+            "wait_reason": wait_conflict.reason,
+            "target_task_ids": list(wait_conflict.target_task_ids),
+            "prev_lock": fenced_lock,
+            "prev_pid": fenced_pid,
+            "prev_run_id": fenced_run_id,
+        },
+        run_id=run_id,
+    )
+    _append_event(
+        conn,
+        task_id,
+        "reclaimed",
+        {
+            "reason": "archive_fence_wait_conflict",
+            "prev_lock": fenced_lock,
+            "wait_task_id": wait_conflict.wait_task_id,
+        },
+        run_id=run_id,
+    )
+    return True
+
+
 def archive_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -18026,6 +18147,12 @@ def archive_task(
     claim via the existing ``reclaim_deferred`` park — so no second writer can
     be dispatched onto the same workspace. Cards without a live run keep the
     historical no-op-successful behaviour.
+
+    Generation-bound fence contract (AC-W2-S5-1): if a typed wait is registered
+    after the external worker fence but before the final board mutation,
+    archive still refuses with :class:`WaitMutationConflict`, but the fenced
+    ownership generation is reconciled (claim cleared, run reclaimed) so the
+    board does not stay ``running`` with a dead pid until stale reclaim.
     """
     fence_row = conn.execute(
         "SELECT status, claim_lock, worker_pid, current_run_id "
@@ -18045,6 +18172,13 @@ def archive_task(
         fence_row["current_run_id"],
     )
     fenced_owner: Optional[tuple[Optional[str], int, Optional[int]]] = None
+    termination: dict[str, Any] = {
+        "prev_pid": fence_row["worker_pid"],
+        "host_local": False,
+        "termination_attempted": False,
+        "terminated": fence_row["worker_pid"] is None,
+        "sigkill": False,
+    }
     if fence_row["status"] == "running" and fence_row["worker_pid"]:
         worker_pid = int(fence_row["worker_pid"])
         claim_lock = fence_row["claim_lock"]
@@ -18075,6 +18209,11 @@ def archive_task(
                 reason="archive_worker_alive",
             )
             return False
+    # Final wait refusal must not leave a fenced (already-killed) generation
+    # as status=running until stale reclaim. Commit any generation reconcile
+    # inside the txn, then raise WaitMutationConflict AFTER commit.
+    final_wait_conflict: Optional[WaitMutationConflictInfo] = None
+    archived_ok = False
     with write_txn(conn):
         # Close the preflight→process-fence race. A wait registered while the
         # bounded worker barrier ran must still win over graph destruction.
@@ -18085,82 +18224,94 @@ def archive_task(
             now=int(time.time()),
         )
         if final_wait_conflict is not None:
-            raise WaitMutationConflict(final_wait_conflict)
-        if fenced_owner is not None:
-            claim_lock, worker_pid, run_id = fenced_owner
-            # The process barrier ran outside the transaction. Revalidate the
-            # exact ownership generation before clearing board state: a stale
-            # reclaim can race the barrier and dispatch generation N+1. The
-            # archive request must lose that race rather than orphan the new
-            # worker.
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'archived', "
-                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status = 'running' "
-                "  AND claim_lock IS ? AND worker_pid IS ? "
-                "  AND current_run_id IS ?",
-                (task_id, claim_lock, worker_pid, run_id),
-            )
+            if fenced_owner is not None:
+                _reconcile_fenced_owner_after_archive_refusal_in_txn(
+                    conn,
+                    task_id,
+                    fenced_owner=fenced_owner,
+                    wait_conflict=final_wait_conflict,
+                    termination=termination,
+                )
         else:
-            # Even a pid-less ready/review task can be claimed between the
-            # initial read and this transaction. Archive only the generation
-            # that the caller observed; a concurrent claim must win intact.
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'archived', "
-                "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status IS ? "
-                "  AND claim_lock IS ? AND worker_pid IS ? "
-                "  AND current_run_id IS ?",
-                (task_id, *archive_snapshot),
-            )
-        if cur.rowcount != 1:
-            return False
-        if fenced_owner is not None:
-            _append_event(
-                conn,
-                task_id,
-                "worker_reaped",
-                {"pid": worker_pid, "source": "archive_task", **termination},
-                run_id=run_id,
-            )
-        # If archive happened while a run was still in flight (e.g. user
-        # archived a running task from the dashboard), close that run with
-        # outcome='reclaimed' so attempt history isn't orphaned.
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="reclaimed",
-            status="reclaimed",
-            summary="task archived with run still active",
-        )
-        _append_event(conn, task_id, "archived", None, run_id=run_id)
-        released_links = conn.execute(
-            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-            (task_id,),
-        ).fetchall()
-        conn.execute("DELETE FROM task_links WHERE parent_id = ?", (task_id,))
-        comment_now = int(time.time())
-        for link in released_links:
-            child_id = str(link["child_id"])
-            payload = {
-                "archived_parent_id": task_id,
-                "removed_link": {"parent_id": task_id, "child_id": child_id},
-            }
-            _append_event(conn, child_id, "dependency_released_by_archive", payload)
-            comment_body = (
-                f"Dependency {task_id} was released because its parent was archived."
-            )
-            conn.execute(
-                "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
-                "VALUES (?, ?, ?, ?, 'comment')",
-                (child_id, "kanban", comment_body, comment_now),
-            )
-            _append_event(
-                conn,
-                child_id,
-                "commented",
-                {"author": "kanban", "len": len(comment_body), "kind": "comment"},
-            )
+            if fenced_owner is not None:
+                claim_lock, worker_pid, run_id = fenced_owner
+                # The process barrier ran outside the transaction. Revalidate the
+                # exact ownership generation before clearing board state: a stale
+                # reclaim can race the barrier and dispatch generation N+1. The
+                # archive request must lose that race rather than orphan the new
+                # worker.
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'archived', "
+                    "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND claim_lock IS ? AND worker_pid IS ? "
+                    "  AND current_run_id IS ?",
+                    (task_id, claim_lock, worker_pid, run_id),
+                )
+            else:
+                # Even a pid-less ready/review task can be claimed between the
+                # initial read and this transaction. Archive only the generation
+                # that the caller observed; a concurrent claim must win intact.
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'archived', "
+                    "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status IS ? "
+                    "  AND claim_lock IS ? AND worker_pid IS ? "
+                    "  AND current_run_id IS ?",
+                    (task_id, *archive_snapshot),
+                )
+            if cur.rowcount == 1:
+                archived_ok = True
+                if fenced_owner is not None:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "worker_reaped",
+                        {"pid": worker_pid, "source": "archive_task", **termination},
+                        run_id=run_id,
+                    )
+                # If archive happened while a run was still in flight (e.g. user
+                # archived a running task from the dashboard), close that run with
+                # outcome='reclaimed' so attempt history isn't orphaned.
+                run_id = _end_run(
+                    conn,
+                    task_id,
+                    outcome="reclaimed",
+                    status="reclaimed",
+                    summary="task archived with run still active",
+                )
+                _append_event(conn, task_id, "archived", None, run_id=run_id)
+                released_links = conn.execute(
+                    "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+                    (task_id,),
+                ).fetchall()
+                conn.execute("DELETE FROM task_links WHERE parent_id = ?", (task_id,))
+                comment_now = int(time.time())
+                for link in released_links:
+                    child_id = str(link["child_id"])
+                    payload = {
+                        "archived_parent_id": task_id,
+                        "removed_link": {"parent_id": task_id, "child_id": child_id},
+                    }
+                    _append_event(conn, child_id, "dependency_released_by_archive", payload)
+                    comment_body = (
+                        f"Dependency {task_id} was released because its parent was archived."
+                    )
+                    conn.execute(
+                        "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
+                        "VALUES (?, ?, ?, ?, 'comment')",
+                        (child_id, "kanban", comment_body, comment_now),
+                    )
+                    _append_event(
+                        conn,
+                        child_id,
+                        "commented",
+                        {"author": "kanban", "len": len(comment_body), "kind": "comment"},
+                    )
+    if final_wait_conflict is not None:
+        raise WaitMutationConflict(final_wait_conflict)
+    if not archived_ok:
+        return False
     recompute_ready(conn)
     return True
 

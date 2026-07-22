@@ -476,3 +476,137 @@ def test_archive_without_worker_never_probes_and_stays_idempotent(
         assert kb.get_task(conn, task_id).status == "archived"
         # Second call is a no-op False (already archived) and must not probe.
         assert kb.archive_task(conn, task_id) is False
+
+
+def test_archive_task_wait_during_fence_reconciles_fenced_generation(
+    kanban_home, monkeypatch
+):
+    """AC-W2-S5-1: wait in fence window refuses archive but ends the fenced run.
+
+    Wave-1 residual: previously the DB mutation stopped while status stayed
+    ``running`` with a dead pid until stale reclaim. Generation-bound contract
+    clears the claim and reclaims the open run immediately.
+    """
+    with kb.connect_closing() as conn:
+        target = kb.create_task(conn, title="archive fence target", assignee="coder")
+        waiter = kb.create_task(conn, title="late wait owner", assignee="coder")
+        claimed = kb.claim_task(conn, target, claimer="host:archive")
+        assert claimed is not None
+        assert kb._set_worker_pid(conn, target, 424242)
+        # block_task requires a live owner generation for dependency waits.
+        assert kb.claim_task(conn, waiter, claimer="host:waiter") is not None
+
+        def register_wait_during_fence(*_args, **_kwargs):
+            assert kb.block_task(
+                conn,
+                waiter,
+                reason="late wait during archive fence",
+                kind="dependency",
+                wait_for={"type": "parents_all_done", "task_ids": [target]},
+            )
+            return {
+                "prev_pid": 424242,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", register_wait_during_fence)
+        with pytest.raises(kb.WaitMutationConflict) as excinfo:
+            kb.archive_task(conn, target)
+
+        assert excinfo.value.info.wait_task_id == waiter
+        assert target in excinfo.value.info.target_task_ids
+        task = kb.get_task(conn, target)
+        assert task is not None
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.worker_pid is None
+        assert task.current_run_id is None
+        assert not _events(conn, target, "archived")
+        assert _events(conn, target, "archive_fence_reconciled")
+        assert _events(conn, target, "reclaimed")
+        run = kb.get_run(conn, claimed.current_run_id)
+        assert run is not None
+        assert run.status == "reclaimed"
+        assert run.outcome == "reclaimed"
+        waiting = kb.get_task(conn, waiter)
+        assert waiting is not None
+        assert waiting.status == "todo"
+        assert waiting.block_kind == "dependency"
+
+
+def test_archive_task_wait_during_fence_does_not_touch_newer_generation(
+    kanban_home, monkeypatch
+):
+    """AC-W2-S5-1: reconcile is generation-bound — N+1 claim stays intact."""
+    with kb.connect_closing() as conn:
+        target = kb.create_task(conn, title="gen fence target", assignee="coder")
+        waiter = kb.create_task(conn, title="late wait", assignee="coder")
+        old = kb.claim_task(conn, target, claimer="host:old")
+        assert old is not None
+        assert kb._set_worker_pid(
+            conn,
+            target,
+            11111,
+            expected_run_id=old.current_run_id,
+            expected_claim_lock=old.claim_lock,
+        )
+        assert kb.claim_task(conn, waiter, claimer="host:waiter") is not None
+        replacement: dict[str, object] = {}
+
+        def race_wait_and_new_generation(*_args, **_kwargs):
+            assert kb.block_task(
+                conn,
+                waiter,
+                reason="wait + reclaim race",
+                kind="dependency",
+                wait_for={"type": "parents_all_done", "task_ids": [target]},
+            )
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_runs SET status = 'reclaimed', "
+                    "outcome = 'reclaimed', ended_at = 1 "
+                    "WHERE id = ? AND ended_at IS NULL",
+                    (old.current_run_id,),
+                )
+                conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                    "WHERE id = ?",
+                    (target,),
+                )
+            new_claim = kb.claim_task(conn, target, claimer="host:new")
+            assert new_claim is not None
+            assert kb._set_worker_pid(
+                conn,
+                target,
+                22222,
+                expected_run_id=new_claim.current_run_id,
+                expected_claim_lock=new_claim.claim_lock,
+            )
+            replacement["claim"] = new_claim
+            return {
+                "prev_pid": 11111,
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            }
+
+        monkeypatch.setattr(kb, "_terminate_reclaimed_worker", race_wait_and_new_generation)
+        with pytest.raises(kb.WaitMutationConflict):
+            kb.archive_task(conn, target)
+
+        new_claim = replacement["claim"]
+        assert isinstance(new_claim, kb.Task)
+        task = kb.get_task(conn, target)
+        assert task is not None
+        assert task.status == "running"
+        assert task.claim_lock == new_claim.claim_lock
+        assert task.current_run_id == new_claim.current_run_id
+        assert task.worker_pid == 22222
+        assert kb.get_run(conn, int(new_claim.current_run_id)).ended_at is None
+        assert not _events(conn, target, "archived")
+        assert not _events(conn, target, "archive_fence_reconciled")

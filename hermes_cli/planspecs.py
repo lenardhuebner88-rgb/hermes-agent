@@ -1902,6 +1902,242 @@ def _describe_chain_diff(conn, spec: BindingPlanSpec, root_id: str) -> list[str]
     return lines
 
 
+def _planspec_content_hash(path: Path) -> str:
+    """Stable SHA-256 of the on-disk PlanSpec bytes used for intent recovery."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_planspec_supersede_intent(
+    conn,
+    *,
+    source_path: Path,
+    content_hash: str,
+    stale_roots: list[str],
+    author: str,
+    plans_root: Path,
+    board: str | None,
+    payload: dict[str, Any] | None = None,
+) -> str:
+    """Persist a supersede intent before any archive mutation (AC-W2-S5-2)."""
+    intent_id = f"psi_{hashlib.sha1(f'{source_path}:{content_hash}:{time_now()}'.encode()).hexdigest()[:16]}"
+    now = int(time_now())
+    with kanban_db.write_txn(conn):
+        conn.execute(
+            "INSERT INTO planspec_mutation_intents ("
+            "id, kind, source_path, content_hash, plans_root, author, board, "
+            "stale_root_ids, payload_json, phase, new_root_id, created_at, updated_at"
+            ") VALUES (?, 'supersede', ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)",
+            (
+                intent_id,
+                str(source_path),
+                content_hash,
+                str(plans_root),
+                author,
+                board,
+                json.dumps(list(stale_roots), ensure_ascii=False),
+                json.dumps(payload or {}, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+    return intent_id
+
+
+def _clear_planspec_mutation_intent(
+    conn,
+    intent_id: str,
+    *,
+    new_root_id: str | None = None,
+) -> None:
+    """Drop a completed supersede intent (or mark done then delete)."""
+    now = int(time_now())
+    with kanban_db.write_txn(conn):
+        if new_root_id is not None:
+            conn.execute(
+                "UPDATE planspec_mutation_intents "
+                "SET phase = 'done', new_root_id = ?, updated_at = ? WHERE id = ?",
+                (new_root_id, now, intent_id),
+            )
+        conn.execute("DELETE FROM planspec_mutation_intents WHERE id = ?", (intent_id,))
+
+
+def _list_open_planspec_mutation_intents(conn) -> list[dict[str, Any]]:
+    try:
+        rows = conn.execute(
+            "SELECT id, kind, source_path, content_hash, plans_root, author, board, "
+            "stale_root_ids, payload_json, phase, new_root_id, created_at, updated_at "
+            "FROM planspec_mutation_intents "
+            "WHERE phase IN ('pending', 'completing') "
+            "ORDER BY created_at ASC"
+        ).fetchall()
+    except Exception:
+        # Table may not exist on pre-migration snapshots in unit tests that
+        # construct schemas by hand — fail soft.
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            stale = json.loads(row["stale_root_ids"] or "[]")
+        except (TypeError, ValueError):
+            stale = []
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        out.append(
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "source_path": row["source_path"],
+                "content_hash": row["content_hash"],
+                "plans_root": row["plans_root"],
+                "author": row["author"],
+                "board": row["board"],
+                "stale_root_ids": [str(x) for x in stale] if isinstance(stale, list) else [],
+                "payload": payload if isinstance(payload, dict) else {},
+                "phase": row["phase"],
+                "new_root_id": row["new_root_id"],
+            }
+        )
+    return out
+
+
+def recover_planspec_mutation_intents(
+    conn,
+    *,
+    plans_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Auto-complete open PlanSpec supersede intents (AC-W2-S5-2).
+
+    A crash between archiving the stale chain and creating the new root leaves
+    a durable intent row. Recovery:
+      1. finishes any remaining archive of ``stale_root_ids``
+      2. re-ingests the source path when the on-disk hash still matches
+      3. clears the intent
+
+    Returns a list of recovery action dicts for tests/operators.
+    """
+    actions: list[dict[str, Any]] = []
+    for intent in _list_open_planspec_mutation_intents(conn):
+        if intent["kind"] != "supersede":
+            continue
+        intent_id = intent["id"]
+        # 1) Finish archives (idempotent for already-archived roots).
+        for root_id in intent["stale_root_ids"]:
+            task = kanban_db.get_task(conn, root_id)
+            if task is None or task.status == "archived":
+                continue
+            try:
+                _archive_planspec_chain(conn, root_id)
+            except PlanSpecBlocked as exc:
+                actions.append(
+                    {
+                        "intent_id": intent_id,
+                        "action": "archive_blocked",
+                        "root_id": root_id,
+                        "findings": list(exc.findings),
+                    }
+                )
+                # Leave intent open for a later pass.
+                break
+        else:
+            # 2) Create path: if a live chain already exists for the source
+            # identity (e.g. create partially succeeded), just clear intent.
+            source = Path(intent["source_path"])
+            if not source.is_file():
+                # Archives done, source gone — half-state resolved as archived
+                # with no create possible; drop intent so it is not sticky.
+                _clear_planspec_mutation_intent(conn, intent_id)
+                actions.append(
+                    {
+                        "intent_id": intent_id,
+                        "action": "cleared_missing_source",
+                        "source_path": str(source),
+                    }
+                )
+                continue
+            try:
+                current_hash = _planspec_content_hash(source)
+            except OSError:
+                actions.append(
+                    {
+                        "intent_id": intent_id,
+                        "action": "hash_unreadable",
+                        "source_path": str(source),
+                    }
+                )
+                continue
+            if current_hash != intent["content_hash"]:
+                # Operator changed the file after the crash. Archives are done;
+                # leave create to a fresh ingest of the new content.
+                _clear_planspec_mutation_intent(conn, intent_id)
+                actions.append(
+                    {
+                        "intent_id": intent_id,
+                        "action": "cleared_hash_mismatch",
+                        "source_path": str(source),
+                    }
+                )
+                continue
+            intent_plans_root = (
+                Path(intent["plans_root"])
+                if intent.get("plans_root")
+                else (plans_root or DEFAULT_PLANS_ROOT)
+            )
+            # Mark completing so nested recovery does not re-enter this row.
+            now = int(time_now())
+            with kanban_db.write_txn(conn):
+                conn.execute(
+                    "UPDATE planspec_mutation_intents "
+                    "SET phase = 'completing', updated_at = ? WHERE id = ?",
+                    (now, intent_id),
+                )
+            try:
+                result = ingest_planspec(
+                    source,
+                    board=intent.get("board"),
+                    author=intent.get("author") or "planspec-ingest",
+                    plans_root=intent_plans_root,
+                    supersede=False,
+                    _recovering_intent_id=intent_id,
+                )
+            except PlanSpecBlocked as exc:
+                # Could be a new conflict unrelated to this intent; leave open
+                # only if still pending archives, else surface and keep.
+                actions.append(
+                    {
+                        "intent_id": intent_id,
+                        "action": "create_blocked",
+                        "findings": list(exc.findings),
+                    }
+                )
+                with kanban_db.write_txn(conn):
+                    conn.execute(
+                        "UPDATE planspec_mutation_intents "
+                        "SET phase = 'pending', updated_at = ? WHERE id = ?",
+                        (int(time_now()), intent_id),
+                    )
+                continue
+            new_root = result.get("root_task_id")
+            _clear_planspec_mutation_intent(conn, intent_id, new_root_id=new_root)
+            actions.append(
+                {
+                    "intent_id": intent_id,
+                    "action": "recovered",
+                    "root_task_id": new_root,
+                    "source_path": str(source),
+                }
+            )
+    return actions
+
+
+def time_now() -> float:
+    """Indirection so tests can freeze intent timestamps if needed."""
+    import time as _time
+
+    return _time.time()
+
+
 def _archive_planspec_chain(conn, root_id: str) -> None:
     """Archive a whole PlanSpec chain (every subtask, then the root sink).
 
@@ -1938,6 +2174,7 @@ def ingest_planspec(
     plans_root: Path = DEFAULT_PLANS_ROOT,
     force: bool = False,
     supersede: bool = False,
+    _recovering_intent_id: str | None = None,
 ) -> dict[str, Any]:
     spec = parse_binding_planspec(path, plans_root=plans_root)
     target_board = _resolve_target_board(spec, board)
@@ -2009,6 +2246,10 @@ def ingest_planspec(
     idempotency_key = ingest_idempotency_key(spec)
     conn = kanban_db.connect(board=target_board)
     try:
+        # AC-W2-S5-2: drain any open supersede intents before a new mutation so
+        # a crash between archive and create self-heals without manual surgery.
+        if _recovering_intent_id is None:
+            recover_planspec_mutation_intents(conn, plans_root=plans_root)
         children = spec.children
         default_workdir = str(
             kanban_db.read_board_metadata(target_board).get("default_workdir") or ""
@@ -2052,6 +2293,7 @@ def ingest_planspec(
         # chain; require an explicit ``--supersede`` to archive the stale one.
         conflicts = _find_superseding_conflicts(conn, spec, idempotency_key)
         superseded: list[str] = []
+        supersede_intent_id: str | None = None
         if conflicts:
             if not supersede:
                 detail = _describe_chain_diff(conn, spec, conflicts[0])
@@ -2081,15 +2323,26 @@ def ingest_planspec(
                         *running_blockers,
                     ]
                 )
-            # NOTE: archive-then-create is not one atomic transaction (each
-            # archive_task + the new-chain INSERT carry their own write_txn). If
-            # the process dies between archiving here and creating the new root,
-            # the stale chain is archived and no new chain exists — this is
-            # RECOVERABLE: re-run ``hermes plan ingest --supersede`` (the conflict
-            # scan skips archived roots, so the new version then ingests cleanly).
-            for stale_root in conflicts:
-                _archive_planspec_chain(conn, stale_root)
-                superseded.append(stale_root)
+            # AC-W2-S5-2: durable intent before archive→create. Crash between
+            # the two steps is auto-recovered by recover_planspec_mutation_intents
+            # (called on the next ingest) — no manual half-state surgery.
+            supersede_intent_id = _write_planspec_supersede_intent(
+                conn,
+                source_path=spec.path,
+                content_hash=_planspec_content_hash(spec.path),
+                stale_roots=list(conflicts),
+                author=author,
+                plans_root=plans_root,
+                board=target_board,
+                payload={"idempotency_key": idempotency_key, "mode": "binding"},
+            )
+            try:
+                for stale_root in conflicts:
+                    _archive_planspec_chain(conn, stale_root)
+                    superseded.append(stale_root)
+            except Exception:
+                # Leave intent open for automatic recovery.
+                raise
 
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
         # A2/#8: stamp freigabe + live_test_depth from the PlanSpec frontmatter
@@ -2148,6 +2401,10 @@ def ingest_planspec(
             raise PlanSpecBlocked([f"DB rejected binding taskgraph: {exc}"]) from exc
         if child_ids is None:
             raise PlanSpecBlocked([f"could not ingest taskgraph for root {root_id}"])
+        if supersede_intent_id is not None:
+            _clear_planspec_mutation_intent(
+                conn, supersede_intent_id, new_root_id=root_id
+            )
         return {
             "ok": True,
             "already_ingested": False,
@@ -2222,6 +2479,7 @@ def ingest_prose_plan(
     idempotency_key = ingest_idempotency_key(spec)
     conn = kanban_db.connect(board=board)
     try:
+        recover_planspec_mutation_intents(conn, plans_root=spec.path.parent)
         existing = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
             "ORDER BY created_at DESC LIMIT 1",
@@ -2247,6 +2505,7 @@ def ingest_prose_plan(
 
         conflicts = _find_superseding_conflicts(conn, spec, idempotency_key)
         superseded: list[str] = []
+        supersede_intent_id: str | None = None
         if conflicts:
             if not supersede:
                 detail = _describe_chain_diff(conn, spec, conflicts[0])
@@ -2274,9 +2533,22 @@ def ingest_prose_plan(
                         *running_blockers,
                     ]
                 )
-            for stale_root in conflicts:
-                _archive_planspec_chain(conn, stale_root)
-                superseded.append(stale_root)
+            supersede_intent_id = _write_planspec_supersede_intent(
+                conn,
+                source_path=spec.path,
+                content_hash=_planspec_content_hash(spec.path),
+                stale_roots=list(conflicts),
+                author=author,
+                plans_root=spec.path.parent,
+                board=board,
+                payload={"idempotency_key": idempotency_key, "mode": "prose"},
+            )
+            try:
+                for stale_root in conflicts:
+                    _archive_planspec_chain(conn, stale_root)
+                    superseded.append(stale_root)
+            except Exception:
+                raise
 
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
         root_id = kanban_db.create_task(
@@ -2329,6 +2601,10 @@ def ingest_prose_plan(
             raise PlanSpecBlocked([f"DB rejected prose taskgraph: {exc}"]) from exc
         if child_ids is None:
             raise PlanSpecBlocked([f"could not ingest taskgraph for root {root_id}"])
+        if supersede_intent_id is not None:
+            _clear_planspec_mutation_intent(
+                conn, supersede_intent_id, new_root_id=root_id
+            )
         return {
             "ok": True,
             "already_ingested": False,
