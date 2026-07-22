@@ -126,15 +126,15 @@ class TestPathResolution:
             fresh_home / "kanban" / "boards" / "other" / "logs"
         )
 
-    def test_env_var_db_override_still_wins(self, fresh_home, tmp_path, monkeypatch):
+    def test_env_var_db_override_still_wins(self, fresh_home, monkeypatch):
         """``HERMES_KANBAN_DB`` pins the file regardless of board= arg."""
-        forced = tmp_path / "custom.db"
+        forced = fresh_home / "custom.db"
         monkeypatch.setenv("HERMES_KANBAN_DB", str(forced))
         assert kb.kanban_db_path() == forced
         assert kb.kanban_db_path(board="ignored") == forced
 
-    def test_env_var_workspaces_override(self, fresh_home, tmp_path, monkeypatch):
-        forced = tmp_path / "ws"
+    def test_env_var_workspaces_override(self, fresh_home, monkeypatch):
+        forced = fresh_home / "ws"
         monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(forced))
         assert kb.workspaces_root(board="any") == forced
 
