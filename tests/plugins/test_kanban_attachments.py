@@ -152,8 +152,11 @@ def test_attachments_root_is_per_board(kanban_home, monkeypatch):
     assert named == default_root
 
 
-def test_attachments_root_env_override(kanban_home, monkeypatch, tmp_path):
+def test_attachments_root_explicit_pinned_env_override(
+    kanban_home, monkeypatch, tmp_path
+):
     override = tmp_path / "custom-attach"
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "custom-kanban-home"))
     monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(override))
     assert kb.attachments_root() == override
     assert kb.task_attachments_dir("t_abc") == override / "t_abc"
