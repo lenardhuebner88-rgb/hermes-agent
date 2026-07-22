@@ -5489,17 +5489,21 @@ def create_held_decompose_root(
             "planspec_ingest hold_reason must be exactly "
             f"{_PLANSPEC_INGEST_HOLD_REASON!r}"
         )
-    freigabe_v = (freigabe or "").strip().lower()
-    depth_v = (live_test_depth or "").strip().lower()
-    if freigabe_v not in {"complete", "operator"}:
-        raise ValueError(f"invalid freigabe: {freigabe!r}")
-    if depth_v not in {"smoke", "contract", "ui-real"}:
-        raise ValueError(f"invalid live_test_depth: {live_test_depth!r}")
+    # Preserve PlanSpec freigabe/depth strings for planspec_ingest (including
+    # legacy values like smoke-only). Only normalize comparison for handoff paths.
+    freigabe_v = (freigabe or "").strip()
+    depth_v = (live_test_depth or "").strip()
+    if not freigabe_v:
+        raise ValueError("freigabe is required")
+    if not depth_v:
+        raise ValueError("live_test_depth is required")
     if rk in {"handoff_direct", "terminal_candidate"}:
-        if freigabe_v != "operator" or depth_v != "contract":
+        if freigabe_v.strip().lower() != "operator" or depth_v.strip().lower() != "contract":
             raise ValueError(
                 f"{rk} requires freigabe=operator and live_test_depth=contract"
             )
+        freigabe_v = "operator"
+        depth_v = "contract"
     if workspace_kind not in {"scratch", "dir", "worktree"}:
         raise ValueError(f"invalid workspace_kind: {workspace_kind!r}")
     if workspace_kind in {"dir", "worktree"} and not workspace_path:
