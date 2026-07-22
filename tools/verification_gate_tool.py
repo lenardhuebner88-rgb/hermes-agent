@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -139,6 +141,79 @@ def _run_commands(specs: Sequence[tuple[str, list[str]]], root: Path) -> list[di
     return results
 
 
+def _parse_ui_summary(summary_path: Path, artifact_dir: Path) -> dict[str, Any]:
+    """Reduce browser output to closed raw-free verdicts and named PNG artifacts."""
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    rows = payload.get("results") if isinstance(payload, dict) else None
+    rows = rows if isinstance(rows, list) else []
+    by_viewport = {
+        row.get("viewport"): row
+        for row in rows
+        if isinstance(row, dict) and row.get("viewport") in VIEWPORTS
+    }
+    safe_results: list[dict[str, Any]] = []
+    artifacts: list[str] = []
+    all_green = bool(payload.get("allPassed", payload.get("ok", False)))
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    for viewport in VIEWPORTS:
+        row = by_viewport.get(viewport)
+        checks = row.get("checks") if isinstance(row, dict) else None
+        checks = checks if isinstance(checks, dict) else {}
+        console_count = checks.get("console_error_count")
+        page_count = checks.get("page_error_count")
+        overflow = checks.get("horizontal_overflow")
+        width_usable = checks.get("terminal_width_usable")
+        bottom_clear = checks.get("bottom_navigation_clear")
+        handoff_visible = checks.get("handoff_visible")
+        held_visible = checks.get("held_candidate_visible")
+        screenshot_value = ""
+        if isinstance(row, dict):
+            screenshot_value = row.get("screenshot") or row.get("screenshotPath") or ""
+        source = Path(screenshot_value) if isinstance(screenshot_value, str) else Path()
+        if not source.is_absolute():
+            source = summary_path.parent / source
+        name = source.name if source.suffix.lower() == ".png" else ""
+        screenshot_ok = bool(name and source.is_file() and source.stat().st_size)
+        if screenshot_ok:
+            destination = artifact_dir / name
+            if source.resolve() != destination.resolve():
+                shutil.copy2(source, destination)
+            artifacts.append(name)
+        reported_pass = bool(
+            isinstance(row, dict)
+            and row.get("status", "passed" if row.get("ok") else "failed") == "passed"
+        )
+        row_green = bool(
+            reported_pass and console_count == 0 and page_count == 0
+            and overflow is False and width_usable is True and bottom_clear is True
+            and handoff_visible is True and held_visible is True and screenshot_ok
+        )
+        all_green = all_green and row_green
+        safe_results.append({
+            "command_id": f"ui_shot_{viewport}",
+            "exit_code": 0 if row_green else 1,
+            "timed_out": False,
+            "viewport": viewport,
+            "console_error_count": console_count if isinstance(console_count, int) else -1,
+            "page_error_count": page_count if isinstance(page_count, int) else -1,
+            "horizontal_overflow": overflow if isinstance(overflow, bool) else True,
+            "terminal_width_usable": width_usable is True,
+            "terminal_width_px": checks.get("terminal_width_px") if isinstance(checks.get("terminal_width_px"), (int, float)) else 0,
+            "terminal_width_min_px": checks.get("terminal_width_min_px") if isinstance(checks.get("terminal_width_min_px"), (int, float)) else 0,
+            "bottom_navigation_clear": bottom_clear is True,
+            "bottom_navigation_clearance_px": checks.get("bottom_navigation_clearance_px") if isinstance(checks.get("bottom_navigation_clearance_px"), (int, float)) else None,
+            "handoff_visible": handoff_visible is True,
+            "held_candidate_visible": held_visible is True,
+            "artifact": name if screenshot_ok else None,
+        })
+    if len(by_viewport) != len(VIEWPORTS):
+        all_green = False
+    return {"status": "passed" if all_green else "failed", "results": safe_results, "artifacts": artifacts}
+
+
 def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> dict[str, Any]:
     if route != "agent-terminals" or scenario != "terminal_bridge":
         raise ValueError("ui_shot only allows route=agent-terminals, scenario=terminal_bridge")
@@ -146,47 +221,77 @@ def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> d
     home = Path(tempfile.mkdtemp(prefix="hermes-terminal-bridge-"))
     tmux_tmp = home / "tmux"
     tmux_tmp.mkdir(mode=0o700)
-    preview: subprocess.Popen[str] | None = None
-    results: list[dict[str, Any]] = []
-    screenshots: list[str] = []
+    preview_pid = 0
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as port_probe:
+        port_probe.bind(("127.0.0.1", 0))
+        preview_port = port_probe.getsockname()[1]
     try:
         launch = subprocess.run(
             [str(root / "scripts/preview-realdata.sh"), "--scenario", scenario,
-             "--route", route, "--home", str(home), "--no-build", "--keep"],
+             "--route", route, "--home", str(home), "--port", str(preview_port), "--keep"],
             cwd=root, env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)}, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=120,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=240,
         )
-        results.append({"command_id": "preview_terminal_bridge", "exit_code": launch.returncode,
-                        "timed_out": False, "duration_seconds": 0.0})
         if launch.returncode == 75 or "ui_preview_busy" in launch.stdout:
-            return {"status": "ui_preview_busy", "results": results, "artifacts": []}
-        if launch.returncode:
-            return {"status": "failed", "results": results, "artifacts": []}
+            return {"status": "ui_preview_busy", "results": [], "artifacts": []}
         output = dict(line.split("=", 1) for line in launch.stdout.splitlines() if "=" in line)
-        url = output.get("PREVIEW_URL", "") + "/agent-terminals"
-        pid = int(output.get("PREVIEW_PID", "0"))
-        for viewport in VIEWPORTS:
-            target = artifact_dir / f"ui-shot-agent-terminals-terminal_bridge-{viewport}.png"
-            shot = subprocess.run(
-                [str(root / "scripts/ui-shot.sh"), url, "--out", str(target),
-                 "--viewport", viewport, "--console"],
-                cwd=root, env=_safe_env(), text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, check=False, timeout=120,
-            )
-            results.append({"command_id": f"ui_shot_{viewport}", "exit_code": shot.returncode,
-                            "timed_out": False, "duration_seconds": 0.0})
-            if shot.returncode == 0 and target.is_file() and target.stat().st_size:
-                screenshots.append(target.name)
-        if pid > 1:
-            subprocess.run(["kill", "-INT", str(pid)], check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        status = "passed" if len(screenshots) == len(VIEWPORTS) else "failed"
-        return {"status": status, "results": results, "artifacts": screenshots}
+        url = output.get("PREVIEW_URL", "")
+        preview_pid = int(output.get("PREVIEW_PID", "0"))
+        if launch.returncode or not url or preview_pid <= 1:
+            return {"status": "failed", "results": [{
+                "command_id": "preview_terminal_bridge", "exit_code": 1,
+                "timed_out": False, "duration_seconds": 0.0,
+            }], "artifacts": []}
+        runner_dir = home / "visual-evidence"
+        runner_dir.mkdir(mode=0o700)
+        head_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+        ).strip()
+        runner = subprocess.run(
+            ["node", str(root / "scripts/visual_verify_runner.mjs"),
+             "--base-url", url, "--output-dir", str(runner_dir), "--git-head", head_sha,
+             "--viewports", "1280x900=1280x900,768x1024=768x1024,390x844=390x844",
+             "--scenario", "terminal_bridge", "/control/agent-terminals"],
+            cwd=root, env=_safe_env(), text=True, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False, timeout=180,
+        )
+        parsed = _parse_ui_summary(runner_dir / "summary.json", artifact_dir)
+        if runner.returncode:
+            parsed["status"] = "failed"
+        return parsed
     except subprocess.TimeoutExpired:
-        results.append({"command_id": "ui_shot_timeout", "exit_code": None,
-                        "timed_out": True, "duration_seconds": 120.0})
-        return {"status": "failed", "results": results, "artifacts": screenshots}
+        return {"status": "failed", "results": [{
+            "command_id": "ui_shot_timeout", "exit_code": 124,
+            "timed_out": True, "duration_seconds": 180.0,
+        }], "artifacts": []}
     finally:
+        if preview_pid > 1:
+            try:
+                os.kill(preview_pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+            for _ in range(30):
+                try:
+                    os.kill(preview_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                try:
+                    os.kill(preview_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        subprocess.run(
+            ["tmux", "kill-server"],
+            env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        # The dashboard's terminal poller and tmux can finish shutdown just after
+        # their parent exits; repeat removal so an empty socket parent cannot race
+        # back into existence after the first rmtree.
+        for _ in range(3):
+            shutil.rmtree(home, ignore_errors=True)
+            time.sleep(0.1)
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -243,7 +348,7 @@ def run_verification_gate(
         gate_version=GATE_IMPLEMENTATION_VERSION, phase=normalized_phase,
         status=status, started_at=started_wall.isoformat(), finished_at=finished.isoformat(),
         duration_seconds=round(time.monotonic() - started, 3), results=results,
-        head_sha=fingerprint.payload["head_sha"],
+        head_sha=fingerprint.payload["head_sha"], artifacts=artifacts,
     )
     receipt = store.write(evidence)
     result = _public_result(evidence, receipt.digest, reused=False,
@@ -265,6 +370,7 @@ def _public_result(evidence: GateEvidence, digest: str, *, reused: bool,
         "evidence_file": evidence_file,
         "reused": reused,
         "results": evidence.results,
+        "artifacts": evidence.artifacts,
     }
 
 

@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import subprocess
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -93,6 +94,14 @@ def test_store_writes_raw_free_0600_json(tmp_path):
     assert receipt.digest == __import__("hashlib").sha256(receipt.path.read_bytes()).hexdigest()
 
 
+def test_store_persists_only_named_ui_artifacts(tmp_path):
+    item = replace(evidence(), artifacts=["agent-terminals-1280x900.png"])
+    receipt = GateEvidenceStore(tmp_path / "artifacts").write(item)
+    payload = json.loads(receipt.path.read_text())
+    assert payload["artifacts"] == ["agent-terminals-1280x900.png"]
+    assert str(tmp_path) not in receipt.path.read_text()
+
+
 def test_actions_are_closed_and_affected_has_separate_exit_codes(repo, monkeypatch):
     from tools import verification_gate_tool as tool
     calls = []
@@ -162,3 +171,79 @@ def test_only_literal_true_enables_reuse(tmp_path):
     store = GateEvidenceStore(tmp_path / "artifacts")
     store.write(evidence())
     assert store.find_reusable("f" * 64, phase="review", reuse_enabled="true") is None
+
+
+def test_ui_summary_requires_all_exact_viewports_and_structured_checks(tmp_path):
+    from tools import verification_gate_tool as tool
+
+    expected = ("1280x900", "768x1024", "390x844")
+    results = []
+    for viewport in expected:
+        screenshot = f"agent-terminals-{viewport}.png"
+        (tmp_path / screenshot).write_bytes(b"png")
+        results.append({
+            "viewport": viewport,
+            "status": "passed",
+            "screenshot": screenshot,
+            "checks": {
+                "console_error_count": 0,
+                "page_error_count": 0,
+                "horizontal_overflow": False,
+                "terminal_width_usable": True,
+                "terminal_width_px": 640,
+                "terminal_width_min_px": 480,
+                "bottom_navigation_clear": True,
+                "bottom_navigation_clearance_px": 16,
+                "handoff_visible": True,
+                "held_candidate_visible": True,
+            },
+        })
+    summary = tmp_path / "summary.json"
+    summary.write_text(json.dumps({"allPassed": True, "results": results}))
+
+    parsed = tool._parse_ui_summary(summary, tmp_path)
+
+    assert parsed["status"] == "passed"
+    assert parsed["artifacts"] == [f"agent-terminals-{v}.png" for v in expected]
+    assert [item["viewport"] for item in parsed["results"]] == list(expected)
+    assert all(item["console_error_count"] == 0 for item in parsed["results"])
+    assert all(item["held_candidate_visible"] is True for item in parsed["results"])
+    assert "stdout" not in json.dumps(parsed) and "stderr" not in json.dumps(parsed)
+
+
+def test_ui_summary_missing_or_failed_viewport_is_red(tmp_path):
+    from tools import verification_gate_tool as tool
+
+    summary = tmp_path / "summary.json"
+    summary.write_text(json.dumps({"allPassed": True, "results": [{
+        "viewport": "1280x900",
+        "status": "passed",
+        "screenshot": "missing.png",
+        "checks": {},
+    }]}))
+
+    parsed = tool._parse_ui_summary(summary, tmp_path)
+
+    assert parsed["status"] == "failed"
+    assert parsed["artifacts"] == []
+    assert {item["viewport"] for item in parsed["results"]} == {"1280x900", "768x1024", "390x844"}
+    assert any(item["exit_code"] != 0 for item in parsed["results"])
+
+
+def test_ui_shot_allocates_non_live_preview_port(tmp_path, monkeypatch):
+    from tools import verification_gate_tool as tool
+
+    calls = []
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return Result()
+    monkeypatch.setattr(tool.subprocess, "run", fake_run)
+
+    tool._run_ui_shot(tmp_path, tmp_path / "artifacts", "agent-terminals", "terminal_bridge")
+
+    preview = calls[0]
+    assert preview[preview.index("--port") + 1] != "9119"

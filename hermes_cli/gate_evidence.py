@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -106,6 +106,7 @@ class GateEvidence:
     duration_seconds: float
     results: list[dict[str, Any]]
     head_sha: str
+    artifacts: list[str] = field(default_factory=list)
     version: str = GATE_EVIDENCE_VERSION
 
     @classmethod
