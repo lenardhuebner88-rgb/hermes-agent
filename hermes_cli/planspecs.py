@@ -2345,36 +2345,45 @@ def ingest_planspec(
                 raise
 
         root_title = f"PlanSpec {spec.frontmatter.get('slice') or spec.path.stem}: {spec.topic}"
-        # W3-S2: born-held root — single txn creates status=scheduled with
-        # specified/created/scheduled + synthetic hold-run + planspec_ingest
-        # marker. Never visible as untagged triage.
-        try:
-            root_id = kanban_db.create_held_decompose_root(
-                conn,
-                title=root_title,
-                body=build_root_body(spec),
-                assignee=None,
-                created_by=author,
-                tenant="planspec",
-                priority=0,
-                idempotency_key=idempotency_key,
-                freigabe=spec.freigabe,
-                live_test_depth=spec.live_test_depth,
-                hold_reason="Planspec ingest: held before release",
-                root_kind="planspec_ingest",
-                specified_payload={
-                    "source": "planspec_ingest",
-                    "path": str(spec.path),
-                    # F6: persist the frontmatter slice so a moved-but-same-slice
-                    # re-ingest is recognised as the same identity. Additive — the
-                    # existing readers only consult ``source``/``path``.
-                    "slice": str(spec.frontmatter.get("slice") or "").strip(),
-                },
+        # A2/#8: stamp freigabe + live_test_depth from the PlanSpec frontmatter
+        # as part of the INSERT so the provenance is atomic with row creation —
+        # no separate UPDATE window where a reader sees NULL, and no way for an
+        # exception between INSERT and a follow-up UPDATE to strand the fields.
+        root_id = kanban_db.create_task(
+            conn,
+            title=root_title,
+            body=build_root_body(spec),
+            assignee=None,
+            created_by=author,
+            tenant="planspec",
+            priority=0,
+            triage=True,
+            idempotency_key=idempotency_key,
+            freigabe=spec.freigabe,
+            live_test_depth=spec.live_test_depth,
+        )
+        with kanban_db.write_txn(conn):
+            cur = conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'triage'",
+                (root_id,),
             )
-        except kanban_db.HeldDecomposeRootConflict as exc:
-            raise PlanSpecBlocked([f"held root idempotency conflict: {exc}"]) from exc
-        except ValueError as exc:
-            raise PlanSpecBlocked([f"could not create held planspec root: {exc}"]) from exc
+            if cur.rowcount != 1:
+                raise PlanSpecBlocked([f"root task {root_id} left triage before scheduling"])
+        kanban_db.add_event(
+            conn,
+            root_id,
+            "specified",
+            {
+                "source": "planspec_ingest",
+                "path": str(spec.path),
+                # F6: persist the frontmatter slice so a moved-but-same-slice
+                # re-ingest is recognised as the same identity. Additive — the
+                # existing readers only consult ``source``/``path``.
+                "slice": str(spec.frontmatter.get("slice") or "").strip(),
+            },
+        )
+        if not kanban_db.schedule_task(conn, root_id, reason="Planspec ingest: held before release"):
+            raise PlanSpecBlocked([f"could not park root task {root_id} in scheduled"])
         child_held_for_operator = spec.freigabe.strip().lower() == "operator" or spec.live_test_depth == "ui-real"
         try:
             child_ids = kanban_db.decompose_triage_task(

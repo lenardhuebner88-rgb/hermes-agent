@@ -405,11 +405,8 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     assert attach_argv[-1] == "work:=hermes"
     draft = service.handoff_draft("work", "hermes", start=-20)
     assert draft["target"] == "work:hermes"
-    assert "content" not in draft or draft.get("content") is None
-    assert "## Recent pane capture" not in str(draft)
-    # Wave-2 windows expose structured source; legacy windows may upgrade_required.
-    assert draft.get("schema_version") == 1
-    assert "upgrade_required" in draft or draft.get("terminal_run_id") or draft.get("capture")
+    assert f"- cwd: `{Path.home()}`" in str(draft["content"])
+    assert "## Recent pane capture" in str(draft["content"])
     service.interrupt("work", "hermes")
 
     log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")

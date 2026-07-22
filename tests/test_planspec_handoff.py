@@ -1,189 +1,214 @@
-"""W3-S2 terminal handoff: structured schema, raw artifacts, born-held roots."""
+"""ATH-S5: terminal-selection → PlanSpec/Kanban handoff backend.
+
+Covers the materialise-then-reuse pipeline:
+  * ``hermes_cli.terminal_handoff`` slug + draft-write helpers
+  * ``POST /api/plugins/kanban/planspecs/validate``  → reuses the EXISTING
+    deterministic validator; a non-binding default draft comes back invalid
+    (the AC-3/AC-7 "validation failure" path), a structurally binding draft
+    parses past the binding gate.
+  * ``POST /api/plugins/kanban/planspecs/ingest-draft`` → delegates to the
+    EXISTING ``ingest_planspec`` (mocked here); blocks surface as 400 findings.
+
+Nothing here dispatches: ingest produces a held chain, never a spawn.
+"""
 from __future__ import annotations
 
-import hashlib
-import os
-import stat
+import importlib.util
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-from hermes_cli import kanban_db as kb
 from hermes_cli import planspecs, terminal_handoff
 
 
-@pytest.fixture()
+def _load_plugin_router():
+    repo_root = Path(__file__).resolve().parents[1]
+    plugin_file = repo_root / "plugins" / "kanban" / "dashboard" / "plugin_api.py"
+    assert plugin_file.exists(), f"plugin file missing: {plugin_file}"
+    mod_name = "hermes_dashboard_plugin_kanban_handoff_test"
+    if mod_name in sys.modules:
+        return sys.modules[mod_name].router
+    spec = importlib.util.spec_from_file_location(mod_name, plugin_file)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod
+    spec.loader.exec_module(mod)
+    return mod.router
+
+
+@pytest.fixture
 def plans_root(tmp_path, monkeypatch):
-    root = tmp_path / "plans"
+    """Redirect the whole PlanSpec plans root at a tmp dir."""
+    root = tmp_path / "03-Agents"
     root.mkdir()
     monkeypatch.setattr(planspecs, "DEFAULT_PLANS_ROOT", root)
     return root
 
 
-@pytest.fixture()
-def hermes_home(tmp_path, monkeypatch):
-    home = tmp_path / "hermes-home"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_SANDBOX_MODE", "1")
-    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
-    return home
+@pytest.fixture
+def client(plans_root):
+    app = FastAPI()
+    app.include_router(_load_plugin_router(), prefix="/api/plugins/kanban")
+    return TestClient(app)
 
 
-def test_legacy_write_handoff_draft_is_forbidden(plans_root):
-    with pytest.raises(terminal_handoff.HandoffSchemaError):
-        terminal_handoff.write_handoff_draft("# x", slug="nope", plans_root=plans_root)
-    assert list(plans_root.rglob("*.md")) == []
+_BINDING_DRAFT = """\
+---
+title: "Handoff binding draft"
+type: planspec
+agent: Hermes
+status: draft
+freigabe: operator
+live_test_depth: smoke
+topic: "Handoff binding draft"
+taskgraph_hints:
+  binding: true
+  subtasks:
+    - id: S1
+      title: "Do the captured thing"
+      lane: coder
+      deps: []
+---
+
+## Kontext (aus Terminal)
+
+captured terminal text goes here
+"""
+
+_NON_BINDING_DRAFT = """\
+---
+title: "Handoff freeform draft"
+type: planspec
+agent: Hermes
+status: draft
+freigabe: operator
+live_test_depth: smoke
+topic: "Handoff freeform draft"
+taskgraph_hints:
+  binding: false
+---
+
+## Kontext (aus Terminal)
+
+just some captured text, no structure yet
+"""
 
 
-def test_legacy_content_request_rejected_before_write(plans_root):
-    with pytest.raises(terminal_handoff.HandoffSchemaError):
-        terminal_handoff.parse_structured_request({"content": "# draft"})
-    assert list(plans_root.rglob("*")) == []
+# ---------------------------------------------------------------------------
+# terminal_handoff helpers
+# ---------------------------------------------------------------------------
+
+def test_slugify_sanitises_and_never_empty():
+    assert terminal_handoff.slugify("Fix the Login Bug!!") == "fix-the-login-bug"
+    assert terminal_handoff.slugify("   ") == "draft"
+    assert terminal_handoff.slugify("", fallback="x") == "x"
+    # Bounded length, no trailing dashes.
+    long = terminal_handoff.slugify("a" * 200)
+    assert len(long) <= 60 and not long.endswith("-")
 
 
-def test_raw_oversize_rejected(hermes_home):
-    big = "x" * (terminal_handoff.RAW_MAX_BYTES + 10)
-    with pytest.raises(terminal_handoff.HandoffError, match="bytes"):
-        terminal_handoff.normalize_raw_text(big)
-
-
-def test_raw_too_many_lines_rejected(hermes_home):
-    text = "\n".join(["line"] * (terminal_handoff.RAW_MAX_LINES + 1))
-    with pytest.raises(terminal_handoff.HandoffError, match="lines"):
-        terminal_handoff.normalize_raw_text(text)
-
-
-def test_materialize_raw_artifact_0600_and_sha(hermes_home):
-    from hermes_constants import terminal_runs_root
-
-    body = b"SECRET_CANARY_raw_only\n"
-    desc = terminal_handoff.materialize_raw_artifact(
-        terminal_run_id="tr_abc", raw_bytes=body
+def test_write_handoff_draft_lands_under_plans_root(plans_root):
+    path = terminal_handoff.write_handoff_draft(
+        "hello", slug="my draft", plans_root=plans_root
     )
-    path = Path(desc.source_path)
     assert path.is_file()
-    assert path.read_bytes() == body
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert desc.sha256 == hashlib.sha256(body).hexdigest()
-    assert path.is_relative_to(terminal_runs_root())
+    assert path.read_text(encoding="utf-8") == "hello"
+    assert path.suffix == ".md"
+    # Lives in the dedicated handoff subdir, under the plans root.
+    assert terminal_handoff.HANDOFF_SUBDIR.as_posix() in path.as_posix()
+    assert plans_root in path.parents
 
 
-def test_stable_planspec_path_identity_and_conflict(plans_root):
-    corr = "corr_stable_1"
-    text1 = terminal_handoff.build_raw_free_planspec_text(
-        title="T1", goal="G1", correlation_id=corr
-    )
-    p1 = terminal_handoff.write_stable_planspec(
-        correlation_id=corr, text=text1, plans_root=plans_root
-    )
-    p2 = terminal_handoff.write_stable_planspec(
-        correlation_id=corr, text=text1, plans_root=plans_root
-    )
+def test_write_handoff_draft_is_idempotent_per_slug(plans_root):
+    p1 = terminal_handoff.write_handoff_draft("v1", slug="dupe", plans_root=plans_root)
+    p2 = terminal_handoff.write_handoff_draft("v2", slug="dupe", plans_root=plans_root)
     assert p1 == p2
-    assert p1.name == f"{corr}.md"
-    with pytest.raises(terminal_handoff.HandoffConflict):
-        terminal_handoff.write_stable_planspec(
-            correlation_id=corr, text=text1 + "\n# changed\n", plans_root=plans_root
-        )
+    assert p2.read_text(encoding="utf-8") == "v2"
+    assert len(list(p2.parent.glob("*.md"))) == 1
 
 
-def test_validate_is_write_free(plans_root, hermes_home):
-    payload = {
-        "schema_version": 1,
-        "capsule": {"terminal_run_id": "tr1"},
-        "draft": {"title": "Validate only", "goal": "g", "mode": "planspec"},
-        "raw": {"text": "capture line"},
-        "terminal_run_id": "tr1",
+# ---------------------------------------------------------------------------
+# POST /planspecs/validate — reuses the existing deterministic validator
+# ---------------------------------------------------------------------------
+
+def test_validate_route_flags_non_binding_draft(client, plans_root):
+    """AC-7 validation-failure: the freeform default (binding:false) is invalid."""
+    resp = client.post(
+        "/api/plugins/kanban/planspecs/validate",
+        json={"content": _NON_BINDING_DRAFT, "slug": "freeform"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert data["disposition"] == "invalid"
+    assert data["would_block"] is True
+    assert any("binding" in f for f in data["findings"])
+    # The draft was materialised under the (tmp) plans root, nothing else.
+    assert (plans_root / terminal_handoff.HANDOFF_SUBDIR / "freeform.md").is_file()
+
+
+def test_validate_route_accepts_structurally_binding_draft(client):
+    """AC-3/AC-4: a binding draft parses past the binding gate via the real
+    validator (disposition may be clean/warn/block, but never the structural
+    'invalid')."""
+    resp = client.post(
+        "/api/plugins/kanban/planspecs/validate",
+        json={"content": _BINDING_DRAFT, "slug": "binding"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["disposition"] in {"clean", "warn", "block"}
+    assert not any("taskgraph_hints.binding must be true" in f for f in data["findings"])
+    assert data["freigabe"] == "operator"
+
+
+# ---------------------------------------------------------------------------
+# POST /planspecs/ingest-draft — delegates to the existing ingest path
+# ---------------------------------------------------------------------------
+
+def test_ingest_draft_route_success_mocked(client, plans_root):
+    """AC-7 successful ingest (mocked): the route materialises the draft then
+    hands a real path to the EXISTING ingest_planspec; no DB writes of its own."""
+    fake = {
+        "ok": True,
+        "already_ingested": False,
+        "path": "x",
+        "root_task_id": "t_root123",
+        "child_ids": ["t_c1", "t_c2"],
+        "freigabe": "operator",
+        "live_test_depth": "smoke",
+        "subtask_count": 2,
     }
-    before = list(plans_root.rglob("*"))
-    result = terminal_handoff.validate_structured_handoff(payload, plans_root=plans_root)
-    after = list(plans_root.rglob("*"))
-    assert before == after
-    assert result.get("writes") is False
-    # no durable artifact under terminal runs from validate
-    from hermes_constants import terminal_runs_root
-    assert not any(terminal_runs_root().rglob("handoff-raw.txt"))
-
-
-def test_create_held_root_never_triage(hermes_home):
-    conn = kb.connect()
-    try:
-        tid = kb.create_held_decompose_root(
-            conn,
-            title="direct held",
-            body="b",
-            assignee="coder",
-            freigabe="operator",
-            live_test_depth="contract",
-            hold_reason="Direct handoff: held before release",
-            root_kind="handoff_direct",
-            correlation_id="c1",
-            artifact_digest="ab" * 32,
-            handoff_artifact_required=True,
+    with patch.object(planspecs, "ingest_planspec", return_value=fake) as m:
+        resp = client.post(
+            "/api/plugins/kanban/planspecs/ingest-draft",
+            json={"content": _BINDING_DRAFT, "slug": "ing", "author": "dashboard"},
         )
-        task = kb.get_task(conn, tid)
-        assert task.status == "scheduled"
-        events = kb.list_events(conn, tid)
-        kinds = [e.kind for e in events]
-        assert "triage" not in kinds
-        assert events[0].kind == "created"
-        assert events[0].payload.get("status") == "scheduled"
-        assert "handoff_direct" in kinds
-        assert "handoff_artifact_required" in kinds
-        # no untagged triage status ever
-        statuses = [
-            (e.payload or {}).get("status")
-            for e in events
-            if isinstance(e.payload, dict) and "status" in (e.payload or {})
-        ]
-        assert "triage" not in statuses
-    finally:
-        conn.close()
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["root_task_id"] == "t_root123"
+    assert body["child_ids"] == ["t_c1", "t_c2"]
+    # ingest_planspec was called with the materialised path under the tmp root.
+    called_path = Path(m.call_args.args[0])
+    assert called_path.is_file()
+    assert plans_root in called_path.parents
+    assert m.call_args.kwargs.get("author") == "dashboard"
 
 
-def test_canary_not_in_events_metadata(hermes_home, plans_root):
-    canary = "SECRET_CANARY_do_not_log"
-    body = f"{canary}\nmore lines\n".encode()
-    desc = terminal_handoff.materialize_raw_artifact(
-        terminal_run_id="tr_canary", raw_bytes=body
-    )
-    text = terminal_handoff.build_raw_free_planspec_text(
-        title="Canary",
-        goal="g",
-        correlation_id="corr_canary",
-        artifact=desc,
-    )
-    assert canary not in text
-    path = terminal_handoff.write_stable_planspec(
-        correlation_id="corr_canary", text=text, plans_root=plans_root
-    )
-    assert canary not in path.read_text()
-    conn = kb.connect()
-    try:
-        tid = kb.create_held_decompose_root(
-            conn,
-            title="canary root",
-            freigabe="operator",
-            live_test_depth="contract",
-            hold_reason="Direct handoff: held before release",
-            root_kind="handoff_direct",
-            correlation_id="corr_canary",
-            artifact_digest=desc.sha256,
-            handoff_artifact_required=True,
-            handoff_artifact_descriptor=desc.as_dict(),
+def test_ingest_draft_route_blocked_returns_400(client):
+    """A blocking spec surfaces as 400 with findings (same contract as ingest)."""
+    blocked = planspecs.PlanSpecBlocked(["live_test_depth must be set", "freigabe is required"])
+    with patch.object(planspecs, "ingest_planspec", side_effect=blocked):
+        resp = client.post(
+            "/api/plugins/kanban/planspecs/ingest-draft",
+            json={"content": _BINDING_DRAFT},
         )
-        att = kb.add_immutable_handoff_attachment(
-            conn,
-            tid,
-            source_path=desc.source_path,
-            sha256=desc.sha256,
-            size=desc.size,
-        )
-        blob = Path(att.stored_path).read_text()
-        assert canary in blob
-        for e in kb.list_events(conn, tid):
-            assert canary not in str(e.payload)
-            assert canary not in e.kind
-    finally:
-        conn.close()
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["findings"] == [
+        "live_test_depth must be set",
+        "freigabe is required",
+    ]

@@ -3135,78 +3135,29 @@ class TmuxAgentSessionService:
         }
 
     def handoff_draft(self, session: str, window: str, *, start: int = -120) -> dict[str, object]:
-        """Return structured run/capture source only (no markdown with pane capture).
-
-        W3-S2: legacy markdown with "Recent pane capture" is no longer produced.
-        Windows without ``terminal_run_id``/manifest return a clear upgrade error.
-        """
         info = self.show(session, window)
+        transcript = self.capture(info.session, info.window, start=start).rstrip()
         target = self._target(info.session, info.window)
-        terminal_run_id = getattr(info, "terminal_run_id", None) or None
-        if not terminal_run_id and isinstance(info, dict):
-            terminal_run_id = info.get("terminal_run_id")
-        # Prefer attributes; fall back to inventory fields if present.
-        run_id = terminal_run_id
-        if not run_id:
-            run_id = getattr(info, "run_id", None)
-        manifest = None
-        try:
-            from hermes_constants import terminal_runs_root
-            if run_id:
-                man_path = terminal_runs_root() / str(run_id) / "manifest.json"
-                if man_path.is_file():
-                    import json
-                    manifest = json.loads(man_path.read_text(encoding="utf-8"))
-        except Exception:
-            manifest = None
-        if not run_id or not manifest:
-            self._log_event(
-                "handoff_draft_upgrade_required",
-                session=info.session,
-                window=info.window,
-            )
-            return {
-                "target": target,
-                "session": info.session,
-                "window": info.window,
-                "title": f"Terminal handoff for {target}",
-                "upgrade_required": True,
-                "error": "legacy_window",
-                "message": (
-                    "This terminal window has no terminal_run_id/manifest. "
-                    "Start a new Wave-2 window before handoff."
-                ),
-                "schema_version": 1,
-            }
-        transcript = self.capture(info.session, info.window, start=start)
-        capsule = None
-        try:
-            capsule = getattr(info, "execution_capsule", None)
-            if capsule is None and manifest:
-                capsule = manifest.get("execution_capsule") or manifest.get("capsule")
-        except Exception:
-            capsule = None
+        title = f"Terminal handoff for {target}"
+        content = (
+            f"# {title}\n\n"
+            f"- tmux target: `{target}`\n"
+            f"- pane: `{info.pane_id}`\n"
+            f"- command: `{info.command}`\n"
+            f"- cwd: `{info.cwd or 'unknown'}`\n\n"
+            "## Recent pane capture\n\n"
+            "```text\n"
+            f"{transcript}\n"
+            "```\n"
+        )
         self._log_event("handoff_draft", session=info.session, window=info.window)
         return {
-            "schema_version": 1,
             "target": target,
             "session": info.session,
             "window": info.window,
-            "title": f"Terminal handoff for {target}",
-            "terminal_run_id": str(run_id),
-            "pane_id": getattr(info, "pane_id", None),
-            "command": getattr(info, "command", None),
-            "cwd": getattr(info, "cwd", None),
-            "execution_capsule": capsule,
-            "capture": {
-                "start": start,
-                "text": transcript,
-                "encoding": "utf-8",
-            },
-            "upgrade_required": False,
-            # Explicitly no markdown content field with Recent pane capture.
+            "title": title,
+            "content": content,
         }
-
 
     def detach_client(self, client_id: str) -> None:
         client_id = self.validate_name(client_id, field="client")

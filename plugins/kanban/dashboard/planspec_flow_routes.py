@@ -8,8 +8,6 @@ exports without keeping these handlers in the upstream-core file.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 # ``extension_runtime.load_api_extension`` injects the parent API names and
 # ``_API_CONTEXT_NAMES`` before executing this module.
 
@@ -258,156 +256,72 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
 # separately-clicked steps — the frontend never auto-fires either.
 # ---------------------------------------------------------------------------
 
-# Legacy HandoffDraftBody removed — structured body only.
-
-
-class StructuredHandoffRouteBody(BaseModel):
-    """Loose container; domain parser enforces extra=forbid + schema."""
-
-    schema_version: Optional[int] = None
-    capsule: Optional[dict] = None
-    draft: Optional[dict] = None
-    raw: Optional[dict] = None
-    session: Optional[ShortText] = None
-    window: Optional[ShortText] = None
-    start: Optional[int] = -120
+class HandoffDraftBody(BaseModel):
+    content: PlanSpecText
+    # Optional filename slug; when absent the first non-empty draft line is used.
+    slug: Optional[ShortText] = None
     author: Optional[ShortText] = "dashboard"
-    terminal_run_id: Optional[ShortText] = None
-    # Accept legacy content solely so we can 422 it explicitly.
-    content: Optional[str] = None
 
 
-def _handoff_http_error(exc: Exception) -> HTTPException:
-    from hermes_cli import terminal_handoff
+def _handoff_slug(body: "HandoffDraftBody") -> str:
+    from hermes_cli import terminal_handoff  # noqa: WPS433 (intentional)
 
-    if isinstance(exc, terminal_handoff.HandoffError):
-        return HTTPException(
-            status_code=int(exc.status_code),
-            detail={"error": exc.code, "message": str(exc)},
-        )
-    return HTTPException(status_code=400, detail={"error": "handoff_error", "message": str(exc)})
+    if body.slug and body.slug.strip():
+        return terminal_handoff.slugify(body.slug)
+    first_line = next(
+        (ln.strip() for ln in (body.content or "").splitlines() if ln.strip()),
+        "",
+    )
+    # Drop a leading markdown/yaml marker so a slug derives from real words.
+    first_line = first_line.lstrip("#").lstrip("-").strip().strip('"').strip("'")
+    return terminal_handoff.slugify(first_line)
 
 
 @planspec_routes.post("/planspecs/validate")
-def validate_planspec_draft(payload: StructuredHandoffRouteBody):
-    """W3-S2: structured write-free validate. Legacy content POST → 422."""
-    from hermes_cli import terminal_handoff  # noqa: WPS433
+def validate_planspec_draft(payload: HandoffDraftBody):
+    """Read-only PlanSpec validation for a handoff draft.
 
-    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-    payload = {k: v for k, v in data.items() if v is not None}
-    if "content" in payload and "schema_version" not in payload:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "legacy_content_forbidden",
-                "message": "legacy content handoff is no longer accepted",
-            },
-        )
-    try:
-        return terminal_handoff.validate_structured_handoff(payload)
-    except terminal_handoff.HandoffError as exc:
-        raise _handoff_http_error(exc) from exc
+    Materialises ``content`` to a draft .md under the plans root and runs the
+    EXISTING deterministic validator (``planspecs.validate_planspec``) on it.
+    Never raises — an invalid draft comes back as ``disposition: "invalid"`` with
+    the findings, so the UI can show *why* without an error toast. Writes only the
+    draft file; touches no DB and dispatches nothing.
+    """
+    from hermes_cli import planspecs, terminal_handoff  # noqa: WPS433 (intentional)
+
+    root = planspecs.DEFAULT_PLANS_ROOT
+    path = terminal_handoff.write_handoff_draft(
+        payload.content, slug=_handoff_slug(payload), plans_root=root
+    )
+    return planspecs.validate_planspec(path, plans_root=root)
 
 
 @planspec_routes.post("/planspecs/ingest-draft")
-def ingest_planspec_draft(payload: StructuredHandoffRouteBody, board: Optional[str] = Query(None)):
-    """W3-S2 structured ingest: durable artifact + born-held planspec root.
+def ingest_planspec_draft(payload: HandoffDraftBody, board: Optional[str] = Query(None)):
+    """Ingest a handoff draft via the EXISTING PlanSpec ingest path.
 
-    Legacy content POST → 422 before any write. Validate remains a separate click.
+    Materialises ``content`` to the same draft .md, then delegates to
+    ``planspecs.ingest_planspec`` (which owns all Kanban DB writes — no SQL here).
+    A structural / rubric / judge failure surfaces as 400 with the findings, the
+    same contract as ``/planspecs/ingest``. This creates a *held* chain
+    (``freigabe: operator`` by default) — it does NOT dispatch.
     """
-    from hermes_cli import kanban_db, planspecs, terminal_handoff  # noqa: WPS433
+    from hermes_cli import planspecs, terminal_handoff  # noqa: WPS433 (intentional)
 
-    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-    payload = {k: v for k, v in data.items() if v is not None}
-    if "content" in payload and "schema_version" not in payload:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "legacy_content_forbidden",
-                "message": "legacy content handoff is no longer accepted",
-            },
-        )
     board = _resolve_board(board)
     root = planspecs.DEFAULT_PLANS_ROOT
-    terminal_run_id = str(
-        payload.get("terminal_run_id")
-        or (payload.get("capsule") or {}).get("terminal_run_id")
-        or ""
-    ).strip()
-    if not terminal_run_id:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "legacy_window",
-                "message": "terminal_run_id required; restart terminal in a Wave-2 window",
-            },
-        )
+    path = terminal_handoff.write_handoff_draft(
+        payload.content, slug=_handoff_slug(payload), plans_root=root
+    )
     try:
-        materialized = terminal_handoff.materialize_structured_handoff_planspec(
-            payload,
-            terminal_run_id=terminal_run_id,
-            plans_root=root,
-        )
-        path = Path(materialized["path"])
-        artifact = materialized["artifact"]
-        corr = materialized["correlation_id"]
-        result = planspecs.ingest_planspec(
+        return planspecs.ingest_planspec(
             path,
             board=board,
-            author=str(payload.get("author") or "dashboard"),
+            author=payload.author or "dashboard",
             plans_root=root,
         )
-        # Attach immutable raw artifact to root + executable children.
-        root_id = result.get("root_task_id")
-        child_ids = list(result.get("child_ids") or [])
-        targets = [root_id] + child_ids if root_id else child_ids
-        conn = kanban_db.connect(board=board)
-        try:
-            for tid in targets:
-                if not tid:
-                    continue
-                try:
-                    kanban_db.add_immutable_handoff_attachment(
-                        conn,
-                        tid,
-                        source_path=artifact["source_path"],
-                        sha256=artifact["sha256"],
-                        size=int(artifact["size"]),
-                        board=board,
-                    )
-                except Exception as att_exc:  # noqa: BLE001
-                    kanban_db.add_event(
-                        conn,
-                        tid,
-                        "handoff_artifact_missing",
-                        {
-                            "schema_version": 1,
-                            "disposition": "missing",
-                            "sha256": artifact.get("sha256"),
-                            "error": str(att_exc)[:200],
-                            "correlation_id": corr,
-                        },
-                    )
-        finally:
-            conn.close()
-        result = {
-            **result,
-            "correlation_id": corr,
-            "artifact": {
-                "sha256": artifact["sha256"],
-                "size": artifact["size"],
-                "artifact_kind": artifact["artifact_kind"],
-                "source_path": artifact["source_path"],
-            },
-            "envelope": materialized.get("envelope"),
-            "release_eligible": True,
-            "auto_released": False,
-        }
-        return result
     except planspecs.PlanSpecBlocked as exc:
-        raise HTTPException(status_code=400, detail={"findings": exc.findings}) from exc
-    except terminal_handoff.HandoffError as exc:
-        raise _handoff_http_error(exc) from exc
+        raise HTTPException(status_code=400, detail={"findings": exc.findings})
 
 
 # ---------------------------------------------------------------------------
