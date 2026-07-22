@@ -549,3 +549,33 @@ def test_catalog_exposes_per_collection_freshness_metadata(kb_home):
     assert wiki["updated_ts"] > 0
     assert wiki["pulse"][0]["model"] == "x-ai/grok-build-0.1"
     assert len(wiki["pulse"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# SLICE 2b: wiki/reports and wiki/prompting get proper inferred types
+# ---------------------------------------------------------------------------
+
+def test_llm_wiki_type_infers_report_for_reports_dir(kb_home):
+    """Paths under wiki/reports/ should infer type 'report' (KI-Lageberichte)."""
+    assert kn._llm_wiki_type("reports/2026-07-20-daily.md", {}) == "report"
+    assert kn._llm_wiki_type("reports/weekly-summary.md", {}) == "report"
+
+
+def test_llm_wiki_type_infers_guide_for_prompting_dir(kb_home):
+    """Paths under wiki/prompting/ should infer type 'guide' (prompting guides)."""
+    assert kn._llm_wiki_type("prompting/gpt5-codex.md", {}) == "guide"
+    assert kn._llm_wiki_type("prompting/claude-opus.md", {}) == "guide"
+
+
+def test_llm_wiki_type_preserves_existing_inferences(kb_home):
+    """Ensure the new entries don't break existing type inference."""
+    assert kn._llm_wiki_type("concepts/some-concept.md", {}) == "concept"
+    assert kn._llm_wiki_type("entities/some-entity.md", {}) == "entity"
+    assert kn._llm_wiki_type("models/model-landscape.md", {}) == "model"
+    assert kn._llm_wiki_type("sources/some-source.md", {}) == "source"
+
+
+def test_llm_wiki_type_declared_type_still_wins(kb_home):
+    """A declared type: in frontmatter always wins over directory inference."""
+    assert kn._llm_wiki_type("reports/special.md", {"type": "analysis"}) == "analysis"
+    assert kn._llm_wiki_type("prompting/custom.md", {"type": "tutorial"}) == "tutorial"

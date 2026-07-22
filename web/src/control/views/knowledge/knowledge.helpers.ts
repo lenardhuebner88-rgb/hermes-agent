@@ -91,6 +91,10 @@ export function knowledgeTypeLabel(type: string): string {
       return "Quellen";
     case "model":
       return "Modelle";
+    case "report":
+      return "Reports";
+    case "guide":
+      return "Guides";
     case "query":
       return "Antworten";
     case "lint":

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { BookOpen, Brain, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
+import { BookOpen, Brain, ChevronDown, Landmark, Newspaper, Search, Sparkles, Users, Workflow } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { FleetEmptyState, SignalLabel, TwoPane } from "../../components/leitstand";
 import { Eyebrow } from "../../components/primitives";
@@ -59,7 +59,12 @@ const t = {
   total: (n: number) => `${n} Dokumente`,
   updatedAgo: (age: string) => `aktualisiert vor ${age}`,
   pulsePrefix: "Neu entdeckt:",
+  plansVisible: (visible: number, total: number) => `${visible} von ${total} Plänen sichtbar`,
+  loadMorePlans: (count: number) => `Weitere ${count} Pläne laden`,
 };
+
+const VAULT_PLANS_COLLECTION_ID = "vault-plans";
+const VAULT_PLANS_PAGE_SIZE = 24;
 
 function FilterButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
   return (
@@ -169,7 +174,7 @@ export function DocCard({ doc, onOpen, selected = false }: {
       type="button"
       onClick={() => onOpen(doc)}
       aria-expanded={selected}
-      className={`flex h-full min-h-[11rem] flex-col gap-2 rounded-card border border-line bg-surface-2 p-4 text-left transition-colors ${
+      className={`flex h-full w-full min-h-[11rem] flex-col gap-2 rounded-card border border-line bg-surface-2 p-4 text-left transition-colors ${
         selected ? "shadow-[inset_3px_0_0_var(--color-bronze)] bg-surface-3" : "hover:bg-surface-3"
       }`}
     >
@@ -211,38 +216,106 @@ function PulseStrip({ pulse }: { pulse: NonNullable<KnowledgeCollection["pulse"]
 
 /** Eine Sammlung (ein Regal): Akzent-Icon, Titel, Beschreibung, Doc-Raster.
  *  Exportiert für Unit-Tests. */
-export function CollectionSection({ collection, now, onOpen, selectedId = null }: {
+export function CollectionSection({ collection, now, onOpen, selectedId = null, collapsible = false, filtersActive = false }: {
   collection: KnowledgeCollection;
   /** epoch-Sekunden "jetzt" (aus `catalog.now`) für den "aktualisiert vor X"-Chip. */
   now: number;
   onOpen: (doc: KnowledgeDoc) => void;
   selectedId?: string | null;
+  /** P7: große, sekundäre Regale halten ihren Karten-DOM bis zur expliziten
+   * Öffnung zurück. Kleine/kuratierte Regale bleiben unverändert offen. */
+  collapsible?: boolean;
+  /** Aktive Suche/Typ-/Sammlungsfilter verwenden die ungekürzte Trefferzahl. */
+  filtersActive?: boolean;
 }) {
-  return (
-    <section className="space-y-3">
-      <header className="flex items-start gap-3 rounded-panel border border-line bg-surface-1 p-3">
-        <span className="grid size-12 shrink-0 place-items-center rounded-card border border-line bg-surface-2 text-brand">
-          <CollectionGlyph name={collection.icon} className="h-5 w-5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2">
-            <h3 className="text-body font-semibold text-ink">{collection.title}</h3>
+  const [expanded, setExpanded] = useState(!collapsible);
+  const [visiblePlanDocs, setVisiblePlanDocs] = useState(VAULT_PLANS_PAGE_SIZE);
+  const isVaultPlans = collection.id === VAULT_PLANS_COLLECTION_ID;
+  const isExpanded = !collapsible || expanded;
+  const docs = isVaultPlans
+    ? collection.docs.slice(0, visiblePlanDocs)
+    : collection.docs;
+  const headerDocCount = filtersActive ? collection.docs.length : collection.doc_count;
+  const remainingPlans = Math.max(0, collection.docs.length - docs.length);
+  const listId = `knowledge-collection-${collection.id}-docs`;
+  const titleId = `knowledge-collection-${collection.id}-title`;
+
+  const headerContent = (
+    <>
+      <span className="grid size-12 shrink-0 place-items-center rounded-card border border-line bg-surface-2 text-brand">
+        <CollectionGlyph name={collection.icon} className="h-5 w-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-baseline gap-x-2">
+          <span id={titleId} className="text-body font-semibold text-ink">
+            {collection.title}
+            {isVaultPlans ? ` (${headerDocCount})` : null}
+          </span>
+          {!isVaultPlans ? (
             <span className="font-data text-micro tabular-nums text-ink-3">{t.docs(collection.docs.length)}</span>
-            {collection.updated_ts > 0 ? (
-              <span className="font-data text-micro tabular-nums text-ink-3">· {t.updatedAgo(fmtAge(collection.updated_ts, now))}</span>
-            ) : null}
+          ) : null}
+          {collection.updated_ts > 0 ? (
+            <span className="font-data text-micro tabular-nums text-ink-3">· {t.updatedAgo(fmtAge(collection.updated_ts, now))}</span>
+          ) : null}
+        </span>
+        <span className="mt-0.5 block text-sec leading-relaxed text-ink-2">{collection.description}</span>
+        {collection.pulse && collection.pulse.length > 0 ? <PulseStrip pulse={collection.pulse} /> : null}
+      </span>
+      {collapsible ? (
+        <ChevronDown
+          aria-hidden="true"
+          className={`mt-3 h-5 w-5 shrink-0 text-ink-2 ${isExpanded ? "" : "-rotate-90"}`}
+        />
+      ) : null}
+    </>
+  );
+
+  return (
+    <section className="space-y-3" aria-labelledby={titleId}>
+      {collapsible ? (
+        <button
+          type="button"
+          aria-expanded={isExpanded}
+          aria-controls={listId}
+          onClick={() => setExpanded((current) => !current)}
+          className="flex w-full items-start gap-3 rounded-panel border border-line bg-surface-1 p-3 text-left transition-colors hover:bg-surface-3"
+        >
+          {headerContent}
+        </button>
+      ) : (
+        <header className="flex items-start gap-3 rounded-panel border border-line bg-surface-1 p-3">
+          {headerContent}
+        </header>
+      )}
+
+      {isExpanded ? (
+        <>
+          <div className="knowledge-grid-host">
+            <ul id={listId} aria-label={`${collection.title} Dokumente`} className="knowledge-card-grid">
+              {docs.map((doc) => (
+                <li key={doc.id} className="h-full">
+                  <DocCard doc={doc} onOpen={onOpen} selected={selectedId === doc.id} />
+                </li>
+              ))}
+            </ul>
           </div>
-          <p className="mt-0.5 text-sec leading-relaxed text-ink-2">{collection.description}</p>
-          {collection.pulse && collection.pulse.length > 0 ? <PulseStrip pulse={collection.pulse} /> : null}
-        </div>
-      </header>
-      <div className="knowledge-grid-host">
-        <div className="knowledge-card-grid">
-          {collection.docs.map((doc) => (
-            <DocCard key={doc.id} doc={doc} onOpen={onOpen} selected={selectedId === doc.id} />
-          ))}
-        </div>
-      </div>
+          {isVaultPlans && remainingPlans > 0 ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-card border border-line bg-surface-1 p-3">
+              <span aria-live="polite" className="font-data text-micro tabular-nums text-ink-3">
+                {t.plansVisible(docs.length, collection.docs.length)}
+              </span>
+              <button
+                type="button"
+                aria-controls={listId}
+                onClick={() => setVisiblePlanDocs((current) => current + VAULT_PLANS_PAGE_SIZE)}
+                className="inline-flex min-h-12 items-center rounded-card border border-line bg-surface-2 px-3 text-sec text-ink-2 transition-colors hover:border-live/40 hover:bg-surface-3"
+              >
+                {t.loadMorePlans(Math.min(VAULT_PLANS_PAGE_SIZE, remainingPlans))}
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : null}
     </section>
   );
 }
@@ -372,11 +445,18 @@ export function KnowledgeShelf() {
         <div className="space-y-4">
           {collections.map((collection) => (
             <CollectionSection
-              key={collection.id}
+              key={`${collection.id}:${activeCollection ?? "all"}:${activeType ?? "all"}`}
               collection={collection}
               now={nowTs}
               onOpen={openDoc}
               selectedId={reading?.id}
+              filtersActive={searching || activeCollection !== null || activeType !== null}
+              collapsible={
+                collection.id === VAULT_PLANS_COLLECTION_ID
+                && !searching
+                && activeCollection === null
+                && activeType === null
+              }
             />
           ))}
         </div>

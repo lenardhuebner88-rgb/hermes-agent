@@ -165,9 +165,10 @@ def test_family_for_id_matches_real_id_shapes():
     assert lm.family_for_id("anthropic/claude-opus-4.8") == "claude-opus"
     assert lm.family_for_id("anthropic/claude-sonnet-5") == "claude-sonnet-haiku"
     assert lm.family_for_id("openai/gpt-5.1-codex-max") == "gpt5-codex"
-    # Real landscape id that needs the exact-match override in the merge step:
-    # by prefix alone this is "other" (no "codex" substring).
-    assert lm.family_for_id("openai/gpt-5.6-sol") == "other"
+    # GPT-5.6 ids map to gpt5-codex via a precise variant prefix.
+    assert lm.family_for_id("openai/gpt-5.6-sol") == "gpt5-codex"
+    assert lm.family_for_id("openai/gpt-5.6-luna") == "gpt5-codex"
+    assert lm.family_for_id("openai/gpt-5.6-terra-pro") == "gpt5-codex"
     assert lm.family_for_id("google/gemini-3.5-flash") == "gemini"
     assert lm.family_for_id("x-ai/grok-4.5") == "other"
 
@@ -199,11 +200,10 @@ def test_build_payload_resolves_guide_family_exact_match_first(wiki_home):
     payload = lm.build_models_payload()
     by_id = {m["id"]: m for m in payload["models"]}
 
-    # openai/gpt-5.6-* ids have no "codex" substring -> family_for_id() alone
-    # would bucket them as "other"; only the guide's explicit model_ids list
-    # (S3) rescues the match. This is the exact-match-matters case from the brief.
+    # GPT-5.6 ids now map to gpt5-codex via prefix, and the guide's
+    # model_ids list confirms the match (both paths agree).
     for luna_id in ("openai/gpt-5.6-luna", "openai/gpt-5.6-luna-pro"):
-        assert by_id[luna_id]["family"] == "other"
+        assert by_id[luna_id]["family"] == "gpt5-codex"
         assert by_id[luna_id]["guide_family"] == "gpt5-codex"
 
     # Normal case: family bucket + guide both say "claude-opus".
@@ -321,3 +321,48 @@ def test_guide_endpoint_traversal_family_is_400(client, wiki_home):
         "/api/library/models/guide", params={"family": "../../etc/passwd"}, headers=HEADERS,
     )
     assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# SLICE 2a: GPT-5.6 models map to gpt5-codex family (prefix-based)
+# ---------------------------------------------------------------------------
+
+def test_gpt56_ids_map_to_gpt5_codex_family():
+    """All 5 GPT-5.6 OpenRouter ids must map to gpt5-codex via the new prefix
+    rule. Covers luna/sol/terra variants with and without -pro suffix."""
+    gpt56_ids = [
+        "openai/gpt-5.6-luna-pro",
+        "openai/gpt-5.6-luna",
+        "openai/gpt-5.6-terra-pro",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-sol-pro",
+    ]
+    for mid in gpt56_ids:
+        assert lm.family_for_id(mid) == "gpt5-codex", \
+            f"{mid} should map to gpt5-codex"
+
+
+def test_gpt5_prefix_does_not_break_existing_families():
+    """The GPT-5.6 rule must not classify general GPT-5 models as Codex."""
+    # Existing codex-branded id (substring match, not prefix)
+    assert lm.family_for_id("openai/gpt-5.1-codex-max") == "gpt5-codex"
+    # Claude families
+    assert lm.family_for_id("anthropic/claude-fable-5") == "claude-fable"
+    assert lm.family_for_id("anthropic/claude-opus-4.8") == "claude-opus"
+    assert lm.family_for_id("anthropic/claude-sonnet-5") == "claude-sonnet-haiku"
+    # Gemini
+    assert lm.family_for_id("google/gemini-3.5-flash") == "gemini"
+    # Kimi
+    assert lm.family_for_id("moonshotai/kimi-k2-thinking") == "kimi"
+    # Non-gpt-5 openai (e.g., gpt-4) stays "other"
+    assert lm.family_for_id("openai/gpt-4-turbo") == "other"
+    assert lm.family_for_id("openai/gpt-4o") == "other"
+    assert lm.family_for_id("openai/gpt-5-chat") == "other"
+    assert lm.family_for_id("openai/gpt-5-mini") == "other"
+    assert lm.family_for_id("openai/gpt-5.1") == "other"
+    assert lm.family_for_id("openai/gpt-5.2") == "other"
+    assert lm.family_for_id("openai/gpt-5.4") == "other"
+    assert lm.family_for_id("openai/gpt-5.5") == "other"
+    # Unrelated providers
+    assert lm.family_for_id("x-ai/grok-4.5") == "other"
+    assert lm.family_for_id("meta-llama/llama-3.3-70b-instruct:free") == "other"

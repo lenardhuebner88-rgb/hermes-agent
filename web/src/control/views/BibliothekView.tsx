@@ -20,6 +20,7 @@ import { de } from "../i18n/de";
 import { extractToc, type TocEntry } from "../lib/slug";
 import type { Density } from "../hooks/useDensity";
 import type { VaultProvenanceResponse } from "../lib/types";
+import type { KnowledgeCatalog } from "./knowledge/knowledge.helpers";
 import {
   CATEGORY_LABEL,
   countByCategory,
@@ -165,7 +166,29 @@ interface LibrarySavedSearchesResponse {
   count: number;
 }
 
-const LAST_VISIT_KEY = "hc-bibliothek-last-visit";
+type Mode = "briefings" | "wissen" | "lesesaal" | "ergebnisse" | "modelle";
+
+const LAST_VISIT_KEYS: Record<Mode, string> = {
+  briefings: "hc-bibliothek.lastVisit.briefings",
+  wissen: "hc-bibliothek.lastVisit.wissen",
+  lesesaal: "hc-bibliothek.lastVisit.lesesaal",
+  ergebnisse: "hc-bibliothek.lastVisit.ergebnisse",
+  modelle: "hc-bibliothek.lastVisit.modelle",
+};
+
+/** Globaler Sidebar-Badge (ControlPage): jeder sichtbare Bibliothek-Tab
+ * quittiert zusätzlich diesen Schlüssel — der Badge zählt über alle
+ * Kategorien und darf nicht an einen einzelnen Tab-Key gebunden sein. */
+const LAST_VISIT_ANY_KEY = "hc-bibliothek.lastVisit.any";
+
+type TabStats = Record<Mode, { count: number | null; timestamps: number[] }>;
+const EMPTY_TAB_STATS: TabStats = {
+  briefings: { count: null, timestamps: [] },
+  wissen: { count: null, timestamps: [] },
+  lesesaal: { count: null, timestamps: [] },
+  ergebnisse: { count: null, timestamps: [] },
+  modelle: { count: null, timestamps: [] },
+};
 
 
 export function ItemRow({ item, unreadSince, onOpen, selected = false }: {
@@ -243,7 +266,7 @@ export function TopicFollowSection({ topics, onToggle, pendingTopicId }: { topic
   );
 }
 
-export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySavedSearch[]; onApply: (search: LibrarySavedSearch) => void }) {
+export function SavedSearchShelf({ searches, counts, onApply }: { searches: LibrarySavedSearch[]; counts?: Record<string, number>; onApply: (search: LibrarySavedSearch) => void }) {
   return (
     <FleetPanel eyebrow={t.savedTitle} meta={t.savedMeta}>
       {searches.length === 0 ? (
@@ -255,7 +278,10 @@ export function SavedSearchShelf({ searches, onApply }: { searches: LibrarySaved
               <li key={search.id} className="rounded-card border border-line bg-surface-2 p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <h3 className="truncate text-sec font-semibold text-ink">{search.title || search.name}</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="truncate text-sec font-semibold text-ink">{search.title || search.name}</h3>
+                      {counts?.[search.id] != null ? <SignalChip tone="neutral" label={String(counts[search.id])} /> : null}
+                    </div>
                     <p className="mt-1 line-clamp-2 text-sec text-ink-2">{search.query}</p>
                     {[...search.topic_tags, ...search.person_tags].length ? (
                       <p className="mt-2 flex flex-wrap gap-1">
@@ -353,7 +379,7 @@ export const ReadingView = ReadingContent;
 // Suche) sitzen darum in einer eigenen Filterleiste statt im Hero.
 const LESESAAL_PAGE_SIZE = 120;
 
-export function LesesaalBody() {
+export function LesesaalBody({ unreadSince: unreadSinceProp }: { unreadSince?: number } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const [category, setCategory] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -365,21 +391,25 @@ export function LesesaalBody() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [topics, setTopics] = useState<LibraryTopic[]>([]);
   const [savedSearches, setSavedSearches] = useState<LibrarySavedSearch[]>([]);
+  const [savedSearchCounts, setSavedSearchCounts] = useState<Record<string, number>>({});
   const [pendingTopicId, setPendingTopicId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState<LibraryItem | null>(null);
   const isExpanded = useExpandedLibraryPane();
   const readingTriggerRef = useRef<HTMLElement | null>(null);
-  // Ungelesen v1: Zeitstempel des letzten Besuchs aus localStorage; beim
-  // Mount einfrieren (Lazy-Initializer), das Fortschreiben passiert im
-  // Mount-Effekt (localStorage-Write + Date.now sind impure → nicht im Render).
+  // Ungelesen v1: die Schwelle dieses Besuchs beim Mount einfrieren. Der
+  // Eltern-State wird beim Tab-Klick bereits auf "jetzt" fortgeschrieben und
+  // darf die Neu-Markierungen der gerade sichtbar werdenden Ausgabe nicht
+  // nachträglich quittieren.
   const [unreadSince] = useState<number>(() => {
-    const raw = typeof window !== "undefined" ? window.localStorage.getItem(LAST_VISIT_KEY) : null;
-    return raw ? Number(raw) || 1 : 1;
+    if (unreadSinceProp != null) return unreadSinceProp;
+    try {
+      const raw = typeof window !== "undefined" ? window.localStorage.getItem(LAST_VISIT_KEYS.lesesaal) : null;
+      return raw ? Number(raw) || 1 : 1;
+    } catch {
+      return 1;
+    }
   });
-  useEffect(() => {
-    try { window.localStorage.setItem(LAST_VISIT_KEY, String(Math.floor(Date.now() / 1000))); } catch { /* private mode */ }
-  }, []);
 
   // Deep-Links (S2): geöffnetes Dokument als `item`-Search-Param — öffnen ist
   // ein push (Back-Button schließt das Dokument), schließen/Filterwechsel ist
@@ -464,19 +494,6 @@ export function LesesaalBody() {
     }
   }, [fetchPage, items.length]);
 
-  const loadPreferences = useCallback(async () => {
-    try {
-      const [topicRes, savedRes] = await Promise.all([
-        fetchJSON<LibraryTopicsResponse>("/api/library/topics"),
-        fetchJSON<LibrarySavedSearchesResponse>("/api/library/saved-searches"),
-      ]);
-      setTopics(topicRes.items);
-      setSavedSearches(savedRes.items);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
-
   const toggleTopicFollow = useCallback(async (topic: LibraryTopic) => {
     setPendingTopicId(topic.id);
     try {
@@ -504,7 +521,6 @@ export function LesesaalBody() {
     // setState im Effect-Body verletzt react-hooks/set-state-in-effect.
     const firstLoad = window.setTimeout(() => {
       void load();
-      void loadPreferences();
     }, 0);
     const id = window.setInterval(() => {
       if (document.hidden) return;
@@ -514,7 +530,46 @@ export function LesesaalBody() {
       window.clearTimeout(firstLoad);
       window.clearInterval(id);
     };
-  }, [load, loadPreferences]);
+  }, [load]);
+
+  // Präferenzen und Saved-Search-Counts gehören nicht in den von q/category
+  // abhängigen Listen-Load: genau einmal pro Lesesaal-Mount laden. Ein
+  // ungültiger einzelner Suchstring darf die übrigen Live-Counts nicht
+  // verwerfen und keinen globalen Lesesaal-Fehler auslösen.
+  useEffect(() => {
+    let cancelled = false;
+    const firstPreferenceLoad = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const [topicRes, savedRes] = await Promise.all([
+            fetchJSON<LibraryTopicsResponse>("/api/library/topics"),
+            fetchJSON<LibrarySavedSearchesResponse>("/api/library/saved-searches"),
+          ]);
+          if (cancelled) return;
+          setTopics(topicRes.items);
+          setSavedSearches(savedRes.items);
+
+          const settledCounts = await Promise.allSettled(savedRes.items.map(async (search) => {
+            const params = new URLSearchParams({ q: search.query, limit: "1", offset: "0" });
+            const res = await fetchJSON<LibraryListResponse>(`/api/library/items?${params.toString()}`);
+            return [search.id, res.count] as const;
+          }));
+          if (cancelled) return;
+          const liveCounts: Record<string, number> = {};
+          for (const result of settledCounts) {
+            if (result.status === "fulfilled") liveCounts[result.value[0]] = result.value[1];
+          }
+          setSavedSearchCounts(liveCounts);
+        } catch (e) {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        }
+      })();
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(firstPreferenceLoad);
+    };
+  }, []);
 
   // Deep-Link wiederherstellen (Reload/Link-Teilen, S2): das Item steht ggf.
   // schon in den geladenen Seiten — sonst direkt nachladen (funktioniert auch,
@@ -590,7 +645,7 @@ export function LesesaalBody() {
       </div>
 
       <TopicFollowSection topics={topics} onToggle={toggleTopicFollow} pendingTopicId={pendingTopicId} />
-      <SavedSearchShelf searches={savedSearches} onApply={applySavedSearch} />
+      <SavedSearchShelf searches={savedSearches} counts={savedSearchCounts} onApply={applySavedSearch} />
 
       {error ? <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3"><SignalLabel tone="alert" label={t.loadError} /><p className="mt-1 text-sec text-ink-2">{error}</p></div> : null}
 
@@ -779,22 +834,21 @@ export function VaultProvenanceShelf({ data, error }: VaultProvenanceShelfProps)
   );
 }
 
-type Mode = "briefings" | "wissen" | "lesesaal" | "ergebnisse" | "modelle";
-
-const MODE_TABS: { id: Mode; label: string; count?: (data: LibraryListResponse | null) => number }[] = [
-  { id: "briefings", label: "Briefings", count: (data) => data?.count ?? 0 },
+const MODE_TABS: { id: Mode; label: string }[] = [
+  { id: "briefings", label: "Briefings" },
   { id: "wissen", label: "Nachschlagewerk" },
-  { id: "lesesaal", label: "Lesesaal", count: (data) => data?.count ?? 0 },
+  { id: "lesesaal", label: "Lesesaal" },
   { id: "ergebnisse", label: "Ergebnisse" },
   { id: "modelle", label: "Modelle" },
 ];
 
-function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode: Mode) => void; lesesaalData: LibraryListResponse | null }) {
+function TabBar({ mode, onChange, stats, lastVisits }: { mode: Mode; onChange: (mode: Mode) => void; stats: TabStats; lastVisits: Record<Mode, number> }) {
   return (
     <div role="tablist" aria-label={t.eyebrow} className="flex gap-1 overflow-x-auto border-b border-line">
       {MODE_TABS.map((tab) => {
         const active = mode === tab.id;
-        const count = tab.count?.(tab.id === "lesesaal" ? lesesaalData : null) ?? 0;
+        const count = stats[tab.id].count;
+        const unread = stats[tab.id].timestamps.filter((ts) => ts > lastVisits[tab.id]).length;
         return (
           <button
             key={tab.id}
@@ -812,11 +866,12 @@ function TabBar({ mode, onChange, lesesaalData }: { mode: Mode; onChange: (mode:
           >
             <span className="flex items-center gap-2">
               {tab.label}
-              {count > 0 ? (
+              {count != null ? (
                 <sup className={`font-data text-micro font-semibold tabular-nums ${active ? "text-bronze-hi" : "text-ink-3"}`}>
                   {count}
                 </sup>
               ) : null}
+              {unread > 0 ? <SignalChip tone="neutral" label={`${unread} neu`} /> : null}
             </span>
             {active ? <span className="absolute inset-x-0 -bottom-px h-0.5 bg-live" /> : null}
           </button>
@@ -838,6 +893,21 @@ export function BibliothekView({ density }: { density?: Density }) {
     if (m === "lesesaal" || m === "wissen" || m === "ergebnisse" || m === "modelle") return m;
     return "briefings";
   }, [searchParams]);
+  const [lastVisits, setLastVisits] = useState<Record<Mode, number>>(() => {
+    const visitedAt = Math.floor(Date.now() / 1000);
+    return Object.fromEntries(Object.entries(LAST_VISIT_KEYS).map(([id, key]) => {
+      if (typeof window !== "undefined") {
+        try {
+          const stored = Number(window.localStorage.getItem(key));
+          if (stored > 0) return [id, stored];
+          window.localStorage.setItem(key, String(visitedAt));
+        } catch { /* private mode */ }
+      }
+      return [id, visitedAt];
+    })) as Record<Mode, number>;
+  });
+  const [tabStats, setTabStats] = useState<TabStats>(EMPTY_TAB_STATS);
+
   const setMode = useCallback((next: Mode) => {
     setSearchParams((prev) => {
       const p = new URLSearchParams(prev);
@@ -847,17 +917,36 @@ export function BibliothekView({ density }: { density?: Density }) {
     }, { replace: true });
   }, [setSearchParams]);
 
-  // Lesesaal-Daten für den Badge (Live-Count) — lightweight, da LesesaalBody
-  // selbstständig lädt. Hier nur für die Tab-Bar.
-  const [lesesaalData, setLesesaalData] = useState<LibraryListResponse | null>(null);
+  useEffect(() => {
+    const visitedAt = Math.floor(Date.now() / 1000);
+    setLastVisits((current) => ({ ...current, [mode]: visitedAt }));
+    try {
+      window.localStorage.setItem(LAST_VISIT_KEYS[mode], String(visitedAt));
+      window.localStorage.setItem(LAST_VISIT_ANY_KEY, String(visitedAt));
+    } catch { /* private mode */ }
+  }, [mode]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetchJSON<LibraryListResponse>("/api/library/items?limit=1&offset=0");
-        if (!cancelled) setLesesaalData(res);
+        const [news, briefs, issues, knowledge, results, models] = await Promise.all([
+          fetchJSON<LibraryListResponse>("/api/library/items?category=news&limit=200&offset=0"),
+          fetchJSON<LibraryListResponse>("/api/library/items?category=briefings&limit=200&offset=0"),
+          fetchJSON<LibraryListResponse>("/api/library/items?limit=200&offset=0"),
+          fetchJSON<KnowledgeCatalog>("/api/library/knowledge"),
+          fetchJSON<{ items: { completed_at: string | null }[]; total: number }>("/api/library/results?limit=100&offset=0"),
+          fetchJSON<{ models: { created: string | null }[] }>("/api/library/models"),
+        ]);
+        if (!cancelled) setTabStats({
+          briefings: { count: news.count + briefs.count, timestamps: [...news.items, ...briefs.items].map((item) => item.ts) },
+          wissen: { count: knowledge.count, timestamps: knowledge.collections.flatMap((collection) => collection.docs.map((doc) => doc.updated_ts)) },
+          lesesaal: { count: issues.count, timestamps: issues.items.map((item) => item.ts) },
+          ergebnisse: { count: results.total, timestamps: results.items.map((item) => item.completed_at ? Math.floor(Date.parse(item.completed_at) / 1000) : 0) },
+          modelle: { count: models.models.length, timestamps: models.models.map((model) => model.created ? Math.floor(Date.parse(model.created) / 1000) : 0) },
+        });
       } catch {
-        // Badge bleibt leer bei Fehler — kein Blocker.
+        // Counts bleiben leer bei Fehler — die Regale selbst zeigen ihren Fehlerzustand.
       }
     })();
     return () => { cancelled = true; };
@@ -887,7 +976,7 @@ export function BibliothekView({ density }: { density?: Density }) {
 
   return (
     <div className="space-y-5">
-      <TabBar mode={mode} onChange={setMode} lesesaalData={lesesaalData} />
+      <TabBar mode={mode} onChange={setMode} stats={tabStats} lastVisits={lastVisits} />
       <div id="bibliothek-panel-briefings" role="tabpanel" hidden={mode !== "briefings"}>
         <BriefingsShelf onOpenItem={openItem} density={density} />
       </div>
@@ -895,7 +984,7 @@ export function BibliothekView({ density }: { density?: Density }) {
         <KnowledgeShelf />
       </div>
       <div id="bibliothek-panel-lesesaal" role="tabpanel" hidden={mode !== "lesesaal"}>
-        <LesesaalBody />
+        <LesesaalBody unreadSince={lastVisits.lesesaal} />
       </div>
       <div id="bibliothek-panel-ergebnisse" role="tabpanel" hidden={mode !== "ergebnisse"}>
         <ErgebnisseShelf onOpenLesesaalItem={openLesesaalItemById} />

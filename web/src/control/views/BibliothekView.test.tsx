@@ -119,8 +119,11 @@ describe("ItemRow (Render, RunTimelineView-Muster)", () => {
 });
 
 describe("Receipts-Regal (S2)", () => {
-  it("hat ein eigenes Chip-Label und rendert Receipt-Items wie jede Serie", () => {
-    expect(CATEGORY_LABEL.receipts).toBe("Receipts");
+  it("hat genau ein Receipt-Chip-Label und rendert Receipt-Items wie jede Serie", () => {
+    expect(Object.entries(CATEGORY_LABEL).filter(([, label]) => label === "Receipts")).toEqual([
+      ["receipts", "Receipts"],
+    ]);
+    expect(CATEGORY_LABEL).not.toHaveProperty("arbeit");
     const row = renderToStaticMarkup(
       <ItemRow
         item={item({ category: "receipts", series: "Claude-Code", title: "Receipt — Härtungs-Lauf", ts: 200 })}

@@ -2,7 +2,10 @@ import { fetchJSON } from "@/lib/api";
 import type { KnowledgeCatalog } from "../views/knowledge/knowledge.helpers";
 import { usePolling } from "./internal";
 
-const LIBRARY_LAST_VISIT_KEY = "hc-bibliothek-last-visit";
+// Globaler Bibliothek-Besuch: jeder sichtbare Bibliothek-Tab quittiert diesen
+// Schlüssel (P9-Ack-Effect in BibliothekView) — der Sidebar-Badge zählt über
+// alle Kategorien und wäre an den Lesesaal-Tab-Key allein dauerhaft stale.
+const LIBRARY_LAST_VISIT_KEY = "hc-bibliothek.lastVisit.any";
 
 
 interface LibraryItemsLite {

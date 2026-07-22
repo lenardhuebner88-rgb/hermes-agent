@@ -478,24 +478,24 @@ def test_receipt_adapter_traversal_and_extension_guards(kanban_home, tmp_path):
 
 
 def test_receipt_adapter_cap_and_cache(kanban_home, tmp_path):
-    """Newest-40-Cap pro Agent (mtime-Reihenfolge) + Cache-Hit liefert
+    """Newest-200-Cap für flache Agent-Receipts (mtime-Reihenfolge) + Cache-Hit liefert
     identische Items."""
     import os
     receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
-    for n in range(45):
-        p = _write_receipt(tmp_path, "Hermes", f"receipt-{n:02d}.md",
+    for n in range(250):
+        p = _write_receipt(tmp_path, "Hermes", f"receipt-{n:03d}.md",
                            body=f"# R{n}\nInhalt {n}.")
         os.utime(p, (1_700_000_000 + n, 1_700_000_000 + n))
-    os.utime(receipts, (1_700_000_100, 1_700_000_100))
+    os.utime(receipts, (1_700_000_300, 1_700_000_300))
     first = lv._collect_receipt_items(with_bodies=False)
-    assert len(first) == lv._MAX_RECEIPTS_PER_AGENT
+    assert len(first) == lv._MAX_RECEIPTS_FLAT
     names = {i.id.rsplit("::", 1)[1] for i in first}
-    assert "receipt-44.md" in names and "receipt-04.md" not in names  # 5 älteste raus
+    assert "receipt-249.md" in names and "receipt-049.md" not in names  # 50 älteste raus
     warm = lv._collect_receipt_items(with_bodies=True)
     assert {i.id for i in warm} == {i.id for i in first}
     assert all(i.body_md for i in warm)
     # Parse-Cache ist gefüllt und liefert beim Hit dasselbe Item-Objekt
-    sample = str(receipts / "receipt-44.md")
+    sample = str(receipts / "receipt-249.md")
     assert lv._receipt_parse_cache[sample][2] is not None
 
 
@@ -547,16 +547,17 @@ def test_library_view_receipts_subdirs(kanban_home, tmp_path):
     assert mother_item.id == "receipt::Hermes::mother/mother-1.md"
     mother_detail = lv._get_item(mother_item.id)
     assert mother_detail is not None and mother_detail.title == "Mother 1"
-    with pytest.raises(ValueError):
-        lv._get_item("receipt::Hermes::other/mother-1.md")
+    # "other/" is now a valid subdir name (dynamic scanning), but the file
+    # doesn't exist -> returns None (not ValueError).
+    assert lv._get_item("receipt::Hermes::other/mother-1.md") is None
     with pytest.raises(ValueError):
         lv._get_item("receipt::Hermes::mother/nested/mother-1.md")
 
     lv._receipt_dir_cache.clear()
-    for n in range(50):
-        p = _write_receipt(tmp_path, "Hermes", f"cap-flat-{n:02d}.md", body=f"# Cap Flat {n}\n")
+    for n in range(210):
+        p = _write_receipt(tmp_path, "Hermes", f"cap-flat-{n:03d}.md", body=f"# Cap Flat {n}\n")
         os.utime(p, (1_700_010_000 + n, 1_700_010_000 + n))
-        p = auto / f"cap-auto-{n:02d}.md"
+        p = auto / f"cap-auto-{n:03d}.md"
         p.write_text(f"# Cap Auto {n}\n", encoding="utf-8")
         os.utime(p, (1_700_020_000 + n, 1_700_020_000 + n))
     os.utime(receipts, (1_700_021_000, 1_700_021_000))
@@ -564,8 +565,8 @@ def test_library_view_receipts_subdirs(kanban_home, tmp_path):
     capped = lv._newest_receipt_names(receipts)
     assert sum(1 for n in capped if "/" not in n) == lv._MAX_RECEIPTS_FLAT
     assert sum(1 for n in capped if n.startswith("auto/")) == lv._MAX_RECEIPTS_PER_SUBDIR
-    assert "cap-flat-49.md" in capped and "cap-flat-09.md" not in capped
-    assert "auto/cap-auto-49.md" in capped and "auto/cap-auto-09.md" not in capped
+    assert "cap-flat-209.md" in capped and "cap-flat-009.md" not in capped
+    assert "auto/cap-auto-209.md" in capped and "auto/cap-auto-009.md" not in capped
 
     cached = lv._newest_receipt_names(receipts)
     assert cached == capped
@@ -585,7 +586,12 @@ def test_library_view_receipt_detail_rejects_symlinked_allowlisted_subdir(kanban
     (real_auto / "hidden.md").write_text("# Hidden\n", encoding="utf-8")
     (receipts / "auto").symlink_to(real_auto, target_is_directory=True)
 
-    assert lv._newest_receipt_names(receipts) == []
+    # The symlinked "auto/" subdir is excluded (symlink exclusion policy).
+    # The real "real-auto/" subdir IS scanned (it's a legitimate non-symlinked dir).
+    names = lv._newest_receipt_names(receipts)
+    assert not any(n.startswith("auto/") for n in names),         "symlinked auto/ must be excluded"
+    assert any("real-auto/hidden.md" in n for n in names),         "real non-symlinked subdir real-auto/ is scanned"
+    # Detail read via the symlinked path is still blocked.
     assert lv._get_item("receipt::Hermes::auto/hidden.md") is None
 
 
@@ -599,11 +605,59 @@ def test_deliverable_adapter_lists_markdown(kanban_home):
     (report_dir / "data.bin").write_bytes(b"\x00\x01")  # kein Markdown → ignoriert
     items = lv._collect_deliverable_items(with_bodies=True)
     assert len(items) == 1
-    assert items[0].category == "arbeit"
+    assert items[0].category == "receipts"
+    assert items[0].series == "Arbeitsergebnisse"
     assert items[0].title == "Build X"
     assert "Fertig." in items[0].body_md
     detail = lv._get_item(items[0].id)
     assert detail is not None and "Fertig." in detail.body_md
+
+
+def test_lesesaal_merges_real_format_deliverables_and_agent_receipts(
+    kanban_home, tmp_path,
+):
+    """Realformat-Regressionspfad: by-task-Report und Vault-Receipt werden
+    ueber den echten Lesesaal-Aggregator in genau eine Kategorie gemergt.
+
+    Die Herkunft bleibt als Serie erhalten: Arbeitsergebnis versus Agent.
+    """
+    with kb.connect() as conn:
+        task_id = kb.create_task(conn, title="Kategorien-Merge")
+        kb.complete_task(conn, task_id, summary="done")
+
+    report_dir = kanban_home / "reports" / "by-task" / task_id
+    report_dir.mkdir(parents=True)
+    (report_dir / "RESULT.md").write_text(
+        "# Kategorien-Merge\n\nBackend und Frontend sind belegt.\n",
+        encoding="utf-8",
+    )
+    _write_receipt(
+        tmp_path,
+        "Codex",
+        "2026-07-22-kategorien-merge-receipt.md",
+        frontmatter=(
+            "agent: codex\n"
+            "status: done\n"
+            "date: 2026-07-22\n"
+            f"task: {task_id}"
+        ),
+        body="# P8a Receipt\n\nEchte Receipt-Struktur mit Frontmatter.",
+    )
+
+    listing = lv._list_items(category=None, q=None, limit=200)
+    by_id = {item["id"]: item for item in listing["items"]}
+    deliverable = by_id[f"deliverable::{task_id}::RESULT.md"]
+    receipt = by_id[
+        "receipt::Codex::2026-07-22-kategorien-merge-receipt.md"
+    ]
+
+    assert listing["categories"].count("receipts") == 1
+    assert "arbeit" not in listing["categories"]
+    assert {deliverable["category"], receipt["category"]} == {"receipts"}
+    assert deliverable["series"] == "Arbeitsergebnisse"
+    assert deliverable["source_ref"] == f"task:{task_id}/RESULT.md"
+    assert receipt["series"] == "Codex"
+    assert receipt["source_ref"].startswith("receipt:Codex/")
 
 
 def test_deliverable_adapter_caps_newest_markdown(kanban_home):
@@ -701,3 +755,232 @@ def test_deliverable_artifact_read_by_name_scans_all_artifacts(kanban_home, tmp_
     detail = lv._get_item(f"deliverable::{t}::cap-4.md")
     assert detail is not None and detail.body_md is not None
     assert "Cap 4" in detail.body_md
+
+
+# ---------------------------------------------------------------------------
+# SLICE 1: receipt indexer scans all subdirs (not just auto/mother)
+# ---------------------------------------------------------------------------
+
+def test_receipt_scan_includes_all_subdirs(tmp_path, monkeypatch):
+    """Regression: the receipt indexer must scan every immediate subdir under
+    <agent>/receipts/, not just a fixed allowlist. This test mirrors the live
+    on-disk layout: <agent>/receipts/<subdir>/<YYYY-MM-DD-...>.md."""
+    # Set up isolated home
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    lv._receipt_parse_cache.clear()
+    lv._receipt_dir_cache.clear()
+
+    # Mirror live layout: ~/vault/03-Agents/Hermes/receipts/<subdir>/*.md
+    agent_receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    agent_receipts.mkdir(parents=True)
+
+    # Traditional subdirs (auto, mother) — must still work
+    (agent_receipts / "auto").mkdir()
+    (agent_receipts / "auto" / "2026-07-20-auto-receipt.md").write_text(
+        "# Auto Receipt\n\nBody.\n", encoding="utf-8"
+    )
+    (agent_receipts / "mother").mkdir()
+    (agent_receipts / "mother" / "2026-07-19-mother-receipt.md").write_text(
+        "# Mother Receipt\n\nBody.\n", encoding="utf-8"
+    )
+
+    # New subdirs that were previously invisible — must now be scanned
+    (agent_receipts / "rca").mkdir()
+    (agent_receipts / "rca" / "2026-07-18-rca-analysis.md").write_text(
+        "# RCA Analysis\n\nRoot cause.\n", encoding="utf-8"
+    )
+    (agent_receipts / "_inbox").mkdir()
+    (agent_receipts / "_inbox" / "2026-07-17-inbox-item.md").write_text(
+        "# Inbox Item\n\nPending.\n", encoding="utf-8"
+    )
+    (agent_receipts / "terminal-tab-redesign-2026-07-09").mkdir()
+    (agent_receipts / "terminal-tab-redesign-2026-07-09" / "2026-07-09-task-receipt.md").write_text(
+        "# Terminal Redesign\n\nTask doc.\n", encoding="utf-8"
+    )
+
+    # Symlinked subdir — must be EXCLUDED (security policy)
+    real_dir = tmp_path / "real_receipts_dir"
+    real_dir.mkdir()
+    (real_dir / "2026-07-16-symlinked.md").write_text(
+        "# Symlinked\n\nShould not appear.\n", encoding="utf-8"
+    )
+    (agent_receipts / "symlinked-dir").symlink_to(real_dir)
+
+    # Empty subdir — must not add noise (no .md files)
+    (agent_receipts / "empty-subdir").mkdir()
+
+    # Scan
+    names = lv._newest_receipt_names(agent_receipts)
+
+    # Assert: receipts from all real subdirs are included
+    assert any("rca/2026-07-18-rca-analysis.md" in n for n in names), \
+        "rca/ subdir should be scanned"
+    assert any("_inbox/2026-07-17-inbox-item.md" in n for n in names), \
+        "_inbox/ subdir should be scanned"
+    assert any("terminal-tab-redesign-2026-07-09/2026-07-09-task-receipt.md" in n for n in names), \
+        "per-task subdir should be scanned"
+    assert any("auto/2026-07-20-auto-receipt.md" in n for n in names), \
+        "traditional auto/ subdir should still work"
+    assert any("mother/2026-07-19-mother-receipt.md" in n for n in names), \
+        "traditional mother/ subdir should still work"
+
+    # Assert: symlinked subdir is EXCLUDED
+    assert not any("symlinked-dir" in n for n in names), \
+        "symlinked subdir must be excluded"
+
+
+def test_receipt_scan_old_allowlist_would_have_missed_rca(tmp_path, monkeypatch):
+    """Prove the OLD fixed-allowlist behavior would have missed rca/ subdir.
+    This is a regression-intent test: if someone reverts to a fixed allowlist,
+    this test will fail."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    lv._receipt_parse_cache.clear()
+    lv._receipt_dir_cache.clear()
+
+    agent_receipts = tmp_path / "vault" / "03-Agents" / "TestAgent" / "receipts"
+    agent_receipts.mkdir(parents=True)
+    (agent_receipts / "rca").mkdir()
+    (agent_receipts / "rca" / "2026-07-20-critical-rca.md").write_text(
+        "# Critical RCA\n\nImportant finding.\n", encoding="utf-8"
+    )
+
+    names = lv._newest_receipt_names(agent_receipts)
+
+    # The OLD behavior (only auto/mother) would have returned [] for this tree.
+    # The NEW behavior must include the rca/ receipt.
+    assert any("rca/2026-07-20-critical-rca.md" in n for n in names), \
+        "rca/ must be scanned (old allowlist would have missed it)"
+
+
+def test_receipt_scan_respects_per_subdir_cap(tmp_path, monkeypatch):
+    """Ensure the per-subdir cap is applied correctly (200 files max per subdir)."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    lv._receipt_parse_cache.clear()
+    lv._receipt_dir_cache.clear()
+
+    agent_receipts = tmp_path / "vault" / "03-Agents" / "CapTest" / "receipts"
+    agent_receipts.mkdir(parents=True)
+    (agent_receipts / "large-subdir").mkdir()
+
+    # Create 250 receipts (exceeds the 200 cap)
+    for i in range(250):
+        (agent_receipts / "large-subdir" / f"2026-07-{i+1:02d}-receipt.md").write_text(
+            f"# Receipt {i}\n\nBody.\n", encoding="utf-8"
+        )
+
+    names = lv._newest_receipt_names(agent_receipts)
+
+    # Count how many are from large-subdir
+    subdir_count = sum(1 for n in names if n.startswith("large-subdir/"))
+    assert subdir_count == 200, \
+        f"per-subdir cap should limit to 200, got {subdir_count}"
+
+
+def test_receipt_full_pipeline_includes_newly_scanned_subdirs(tmp_path, monkeypatch):
+    """Full-pipeline regression: receipts from rca/, _inbox/ and per-task
+    subdirs must survive through _collect_receipt_items (not just the raw
+    file walk) AND be readable via the detail path (_get_item), proving the
+    _valid_receipt_relpath guard at the detail-read layer is also relaxed."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_CLAUDE_CLI_PROFILES", raising=False)
+    lv._receipt_parse_cache.clear()
+    lv._receipt_dir_cache.clear()
+
+    agent_receipts = tmp_path / "vault" / "03-Agents" / "Hermes" / "receipts"
+    agent_receipts.mkdir(parents=True)
+
+    # Per-task subdir (previously invisible under the old allowlist)
+    task_dir = agent_receipts / "terminal-tab-redesign-2026-07-09"
+    task_dir.mkdir()
+    (task_dir / "2026-07-09-task-doc.md").write_text(
+        "# Terminal Tab Redesign\n\nTask body text.\n", encoding="utf-8"
+    )
+
+    # rca/ subdir
+    rca_dir = agent_receipts / "rca"
+    rca_dir.mkdir()
+    (rca_dir / "2026-07-18-root-cause.md").write_text(
+        "# Root Cause Analysis\n\nRCA body.\n", encoding="utf-8"
+    )
+
+    # _inbox/ subdir
+    inbox_dir = agent_receipts / "_inbox"
+    inbox_dir.mkdir()
+    (inbox_dir / "2026-07-17-pending.md").write_text(
+        "# Pending Inbox\n\nInbox body.\n", encoding="utf-8"
+    )
+
+    # Symlinked subdir — must be excluded at every layer
+    real_outside = tmp_path / "outside"
+    real_outside.mkdir()
+    (real_outside / "2026-07-16-leaked.md").write_text(
+        "# Leaked\n\nShould never appear.\n", encoding="utf-8"
+    )
+    (agent_receipts / "symlinked-outside").symlink_to(real_outside)
+
+    # --- FULL COLLECTOR ---
+    items = lv._collect_receipt_items(with_bodies=True)
+    titles = {i.title for i in items}
+    ids = {i.id for i in items}
+
+    # Assert: receipts from newly-visible subdirs appear in the final output
+    assert "Terminal Tab Redesign" in titles, \
+        "per-task subdir receipt must survive the full pipeline"
+    assert "Root Cause Analysis" in titles, \
+        "rca/ receipt must survive the full pipeline"
+    assert "Pending Inbox" in titles, \
+        "_inbox/ receipt must survive the full pipeline"
+
+    # Assert: category is 'receipts' (existing convention, not a new bucket)
+    for item in items:
+        assert item.category == "receipts"
+
+    # Assert: symlinked subdir is excluded
+    assert "Leaked" not in titles
+    assert not any("symlinked-outside" in i.id for i in items)
+
+    # --- DETAIL READ PATH (_get_item via _valid_receipt_relpath) ---
+    # This is the guard the coordinator flagged: if _valid_receipt_relpath
+    # still checked against the old fixed allowlist, these would return None.
+    task_detail = lv._get_item(
+        "receipt::Hermes::terminal-tab-redesign-2026-07-09/2026-07-09-task-doc.md"
+    )
+    assert task_detail is not None, \
+        "detail read must accept per-task subdir (not just auto/mother)"
+    assert task_detail.title == "Terminal Tab Redesign"
+
+    rca_detail = lv._get_item("receipt::Hermes::rca/2026-07-18-root-cause.md")
+    assert rca_detail is not None, \
+        "detail read must accept rca/ subdir"
+    assert rca_detail.title == "Root Cause Analysis"
+
+    inbox_detail = lv._get_item("receipt::Hermes::_inbox/2026-07-17-pending.md")
+    assert inbox_detail is not None, \
+        "detail read must accept _inbox/ subdir"
+
+    # Symlinked subdir detail read still blocked
+    symlink_detail = lv._get_item(
+        "receipt::Hermes::symlinked-outside/2026-07-16-leaked.md"
+    )
+    assert symlink_detail is None, \
+        "symlinked subdir must remain blocked at detail layer"

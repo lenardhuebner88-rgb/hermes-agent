@@ -8,7 +8,6 @@ export const CATEGORY_LABEL: Record<string, string> = {
   briefings: "Briefings",
   recherchen: "Recherchen",
   familie: "Familie",
-  arbeit: "Arbeit & Receipts",
   receipts: "Receipts",
   wartung: "Wartung",
 };

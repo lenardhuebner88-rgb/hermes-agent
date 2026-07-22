@@ -20,7 +20,8 @@ vi.mock("@/lib/api", async () => {
   return { ...actual, fetchJSON: fetchJSONMock };
 });
 
-import { BibliothekView } from "./BibliothekView";
+import { BibliothekView, type LibrarySavedSearch } from "./BibliothekView";
+import { _resetPollingStore } from "../hooks/pollingStore";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
@@ -43,6 +44,8 @@ function mockExpandedViewport(expanded: boolean) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  _resetPollingStore();
+  window.localStorage.clear();
   if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
   else delete (window as { matchMedia?: unknown }).matchMedia;
 });
@@ -65,7 +68,7 @@ const ITEMS_RESPONSE = {
   count: 1,
   truncated: false,
   has_more: false,
-  categories: ["news", "briefings", "recherchen", "familie", "arbeit", "receipts", "wartung"],
+  categories: ["news", "briefings", "recherchen", "familie", "receipts", "wartung"],
   now: 1_749_540_700,
 };
 
@@ -110,6 +113,144 @@ function mockLibraryFetch(extra?: (url: string) => unknown) {
   });
 }
 
+const P9_KEYS = [
+  "hc-bibliothek.lastVisit.briefings",
+  "hc-bibliothek.lastVisit.wissen",
+  "hc-bibliothek.lastVisit.lesesaal",
+  "hc-bibliothek.lastVisit.ergebnisse",
+  "hc-bibliothek.lastVisit.modelle",
+] as const;
+
+function mockP9Fetch(
+  saved: { items: LibrarySavedSearch[]; count: number } = EMPTY_SAVED,
+  extra?: (url: string) => unknown,
+) {
+  const knowledge = {
+    collections: [{
+      id: "canon", title: "Canon", description: "Kanonisches Wissen", accent: "cyan", icon: "book",
+      doc_count: 1, updated_ts: 1_749_540_680,
+      docs: [{ id: "canon::vision.md", collection: "canon", title: "Vision", summary: "North Star", source_ref: "vault:00-Canon/vision.md", tags: ["type:concept"], updated_ts: 1_749_540_680, heading_count: 3 }],
+    }],
+    count: 5, query: "", now: 1_749_540_700,
+  };
+  const result = {
+    id: "task::t_real", title: "Bibliothek-Audit", kind: "implementation", profile: "coder",
+    completed_at: "2025-06-10T07:31:09+00:00", result_summary: "P9 umgesetzt.", verdict: "APPROVED",
+    outcome: "completed", cost_usd: 0.12, run_count: 1,
+  };
+  const models = {
+    updated: "2025-06-10", pulse: [], guides: [],
+    models: [{ id: "gpt-5", provider: "OpenAI", family: "gpt5-codex", context: "400k", price_in: 1.25, price_out: 10, created: "2025-06-10", scores: [], guide_family: "gpt5-codex" }],
+  };
+  fetchJSONMock.mockImplementation(async (url: string) => {
+    if (extra) {
+      const hit = extra(url);
+      if (hit !== undefined) return hit;
+    }
+    if (url.includes("q=frontier+model+releases")) return { ...ITEMS_RESPONSE, count: 8 };
+    if (url.includes("category=news")) return { ...ITEMS_RESPONSE, items: [{ ...ITEM, id: "news::real", category: "news", ts: 1_749_540_680 }], count: 1 };
+    if (url.includes("category=briefings")) return { ...ITEMS_RESPONSE, count: 2 };
+    if (url.startsWith("/api/library/items")) return { ...ITEMS_RESPONSE, count: 7 };
+    if (url.startsWith("/api/library/topics")) return EMPTY_TOPICS;
+    if (url.startsWith("/api/library/saved-searches")) return saved;
+    if (url.startsWith("/api/library/knowledge")) return knowledge;
+    if (url.startsWith("/api/library/results")) return { items: [result], total: 4 };
+    if (url.startsWith("/api/library/models")) return models;
+    if (url.startsWith("/api/vault/provenance")) return VAULT_PROVENANCE_FIXTURE;
+    throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+  });
+}
+
+describe("Bibliothek P9: per-tab Ungelesen und Live-Counts", () => {
+  it("zeigt API-Gesamtzahlen + tabbezogene Neu-Zahlen und quittiert den gewählten Tab", async () => {
+    for (const key of P9_KEYS) window.localStorage.setItem(key, "100");
+    mockP9Fetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
+
+    const briefings = await screen.findByRole("tab", { name: /Briefings/ });
+    await waitFor(() => expect(briefings.textContent).toContain("3"));
+    expect(briefings.textContent).not.toContain("neu");
+    expect(screen.getByRole("tab", { name: /Nachschlagewerk/ }).textContent).toContain("5");
+    expect(screen.getByRole("tab", { name: /Lesesaal/ }).textContent).toContain("7");
+    expect(screen.getByRole("tab", { name: /Ergebnisse/ }).textContent).toContain("4");
+    expect(screen.getByRole("tab", { name: /Modelle/ }).textContent).toContain("1");
+
+    const wissen = screen.getByRole("tab", { name: /Nachschlagewerk/ });
+    expect(wissen.textContent).toContain("1 neu");
+    fireEvent.click(wissen);
+    await waitFor(() => expect(wissen.textContent).not.toContain("neu"));
+    expect(Number(window.localStorage.getItem("hc-bibliothek.lastVisit.wissen"))).toBeGreaterThan(100);
+    for (const key of P9_KEYS) expect(window.localStorage.getItem(key)).not.toBeNull();
+  });
+
+  it("zeigt pro Smart Shelf den Live-Count der bestehenden Items-Suche", async () => {
+    mockP9Fetch({
+      items: [{ id: "ss_1", name: "KI Modelle täglich", title: "KI Modelle täglich", query: "frontier model releases", topic_tags: ["KI-Modelle"], person_tags: ["Piet"], created_at: 1, updated_at: 2 }],
+      count: 1,
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+
+    const title = await screen.findByText("KI Modelle täglich");
+    expect(title.closest("li")?.textContent).toContain("8");
+    expect(fetchJSONMock).toHaveBeenCalledWith(expect.stringContaining("q=frontier+model+releases"));
+  });
+
+  it("quittiert die Deep-Link-Ankunft, ohne die Neu-Schwelle der Lesesaal-Items zu verschieben", async () => {
+    window.localStorage.setItem("hc-bibliothek.lastVisit.lesesaal", String(ITEM.ts - 1));
+    mockP9Fetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+
+    const title = await lesesaalPanel().findByText(ITEM.title);
+    expect(title.closest('[role="button"]')?.textContent).toContain("neu");
+
+    const lesesaal = screen.getByRole("tab", { name: /Lesesaal/ });
+    await waitFor(() => expect(lesesaal.textContent).not.toContain("neu"));
+    expect(Number(window.localStorage.getItem("hc-bibliothek.lastVisit.lesesaal"))).toBeGreaterThan(ITEM.ts);
+  });
+
+  it("quittiert den Lesesaal auch beim Item-Open aus dem Briefings-Regal", async () => {
+    window.localStorage.setItem("hc-bibliothek.lastVisit.lesesaal", String(ITEM.ts - 1));
+    mockP9Fetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek"]}><BibliothekView /></MemoryRouter>);
+
+    const titles = await briefingsPanel().findAllByText(ITEM.title);
+    const trigger = titles.map((title) => title.closest('[role="button"]')).find(Boolean) as HTMLElement | null;
+    expect(trigger).not.toBeNull();
+    fireEvent.click(trigger as HTMLElement);
+
+    const lesesaal = screen.getByRole("tab", { name: /Lesesaal/ });
+    await waitFor(() => expect(lesesaal.textContent).not.toContain("neu"));
+    expect(Number(window.localStorage.getItem("hc-bibliothek.lastVisit.lesesaal"))).toBeGreaterThan(ITEM.ts);
+  });
+
+  it("überspringt nur den fehlerhaften Saved-Search-Count ohne globalen Alert", async () => {
+    const tooLongQuery = "x".repeat(201);
+    const saved = {
+      items: [
+        { id: "ss_bad", name: "Zu lange Suche", title: "Zu lange Suche", query: tooLongQuery, topic_tags: [], person_tags: [], created_at: 1, updated_at: 2 },
+        { id: "ss_ok", name: "Gültige Suche", title: "Gültige Suche", query: "healthy query", topic_tags: [], person_tags: [], created_at: 1, updated_at: 2 },
+      ],
+      count: 2,
+    };
+    mockP9Fetch(saved, (url) => {
+      if (!url.startsWith("/api/library/items?")) return undefined;
+      const query = new URL(url, "http://localhost").searchParams.get("q");
+      if (query === tooLongQuery) throw new Error("400: q must have at most 200 characters");
+      if (query === "healthy query") return { ...ITEMS_RESPONSE, count: 4 };
+      return undefined;
+    });
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+
+    const validCard = (await screen.findByText("Gültige Suche")).closest("li");
+    const invalidCard = screen.getByText("Zu lange Suche").closest("li");
+    expect(validCard).not.toBeNull();
+    expect(invalidCard).not.toBeNull();
+    expect(within(validCard as HTMLElement).getByText("4")).toBeTruthy();
+    expect(within(invalidCard as HTMLElement).queryByText("7")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
 describe("BibliothekView: Zustand bleibt beim Moduswechsel erhalten (S3)", () => {
   it("Lesesaal-Suchtext übersteht Briefings→Lesesaal→Briefings→Lesesaal", async () => {
     mockLibraryFetch();
@@ -133,6 +274,17 @@ function lesesaalPanel() {
   if (!el) throw new Error("Lesesaal-Panel nicht gefunden");
   return within(el);
 }
+
+describe("Lesesaal: zusammengeführte Receipt-Kategorie (P8a)", () => {
+  it("zeigt genau einen Receipts-Filter und keinen alten Arbeit-Filter", async () => {
+    mockLibraryFetch();
+    render(<MemoryRouter initialEntries={["/control/bibliothek?mode=lesesaal"]}><BibliothekView /></MemoryRouter>);
+
+    const panel = lesesaalPanel();
+    expect(await panel.findAllByRole("button", { name: /Receipts$/ })).toHaveLength(1);
+    expect(panel.queryByRole("button", { name: /Arbeit/ })).toBeNull();
+  });
+});
 
 describe("ReadingView: Inhaltsverzeichnis erst ab 3 Überschriften (S4)", () => {
   it("zeigt das Inhaltsverzeichnis bei 3 Überschriften", async () => {

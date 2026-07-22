@@ -36,6 +36,11 @@ Hier gilt derselbe Grund nochmal verschärft: ``hermes_cli`` läuft in einem
 komplett anderen venv/Prozessraum als die research-profile Scripts — es gibt
 keine Paketgrenze, über die man importieren könnte. Bei einer neuen
 Familie/Prefix müssen alle drei Tabellen von Hand synchron gehalten werden.
+SYNC-STAND (2026-07-22, P2 + P11b-Sync): alle drei Kopien mappen
+GPT-5.6-Präfixe (luna/sol/terra) auf ``gpt5-codex`` (präziser Prefix-Eintrag
+``openai/gpt-5.6-`` + codex-Substring-Check). Hinweis: unter
+``profiles/scout/scripts/model-return-watch.py`` existiert ein vierter,
+bewusst nicht automatisch gesyncter Profil-Fork derselben Tabelle.
 """
 
 from __future__ import annotations
@@ -78,6 +83,7 @@ _FAMILY_PREFIXES: tuple[tuple[str, str], ...] = (
     ("moonshotai/kimi", "kimi"),
     ("minimax/", "minimax"),
     ("deepseek/", "deepseek"),
+    ("openai/gpt-5.6-", "gpt5-codex"),
 )
 
 
@@ -325,8 +331,10 @@ def _load_all_guides() -> list[_Guide]:
 
 def _resolve_guide_family(model_id: str, family: str, guides: list[_Guide]) -> Optional[str]:
     """S3 resolution rule (S4.2c): frontmatter ``model_ids`` EXACT match
-    first (needed e.g. for the GA GPT-5.6 sol/terra/luna ids, whose family
-    bucket alone is "other"), then family-prefix fallback."""
+    first (a guide may target specific model variants rather than the whole
+    family — historically needed for the GA GPT-5.6 sol/terra/luna ids when
+    their family bucket was "other"; since P2 (2026-07-21) it is
+    "gpt5-codex"), then family-prefix fallback."""
     for g in guides:
         if model_id in g.model_ids:
             return g.family

@@ -226,7 +226,7 @@ def _artifacts_for_task(
             artifacts.append({
                 "title": task_title if rel == "RESULT.md" else f"{task_title} · {rel}",
                 "id": f"deliverable::{task_id}::{rel}",
-                "category": "arbeit",
+                "category": "receipts",
             })
     seen = {a["id"] for a in artifacts}
     vault_root = (Path.home() / "vault").resolve()
@@ -258,7 +258,7 @@ def _artifacts_for_task(
             artifacts.append({
                 "title": f"{task_title} - {p_resolved.name}",
                 "id": aid,
-                "category": "arbeit",
+                "category": "receipts",
             })
     return artifacts
 

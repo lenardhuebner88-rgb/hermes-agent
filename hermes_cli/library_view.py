@@ -57,7 +57,7 @@ class SavedSearchUpdate(BaseModel):
 # sind explizit gemappt — jeder Job ist eine Serie ("Abo").
 # ---------------------------------------------------------------------------
 
-CATEGORIES = ("news", "briefings", "recherchen", "familie", "arbeit", "receipts", "wartung")
+CATEGORIES = ("news", "briefings", "recherchen", "familie", "receipts", "wartung")
 
 # job_id → Kategorie (explizit; gewinnt vor den Namens-Heuristiken).
 _JOB_CATEGORY: dict[str, str] = {
@@ -675,6 +675,8 @@ def _read_research_item(task_id: str) -> Optional[_Item]:
 # ---------------------------------------------------------------------------
 
 _DELIVERABLE_MAX_PER_TASK = 3
+_DELIVERABLE_CATEGORY = "receipts"
+_DELIVERABLE_SERIES = "Arbeitsergebnisse"
 
 
 def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> list[_Item]:
@@ -721,9 +723,9 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
                 suffix = "" if rel == "RESULT.md" else f" · {rel}"
                 items.append(_Item(
                     id=f"deliverable::{task_dir.name}::{rel}",
-                    category="arbeit",
+                    category=_DELIVERABLE_CATEGORY,
                     series_id="deliverables",
-                    series="Arbeit & Receipts",
+                    series=_DELIVERABLE_SERIES,
                     title=f"{task_title}{suffix}",
                     ts=int(stat.st_mtime),
                     preview=_preview(body),
@@ -786,9 +788,9 @@ def _collect_deliverable_items(*, with_bodies: bool, limit_tasks: int = 150) -> 
             task_title = row["title"] or titles.get(task_id, task_id)
             items.append(_Item(
                 id=f"deliverable::{task_id}::{name}",
-                category="arbeit",
+                category=_DELIVERABLE_CATEGORY,
                 series_id="deliverables",
-                series="Arbeit & Receipts",
+                series=_DELIVERABLE_SERIES,
                 title=f"{task_title} - {name}",
                 ts=int(stat.st_mtime),
                 preview=_preview(body),
@@ -850,9 +852,9 @@ def _read_deliverable_item(task_id: str, rel_path: str) -> Optional[_Item]:
     body = target.read_text(encoding="utf-8", errors="replace")[:_MAX_BODY_BYTES]
     return _Item(
         id=f"deliverable::{task_id}::{rel_path}",
-        category="arbeit",
+        category=_DELIVERABLE_CATEGORY,
         series_id="deliverables",
-        series="Arbeit & Receipts",
+        series=_DELIVERABLE_SERIES,
         title=f"{task_id} · {rel_path}",
         ts=int(target.stat().st_mtime),
         preview=_preview(body),
@@ -912,9 +914,9 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
                 return None
             return _Item(
                 id=f"deliverable::{task_id}::{name}",
-                category="arbeit",
+                category=_DELIVERABLE_CATEGORY,
                 series_id="deliverables",
-                series="Arbeit & Receipts",
+                series=_DELIVERABLE_SERIES,
                 title=f"{row['title'] or task_id} - {name}",
                 ts=int(stat.st_mtime),
                 preview=_preview(body),
@@ -926,19 +928,20 @@ def _read_artifact_deliverable_item(task_id: str, name: str) -> Optional[_Item]:
 
 # ---------------------------------------------------------------------------
 # Receipts-Adapter (~/vault/03-Agents/<Agent>/receipts/*.md — read-only
-# Quelle, wird NIE beschrieben). Serie = Agent. Der Hermes-Agent hält >500
-# Receipts → newest-40-Cap pro Agent + Dir/Parse-mtime-Cache (Cron-Muster
-# 1:1, Latenzfalle-Lehre vom 2026-06-11). Receipts haben kein Prompt/
+# Quelle, wird NIE beschrieben). Serie = Agent. Der Receipt-Korpus wächst
+# in die Tausende → newest-200-Cap flach sowie je Subdir + Dir/Parse-mtime-Cache
+# (Cron-Muster 1:1, Latenzfalle-Lehre vom 2026-06-11). Receipts haben kein Prompt/
 # Response-Format → Body roh (gekappt), Frontmatter abgetrennt und als
 # Meta-Zeile gerendert; fail-soft ohne Frontmatter (Titel = H1 → Dateiname,
 # ts = mtime).
 # ---------------------------------------------------------------------------
 
 _RECEIPT_FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}\.md$")
-_RECEIPT_SUBDIRS = ("auto", "mother")
-_MAX_RECEIPTS_FLAT = 40
-_MAX_RECEIPTS_PER_SUBDIR = 40
-_MAX_RECEIPTS_PER_AGENT = _MAX_RECEIPTS_FLAT
+# Jeder immediate Subdir unter <agent>/receipts/ wird gescannt (nicht nur ein
+# festes Allowlist-Paar). Symlinks werden weiterhin übersprungen.
+_RECEIPT_SUBDIR_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._\-]{0,127}$")
+_MAX_RECEIPTS_FLAT = 200
+_MAX_RECEIPTS_PER_SUBDIR = 200
 # path → (mtime_ns, size, geparstes Item oder None).
 _receipt_parse_cache: dict[str, tuple[int, int, Optional[_Item]]] = {}
 # receipts_dir → ((dir_mtime_ns, subdir_mtimes), newest Dateinamen, mtime-absteigend).
@@ -950,12 +953,19 @@ def _receipts_root() -> Path:
 
 
 def _newest_receipt_names(receipts_dir: Path) -> list[str]:
-    """Newest receipts per source (flat + allowlisted subdirs).
+    """Newest receipts per source (flat + alle immediate Subdirs).
 
     Receipt-Namen sind nicht zeitlich sortierbar. Der Cache hängt am
-    Parent-dir-mtime und an den Subdir-mtimes, damit neue Auto-Receipts in
-    ``receipts/auto`` invalidieren, obwohl der Parent unverändert bleiben kann.
-    Eine reine Inhalts-Änderung fängt weiterhin der Parse-Cache.
+    Parent-dir-mtime und an den Subdir-mtimes, damit neue Receipts in
+    irgendeinem Subdir invalidieren, obwohl der Parent unverändert bleiben
+    kann. Eine reine Inhalts-Änderung fängt weiterhin der Parse-Cache.
+
+    Statt eines festen Allowlist-Paars (früher nur ``auto``/``mother``) werden
+    jetzt alle immediate Subdirs unter ``<agent>/receipts/`` gescannt.
+    Symlinked Dirs und symlinked Dateien werden übersprungen (Security-Policy
+    vom 2026-06-11). Leere Subdirs (kein einziges ``.md``) liefern keine
+    Einträge, bleiben aber im Cache-Tracking, damit neu hinzugefügte Dateien
+    die Invalidierung auslösen.
     """
     key = str(receipts_dir)
     try:
@@ -963,11 +973,22 @@ def _newest_receipt_names(receipts_dir: Path) -> list[str]:
     except OSError:
         _receipt_dir_cache.pop(key, None)
         return []
+    # Alle immediate Subdirs sammeln (sortiert für deterministischen Cache-Key).
+    subdirs: list[str] = []
+    try:
+        for e in receipts_dir.iterdir():
+            if e.is_symlink() or not e.is_dir():
+                continue
+            if _RECEIPT_SUBDIR_RE.match(e.name):
+                subdirs.append(e.name)
+    except OSError:
+        subdirs = []
+    subdirs.sort()
     subdir_mtimes: list[int | None] = []
-    for sub in _RECEIPT_SUBDIRS:
+    for sub in subdirs:
         subdir = receipts_dir / sub
         try:
-            subdir_mtimes.append(subdir.stat().st_mtime_ns if subdir.is_dir() else None)
+            subdir_mtimes.append(subdir.stat().st_mtime_ns)
         except OSError:
             subdir_mtimes.append(None)
     cache_key = (dir_mtime, tuple(subdir_mtimes))
@@ -983,7 +1004,7 @@ def _newest_receipt_names(receipts_dir: Path) -> list[str]:
         except OSError:
             continue
     names = [n for _, n in sorted(flat_entries, reverse=True)[:_MAX_RECEIPTS_FLAT]]
-    for sub in _RECEIPT_SUBDIRS:
+    for sub in subdirs:
         subdir = receipts_dir / sub
         if subdir.is_symlink() or not subdir.is_dir():
             continue
@@ -1103,7 +1124,7 @@ def _valid_receipt_relpath(filename: str) -> Optional[Path]:
     parts = filename.split("/")
     if len(parts) == 1:
         return Path(filename) if _RECEIPT_FILE_RE.match(parts[0]) else None
-    if len(parts) == 2 and parts[0] in _RECEIPT_SUBDIRS and _RECEIPT_FILE_RE.match(parts[1]):
+    if len(parts) == 2 and _RECEIPT_SUBDIR_RE.match(parts[0]) and _RECEIPT_FILE_RE.match(parts[1]):
         return Path(parts[0]) / parts[1]
     return None
 

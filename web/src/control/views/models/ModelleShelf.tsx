@@ -31,8 +31,15 @@ const t = {
   emptyDesc: "Die Landscape-Datei enthält aktuell keine Modelle.",
   pulsePrefix: "Neu entdeckt:",
   stand: (s: string) => `Stand ${s}`,
+  scored: "Gescoret",
+  scoredEmpty: "Noch keine gescoreten Modelle",
+  scoredEmptyDesc: "Für diese Provider-Auswahl liegen noch keine belastbaren Vergleichsdaten vor.",
   noScores: "Noch keine gequellten Benchmarks.",
   noScoresDesc: "Die Modelle sind noch nicht belastbar vergleichbar.",
+  noIndependentScores: "Keine unabhängigen Benchmarks",
+  noIndependentScoresDesc: "Bleiben sichtbar, ohne Vergleichbarkeit vorzutäuschen.",
+  modelCount: (count: number) => `${count} ${count === 1 ? "Modell" : "Modelle"}`,
+  coverage: (scored: number, total: number) => `${scored} von ${total} unabhängig gescoret`,
   providerAngabe: "Provider-Angabe",
   guideLink: "Prompting-Guide →",
   guideBack: "Alle Guides",
@@ -105,6 +112,10 @@ function priceLabel(price: number | null): string {
 function shortDate(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
   return m ? `${m[3]}.${m[2]}.` : iso;
+}
+
+function hasIndependentScore(model: LandscapeModel): boolean {
+  return model.scores.some((score) => !score.claimed_by_provider);
 }
 
 const SUITE_WORD_OVERRIDES: Record<string, string> = { swe: "SWE" };
@@ -198,12 +209,62 @@ function ModelCard({ model, onOpenGuide }: { model: LandscapeModel; onOpenGuide:
   );
 }
 
+function UnscoredModelsDisclosure({
+  models,
+  onOpenGuide,
+}: {
+  models: LandscapeModel[];
+  onOpenGuide: (family: string) => void;
+}) {
+  if (models.length === 0) return null;
+  return (
+    <details className="group rounded-panel border border-line bg-surface-1">
+      <summary className="flex min-h-12 cursor-pointer items-center justify-between gap-3 px-4 py-3 marker:text-ink-3">
+        <div className="min-w-0">
+          <p className="text-sec font-semibold text-ink">{t.noIndependentScores}</p>
+          <p className="mt-0.5 text-micro text-ink-3">{t.noIndependentScoresDesc}</p>
+        </div>
+        <SignalChip tone="neutral" label={t.modelCount(models.length)} className="shrink-0" />
+      </summary>
+      <ul className="grid gap-2 border-t border-line-soft p-3 sm:grid-cols-2 lg:grid-cols-3">
+        {models.map((model) => (
+          <li key={model.id} className="min-w-0 rounded-card border border-line-soft bg-surface-2 px-3 py-2.5">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <div className="min-w-0">
+                <Eyebrow>{model.provider}</Eyebrow>
+                <p className="truncate font-data text-sec text-ink" title={model.id}>{model.id}</p>
+              </div>
+              {model.guide_family ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenGuide(model.guide_family!)}
+                  className="min-h-12 shrink-0 rounded-card text-micro text-bronze-hi hover:underline"
+                >
+                  {t.guideLink}
+                </button>
+              ) : null}
+            </div>
+            {model.scores.length > 0 ? (
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {model.scores.slice(0, 3).map((score, i) => (
+                  <ScoreChip key={`${score.suite}-${score.source}-${i}`} score={score} />
+                ))}
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
+  const scoredModels = useMemo(() => models.filter((model) => model.scores.length > 0), [models]);
   const suites = useMemo(() => {
     const seen = new Set<string>();
-    for (const m of models) for (const s of m.scores) seen.add(s.suite);
+    for (const m of scoredModels) for (const s of m.scores) seen.add(s.suite);
     return Array.from(seen).sort();
-  }, [models]);
+  }, [scoredModels]);
 
   const [sortKey, setSortKey] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
@@ -214,16 +275,16 @@ function BenchmarksTable({ models }: { models: LandscapeModel[] }) {
   );
 
   const sorted = useMemo(() => {
-    if (!sortKey) return models;
-    const withScore = models.filter((m) => scoreFor(m, sortKey) != null);
-    const without = models.filter((m) => scoreFor(m, sortKey) == null);
+    if (!sortKey) return scoredModels;
+    const withScore = scoredModels.filter((m) => scoreFor(m, sortKey) != null);
+    const without = scoredModels.filter((m) => scoreFor(m, sortKey) == null);
     withScore.sort((a, b) => {
       const av = scoreFor(a, sortKey)!.score;
       const bv = scoreFor(b, sortKey)!.score;
       return sortDir === "asc" ? av - bv : bv - av;
     });
     return [...withScore, ...without];
-  }, [models, sortKey, sortDir, scoreFor]);
+  }, [scoredModels, sortKey, sortDir, scoreFor]);
 
   const toggleSort = (suite: string) => {
     if (sortKey === suite) {
@@ -412,6 +473,15 @@ export function ModelleShelf() {
     return provider ? models.filter((m) => m.provider === provider) : models;
   }, [data, provider]);
 
+  const independentlyScoredModels = useMemo(
+    () => filteredModels.filter(hasIndependentScore),
+    [filteredModels],
+  );
+  const modelsWithoutIndependentScores = useMemo(
+    () => filteredModels.filter((model) => !hasIndependentScore(model)),
+    [filteredModels],
+  );
+
   const subtabItems = [
     { id: "uebersicht", label: t.subtabUebersicht },
     { id: "benchmarks", label: t.subtabBenchmarks },
@@ -434,17 +504,28 @@ export function ModelleShelf() {
             <div className="space-y-4">
               <PulseHero pulse={data.pulse} updated={data.updated} />
               <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} className="[&_button]:min-h-12" />
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {filteredModels.map((model) => (
-                  <ModelCard key={model.id} model={model} onOpenGuide={openGuide} />
-                ))}
-              </div>
+              {independentlyScoredModels.length > 0 ? (
+                <section className="space-y-3" aria-label={t.scored}>
+                  <SectionHeader label={t.scored} meta={t.modelCount(independentlyScoredModels.length)} />
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {independentlyScoredModels.map((model) => (
+                      <ModelCard key={model.id} model={model} onOpenGuide={openGuide} />
+                    ))}
+                  </div>
+                </section>
+              ) : (
+                <FleetEmptyState title={t.scoredEmpty} desc={t.scoredEmptyDesc} />
+              )}
+              <UnscoredModelsDisclosure models={modelsWithoutIndependentScores} onOpenGuide={openGuide} />
             </div>
           ) : null}
 
           {subtab === "benchmarks" ? (
             <div className="space-y-4">
-              <SectionHeader label={t.subtabBenchmarks} meta={t.stand(data.updated)} />
+              <SectionHeader
+                label={t.subtabBenchmarks}
+                meta={`${t.coverage(independentlyScoredModels.length, filteredModels.length)} · ${t.stand(data.updated)}`}
+              />
               <SubtabChips items={providerTabs} active={provider ?? ALL_TAB} onSelect={(next) => setProvider(next === ALL_TAB ? null : next)} ariaLabelPrefix={t.providerFilterLabel} className="[&_button]:min-h-12" />
               <BenchmarksTable models={filteredModels} />
             </div>

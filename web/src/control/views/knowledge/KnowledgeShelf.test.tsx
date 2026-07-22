@@ -3,9 +3,12 @@
 // Der Rest der Datei rendert Subkomponenten via renderToStaticMarkup (node,
 // Hauskonvention) — jsdom wird nur für die neuen Full-Component-Tests am
 // Dateiende gebraucht (echter Fetch-Mock + Router-Kontext).
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 // Under full-suite CPU pressure the catalog fetch can resolve before the router
@@ -22,6 +25,7 @@ vi.mock("@/lib/api", async () => {
 
 import { CollectionSection, DocCard, KnowledgeShelf } from "./KnowledgeShelf";
 import { TocNav } from "./KnowledgeReader";
+import { _resetPollingStore } from "../../hooks/pollingStore";
 import {
   filterCatalog,
   knowledgeType,
@@ -35,6 +39,15 @@ import {
 } from "./knowledge.helpers";
 
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+const fixtureDir = path.dirname(fileURLToPath(import.meta.url));
+const REAL_KNOWLEDGE_FIXTURE = JSON.parse(readFileSync(
+  path.join(fixtureDir, "../briefings/__fixtures__/knowledge.json"),
+  "utf-8",
+)) as KnowledgeCatalog;
+const REAL_VAULT_PLAN = JSON.parse(readFileSync(
+  path.join(fixtureDir, "__fixtures__/vault-plan-item.json"),
+  "utf-8",
+)) as KnowledgeDoc;
 
 function mockExpandedViewport(expanded: boolean) {
   Object.defineProperty(window, "matchMedia", {
@@ -55,6 +68,7 @@ function mockExpandedViewport(expanded: boolean) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  _resetPollingStore();
   if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
   else delete (window as { matchMedia?: unknown }).matchMedia;
 });
@@ -206,6 +220,11 @@ describe("helpers", () => {
   it("knowledgeTypeLabel übersetzt den neuen models-Typ", () => {
     expect(knowledgeType(doc({ tags: ["llm-wiki", "type:model"] }))).toBe("model");
     expect(knowledgeTypeLabel("model")).toBe("Modelle");
+  });
+
+  it("knowledgeTypeLabel übersetzt Reports und Guides", () => {
+    expect(knowledgeTypeLabel("report")).toBe("Reports");
+    expect(knowledgeTypeLabel("guide")).toBe("Guides");
   });
 
   it("akzeptiert das Vault-Plans-Backend-Schema inklusive Metadaten, Icon und Akzent", () => {
@@ -408,5 +427,79 @@ describe("KnowledgeShelf: Baseline-Poll + Collection-Deep-Link (S6)", () => {
     expect(await screen.findByRole("button", { name: "Alle Regale" })).toBeTruthy();
     expect(screen.queryByLabelText("Im Nachschlagewerk suchen")).toBeNull();
     expect(screen.queryByRole("region", { name: /LLM-Wiki: Overview/ })).toBeNull();
+  });
+});
+
+describe("KnowledgeShelf: Vault-Plans Disclosure + Virtualisierung-light (P7)", () => {
+  const planCount = 345;
+  const firstPageSize = 24;
+
+  function catalogWithCurrentPlanCount(): KnowledgeCatalog {
+    const plans = Array.from({ length: planCount }, (_, index) => ({
+      ...REAL_VAULT_PLAN,
+      id: `${REAL_VAULT_PLAN.id}#${index + 1}`,
+      title: index === 0 ? REAL_VAULT_PLAN.title : `${REAL_VAULT_PLAN.title} · ${index + 1}`,
+    }));
+    return {
+      ...REAL_KNOWLEDGE_FIXTURE,
+      count: 433,
+      collections: REAL_KNOWLEDGE_FIXTURE.collections.map((collection) => (
+        collection.id === "vault-plans"
+          ? { ...collection, doc_count: planCount, docs: plans }
+          : collection
+      )),
+    };
+  }
+
+  it("zeigt bei aktiven Filtern die ungekürzte gefilterte Plan-Zahl", () => {
+    const filteredPlans = Array.from({ length: 30 }, (_, index) => vaultPlan({ id: `filtered-plan-${index}` }));
+    const collection: KnowledgeCollection = {
+      id: "vault-plans",
+      title: "Vault Plans",
+      description: "Gefilterte Pläne",
+      accent: "rose",
+      icon: "Newspaper",
+      doc_count: planCount,
+      updated_ts: 1,
+      docs: filteredPlans,
+    };
+
+    const html = renderToStaticMarkup(
+      <CollectionSection collection={collection} now={1} onOpen={() => {}} filtersActive />,
+    );
+    expect(html).toContain("Vault Plans (30)");
+    expect(html).not.toContain(`Vault Plans (${planCount})`);
+  });
+
+  it("hält 345 reale Plan-Items initial aus dem DOM und rendert nach Öffnung nur die erste 24er-Seite", async () => {
+    mockExpandedViewport(false);
+    const catalog = catalogWithCurrentPlanCount();
+    fetchJSONMock.mockImplementation(async (url: string) => {
+      if (url.startsWith("/api/library/knowledge")) return catalog;
+      throw new Error(`unerwarteter fetchJSON-Aufruf: ${url}`);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/control/bibliothek?mode=wissen"]}>
+        <KnowledgeShelf />
+      </MemoryRouter>,
+    );
+
+    // Die kuratierten Regale bleiben sichtbar, Plan-Karten hingegen werden
+    // vor der expliziten Öffnung gar nicht gemountet.
+    expect(await screen.findByText("Canon-Index")).toBeTruthy();
+    expect(screen.getByText("Overview")).toBeTruthy();
+    const disclosure = screen.getByRole("button", { name: /Vault Plans \(345\)/ });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("list", { name: "Vault Plans Dokumente" })).toBeNull();
+    expect(screen.queryByText(REAL_VAULT_PLAN.title)).toBeNull();
+
+    fireEvent.click(disclosure);
+
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    const firstPage = screen.getByRole("list", { name: "Vault Plans Dokumente" });
+    expect(within(firstPage).getAllByRole("listitem")).toHaveLength(firstPageSize);
+    expect(screen.getByText(`${firstPageSize} von ${planCount} Plänen sichtbar`)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Weitere 24 Pläne laden" })).toBeTruthy();
   });
 });

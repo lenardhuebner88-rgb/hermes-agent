@@ -479,6 +479,8 @@ def _llm_wiki_type(rel: str, meta: dict[str, Any]) -> str:
         "lint": "lint",
         "overview.md": "overview",
         "synthesis.md": "synthesis",
+        "reports": "report",
+        "prompting": "guide",
     }
     return inferred.get(first, "page" if first.endswith(".md") else first)
 

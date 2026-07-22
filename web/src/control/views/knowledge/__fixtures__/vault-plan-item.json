@@ -1,0 +1,15 @@
+{
+  "id": "kb::plan::Claude-Code/plans/2026-06-16-abo-limits-tile-planspec.md",
+  "collection": "vault-plans",
+  "title": "PlanSpec — Dashboard-Tile „Abo-Limits“ (Variante A für Kimi)",
+  "summary": "Ein `/control`-Tile „Abo-Limits“ zeigt Anthropic Max und ChatGPT/Codex aus den vorhandenen OAuth-Usage-Endpunkten sowie Kimi aus lokaler `kanban.db`-Aggregation. Zusätzlich wird der bestehende Planspec-Hub so erweitert,…",
+  "source_ref": "vault/03-Agents/Claude-Code/plans/2026-06-16-abo-limits-tile-planspec.md",
+  "tags": [
+    "vault-plan",
+    "type:plan",
+    "status:obsolete"
+  ],
+  "updated_ts": 1781728435,
+  "heading_count": 18,
+  "status": "obsolete"
+}
