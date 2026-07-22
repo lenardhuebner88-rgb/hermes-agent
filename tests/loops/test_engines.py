@@ -337,6 +337,20 @@ def test_kimi_cli_builds_headless_command(monkeypatch, tmp_path):
     assert cmd[-1] == "sag OK"
 
 
+def test_kimi_cli_maps_catalog_k3_to_managed_oauth_alias(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK", stderr="")
+
+    monkeypatch.setattr(kimi_cli.subprocess, "run", fake_run)
+    result = kimi_cli.run("k3", "sag OK", tmp_path, 60)
+
+    assert result.rc == 0
+    assert seen["cmd"][seen["cmd"].index("--model") + 1] == "kimi-code/k3"
+
+
 def test_kimi_cli_timeout_maps_to_timed_out(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, 60, output=b"teil", stderr=b"")
@@ -485,3 +499,49 @@ def test_resolve_hermes_bin_falls_back_to_bare_name(monkeypatch):
         assert hermes_profile._resolve_hermes_bin() == "hermes"
     finally:
         hermes_profile.REPO_ROOT = real_repo_root
+
+
+def test_alibaba_token_plan_engine_registered_and_command_shape(tmp_path, monkeypatch):
+    from loops.engines import alibaba_token_plan_cli
+
+    assert "alibaba-token-plan" in engines.ENGINES
+    assert engines.ENGINES["alibaba-token-plan"] is alibaba_token_plan_cli.run
+
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
+    monkeypatch.setattr(alibaba_token_plan_cli, "QWEN_BIN", "/opt/qwen-bin")
+    result = alibaba_token_plan_cli.run(
+        "qwen3.8-max-preview", "do work", tmp_path, 90
+    )
+
+    assert result.rc == 0
+    assert captured["cmd"] == [
+        "/opt/qwen-bin",
+        "-m",
+        "qwen3.8-max-preview",
+        "--safe-mode",
+        "--sandbox",
+        "--output-format",
+        "text",
+        "-p",
+        "do work",
+    ]
+    assert captured["env"].get("HERMES_SANDBOX_MODE") == "1"
+    assert captured["cwd"] == str(tmp_path)
+
+
+def test_models_yaml_lists_kimi_k3_and_alibaba_qwen():
+    import yaml
+    from loops.runner import MODELS_FILE
+
+    data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8"))
+    engines_cat = data["engines"]
+    assert "k3" in engines_cat["kimi"]["models"]
+    assert engines_cat["alibaba-token-plan"]["models"] == ["qwen3.8-max-preview"]

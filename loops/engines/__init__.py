@@ -83,3 +83,4 @@ from . import codex_cli  # noqa: E402,F401
 from . import hermes_profile  # noqa: E402,F401
 from . import neuralwatt_cli  # noqa: E402,F401
 from . import xai_cli  # noqa: E402,F401
+from . import alibaba_token_plan_cli  # noqa: E402,F401

@@ -20,7 +20,7 @@ import type { LucideIcon } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { cn } from "@/lib/utils";
 import { extractDetail } from "../hooks/internal";
-import { duplicateLoop, landLoop, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
+import { duplicateLoop, getLoopNightOverrides, landLoop, putLoopNightOverrides, saveLoopFile, setLoopTimerSchedule, startLoop, stopLoop, toggleLoopTimer, useLoopDetail, useLoopFiles, useLoopModels, useLoopQueueFile, useLoops } from "../hooks/loops";
 import { de } from "../i18n/de";
 import { SignalLabel, type SignalTone } from "../components/leitstand";
 import { Disclosure } from "../components/primitives";
@@ -122,6 +122,9 @@ const ENGINE_COLOR: Record<string, string> = {
   codex: "var(--color-data-4)",
   kimi: "var(--color-data-5)",
   hermes: "var(--color-data-2)",
+  neuralwatt: "var(--color-data-3)",
+  "alibaba-token-plan": "var(--color-data-6)",
+  xai: "var(--color-data-7)",
 };
 const engineColor = (engine: string): string => ENGINE_COLOR[engine] ?? "var(--ln-ink-mute)";
 
@@ -1201,13 +1204,197 @@ function LoopCardAction({
 
 const TIMER_TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
+function buildNightOverrides(
+  pack: LoopPackSummary,
+  selected: Record<string, { engine: string; model: string }>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [phase, choice] of Object.entries(selected)) {
+    const base = pack.phases[phase];
+    if (!base) continue;
+    if (choice.engine !== base.engine) {
+      out[`PHASE_${phase.toUpperCase()}_ENGINE`] = choice.engine;
+    }
+    if (choice.model !== base.model) {
+      out[`PHASE_${phase.toUpperCase()}_MODEL`] = choice.model;
+    }
+  }
+  return out;
+}
+
+function seedNightSelections(
+  pack: LoopPackSummary,
+  overrides: Record<string, string>,
+): Record<string, { engine: string; model: string }> {
+  const next: Record<string, { engine: string; model: string }> = {};
+  for (const [phase, base] of Object.entries(pack.phases)) {
+    const up = phase.toUpperCase();
+    next[phase] = {
+      engine: overrides[`PHASE_${up}_ENGINE`] ?? base.engine,
+      model: overrides[`PHASE_${up}_MODEL`] ?? base.model,
+    };
+  }
+  return next;
+}
+
+function NightModelControl({
+  pack,
+  models,
+  busy,
+}: {
+  pack: LoopPackSummary;
+  models: LoopModelsResponse | null;
+  busy: boolean;
+}) {
+  const phaseNames = useMemo(() => Object.keys(pack.phases), [pack.phases]);
+  const [selected, setSelected] = useState<Record<string, { engine: string; model: string }>>(() =>
+    seedNightSelections(pack, {}),
+  );
+  const [savedOverrides, setSavedOverrides] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+    void getLoopNightOverrides(pack.name)
+      .then((res) => {
+        if (cancelled) return;
+        setSavedOverrides(res.overrides);
+        setSelected(seedNightSelections(pack, res.overrides));
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setError(`${t.nightModelsLoadFailed}: ${extractDetail(e)}`);
+        setSelected(seedNightSelections(pack, {}));
+        setSavedOverrides({});
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pack]);
+
+  const draftOverrides = useMemo(() => buildNightOverrides(pack, selected), [pack, selected]);
+  const dirty = useMemo(() => {
+    const a = Object.entries(draftOverrides).sort(([x], [y]) => x.localeCompare(y));
+    const b = Object.entries(savedOverrides).sort(([x], [y]) => x.localeCompare(y));
+    if (a.length !== b.length) return true;
+    return a.some(([k, v], i) => k !== b[i]?.[0] || v !== b[i]?.[1]);
+  }, [draftOverrides, savedOverrides]);
+
+  const roleChange = useMemo(
+    () =>
+      phaseNames.some((phase) => {
+        const base = pack.phases[phase];
+        const choice = selected[phase];
+        return Boolean(base && choice && choice.engine !== base.engine);
+      }),
+    [pack.phases, phaseNames, selected],
+  );
+
+  const save = async (overrides: Record<string, string>, successMsg: string) => {
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await putLoopNightOverrides(pack.name, overrides);
+      setSavedOverrides(res.overrides);
+      setSelected(seedNightSelections(pack, res.overrides));
+      setSuccess(successMsg);
+    } catch (e: unknown) {
+      setError(`${t.nightModelsSaveFailed}: ${extractDetail(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="mt-3 space-y-2 border-t pt-3"
+      style={{ borderColor: "var(--ln-line)" }}
+      data-testid={`night-models-${pack.name}`}
+    >
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <p className="text-[11px] uppercase tracking-[0.14em]" style={{ color: "var(--ln-ink-soft)" }}>
+          {t.nightModelsTitle}
+        </p>
+        {dirty ? (
+          <span className="text-[11px]" style={{ color: "var(--ln-warn)" }}>{t.nightModelsDirty}</span>
+        ) : null}
+      </div>
+      <p className="text-[11px]" style={{ color: "var(--ln-ink-soft)" }}>{t.nightModelsHint}</p>
+      {loading ? (
+        <p className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>…</p>
+      ) : (
+        <div className="space-y-2">
+          {phaseNames.map((phase) => {
+            const choice = selected[phase] ?? { engine: pack.phases[phase].engine, model: pack.phases[phase].model };
+            return (
+              <div key={phase} className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium" style={{ color: "var(--ln-ink)" }}>{phase}</span>
+                <LoopModelPicker
+                  phase={phase}
+                  value={choice}
+                  models={models}
+                  busy={busy || saving}
+                  onChange={(next) => setSelected((prev) => ({ ...prev, [phase]: next }))}
+                />
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {roleChange ? (
+        <p className="text-[11px]" style={{ color: "var(--ln-warn)" }} data-testid={`night-models-manual-land-${pack.name}`}>
+          {t.nightModelsManualLand}
+        </p>
+      ) : null}
+      {error ? (
+        <p className="text-xs" style={{ color: "var(--ln-alert)" }} role="alert">{error}</p>
+      ) : null}
+      {success ? (
+        <p className="text-xs" style={{ color: "var(--ln-ok)" }} role="status">{success}</p>
+      ) : null}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button
+          size="sm"
+          ghost
+          disabled={busy || saving || loading || Object.keys(savedOverrides).length === 0}
+          onClick={() => void save({}, t.nightModelsResetDone)}
+          className={cn("min-h-[44px] px-3", NIGHT_ACTION_CLASS)}
+        >
+          {t.nightModelsReset}
+        </Button>
+        <Button
+          size="sm"
+          disabled={busy || saving || loading || !dirty}
+          onClick={() => void save(draftOverrides, t.nightModelsSaved)}
+          className={cn("min-h-[44px] border-0 px-3 disabled:opacity-40", NIGHT_ACTION_CLASS)}
+          style={{ background: "var(--ln-sodium)", color: "var(--ln-sodium-ink)" }}
+        >
+          {saving ? "…" : t.nightModelsSave}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function TimerScheduleControl({
   pack,
+  models,
   busy,
   onToggleTimer,
   onSaveTimerSchedule,
 }: {
   pack: LoopPackSummary;
+  models: LoopModelsResponse | null;
   busy: boolean;
   onToggleTimer: (name: string, enabled: boolean) => void;
   onSaveTimerSchedule: (name: string, time: string) => void;
@@ -1271,6 +1458,7 @@ function TimerScheduleControl({
             : t.timerNextRunPending
           : t.timerDisabledHint(valid ? time : pack.timer_schedule)}
       </p>
+      <NightModelControl pack={pack} models={models} busy={busy} />
     </div>
   );
 }
@@ -1369,6 +1557,7 @@ function LoopCard({
         <TimerScheduleControl
           key={`${pack.name}:${pack.timer_schedule}`}
           pack={pack}
+          models={models}
           busy={busy}
           onToggleTimer={onToggleTimer}
           onSaveTimerSchedule={onSaveTimerSchedule}

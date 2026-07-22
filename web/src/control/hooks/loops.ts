@@ -9,6 +9,7 @@ import {
   LoopFileSaveResultSchema,
   LoopDuplicateResultSchema,
   LoopLandResultSchema,
+  LoopNightOverridesResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
 import type { LoopDetailResponse, LoopModelsResponse, LoopsResponse, LoopQueueFileResponse, LoopFilesResponse, LoopFileSaveResult, LoopDuplicateResult, LoopLandResult } from "../lib/types";
@@ -152,6 +153,38 @@ export function setLoopTimerSchedule(pack: string, time: string): Promise<LoopTi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ time }),
   });
+}
+
+
+export interface LoopNightOverridesResult {
+  pack: string;
+  overrides: Record<string, string>;
+  ok?: boolean;
+}
+
+
+export async function getLoopNightOverrides(pack: string): Promise<LoopNightOverridesResult> {
+  return parseOrThrow(
+    LoopNightOverridesResponseSchema,
+    await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/night-overrides`),
+    `loops/${pack}/night-overrides`,
+  );
+}
+
+
+export async function putLoopNightOverrides(
+  pack: string,
+  overrides: Record<string, string>,
+): Promise<LoopNightOverridesResult> {
+  return parseOrThrow(
+    LoopNightOverridesResponseSchema,
+    await fetchJSON<unknown>(`/api/loops/${encodeURIComponent(pack)}/night-overrides`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ overrides }),
+    }),
+    `loops/${pack}/night-overrides`,
+  );
 }
 
 

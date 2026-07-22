@@ -60,8 +60,24 @@ def api(tmp_path, monkeypatch):
 
     models = tmp_path / "models.yaml"
     models.write_text(
-        yaml.safe_dump({"engines": {"claude": {"label": "Claude (Abo)",
-                                               "models": ["claude-sonnet-5"]}}}),
+        yaml.safe_dump(
+            {
+                "engines": {
+                    "claude": {
+                        "label": "Claude (Abo)",
+                        "models": ["claude-sonnet-5", "claude-opus-4-6"],
+                    },
+                    "kimi": {
+                        "label": "Kimi Code",
+                        "models": ["kimi-for-coding", "k3"],
+                    },
+                    "alibaba-token-plan": {
+                        "label": "Alibaba Token Plan",
+                        "models": ["qwen3.8-max-preview"],
+                    },
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -209,7 +225,10 @@ def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
 def test_models_endpoint_serves_catalog(api):
     client, _calls, _tmp = api
     data = client.get("/api/loops/models").json()
-    assert data["engines"]["claude"]["models"] == ["claude-sonnet-5"]
+    models = data["engines"]["claude"]["models"]
+    assert "claude-sonnet-5" in models
+    assert "claude-opus-4-6" in models  # fixture catalog for partial-pair tests
+    assert data["engines"]["claude"]["label"] == "Claude (Abo)"
 
 
 def test_list_loops_preserves_round_number_from_heartbeat(api):
@@ -697,3 +716,112 @@ def test_detail_returns_ledger_and_queue(api):
     assert data["queue_entries"]["00-planned"] == ["P1-x.md"]
     assert any("PLAN: 1" in line for line in data["ledger_tail"])
     assert data["overrides"] == {"MAX_ROUNDS": "5"}
+
+
+def test_night_overrides_get_empty_then_put_and_reset(api):
+    client, _calls, tmp = api
+    empty = client.get("/api/loops/fliessband/night-overrides").json()
+    assert empty == {"pack": "fliessband", "overrides": {}}
+
+    body = {
+        "overrides": {
+            "PHASE_PLAN_ENGINE": "kimi",
+            "PHASE_PLAN_MODEL": "k3",
+            "PHASE_BUILD_ENGINE": "alibaba-token-plan",
+            "PHASE_BUILD_MODEL": "qwen3.8-max-preview",
+        }
+    }
+    saved = client.put("/api/loops/fliessband/night-overrides", json=body).json()
+    assert saved["ok"] is True
+    assert saved["pack"] == "fliessband"
+    assert saved["overrides"] == body["overrides"]
+
+    path = tmp / "state" / "fliessband" / "night-overrides.env"
+    assert path.is_file()
+    assert path.stat().st_mode & 0o777 == 0o600
+    text = path.read_text(encoding="utf-8")
+    assert "PHASE_PLAN_ENGINE=kimi" in text
+    assert "PHASE_BUILD_MODEL=qwen3.8-max-preview" in text
+
+    # Full replace: only PLAN remains.
+    replaced = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_PLAN_ENGINE": "kimi", "PHASE_PLAN_MODEL": "k3"}},
+    ).json()
+    assert replaced["overrides"] == {
+        "PHASE_PLAN_ENGINE": "kimi",
+        "PHASE_PLAN_MODEL": "k3",
+    }
+    assert "PHASE_BUILD_ENGINE" not in path.read_text(encoding="utf-8")
+
+    reset = client.put("/api/loops/fliessband/night-overrides", json={"overrides": {}}).json()
+    assert reset["ok"] is True
+    assert reset["overrides"] == {}
+    assert not path.exists()
+    assert client.get("/api/loops/fliessband/night-overrides").json()["overrides"] == {}
+
+
+def test_night_overrides_reject_bad_keys_values_and_catalog(api):
+    client, _calls, _tmp = api
+
+    bad_key = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"MAX_ROUNDS": "3"}},
+    )
+    assert bad_key.status_code == 400
+    assert "nicht erlaubt" in bad_key.json()["detail"]
+
+    bad_phase = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_NOPE_ENGINE": "claude"}},
+    )
+    assert bad_phase.status_code == 400
+    assert "Unbekannte Phase" in bad_phase.json()["detail"]
+
+    bad_value = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_PLAN_ENGINE": "claude;rm"}},
+    )
+    assert bad_value.status_code == 400
+    assert "ungültig" in bad_value.json()["detail"]
+
+    bad_model = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={
+            "overrides": {
+                "PHASE_PLAN_ENGINE": "kimi",
+                "PHASE_PLAN_MODEL": "not-a-kimi-model",
+            }
+        },
+    )
+    assert bad_model.status_code == 400
+    assert "nicht freigegeben" in bad_model.json()["detail"]
+
+    # Engine-only with incompatible pack.yaml model must fail closed.
+    bad_partial = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_PLAN_ENGINE": "kimi"}},
+    )
+    assert bad_partial.status_code == 400
+    assert "nicht freigegeben" in bad_partial.json()["detail"]
+
+
+def test_night_overrides_partial_pair_resolves_from_pack(api):
+    client, _calls, tmp = api
+    # pack.yaml PLAN is claude/claude-sonnet-5 — model-only override keeps engine.
+    ok = client.put(
+        "/api/loops/fliessband/night-overrides",
+        json={"overrides": {"PHASE_PLAN_MODEL": "claude-opus-4-6"}},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["overrides"] == {"PHASE_PLAN_MODEL": "claude-opus-4-6"}
+    path = tmp / "state" / "fliessband" / "night-overrides.env"
+    assert path.read_text(encoding="utf-8").strip().endswith("PHASE_PLAN_MODEL=claude-opus-4-6")
+
+
+def test_models_catalog_exposes_kimi_k3_and_alibaba(api):
+    client, _calls, _tmp = api
+    data = client.get("/api/loops/models").json()
+    assert "k3" in data["engines"]["kimi"]["models"]
+    assert "alibaba-token-plan" in data["engines"]
+    assert data["engines"]["alibaba-token-plan"]["models"] == ["qwen3.8-max-preview"]

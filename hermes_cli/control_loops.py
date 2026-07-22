@@ -66,6 +66,10 @@ _OVERRIDE_KEY_RE = re.compile(
     r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL|SKIP_PLAN)"
 )
 _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
+# Night-Overrides speichern Engine/Model-IDs — enger als One-Shot (kein Shell-Metachar).
+_NIGHT_OVERRIDE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
+_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
+NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
 
 
 def _packs_dir() -> Path:
@@ -140,6 +144,139 @@ def _timer_mutation_lock(name: str) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _night_overrides_lock(name: str) -> Iterator[None]:
+    """Night-Overrides pro Pack atomar ersetzen."""
+    lock_path = _state_root() / name / ".night-overrides.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _night_overrides_path(name: str) -> Path:
+    return _state_root() / name / NIGHT_OVERRIDES_FILENAME
+
+
+def _read_night_overrides(name: str) -> dict[str, str]:
+    path = _night_overrides_path(name)
+    if not path.is_file():
+        return {}
+    try:
+        return loop_runner.parse_night_overrides(path)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _load_models_catalog() -> dict[str, Any]:
+    path = _models_path()
+    if not path.is_file():
+        return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    engines = data.get("engines")
+    return engines if isinstance(engines, dict) else {}
+
+
+def _validate_night_overrides(
+    pack: loop_runner.Pack,
+    raw: dict[str, Any],
+) -> dict[str, str]:
+    """Pack-/Phase-/Key-/Katalogvalidierung; partielle Paare nur via pack.yaml."""
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="overrides muss ein Objekt sein")
+    cleaned: dict[str, str] = {}
+    for key, val in raw.items():
+        if not isinstance(key, str) or not _NIGHT_OVERRIDE_KEY_RE.fullmatch(key):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Night-Override-Key nicht erlaubt: {key!r} "
+                    "(nur PHASE_[A-Z]+_(ENGINE|MODEL))"
+                ),
+            )
+        sval = str(val).strip()
+        if not sval or not _NIGHT_OVERRIDE_VALUE_RE.fullmatch(sval):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Night-Override-Wert ungültig für {key}",
+            )
+        cleaned[key] = sval
+
+    phase_names = {name.upper(): name for name in pack.phases}
+    touched: set[str] = set()
+    for key in cleaned:
+        # PHASE_<NAME>_(ENGINE|MODEL)
+        body = key[len("PHASE_") :]
+        phase_up, kind = body.rsplit("_", 1)
+        if phase_up not in phase_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unbekannte Phase in Night-Override: {key}",
+            )
+        touched.add(phase_up)
+
+    catalog = _load_models_catalog()
+    from loops import engines as loop_engines
+
+    for phase_up in sorted(touched):
+        phase_name = phase_names[phase_up]
+        base = pack.phases[phase_name]
+        eng_key = f"PHASE_{phase_up}_ENGINE"
+        mod_key = f"PHASE_{phase_up}_MODEL"
+        engine = cleaned.get(eng_key, base.engine)
+        model = cleaned.get(mod_key, base.model)
+        engine_entry = catalog.get(engine)
+        if engine not in loop_engines.ENGINES or not isinstance(engine_entry, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Engine {engine!r} für Phase {phase_name!r} unbekannt",
+            )
+        models = engine_entry.get("models") or []
+        if model not in models:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Modell {model!r} ist für Engine {engine!r} "
+                    f"(Phase {phase_name!r}) nicht freigegeben"
+                ),
+            )
+    return cleaned
+
+
+def _write_night_overrides(name: str, overrides: dict[str, str]) -> None:
+    """Atomischer Replace (0600). Leeres Dict löscht die Ressource."""
+    path = _night_overrides_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not overrides:
+        path.unlink(missing_ok=True)
+        return
+    content = (
+        "# night-overrides — persistent; One-Shot overrides.env hat Vorrang\n"
+        + "\n".join(f"{k}={v}" for k, v in sorted(overrides.items()))
+        + "\n"
+    )
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=".night-overrides.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _timer_schedule(name: str) -> str:
@@ -517,6 +654,10 @@ class DuplicateBody(BaseModel):
     name: str
 
 
+class NightOverridesBody(BaseModel):
+    overrides: dict[str, Any] = {}
+
+
 def register_loops_routes(app: FastAPI) -> None:
     """Loops-Endpoints registrieren (vor dem SPA-Catch-all aufrufen)."""
 
@@ -758,3 +899,26 @@ def register_loops_routes(app: FastAPI) -> None:
             "timer_schedule": timer_schedule,
             "timer_next_run": timer_next_run,
         }
+
+    @app.get("/api/loops/{pack}/night-overrides")
+    def get_night_overrides(pack: str) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        return {
+            "pack": loaded.name,
+            "overrides": _read_night_overrides(loaded.name),
+        }
+
+    @app.put("/api/loops/{pack}/night-overrides")
+    def put_night_overrides(pack: str, body: NightOverridesBody) -> dict[str, Any]:
+        loaded = _load_pack_or_404(pack)
+        cleaned = _validate_night_overrides(loaded, body.overrides)
+        with _night_overrides_lock(loaded.name):
+            try:
+                _write_night_overrides(loaded.name, cleaned)
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"night-overrides konnten nicht geschrieben werden: {exc}",
+                ) from exc
+            stored = _read_night_overrides(loaded.name)
+        return {"ok": True, "pack": loaded.name, "overrides": stored}

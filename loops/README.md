@@ -31,10 +31,13 @@ Ledger + Phasen-Logs unter `~/.hermes/loops/<pack>/`.
 
 ## Archetypen & Protokoll
 
-- **pipeline** (plan → Queue → build+verify pro Plan): Fable plant Kontrakt-Pläne
-  (done_when/anti_scope/tests), billiges Modell baut, Fable verifiziert adversarial
+- **pipeline** (plan → Queue → build+verify pro Plan): Planner plant Kontrakt-Pläne
+  (done_when/anti_scope/tests), Builder implementiert, Verifier prüft adversarial
   (Gates selbst, Tautologie-Check). FAIL → Revert + 1 Retry mit Feedback → bounced.
   Queue-Stufen: `00-planned → 10-building → 20-verified → 30-landed · 90-bounced`.
+  Effektive Engine/Model-Routen kommen aus `pack.yaml` + One-Shot/Night-Overrides
+  und werden in Prompts als `{{ENGINE}}`/`{{MODEL}}` bzw. Writer-Route
+  `{{BUILD_ENGINE}}`/`{{BUILD_MODEL}}` gerendert — keine festen Display-Namen.
 - **sweep** (eine round-Phase wiederholt): finden + fixen + committen, Status
   `FIXED|DRY|BLOCKED` (Stop nach `dry_rounds` DRY bzw. `fail_streak` BLOCKED).
 - **Eskalations-Konvention** (seit 2026-07-06): ein BLOCKED mit echtem Fund (Bug/
@@ -73,14 +76,15 @@ Auto-Land (Stufe 2) ist für alle übrigen Packs bewusst NICHT freigeschaltet.
 
 **Eng begrenzte Ausnahme (Operator 2026-07-09):** Nur das kuratierte Repo-Pack
 `dashboard-experience` steht zusätzlich in der Code-Allowlist des Runners. Die
-Freigabe ist an den Repo-Pack-Pfad, das Live-Repo, den Fable→Sol→Fable-Vertrag
+Freigabe ist an den Repo-Pack-Pfad, das Live-Repo, den Planner→Builder→Verifier-Vertrag
 sowie SHA-256 der Manifest- und Prompt-Inhalte gebunden; Custom-Kopien und Drift
 brechen hart ab. Der Control-Startdialog darf Engine, Modell und Laufbudgets
 one-shot überschreiben; nur Budget-Overrides behalten die Auto-Land-Autorität.
 Ein abweichender Phasenvertrag läuft vollständig, bleibt aber zur manuellen Prüfung
 und Landung liegen. Dort
-plant und verifiziert Fable 5 in frischen Sessions, GPT-5.6 Sol baut genau einen
-Commit, und der Driver landet ausschließlich bei `1 verified / 1 commit / 0
+plant und verifiziert die Planner-/Verifier-Phase in frischen Sessions, der Builder
+baut genau einen Commit (Default-Routen in pack.yaml, Overrides erlaubt), und der
+Driver landet ausschließlich bei `1 verified / 1 commit / 0
 planned / 0 building`, ausschließlich geänderten Pfaden unter
 `web/src/control/**`, exakt passender `PASS <plan-id>`-Quittung und einer
 runner-attestierten, commitgebundenen 390/820/1366-Evidenz (Summary + 3 PNG + 3
@@ -92,7 +96,7 @@ Merge-Commit steht; fremde Parallel-Commits erzwingen manuelle Klärung statt
 Reset. Eine gesetzte `STOP`-Datei blockiert auch Resume/Push. `autoland: true` in
 irgendeinem anderen Manifest ist ein harter Manifest-Fehler; Custom-Packs können
 diese Autorität nicht erlangen. Modellphasen laufen mit Worker-Markern: Claudes
-globaler Guard sperrt Push/Deploy in den Fable-Phasen; für **alle** Engines setzt
+globaler Guard sperrt Push/Deploy in den Claude-Phasen; für **alle** Engines setzt
 der Runner zusätzlich einen `git`-Push-Deny vor den PATH, neutralisiert bekannte
 Push-Remotes/Credentials und stellt die Umgebung nach der Phase wieder her. Die
 Ausnahme deployt nicht und erweitert keine Worker-Rechte auf push/merge.

@@ -161,8 +161,8 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
         safety_sha256="8940bc59f98cfdb9ae45c4fec67f39da364d59a2aa5be2e67f52292adb42585c",
         prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
-        "BUILDER-PROMPT.md": "55d09f80c724dcb8c8f55bc94a19fc9fd4d42291908cf697659abe7e7db736c0",
-        "VERIFIER-PROMPT.md": "05916a02da05f005c64407decb2468e296565e356d04c04da6ac5b3916ebd441",
+        "BUILDER-PROMPT.md": "4a6eb2e5e558901a0d3e06a0f5785b30295e56c84c51d3f0321a7eed06ec8d93",
+        "VERIFIER-PROMPT.md": "cc76ab3f0a602a0a54d3e8ce01f0df5c89ef9b929f23a2ef52133e0ee10fc2cb",
         },
         require_visual="always",
     ),
@@ -533,6 +533,12 @@ def parse_worktree_paths(porcelain: str) -> list[str]:
     return [line[len("worktree "):] for line in porcelain.splitlines() if line.startswith("worktree ")]
 
 
+# Night-Overrides: nur PHASE_[A-Z]+_(ENGINE|MODEL). Persistent (nicht konsumiert).
+# Präzedenz: One-Shot (overrides.env) > Night (night-overrides.env) > pack.yaml.
+_NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
+NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
+
+
 def parse_overrides(path: Path) -> dict[str, str]:
     """overrides.env: KEY=VALUE pro Zeile; #-Kommentare und Leerzeilen erlaubt."""
     if not path.is_file():
@@ -545,6 +551,20 @@ def parse_overrides(path: Path) -> dict[str, str]:
         key, val = line.split("=", 1)
         out[key.strip()] = val.strip()
     return out
+
+
+def parse_night_overrides(path: Path) -> dict[str, str]:
+    """night-overrides.env: nur PHASE_*_(ENGINE|MODEL); ungültige Keys fail-closed."""
+    if not path.is_file():
+        return {}
+    data = parse_overrides(path)
+    bad = sorted(k for k in data if not _NIGHT_OVERRIDE_KEY_RE.fullmatch(k))
+    if bad:
+        raise RuntimeError(
+            "night-overrides.env: nur PHASE_[A-Z]+_(ENGINE|MODEL) erlaubt; "
+            f"ungültig: {', '.join(bad)}"
+        )
+    return data
 
 
 def read_ledger_stats(pack_state_dir: Path) -> dict:
@@ -656,6 +676,7 @@ class LoopRunner:
         self.stop_path = self.state / "STOP"
         self.visual_attestation_path = self.state / "visual-attestation.json"
         self.overrides = parse_overrides(self.state / "overrides.env")
+        self.night_overrides = parse_night_overrides(self.state / NIGHT_OVERRIDES_FILENAME)
         self.phase_secs: dict[str, int] = {}
         self._overrides_consumed = False
         self._repo_validated = False
@@ -830,11 +851,26 @@ class LoopRunner:
             return fallback
 
     def phase_cfg(self, name: str) -> PhaseCfg:
+        """Phase-Config: One-Shot > Night > pack.yaml (ENGINE/MODEL); TIMEOUT nur One-Shot."""
         cfg = self.pack.phases[name]
         up = name.upper()
+        eng_key = f"PHASE_{up}_ENGINE"
+        mod_key = f"PHASE_{up}_MODEL"
+        if eng_key in self.overrides:
+            engine = self.overrides[eng_key]
+        elif eng_key in self.night_overrides:
+            engine = self.night_overrides[eng_key]
+        else:
+            engine = cfg.engine
+        if mod_key in self.overrides:
+            model = self.overrides[mod_key]
+        elif mod_key in self.night_overrides:
+            model = self.night_overrides[mod_key]
+        else:
+            model = cfg.model
         return PhaseCfg(
-            engine=self.overrides.get(f"PHASE_{up}_ENGINE", cfg.engine),
-            model=self.overrides.get(f"PHASE_{up}_MODEL", cfg.model),
+            engine=engine,
+            model=model,
             timeout=self._int_override(f"PHASE_{up}_TIMEOUT", cfg.timeout),
             prompt=cfg.prompt,
         )
@@ -843,13 +879,34 @@ class LoopRunner:
         return self._int_override(key.upper(), self.pack.stop[key])
 
     def render_prompt(self, phase: str, **extra: str) -> str:
-        text = (self.pack.pack_dir / self.pack.phases[phase].prompt).read_text(encoding="utf-8")
+        """Render a pack prompt with effective route placeholders.
+
+        ``ENGINE``/``MODEL`` always come from ``phase_cfg(phase)`` after One-Shot
+        and Night overrides. When the pack has a ``build`` phase,
+        ``BUILD_ENGINE``/``BUILD_MODEL`` expose that same resolution for the
+        writer route (used by verifiers). Missing build-phase placeholders stay
+        unreplaced — never invent a fallback model name.
+        """
+        cfg = self.phase_cfg(phase)
+        text = (self.pack.pack_dir / cfg.prompt).read_text(encoding="utf-8")
         params = dict(self.pack.params)
         for key in params:
             if key.upper() in self.overrides:
                 params[key] = self.overrides[key.upper()]
         params_line = " ".join(f"{k.upper()}={v}" for k, v in sorted(params.items()))
-        subst = {"STATE_DIR": str(self.state), "WT": str(self.wt), "PARAMS": params_line, **extra}
+        subst: dict[str, str] = {
+            "STATE_DIR": str(self.state),
+            "WT": str(self.wt),
+            "PARAMS": params_line,
+            "PHASE": phase,
+            "ENGINE": cfg.engine,
+            "MODEL": cfg.model,
+            **extra,
+        }
+        if "build" in self.pack.phases:
+            build_cfg = self.phase_cfg("build")
+            subst.setdefault("BUILD_ENGINE", build_cfg.engine)
+            subst.setdefault("BUILD_MODEL", build_cfg.model)
         for key, val in subst.items():
             text = text.replace("{{" + key + "}}", str(val))
         return text
@@ -987,7 +1044,14 @@ class LoopRunner:
         self._heartbeat(None, done=done)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
-        subscription_engine = cfg.engine in {"claude", "codex", "kimi", "neuralwatt", "xai"}
+        subscription_engine = cfg.engine in {
+            "alibaba-token-plan",
+            "claude",
+            "codex",
+            "kimi",
+            "neuralwatt",
+            "xai",
+        }
         self.ledger_event(
             event="phase_usage",
             round=round_,
@@ -1020,8 +1084,30 @@ class LoopRunner:
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
 
+    def _validate_effective_phase_catalog(self) -> None:
+        """Fail-closed: effektive One-Shot/Night/pack.yaml-Paare müssen im Katalog stehen.
+
+        Gilt für alle Packs (nicht nur Autoland).
+        """
+        catalog_data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8")) or {}
+        catalog = catalog_data.get("engines", {})
+        for phase in self.pack.phases:
+            cfg = self.phase_cfg(phase)
+            engine_entry = catalog.get(cfg.engine)
+            if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: Phase {phase}: Engine {cfg.engine!r} unbekannt"
+                )
+            if cfg.model not in engine_entry.get("models", []):
+                raise RuntimeError(
+                    f"Pack {self.pack.name}: Phase {phase}: Modell {cfg.model!r} "
+                    "ist nicht im UI-Katalog erlaubt"
+                )
+
     def _validate_autoland_runtime(self, *, skip_plan: bool = False) -> None:
-        """Autoland erlaubt nur den im Control-Startdialog sichtbaren Laufvertrag."""
+        """Validiert effektive Phase-Paare; Autoland zusätzlich den sichtbaren Laufvertrag."""
+        # Effektive Engine/Model-Paarung gilt fail-closed für alle Packs.
+        self._validate_effective_phase_catalog()
         if not self.pack.autoland:
             return
         if skip_plan:
@@ -1042,23 +1128,6 @@ class LoopRunner:
                 "Autoland akzeptiert nur Engine, Modell, MAX_ROUNDS und MAX_HOURS"
             )
 
-        # Jedes Default- UND Override-Modell muss im Katalog liegen (kein
-        # override-only-continue): auch ein nicht überschriebenes Default-Modell,
-        # das aus dem Katalog gefallen ist, fällt so fail-closed auf.
-        catalog_data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8")) or {}
-        catalog = catalog_data.get("engines", {})
-        for phase in self.pack.phases:
-            cfg = self.phase_cfg(phase)
-            engine_entry = catalog.get(cfg.engine)
-            if cfg.engine not in engines.ENGINES or not isinstance(engine_entry, dict):
-                raise RuntimeError(
-                    f"Pack {self.pack.name}: Phase {phase}: Engine {cfg.engine!r} unbekannt"
-                )
-            if cfg.model not in engine_entry.get("models", []):
-                raise RuntimeError(
-                    f"Pack {self.pack.name}: Phase {phase}: Modell {cfg.model!r} "
-                    "ist nicht im UI-Katalog erlaubt"
-                )
         limits = {"max_rounds": 50, "max_hours": 24}
         for key, maximum in limits.items():
             env_key = key.upper()
@@ -1075,21 +1144,27 @@ class LoopRunner:
 
     def _runtime_autoland_authorized(self) -> bool:
         """Modell UND Budgets floaten frei; nur die Engine-ROLLE pro Phase bleibt
-        Teil der Landungsautorität. Ohne Engine/Modell-Override ist der beim Laden
-        fail-closed validierte Manifest-Phasenvertrag maßgeblich; mit Override
-        zählt die Engine-Rolle — ein gültiger reiner Modell-Swap erzwingt KEIN
-        manual-land, ein Engine-Rollenwechsel schon."""
+        Teil der Landungsautorität. Effektive Rolle folgt One-Shot > Night >
+        pack.yaml — reiner Modell-Swap gleicher Rolle erzwingt KEIN manual-land,
+        ein Engine-Rollenwechsel schon.
+
+        Ohne PHASE_*_ENGINE/MODEL-Overrides (One-Shot oder Night) gilt der beim
+        Laden fail-closed validierte Manifest-Vertrag weiter (Fixtures mutieren
+        pack.phases oft auf Fake-Engines ohne Overrides).
+        """
         if not self.pack.autoland:
             return False
         phase_keys = {
-            key for key in self.overrides
+            key
+            for key in (*self.overrides, *self.night_overrides)
             if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
         }
         if not phase_keys:
-            return True  # Manifest-Phasenvertrag wurde beim Laden fail-closed validiert.
+            return True
         return all(
             self.phase_cfg(phase).engine == AUTOLAND_PHASE_CONTRACT[phase][0]
             for phase in AUTOLAND_PHASE_CONTRACT
+            if phase in self.pack.phases
         )
 
     @property
