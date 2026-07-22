@@ -777,6 +777,50 @@ def _sandbox_workspaces_root() -> Path:
     return kanban_home() / ".kanban-sandbox" / "workspaces"
 
 
+def _inherited_override_is_native(override: str) -> bool:
+    """True when an inherited ``HERMES_KANBAN_*`` path override belongs to the
+    *active* Hermes home.
+
+    The dispatcher pins workers to the live board by injecting
+    ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_WORKSPACES_ROOT`` /
+    ``HERMES_KANBAN_ATTACHMENTS_ROOT`` into their environment.  A probe or
+    test that moves ``HERMES_HOME`` elsewhere afterwards must not keep
+    writing to that pinned live path — incident
+    ``hermes-worker-env-live-db-leak`` (2026-05-27) and its recurrence
+    (2026-07-22: a kanban worker probe created the tasks ``t``/``w``/``w2``
+    on the production board despite setting ``HERMES_HOME`` to a temp dir,
+    because the inherited ``HERMES_KANBAN_DB`` silently won precedence).
+
+    The override is honoured only when it is *native* to the current
+    resolution context:
+
+    * ``HERMES_HOME`` is unset (legacy callers that pin the DB directly), or
+    * ``HERMES_KANBAN_HOME`` is explicitly set (documented Docker/custom
+      deployments and tests pin the umbrella root themselves), or
+    * the override path lives under :func:`kanban_home` — the
+      dispatcher→worker handoff is always consistent this way.
+    """
+    if not os.environ.get("HERMES_HOME", "").strip():
+        return True
+    if os.environ.get("HERMES_KANBAN_HOME", "").strip():
+        return True
+    try:
+        candidate = Path(override).expanduser().resolve(strict=False)
+        root = kanban_home().resolve(strict=False)
+    except (OSError, ValueError):
+        return False
+    if candidate == root or root in candidate.parents:
+        return True
+    _log.warning(
+        "ignoring inherited kanban path override %r: outside active home %s "
+        "(caller moved HERMES_HOME; set HERMES_SANDBOX_MODE=1 or pin "
+        "HERMES_KANBAN_HOME to force an external location)",
+        override,
+        root,
+    )
+    return False
+
+
 def kanban_db_path(board: Optional[str] = None) -> Path:
     """Return the path to the ``kanban.db`` for ``board``.
 
@@ -790,7 +834,9 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     1. ``HERMES_KANBAN_DB`` env var — pins the path directly. Honoured for
        back-compat and for the dispatcher→worker handoff (defense in
        depth: dispatcher injects this into worker env so workers are
-       immune to any path-resolution disagreement).
+       immune to any path-resolution disagreement).  Dropped with a
+       warning when it is *foreign* to the active ``HERMES_HOME`` — see
+       :func:`_inherited_override_is_native`.
     2. When ``board`` arg is None, the active board from
        :func:`get_current_board` is used.
     3. Board ``default`` → ``<root>/kanban.db`` (back-compat path).
@@ -799,7 +845,7 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
     if _sandbox_mode_enabled():
         return _sandbox_db_path(board)
     override = os.environ.get("HERMES_KANBAN_DB", "").strip()
-    if override:
+    if override and _inherited_override_is_native(override):
         return Path(override).expanduser()
     slug = _normalize_board_slug(board)
     if slug is None:
@@ -875,7 +921,7 @@ def workspaces_root(board: Optional[str] = None) -> Path:
     if _sandbox_mode_enabled():
         return _sandbox_workspaces_root()
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
-    if override:
+    if override and _inherited_override_is_native(override):
         return Path(override).expanduser()
     slug = _normalize_board_slug(board)
     if slug is None:
@@ -905,7 +951,7 @@ def attachments_root(board: Optional[str] = None) -> Path:
     see the kanban docs.
     """
     override = os.environ.get("HERMES_KANBAN_ATTACHMENTS_ROOT", "").strip()
-    if override:
+    if override and _inherited_override_is_native(override):
         return Path(override).expanduser()
     slug = _normalize_board_slug(board)
     if slug is None:
@@ -18879,7 +18925,11 @@ def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
             if _pid_alive(int(pid)):
                 continue
             termination = _terminate_reclaimed_worker(int(pid), lease["claim_lock"])
-            if not bool(termination.get("process_group_terminated")):
+            # ``_terminate_reclaimed_worker`` reports ``terminated`` (never a
+            # ``process_group_terminated`` key — the 2026-07-22 stale-lease
+            # stall: every dead-pid lease skipped forever because the reaper
+            # read a key the terminator never writes).
+            if not bool(termination.get("terminated")):
                 continue
         observed_head, clean = _workspace_release_state(lease["workspace_path"])
         recovered_wip = False

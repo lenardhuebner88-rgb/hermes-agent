@@ -165,3 +165,80 @@ def test_sandbox_mode_helper_is_case_insensitive(monkeypatch):
 
     monkeypatch.setenv("HERMES_SANDBOX_MODE", "nope")
     assert kb._sandbox_mode_enabled() is False
+
+
+
+# ---------------------------------------------------------------------------
+# Foreign inherited overrides (live-DB-leak recurrence 2026-07-22)
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_inherited_db_override_is_dropped(hermes_home, monkeypatch):
+    """A probe that moved HERMES_HOME must not write through the inherited
+    live ``HERMES_KANBAN_DB`` — the foreign override is dropped (recurrence
+    2026-07-22: worker probe created t/w/w2 on the production board)."""
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_DB", "/live/root/kanban.db")
+    assert kb.kanban_db_path() == hermes_home / "kanban.db"
+
+
+def test_native_inherited_db_override_is_honoured(hermes_home, monkeypatch):
+    """The dispatcher→worker handoff pins a DB *inside* the active home —
+    that override stays authoritative."""
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    native = hermes_home / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(native))
+    assert kb.kanban_db_path() == native
+
+
+def test_db_override_honoured_without_hermes_home(monkeypatch, tmp_path):
+    """Legacy callers that pin the DB directly without HERMES_HOME keep working."""
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    foreign = tmp_path / "elsewhere" / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(foreign))
+    assert kb.kanban_db_path() == foreign
+
+
+def test_db_override_honoured_with_explicit_kanban_home(hermes_home, monkeypatch, tmp_path):
+    """Docker/custom deployments that explicitly pin HERMES_KANBAN_HOME may
+    place the DB outside the active home."""
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "umbrella"))
+    foreign = tmp_path / "elsewhere" / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(foreign))
+    assert kb.kanban_db_path() == foreign
+
+
+def test_foreign_workspaces_override_is_dropped(hermes_home, monkeypatch):
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", "/live/root/kanban/workspaces")
+    assert kb.workspaces_root() == hermes_home / "kanban" / "workspaces"
+
+
+def test_foreign_attachments_override_is_dropped(hermes_home, monkeypatch):
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", "/live/root/kanban/attachments")
+    assert kb.attachments_root() == hermes_home / "kanban" / "attachments"
+
+
+def test_worker_probe_cannot_leak_into_live_board(hermes_home, monkeypatch, tmp_path):
+    """End-to-end regression for the t/w/w2 incident: inherited live
+    ``HERMES_KANBAN_DB`` + temp HERMES_HOME → all writes land in the temp
+    home; the live file is never even created."""
+    _clean_kanban_env(monkeypatch)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+    live = tmp_path / "live"
+    live.mkdir()
+    live_db = live / "kanban.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(live_db))
+    kb.init_db()
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="probe", assignee="coder")
+        assert kb.get_task(conn, tid) is not None
+    assert not live_db.exists()
