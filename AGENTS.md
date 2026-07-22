@@ -141,3 +141,7 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
+
+## Code map (graphify)
+
+If `graphify-out/graph.json` exists: architecture / callers / "what connects X→Y" → prefer `graphify query|path` before wide rg/read. Full rules: `/home/piet/vault/00-Canon/graphify-playbook.md`. Builders never rebuild; Maintainer/timer only.

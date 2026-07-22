@@ -29,3 +29,6 @@
 
 ## Dependency source (opensrc)
 Read a dependency's internals instead of guessing: `rg "x" $(opensrc path <pkg>)` / `cat $(opensrc path pypi:<pkg>)/…` — real repo source at the version tag, cached globally in `~/.opensrc/` (works without `web/node_modules` in worktrees). Full block: `AGENTS.md`.
+
+## Code map (graphify)
+Prefer `graphify query|path` for architecture/callers when `graphify-out/` exists. Canon: `vault/00-Canon/graphify-playbook.md`. No worker rebuilds.

@@ -1,0 +1,32 @@
+# Graphify ignore — hermes-agent
+# Measured 2026-07-22 after first code-only extract (5719 files → ~144k nodes).
+# Patterns merge with .gitignore; this only ever excludes more.
+# Rebuild after changes: graphify extract . --code-only --no-cluster --force
+
+# Parallel worktrees / local agent state (also git-excluded, belt-and-suspenders)
+.claude/worktrees/
+.worktrees/
+.qwen/
+
+# Deps & build artifacts
+node_modules/
+**/node_modules/
+web/dist/
+apps/desktop/dist/
+apps/desktop/release/
+**/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.memsearch/
+.venv/
+venv/
+graphify-out/
+
+# Docs site (not runtime architecture for agent/kanban/dashboard work)
+website/
+
+# Generated evidence dumps (if present)
+docs/dogfood-repo-cap-evidence/
