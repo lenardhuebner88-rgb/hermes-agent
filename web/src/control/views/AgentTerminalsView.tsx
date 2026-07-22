@@ -51,6 +51,7 @@ import {
   buildWsUrl,
   type AgentTerminalCapabilityState,
   type AgentTerminalContextProfile,
+  type AgentTerminalExecutionCapsule,
   type AgentTerminalExecutionProfile,
   type AgentTerminalKind,
   type AgentTerminalOverviewState,
@@ -208,6 +209,7 @@ export function AgentTerminalsView() {
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const resizeSendTimerRef = useRef<number | null>(null);
+  const executionCapsuleLoadSeqRef = useRef(0);
   const chipRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   // Monotonic seq for windows-list fetches: an in-flight poll issued before a
   // close must never overwrite a newer post-close list (stale tab flash).
@@ -291,6 +293,9 @@ export function AgentTerminalsView() {
   const [executionCapsuleNextSteps, setExecutionCapsuleNextSteps] = useState("");
   const [executionCapsuleRisks, setExecutionCapsuleRisks] = useState("");
   const [executionCapsuleBusy, setExecutionCapsuleBusy] = useState(false);
+  const [executionCapsuleLoading, setExecutionCapsuleLoading] = useState(false);
+  const [executionCapsuleDetail, setExecutionCapsuleDetail] =
+    useState<AgentTerminalExecutionCapsule | null>(null);
   const [executionCapsuleError, setExecutionCapsuleError] = useState<string | null>(null);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
@@ -1258,17 +1263,53 @@ export function AgentTerminalsView() {
 
   const openExecutionCapsule = useCallback(() => {
     if (!selectedWindow) return;
-    setExecutionCapsuleTaskId(selectedWindow.task_id ?? "");
-    setExecutionCapsuleRunId(selectedWindow.run_id ? String(selectedWindow.run_id) : "");
+    const targetWindow = selectedWindow;
+    const loadSeq = ++executionCapsuleLoadSeqRef.current;
+    setExecutionCapsuleTaskId(targetWindow.task_id ?? "");
+    setExecutionCapsuleRunId(targetWindow.run_id ? String(targetWindow.run_id) : "");
     setExecutionCapsuleProfile("implementation");
     setExecutionCapsuleSummary("");
     setExecutionCapsuleDecisions("");
     setExecutionCapsuleNextSteps("");
     setExecutionCapsuleRisks("");
+    setExecutionCapsuleDetail(null);
     setExecutionCapsuleError(null);
     setExecutionCapsuleOpen(true);
     setSessionSheetOpen(false);
+    if (!targetWindow.correlation_id) {
+      setExecutionCapsuleLoading(false);
+      return;
+    }
+    setExecutionCapsuleLoading(true);
+    void api
+      .getAgentTerminalExecutionCapsule(targetWindow.session, targetWindow.window)
+      .then((response) => {
+        if (executionCapsuleLoadSeqRef.current !== loadSeq) return;
+        if (
+          !response.consistent ||
+          !response.capsule ||
+          response.capsule.correlation_id !== targetWindow.correlation_id
+        ) {
+          throw new Error("Die gespeicherte Execution Capsule ist nicht konsistent gebunden.");
+        }
+        setExecutionCapsuleDetail(response.capsule);
+      })
+      .catch((err) => {
+        if (executionCapsuleLoadSeqRef.current !== loadSeq) return;
+        setExecutionCapsuleError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (executionCapsuleLoadSeqRef.current === loadSeq) {
+          setExecutionCapsuleLoading(false);
+        }
+      });
   }, [selectedWindow]);
+
+  const closeExecutionCapsule = useCallback(() => {
+    executionCapsuleLoadSeqRef.current += 1;
+    setExecutionCapsuleLoading(false);
+    setExecutionCapsuleOpen(false);
+  }, []);
 
   const bindExecutionCapsule = useCallback(async () => {
     if (!selectedWindow || selectedWindow.correlation_id) return;
@@ -1330,7 +1371,7 @@ export function AgentTerminalsView() {
         windowsJsonRef.current = JSON.stringify(next);
         return next;
       });
-      setExecutionCapsuleOpen(false);
+      setExecutionCapsuleDetail(response.capsule);
     } catch (err) {
       setExecutionCapsuleError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -3106,7 +3147,7 @@ export function AgentTerminalsView() {
                 type="button"
                 aria-label="Execution Capsule schließen"
                 disabled={executionCapsuleBusy}
-                onClick={() => setExecutionCapsuleOpen(false)}
+                onClick={closeExecutionCapsule}
                 className="grid min-h-[44px] min-w-[44px] shrink-0 place-items-center rounded-card border border-line text-ink-2 hover:bg-surface-3 disabled:opacity-40"
               >
                 <X className="h-4 w-4" />
@@ -3117,11 +3158,55 @@ export function AgentTerminalsView() {
               <div className="mt-4 grid gap-2 rounded-card border border-live/25 bg-live/[0.06] p-4 text-xs">
                 <div className="flex items-center gap-2 text-live"><CheckCircle2 className="h-4 w-4" /><strong>Aktiv verknüpft</strong></div>
                 <div className="grid gap-1.5 text-ink-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
-                  <span className="text-ink-3">Task</span><code className="truncate">{selectedWindow.task_id}</code>
-                  <span className="text-ink-3">Run</span><code>#{selectedWindow.run_id}</code>
-                  <span className="text-ink-3">Pane</span><code>{selectedWindow.pane_id}</code>
-                  <span className="text-ink-3">Korrelation</span><code className="truncate">{selectedWindow.correlation_id}</code>
+                  <span className="text-ink-3">Task</span><span className="truncate font-mono text-ink-2">{selectedWindow.task_id}</span>
+                  <span className="text-ink-3">Run</span><span className="font-mono text-ink-2">#{selectedWindow.run_id}</span>
+                  <span className="text-ink-3">Pane</span><span className="font-mono text-ink-2">{selectedWindow.pane_id}</span>
+                  <span className="text-ink-3">Korrelation</span><span className="truncate font-mono text-ink-2">{selectedWindow.correlation_id}</span>
                 </div>
+                {executionCapsuleLoading && (
+                  <div className="inline-flex items-center gap-2 border-t border-live/15 pt-3 text-ink-3">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Context-Handoff wird geladen …
+                  </div>
+                )}
+                {executionCapsuleDetail && (
+                  <div
+                    data-testid="execution-capsule-context-handoff"
+                    className="grid gap-3 border-t border-live/15 pt-3 text-ink-2"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <strong className="text-live">Context-Handoff</strong>
+                      <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-ink-3">
+                        {executionCapsuleDetail.context.profile}
+                      </span>
+                    </div>
+                    <p className="text-sm leading-relaxed text-ink-2">
+                      {executionCapsuleDetail.context.summary}
+                    </p>
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      {([
+                        ["Entscheidungen", executionCapsuleDetail.context.decisions],
+                        ["Nächste Schritte", executionCapsuleDetail.context.next_steps],
+                        ["Risiken", executionCapsuleDetail.context.risks],
+                      ] as const).map(([label, items]) => (
+                        <div key={label} className="grid content-start gap-1.5 rounded-card border border-line bg-surface-2 p-2.5">
+                          <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">{label}</span>
+                          {items.length > 0 ? (
+                            <ul className="grid gap-1 text-xs leading-relaxed">
+                              {items.map((item) => <li key={item}>• {item}</li>)}
+                            </ul>
+                          ) : (
+                            <span className="text-xs text-ink-3">Keine</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {executionCapsuleError && (
+                  <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3 text-xs text-status-alert">
+                    {executionCapsuleError}
+                  </div>
+                )}
               </div>
             ) : (
               <div className="mt-4 grid gap-3">
@@ -3207,7 +3292,7 @@ export function AgentTerminalsView() {
                   <button
                     type="button"
                     disabled={executionCapsuleBusy}
-                    onClick={() => setExecutionCapsuleOpen(false)}
+                    onClick={closeExecutionCapsule}
                     className="min-h-[44px] rounded-card border border-line px-4 text-xs font-medium text-ink-2 hover:bg-surface-3 disabled:opacity-40"
                   >
                     Abbrechen

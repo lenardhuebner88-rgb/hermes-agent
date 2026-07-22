@@ -2,7 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import type { AgentTerminalCapabilityState, AgentTerminalOverviewResponse, AgentTerminalWindow } from "@/lib/api";
+import type {
+  AgentTerminalCapabilityState,
+  AgentTerminalExecutionCapsule,
+  AgentTerminalOverviewResponse,
+  AgentTerminalWindow,
+} from "@/lib/api";
 import { TERMINAL_MAIN_BACKGROUND, TERMINAL_PANE_BACKGROUND } from "@/lib/xtermSurface";
 
 // Unter Voll-Suite-Last fällt der FakeWebSocket-onopen (setTimeout(0)) hinter den
@@ -24,6 +29,7 @@ const apiMock = {
   renameAgentTerminalWindow: vi.fn(),
   captureAgentTerminalWindow: vi.fn(),
   bindAgentTerminalExecutionCapsule: vi.fn(),
+  getAgentTerminalExecutionCapsule: vi.fn(),
   getAgentTerminalOverview: vi.fn(),
   sendAgentTerminalKeys: vi.fn(),
   getSkills: vi.fn(),
@@ -225,6 +231,37 @@ const overviewFixture: AgentTerminalOverviewResponse = {
   ],
 };
 
+const executionCapsuleFixture: AgentTerminalExecutionCapsule = {
+  schema_version: 1,
+  state: "active",
+  correlation_id: "aabbccddeeff001122334455",
+  revision: 1,
+  task_id: "t_capsule",
+  run_id: 42,
+  terminal: {
+    server_id: "a".repeat(64),
+    session: "hermes-agents",
+    window: "hermes",
+    pane_id: "%1",
+  },
+  workspace: {
+    path: "/home/piet",
+    branch: "main",
+    pre_run_commit_sha: null,
+    head_sha: null,
+  },
+  context: {
+    profile: "implementation",
+    summary: "Verified implementation can continue",
+    decisions: ["Keep task_runs authoritative", "Do not capture pane output"],
+    next_steps: ["Run the affected gate"],
+    risks: ["No live activation"],
+    fingerprint: "b".repeat(64),
+  },
+  bound_at: 1,
+  updated_at: 1,
+};
+
 async function loadView() {
   const module = await import("./AgentTerminalsView");
   return module.AgentTerminalsView;
@@ -331,6 +368,12 @@ beforeEach(() => {
     capsule: {},
     window: windows[0],
   });
+  apiMock.getAgentTerminalExecutionCapsule.mockResolvedValue({
+    capsule: null,
+    window: windows[0],
+    consistent: true,
+    terminal_run_id: null,
+  });
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -374,7 +417,7 @@ describe("AgentTerminalsView desktop rendering", () => {
       correlation_id: "aabbccddeeff001122334455",
     };
     apiMock.bindAgentTerminalExecutionCapsule.mockResolvedValueOnce({
-      capsule: { state: "active" },
+      capsule: executionCapsuleFixture,
       window: boundWindow,
     });
     await renderView();
@@ -422,6 +465,52 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByTestId("desktop-execution-capsule-binding").textContent).toContain(
       "Run #42",
     );
+    const handoff = await screen.findByTestId("execution-capsule-context-handoff");
+    expect(handoff.textContent).toContain("Verified implementation can continue");
+    expect(handoff.textContent).toContain("Keep task_runs authoritative");
+    expect(handoff.textContent).toContain("Run the affected gate");
+    expect(handoff.textContent).toContain("No live activation");
+    expect(screen.getByRole("dialog", { name: /Kanban-Run mit/ })).toBeTruthy();
+  });
+
+  it("loads the persisted context handoff when an existing capsule is opened", async () => {
+    const boundWindow: AgentTerminalWindow = {
+      ...windows[0],
+      task_id: executionCapsuleFixture.task_id,
+      run_id: executionCapsuleFixture.run_id,
+      correlation_id: executionCapsuleFixture.correlation_id,
+    };
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [boundWindow, ...windows.slice(1)],
+    });
+    apiMock.getAgentTerminalOverview.mockResolvedValue({
+      ...overviewFixture,
+      windows: [
+        { ...overviewFixture.windows[0], ...boundWindow },
+        ...overviewFixture.windows.slice(1),
+      ],
+    });
+    apiMock.getAgentTerminalExecutionCapsule.mockResolvedValueOnce({
+      capsule: executionCapsuleFixture,
+      window: boundWindow,
+      consistent: true,
+      terminal_run_id: null,
+    });
+    await renderView();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Kanban-Run-Verknüpfung anzeigen" }),
+    );
+
+    await waitFor(() =>
+      expect(apiMock.getAgentTerminalExecutionCapsule).toHaveBeenCalledWith(
+        "hermes-agents",
+        "hermes",
+      ),
+    );
+    const handoff = await screen.findByTestId("execution-capsule-context-handoff");
+    expect(handoff.textContent).toContain("Context-Handoff");
+    expect(handoff.textContent).toContain("Verified implementation can continue");
   });
 
   it("keeps the capsule dialog open and surfaces a binding conflict", async () => {

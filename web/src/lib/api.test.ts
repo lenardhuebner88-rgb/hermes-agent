@@ -407,6 +407,28 @@ describe("agent terminal worker contract", () => {
     expect(body).not.toHaveProperty("commit");
     expect(body.context_handoff).not.toHaveProperty("content");
   });
+
+  it("getAgentTerminalExecutionCapsule encodes the terminal identity and optional board", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        mockResponse(200, {
+          jsonBody: {
+            capsule: null,
+            window: { session: "work one", window: "codex/review" },
+            consistent: true,
+          },
+        }),
+      ),
+    );
+
+    await api.getAgentTerminalExecutionCapsule("work one", "codex/review", "release board");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/agent-terminals/execution-capsule?session=work+one&window=codex%2Freview&board=release+board",
+      expect.objectContaining({ headers: expect.any(Headers) }),
+    );
+  });
 });
 
 describe("answerAgentQuestion via_suggestion (Feature A Slice 2)", () => {

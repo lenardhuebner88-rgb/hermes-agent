@@ -571,6 +571,14 @@ export interface AgentTerminalExecutionCapsuleResponse {
   terminal_run_id?: string | null;
 }
 
+export interface AgentTerminalExecutionCapsuleReadResponse {
+  capsule: AgentTerminalExecutionCapsule | null;
+  window: AgentTerminalWindow;
+  consistent: boolean;
+  /** Additive join with terminal-run manifests when the bound window has one. */
+  terminal_run_id?: string | null;
+}
+
 export type AgentTerminalOverviewState = "dead" | "frage" | "laeuft" | "wartet" | "idle";
 
 export interface AgentTerminalOverviewWindow extends AgentTerminalWindow {
@@ -1220,12 +1228,17 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window, action }),
     }),
-  /**
-   * Wave-3 repair surface: GET /api/agent-terminals/execution-capsule is
-   * implemented server-side. Wire a typed client helper here when the UI
-   * needs direct capsule reads outside the bind response path.
-   * Intentionally not exported yet so Wave-3 can own the client shape.
-   */
+  getAgentTerminalExecutionCapsule: (
+    session: string,
+    window: string,
+    board?: string,
+  ) => {
+    const params = new URLSearchParams({ session, window });
+    if (board) params.set("board", board);
+    return fetchJSON<AgentTerminalExecutionCapsuleReadResponse>(
+      `/api/agent-terminals/execution-capsule?${params.toString()}`,
+    );
+  },
   killDeadAgentTerminalWindow: (session: string, window: string) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/kill-dead", {
       method: "POST",
