@@ -1085,7 +1085,9 @@ def test_worktree_writer_lease_serializes_and_reaps_after_group_exit(
     monkeypatch.setattr(
         kb,
         "_terminate_reclaimed_worker",
-        lambda _pid, _claim: {"process_group_terminated": True, "worker_alive": False},
+        # The real terminator reports ``terminated`` — never a
+        # ``process_group_terminated`` key (2026-07-22 stale-lease stall).
+        lambda _pid, _claim: {"terminated": True, "worker_alive": False},
     )
 
     with kb.connect_closing() as conn:
@@ -1124,6 +1126,46 @@ def test_worktree_writer_lease_serializes_and_reaps_after_group_exit(
         assert spawned == [first, second]
         assert result.reaped_worktree_writer_leases == [first]
         assert conn.execute("SELECT task_id FROM worktree_writer_leases").fetchone()[0] == second
+
+
+def test_worktree_writer_lease_reaps_with_real_terminator_contract(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Regression 2026-07-22: the reaper must release a dead writer's lease
+    against the REAL ``_terminate_reclaimed_worker`` return contract
+    (``terminated``), not a mocked ``process_group_terminated`` key. A chain
+    worktree sat held for hours because every dead-pid lease skipped."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import socket
+
+    local_claim = f"{socket.gethostname()}:1"
+    with kb.connect_closing() as conn:
+        owner = kb.create_task(
+            conn, title="finished writer", assignee="coder", kind="code",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        claimed = kb.claim_task(conn, owner, claimer=local_claim)
+        assert claimed is not None and claimed.current_run_id is not None
+        run_id = int(claimed.current_run_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, "
+                " worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"chain:{owner}", owner, owner, run_id, local_claim,
+                    424242, str(repo), None, 1, 1,
+                ),
+            )
+        # Dead pid: real terminator reports terminated=True, no SIG needed.
+        monkeypatch.setattr(kb, "_pid_alive", lambda _pid: False)
+        released = kb._reap_worktree_writer_leases(conn)
+        assert released == [owner]
+        assert conn.execute(
+            "SELECT count(*) FROM worktree_writer_leases"
+        ).fetchone()[0] == 0
 
 
 def test_read_only_task_bypasses_active_worktree_writer_lease(
