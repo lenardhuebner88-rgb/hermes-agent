@@ -5489,8 +5489,8 @@ def create_held_decompose_root(
             "planspec_ingest hold_reason must be exactly "
             f"{_PLANSPEC_INGEST_HOLD_REASON!r}"
         )
-    freigabe_v = (freigabe or "").strip()
-    depth_v = (live_test_depth or "").strip()
+    freigabe_v = (freigabe or "").strip().lower()
+    depth_v = (live_test_depth or "").strip().lower()
     if freigabe_v not in {"complete", "operator"}:
         raise ValueError(f"invalid freigabe: {freigabe!r}")
     if depth_v not in {"smoke", "contract", "ui-real"}:
