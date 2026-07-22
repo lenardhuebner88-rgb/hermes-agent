@@ -90,4 +90,3 @@ describe("W3-S2 structured handoff helpers", () => {
     ).not.toBe("a::b::tr::1");
   });
 });
-
