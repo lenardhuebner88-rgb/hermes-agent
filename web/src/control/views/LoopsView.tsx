@@ -1343,7 +1343,7 @@ function NightModelControl({
                   phase={phase}
                   value={choice}
                   models={models}
-                  disabled={busy || saving}
+                  busy={busy || saving}
                   onChange={(next) => setSelected((prev) => ({ ...prev, [phase]: next }))}
                 />
               </div>
@@ -1365,7 +1365,7 @@ function NightModelControl({
       <div className="flex flex-wrap justify-end gap-2">
         <Button
           size="sm"
-          variant="outline"
+          ghost
           disabled={busy || saving || loading || Object.keys(savedOverrides).length === 0}
           onClick={() => void save({}, t.nightModelsResetDone)}
           className={cn("min-h-[44px] px-3", NIGHT_ACTION_CLASS)}

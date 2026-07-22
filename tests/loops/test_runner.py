@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -274,10 +275,16 @@ def authorize_autoland_fixture(
     test_catalog = {
         "engines": {
             "claude": {"label": "Claude", "models": [
-                "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5",
+                "claude-opus-4-8", "claude-sonnet-5", "claude-sonnet-4-6",
+                "claude-haiku-4-5",
             ]},
-            "codex": {"label": "Codex", "models": ["gpt-5.6-sol", "gpt-5.5", "gpt-5.3-codex"]},
+            "codex": {
+                "label": "Codex",
+                "models": ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex"],
+            },
             "fake": {"label": "Test-Fake", "models": ["fake-1"]},
+            "kimi": {"label": "Kimi", "models": ["kimi-for-coding", "k3"]},
+            "hermes": {"label": "Hermes", "models": ["fake-1"]},
         }
     }
     test_models = packs_dir.parent / "test-models.yaml"
@@ -350,6 +357,53 @@ def fake_engine(monkeypatch):
         return behaviors[kv["PHASE"]](kv, Path(cwd))
 
     monkeypatch.setitem(engines.ENGINES, "fake", run)
+    # Runner validiert effektive Engine/Model-Paare fail-closed gegen models.yaml.
+    # Hermetischer Testkatalog, damit Fake-Packs nicht den Prod-Katalog brauchen.
+    test_catalog = {
+        "engines": {
+            "fake": {
+                "label": "Fake",
+                "models": [
+                    "fake-1",
+                    "fake-2",
+                    "m1",
+                    "m2",
+                    "m3",
+                    "m-a",
+                    "m-b",
+                    "m-c",
+                    "m-x",
+                    "m-y",
+                    "m-z",
+                ],
+            },
+            "claude": {
+                "label": "Claude",
+                "models": [
+                    "claude-opus-4-8",
+                    "claude-sonnet-5",
+                    "claude-sonnet-4-6",
+                    "claude-haiku-4-5",
+                ],
+            },
+            "codex": {
+                "label": "Codex",
+                "models": ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex"],
+            },
+            "kimi": {"label": "Kimi", "models": ["kimi-for-coding", "k3"]},
+            "hermes": {"label": "Hermes", "models": ["fake-1", "gpt-5.6-sol", "local"]},
+            "alibaba-token-plan": {
+                "label": "Alibaba",
+                "models": ["qwen3.8-max-preview"],
+            },
+        }
+    }
+    test_models = Path(tempfile.mkdtemp(prefix="hermes-fake-models-")) / "models.yaml"
+    test_models.write_text(
+        yaml.safe_dump(test_catalog, allow_unicode=True),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runner_module, "MODELS_FILE", test_models)
     return behaviors, calls
 
 
@@ -1283,14 +1337,16 @@ def test_effective_catalog_rejects_unknown_engine_for_any_pack(tmp_path, fake_en
 
 
 def test_autoland_night_role_change_forces_manual_land(tmp_path, fake_engine, monkeypatch):
-    pack, state = load_autoland_fixture(tmp_path, fake_engine, monkeypatch)
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     # Restore real autoland engines for phase_cfg (fixture mutates to fake).
     pack.phases["plan"].engine = "claude"
-    pack.phases["plan"].model = "claude-opus-4-6"
+    pack.phases["plan"].model = "claude-opus-4-8"
     pack.phases["build"].engine = "codex"
     pack.phases["build"].model = "gpt-5.4"
     pack.phases["verify"].engine = "claude"
-    pack.phases["verify"].model = "claude-opus-4-6"
+    pack.phases["verify"].model = "claude-opus-4-8"
+    state = tmp_path / "state" / pack.name
+    state.mkdir(parents=True, exist_ok=True)
     (state / "night-overrides.env").write_text(
         "PHASE_PLAN_ENGINE=kimi\nPHASE_PLAN_MODEL=k3\n",
         encoding="utf-8",
@@ -1299,21 +1355,23 @@ def test_autoland_night_role_change_forces_manual_land(tmp_path, fake_engine, mo
     runner._validate_autoland_runtime()
     assert runner._runtime_autoland_authorized() is False
     runner._prepare_runtime_land_mode()
-    assert runner.land_mode == "manual"
+    assert runner.manual_land_marker.is_file()
     assert (state / "night-overrides.env").is_file()
 
 
 def test_autoland_night_same_role_model_swap_keeps_autoland(tmp_path, fake_engine, monkeypatch):
-    pack, state = load_autoland_fixture(tmp_path, fake_engine, monkeypatch)
+    _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     pack.phases["plan"].engine = "claude"
-    pack.phases["plan"].model = "claude-opus-4-6"
+    pack.phases["plan"].model = "claude-opus-4-8"
     pack.phases["build"].engine = "codex"
     pack.phases["build"].model = "gpt-5.4"
     pack.phases["verify"].engine = "claude"
-    pack.phases["verify"].model = "claude-opus-4-6"
+    pack.phases["verify"].model = "claude-opus-4-8"
+    state = tmp_path / "state" / pack.name
+    state.mkdir(parents=True, exist_ok=True)
     (state / "night-overrides.env").write_text(
         "PHASE_PLAN_ENGINE=claude\n"
-        "PHASE_PLAN_MODEL=claude-opus-4-6\n"
+        "PHASE_PLAN_MODEL=claude-opus-4-8\n"
         "PHASE_BUILD_ENGINE=codex\n"
         "PHASE_BUILD_MODEL=gpt-5.6-sol\n"
         "PHASE_VERIFY_ENGINE=claude\n"

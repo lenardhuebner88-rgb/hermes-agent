@@ -488,13 +488,22 @@ describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
 });
 
 describe("LoopsGrid — Nachtmodelle", () => {
+  // Idle-Pipeline mit plan/build/verify — Night-Modellwahl pro Phase + Rollenwechsel.
+  const nightPipeline: LoopPack = {
+    ...runningPipeline,
+    name: "builder-reviewer-idle",
+    running: false,
+    heartbeat: null,
+    commits_ahead: 0,
+  };
+
   it("lädt Night-Overrides und speichert Diffs über denselben LoopModelPicker", async () => {
     getLoopNightOverrides.mockResolvedValueOnce({
-      pack: "doc-sweep",
+      pack: "builder-reviewer-idle",
       overrides: { PHASE_PLAN_ENGINE: "kimi", PHASE_PLAN_MODEL: "k3" },
     });
     putLoopNightOverrides.mockResolvedValueOnce({
-      pack: "doc-sweep",
+      pack: "builder-reviewer-idle",
       overrides: {
         PHASE_PLAN_ENGINE: "kimi",
         PHASE_PLAN_MODEL: "k3",
@@ -504,12 +513,12 @@ describe("LoopsGrid — Nachtmodelle", () => {
       ok: true,
     });
 
-    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    const { container } = renderInteractiveGrid([nightPipeline]);
     await waitFor(() => {
-      expect(getLoopNightOverrides).toHaveBeenCalledWith("doc-sweep");
+      expect(getLoopNightOverrides).toHaveBeenCalledWith("builder-reviewer-idle");
     });
 
-    const night = within(container).getByTestId("night-models-doc-sweep");
+    const night = within(container).getByTestId("night-models-builder-reviewer-idle");
     expect(within(night).getByText(t.nightModelsTitle)).toBeTruthy();
     // Reuses LoopModelPicker trigger labels (chooseModel(phase)).
     const planTrigger = within(night).getByRole("button", { name: t.chooseModel("plan") });
@@ -529,7 +538,8 @@ describe("LoopsGrid — Nachtmodelle", () => {
     await waitFor(() => {
       expect(putLoopNightOverrides).toHaveBeenCalled();
     });
-    const [, payload] = putLoopNightOverrides.mock.calls.at(-1)!;
+    const [packName, payload] = putLoopNightOverrides.mock.calls.at(-1)!;
+    expect(packName).toBe("builder-reviewer-idle");
     expect(payload.PHASE_PLAN_ENGINE).toBe("kimi");
     expect(payload.PHASE_PLAN_MODEL).toBe("k3");
     expect(payload.PHASE_BUILD_ENGINE).toBe("alibaba-token-plan");
@@ -541,18 +551,18 @@ describe("LoopsGrid — Nachtmodelle", () => {
 
   it("zeigt Manual-Land-Hinweis bei Engine-Rollenwechsel und Reset löscht die Ressource", async () => {
     getLoopNightOverrides.mockResolvedValueOnce({
-      pack: "doc-sweep",
+      pack: "builder-reviewer-idle",
       overrides: { PHASE_PLAN_ENGINE: "kimi", PHASE_PLAN_MODEL: "k3" },
     });
-    putLoopNightOverrides.mockResolvedValueOnce({ pack: "doc-sweep", overrides: {}, ok: true });
+    putLoopNightOverrides.mockResolvedValueOnce({ pack: "builder-reviewer-idle", overrides: {}, ok: true });
 
-    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    const { container } = renderInteractiveGrid([nightPipeline]);
     await waitFor(() => {
-      expect(within(container).getByTestId("night-models-manual-land-doc-sweep")).toBeTruthy();
+      expect(within(container).getByTestId("night-models-manual-land-builder-reviewer-idle")).toBeTruthy();
     });
 
-    const night = within(container).getByTestId("night-models-doc-sweep");
-    expect(within(night).getByTestId("night-models-manual-land-doc-sweep").textContent).toContain(
+    const night = within(container).getByTestId("night-models-builder-reviewer-idle");
+    expect(within(night).getByTestId("night-models-manual-land-builder-reviewer-idle").textContent).toContain(
       t.nightModelsManualLand,
     );
 
@@ -560,15 +570,15 @@ describe("LoopsGrid — Nachtmodelle", () => {
     expect((resetBtn as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(resetBtn);
     await waitFor(() => {
-      expect(putLoopNightOverrides).toHaveBeenCalledWith("doc-sweep", {});
+      expect(putLoopNightOverrides).toHaveBeenCalledWith("builder-reviewer-idle", {});
     });
   });
 
   it("zeigt Load-Fehler aus dem GET", async () => {
     getLoopNightOverrides.mockRejectedValueOnce(new Error("boom"));
-    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    const { container } = renderInteractiveGrid([nightPipeline]);
     await waitFor(() => {
-      const night = within(container).getByTestId("night-models-doc-sweep");
+      const night = within(container).getByTestId("night-models-builder-reviewer-idle");
       expect(within(night).getByRole("alert").textContent).toContain(t.nightModelsLoadFailed);
     });
   });

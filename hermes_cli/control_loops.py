@@ -66,6 +66,8 @@ _OVERRIDE_KEY_RE = re.compile(
     r"|MAX_ROUNDS|MAX_HOURS|FAIL_STREAK|DRY_ROUNDS|DISCORD_CHANNEL|SKIP_PLAN)"
 )
 _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
+# Night-Overrides speichern Engine/Model-IDs — enger als One-Shot (kein Shell-Metachar).
+_NIGHT_OVERRIDE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
 _NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
 NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
 
@@ -198,7 +200,7 @@ def _validate_night_overrides(
                 ),
             )
         sval = str(val).strip()
-        if not sval or not _OVERRIDE_VALUE_RE.fullmatch(sval):
+        if not sval or not _NIGHT_OVERRIDE_VALUE_RE.fullmatch(sval):
             raise HTTPException(
                 status_code=400,
                 detail=f"Night-Override-Wert ungültig für {key}",

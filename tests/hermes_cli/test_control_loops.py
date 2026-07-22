@@ -225,7 +225,10 @@ def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
 def test_models_endpoint_serves_catalog(api):
     client, _calls, _tmp = api
     data = client.get("/api/loops/models").json()
-    assert data["engines"]["claude"]["models"] == ["claude-sonnet-5"]
+    models = data["engines"]["claude"]["models"]
+    assert "claude-sonnet-5" in models
+    assert "claude-opus-4-6" in models  # fixture catalog for partial-pair tests
+    assert data["engines"]["claude"]["label"] == "Claude (Abo)"
 
 
 def test_list_loops_preserves_round_number_from_heartbeat(api):

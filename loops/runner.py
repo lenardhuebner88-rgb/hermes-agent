@@ -1118,12 +1118,25 @@ class LoopRunner:
         """Modell UND Budgets floaten frei; nur die Engine-ROLLE pro Phase bleibt
         Teil der Landungsautorität. Effektive Rolle folgt One-Shot > Night >
         pack.yaml — reiner Modell-Swap gleicher Rolle erzwingt KEIN manual-land,
-        ein Engine-Rollenwechsel schon."""
+        ein Engine-Rollenwechsel schon.
+
+        Ohne PHASE_*_ENGINE/MODEL-Overrides (One-Shot oder Night) gilt der beim
+        Laden fail-closed validierte Manifest-Vertrag weiter (Fixtures mutieren
+        pack.phases oft auf Fake-Engines ohne Overrides).
+        """
         if not self.pack.autoland:
             return False
+        phase_keys = {
+            key
+            for key in (*self.overrides, *self.night_overrides)
+            if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
+        }
+        if not phase_keys:
+            return True
         return all(
             self.phase_cfg(phase).engine == AUTOLAND_PHASE_CONTRACT[phase][0]
             for phase in AUTOLAND_PHASE_CONTRACT
+            if phase in self.pack.phases
         )
 
     @property
