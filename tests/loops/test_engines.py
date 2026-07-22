@@ -485,3 +485,40 @@ def test_resolve_hermes_bin_falls_back_to_bare_name(monkeypatch):
         assert hermes_profile._resolve_hermes_bin() == "hermes"
     finally:
         hermes_profile.REPO_ROOT = real_repo_root
+
+
+def test_alibaba_token_plan_engine_registered_and_command_shape(tmp_path, monkeypatch):
+    from loops.engines import alibaba_token_plan_cli
+
+    assert "alibaba-token-plan" in engines.ENGINES
+    assert engines.ENGINES["alibaba-token-plan"] is alibaba_token_plan_cli.run
+
+    monkeypatch.setenv("HERMES_BIN", "/opt/hermes-bin")
+    env = {
+        "PROMPT": "do work",
+        "MODEL": "qwen3.8-max-preview",
+        "TIMEOUT": "90",
+        "WORKDIR": str(tmp_path),
+    }
+    cmd = alibaba_token_plan_cli.build_command(env)
+    assert cmd[:6] == [
+        "/opt/hermes-bin",
+        "-q",
+        "--provider",
+        "alibaba-token-plan",
+        "-m",
+        "qwen3.8-max-preview",
+    ]
+    assert "--yolo" in cmd
+    assert "--pass-session-id" in cmd
+    assert cmd[-1] == "do work"
+
+
+def test_models_yaml_lists_kimi_k3_and_alibaba_qwen():
+    import yaml
+    from loops.runner import MODELS_FILE
+
+    data = yaml.safe_load(MODELS_FILE.read_text(encoding="utf-8"))
+    engines_cat = data["engines"]
+    assert "k3" in engines_cat["kimi"]["models"]
+    assert engines_cat["alibaba-token-plan"]["models"] == ["qwen3.8-max-preview"]

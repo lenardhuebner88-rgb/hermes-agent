@@ -13,6 +13,23 @@ import type { LoopDetailResponse, LoopFilesResponse, LoopHeartbeatCurrent, LoopM
 
 const t = de.loops;
 
+const getLoopNightOverrides = vi.fn(async (pack: string) => ({ pack, overrides: {} as Record<string, string> }));
+const putLoopNightOverrides = vi.fn(async (pack: string, overrides: Record<string, string>) => ({
+  pack,
+  overrides,
+  ok: true,
+}));
+
+vi.mock("../hooks/loops", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../hooks/loops")>();
+  return {
+    ...actual,
+    getLoopNightOverrides: (pack: string) => getLoopNightOverrides(pack),
+    putLoopNightOverrides: (pack: string, overrides: Record<string, string>) =>
+      putLoopNightOverrides(pack, overrides),
+  };
+});
+
 // Ohne explizites afterEach(cleanup) akkumulieren mehrfache render()-Aufrufe
 // (screen/within) im selben Testfile den DOM — belegt beim Hinzufügen der
 // W3-5-Touch-Target-Tests unten (Cross-Test-Kollision auf "Planung
@@ -21,6 +38,14 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   cleanup();
+  getLoopNightOverrides.mockReset();
+  putLoopNightOverrides.mockReset();
+  getLoopNightOverrides.mockImplementation(async (pack: string) => ({ pack, overrides: {} }));
+  putLoopNightOverrides.mockImplementation(async (pack: string, overrides: Record<string, string>) => ({
+    pack,
+    overrides,
+    ok: true,
+  }));
 });
 
 describe("Loops live clock", () => {
@@ -164,9 +189,10 @@ const brokenPack: LoopPack = {
 const models: LoopModelsResponse = {
   engines: {
     claude: { label: "Claude (Abo)", models: ["claude-fable-5", "claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"] },
-    kimi: { label: "Kimi (Coding-Abo)", models: ["kimi-code/kimi-for-coding"] },
+    kimi: { label: "Kimi (Coding-Abo)", models: ["kimi-code/kimi-for-coding", "k3"] },
     codex: { label: "Codex (ChatGPT-Abo)", models: ["gpt-5.5", "gpt-5.3-codex"] },
     neuralwatt: { label: "NeuralWatt (Abo)", models: ["glm-5.2", "kimi-k2.7-code", "qwen3.6-35b-fast"] },
+    "alibaba-token-plan": { label: "Alibaba Token Plan", models: ["qwen3.8-max-preview"] },
   },
 };
 
@@ -458,6 +484,93 @@ describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
     const timerPanel = input.parentElement?.parentElement?.parentElement;
     expect(timerPanel).not.toBeNull();
     expect(within(timerPanel!).getByText(t.timerDisabledHint("02:07"))).toBeTruthy();
+  });
+});
+
+describe("LoopsGrid — Nachtmodelle", () => {
+  it("lädt Night-Overrides und speichert Diffs über denselben LoopModelPicker", async () => {
+    getLoopNightOverrides.mockResolvedValueOnce({
+      pack: "doc-sweep",
+      overrides: { PHASE_PLAN_ENGINE: "kimi", PHASE_PLAN_MODEL: "k3" },
+    });
+    putLoopNightOverrides.mockResolvedValueOnce({
+      pack: "doc-sweep",
+      overrides: {
+        PHASE_PLAN_ENGINE: "kimi",
+        PHASE_PLAN_MODEL: "k3",
+        PHASE_BUILD_ENGINE: "alibaba-token-plan",
+        PHASE_BUILD_MODEL: "qwen3.8-max-preview",
+      },
+      ok: true,
+    });
+
+    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    await waitFor(() => {
+      expect(getLoopNightOverrides).toHaveBeenCalledWith("doc-sweep");
+    });
+
+    const night = within(container).getByTestId("night-models-doc-sweep");
+    expect(within(night).getByText(t.nightModelsTitle)).toBeTruthy();
+    // Reuses LoopModelPicker trigger labels (chooseModel(phase)).
+    const planTrigger = within(night).getByRole("button", { name: t.chooseModel("plan") });
+    expect(planTrigger.textContent).toContain("k3");
+
+    const buildTrigger = within(night).getByRole("button", { name: t.chooseModel("build") });
+    fireEvent.click(buildTrigger);
+    const option = await within(night).findByRole("button", { name: /qwen3\.8-max-preview/i });
+    fireEvent.click(option);
+
+    const saveBtn = within(night).getByRole("button", { name: t.nightModelsSave });
+    await waitFor(() => {
+      expect((saveBtn as HTMLButtonElement).disabled).toBe(false);
+    });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(putLoopNightOverrides).toHaveBeenCalled();
+    });
+    const [, payload] = putLoopNightOverrides.mock.calls.at(-1)!;
+    expect(payload.PHASE_PLAN_ENGINE).toBe("kimi");
+    expect(payload.PHASE_PLAN_MODEL).toBe("k3");
+    expect(payload.PHASE_BUILD_ENGINE).toBe("alibaba-token-plan");
+    expect(payload.PHASE_BUILD_MODEL).toBe("qwen3.8-max-preview");
+    await waitFor(() => {
+      expect(within(night).getByRole("status").textContent).toContain(t.nightModelsSaved);
+    });
+  });
+
+  it("zeigt Manual-Land-Hinweis bei Engine-Rollenwechsel und Reset löscht die Ressource", async () => {
+    getLoopNightOverrides.mockResolvedValueOnce({
+      pack: "doc-sweep",
+      overrides: { PHASE_PLAN_ENGINE: "kimi", PHASE_PLAN_MODEL: "k3" },
+    });
+    putLoopNightOverrides.mockResolvedValueOnce({ pack: "doc-sweep", overrides: {}, ok: true });
+
+    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    await waitFor(() => {
+      expect(within(container).getByTestId("night-models-manual-land-doc-sweep")).toBeTruthy();
+    });
+
+    const night = within(container).getByTestId("night-models-doc-sweep");
+    expect(within(night).getByTestId("night-models-manual-land-doc-sweep").textContent).toContain(
+      t.nightModelsManualLand,
+    );
+
+    const resetBtn = within(night).getByRole("button", { name: t.nightModelsReset });
+    expect((resetBtn as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(resetBtn);
+    await waitFor(() => {
+      expect(putLoopNightOverrides).toHaveBeenCalledWith("doc-sweep", {});
+    });
+  });
+
+  it("zeigt Load-Fehler aus dem GET", async () => {
+    getLoopNightOverrides.mockRejectedValueOnce(new Error("boom"));
+    const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    await waitFor(() => {
+      const night = within(container).getByTestId("night-models-doc-sweep");
+      expect(within(night).getByRole("alert").textContent).toContain(t.nightModelsLoadFailed);
+    });
   });
 });
 

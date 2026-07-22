@@ -122,6 +122,9 @@ const ENGINE_COLOR: Record<string, string> = {
   codex: "var(--color-data-4)",
   kimi: "var(--color-data-5)",
   hermes: "var(--color-data-2)",
+  neuralwatt: "var(--color-data-3)",
+  "alibaba-token-plan": "var(--color-data-6)",
+  xai: "var(--color-data-7)",
 };
 const engineColor = (engine: string): string => ENGINE_COLOR[engine] ?? "var(--ln-ink-mute)";
 
