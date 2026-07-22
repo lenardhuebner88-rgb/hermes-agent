@@ -123,21 +123,7 @@ Rules:
     child tasks solely because a profile has good statistics; code lanes
     already have a structural review gate on the board.
   - Lane routing table for implementation work:
-      * coder: default code implementation lane (OpenAI-Codex/GPT) for ordinary code tasks.
-      * premium: the Claude code lane (claude-cli on the Claude Max subscription):
-        reasoning-heavy, chain-critical, or hard multi-file work the coder lane
-        can't carry. Also the auto-retry escalation target.
-      * coder-claude: DEPRECATED alias of premium - accepted for back-compat, routes to premium.
-      * reviewer and critic: verdict-only lanes; never assign them
-        kind=code or build/implementation tasks.
-      * research: research lane; never assign it kind=code or
-        build/implementation tasks. Do not invent "researcher" as an alias.
-      * scout: read-only code-recon PREP lane (cheap/fast). OPTIONAL — only for a
-        genuinely large or risky implementation. Use it as a FIRST child
-        (parents=[]) that the heavy implementation child then depends on, so the
-        scout's file/caller/risk brief grounds the coder before it starts. It
-        edits, commits and deploys NOTHING; never assign it kind=code or
-        build/implementation work, and never use it for a small/simple task.
+{{ACTIVE_LANE_ROUTING_BLOCK}}
   - AUDIT / INVENTORY / HYGIENE graphs (token-burn guard, 2026-07-15):
       * Tree-wide file or skill inventory (enumerate SKILL.md / frontmatter /
         links / duplicates under ~/.hermes/skills or profiles/*/skills) is a
@@ -270,6 +256,42 @@ Still output only the single JSON object, no prose outside it."""
 
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def _active_lane_routing_block() -> str:
+    """Render route claims exclusively from the currently active lane."""
+    try:
+        with kb.connect_closing() as conn:
+            lane = kb.get_active_lane(conn) or {}
+    except Exception:
+        lane = {}
+    profiles = lane.get("profiles") if isinstance(lane, dict) else {}
+    profiles = profiles if isinstance(profiles, dict) else {}
+
+    def route(name: str, purpose: str, *, source: str | None = None) -> str:
+        entry = profiles.get(source or name)
+        entry = entry if isinstance(entry, dict) else {}
+        actual = [
+            str(entry.get(field))
+            for field in ("worker_runtime", "provider", "model")
+            if entry.get(field)
+        ]
+        suffix = f" Active route: {' / '.join(actual)}." if actual else " Route is resolved from active lane configuration."
+        return f"      * {name}: {purpose}.{suffix}"
+
+    lines = [
+        route("coder", "default code implementation lane for ordinary code tasks"),
+        route("premium", "reasoning-heavy, chain-critical, or hard multi-file lane; auto-retry escalation target"),
+        route("coder-claude", "deprecated alias of premium", source="premium"),
+        "      * reviewer and critic: verdict-only lanes; never assign them kind=code or implementation tasks.",
+        "      * research: research lane; never assign it kind=code; do not invent researcher as an alias.",
+        "      * scout: optional read-only code-recon PREP lane for genuinely large or risky work; it edits, commits and deploys nothing.",
+    ]
+    return "\n".join(lines)
+
+
+def _system_prompt() -> str:
+    return _SYSTEM_PROMPT.replace("{{ACTIVE_LANE_ROUTING_BLOCK}}", _active_lane_routing_block())
 
 
 @dataclass
@@ -1634,7 +1656,7 @@ def decompose_task(
     parsed, error, detail = _invoke_decomposer(
         task_id,
         user_message=request.user_message,
-        system_prompt=_SYSTEM_PROMPT,
+        system_prompt=_system_prompt(),
         timeout=timeout,
         log_prefix="decompose",
     )
@@ -2006,10 +2028,11 @@ def plan_and_document(
         )
 
     request = _prepare_decomposer_request(task, log_prefix="flow-plan")
+    base_system_prompt = _system_prompt()
     system_prompt = (
-        _SYSTEM_PROMPT + _DOCUMENTED_PROMPT_ADDENDUM
+        base_system_prompt + _DOCUMENTED_PROMPT_ADDENDUM
         if document
-        else _SYSTEM_PROMPT
+        else base_system_prompt
     )
     parsed, error, detail = _invoke_decomposer(
         task_id,

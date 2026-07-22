@@ -17,6 +17,7 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from hermes_cli import kanban_context as context
 from hermes_cli import kanban_db as kb
 
 # ---------------------------------------------------------------------------
@@ -726,15 +727,13 @@ class TestClaudeCliWorkerSpawn:
 
         assert "## Comment thread" not in prompt
         assert "comment from worker" not in prompt
-        assert f"{task.body}\n\n## Knowledge pointers" in prompt
+        assert prompt.index("do the thing") < prompt.index("## Knowledge pointers")
         assert prompt.index("## Knowledge pointers") < prompt.index(
             "Work in the current directory."
         )
 
-    def test_claude_worker_comment_thread_caps_at_ctx_max(self, kanban_home, monkeypatch):
-        """More than _CTX_MAX_COMMENTS comments → only the most-recent N are
-        shown in full, with the same 'earlier comment(s) omitted' marker the
-        Hermes-worker path emits (token cap parity)."""
+    def test_claude_worker_comment_thread_uses_worker_slim_cap(self, kanban_home, monkeypatch):
+        """Claude and Hermes launch briefs use the same worker_slim comment cap."""
         monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
         total = kb._CTX_MAX_COMMENTS + 3
         with kb.connect_closing() as conn:
@@ -749,9 +748,11 @@ class TestClaudeCliWorkerSpawn:
 
         prompt = self._capture_claude_prompt(monkeypatch, task)
 
-        assert f"showing most recent {kb._CTX_MAX_COMMENTS}" in prompt
-        # Oldest 3 dropped; newest retained.
-        assert "comment-number-0\n" not in prompt
+        assert "## Relevant comments" in prompt
+        assert "earlier comments omitted" in prompt
+        assert "comment-number-0" not in prompt
+        worker_slim_comments = context.context_caps("worker_slim")["comments"]
+        assert f"comment-number-{total - worker_slim_comments}" in prompt
         assert f"comment-number-{total - 1}" in prompt
 
     def test_claude_worker_renders_operator_directive(self, kanban_home, monkeypatch):

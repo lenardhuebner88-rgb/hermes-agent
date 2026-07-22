@@ -2469,6 +2469,9 @@ CREATE TABLE IF NOT EXISTS worktree_writer_leases (
 );
 CREATE INDEX IF NOT EXISTS idx_writer_leases_task ON worktree_writer_leases(task_id, run_id);
 
+-- Durable intent log for multi-step PlanSpec mutations (archive→create supersede).
+-- Additive only: recovery drains open rows so a crash between archive and create
+-- cannot leave a permanent half-state that needs manual board surgery.
 CREATE TABLE IF NOT EXISTS planspec_mutation_intents (
     id              TEXT PRIMARY KEY,
     kind            TEXT NOT NULL,
@@ -4486,21 +4489,9 @@ def _conflict_event_fingerprint(payload: dict[str, Any]) -> str:
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
 _CODE_LANE_REASONS = {
-    # B2.2: do NOT hardcode a model/provider here. The `coder` lane resolves to
-    # whatever the lane config routes to (Codex, glm/neuralwatt, …), so the old
-    # "(OpenAI-Codex/GPT)" claim was actively misleading in the contract event
-    # (the incident run used glm-5.2-fast). Describe the lane's PURPOSE only.
-    "coder": "default code implementation lane (model resolved per lane config)",
-    # coder-claude folds into premium (Phase A); kept for any pre-canonicalization
-    # literal lookup. The canonical Claude coder reason lives on `premium`.
-    "coder-claude": (
-        "Claude code lane (alias of premium): reasoning-heavy or chain-critical "
-        "work; requires cross-family review"
-    ),
-    "premium": (
-        "the Claude code lane (claude-cli/Opus): reasoning-heavy, chain-critical, "
-        "or hard multi-file work; requires cross-family review"
-    ),
+    "coder": "default code implementation lane",
+    "coder-claude": "reasoning-heavy code lane (alias of premium); requires cross-family review",
+    "premium": "reasoning-heavy, chain-critical, or hard multi-file code lane; requires cross-family review",
 }
 
 
@@ -4509,10 +4500,18 @@ def _assignee_key(assignee: Optional[str]) -> str:
 
 
 def _reason_for_lane(assignee: Optional[str]) -> str:
-    return _CODE_LANE_REASONS.get(
-        _assignee_key(assignee),
-        "code-role implementation task",
-    )
+    key = _assignee_key(assignee)
+    purpose = _CODE_LANE_REASONS.get(key, "code-role implementation task")
+    canonical = "premium" if key == "coder-claude" else key
+    entry = _active_lane_entry_for_profile(canonical) if canonical else None
+    if not entry:
+        return purpose + " (runtime/provider/model resolved per active lane config)"
+    route = [
+        str(entry.get(field))
+        for field in ("worker_runtime", "provider", "model")
+        if entry.get(field)
+    ]
+    return purpose + (f"; active route: {' / '.join(route)}" if route else "")
 
 
 def role_misuse_reason(
@@ -29212,6 +29211,7 @@ def _build_claude_worker_launch_spec(
     lane_model: Optional[str] = None,
     resolved_model: Optional[str] = None,
     read_only_verdict_lane: bool = False,
+    worker_context: Optional[str] = None,
 ) -> _worker_runtime.WorkerLaunchSpec:
     """Build ``claude -p <prompt>`` policy for the canonical launcher.
 
@@ -29274,57 +29274,25 @@ def _build_claude_worker_launch_spec(
             )
     except Exception:
         git_contract = ""
-    # Prior attempts + comment thread + parent results + role history: a
-    # claude-CLI worker has NO kanban tools and never sees task context via
-    # kanban_show — unlike the Hermes worker path, which gets the full
-    # build_worker_context. Bake the prior-attempts, comment, and
-    # parent-results / role-history blocks into the prompt using the SAME
-    # renderers so the claude-CLI worker gets context parity with the Hermes
-    # worker path, including a retried worker seeing WHY its predecessor
-    # failed/was rejected, the scout-parent advisory labeling, and the
-    # tenant-scoped role history. Fail-soft: a DB hiccup must never block the
-    # spawn — fall back to no block. Board-scoped (not os.environ) so the
-    # fetch matches the board the dispatcher claimed the task from.
-    prior_attempts_block = ""
-    comment_block = ""
-    parent_history_block = ""
-    try:
-        with connect_closing(board=board) as _cconn:
-            _prior_attempts_lines = _render_prior_attempts(_cconn, task.id)
-            _comment_lines = _render_comment_thread(list_comments(_cconn, task.id))
-            _parent_history_lines = _render_parent_results_and_role_history(
-                _cconn,
-                task,
-                field_bytes=_CTX_MAX_FIELD_BYTES,
-                role_history_limit=5,
-            )
-        if _prior_attempts_lines:
-            prior_attempts_block = "\n".join(_prior_attempts_lines).rstrip() + "\n\n"
-        if _comment_lines:
-            comment_block = "\n".join(_comment_lines).rstrip() + "\n\n"
-        if _parent_history_lines:
-            parent_history_block = "\n".join(_parent_history_lines).rstrip() + "\n\n"
-    except Exception:
-        prior_attempts_block = ""
-        comment_block = ""
-        parent_history_block = ""
+    if worker_context is None:
+        try:
+            with connect_closing(board=board) as _cconn:
+                worker_context = build_worker_context(
+                    _cconn, task.id, audience="claude-cli"
+                )
+        except Exception:
+            worker_context = f"# Kanban task {task.id}: {title}\n\n{body}\n"
     profile_instructions = _claude_profile_instructions(env.get("HERMES_HOME"))
     profile_block = (
         f"Profile instructions (SOUL.md):\n{profile_instructions}\n\n"
         if profile_instructions
         else ""
     )
-    knowledge_pointers_block = "\n".join(_render_knowledge_pointers()).rstrip() + "\n\n"
     prompt = (
         "You are an autonomous Hermes kanban worker running headless. "
         "Your task id is in $HERMES_KANBAN_TASK.\n\n"
         f"{profile_block}"
-        f"Task title: {title}\n"
-        f"Task body:\n{body}\n\n"
-        f"{knowledge_pointers_block}"
-        f"{prior_attempts_block}"
-        f"{parent_history_block}"
-        f"{comment_block}"
+        f"{worker_context.rstrip()}\n\n"
         "Work in the current directory.\n\n"
         f"{git_contract}"
         "MANDATORY: your turn is not over until you report back, via the "
@@ -29693,6 +29661,124 @@ def _persisted_spawn_identity(
     return identity
 
 
+def _prepare_worker_brief_launch(
+    task: Task,
+    *,
+    board: Optional[str],
+    audience: str,
+) -> _kanban_context.RenderedWorkerBrief:
+    """Persist brief telemetry and atomically materialize launch overflows."""
+    with contextlib.closing(connect(board=board)) as conn:
+        persisted = get_task(conn, task.id)
+        if persisted is not None and task.current_run_id is None:
+            return render_worker_brief_for_task(conn, task.id, audience=audience)
+    if persisted is None:
+        profile_name = (task.assignee or "").strip().lower()
+        phase = (
+            "verify" if "verifier" in profile_name
+            else "review" if profile_name in {"reviewer", "critic"} or "review" in profile_name
+            else "execute"
+        )
+        profile = _worker_brief_profile(phase, audience)
+        synthetic = _kanban_context.WorkerBriefInput(
+            task_id=task.id,
+            title=task.title,
+            header=f"# Kanban task {task.id}: {task.title}",
+            sections={
+                "assignment": [
+                    _kanban_context.BriefRecord(task.body or task.title, key="body")
+                ]
+            },
+        )
+        return _kanban_context.render_worker_brief(
+            synthetic, phase=phase, audience=audience, profile=profile
+        )
+    from hermes_constants import get_hermes_home
+
+    with contextlib.closing(connect(board=board)) as conn:
+        brief = render_worker_brief_for_task(conn, task.id, audience=audience)
+        run = conn.execute(
+            "SELECT metadata, requested_provider, requested_model, active_provider, active_model "
+            "FROM task_runs WHERE id = ? AND task_id = ?",
+            (task.current_run_id, task.id),
+        ).fetchone()
+        if not run:
+            raise RuntimeError(f"missing run {task.current_run_id} for worker brief launch")
+        try:
+            metadata = json.loads(run["metadata"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        artifacts: list[dict] = []
+        if brief.overflows:
+            directory = get_hermes_home() / "reports" / "by-run"
+            directory.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(directory, 0o700)
+            except OSError:
+                pass
+            for section, content in brief.overflows.items():
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                final_path = directory / f"{task.current_run_id}-{section}-{digest[:16]}.md"
+                temp_path = directory / f".{final_path.name}.{secrets.token_hex(16)}.tmp"
+                fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(content)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(temp_path, final_path)
+                    os.chmod(final_path, 0o600)
+                finally:
+                    try:
+                        temp_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                counts = brief.manifest["section_counts"].get(section, {})
+                artifacts.append(
+                    {
+                        "section": section,
+                        "path": str(final_path),
+                        "sha256": digest,
+                        "omitted_records": int(counts.get("omitted", 0)),
+                    }
+                )
+        metadata.update(
+            {
+                "brief": brief.manifest,
+                "brief_artifacts": artifacts,
+                "requested_provider": run["requested_provider"],
+                "requested_model": run["requested_model"],
+                "actual_provider": run["active_provider"] or run["requested_provider"],
+                "actual_model": run["active_model"] or run["requested_model"],
+            }
+        )
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ?",
+            (json.dumps(metadata, sort_keys=True), task.current_run_id),
+        )
+        _append_event(
+            conn,
+            task.id,
+            "brief_rendered",
+            {
+                "run_id": task.current_run_id,
+                "renderer_version": brief.manifest["renderer_version"],
+                "phase": brief.manifest["phase"],
+                "profile": brief.manifest["profile"],
+                "chars": brief.manifest["chars"],
+                "token_estimate": brief.manifest["token_estimate"],
+                "section_counts": brief.manifest["section_counts"],
+                "payload_fingerprint": brief.manifest["payload_fingerprint"],
+                "artifact_count": len(artifacts),
+            },
+            run_id=task.current_run_id,
+        )
+        conn.commit()
+        return render_worker_brief_for_task(conn, task.id, audience=audience)
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -29854,6 +29940,12 @@ def _default_spawn(
         lane_model = (lane_entry or {}).get("model")
         lane_fallback_providers = (lane_entry or {}).get("fallback_providers") or []
 
+    brief = _prepare_worker_brief_launch(
+        task,
+        board=board,
+        audience="claude-cli" if lane_runtime == "claude-cli" else "hermes",
+    )
+
     # Early branch for claude-CLI worker profiles: launch the `claude` CLI
     # instead of `hermes -p <profile> chat`. The lane's worker_runtime (when
     # set) overrides the profile-config seam in BOTH directions; otherwise
@@ -29889,6 +29981,7 @@ def _default_spawn(
                 lane_model=lane_model,
                 resolved_model=lane_model if route_is_frozen else None,
                 read_only_verdict_lane=_verdict_lane,
+                worker_context=brief.payload,
             )
         )
 
@@ -30866,176 +30959,274 @@ def _stamp_expanded_contract(conn: sqlite3.Connection, task: "Task") -> None:
         )
 
 
-def build_worker_context(
+def _worker_brief_phase(conn: sqlite3.Connection, task: "Task") -> str:
+    """Derive the current run phase from persisted state, never caller hints."""
+    run_id = _current_run_id(conn, task.id)
+    profile = (task.assignee or "").strip().lower()
+    if run_id is not None:
+        row = conn.execute(
+            "SELECT profile FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if row:
+            profile = str(row["profile"] or profile).strip().lower()
+            if _run_originated_from_review(conn, task.id, run_id):
+                return "verify" if "verifier" in profile else "review"
+    if "verifier" in profile:
+        return "verify"
+    if profile in {"reviewer", "critic"} or "review" in profile:
+        return "review"
+    if int(task.continuation_count or 0) > 0:
+        return "retry"
+    prior = conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? AND ended_at IS NOT NULL LIMIT 1",
+        (task.id,),
+    ).fetchone()
+    if prior:
+        return "retry"
+    return "execute"
+
+
+def _worker_brief_profile(phase: str, audience: str) -> str:
+    if audience == "operator":
+        return "operator_detail"
+    if phase in {"verify", "review"}:
+        return "reviewer_review"
+    if phase == "retry":
+        return "retry"
+    return "worker_slim"
+
+
+def _brief_records_from_lines(lines: list[str]) -> list[_kanban_context.BriefRecord]:
+    """Split legacy section output into stable heading/record boundaries."""
+    records: list[_kanban_context.BriefRecord] = []
+    current: list[str] = []
+    for line in lines:
+        if line.startswith("### ") or (line.startswith("## ") and current):
+            text = "\n".join(current).strip()
+            if text:
+                records.append(_kanban_context.BriefRecord(text=text))
+            current = [line]
+        else:
+            current.append(line)
+    text = "\n".join(current).strip()
+    if text:
+        records.append(_kanban_context.BriefRecord(text=text))
+    return records
+
+
+def _complete_review_diff(conn: sqlite3.Connection, task: "Task") -> Optional[str]:
+    """Read the immutable full review diff without persisting it in the board."""
+    if not _run_originated_from_review(conn, task.id, _current_run_id(conn, task.id)):
+        return None
+    submission = _latest_review_submission(conn, task.id) or {}
+    base = str(submission.get("diff_base_commit") or "").strip()
+    candidate = str(submission.get("diff_candidate_commit") or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", base) and re.fullmatch(
+        r"[0-9a-fA-F]{7,64}", candidate
+    ):
+        cwd = task.workspace_path if task.workspace_path and os.path.isdir(task.workspace_path) else None
+        try:
+            proc = subprocess.run(
+                ["git", "diff", "--no-ext-diff", "--unified=3", f"{base}..{candidate}"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return proc.stdout
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return (_latest_review_diff_snapshot(conn, task.id)[2] or None)
+
+
+def _worker_brief_input(
     conn: sqlite3.Connection,
-    task_id: str,
+    task: "Task",
     *,
-    profile: str = "full",
-) -> str:
-    """Return the full text a worker should read to understand its task.
-
-    Order:
-      1. Task title (mandatory).
-      2. Task body (optional opening post, capped at 8 KB).
-      3. Prior attempts on THIS task (most recent ``_CTX_MAX_PRIOR_ATTEMPTS``
-         shown; older attempts collapsed into a one-line summary).
-         Each attempt's ``summary`` / ``error`` / ``metadata`` capped at
-         ``_CTX_MAX_FIELD_BYTES`` each.
-      4. Structured handoff results of every done parent task. Prefers
-         ``run.summary`` / ``run.metadata`` when the parent was executed
-         via a run; falls back to ``task.result`` for older data. Same
-         per-field cap.
-      5. Cross-task role history for the assignee (most recent 5
-         completed runs on other tasks).
-      6. Comment thread (most recent ``_CTX_MAX_COMMENTS`` shown, older
-         collapsed).
-
-    All caps exist so worker prompts stay bounded even on pathological
-    boards (retry-heavy tasks, comment storms). The per-field char cap
-    prevents a single 1 MB summary from dominating context.
-    """
-    task = get_task(conn, task_id)
-    if not task:
-        raise ValueError(f"unknown task {task_id}")
-    profile = _kanban_context.context_profile_for_task(task, profile)
-    caps = _kanban_context.context_caps(profile)
-    prior_attempts_limit = int(caps["prior_attempts"])
-    comments_limit = int(caps["comments"])
-    field_bytes = int(caps["field_bytes"])
-    body_bytes = int(caps["body_bytes"])
-    comment_bytes = int(caps["comment_bytes"])
-    role_history_limit = int(caps["role_history"])
-
-    # Single clock reading shared by every relative-age stamp below, so all
-    # ages in one rendering are consistent.
-    _now = int(time.time())
-
-    lines: list[str] = []
-    lines.append(f"# Kanban task {task.id}: {task.title}")
-    lines.append("")
-    lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
-    lines.append(f"Status:   {task.status}")
+    phase: str,
+    profile: str,
+) -> _kanban_context.WorkerBriefInput:
+    now = int(time.time())
+    header = [
+        f"# Kanban task {task.id}: {task.title}",
+        "",
+        f"Assignee: {task.assignee or '(unassigned)'}",
+        f"Status:   {task.status}",
+    ]
     if task.tenant:
-        lines.append(f"Tenant:   {task.tenant}")
-    lines.append(
-        f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}"
-    )
+        header.append(f"Tenant:   {task.tenant}")
+    header.append(f"Workspace: {task.workspace_kind} @ {task.workspace_path or '(unresolved)'}")
     if task.max_runtime_seconds is not None:
+        header.append(f"Max runtime: {task.max_runtime_seconds}s")
         terminal_timeout = _worker_terminal_timeout_env(
             task.max_runtime_seconds,
             os.environ.get("TERMINAL_TIMEOUT"),
         )
-        effective_terminal_timeout = terminal_timeout or os.environ.get(
-            "TERMINAL_TIMEOUT"
-        )
-        lines.append(f"Max runtime: {task.max_runtime_seconds}s")
-        if effective_terminal_timeout:
-            lines.append(f"Terminal timeout: {effective_terminal_timeout}s")
+        if terminal_timeout:
+            header.append(f"Terminal timeout: {terminal_timeout}s")
     if task.branch_name:
-        lines.append(f"Branch:   {task.branch_name}")
-    if int(task.continuation_count or 0) > 0:
-        continuation_limit = _resolve_max_continuations(task)
-        lines.append("")
-        lines.append(
-            f"This is continuation run {int(task.continuation_count or 0)}/{continuation_limit}."
-        )
-        lines.append(
-            "Continue from the latest run summary/log. Do not restart from scratch."
-        )
-        lines.append(
-            "If complete, call kanban_complete. If blocked, call kanban_block."
-        )
-    lines.append("")
+        header.append(f"Branch:   {task.branch_name}")
 
-    # Knowledge pointers — static pointers to external resources workers may
-    # consult on demand. No content is inlined here; workers read on-disk files
-    # only when the pointer is relevant to their specific task.
-    lines.extend(_render_knowledge_pointers())
-
+    assignment: list[_kanban_context.BriefRecord] = []
     if task.body and task.body.strip():
-        # PlanSpec B: when the body references a known contract_profile (and
-        # carries no inline scope_contract block), render the expanded template
-        # contract instead of the raw boilerplate. Pure render — the permanent
-        # trace is stamped onto run.metadata by the dispatcher, not here.
         expanded = expand_contract_for_body(task.body)
-        lines.append("## Body")
+        body = _strip_contract_profile_line(task.body) if expanded is not None else task.body
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", body) if part.strip()]
+        assignment.extend(
+            _kanban_context.BriefRecord(text=part, key=f"body:{idx}")
+            for idx, part in enumerate(paragraphs)
+        )
         if expanded is not None:
-            cleaned = _strip_contract_profile_line(task.body)
-            if cleaned:
-                lines.append(_cap(cleaned, body_bytes))
-                lines.append("")
-            lines.extend(_render_expanded_contract_block(expanded))
-        else:
-            lines.append(_cap(task.body, body_bytes))
-        lines.append("")
-
-    # A2: verifier-only section (acceptance checklist + changed-files snapshot).
-    # Empty for every non-review run, so an ordinary worker's context is
-    # byte-identical to the pre-A2 output.
-    lines.extend(_render_review_verifier_section(conn, task_id))
-
-    # Attachments — files uploaded to this task (PDFs, source docs,
-    # images). Surface the absolute on-disk path so the worker, which has
-    # full file-tool access, can read them directly (read_file, terminal
-    # `pdftotext`, etc.). On the local terminal backend the path resolves
-    # as-is; remote backends need the kanban attachments dir mounted.
-    attachments = list_attachments(conn, task_id)
+            assignment.extend(_brief_records_from_lines(_render_expanded_contract_block(expanded)))
+    assignment.append(
+        _kanban_context.BriefRecord(
+            text="\n".join(_render_knowledge_pointers()).strip(),
+            key="knowledge-pointers",
+        )
+    )
+    attachments = list_attachments(conn, task.id)
     if attachments:
-        lines.append("## Attachments")
+        assignment.append(_kanban_context.BriefRecord(text="## Attachments", key="attachments"))
+    for att in attachments:
+        assignment.append(
+            _kanban_context.BriefRecord(
+                text=f"Attachment `{att.filename}` ({att.content_type or 'unknown type'}, {att.size} bytes): `{att.stored_path}`",
+                key=f"attachment:{att.id}",
+            )
+        )
+    if int(task.continuation_count or 0) > 0:
+        assignment.insert(
+            0,
+            _kanban_context.BriefRecord(
+                text=(
+                    f"This is continuation run {int(task.continuation_count or 0)}/{_resolve_max_continuations(task)}. "
+                    "Continue from the latest run summary/log; do not restart from scratch."
+                ),
+                key="continuation",
+            ),
+        )
+
+    extraction_caps = _kanban_context.context_caps(profile)
+    parent_and_recent = _render_parent_results_and_role_history(
+        conn,
+        task,
+        field_bytes=int(extraction_caps["field_bytes"]),
+        role_history_limit=int(extraction_caps["role_history"]),
+        now=now,
+    )
+    split_at = next(
+        (i for i, line in enumerate(parent_and_recent) if line.startswith("## Recent work")),
+        len(parent_and_recent),
+    )
+    parent_lines = parent_and_recent[:split_at]
+    recent_lines = parent_and_recent[split_at:]
+    comments = _render_comment_thread(
+        list_comments(conn, task.id),
+        max_comments=int(extraction_caps["comments"]),
+        comment_bytes=int(extraction_caps["comment_bytes"]),
+    )
+    runs = _render_prior_attempts(
+        conn,
+        task.id,
+        prior_attempts_limit=int(extraction_caps["prior_attempts"]),
+        field_bytes=int(extraction_caps["field_bytes"]),
+        now=now,
+    )
+    findings = _render_review_verifier_section(conn, task.id)
+    full_diff = _complete_review_diff(conn, task)
+    diff_records = []
+    if full_diff is not None:
+        diff_records.append(
+            _kanban_context.BriefRecord(
+                text="```diff\n" + full_diff.rstrip() + "\n```",
+                canonical_text=full_diff,
+                key="immutable-review-diff",
+            )
+        )
+    sections = {
+        "assignment": assignment,
+        "parent_evidence": _brief_records_from_lines(parent_lines),
+        "findings": _brief_records_from_lines(findings),
+        "comments": _brief_records_from_lines(comments),
+        "runs": _brief_records_from_lines(runs),
+        "recent_work": _brief_records_from_lines(recent_lines),
+        "review_diff": diff_records,
+    }
+    return _kanban_context.WorkerBriefInput(
+        task_id=task.id,
+        title=task.title,
+        header="\n".join(header).rstrip(),
+        sections=sections,
+    )
+
+
+def _current_brief_artifacts(conn: sqlite3.Connection, task: "Task") -> list[dict]:
+    run_id = _current_run_id(conn, task.id)
+    if run_id is None:
+        return []
+    row = conn.execute("SELECT metadata FROM task_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row or not row["metadata"]:
+        return []
+    try:
+        metadata = json.loads(row["metadata"])
+    except (TypeError, ValueError):
+        return []
+    artifacts = metadata.get("brief_artifacts") if isinstance(metadata, dict) else None
+    return artifacts if isinstance(artifacts, list) else []
+
+
+def render_worker_brief_for_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    audience: Optional[str] = None,
+    profile: Optional[str] = None,
+) -> _kanban_context.RenderedWorkerBrief:
+    """DB adapter around the pure canonical brief renderer."""
+    task = get_task(conn, task_id)
+    if not task:
+        raise ValueError(f"unknown task {task_id}")
+    if audience is None:
+        audience = "hermes" if os.environ.get("HERMES_KANBAN_TASK") else "operator"
+    phase = _worker_brief_phase(conn, task)
+    # Caller profile hints are retained only for API compatibility; phase and
+    # audience deterministically select the actual profile for a new run.
+    resolved_profile = _worker_brief_profile(phase, audience)
+    brief = _kanban_context.render_worker_brief(
+        _worker_brief_input(conn, task, phase=phase, profile=resolved_profile),
+        phase=phase,
+        audience=audience,
+        profile=resolved_profile,
+    )
+    artifacts = _current_brief_artifacts(conn, task)
+    if not artifacts:
+        return brief
+    lines = [brief.payload.rstrip(), "", "## Overflow artifacts"]
+    for artifact in artifacts:
         lines.append(
-            "Files attached to this task. Read them with the file/terminal "
-            "tools at the absolute paths below:"
+            f"- `{artifact.get('section', 'unknown')}`: {artifact.get('omitted_records', 0)} omitted record(s); "
+            f"sha256 `{artifact.get('sha256', '')}`; full content: `{artifact.get('path', '')}`"
         )
-        for att in attachments:
-            size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
-            size_str = f", {size_kb} KB" if size_kb else ""
-            ctype = f", {att.content_type}" if att.content_type else ""
-            lines.append(f"- `{att.filename}`{ctype}{size_str} → `{att.stored_path}`")
-        lines.append("")
-
-    # Prior attempts — show closed runs so a retrying worker sees the
-    # history. Skip the currently-active run (that's this worker). Rendering
-    # is shared with the claude-CLI worker path (see _render_prior_attempts)
-    # so both runtimes show the identical view.
-    lines.extend(
-        _render_prior_attempts(
-            conn,
-            task_id,
-            prior_attempts_limit=prior_attempts_limit,
-            field_bytes=field_bytes,
-            now=_now,
-        )
+    return _kanban_context.RenderedWorkerBrief(
+        payload="\n".join(lines).rstrip() + "\n",
+        manifest=brief.manifest,
+        overflows=brief.overflows,
     )
 
-    # Parent task results + cross-task role history.
-    # Rendering is shared with the claude-CLI worker path
-    # (see _render_parent_results_and_role_history) so both runtimes show
-    # the identical view — including the scout-parent advisory labeling
-    # and the tenant-scoped, scout-suppressed role history.
-    lines.extend(
-        _render_parent_results_and_role_history(
-            conn,
-            task,
-            field_bytes=field_bytes,
-            role_history_limit=role_history_limit,
-            now=_now,
-        )
-    )
 
-    # Comments: cap at the most-recent _CTX_MAX_COMMENTS so comment-storm
-    # tasks don't blow out the worker's prompt. Older comments collapse into a
-    # one-line marker like prior attempts. Rendering is shared with the
-    # claude-CLI worker path (see _render_comment_thread) so both runtimes show
-    # the identical view.
-    lines.extend(
-        _render_comment_thread(
-            list_comments(conn, task_id),
-            max_comments=comments_limit,
-            comment_bytes=comment_bytes,
-        )
-    )
-
-    return "\n".join(lines).rstrip() + "\n"
+def build_worker_context(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    profile: Optional[str] = None,
+    audience: Optional[str] = None,
+) -> str:
+    """Return the canonical phase-aware, bounded context payload."""
+    return render_worker_brief_for_task(
+        conn, task_id, audience=audience, profile=profile
+    ).payload
 
 
 # ---------------------------------------------------------------------------

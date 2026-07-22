@@ -951,7 +951,8 @@ def test_3a_coder_claude_contract_uses_canonical_lane_reason(
     assert task.body is not None
     # Phase A: coder-claude folds into the canonical Claude coder lane `premium`.
     assert task.assignee == "premium"
-    assert "Reason for lane: the Claude code lane (claude-cli/Opus)" in task.body
+    assert "Reason for lane: reasoning-heavy" in task.body
+    assert "claude-cli/Opus" not in task.body
     contract = [e for e in events if e.kind == "code_task_contract_inferred"][-1]
     payload = contract.payload or {}
     assert payload["assignee_lane"] == "premium"

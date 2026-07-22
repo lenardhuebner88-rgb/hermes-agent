@@ -874,7 +874,7 @@ def test_decompose_prompt_mentions_scope_contract_allowed_tools():
 
 def test_decompose_prompt_offers_scout_prep_lane():
     """Slice c: the decomposer may propose a read-only scout recon predecessor."""
-    prompt = decomp._SYSTEM_PROMPT
+    prompt = decomp._system_prompt()
     assert "scout:" in prompt          # listed in the lane routing table
     assert "recon" in prompt.lower()
     assert "read-only" in prompt.lower()
@@ -908,24 +908,23 @@ def test_decompose_prompt_documents_optional_kind():
 
 
 def test_decompose_prompt_documents_3a_lane_policy():
-    prompt = decomp._SYSTEM_PROMPT
+    prompt = decomp._system_prompt()
     assert "Lane routing table" in prompt
     assert "coder-claude" in prompt
     assert "reviewer and critic: verdict-only lanes" in prompt
     assert "research: research lane" in prompt
-    assert 'Do not invent "researcher" as an alias' in prompt
+    assert "do not invent researcher as an alias" in prompt.lower()
     assert "code|research|review|ops|text" in prompt
     assert "null if unsure" in prompt
 
 
 def test_decompose_prompt_separates_coder_and_claude_coder():
-    """Phase A: two clean coder families in the lane table —
-    coder = Codex/GPT default; premium = the Claude coder; coder-claude =
-    deprecated alias of premium; no invented opus-coder lane."""
-    prompt = decomp._SYSTEM_PROMPT
-    assert "OpenAI-Codex/GPT" in prompt
-    assert "premium: the Claude code lane" in prompt
-    assert "DEPRECATED alias of premium" in prompt
+    """Code routes are rendered from the active lane, including aliases."""
+    prompt = decomp._system_prompt()
+    assert "coder: default code implementation lane" in prompt
+    assert "premium: reasoning-heavy" in prompt
+    assert "coder-claude: deprecated alias of premium" in prompt
+    assert "Active route:" in prompt or "resolved from active lane configuration" in prompt
     assert "opus-coder" not in prompt
 
 

@@ -25,6 +25,16 @@ _CTX_CAP_PROFILES = {
         "comment_bytes": _CTX_MAX_COMMENT_BYTES,
         "role_history": 5,
     },
+    # Operator inspection is deliberately bounded too, while retaining the
+    # historical full-profile extraction caps.
+    "operator_detail": {
+        "prior_attempts": _CTX_MAX_PRIOR_ATTEMPTS,
+        "comments": _CTX_MAX_COMMENTS,
+        "field_bytes": _CTX_MAX_FIELD_BYTES,
+        "body_bytes": _CTX_MAX_BODY_BYTES,
+        "comment_bytes": _CTX_MAX_COMMENT_BYTES,
+        "role_history": 5,
+    },
     # Compact review context: keep the wide opening-body window (AC, bounded
     # diff, gates all live in the body) and the per-field byte cap (previous
     # stage findings / delta / residual risk live in the most recent run
@@ -146,3 +156,157 @@ def render_comment_thread(
             lines.append(cap_text(c.body, comment_bytes))
             lines.append("")
     return lines
+
+
+"""Pure, budgeted rendering for Kanban worker briefs.
+
+Database access and overflow-artifact materialization deliberately live at the
+launch boundary in :mod:`hermes_cli.kanban_db`. This module only turns a
+canonical task/section input into a bounded payload plus telemetry.
+"""
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
+
+RENDERER_VERSION = "worker-brief-v1"
+SECTION_ORDER = (
+    "assignment",
+    "parent_evidence",
+    "findings",
+    "comments",
+    "runs",
+    "recent_work",
+    "review_diff",
+)
+SECTION_LABELS = {
+    "assignment": "Assignment, acceptance criteria, and scope",
+    "parent_evidence": "Parent and scout evidence",
+    "findings": "Current findings",
+    "comments": "Relevant comments",
+    "runs": "Prior runs",
+    "recent_work": "Recent work",
+    "review_diff": "Review diff",
+}
+PROFILE_BUDGETS = {
+    "worker_slim": {"total": 48000, "assignment": 24000, "parent_evidence": 10000, "findings": 6000, "comments": 7000, "runs": 6000, "recent_work": 3000, "review_diff": 8000},
+    "retry": {"total": 56000, "assignment": 24000, "parent_evidence": 10000, "findings": 10000, "comments": 7000, "runs": 10000, "recent_work": 3000, "review_diff": 8000},
+    "reviewer_review": {"total": 64000, "assignment": 22000, "parent_evidence": 12000, "findings": 8000, "comments": 8000, "runs": 8000, "recent_work": 2000, "review_diff": 16000},
+    "operator_detail": {"total": 80000, "assignment": 28000, "parent_evidence": 16000, "findings": 12000, "comments": 12000, "runs": 12000, "recent_work": 6000, "review_diff": 20000},
+}
+_RELATIVE_TIME_RE = re.compile(r"\b(?:just now|\d+\s*(?:s|sec(?:ond)?s?|m|min(?:ute)?s?|h|hours?|d|days?|w|weeks?)\s+ago)\b", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class BriefRecord:
+    """One indivisible record in a priority-ordered brief section."""
+    text: str
+    canonical_text: str | None = None
+    key: str | None = None
+
+
+@dataclass(frozen=True)
+class WorkerBriefInput:
+    """Canonical task input consumed by render_worker_brief."""
+    task_id: str
+    title: str
+    header: str
+    sections: Mapping[str, Sequence[BriefRecord]]
+
+
+@dataclass(frozen=True)
+class RenderedWorkerBrief:
+    payload: str
+    manifest: dict[str, Any]
+    overflows: Mapping[str, str]
+
+
+def _canonical_record(record: BriefRecord) -> str:
+    text = record.canonical_text if record.canonical_text is not None else record.text
+    return _RELATIVE_TIME_RE.sub("<relative-time>", text).rstrip()
+
+
+def _fingerprint(task: WorkerBriefInput, *, phase: str, audience: str, profile: str) -> str:
+    canonical = {
+        "renderer_version": RENDERER_VERSION,
+        "task_id": task.task_id,
+        "title": task.title,
+        "phase": phase,
+        "profile": profile,
+        "header": _RELATIVE_TIME_RE.sub("<relative-time>", task.header).rstrip(),
+        "sections": {
+            name: [{"key": record.key, "text": _canonical_record(record)} for record in task.sections.get(name, ())]
+            for name in SECTION_ORDER
+        },
+    }
+    raw = json.dumps(canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def render_worker_brief(task: WorkerBriefInput, *, phase: str, audience: str, profile: str) -> RenderedWorkerBrief:
+    """Render one bounded worker payload without I/O or side effects.
+
+    Records are admitted whole, in section/record priority order. Any record
+    that exceeds a section or total budget is omitted visibly and returned in
+    overflows for the launch boundary to materialize.
+    """
+    if phase not in {"execute", "retry", "verify", "review"}:
+        raise ValueError(f"unsupported worker brief phase: {phase}")
+    if profile not in PROFILE_BUDGETS:
+        raise ValueError(f"unsupported worker brief profile: {profile}")
+    budgets = PROFILE_BUDGETS[profile]
+    prefix = task.header.rstrip()
+    parts = [prefix] if prefix else []
+    used = len(prefix)
+    overflows: dict[str, str] = {}
+    section_counts: dict[str, dict[str, int]] = {}
+
+    for name in SECTION_ORDER:
+        records = tuple(task.sections.get(name, ()))
+        if not records:
+            continue
+        heading = f"## {SECTION_LABELS[name]}"
+        section_used = 0
+        included: list[str] = []
+        omitted: list[BriefRecord] = []
+        for record in records:
+            text = record.text.rstrip()
+            if not text:
+                continue
+            record_cost = len(text) + (2 if included else 0)
+            projected_total = used + len(heading) + 4 + section_used + record_cost
+            if section_used + record_cost <= int(budgets[name]) and projected_total <= int(budgets["total"]):
+                included.append(text)
+                section_used += record_cost
+            else:
+                omitted.append(record)
+        block_lines = [heading]
+        if included:
+            block_lines.append("\n\n".join(included))
+        if omitted:
+            block_lines.append(f"[{len(omitted)} record(s) omitted at record boundaries; full overflow is materialized at launch.]")
+            overflows[name] = "\n\n".join(record.text.rstrip() for record in records if record.text.rstrip()) + "\n"
+        block = "\n".join(block_lines)
+        parts.append(block)
+        used += len(block) + 2
+        section_counts[name] = {
+            "available": len(records),
+            "included": len(included),
+            "omitted": len(omitted),
+            "included_chars": section_used,
+        }
+
+    payload = "\n\n".join(parts).rstrip() + "\n"
+    manifest = {
+        "renderer_version": RENDERER_VERSION,
+        "phase": phase,
+        "audience": audience,
+        "profile": profile,
+        "chars": len(payload),
+        "token_estimate": (len(payload) + 3) // 4,
+        "section_counts": section_counts,
+        "omitted_records": sum(v["omitted"] for v in section_counts.values()),
+        "payload_fingerprint": _fingerprint(task, phase=phase, audience=audience, profile=profile),
+    }
+    return RenderedWorkerBrief(payload=payload, manifest=manifest, overflows=overflows)

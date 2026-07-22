@@ -502,7 +502,7 @@ def _handle_show(args: dict, **kw) -> str:
                     # agent can include it directly if it wants. This is
                     # the same string build_worker_context returns to the
                     # dispatcher at spawn time.
-                    "worker_context": kb.build_worker_context(conn, tid, profile="worker_slim"),
+                    "worker_context": kb.build_worker_context(conn, tid, audience="hermes" if os.environ.get("HERMES_KANBAN_TASK") else "operator"),
                 })
 
             return json.dumps({
@@ -516,7 +516,7 @@ def _handle_show(args: dict, **kw) -> str:
                 # agent can include it directly if it wants. This is
                 # the same string build_worker_context returns to the
                 # dispatcher at spawn time.
-                "worker_context": kb.build_worker_context(conn, tid),
+                "worker_context": kb.build_worker_context(conn, tid, audience="hermes" if os.environ.get("HERMES_KANBAN_TASK") else "operator"),
             })
         finally:
             conn.close()

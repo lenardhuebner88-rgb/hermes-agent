@@ -4198,7 +4198,7 @@ def _cmd_runs(args: argparse.Namespace) -> int:
 
 def _cmd_context(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
-        text = kb.build_worker_context(conn, args.task_id)
+        text = kb.build_worker_context(conn, args.task_id, audience="operator")
     print(text)
     return 0
 
