@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -24,6 +25,8 @@ from typing import Callable, Mapping, Sequence
 
 from hermes_cli.config import get_hermes_home
 from hermes_cli.projects_overview import load_projects_registry
+from hermes_constants import terminal_runs_root
+from utils import atomic_json_write
 
 try:
     import fcntl as _fcntl
@@ -48,6 +51,75 @@ _AUTO_CAPTURE_VARIANT = "question-v1"
 _EVENT_LOG_MAX_BYTES = 256 * 1024
 _EVENT_LOG_GENERATIONS = 3
 _EVENT_LOG_LOCK = threading.Lock()
+_TERMINAL_RUN_ID_OPTION = "@hermes_terminal_run_id"
+_START_MODE_OPTION = "@hermes_start_mode"
+_CONTEXT_PROFILE_OPTION = "@hermes_context_profile"
+_BASE_SHA_OPTION = "@hermes_base_sha"
+_NATIVE_SESSION_OPTION = "@hermes_native_session_id"
+_WORKTREE_PATH_OPTION = "@hermes_worktree_path"
+_WORKTREE_BRANCH_OPTION = "@hermes_worktree_branch"
+_CWD_OPTION = "@hermes_cwd"
+_START_MODE_FREE = "free"
+_START_MODE_ISOLATED_WRITE = "isolated_write"
+_CONTEXT_PROFILE_FULL = "full"
+_CONTEXT_PROFILE_LEAN = "lean"
+_ACTION_FRESH = "fresh"
+_ACTION_RESUME = "resume"
+_ACTION_FORK = "fork"
+_ACTION_LEAN = "lean"
+_TERMINAL_MANIFEST_SCHEMA_VERSION = 1
+_TERMINAL_WORKTREE_DIRNAME = "terminal"
+_TERMINAL_WORKTREE_GROUP = "terminal_worktree"
+_TERMINAL_PRUNE_MIN_AGE_SECONDS = 7 * 24 * 60 * 60
+_VALID_START_MODES = frozenset({_START_MODE_FREE, _START_MODE_ISOLATED_WRITE})
+_VALID_CONTEXT_PROFILES = frozenset({_CONTEXT_PROFILE_FULL, _CONTEXT_PROFILE_LEAN})
+_VALID_RESPAWN_ACTIONS = frozenset({_ACTION_FRESH, _ACTION_RESUME, _ACTION_FORK})
+# Closed capability matrix: only proven installed CLI semantics are enabled.
+# Lean is a start-time context profile, never a free-form flag approximation.
+_AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
+    "hermes": {
+        "fresh": True,
+        "resume": False,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+    },
+    "claude": {
+        "fresh": True,
+        "resume": True,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+    },
+    "codex": {
+        "fresh": True,
+        "resume": True,
+        "fork": False,
+        "lean": True,
+        "compact": False,
+    },
+    "kimi": {
+        "fresh": True,
+        "resume": False,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+    },
+    "grok": {
+        "fresh": True,
+        "resume": False,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+    },
+    "qwen": {
+        "fresh": True,
+        "resume": False,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+    },
+}
 
 # Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
 # Used by window_exists / show / idempotent kill to distinguish not-found from
@@ -264,6 +336,51 @@ class IsolatedAttachTarget:
 
 
 @dataclass(frozen=True)
+class TerminalLaunchContext:
+    """Server-controlled launch identity for one TMAX window.
+
+    Browser payloads may select kind/workdir/start_mode/context_profile/action,
+    but never options or argv. The service stamps these fields into tmux options
+    and a profile-independent terminal-run manifest.
+    """
+
+    terminal_run_id: str
+    agent_kind: str
+    start_mode: str
+    context_profile: str
+    cwd: str
+    base_sha: str | None = None
+    native_session_id: str | None = None
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
+    action: str = _ACTION_FRESH
+    capsule_correlation_id: str | None = None
+    argv: tuple[str, ...] = ()
+
+    def to_manifest(self, *, window: str, session: str, status: str = "running") -> dict[str, object]:
+        return {
+            "schema_version": _TERMINAL_MANIFEST_SCHEMA_VERSION,
+            "terminal_run_id": self.terminal_run_id,
+            "agent_kind": self.agent_kind,
+            "start_mode": self.start_mode,
+            "context_profile": self.context_profile,
+            "cwd": self.cwd,
+            "base_sha": self.base_sha,
+            "native_session_id": self.native_session_id,
+            # Free mode always records an explicit null worktree path.
+            "worktree_path": self.worktree_path,
+            "worktree_branch": self.worktree_branch,
+            "action": self.action,
+            "argv": list(self.argv),
+            "window": window,
+            "session": session,
+            "status": status,
+            "capsule_correlation_id": self.capsule_correlation_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+
+@dataclass(frozen=True)
 class TmuxWindow:
     session: str
     window: str
@@ -282,6 +399,13 @@ class TmuxWindow:
     task_id: str | None = None
     run_id: int | None = None
     correlation_id: str | None = None
+    terminal_run_id: str | None = None
+    start_mode: str | None = None
+    context_profile: str | None = None
+    base_sha: str | None = None
+    native_session_id: str | None = None
+    worktree_path: str | None = None
+    worktree_branch: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -298,6 +422,13 @@ class TmuxWindow:
             "task_id": self.task_id,
             "run_id": self.run_id,
             "correlation_id": self.correlation_id,
+            "terminal_run_id": self.terminal_run_id,
+            "start_mode": self.start_mode,
+            "context_profile": self.context_profile,
+            "base_sha": self.base_sha,
+            "native_session_id": self.native_session_id,
+            "worktree_path": self.worktree_path,
+            "worktree_branch": self.worktree_branch,
         }
 
 
@@ -753,7 +884,11 @@ class TmuxAgentSessionService:
 
         for path, (project_name, branch) in sorted(
             worktrees.items(), key=worktree_mtime, reverse=True
-        )[:_WORKTREE_LIMIT]:
+        ):
+            # Terminal isolated-write worktrees use a separate picker group and
+            # must not consume the regular fifteen worktree slots.
+            if ".worktrees/terminal/" in f"{path.as_posix()}/" or path.parent.name == _TERMINAL_WORKTREE_DIRNAME and path.parent.parent.name == ".worktrees":
+                continue
             options.append(
                 {
                     "key": f"dir:{path}",
@@ -762,6 +897,8 @@ class TmuxAgentSessionService:
                     "group": "worktree",
                 }
             )
+            if sum(1 for opt in options if opt.get("group") == "worktree") >= _WORKTREE_LIMIT:
+                break
         return options
 
     @staticmethod
@@ -773,6 +910,12 @@ class TmuxAgentSessionService:
                 options = TmuxAgentSessionService._enumerate_workdir_options()
                 _workdir_cache = (time.monotonic(), options)
             return [dict(option) for option in _workdir_cache[1]]
+
+    def workdir_options_with_terminal(self) -> list[dict[str, object]]:
+        """Regular workdirs plus terminal-worktree group (separate from the 15-slot cap)."""
+        options = self.workdir_options()
+        options.extend(self._enumerate_terminal_worktree_options())
+        return options
 
     @staticmethod
     def resolve_workdir(workdir: str | None) -> tuple[str, Path]:
@@ -789,7 +932,14 @@ class TmuxAgentSessionService:
             }
             path = enumerated.get(key)
             if path is None:
-                raise InvalidTarget(f"unknown workdir: {workdir!r}")
+                # Terminal isolated-write worktrees are outside the regular
+                # 15-slot cache; accept an existing .worktrees/terminal path.
+                candidate = Path(key[4:]).expanduser()
+                posix = candidate.as_posix()
+                if candidate.is_dir() and "/.worktrees/terminal/" in f"{posix}/":
+                    path = candidate
+                else:
+                    raise InvalidTarget(f"unknown workdir: {workdir!r}")
         else:
             raise InvalidTarget(f"unknown workdir: {workdir!r}")
         if not path.is_dir():
@@ -974,6 +1124,15 @@ class TmuxAgentSessionService:
                     expected_pane_id=expected_pane_id,
                 )
             raise
+        # Additive join with terminal-run manifests (one correlation truth only).
+        stamped_run_id = self._read_window_option(session, window, _TERMINAL_RUN_ID_OPTION)
+        if stamped_run_id:
+            self.update_terminal_manifest(
+                stamped_run_id,
+                capsule_correlation_id=correlation_id,
+                task_id=task_id,
+                run_id=int(run_id),
+            )
         self._log_event(
             "execution_correlation_stamped",
             session=session,
@@ -982,6 +1141,7 @@ class TmuxAgentSessionService:
             task_id=task_id,
             run_id=int(run_id),
             correlation_id=correlation_id,
+            terminal_run_id=stamped_run_id,
         )
         return previous
 
@@ -1000,15 +1160,362 @@ class TmuxAgentSessionService:
             return False
         return True
 
+
+    # ----- terminal-run identity / manifests ----------------------------
+    def terminal_runs_root(self) -> Path:
+        """Profile-independent root for this service instance."""
+        return terminal_runs_root(explicit_home=self.hermes_home)
+
+    def _lean_context_allowlist(self) -> set[str]:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config() or {}
+        except Exception:
+            return set()
+        raw = cfg.get("agent_terminals") if isinstance(cfg, dict) else None
+        if not isinstance(raw, dict):
+            return set()
+        items = raw.get("lean_context_profiles") or []
+        if not isinstance(items, list):
+            return set()
+        return {str(item).strip() for item in items if str(item).strip()}
+
+    def agent_context_actions(self, kind: str) -> dict[str, bool]:
+        base = dict(_AGENT_CONTEXT_ACTIONS.get(kind, {
+            "fresh": True,
+            "resume": False,
+            "fork": False,
+            "lean": False,
+            "compact": False,
+        }))
+        # Lean requires both a proven adapter and an operator allowlist entry.
+        if base.get("lean") and kind not in self._lean_context_allowlist():
+            base["lean"] = False
+        return base
+
+    def build_agent_argv(
+        self,
+        kind: str,
+        *,
+        binary: Path,
+        action: str = _ACTION_FRESH,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+        native_session_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return closed argv for a proven action; never invent approximate flags."""
+        actions = self.agent_context_actions(kind)
+        effective_action = action
+        if context_profile == _CONTEXT_PROFILE_LEAN:
+            # Lean is a start option, not a mutation of a running context.
+            if not actions.get("lean"):
+                raise CapabilityError(
+                    f"lean context is not available for agent {kind!r}; "
+                    "no proven safe lean adapter is enabled"
+                )
+            effective_action = _ACTION_LEAN
+        if effective_action == _ACTION_FRESH:
+            if not actions.get("fresh", True):
+                raise CapabilityError(f"fresh start is not available for agent {kind!r}")
+            if kind == "hermes":
+                return (str(binary), "--tui")
+            if kind == "grok":
+                return (str(binary), "--model", "grok-4.5")
+            return (str(binary),)
+        if effective_action == _ACTION_RESUME:
+            if not actions.get("resume"):
+                raise CapabilityError(f"resume is not available for agent {kind!r}")
+            if kind == "claude":
+                return (str(binary), "--continue")
+            if kind == "codex":
+                if not native_session_id:
+                    raise CapabilityError("codex resume requires a stamped native_session_id")
+                return (str(binary), "resume", native_session_id)
+            raise CapabilityError(f"resume is not available for agent {kind!r}")
+        if effective_action == _ACTION_FORK:
+            if not actions.get("fork"):
+                raise CapabilityError(f"fork is not available for agent {kind!r}")
+            raise CapabilityError(f"fork is not available for agent {kind!r}")
+        if effective_action == _ACTION_LEAN:
+            if not actions.get("lean"):
+                raise CapabilityError(f"lean is not available for agent {kind!r}")
+            if kind == "codex":
+                # Closed proven form: explicit profile flag, never free-form flags.
+                return (str(binary), "--profile", "lean")
+            raise CapabilityError(f"lean is not available for agent {kind!r}")
+        raise CapabilityError(f"unknown context action: {effective_action!r}")
+
+    def _manifest_path(self, terminal_run_id: str) -> Path:
+        return self.terminal_runs_root() / terminal_run_id / "manifest.json"
+
+    def read_terminal_manifest(self, terminal_run_id: str) -> dict[str, object] | None:
+        path = self._manifest_path(terminal_run_id)
+        if not path.is_file():
+            return None
+        try:
+            import json
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def write_terminal_manifest(self, launch: TerminalLaunchContext, *, window: str, session: str, status: str = "running") -> Path:
+        run_dir = self.terminal_runs_root() / launch.terminal_run_id
+        run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+        path = run_dir / "manifest.json"
+        payload = launch.to_manifest(window=window, session=session, status=status)
+        atomic_json_write(path, payload, mode=0o600)
+        return path
+
+    def update_terminal_manifest(self, terminal_run_id: str, **fields: object) -> dict[str, object] | None:
+        current = self.read_terminal_manifest(terminal_run_id)
+        if current is None:
+            return None
+        current.update(fields)
+        path = self._manifest_path(terminal_run_id)
+        atomic_json_write(path, current, mode=0o600)
+        return current
+
+    def mark_terminal_run_ended(self, terminal_run_id: str | None) -> None:
+        if not terminal_run_id:
+            return
+        with contextlib.suppress(Exception):
+            self.update_terminal_manifest(terminal_run_id, status="ended", ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+    def _git_output(self, *args: str, cwd: Path | None = None) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                cwd=str(cwd) if cwd is not None else None,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "").strip()
+
+    def _repo_root_for(self, path: Path) -> Path | None:
+        out = self._git_output("rev-parse", "--show-toplevel", cwd=path)
+        return Path(out) if out else None
+
+    def _current_head_sha(self, path: Path) -> str | None:
+        return self._git_output("rev-parse", "HEAD", cwd=path)
+
+    def _create_isolated_write_worktree(self, *, base_cwd: Path, terminal_run_id: str, base_sha: str) -> tuple[Path, str]:
+        repo = self._repo_root_for(base_cwd)
+        if repo is None:
+            raise CapabilityError(f"isolated write requires a git repository under {base_cwd}")
+        branch = f"terminal/{terminal_run_id}"
+        worktree_root = repo / ".worktrees" / _TERMINAL_WORKTREE_DIRNAME
+        worktree_root.mkdir(parents=True, exist_ok=True)
+        worktree_path = worktree_root / terminal_run_id
+        if worktree_path.exists():
+            raise CapabilityError(f"terminal worktree already exists: {worktree_path}")
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree_path), base_sha],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+            raise CapabilityError(f"failed to create isolated write worktree: {detail}")
+        return worktree_path, branch
+
+    def _build_launch_context(
+        self,
+        kind: str,
+        workdir: str | None,
+        *,
+        start_mode: str = _START_MODE_FREE,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+        action: str = _ACTION_FRESH,
+        native_session_id: str | None = None,
+        terminal_run_id: str | None = None,
+        capsule_correlation_id: str | None = None,
+        reuse_worktree_path: str | None = None,
+        reuse_worktree_branch: str | None = None,
+        reuse_base_sha: str | None = None,
+    ) -> tuple[AgentWindowDefinition, TerminalLaunchContext]:
+        kind = self.validate_name(kind, field="kind")
+        if kind not in _AGENT_KINDS:
+            raise InvalidTarget(f"unknown agent kind: {kind}")
+        start_mode = (start_mode or _START_MODE_FREE).strip()
+        context_profile = (context_profile or _CONTEXT_PROFILE_FULL).strip()
+        action = (action or _ACTION_FRESH).strip()
+        if start_mode not in _VALID_START_MODES:
+            raise InvalidTarget(f"unknown start_mode: {start_mode!r}")
+        if context_profile not in _VALID_CONTEXT_PROFILES:
+            raise InvalidTarget(f"unknown context_profile: {context_profile!r}")
+        if action not in _VALID_RESPAWN_ACTIONS and action != _ACTION_LEAN:
+            raise InvalidTarget(f"unknown action: {action!r}")
+        workdir_key, cwd = self.resolve_workdir(workdir)
+        run_id = terminal_run_id or uuid.uuid4().hex
+        base_sha = reuse_base_sha or self._current_head_sha(cwd)
+        worktree_path: str | None = None
+        worktree_branch: str | None = None
+        launch_cwd = cwd
+        if start_mode == _START_MODE_ISOLATED_WRITE:
+            if reuse_worktree_path:
+                wt = Path(reuse_worktree_path)
+                if not wt.is_dir():
+                    raise CapabilityError(f"isolated write worktree missing: {wt}")
+                worktree_path = str(wt)
+                worktree_branch = reuse_worktree_branch
+                launch_cwd = wt
+            else:
+                if not base_sha:
+                    raise CapabilityError("isolated write requires a resolvable base SHA")
+                wt, branch = self._create_isolated_write_worktree(
+                    base_cwd=cwd,
+                    terminal_run_id=run_id,
+                    base_sha=base_sha,
+                )
+                worktree_path = str(wt)
+                worktree_branch = branch
+                launch_cwd = wt
+        else:
+            # Free/Exploration: existing directory only, never create a worktree.
+            worktree_path = None
+            worktree_branch = None
+        binary = self.resolve_agent_binary(kind)
+        argv = self.build_agent_argv(
+            kind,
+            binary=binary,
+            action=action,
+            context_profile=context_profile,
+            native_session_id=native_session_id,
+        )
+        env = self._safe_env({"HERMES_TUI_INLINE": "1"} if kind == "hermes" else None)
+        window = self.window_name_for(kind, workdir_key)
+        definition = AgentWindowDefinition(
+            kind=kind,
+            session="work",
+            window=window,
+            argv=argv,
+            cwd=launch_cwd,
+            env=env,
+            workdir_key=workdir_key,
+        )
+        launch = TerminalLaunchContext(
+            terminal_run_id=run_id,
+            agent_kind=kind,
+            start_mode=start_mode,
+            context_profile=context_profile,
+            cwd=str(launch_cwd),
+            base_sha=base_sha,
+            native_session_id=native_session_id,
+            worktree_path=worktree_path,
+            worktree_branch=worktree_branch,
+            action=_ACTION_LEAN if context_profile == _CONTEXT_PROFILE_LEAN else action,
+            capsule_correlation_id=capsule_correlation_id,
+            argv=argv,
+        )
+        return definition, launch
+
+    def _read_window_option(self, session: str, window: str, option: str) -> str | None:
+        target = self._cmd_target(session, window)
+        proc = self._run("show-options", "-w", "-v", "-t", target, option, check=False)
+        if proc.returncode != 0:
+            return None
+        value = (proc.stdout or "").strip()
+        return value or None
+
+    def terminal_launch_state_for(self, session: str, window: str) -> dict[str, str | None]:
+        return {
+            "terminal_run_id": self._read_window_option(session, window, _TERMINAL_RUN_ID_OPTION),
+            "start_mode": self._read_window_option(session, window, _START_MODE_OPTION),
+            "context_profile": self._read_window_option(session, window, _CONTEXT_PROFILE_OPTION),
+            "base_sha": self._read_window_option(session, window, _BASE_SHA_OPTION),
+            "native_session_id": self._read_window_option(session, window, _NATIVE_SESSION_OPTION),
+            "worktree_path": self._read_window_option(session, window, _WORKTREE_PATH_OPTION),
+            "worktree_branch": self._read_window_option(session, window, _WORKTREE_BRANCH_OPTION),
+            "cwd": self._read_window_option(session, window, _CWD_OPTION),
+        }
+
+    def _stamp_launch_options(self, session: str, window: str, launch: TerminalLaunchContext) -> None:
+        target = self._cmd_target(session, window)
+        pairs = [
+            (_TERMINAL_RUN_ID_OPTION, launch.terminal_run_id),
+            (_START_MODE_OPTION, launch.start_mode),
+            (_CONTEXT_PROFILE_OPTION, launch.context_profile),
+            (_CWD_OPTION, launch.cwd),
+        ]
+        if launch.base_sha:
+            pairs.append((_BASE_SHA_OPTION, launch.base_sha))
+        if launch.native_session_id:
+            pairs.append((_NATIVE_SESSION_OPTION, launch.native_session_id))
+        if launch.worktree_path:
+            pairs.append((_WORKTREE_PATH_OPTION, launch.worktree_path))
+        if launch.worktree_branch:
+            pairs.append((_WORKTREE_BRANCH_OPTION, launch.worktree_branch))
+        for option, value in pairs:
+            self._run("set-option", "-w", "-t", target, option, value)
+
+    def _enumerate_terminal_worktree_options(self) -> list[dict[str, object]]:
+        root = self.terminal_runs_root()
+        if not root.is_dir():
+            return []
+        options: list[dict[str, object]] = []
+        try:
+            run_dirs = sorted(root.iterdir(), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        except OSError:
+            return []
+        for run_dir in run_dirs:
+            if not run_dir.is_dir():
+                continue
+            manifest = self.read_terminal_manifest(run_dir.name)
+            if not manifest:
+                continue
+            wt = manifest.get("worktree_path")
+            if not isinstance(wt, str) or not wt:
+                continue
+            path = Path(wt)
+            if not path.is_dir():
+                continue
+            branch = manifest.get("worktree_branch") or path.name
+            label = f"terminal · {branch}"
+            options.append(
+                {
+                    "key": f"dir:{path}",
+                    "label": label,
+                    "path": str(path),
+                    "group": _TERMINAL_WORKTREE_GROUP,
+                    "terminal_run_id": run_dir.name,
+                }
+            )
+        return options
+
     def capabilities(self) -> CapabilityState:
         tmux_available = shutil.which(self.tmux_binary) is not None or Path(self.tmux_binary).exists()
         agents: dict[str, dict[str, object]] = {}
         for kind in _AGENT_KINDS:
+            actions = self.agent_context_actions(kind)
             try:
                 binary = self.resolve_agent_binary(kind)
-                agents[kind] = {"available": True, "binary": str(binary), "reason": None}
+                agents[kind] = {
+                    "available": True,
+                    "binary": str(binary),
+                    "reason": None,
+                    "actions": actions,
+                    "prerequisites": self._agent_prerequisites(kind, actions),
+                }
             except (CapabilityError, InvalidTarget) as exc:
-                agents[kind] = {"available": False, "binary": None, "reason": str(exc)}
+                agents[kind] = {
+                    "available": False,
+                    "binary": None,
+                    "reason": str(exc),
+                    "actions": actions,
+                    "prerequisites": self._agent_prerequisites(kind, actions),
+                }
         hermes_state = agents["hermes"]
         return CapabilityState(
             tmux_available=tmux_available,
@@ -1016,29 +1523,87 @@ class TmuxAgentSessionService:
             hermes_binary=hermes_state["binary"] if isinstance(hermes_state["binary"], str) else None,
             reason=hermes_state["reason"] if isinstance(hermes_state["reason"], str) else None,
             agents=agents,
-            workdirs=self.workdir_options(),
+            workdirs=self.workdir_options_with_terminal(),
         )
 
-    def definition_for(self, kind: str, workdir: str | None = None) -> AgentWindowDefinition:
-        kind = self.validate_name(kind, field="kind")
-        if kind not in _AGENT_KINDS:
-            raise InvalidTarget(f"unknown agent kind: {kind}")
-        workdir_key, cwd = self.resolve_workdir(workdir)
-        window = self.window_name_for(kind, workdir_key)
-        binary = self.resolve_agent_binary(kind)
-        if kind == "hermes":
-            argv: tuple[str, ...] = (str(binary), "--tui")
-            env = self._safe_env({"HERMES_TUI_INLINE": "1"})
-        elif kind == "grok":
-            # CLI dropped the grok-build product slot (2026-07-16: "unknown
-            # model id"); grok-4.5 is the CLI-native default id.
-            argv = (str(binary), "--model", "grok-4.5")
-            env = self._safe_env()
-        else:
-            argv = (str(binary),)
-            env = self._safe_env()
-        return AgentWindowDefinition(
-            kind=kind, session="work", window=window, argv=argv, cwd=cwd, env=env, workdir_key=workdir_key
+    def _agent_prerequisites(self, kind: str, actions: Mapping[str, bool]) -> list[dict[str, object]]:
+        """Operator-facing prerequisites; never auto-create host profiles."""
+        notes: list[dict[str, object]] = []
+        if kind == "codex" and actions.get("lean"):
+            # Host-wide Codex profiles are operator-owned; surface a prerequisite only.
+            codex_home = Path.home() / ".codex"
+            profile_cfg = codex_home / "config.toml"
+            if not profile_cfg.is_file():
+                notes.append(
+                    {
+                        "code": "codex_profile_missing",
+                        "message": (
+                            "Lean/Fresh for Codex requires an operator-managed host Codex "
+                            "profile (e.g. ~/.codex/config.toml with a lean profile). "
+                            "Hermes will not create host-wide Codex profiles."
+                        ),
+                        "blocks": ["lean"],
+                    }
+                )
+        return notes
+
+    def definition_for(
+        self,
+        kind: str,
+        workdir: str | None = None,
+        *,
+        start_mode: str = _START_MODE_FREE,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+        action: str = _ACTION_FRESH,
+        native_session_id: str | None = None,
+        terminal_run_id: str | None = None,
+        capsule_correlation_id: str | None = None,
+        reuse_worktree_path: str | None = None,
+        reuse_worktree_branch: str | None = None,
+        reuse_base_sha: str | None = None,
+    ) -> AgentWindowDefinition:
+        definition, _launch = self._build_launch_context(
+            kind,
+            workdir,
+            start_mode=start_mode,
+            context_profile=context_profile,
+            action=action,
+            native_session_id=native_session_id,
+            terminal_run_id=terminal_run_id,
+            capsule_correlation_id=capsule_correlation_id,
+            reuse_worktree_path=reuse_worktree_path,
+            reuse_worktree_branch=reuse_worktree_branch,
+            reuse_base_sha=reuse_base_sha,
+        )
+        return definition
+
+    def definition_and_launch(
+        self,
+        kind: str,
+        workdir: str | None = None,
+        *,
+        start_mode: str = _START_MODE_FREE,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+        action: str = _ACTION_FRESH,
+        native_session_id: str | None = None,
+        terminal_run_id: str | None = None,
+        capsule_correlation_id: str | None = None,
+        reuse_worktree_path: str | None = None,
+        reuse_worktree_branch: str | None = None,
+        reuse_base_sha: str | None = None,
+    ) -> tuple[AgentWindowDefinition, TerminalLaunchContext]:
+        return self._build_launch_context(
+            kind,
+            workdir,
+            start_mode=start_mode,
+            context_profile=context_profile,
+            action=action,
+            native_session_id=native_session_id,
+            terminal_run_id=terminal_run_id,
+            capsule_correlation_id=capsule_correlation_id,
+            reuse_worktree_path=reuse_worktree_path,
+            reuse_worktree_branch=reuse_worktree_branch,
+            reuse_base_sha=reuse_base_sha,
         )
 
     # ----- inventory ------------------------------------------------------
@@ -1185,6 +1750,18 @@ class TmuxAgentSessionService:
                     "run_id": None,
                     "correlation_id": None,
                 }
+            try:
+                launch_state = self.terminal_launch_state_for(session_name, window_name)
+            except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+                launch_state = {
+                    "terminal_run_id": None,
+                    "start_mode": None,
+                    "context_profile": None,
+                    "base_sha": None,
+                    "native_session_id": None,
+                    "worktree_path": None,
+                    "worktree_branch": None,
+                }
             windows.append(
                 TmuxWindow(
                     session_name,
@@ -1200,6 +1777,13 @@ class TmuxAgentSessionService:
                     task_id=correlation["task_id"],
                     run_id=correlation["run_id"],
                     correlation_id=correlation["correlation_id"],
+                    terminal_run_id=launch_state.get("terminal_run_id"),
+                    start_mode=launch_state.get("start_mode"),
+                    context_profile=launch_state.get("context_profile"),
+                    base_sha=launch_state.get("base_sha"),
+                    native_session_id=launch_state.get("native_session_id"),
+                    worktree_path=launch_state.get("worktree_path"),
+                    worktree_branch=launch_state.get("worktree_branch"),
                 )
             )
         return windows
@@ -1281,8 +1865,17 @@ class TmuxAgentSessionService:
                 correlation_id,
             )
 
-    def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
-        """Create a tmux window from a resolved definition and return it."""
+    def _spawn_window(
+        self,
+        definition: AgentWindowDefinition,
+        launch: "TerminalLaunchContext | None" = None,
+    ) -> TmuxWindow:
+        """Create a tmux window from a server-side definition and optional launch context.
+
+        Browser payloads never set tmux options or argv here. When ``launch`` is
+        provided, the service stamps terminal_run identity into window options
+        and writes an atomic 0600 manifest under ``terminal_runs_root``.
+        """
         if not definition.argv:
             raise CapabilityError(f"baseline window {definition.session}:{definition.window} is missing")
         if definition.session not in self.list_sessions():
@@ -1312,9 +1905,24 @@ class TmuxAgentSessionService:
             kind=definition.kind,
             workdir_key=definition.workdir_key,
         )
+        if launch is not None:
+            self._stamp_launch_options(definition.session, definition.window, launch)
+            self.write_terminal_manifest(
+                launch,
+                window=definition.window,
+                session=definition.session,
+                status="running",
+            )
         return self.show(definition.session, definition.window)
 
-    def ensure(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+    def ensure(
+        self,
+        kind: str,
+        workdir: str | None = None,
+        *,
+        start_mode: str = _START_MODE_FREE,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+    ) -> TmuxWindow:
         kind = self.validate_name(kind, field="kind")
         if kind not in _AGENT_KINDS:
             raise InvalidTarget(f"unknown agent kind: {kind}")
@@ -1330,12 +1938,36 @@ class TmuxAgentSessionService:
             self._set_window_identity("work", window, kind=kind, workdir_key=workdir_key)
             self._log_event("ensure_existing", kind=kind, session="work", window=window)
             return self.show("work", window)
-        definition = self.definition_for(kind, workdir_key)
-        result = self._spawn_window(definition)
-        self._log_event("ensure_created", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        definition, launch = self.definition_and_launch(
+            kind,
+            workdir_key,
+            start_mode=start_mode,
+            context_profile=context_profile,
+            action=_ACTION_FRESH,
+        )
+        result = self._spawn_window(definition, launch=launch)
+        self._log_event(
+            "ensure_created",
+            kind=kind,
+            session=definition.session,
+            window=definition.window,
+            workdir=workdir_key,
+            terminal_run_id=launch.terminal_run_id,
+            start_mode=launch.start_mode,
+            context_profile=launch.context_profile,
+        )
         return result
 
-    def create_new(self, kind: str, workdir: str | None = None) -> TmuxWindow:
+    def create_new(
+        self,
+        kind: str,
+        workdir: str | None = None,
+        *,
+        start_mode: str = _START_MODE_FREE,
+        context_profile: str = _CONTEXT_PROFILE_FULL,
+        native_session_id: str | None = None,
+        capsule_correlation_id: str | None = None,
+    ) -> TmuxWindow:
         """Always create a fresh window, never reuse an existing one.
 
         Unlike `ensure` (get-or-create), a collision with the base window
@@ -1360,15 +1992,43 @@ class TmuxAgentSessionService:
                     f"too many open {base_name!r} windows (max {_MAX_NUMBERED_WINDOWS}); "
                     "close one before creating another"
                 )
-        definition = self.definition_for(kind, workdir_key)
+        definition, launch = self.definition_and_launch(
+            kind,
+            workdir_key,
+            start_mode=start_mode,
+            context_profile=context_profile,
+            action=_ACTION_FRESH,
+            native_session_id=native_session_id,
+            capsule_correlation_id=capsule_correlation_id,
+        )
         if window_name != definition.window:
             definition = replace(definition, window=window_name)
-        result = self._spawn_window(definition)
-        self._log_event("create_new", kind=kind, session=definition.session, window=definition.window, workdir=workdir_key)
+        result = self._spawn_window(definition, launch=launch)
+        self._log_event(
+            "create_new",
+            kind=kind,
+            session=definition.session,
+            window=definition.window,
+            workdir=workdir_key,
+            terminal_run_id=launch.terminal_run_id,
+            start_mode=launch.start_mode,
+            context_profile=launch.context_profile,
+        )
         return result
 
-    def respawn_dead(self, session: str, window: str) -> TmuxWindow:
-        """Kill a dead agent pane and recreate its window — never live processes."""
+    def respawn_dead(
+        self,
+        session: str,
+        window: str,
+        *,
+        action: str = _ACTION_FRESH,
+    ) -> TmuxWindow:
+        """Kill a dead agent pane and recreate its window — never live processes.
+
+        Resume/Fork/Fresh use only server-stamped identity and the closed agent
+        capability matrix. Browser payloads never supply options or argv.
+        Lean is a start option only and is rejected as a respawn mutation.
+        """
         info = self.show(session, window)
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing respawn")
@@ -1376,10 +2036,49 @@ class TmuxAgentSessionService:
         # foreign session and recreate it under work.
         if info.session != "work":
             raise CapabilityError(f"window {session}:{window} is not a dashboard-managed agent window")
+        action = (action or _ACTION_FRESH).strip()
+        if action not in _VALID_RESPAWN_ACTIONS:
+            raise InvalidTarget(
+                f"unsupported respawn action: {action!r}; "
+                f"allowed: {sorted(_VALID_RESPAWN_ACTIONS)}"
+            )
         kind, workdir_key = self.identity_for(session, info.window)
+        stamped = self.terminal_launch_state_for(session, info.window)
+        terminal_run_id = stamped.get("terminal_run_id")
+        start_mode = stamped.get("start_mode") or _START_MODE_FREE
+        native_session_id = stamped.get("native_session_id")
+        base_sha = stamped.get("base_sha")
+        worktree_path = stamped.get("worktree_path")
+        worktree_branch = stamped.get("worktree_branch")
+        actions = self.agent_context_actions(kind)
+        if action != _ACTION_FRESH and not actions.get(action):
+            raise CapabilityError(
+                f"{action} is not available for agent {kind!r}; "
+                "adapter does not prove installed CLI semantics"
+            )
         # Validate binary + workdir BEFORE killing: a failing recreate must not
         # destroy the dead pane's scrollback for nothing.
-        definition = self.definition_for(kind, workdir_key)
+        if terminal_run_id:
+            definition, launch = self.definition_and_launch(
+                kind,
+                workdir_key,
+                start_mode=start_mode,
+                context_profile=_CONTEXT_PROFILE_FULL,
+                action=action,
+                native_session_id=native_session_id,
+                terminal_run_id=terminal_run_id,
+                reuse_worktree_path=worktree_path,
+                reuse_worktree_branch=worktree_branch,
+                reuse_base_sha=base_sha,
+            )
+        else:
+            if action != _ACTION_FRESH:
+                raise CapabilityError(
+                    "native resume/fork requires a stamped terminal_run_id; "
+                    "this legacy window only supports fresh respawn"
+                )
+            definition = self.definition_for(kind, workdir_key)
+            launch = None
         # Recreate under the SAME name: a dead `claude-2` kommt als `claude-2`
         # zurück — ensure() würde stattdessen still das lebende Basis-Fenster
         # zurückgeben und das nummerierte Fenster verschwinden lassen.
@@ -1389,8 +2088,16 @@ class TmuxAgentSessionService:
         # Prefer pane id so a delayed close cannot race a respawn of the same name.
         kill_target = info.pane_id if info.pane_id else self._cmd_target(session, window)
         self._run("kill-window", "-t", kill_target)
-        self._log_event("respawn_dead", kind=kind, session=session, window=window, workdir=workdir_key)
-        return self._spawn_window(definition)
+        self._log_event(
+            "respawn_dead",
+            kind=kind,
+            session=session,
+            window=window,
+            workdir=workdir_key,
+            action=action,
+            terminal_run_id=terminal_run_id,
+        )
+        return self._spawn_window(definition, launch=launch)
 
     def _kill_window_idempotent(
         self, session: str, window: str, *, pane_id: str | None = None
@@ -1487,9 +2194,17 @@ class TmuxAgentSessionService:
         # (source markers are set by dashboard attach of work-session targets).
         if not allow_external or self.is_managed_window(info.session, info.window):
             self.cleanup_related_isolated_attaches(info.session, info.window)
+        terminal_run_id = None
+        with contextlib.suppress(Exception):
+            terminal_run_id = self._read_window_option(info.session, info.window, _TERMINAL_RUN_ID_OPTION)
         if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
+        # Isolated-write worktrees are never auto-removed on terminate; only the
+        # run manifest is marked ended so the pruner can decide later.
+        self.mark_terminal_run_ended(terminal_run_id)
         log_fields = {"kind": kind, "session": session, "window": window}
+        if terminal_run_id:
+            log_fields["terminal_run_id"] = terminal_run_id
         if allow_external:
             log_fields["external"] = True
         self._log_event("terminate", **log_fields)
@@ -1555,6 +2270,18 @@ class TmuxAgentSessionService:
                 "run_id": None,
                 "correlation_id": None,
             }
+        try:
+            launch_state = self.terminal_launch_state_for(session_name, window_name)
+        except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+            launch_state = {
+                "terminal_run_id": None,
+                "start_mode": None,
+                "context_profile": None,
+                "base_sha": None,
+                "native_session_id": None,
+                "worktree_path": None,
+                "worktree_branch": None,
+            }
         return TmuxWindow(
             session_name,
             window_name,
@@ -1569,6 +2296,13 @@ class TmuxAgentSessionService:
             task_id=correlation["task_id"],
             run_id=correlation["run_id"],
             correlation_id=correlation["correlation_id"],
+            terminal_run_id=launch_state.get("terminal_run_id"),
+            start_mode=launch_state.get("start_mode"),
+            context_profile=launch_state.get("context_profile"),
+            base_sha=launch_state.get("base_sha"),
+            native_session_id=launch_state.get("native_session_id"),
+            worktree_path=launch_state.get("worktree_path"),
+            worktree_branch=launch_state.get("worktree_branch"),
         )
 
     def capture(self, session: str, window: str, *, start: int = -200, log: bool = True) -> str:
@@ -1647,10 +2381,15 @@ class TmuxAgentSessionService:
         """Fleet snapshot: every tmux window plus a best-effort live tail and
         an honest heuristic state — one call for the dashboard control room.
 
+        ``tail_lines`` is clamped server-side to ``[1, 25]`` (the absolute value
+        of ``_AUTO_CAPTURE_START``). Callers may request more, but the service
+        never captures beyond that automatic-reader bound.
+
         Pane contents never reach `_log_event` (same rule as elsewhere in this
         module); only the window count is logged.
         """
         now = self._now()
+        # API contract: clamp to the automatic capture bound (25 lines).
         tail_lines = max(1, min(abs(int(tail_lines)), abs(_AUTO_CAPTURE_START)))
         entries: list[dict[str, object]] = []
         for window in self.list_windows():

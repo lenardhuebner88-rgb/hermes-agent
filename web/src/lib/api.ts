@@ -455,18 +455,38 @@ export async function buildWsUrl(
 
 export type AgentTerminalKind = "hermes" | "claude" | "codex" | "kimi" | "grok" | "qwen";
 
+export interface AgentTerminalAgentActions {
+  fresh?: boolean;
+  resume?: boolean;
+  fork?: boolean;
+  lean?: boolean;
+  compact?: boolean;
+}
+
+export interface AgentTerminalPrerequisite {
+  code: string;
+  message: string;
+  blocks?: string[];
+}
+
 export interface AgentTerminalAgentState {
   available: boolean;
   binary: string | null;
   reason: string | null;
+  actions?: AgentTerminalAgentActions;
+  prerequisites?: AgentTerminalPrerequisite[];
 }
 
 export interface AgentTerminalWorkdirOption {
   key: string;
   label: string;
   path: string;
-  group?: "standard" | "projekt" | "worktree";
+  group?: "standard" | "projekt" | "worktree" | "terminal_worktree";
 }
+
+export type AgentTerminalStartMode = "free" | "isolated_write";
+export type AgentTerminalContextProfile = "full" | "lean";
+export type AgentTerminalRespawnAction = "fresh" | "resume" | "fork";
 
 export interface AgentTerminalCapabilityState {
   tmux_available: boolean;
@@ -491,6 +511,14 @@ export interface AgentTerminalWindow {
   task_id?: string | null;
   run_id?: number | null;
   correlation_id?: string | null;
+  /** Hermes terminal-run identity (TMAX); absent on legacy windows. */
+  terminal_run_id?: string | null;
+  start_mode?: AgentTerminalStartMode | string | null;
+  context_profile?: AgentTerminalContextProfile | string | null;
+  base_sha?: string | null;
+  native_session_id?: string | null;
+  worktree_path?: string | null;
+  worktree_branch?: string | null;
 }
 
 export type AgentTerminalExecutionProfile =
@@ -534,6 +562,9 @@ export interface AgentTerminalExecutionCapsule {
 export interface AgentTerminalExecutionCapsuleResponse {
   capsule: AgentTerminalExecutionCapsule;
   window: AgentTerminalWindow;
+  consistent?: boolean;
+  /** Additive join with terminal-run manifests when the bound window has one. */
+  terminal_run_id?: string | null;
 }
 
 export type AgentTerminalOverviewState = "dead" | "frage" | "laeuft" | "wartet" | "idle";
@@ -995,11 +1026,23 @@ export const api = {
         }),
       },
     ),
-  ensureAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
+  ensureAgentTerminalWindow: (
+    kind: AgentTerminalKind,
+    workdir?: string,
+    opts?: {
+      start_mode?: AgentTerminalStartMode;
+      context_profile?: AgentTerminalContextProfile;
+    },
+  ) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/ensure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
+      body: JSON.stringify({
+        kind,
+        ...(workdir ? { workdir } : {}),
+        ...(opts?.start_mode ? { start_mode: opts.start_mode } : {}),
+        ...(opts?.context_profile ? { context_profile: opts.context_profile } : {}),
+      }),
     }),
   // PA (Jarvis) chat — pa_chat.py. Bubble history is the source of truth;
   // send returns a turn_id that is polled until done|error.
@@ -1145,18 +1188,46 @@ export const api = {
       `/api/pa/live-share/${encodeURIComponent(sessionId)}/stop`,
       { method: "POST" },
     ),
-  createAgentTerminalWindow: (kind: AgentTerminalKind, workdir?: string) =>
+  createAgentTerminalWindow: (
+    kind: AgentTerminalKind,
+    workdir?: string,
+    opts?: {
+      start_mode?: AgentTerminalStartMode;
+      context_profile?: AgentTerminalContextProfile;
+      native_session_id?: string;
+      capsule_correlation_id?: string;
+    },
+  ) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kind, ...(workdir ? { workdir } : {}) }),
+      body: JSON.stringify({
+        kind,
+        ...(workdir ? { workdir } : {}),
+        ...(opts?.start_mode ? { start_mode: opts.start_mode } : {}),
+        ...(opts?.context_profile ? { context_profile: opts.context_profile } : {}),
+        ...(opts?.native_session_id ? { native_session_id: opts.native_session_id } : {}),
+        ...(opts?.capsule_correlation_id
+          ? { capsule_correlation_id: opts.capsule_correlation_id }
+          : {}),
+      }),
     }),
-  respawnAgentTerminalWindow: (session: string, window: string) =>
+  respawnAgentTerminalWindow: (
+    session: string,
+    window: string,
+    action: AgentTerminalRespawnAction = "fresh",
+  ) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/respawn", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, window }),
+      body: JSON.stringify({ session, window, action }),
     }),
+  /**
+   * Wave-3 repair surface: GET /api/agent-terminals/execution-capsule is
+   * implemented server-side. Wire a typed client helper here when the UI
+   * needs direct capsule reads outside the bind response path.
+   * Intentionally not exported yet so Wave-3 can own the client shape.
+   */
   killDeadAgentTerminalWindow: (session: string, window: string) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/kill-dead", {
       method: "POST",

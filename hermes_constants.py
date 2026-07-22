@@ -150,6 +150,50 @@ def get_default_hermes_root() -> Path:
     return env_path
 
 
+def _normalize_terminal_runs_home(path: Path) -> Path:
+    """Collapse a final ``<root>/profiles/<name>`` segment back to ``<root>``.
+
+    Productive profiles must share one terminal-runs root. Nested profile homes
+    are therefore normalized once at the end; temp/Docker/test homes that are
+    not profile paths stay untouched and never snap back to the real user root.
+    """
+    resolved = path.expanduser()
+    if resolved.name and resolved.parent.name == "profiles":
+        return resolved.parent.parent
+    return resolved
+
+
+def terminal_runs_root(explicit_home: str | Path | None = None) -> Path:
+    """Return the profile-independent terminal-run manifest root.
+
+    Precedence (highest first):
+
+    1. ``explicit_home`` injected by ``TmuxAgentSessionService``
+    2. ContextVar override from :func:`set_hermes_home_override`
+    3. ``HERMES_HOME``
+    4. platform default from :func:`_get_platform_default_hermes_home`
+
+    This helper intentionally does **not** call :func:`get_default_hermes_root`
+    for resolution. That function can collapse custom ``HERMES_HOME`` values
+    under the native home; terminal-run storage must keep temp/Docker/test
+    homes isolated. Only a final ``<root>/profiles/<name>`` path is normalized
+    to ``<root>``. The returned directory is ``<normalized-root>/terminal-runs``.
+    """
+    if explicit_home is not None:
+        root = _normalize_terminal_runs_home(Path(explicit_home))
+    else:
+        override = get_hermes_home_override()
+        if override:
+            root = _normalize_terminal_runs_home(Path(override))
+        else:
+            env_home = os.getenv("HERMES_HOME")
+            if env_home:
+                root = _normalize_terminal_runs_home(Path(env_home))
+            else:
+                root = _get_platform_default_hermes_home()
+    return root / "terminal-runs"
+
+
 def _get_packaged_data_dir(name: str) -> Path | None:
     """Return an installed data-files directory if one exists.
 

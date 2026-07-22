@@ -374,3 +374,106 @@ def test_pruner_fails_closed_when_named_board_schema_is_unavailable(
 
     assert worktree.exists()
     assert f"kept(board unavailable): {worktree}" in result.stdout
+
+
+def _make_terminal_worktree(tmp_path: Path, run_id: str) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _run("git", "init", "-b", "main", cwd=repo)
+    _run("git", "config", "user.email", "test@example.invalid", cwd=repo)
+    _run("git", "config", "user.name", "Test", cwd=repo)
+    (repo / "tracked.txt").write_text("base\n")
+    _run("git", "add", "tracked.txt", cwd=repo)
+    _run("git", "commit", "-m", "base", cwd=repo)
+    worktree = repo / ".worktrees" / "terminal" / run_id
+    worktree.parent.mkdir(parents=True)
+    _run("git", "worktree", "add", "-b", f"terminal/{run_id}", worktree, "main", cwd=repo)
+    return repo, worktree
+
+
+def _write_terminal_manifest(
+    hermes_home: Path,
+    *,
+    run_id: str,
+    worktree: Path | None,
+    status: str = "ended",
+    start_mode: str = "isolated_write",
+) -> Path:
+    import json
+    import time
+
+    root = hermes_home / "terminal-runs" / run_id
+    root.mkdir(parents=True)
+    path = root / "manifest.json"
+    payload = {
+        "schema_version": 1,
+        "terminal_run_id": run_id,
+        "start_mode": start_mode,
+        "status": status,
+        "worktree_path": str(worktree) if worktree is not None else None,
+        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600)),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7200)),
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_pruner_terminal_isolated_write_removes_clean_ended_aged(tmp_path: Path) -> None:
+    run_id = "run_clean"
+    repo, worktree = _make_terminal_worktree(tmp_path, run_id)
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "kanban.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
+        )
+    _write_terminal_manifest(hermes_home, run_id=run_id, worktree=worktree, status="ended")
+
+    result = _prune(repo, db_path, hermes_home=hermes_home)
+
+    assert not worktree.exists()
+    assert f"removed(terminal): {worktree}" in result.stdout or f"removed(terminal-path): {worktree}" in result.stdout
+
+
+def test_pruner_terminal_free_manifest_has_no_cleanup_path(tmp_path: Path) -> None:
+    run_id = "run_free"
+    repo, worktree = _make_terminal_worktree(tmp_path, run_id)
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "kanban.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
+        )
+    _write_terminal_manifest(
+        hermes_home,
+        run_id=run_id,
+        worktree=None,
+        status="ended",
+        start_mode="free",
+    )
+
+    result = _prune(repo, db_path, hermes_home=hermes_home)
+
+    assert worktree.exists()
+    assert "removed(terminal)" not in result.stdout
+
+
+def test_pruner_terminal_keeps_dirty(tmp_path: Path) -> None:
+    run_id = "run_dirty"
+    repo, worktree = _make_terminal_worktree(tmp_path, run_id)
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "kanban.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
+        )
+    _write_terminal_manifest(hermes_home, run_id=run_id, worktree=worktree, status="ended")
+    (worktree / "tracked.txt").write_text("dirty\n")
+
+    result = _prune(repo, db_path, hermes_home=hermes_home)
+
+    assert worktree.exists()
+    assert f"kept(dirty): {worktree}" in result.stdout

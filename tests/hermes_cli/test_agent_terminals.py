@@ -19,6 +19,7 @@ from hermes_cli.agent_terminals import (
     CapabilityError,
     InvalidTarget,
     PaneCaptureCache,
+    TerminalLaunchContext,
     TmuxWindow,
     TmuxAgentSessionService,
     classify_agent_pane,
@@ -1907,3 +1908,78 @@ def test_ensure_session_options_swallows_failure_for_missing_session(
     service.ensure_session_options("ghost")
     log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
     assert "ensure_session_options_failed" in log
+
+
+def test_build_agent_argv_closed_matrix_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path)
+    binary = tmp_path / "fake-codex"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    assert service.build_agent_argv("codex", binary=binary, action="fresh") == (str(binary),)
+    assert service.build_agent_argv(
+        "codex", binary=binary, action="resume", native_session_id="sess-1"
+    ) == (str(binary), "resume", "sess-1")
+
+    claude = tmp_path / "fake-claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    assert service.build_agent_argv("claude", binary=claude, action="resume") == (str(claude), "--continue")
+
+    with pytest.raises(CapabilityError):
+        service.build_agent_argv("kimi", binary=binary, action="resume")
+    with pytest.raises(CapabilityError):
+        service.build_agent_argv("codex", binary=binary, context_profile="lean")
+
+
+def test_build_agent_argv_lean_requires_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path)
+    binary = tmp_path / "fake-codex"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+
+    monkeypatch.setattr(
+        service,
+        "_lean_context_allowlist",
+        lambda: {"codex"},
+    )
+    assert service.build_agent_argv("codex", binary=binary, context_profile="lean") == (
+        str(binary),
+        "--profile",
+        "lean",
+    )
+
+
+def test_write_terminal_manifest_free_mode_null_worktree(tmp_path: Path) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path)
+    launch = TerminalLaunchContext(
+        terminal_run_id="run123",
+        agent_kind="hermes",
+        start_mode="free",
+        context_profile="full",
+        cwd=str(tmp_path),
+        worktree_path=None,
+        argv=(str(tmp_path / "hermes"), "--tui"),
+    )
+    path = service.write_terminal_manifest(launch, window="hermes-home", session="work")
+    assert path.exists()
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["worktree_path"] is None
+    assert data["start_mode"] == "free"
+    assert data["terminal_run_id"] == "run123"
+    assert data["status"] == "running"
+    run_dir = path.parent
+    assert oct(run_dir.stat().st_mode & 0o777) == "0o700"
+
+
+def test_capabilities_include_closed_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path)
+    monkeypatch.setattr(service, "resolve_agent_binary", lambda kind: tmp_path / kind)
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/tmux")
+    caps = service.capabilities().to_dict()
+    agents = caps["agents"]
+    assert agents["claude"]["actions"]["resume"] is True
+    assert agents["claude"]["actions"]["lean"] is False
+    assert agents["kimi"]["actions"]["resume"] is False
+    assert agents["codex"]["actions"]["lean"] is False  # not allowlisted by default

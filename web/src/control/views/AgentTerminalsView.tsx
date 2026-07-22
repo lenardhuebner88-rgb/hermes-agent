@@ -50,10 +50,13 @@ import {
   api,
   buildWsUrl,
   type AgentTerminalCapabilityState,
+  type AgentTerminalContextProfile,
   type AgentTerminalExecutionProfile,
   type AgentTerminalKind,
   type AgentTerminalOverviewState,
   type AgentTerminalOverviewWindow,
+  type AgentTerminalRespawnAction,
+  type AgentTerminalStartMode,
   type AgentTerminalWindow,
 } from "@/lib/api";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -269,6 +272,9 @@ export function AgentTerminalsView() {
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
   const [createKind, setCreateKind] = useState<AgentTerminalKind>("hermes");
   const [createBusy, setCreateBusy] = useState(false);
+  const [createStartMode, setCreateStartMode] = useState<AgentTerminalStartMode>("free");
+  const [createContextProfile, setCreateContextProfile] = useState<AgentTerminalContextProfile>("full");
+  const [respawnAction, setRespawnAction] = useState<AgentTerminalRespawnAction>("fresh");
   const [createError, setCreateError] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -959,7 +965,10 @@ export function AgentTerminalsView() {
     setCreateBusy(true);
     setCreateError(null);
     try {
-      const response = await api.createAgentTerminalWindow(createKind, workdir);
+      const response = await api.createAgentTerminalWindow(createKind, workdir, {
+        start_mode: createStartMode,
+        context_profile: createContextProfile,
+      });
       setSelectedKind(createKind);
       selectPaneTarget(activePane, targetFromWindow(response.window));
       await refresh();
@@ -969,20 +978,20 @@ export function AgentTerminalsView() {
     } finally {
       setCreateBusy(false);
     }
-  }, [activePane, createKind, refresh, selectPaneTarget, workdir]);
+  }, [activePane, createContextProfile, createKind, createStartMode, refresh, selectPaneTarget, workdir]);
 
   const respawnWindow = useCallback(
-    async (win: { session: string; window: string }) => {
+    async (win: { session: string; window: string }, action: AgentTerminalRespawnAction = respawnAction) => {
       setError(null);
       try {
-        const response = await api.respawnAgentTerminalWindow(win.session, win.window);
+        const response = await api.respawnAgentTerminalWindow(win.session, win.window, action);
         selectPaneTarget(activePane, targetFromWindow(response.window));
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [activePane, refresh, selectPaneTarget],
+    [activePane, refresh, respawnAction, selectPaneTarget],
   );
 
   const killWindow = useCallback(
@@ -2101,8 +2110,6 @@ export function AgentTerminalsView() {
   const sessionSheetKind = kindFromWindow(selectedWindow, selectedKind);
   const sessionSheetDead = selectedWindow ? isDeadWindow(selectedWindow) : false;
   const sessionSheetManaged = selectedWindow ? isManagedWindow(selectedWindow) : true;
-  const createWorkdirOptions = capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
-  const selectedCreateWorkdir = createWorkdirOptions.find((option) => option.key === workdir) ?? null;
 
   const chipStrip = (
     <div className="flex min-h-[44px] shrink-0 items-stretch border-b border-line-soft bg-surface-1">
@@ -2330,6 +2337,15 @@ export function AgentTerminalsView() {
     </div>
   );
 
+  const createWorkdirOptions = capability?.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
+  const selectedCreateWorkdir = createWorkdirOptions.find((option) => option.key === workdir) ?? null;
+  const createAgentCapability = capability?.agents?.[createKind];
+  const createActions = createAgentCapability?.actions;
+  const leanEnabled = Boolean(createActions?.lean);
+  const leanPrerequisite = (createAgentCapability?.prerequisites ?? []).find((item) =>
+    (item.blocks ?? []).includes("lean"),
+  );
+
   const createSessionForm = (
     <div className="grid gap-3">
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-6">
@@ -2368,6 +2384,7 @@ export function AgentTerminalsView() {
             ["standard", de.agentTerminals.workdirGroupStandard],
             ["projekt", de.agentTerminals.workdirGroupProjects],
             ["worktree", de.agentTerminals.workdirGroupWorktrees],
+            ["terminal_worktree", "Terminal-Worktrees"],
           ] as const).map(([group, label]) => {
             const options = createWorkdirOptions
               .filter((option) => (option.group ?? "standard") === group);
@@ -2385,6 +2402,44 @@ export function AgentTerminalsView() {
           {selectedCreateWorkdir?.path ?? "—"}
         </span>
       </label>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="grid gap-1 text-ink-3">
+          <span className="font-display text-micro font-semibold uppercase tracking-[0.08em]">Startmodus</span>
+          <select
+            aria-label="Terminal-Startmodus"
+            value={createStartMode}
+            onChange={(event) => setCreateStartMode(event.target.value as AgentTerminalStartMode)}
+            className="min-h-[44px] rounded-card border border-line bg-surface-2 px-2 py-2 text-sec text-ink-2 focus:border-live/50 focus:outline-none sm:min-h-0"
+          >
+            <option value="free">Free / Exploration</option>
+            <option value="isolated_write">Isolated Write</option>
+          </select>
+        </label>
+        <label className="grid gap-1 text-ink-3">
+          <span className="font-display text-micro font-semibold uppercase tracking-[0.08em]">Kontext</span>
+          <select
+            aria-label="Terminal-Kontextprofil"
+            value={createContextProfile}
+            onChange={(event) => setCreateContextProfile(event.target.value as AgentTerminalContextProfile)}
+            className="min-h-[44px] rounded-card border border-line bg-surface-2 px-2 py-2 text-sec text-ink-2 focus:border-live/50 focus:outline-none sm:min-h-0"
+          >
+            <option value="full">Full</option>
+            <option value="lean" disabled={!leanEnabled}>
+              Lean / Fresh{leanEnabled ? "" : " (nicht verfügbar)"}
+            </option>
+          </select>
+        </label>
+      </div>
+      {createContextProfile === "lean" && !leanEnabled && (
+        <div className="rounded-card border border-status-warn/30 bg-status-warn/10 p-2 text-micro text-status-warn" role="status">
+          Lean/Fresh ist für {createKind} disabled — kein belegter sicherer Lean-Adapter (oder nicht allowlisted).
+        </div>
+      )}
+      {leanPrerequisite && (
+        <div className="rounded-card border border-line bg-surface-2 p-2 text-micro text-ink-3" role="note">
+          Operator-Prerequisite: {leanPrerequisite.message}
+        </div>
+      )}
       {workdirResetNote && (
         <div className="rounded-card border border-line bg-surface-2 p-2 text-micro text-ink-3" role="status">
           {workdirResetNote}
@@ -2394,7 +2449,7 @@ export function AgentTerminalsView() {
       <button
         type="button"
         onClick={() => void submitCreateSession()}
-        disabled={createBusy}
+        disabled={createBusy || (createContextProfile === "lean" && !leanEnabled)}
         className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sec font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0"
       >
         {createBusy ? "Startet…" : "Session starten"}

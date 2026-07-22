@@ -1458,11 +1458,21 @@ class ManagedFileDelete(BaseModel):
 class AgentTerminalEnsureRequest(BaseModel):
     kind: str
     workdir: Optional[str] = None
+    start_mode: Optional[str] = "free"
+    context_profile: Optional[str] = "full"
+    native_session_id: Optional[str] = None
+    capsule_correlation_id: Optional[str] = None
 
 
 class AgentTerminalTargetRequest(BaseModel):
     session: str
     window: str
+
+
+class AgentTerminalRespawnRequest(AgentTerminalTargetRequest):
+    """Respawn a dead pane using server-stamped identity + closed action matrix."""
+
+    action: Optional[str] = "fresh"
 
 
 class AgentTerminalTerminateRequest(AgentTerminalTargetRequest):
@@ -17874,7 +17884,16 @@ async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, obje
 @app.post("/api/agent-terminals/ensure")
 async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().ensure(req.kind, req.workdir).to_dict()}
+        return {
+            "window": _agent_terminal_service()
+            .ensure(
+                req.kind,
+                req.workdir,
+                start_mode=req.start_mode or "free",
+                context_profile=req.context_profile or "full",
+            )
+            .to_dict()
+        }
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17882,15 +17901,30 @@ async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, ob
 @app.post("/api/agent-terminals/create")
 async def agent_terminal_create(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().create_new(req.kind, req.workdir).to_dict()}
+        return {
+            "window": _agent_terminal_service()
+            .create_new(
+                req.kind,
+                req.workdir,
+                start_mode=req.start_mode or "free",
+                context_profile=req.context_profile or "full",
+                native_session_id=req.native_session_id,
+                capsule_correlation_id=req.capsule_correlation_id,
+            )
+            .to_dict()
+        }
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
 
 @app.post("/api/agent-terminals/respawn")
-async def agent_terminal_respawn(req: AgentTerminalTargetRequest) -> Dict[str, object]:
+async def agent_terminal_respawn(req: AgentTerminalRespawnRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().respawn_dead(req.session, req.window).to_dict()}
+        return {
+            "window": _agent_terminal_service()
+            .respawn_dead(req.session, req.window, action=req.action or "fresh")
+            .to_dict()
+        }
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -18080,6 +18114,9 @@ def agent_terminal_get_execution_capsule(
         "capsule": capsule,
         "window": info.to_dict(),
         "consistent": consistent,
+        # Additive join surface for Wave 3: capsule GET exposes the bound
+        # window's terminal_run_id when present. No second registry.
+        "terminal_run_id": info.terminal_run_id,
     }
 
 

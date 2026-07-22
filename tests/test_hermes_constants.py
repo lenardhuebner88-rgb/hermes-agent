@@ -8,6 +8,7 @@ import pytest
 
 import hermes_constants
 from hermes_constants import (
+    terminal_runs_root,
     VALID_REASONING_EFFORTS,
     agent_browser_runnable,
     find_hermes_node_executable,
@@ -1213,3 +1214,29 @@ class TestWslPathTranslation:
         assert hermes_constants.translate_cwd_for_wsl_backend(r"\\wsl.localhost\Ubuntu\home\alex") == "/home/alex"
         # Already-POSIX paths pass through untouched.
         assert hermes_constants.translate_cwd_for_wsl_backend("/home/alex") == "/home/alex"
+
+
+class TestTerminalRunsRoot:
+    def test_explicit_home_wins_over_env_and_override(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "env-home"))
+        hermes_constants.set_hermes_home_override(tmp_path / "override-home")
+        try:
+            explicit = tmp_path / "explicit"
+            assert terminal_runs_root(explicit_home=explicit) == explicit / "terminal-runs"
+        finally:
+            hermes_constants.set_hermes_home_override(None)
+
+    def test_profile_home_normalizes_to_shared_root(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        root = tmp_path / "hermes-root"
+        profile = root / "profiles" / "coder"
+        assert terminal_runs_root(explicit_home=profile) == root / "terminal-runs"
+
+    def test_temp_home_never_snaps_to_native(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "native-home")
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        hermes_constants.set_hermes_home_override(None)
+        temp = tmp_path / "docker-home"
+        monkeypatch.setenv("HERMES_HOME", str(temp))
+        assert terminal_runs_root() == temp / "terminal-runs"
+        assert ".hermes" not in str(terminal_runs_root())

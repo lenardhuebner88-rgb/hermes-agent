@@ -189,3 +189,122 @@ for repo in $PRUNE_REPOS; do
   done
 
 done
+
+# ---------------------------------------------------------------------------
+# Terminal isolated-write worktrees (.worktrees/terminal/{terminal_run_id})
+# ---------------------------------------------------------------------------
+# Separate from the regular fifteen worktree slots. Only prune when:
+# - matching ended terminal-runs/{id}/manifest.json exists
+# - no live tmux holder stamped with @hermes_terminal_run_id
+# - clean tree, HEAD already contained in main, age exceeded
+# Dirty/ahead is never auto-removed. Free manifests have no cleanup path.
+TERMINAL_RUNS_ROOT="${HERMES_TERMINAL_RUNS_ROOT:-}"
+if [[ -z "${TERMINAL_RUNS_ROOT}" ]]; then
+  if [[ -n "${HERMES_HOME:-}" ]]; then
+    _tr_home="${HERMES_HOME}"
+    if [[ "$(basename "$(dirname "${_tr_home}")")" == "profiles" ]]; then
+      _tr_home="$(dirname "$(dirname "${_tr_home}")")"
+    fi
+    TERMINAL_RUNS_ROOT="${_tr_home}/terminal-runs"
+  else
+    TERMINAL_RUNS_ROOT="${HOME}/.hermes/terminal-runs"
+  fi
+fi
+
+is_live_tmux_holder_for_run() {
+  local run_id="$1"
+  command -v tmux >/dev/null 2>&1 || return 1
+  local target val
+  while IFS= read -r target; do
+    [[ -z "${target}" ]] && continue
+    val="$(tmux show-options -w -v -t "${target}" @hermes_terminal_run_id 2>/dev/null || true)"
+    if [[ "${val}" == "${run_id}" ]]; then
+      return 0
+    fi
+  done < <(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null || true)
+  return 1
+}
+
+if [[ -d "${TERMINAL_RUNS_ROOT}" ]] && command -v python3 >/dev/null 2>&1; then
+  shopt -s nullglob
+  for manifest in "${TERMINAL_RUNS_ROOT}"/*/manifest.json; do
+    parsed="$(
+      TERMINAL_PRUNE_MIN_AGE_SECONDS="${TERMINAL_PRUNE_MIN_AGE_SECONDS:-$((MIN_AGE_HOURS * 3600))}" \
+      python3 - "$manifest" <<'PY'
+import json, os, sys, time
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    raise SystemExit(0)
+wt = data.get("worktree_path")
+if not isinstance(wt, str) or not wt:
+    raise SystemExit(0)  # free manifests: no worktree cleanup path
+if data.get("start_mode") != "isolated_write":
+    raise SystemExit(0)
+if data.get("status") != "ended":
+    raise SystemExit(0)
+run_id = str(data.get("terminal_run_id") or path.parent.name)
+created = str(data.get("ended_at") or data.get("created_at") or "")
+min_age = int(os.environ.get("TERMINAL_PRUNE_MIN_AGE_SECONDS", str(7 * 24 * 3600)))
+ts = None
+for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
+    try:
+        ts = time.mktime(time.strptime(created, fmt))
+        break
+    except Exception:
+        pass
+if ts is None:
+    try:
+        ts = path.stat().st_mtime
+    except OSError:
+        raise SystemExit(0)
+if time.time() - ts < min_age:
+    raise SystemExit(0)
+print(f"{run_id}\t{wt}")
+PY
+    )" || true
+    [[ -z "${parsed}" ]] && continue
+    run_id="${parsed%%$'\t'*}"
+    wt_path="${parsed#*$'\t'}"
+    [[ -d "${wt_path}" ]] || continue
+    if is_live_tmux_holder_for_run "${run_id}"; then
+      echo "kept(tmux-holder): $wt_path"
+      continue
+    fi
+    repo="$(git -C "${wt_path}" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "${repo}" ]] || continue
+    # Never auto-remove dirty or ahead worktrees.
+    if [[ -n "$(git -C "${wt_path}" status --porcelain 2>/dev/null || true)" ]]; then
+      echo "kept(dirty): $wt_path"
+      continue
+    fi
+    head_sha="$(git -C "${wt_path}" rev-parse HEAD 2>/dev/null || true)"
+    [[ -n "${head_sha}" ]] || continue
+    main_ref=""
+    if git -C "${repo}" rev-parse --verify main >/dev/null 2>&1; then
+      main_ref="main"
+    elif git -C "${repo}" rev-parse --verify master >/dev/null 2>&1; then
+      main_ref="master"
+    fi
+    [[ -n "${main_ref}" ]] || continue
+    if ! git -C "${repo}" merge-base --is-ancestor "${head_sha}" "${main_ref}" 2>/dev/null; then
+      echo "kept(ahead-or-diverged): $wt_path"
+      continue
+    fi
+    if (( APPLY )); then
+      if git -C "${repo}" worktree remove "${wt_path}" >/dev/null 2>&1; then
+        echo "removed(terminal): $wt_path (run ${run_id})"
+      else
+        rm -rf "${wt_path}" 2>/dev/null || true
+        echo "removed(terminal-path): $wt_path (run ${run_id})"
+      fi
+    else
+      echo "would remove(terminal): $wt_path (run ${run_id})"
+    fi
+  done
+  shopt -u nullglob
+fi
