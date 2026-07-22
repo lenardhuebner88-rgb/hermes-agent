@@ -129,6 +129,285 @@ def test_respec_rewires_parent_and_child_links_without_source_dependency(kanban_
         assert (new, child) in links
 
 
+def test_respec_rewires_downstream_typed_wait_payload_and_edge_atomically(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        old = kb.create_task(conn, title="old", body="old")
+        child = kb.create_task(conn, title="child", body="child")
+        assert kb.claim_task(conn, child) is not None
+        kb.link_tasks(conn, old, child)
+        assert kb.block_task(
+            conn,
+            child,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [old]},
+        )
+
+        new = kb.respec_task(conn, old, body="replacement")
+        assert new is not None
+        waiting = kb.get_task(conn, child)
+        assert waiting.wait_for == {
+            "type": "parents_all_done",
+            "task_ids": [new],
+        }
+        links = _links(conn)
+        assert (old, child) not in links
+        assert (new, child) in links
+        rewired = [
+            event for event in kb.list_events(conn, child) if event.kind == "wait_rewired"
+        ]
+        assert rewired[-1].payload == {
+            "operation": "respec_task",
+            "old_parent_id": old,
+            "new_parent_id": new,
+            "wait_for": {"type": "parents_all_done", "task_ids": [new]},
+        }
+
+
+@pytest.mark.parametrize("wait_type", ["parents_all_done", "not_before", "event_seen"])
+def test_respec_transfers_source_owned_wait_and_keeps_replacement_unclaimable(
+    kanban_home, wait_type
+):
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent")
+        old = kb.create_task(conn, title="old", body="old")
+        if wait_type == "parents_all_done":
+            wait_for = {"type": wait_type, "task_ids": [parent]}
+            assert kb.claim_task(conn, old) is not None
+            kb.link_tasks(conn, parent, old)
+        elif wait_type == "not_before":
+            wait_for = {"type": wait_type, "at": kb._wait_timestamp(int(time.time()) + 3600)}
+        else:
+            wait_for = {
+                "type": wait_type,
+                "task_id": parent,
+                "event_kind": "operator_approved",
+            }
+        assert kb.block_task(
+            conn,
+            old,
+            kind="dependency",
+            wait_for=wait_for,
+        )
+        before = kb.get_task(conn, old)
+
+        new = kb.respec_task(conn, old, body="replacement")
+        assert new is not None
+        archived = kb.get_task(conn, old)
+        replacement = kb.get_task(conn, new)
+        assert archived.status == "archived"
+        assert archived.wait_for is None
+        assert replacement.status == "todo"
+        assert replacement.wait_for == before.wait_for
+        assert replacement.due_at == before.due_at
+        assert replacement.block_kind == before.block_kind == "dependency"
+        assert replacement.block_recurrences == before.block_recurrences == 1
+        assert kb.claim_task(conn, new) is None
+        assert any(
+            event.kind == "wait_received" for event in kb.list_events(conn, new)
+        )
+        if wait_type == "parents_all_done":
+            assert (parent, new) in _links(conn)
+
+
+def test_respec_refuses_unsatisfied_external_event_wait_without_replacement(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        old = kb.create_task(conn, title="old", body="old")
+        waiter = kb.create_task(conn, title="waiter")
+        assert kb.block_task(
+            conn,
+            waiter,
+            kind="dependency",
+            wait_for={
+                "type": "event_seen",
+                "task_id": old,
+                "event_kind": "operator_approved",
+            },
+        )
+        before_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+
+        with pytest.raises(kb.WaitMutationConflict) as exc:
+            kb.respec_task(conn, old, body="must not exist")
+        assert exc.value.info.reason == "event_wait_source_cannot_be_rewired"
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before_count
+        assert kb.get_task(conn, old).status == "ready"
+        assert kb.get_task(conn, waiter).wait_for["task_id"] == old
+
+
+def test_respec_final_guard_closes_external_event_registration_race(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        old = kb.create_task(conn, title="old", body="old")
+        waiter = kb.create_task(conn, title="late event waiter")
+        real_preflight = kb.preflight_task_respec
+        injected = False
+
+        def preflight_then_register(db, task_id, *, operation="respec_task"):
+            nonlocal injected
+            real_preflight(db, task_id, operation=operation)
+            if not injected:
+                injected = True
+                assert kb.block_task(
+                    db,
+                    waiter,
+                    kind="dependency",
+                    wait_for={
+                        "type": "event_seen",
+                        "task_id": old,
+                        "event_kind": "operator_approved",
+                    },
+                )
+
+        monkeypatch.setattr(kb, "preflight_task_respec", preflight_then_register)
+        before_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+
+        with pytest.raises(kb.WaitMutationConflict):
+            kb.respec_task(conn, old, body="replacement")
+
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before_count
+        assert kb.get_task(conn, old).status == "ready"
+        assert kb.get_task(conn, waiter).wait_for["task_id"] == old
+
+
+def test_respec_final_guard_releases_late_satisfied_source_wait(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        old = kb.create_task(conn, title="old", body="old")
+        real_preflight = kb.preflight_task_respec
+        injected = False
+
+        def preflight_then_seed_satisfied(db, task_id, *, operation="respec_task"):
+            nonlocal injected
+            real_preflight(db, task_id, operation=operation)
+            if injected:
+                return
+            injected = True
+            past = int(time.time()) - 60
+            late_wait = {
+                "type": "not_before",
+                "at": kb._wait_timestamp(past),
+            }
+            with kb.write_txn(db):
+                db.execute(
+                    "UPDATE tasks SET status = 'todo', wait_for = ?, due_at = ?, "
+                    "block_kind = 'dependency', block_recurrences = 1 WHERE id = ?",
+                    (json.dumps(late_wait, sort_keys=True), past, old),
+                )
+
+        monkeypatch.setattr(kb, "preflight_task_respec", preflight_then_seed_satisfied)
+        new = kb.respec_task(conn, old, body="replacement")
+
+        assert new is not None
+        archived = kb.get_task(conn, old)
+        replacement = kb.get_task(conn, new)
+        assert archived.status == "archived"
+        assert archived.wait_for is None
+        assert archived.due_at is None
+        assert replacement.wait_for is None
+        assert replacement.due_at is None
+        assert replacement.status == "ready"
+        assert any(
+            event.kind == "wait_released"
+            and event.payload["source"] == "respec_task:final"
+            for event in kb.list_events(conn, old)
+        )
+
+
+def test_review_rewire_updates_typed_wait(kanban_home):
+    with kb.connect() as conn:
+        old_review = kb.create_task(conn, title="old review")
+        new_review = kb.create_task(conn, title="new review")
+        source = kb.create_task(conn, title="source")
+        assert kb.claim_task(conn, source) is not None
+        kb.link_tasks(conn, old_review, source)
+        assert kb.block_task(
+            conn,
+            source,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [old_review]},
+        )
+        kb.rewire_superseding_review_parent(
+            conn,
+            source_task=source,
+            old_review_task=old_review,
+            new_review_task=new_review,
+            reason="replacement reviewer",
+        )
+        assert kb.get_task(conn, source).wait_for["task_ids"] == [new_review]
+        assert (old_review, source) not in _links(conn)
+        assert (new_review, source) in _links(conn)
+
+
+def test_review_rewire_refuses_unavailable_replacement_without_partial_change(
+    kanban_home,
+):
+    with kb.connect() as conn:
+        old_review = kb.create_task(conn, title="old review")
+        new_review = kb.create_task(conn, title="archived replacement")
+        assert kb.archive_task(conn, new_review)
+        source = kb.create_task(conn, title="source")
+        assert kb.claim_task(conn, source) is not None
+        kb.link_tasks(conn, old_review, source)
+        assert kb.block_task(
+            conn,
+            source,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [old_review]},
+        )
+
+        with pytest.raises(kb.WaitMutationConflict) as exc:
+            kb.rewire_superseding_review_parent(
+                conn,
+                source_task=source,
+                old_review_task=old_review,
+                new_review_task=new_review,
+                reason="invalid replacement must fail closed",
+            )
+
+        assert exc.value.info.reason == f"replacement_parent_unavailable:{new_review}"
+        assert kb.get_task(conn, source).wait_for["task_ids"] == [old_review]
+        assert (old_review, source) in _links(conn)
+        assert (new_review, source) not in _links(conn)
+
+
+def test_respec_fault_rolls_back_task_wait_payload_and_all_edges(
+    kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        old = kb.create_task(conn, title="old", body="old")
+        child = kb.create_task(conn, title="child")
+        assert kb.claim_task(conn, child) is not None
+        kb.link_tasks(conn, old, child)
+        assert kb.block_task(
+            conn,
+            child,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [old]},
+        )
+        before_links = _links(conn)
+        before_count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        real_link = kb._link_tasks_in_txn
+
+        def fail_on_replacement(db, parent_id, child_id):
+            if child_id == child and parent_id != old:
+                raise RuntimeError("injected rewire fault")
+            return real_link(db, parent_id, child_id)
+
+        monkeypatch.setattr(kb, "_link_tasks_in_txn", fail_on_replacement)
+        with pytest.raises(RuntimeError, match="injected rewire fault"):
+            kb.respec_task(conn, old, body="replacement")
+
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before_count
+        assert kb.get_task(conn, old).status == "ready"
+        assert kb.get_task(conn, child).wait_for["task_ids"] == [old]
+        assert _links(conn) == before_links
+
+
 def test_respec_replacement_waits_only_on_unsatisfied_true_parents(kanban_home):
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent", body="p")

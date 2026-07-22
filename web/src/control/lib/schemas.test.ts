@@ -569,6 +569,23 @@ describe("WorkersResponseSchema", () => {
     expect(parsed.workers[0].run_id).toBe("380");
     expect(parsed.workers[0].run_status).toBe("blocked");
   });
+
+  it("keeps the Fleet payload when a newer backend adds a liveness state", () => {
+    const parsed = parseOrThrow(WorkersResponseSchema, {
+      count: 1,
+      checked_at: 10,
+      workers: [{
+        run_id: 381, task_id: "t_future", task_title: "future", task_status: "running",
+        task_assignee: "coder", profile: "coder", worker_pid: 123, started_at: 1,
+        claim_lock: "l", claim_expires: 20, last_heartbeat_at: 2, max_runtime_seconds: 3600,
+        run_status: "running", run_outcome: null, block_reason: null,
+        liveness_state: "paused_by_provider",
+      }],
+    }, "workers/active");
+
+    expect(parsed.workers).toHaveLength(1);
+    expect(parsed.workers[0].liveness_state).toBeUndefined();
+  });
 });
 
 

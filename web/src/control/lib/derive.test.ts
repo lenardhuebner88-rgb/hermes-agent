@@ -62,6 +62,18 @@ describe('workerHealth', () => {
   it('OHNE Heartbeat aber abgelaufenem Claim ist stuck', () => {
     expect(workerHealth(mkWorker({ last_heartbeat_at: 0, claim_expires: NOW - 1 }), NOW).key).toBe('stuck');
   });
+  it('verwendet den Backend-Liveness-Vertrag autoritativ', () => {
+    expect(workerHealth(mkWorker({
+      liveness_state: 'running',
+      claim_expires: NOW - 1,
+      last_heartbeat_at: NOW - 9999,
+    }), NOW).key).toBe('healthy');
+    expect(workerHealth(mkWorker({ liveness_state: 'suspect' }), NOW).key).toBe('stuck');
+    expect(workerHealth(mkWorker({ liveness_state: 'failed' }), NOW).key).toBe('offline');
+  });
+  it('behält einen explizit blockierten Run trotz Liveness-Feld als blockiert', () => {
+    expect(workerHealth(mkWorker({ run_status: 'blocked', liveness_state: 'failed' }), NOW).key).toBe('blocked');
+  });
 });
 
 describe('buildOverview', () => {

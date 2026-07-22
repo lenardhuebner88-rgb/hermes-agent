@@ -7,6 +7,7 @@ clients choose an agent kind/window, while argv/cwd/env are resolved here.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -16,12 +17,18 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from hermes_cli.config import get_hermes_home
 from hermes_cli.projects_overview import load_projects_registry
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover - tmux is Unix-only; import safety for Windows.
+    _fcntl = None
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
@@ -34,6 +41,13 @@ _EPHEMERAL_ATTACH_WINDOW = "@hermes_attach_window"
 _EPHEMERAL_ATTACH_CREATED_AT = "@hermes_attach_created_at"
 _EPHEMERAL_ATTACH_GRACE_SECONDS = 60
 _TMUX_RUN_TIMEOUT_SECONDS = 10
+_AUTO_CAPTURE_START = -25
+_AUTO_CAPTURE_TTL_SECONDS = 2.0
+_AUTO_CAPTURE_CACHE_MAX_ENTRIES = 128
+_AUTO_CAPTURE_VARIANT = "question-v1"
+_EVENT_LOG_MAX_BYTES = 256 * 1024
+_EVENT_LOG_GENERATIONS = 3
+_EVENT_LOG_LOCK = threading.Lock()
 
 # Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
 # Used by window_exists / show / idempotent kill to distinguish not-found from
@@ -265,6 +279,9 @@ class TmuxWindow:
     # foreign (visible/attachable, but close would 503); None = unknown (callers
     # that did not compute it — safe default so older constructors stay valid).
     managed: bool | None = None
+    task_id: str | None = None
+    run_id: int | None = None
+    correlation_id: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -278,7 +295,154 @@ class TmuxWindow:
             "dead": self.dead,
             "activity": self.activity,
             "managed": self.managed,
+            "task_id": self.task_id,
+            "run_id": self.run_id,
+            "correlation_id": self.correlation_id,
         }
+
+
+@dataclass(frozen=True)
+class TerminalSnapshot:
+    """Canonical raw pane capture shared by automatic readers.
+
+    ``raw`` is intentionally not normalized or truncated: overview rendering and
+    question parsing derive their own views from the same exact 25-line capture.
+    """
+
+    pane_id: str
+    window_activity: int
+    captured_at: float
+    raw: str
+    variant: str
+
+
+class PaneCaptureCache:
+    """Thread-safe, bounded LRU with per-generation single-flight captures."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = _AUTO_CAPTURE_TTL_SECONDS,
+        max_entries: int = _AUTO_CAPTURE_CACHE_MAX_ENTRIES,
+    ) -> None:
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self.max_entries = max(1, int(max_entries))
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[
+            tuple[int, str, str, int, str], TerminalSnapshot
+        ] = OrderedDict()
+        self._inflight: dict[
+            tuple[int, str, str, int, str], threading.Event
+        ] = {}
+        # A send/interrupt can race a capture whose tmux activity timestamp is
+        # still in the same whole second. The generation makes such an
+        # in-flight result permanently non-reusable after invalidation.
+        self._generation = 0
+
+    def get_or_capture(
+        self,
+        *,
+        server_id: str,
+        pane_id: str,
+        window_activity: int | None,
+        variant: str,
+        now: float,
+        capture: Callable[[], str],
+        clock: Callable[[], float] | None = None,
+    ) -> TerminalSnapshot:
+        """Return a reusable snapshot, or capture once for concurrent readers.
+
+        tmux reports activity in whole seconds. An activity value from the current
+        second may still change without changing the cache key, so it is never
+        cacheable. Missing activity is likewise captured fresh.
+        """
+        activity = int(window_activity) if window_activity is not None else None
+        cacheable = activity is not None and activity < int(now)
+        if not cacheable:
+            raw = capture()
+            return TerminalSnapshot(
+                pane_id=pane_id,
+                window_activity=activity if activity is not None else int(now),
+                captured_at=float(clock()) if clock is not None else now,
+                raw=raw,
+                variant=variant,
+            )
+
+        while True:
+            leader = False
+            with self._lock:
+                generation = self._generation
+                key = (generation, server_id, pane_id, activity, variant)
+                existing = self._entries.get(key)
+                if existing is not None:
+                    age = now - existing.captured_at
+                    if 0.0 <= age <= self.ttl_seconds:
+                        self._entries.move_to_end(key)
+                        return existing
+                    del self._entries[key]
+                pending = self._inflight.get(key)
+                if pending is None:
+                    pending = threading.Event()
+                    self._inflight[key] = pending
+                    leader = True
+            if leader:
+                break
+            # A failed leader wakes waiters too; one waiter then becomes the next
+            # leader and performs a fresh capture instead of caching an exception.
+            pending.wait(_TMUX_RUN_TIMEOUT_SECONDS + 1)
+            if clock is not None:
+                now = float(clock())
+
+        try:
+            raw = capture()
+            snapshot = TerminalSnapshot(
+                pane_id=pane_id,
+                window_activity=activity,
+                captured_at=float(clock()) if clock is not None else now,
+                raw=raw,
+                variant=variant,
+            )
+            with self._lock:
+                # If a send/interrupt invalidated the cache while tmux was
+                # capturing, return this snapshot only to its original caller;
+                # never publish it for a later automatic reader.
+                if self._generation == generation:
+                    self._entries[key] = snapshot
+                    self._entries.move_to_end(key)
+                    while len(self._entries) > self.max_entries:
+                        self._entries.popitem(last=False)
+            return snapshot
+        finally:
+            with self._lock:
+                finished = self._inflight.pop(key, None)
+                if finished is not None:
+                    finished.set()
+
+    def invalidate_pane(self, server_id: str, pane_id: str) -> None:
+        with self._lock:
+            # Deliberately global and conservative: invalidations are rare,
+            # while a process-wide generation makes in-flight races impossible
+            # without retaining an unbounded per-pane version map.
+            self._generation += 1
+            self._entries.clear()
+
+    def invalidate_server(self, server_id: str) -> None:
+        with self._lock:
+            self._generation += 1
+            self._entries.clear()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._entries.clear()
+
+
+_PANE_CAPTURE_CACHE = PaneCaptureCache()
+
+
+def _reset_pane_capture_cache() -> None:
+    """Test hook: discard all process-wide automatic terminal snapshots."""
+    _PANE_CAPTURE_CACHE.clear()
 
 
 class TmuxAgentSessionService:
@@ -292,6 +456,7 @@ class TmuxAgentSessionService:
         hermes_binary: str | Path | None = None,
         hermes_home: str | Path | None = None,
         now=time.time,
+        capture_cache: PaneCaptureCache | None = None,
     ) -> None:
         self.tmux_binary = tmux_binary or shutil.which("tmux") or "tmux"
         self.socket_path = Path(socket_path) if socket_path else None
@@ -299,6 +464,21 @@ class TmuxAgentSessionService:
         self.hermes_home = Path(hermes_home) if hermes_home else get_hermes_home()
         self.log_dir = self.hermes_home / "agent-terminals"
         self._now = now
+        self._capture_cache = capture_cache or _PANE_CAPTURE_CACHE
+
+    @property
+    def _capture_server_id(self) -> str:
+        socket = (
+            str(self.socket_path.expanduser().resolve(strict=False))
+            if self.socket_path is not None
+            else "<default>"
+        )
+        return f"{self.tmux_binary}\0{socket}"
+
+    @property
+    def execution_server_id(self) -> str:
+        """Opaque local tmux-server identity safe to persist in run metadata."""
+        return hashlib.sha256(self._capture_server_id.encode("utf-8")).hexdigest()
 
     # ----- validation / command helpers ---------------------------------
     @staticmethod
@@ -382,15 +562,44 @@ class TmuxAgentSessionService:
         path = self.log_dir / "events.jsonl"
         record = {"ts": self._now(), "event": event, **fields}
         # Bounded metadata log: do not persist pane buffers or typed text.
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-        max_bytes = 256 * 1024
-        try:
-            if path.stat().st_size > max_bytes:
-                data = path.read_bytes()[-max_bytes:]
-                path.write_bytes(data)
-        except OSError:
-            pass
+        line = json.dumps(record, sort_keys=True) + "\n"
+        encoded_size = len(line.encode("utf-8"))
+        with _EVENT_LOG_LOCK:
+            try:
+                lock_path = self.log_dir / ".events.lock"
+                with lock_path.open("a", encoding="utf-8") as lock_handle:
+                    if _fcntl is not None:
+                        _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_EX)
+                    try:
+                        current_size = path.stat().st_size if path.exists() else 0
+                        if (
+                            current_size
+                            and current_size + encoded_size > _EVENT_LOG_MAX_BYTES
+                        ):
+                            for generation in range(
+                                _EVENT_LOG_GENERATIONS - 1, 0, -1
+                            ):
+                                source = (
+                                    path
+                                    if generation == 1
+                                    else path.with_name(
+                                        f"{path.name}.{generation - 1}"
+                                    )
+                                )
+                                target = path.with_name(
+                                    f"{path.name}.{generation}"
+                                )
+                                if source.exists():
+                                    os.replace(source, target)
+                        with path.open("a", encoding="utf-8") as handle:
+                            handle.write(line)
+                    finally:
+                        if _fcntl is not None:
+                            _fcntl.flock(lock_handle.fileno(), _fcntl.LOCK_UN)
+            except OSError:
+                # Terminal control must remain available even if its metadata log
+                # cannot be rotated or written.
+                pass
 
     # ----- capabilities / definitions -----------------------------------
     def _discover_hermes_binary(self) -> Path | None:
@@ -644,6 +853,138 @@ class TmuxAgentSessionService:
                 return kind, workdir_key
         return self._identity_from_window(window)
 
+    def _window_option(
+        self, session: str, window: str, name: str
+    ) -> str | None:
+        target = self._cmd_target(session, window)
+        proc = self._run(
+            "show-options", "-w", "-v", "-t", target, name, check=False
+        )
+        if proc.returncode != 0:
+            return None
+        value = proc.stdout.strip()
+        return value or None
+
+    def execution_correlation_for(
+        self, session: str, window: str
+    ) -> dict[str, object | None]:
+        """Read only exact-window correlation pointers; never pane/global scope."""
+        target = self._cmd_target(session, window)
+        proc = self._run("show-options", "-w", "-t", target, check=False)
+        options: dict[str, str] = {}
+        if proc.returncode == 0:
+            for line in proc.stdout.splitlines():
+                name, separator, value = line.partition(" ")
+                if separator and name.startswith("@hermes_"):
+                    options[name] = value.strip()
+        task_id = options.get("@hermes_task_id") or None
+        run_raw = options.get("@hermes_run_id") or None
+        correlation_id = options.get("@hermes_correlation_id") or None
+        if task_id is not None and (
+            len(task_id) > 128 or any(ch.isspace() for ch in task_id)
+        ):
+            task_id = None
+        run_id = int(run_raw) if run_raw and run_raw.isdigit() else None
+        if correlation_id is not None and not re.fullmatch(
+            r"[a-f0-9]{24}", correlation_id
+        ):
+            correlation_id = None
+        return {
+            "task_id": task_id,
+            "run_id": run_id,
+            "correlation_id": correlation_id,
+        }
+
+    def _set_or_unset_window_option(
+        self,
+        session: str,
+        window: str,
+        name: str,
+        value: object | None,
+    ) -> None:
+        target = self._cmd_target(session, window)
+        if value is None:
+            self._run("set-option", "-w", "-u", "-t", target, name)
+        else:
+            self._run("set-option", "-w", "-t", target, name, str(value))
+
+    def restore_execution_correlation(
+        self,
+        session: str,
+        window: str,
+        previous: Mapping[str, object | None],
+        *,
+        expected_pane_id: str,
+    ) -> None:
+        current = self.show(session, window)
+        if current.pane_id != expected_pane_id:
+            raise CapabilityError(
+                f"window {session}:{window} changed pane generation; refusing restore"
+            )
+        for field, option in (
+            ("task_id", "@hermes_task_id"),
+            ("run_id", "@hermes_run_id"),
+            ("correlation_id", "@hermes_correlation_id"),
+        ):
+            self._set_or_unset_window_option(
+                session, window, option, previous.get(field)
+            )
+
+    def stamp_execution_correlation(
+        self,
+        session: str,
+        window: str,
+        *,
+        expected_pane_id: str,
+        task_id: str,
+        run_id: int,
+        correlation_id: str,
+    ) -> dict[str, object | None]:
+        """CAS-stamp correlation pointers onto one concrete pane generation."""
+        if not re.fullmatch(r"%\d+", expected_pane_id or ""):
+            raise InvalidTarget(f"invalid pane_id: {expected_pane_id!r}")
+        if not task_id or len(task_id) > 128 or any(ch.isspace() for ch in task_id):
+            raise InvalidTarget("invalid execution-capsule task id")
+        if int(run_id) <= 0:
+            raise InvalidTarget("invalid execution-capsule run id")
+        if not re.fullmatch(r"[a-f0-9]{24}", correlation_id or ""):
+            raise InvalidTarget("invalid execution-capsule correlation id")
+        current = self.show(session, window)
+        if current.pane_id != expected_pane_id:
+            raise CapabilityError(
+                f"window {session}:{window} changed pane generation; refusing stamp"
+            )
+        previous = self.execution_correlation_for(session, window)
+        try:
+            self._set_or_unset_window_option(
+                session, window, "@hermes_task_id", task_id
+            )
+            self._set_or_unset_window_option(
+                session, window, "@hermes_run_id", int(run_id)
+            )
+            self._set_or_unset_window_option(
+                session, window, "@hermes_correlation_id", correlation_id
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.restore_execution_correlation(
+                    session,
+                    window,
+                    previous,
+                    expected_pane_id=expected_pane_id,
+                )
+            raise
+        self._log_event(
+            "execution_correlation_stamped",
+            session=session,
+            window=window,
+            pane_id=expected_pane_id,
+            task_id=task_id,
+            run_id=int(run_id),
+            correlation_id=correlation_id,
+        )
+        return previous
+
     def is_managed_window(self, session: str, window: str) -> bool:
         """True iff terminate_live() would accept this window (not raise CapabilityError).
 
@@ -834,6 +1175,16 @@ class TmuxAgentSessionService:
             # managed gates the UI terminate affordance only; kill_dead stays
             # available for dead foreign panes (intentional cleanup path).
             managed = self.is_managed_window(session_name, window_name)
+            try:
+                correlation = self.execution_correlation_for(
+                    session_name, window_name
+                )
+            except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+                correlation = {
+                    "task_id": None,
+                    "run_id": None,
+                    "correlation_id": None,
+                }
             windows.append(
                 TmuxWindow(
                     session_name,
@@ -846,6 +1197,9 @@ class TmuxAgentSessionService:
                     dead,
                     activity,
                     managed,
+                    task_id=correlation["task_id"],
+                    run_id=correlation["run_id"],
+                    correlation_id=correlation["correlation_id"],
                 )
             )
         return windows
@@ -904,6 +1258,8 @@ class TmuxAgentSessionService:
         workdir_key: str,
         session_id: str | None = None,
         task_id: str | None = None,
+        run_id: int | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         """Persist managed identity without touching the pane process."""
         target = self._cmd_target(session, window)
@@ -913,6 +1269,17 @@ class TmuxAgentSessionService:
             self._run("set-option", "-w", "-t", target, "@hermes_session_id", session_id)
         if task_id:
             self._run("set-option", "-w", "-t", target, "@hermes_task_id", task_id)
+        if run_id is not None:
+            self._run("set-option", "-w", "-t", target, "@hermes_run_id", str(int(run_id)))
+        if correlation_id:
+            self._run(
+                "set-option",
+                "-w",
+                "-t",
+                target,
+                "@hermes_correlation_id",
+                correlation_id,
+            )
 
     def _spawn_window(self, definition: AgentWindowDefinition) -> TmuxWindow:
         """Create a tmux window from a resolved definition and return it."""
@@ -1178,6 +1545,16 @@ class TmuxAgentSessionService:
         # Cheap for a single window (two show-options + optional name parse) —
         # same rule as list_windows so show/ensure/respawn payloads stay consistent.
         managed = self.is_managed_window(session_name, window_name)
+        try:
+            correlation = self.execution_correlation_for(
+                session_name, window_name
+            )
+        except (AgentTerminalError, OSError, subprocess.CalledProcessError):
+            correlation = {
+                "task_id": None,
+                "run_id": None,
+                "correlation_id": None,
+            }
         return TmuxWindow(
             session_name,
             window_name,
@@ -1189,6 +1566,9 @@ class TmuxAgentSessionService:
             dead,
             activity,
             managed,
+            task_id=correlation["task_id"],
+            run_id=correlation["run_id"],
+            correlation_id=correlation["correlation_id"],
         )
 
     def capture(self, session: str, window: str, *, start: int = -200, log: bool = True) -> str:
@@ -1202,7 +1582,9 @@ class TmuxAgentSessionService:
     def capture_pane(self, pane_id: str, *, start: int = -50) -> str:
         """Capture a pane by absolute tmux pane id (``%N``), not session:window.
 
-        Pane ids survive window renames/respawns better for answer delivery.
+        Pane ids survive window renames/respawns better for answer delivery. This
+        explicit API is always fresh; safety rechecks must never use the automatic
+        snapshot cache.
         """
         if not re.fullmatch(r"%\d+", pane_id or ""):
             raise InvalidTarget(f"invalid pane_id: {pane_id!r}")
@@ -1210,6 +1592,56 @@ class TmuxAgentSessionService:
         proc = self._run("capture-pane", "-p", "-t", pane_id, "-S", str(start))
         self._log_event("capture_pane", pane_id=pane_id, lines=abs(start))
         return proc.stdout
+
+    def capture_pane_snapshot(
+        self,
+        pane_id: str,
+        *,
+        window_activity: int | None,
+        variant: str = _AUTO_CAPTURE_VARIANT,
+        force_fresh: bool = False,
+    ) -> TerminalSnapshot:
+        """Capture the canonical automatic-reader view of a pane.
+
+        Cache identity is server + pane + tmux activity generation + normalization
+        variant. Consumer display depth is deliberately absent: all automatic
+        readers derive from the same unmodified 25-line raw capture.
+        """
+        if not re.fullmatch(r"%\d+", pane_id or ""):
+            raise InvalidTarget(f"invalid pane_id: {pane_id!r}")
+        now = float(self._now())
+
+        def capture_raw() -> str:
+            proc = self._run(
+                "capture-pane",
+                "-p",
+                "-t",
+                pane_id,
+                "-S",
+                str(_AUTO_CAPTURE_START),
+            )
+            return proc.stdout
+
+        if force_fresh:
+            activity = (
+                int(window_activity) if window_activity is not None else int(now)
+            )
+            return TerminalSnapshot(
+                pane_id=pane_id,
+                window_activity=activity,
+                captured_at=now,
+                raw=capture_raw(),
+                variant=variant,
+            )
+        return self._capture_cache.get_or_capture(
+            server_id=self._capture_server_id,
+            pane_id=pane_id,
+            window_activity=window_activity,
+            variant=variant,
+            now=now,
+            capture=capture_raw,
+            clock=self._now,
+        )
 
     def overview(self, *, tail_lines: int = 10) -> dict[str, object]:
         """Fleet snapshot: every tmux window plus a best-effort live tail and
@@ -1219,11 +1651,15 @@ class TmuxAgentSessionService:
         module); only the window count is logged.
         """
         now = self._now()
+        tail_lines = max(1, min(abs(int(tail_lines)), abs(_AUTO_CAPTURE_START)))
         entries: list[dict[str, object]] = []
         for window in self.list_windows():
             tail: str | None
             try:
-                raw = self.capture(window.session, window.window, start=-tail_lines, log=False)
+                raw = self.capture_pane_snapshot(
+                    window.pane_id,
+                    window_activity=window.activity,
+                ).raw
             except (AgentTerminalError, OSError, subprocess.CalledProcessError):
                 tail = None
             else:
@@ -1246,6 +1682,10 @@ class TmuxAgentSessionService:
     def send_keys(self, session: str, window: str, text: str) -> None:
         target = self._cmd_target(session, window)
         self._run("send-keys", "-t", target, "-l", "--", text)
+        # This API addresses a window name rather than a stable pane id; clear
+        # every cached pane for the server so no automatic reader sees pre-send
+        # output under a still-unchanged whole-second activity value.
+        self._capture_cache.invalidate_server(self._capture_server_id)
         self._log_event("send_keys", session=session, window=window, bytes=len(text.encode("utf-8")))
 
     def send_keys_to_pane(self, pane_id: str, text: str, *, enter: bool = False) -> None:
@@ -1259,6 +1699,7 @@ class TmuxAgentSessionService:
         self._run("send-keys", "-t", pane_id, "-l", "--", text)
         if enter:
             self._run("send-keys", "-t", pane_id, "Enter")
+        self._capture_cache.invalidate_pane(self._capture_server_id, pane_id)
         self._log_event(
             "send_keys_to_pane",
             pane_id=pane_id,
@@ -1269,6 +1710,7 @@ class TmuxAgentSessionService:
     def interrupt(self, session: str, window: str) -> None:
         target = self._cmd_target(session, window)
         self._run("send-keys", "-t", target, "C-c")
+        self._capture_cache.invalidate_server(self._capture_server_id)
         self._log_event("interrupt", session=session, window=window)
 
     def attach_argv(self, session: str, window: str) -> list[str]:

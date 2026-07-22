@@ -84,6 +84,16 @@ def _parse_schedule_due(value: str) -> int:
         "or a relative duration such as +2h, +45m, or +90s"
     )
 
+
+def _parse_wait_for(value: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("--wait-for must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("--wait-for must be a JSON object")
+    return parsed
+
 def _coerce_config_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -126,6 +136,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "created_by": t.created_by,
         "created_at": t.created_at,
         "due_at": t.due_at,
+        "wait_for": t.wait_for,
         "started_at": t.started_at,
         "completed_at": t.completed_at,
         "result": t.result,
@@ -744,6 +755,16 @@ def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
             "unblock loops. Omit for a generic block."
         ),
     )
+    p_block.add_argument(
+        "--wait-for",
+        type=_parse_wait_for,
+        default=None,
+        metavar="JSON",
+        help=(
+            "Required with --kind dependency. Closed JSON union: "
+            "parents_all_done, not_before, or event_seen."
+        ),
+    )
 
     p_set_wf = sub.add_parser("set-workflow", help="Assign a workflow template to a task (seeds the first step)")
     p_set_wf.add_argument("task_id")
@@ -771,6 +792,14 @@ def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
         "--force",
         action="store_true",
         help="Unblock even when an exhausted per-task input-token budget would immediately re-park it",
+    )
+    p_unblock.add_argument(
+        "--override-wait",
+        action="store_true",
+        help=(
+            "Operator-only: discard an active worker wait and its typed parent "
+            "edges. Requires --reason; the override is written to the audit trail."
+        ),
     )
     p_unblock.add_argument("task_ids", nargs="+")
 
@@ -3190,6 +3219,7 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 tid,
                 reason=reason,
                 kind=kind,
+                wait_for=getattr(args, "wait_for", None),
                 expected_run_id=_worker_run_id_for(tid),
             ):
                 failed.append(tid)
@@ -3244,8 +3274,6 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     failed: list[str] = []
     with kb.connect_closing() as conn:
         for tid in ids:
-            if reason:
-                kb.add_comment(conn, tid, author, f"SCHEDULED: {reason}")
             if not kb.schedule_task(
                 conn,
                 tid,
@@ -3256,6 +3284,8 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
                 failed.append(tid)
                 print(f"cannot schedule {tid}", file=sys.stderr)
             else:
+                if reason:
+                    kb.add_comment(conn, tid, author, f"SCHEDULED: {reason}")
                 print(f"Scheduled {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
 
@@ -3265,6 +3295,13 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
         print("at least one task_id is required", file=sys.stderr)
         return 1
     reason = getattr(args, "reason", None)
+    override_wait = bool(getattr(args, "override_wait", False))
+    if override_wait and os.environ.get("HERMES_KANBAN_TASK"):
+        print("--override-wait is operator-only", file=sys.stderr)
+        return 1
+    if override_wait and (not reason or not str(reason).strip()):
+        print("--override-wait requires --reason", file=sys.stderr)
+        return 1
     if reason is not None:
         reason = reason.strip() or None
     author = _profile_author() if reason else None
@@ -3296,12 +3333,21 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 continue
-            if reason:
-                kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
-            if not kb.unblock_task(conn, tid):
+            if not kb.unblock_task(
+                conn,
+                tid,
+                override_wait=override_wait,
+                actor=author,
+                reason=reason,
+            ):
                 failed.append(tid)
-                print(f"cannot unblock {tid} (not blocked/scheduled?)", file=sys.stderr)
+                print(
+                    f"cannot unblock {tid} (not blocked/scheduled, or active wait?)",
+                    file=sys.stderr,
+                )
             else:
+                if reason:
+                    kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
                 print(f"Unblocked {tid}" + (f": {reason}" if reason else ""))
     return 0 if not failed else 1
 

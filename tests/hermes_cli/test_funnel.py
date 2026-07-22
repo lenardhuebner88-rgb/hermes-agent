@@ -195,6 +195,39 @@ def test_archive_stale_archives_only_old_proposals(conn):
     assert funnel.archive_stale(conn, now=now) == []
 
 
+def test_archive_stale_skips_wait_protected_proposal_and_continues_batch(conn):
+    now = int(time.time())
+    protected = funnel.create_wish(
+        conn, title="geschützter wunsch", body="b", created_by="family"
+    )
+    ordinary = funnel.create_wish(
+        conn, title="normaler wunsch", body="b", created_by="family"
+    )
+    waiter = kb.create_task(conn, title="wartet auf proposal event")
+    assert kb.block_task(
+        conn,
+        waiter,
+        kind="dependency",
+        wait_for={
+            "type": "event_seen",
+            "task_id": protected,
+            "event_kind": "operator_approved",
+        },
+    )
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET created_at = ? WHERE id IN (?, ?)",
+            (now - 31 * 86400, protected, ordinary),
+        )
+
+    archived = funnel.archive_stale(conn, now=now)
+
+    assert [item["id"] for item in archived] == [ordinary]
+    assert kb.get_task(conn, protected).status == "triage"
+    assert kb.get_task(conn, ordinary).status == "archived"
+    assert kb.get_task(conn, waiter).wait_for["task_id"] == protected
+
+
 # --- Auto-Decomposer-Exemption (Contract: nichts startet ohne Operator-Tap) --
 
 
@@ -296,6 +329,46 @@ def test_dismiss_draft_archives_with_comment(conn):
     ).fetchone()
     assert "Verworfen" in last["body"]
     assert funnel.list_drafts(conn) == []
+
+
+@pytest.mark.parametrize("action", ["dismiss", "revision"])
+def test_funnel_draft_mutations_refuse_external_event_wait_without_partial_write(
+    conn, action
+):
+    draft = _make_done_draft(conn, title=f"protected {action}")
+    waiter = kb.create_task(conn, title=f"waiter {action}")
+    assert kb.block_task(
+        conn,
+        waiter,
+        kind="dependency",
+        wait_for={
+            "type": "event_seen",
+            "task_id": draft,
+            "event_kind": "operator_approved",
+        },
+    )
+    before_tasks = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+    before_comments = conn.execute(
+        "SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (draft,)
+    ).fetchone()[0]
+
+    with pytest.raises(kb.WaitMutationConflict):
+        if action == "dismiss":
+            funnel.dismiss_draft(conn, draft)
+        else:
+            funnel.request_revision(
+                conn,
+                draft,
+                draft_text="# Revised\n" + "x" * 150,
+                operator_note="please retry",
+            )
+
+    assert kb.get_task(conn, draft).status == "done"
+    assert kb.get_task(conn, waiter).wait_for["task_id"] == draft
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == before_tasks
+    assert conn.execute(
+        "SELECT COUNT(*) FROM task_comments WHERE task_id = ?", (draft,)
+    ).fetchone()[0] == before_comments
 
 
 def test_dismiss_draft_rejects_already_approved(conn):

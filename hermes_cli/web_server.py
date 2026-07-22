@@ -16,6 +16,7 @@ import atexit
 import base64
 import binascii
 import concurrent.futures
+import contextlib
 import functools
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ import re
 import secrets
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -1479,6 +1481,27 @@ class AgentTerminalCaptureRequest(AgentTerminalTargetRequest):
 
 class AgentTerminalHandoffDraftRequest(AgentTerminalTargetRequest):
     start: int = -120
+
+
+class AgentTerminalExecutionContextRequest(BaseModel):
+    profile: Literal["implementation", "review", "recovery", "operator_handoff"]
+    summary: str = Field(min_length=1, max_length=1200)
+    decisions: List[str] = Field(default_factory=list, max_length=8)
+    next_steps: List[str] = Field(default_factory=list, max_length=8)
+    risks: List[str] = Field(default_factory=list, max_length=8)
+
+    class Config:
+        extra = "forbid"
+
+
+class AgentTerminalExecutionCapsuleRequest(AgentTerminalTargetRequest):
+    board: Optional[str] = None
+    task_id: str = Field(min_length=1, max_length=128)
+    run_id: int = Field(gt=0)
+    context_handoff: AgentTerminalExecutionContextRequest
+
+    class Config:
+        extra = "forbid"
 
 
 class AgentTerminalSendKeysRequest(AgentTerminalTargetRequest):
@@ -17923,6 +17946,141 @@ async def agent_terminal_handoff_draft(req: AgentTerminalHandoffDraftRequest) ->
         return {"draft": _agent_terminal_service().handoff_draft(req.session, req.window, start=req.start)}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
+
+
+@app.post("/api/agent-terminals/execution-capsule")
+def agent_terminal_bind_execution_capsule(
+    req: AgentTerminalExecutionCapsuleRequest,
+) -> Dict[str, object]:
+    """Bind one active Kanban run to one concrete tmux pane generation.
+
+    The DB write and tmux option stamp form an explicit two-step saga.  tmux
+    carries pointers only; the bounded context handoff remains in ``task_runs``.
+    """
+    from hermes_cli import kanban_db as _kanban_db  # noqa: WPS433
+
+    service = _agent_terminal_service()
+    try:
+        window = service.show(req.session, req.window)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+
+    context_handoff = req.context_handoff.model_dump()
+    pending: dict[str, object] | None = None
+    previous: dict[str, object | None] | None = None
+    try:
+        with _kanban_db.connect_closing(board=req.board) as conn:
+            pending = _kanban_db.begin_execution_capsule_binding(
+                conn,
+                task_id=req.task_id,
+                run_id=req.run_id,
+                terminal_server_id=service.execution_server_id,
+                terminal_session=window.session,
+                terminal_window=window.window,
+                pane_id=window.pane_id,
+                terminal_cwd=window.cwd or "",
+                context_handoff=context_handoff,
+            )
+        correlation_id = str(pending["correlation_id"])
+        previous = service.stamp_execution_correlation(
+            window.session,
+            window.window,
+            expected_pane_id=window.pane_id,
+            task_id=req.task_id,
+            run_id=req.run_id,
+            correlation_id=correlation_id,
+        )
+        try:
+            with _kanban_db.connect_closing(board=req.board) as conn:
+                capsule = _kanban_db.activate_execution_capsule(
+                    conn,
+                    task_id=req.task_id,
+                    run_id=req.run_id,
+                    correlation_id=correlation_id,
+                )
+        except Exception:
+            with contextlib.suppress(Exception):
+                service.restore_execution_correlation(
+                    window.session,
+                    window.window,
+                    previous,
+                    expected_pane_id=window.pane_id,
+                )
+            with contextlib.suppress(Exception):
+                with _kanban_db.connect_closing(board=req.board) as conn:
+                    _kanban_db.abort_execution_capsule_binding(
+                        conn,
+                        task_id=req.task_id,
+                        run_id=req.run_id,
+                        correlation_id=correlation_id,
+                        reason="activation_failed",
+                    )
+            raise
+        window_payload = window.to_dict()
+        window_payload.update(
+            {
+                "task_id": req.task_id,
+                "run_id": req.run_id,
+                "correlation_id": correlation_id,
+            }
+        )
+        return {"capsule": capsule, "window": window_payload}
+    except (AgentTerminalError, OSError, subprocess.CalledProcessError) as exc:
+        if pending is not None:
+            with contextlib.suppress(Exception):
+                with _kanban_db.connect_closing(board=req.board) as conn:
+                    _kanban_db.abort_execution_capsule_binding(
+                        conn,
+                        task_id=req.task_id,
+                        run_id=req.run_id,
+                        correlation_id=str(pending["correlation_id"]),
+                        reason="tmux_stamp_failed",
+                    )
+        raise _agent_terminal_error(exc) from exc
+    except _kanban_db.ExecutionCapsuleConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+@app.get("/api/agent-terminals/execution-capsule")
+def agent_terminal_get_execution_capsule(
+    session: str,
+    window: str,
+    board: Optional[str] = None,
+) -> Dict[str, object]:
+    from hermes_cli import kanban_db as _kanban_db  # noqa: WPS433
+
+    service = _agent_terminal_service()
+    try:
+        info = service.show(session, window)
+    except (AgentTerminalError, OSError) as exc:
+        raise _agent_terminal_error(exc) from exc
+    if info.run_id is None or not info.correlation_id:
+        return {"capsule": None, "window": info.to_dict(), "consistent": True}
+    try:
+        with _kanban_db.connect_closing(board=board) as conn:
+            capsule = _kanban_db.get_execution_capsule(conn, info.run_id)
+    except sqlite3.Error as exc:
+        detail = scrub_detail(str(exc)) or exc.__class__.__name__
+        raise HTTPException(status_code=503, detail=detail) from exc
+    terminal = capsule.get("terminal") if isinstance(capsule, dict) else None
+    consistent = bool(
+        isinstance(capsule, dict)
+        and capsule.get("correlation_id") == info.correlation_id
+        and capsule.get("task_id") == info.task_id
+        and isinstance(terminal, dict)
+        and terminal.get("pane_id") == info.pane_id
+        and terminal.get("server_id") == service.execution_server_id
+    )
+    return {
+        "capsule": capsule,
+        "window": info.to_dict(),
+        "consistent": consistent,
+    }
 
 
 @app.post("/api/agent-terminals/send-keys")

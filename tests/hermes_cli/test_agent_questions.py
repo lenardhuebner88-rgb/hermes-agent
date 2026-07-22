@@ -437,6 +437,26 @@ class _StubService:
         return None
 
 
+class _SnapshotStubService(_StubService):
+    """Records the automatic snapshot contract separately from fresh captures."""
+
+    def __init__(self, windows: list[dict[str, Any]], now: float) -> None:
+        super().__init__(windows, now=now)
+        self.snapshot_calls: list[tuple[str, int | None]] = []
+
+    def capture_pane_snapshot(
+        self,
+        pane_id: str,
+        *,
+        window_activity: int | None,
+        variant: str = "question-v1",
+        force_fresh: bool = False,
+    ) -> Any:
+        self.snapshot_calls.append((pane_id, window_activity))
+        raw = self.capture_pane(pane_id, start=-25)
+        return type("Snapshot", (), {"raw": raw})()
+
+
 def _frage_window(
     *,
     pane_id: str = "%1",
@@ -772,6 +792,32 @@ def test_ingestor_long_prompt_over_600_keeps_all_options_and_recheck_matches(
     answered = aq.list_question_events(status="answered", db_path=qdb)
     assert len(answered) == 1
     assert answered[0]["answer"] == "1"
+
+
+def test_ingestor_uses_automatic_snapshot_but_recheck_stays_fresh(qdb: Path) -> None:
+    now = 1_700_000_575.0
+    win = _frage_window(
+        pane_id="%snapshot",
+        tail=_FIXTURE_CLAUDE_SELECT,
+        now=now,
+        activity=now - 10,
+    )
+    service = _SnapshotStubService([win], now=now)
+    ingestor = aq.QuestionScrapeIngestor(
+        db_path=qdb,
+        service_factory=lambda: service,
+        now=lambda: now,
+    )
+
+    ingestor.poll_once()
+    ingestor.poll_once()
+    snapshot_count = len(service.snapshot_calls)
+    assert snapshot_count == 2
+    assert service.snapshot_calls == [("%snapshot", int(now - 10))] * 2
+
+    assert aq._recheck_fingerprint(service, "%snapshot") is not None
+    assert len(service.snapshot_calls) == snapshot_count
+    assert service.capture_starts[-1] == -25
 
 
 def test_ingestor_capture_error_skips_pane_counts_and_continues(qdb: Path) -> None:

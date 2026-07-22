@@ -1139,6 +1139,46 @@ def test_ac_f6_supersede_refused_when_old_chain_has_running_children(kanban_home
     assert [r["id"] for r in roots] == [first["root_task_id"]]
 
 
+def test_ac_f6_supersede_refuses_typed_wait_before_archiving_any_chain_task(
+    kanban_home, tmp_path: Path
+):
+    plans_root = tmp_path / "03-Agents"
+    path = _write_planspec(plans_root)
+    first = planspecs.ingest_planspec(path, plans_root=plans_root)
+    protected_child = first["child_ids"][0]
+    with kb.connect_closing() as conn:
+        waiter = kb.create_task(conn, title="waits on old PlanSpec event")
+        assert kb.block_task(
+            conn,
+            waiter,
+            kind="dependency",
+            wait_for={
+                "type": "event_seen",
+                "task_id": protected_child,
+                "event_kind": "operator_approved",
+            },
+        )
+    text = path.read_text(encoding="utf-8")
+    path.write_text(
+        text.replace("Document schema", "Document schema v2"), encoding="utf-8"
+    )
+
+    with pytest.raises(planspecs.PlanSpecBlocked) as exc:
+        planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)
+
+    assert "typed worker wait" in "\n".join(exc.value.findings)
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, first["root_task_id"]).status != "archived"
+        assert all(
+            kb.get_task(conn, child_id).status != "archived"
+            for child_id in first["child_ids"]
+        )
+        assert kb.get_task(conn, waiter).wait_for["task_id"] == protected_child
+        assert [r["id"] for r in _active_planspec_roots(conn)] == [
+            first["root_task_id"]
+        ]
+
+
 def test_ac_f6_identity_tracks_slice_across_a_moved_file(kanban_home, tmp_path: Path):
     """Robustness: same frontmatter ``slice`` at a new path is the same identity."""
     plans_root = tmp_path / "03-Agents"

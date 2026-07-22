@@ -386,6 +386,18 @@ def test_k5a_task_runs_cost_columns_present_and_migrate_idempotently(kanban_home
             assert cols2.count(name) == 1
 
 
+def test_execution_capsule_column_present_and_migrates_idempotently(kanban_home):
+    with kb.connect_closing() as conn:
+        cols = [row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")]
+        assert cols.count("execution_capsule") == 1
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        migrated = [
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        ]
+        assert migrated.count("execution_capsule") == 1
+
+
 def test_k11_decompose_failed_column_present_and_defaults_zero(kanban_home):
     """K11: tasks gains ``decompose_failed`` (additive), defaulting to 0 on a
     fresh task."""

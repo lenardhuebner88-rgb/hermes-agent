@@ -153,6 +153,19 @@ VALID_BLOCK_KINDS = frozenset(
 OPERATOR_ONLY_BLOCK_KINDS = frozenset(
     {"needs_input", "capability", "dependency", "capacity", "integration"}
 )
+VALID_WAIT_TYPES = frozenset({"parents_all_done", "not_before", "event_seen"})
+VALID_WAIT_EVENT_KINDS = frozenset(
+    {
+        "completed",
+        "commented",
+        "unblocked",
+        "promoted_manual",
+        "review_approved",
+        "operator_approved",
+        "approved",
+        "planspec_released",
+    }
+)
 BLOCK_RECURRENCE_LIMIT = 2
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
@@ -240,6 +253,9 @@ DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
 # so any genuinely active worker keeps its heartbeat fresh as a side
 # effect of normal API traffic.
 DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
+# Read-model warning threshold. This is deliberately earlier than the 1h
+# dispatcher reclaim backstop: "suspect" asks for attention; it does not reclaim.
+WORKER_LIVENESS_HEARTBEAT_SUSPECT_SECONDS = 10 * 60
 
 # Dispatcher-side heartbeat cadence for claude-CLI workers. Unlike Hermes-
 # runtime workers (which bridge chunk-level liveness into ``last_heartbeat_at``
@@ -252,6 +268,98 @@ DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
 # (1h) and the SPA's ``STUCK_HEARTBEAT_S`` (10m), so a live claude worker never
 # reads as stale/stuck.
 _CLAUDE_CLI_HEARTBEAT_MIN_GAP_SECONDS = 120
+
+
+def derive_worker_liveness(
+    *,
+    run_status: object,
+    claim_expires: object,
+    last_heartbeat_at: object,
+    worker_pid: object,
+    now: int,
+    started_at: object = None,
+    process_alive: Optional[bool] = None,
+    process_group_alive: Optional[bool] = None,
+) -> dict[str, object]:
+    """Authoritative worker read-model from persisted + host process signals.
+
+    ``suspect`` is observational and never mutates/reclaims a task. ``failed`` is
+    reserved for an explicit terminal run state or a confirmed-dead recorded PID.
+    """
+    status = str(run_status or "").strip().lower()
+    if status in {
+        "timed_out",
+        "crashed",
+        "failed",
+        "reclaimed",
+        "stale",
+        "canceled",
+    }:
+        return {"state": "failed", "reason": f"run_{status}"}
+
+    try:
+        pid = int(worker_pid) if worker_pid is not None else 0
+    except (TypeError, ValueError):
+        pid = 0
+
+    try:
+        started = int(started_at) if started_at is not None else 0
+    except (TypeError, ValueError):
+        return {"state": "suspect", "reason": "started_at_invalid"}
+    if started < 0 or started > int(now) + 60:
+        return {"state": "suspect", "reason": "started_at_invalid"}
+    launch_grace = bool(
+        started > 0 and 0 <= int(now) - started < _resolve_crash_grace_seconds()
+    )
+    confirmed_dead = process_alive is False and process_group_alive is not True
+    if pid > 0 and confirmed_dead and not launch_grace:
+        return {"state": "failed", "reason": "worker_process_not_alive"}
+
+    try:
+        heartbeat = (
+            int(last_heartbeat_at) if last_heartbeat_at is not None else 0
+        )
+    except (TypeError, ValueError):
+        return {"state": "suspect", "reason": "heartbeat_invalid"}
+    if heartbeat < 0:
+        return {"state": "suspect", "reason": "heartbeat_invalid"}
+    if heartbeat > int(now) + 60:
+        return {"state": "suspect", "reason": "heartbeat_in_future"}
+    heartbeat_stale = bool(
+        heartbeat > 0
+        and int(now) - heartbeat > WORKER_LIVENESS_HEARTBEAT_SUSPECT_SECONDS
+    )
+
+    try:
+        expires = int(claim_expires) if claim_expires is not None else 0
+    except (TypeError, ValueError):
+        expires = 0
+    if expires <= 0:
+        return {"state": "suspect", "reason": "claim_missing"}
+    if expires > int(now) + 10 * 366 * 24 * 60 * 60:
+        return {"state": "suspect", "reason": "claim_invalid"}
+    if expires < int(now):
+        # release_stale_claims extends this exact state on its next tick. Do
+        # not label a host-confirmed worker as stuck during that small window.
+        if (
+            pid > 0
+            and (process_alive is True or process_group_alive is True)
+            and heartbeat > 0
+            and not heartbeat_stale
+        ):
+            return {"state": "running", "reason": "claim_refresh_pending"}
+        return {"state": "suspect", "reason": "claim_expired"}
+
+    if heartbeat_stale:
+        return {"state": "suspect", "reason": "heartbeat_stale"}
+    if launch_grace and confirmed_dead:
+        return {"state": "running", "reason": "launch_grace"}
+    if process_alive is False and process_group_alive is True:
+        return {"state": "running", "reason": "worker_group_alive"}
+    return {
+        "state": "running",
+        "reason": "heartbeat_fresh" if heartbeat > 0 else "claim_valid",
+    }
 
 # Grace added to a claim when a reclaim is deferred because the previous
 # host-local worker is still alive after a termination attempt. Releasing the
@@ -1169,6 +1277,8 @@ class Task:
     # holds the task in place in ``recompute_ready`` until the wall clock
     # reaches it — native time-based scheduling without a separate cron.
     due_at: Optional[int] = None
+    # Closed, machine-readable worker wait union. NULL means no active wait.
+    wait_for: Optional[dict[str, object]] = None
     # N-E3: durable epic this task belongs to. NULL = not part of an epic.
     epic_id: Optional[str] = None
     # Optional coarse task kind stamped by decomposer/CLI. NULL = unknown.
@@ -1208,6 +1318,14 @@ class Task:
                     scope_contract_value = parsed_scope
             except Exception:
                 scope_contract_value = None
+        wait_for_value: Optional[dict[str, object]] = None
+        if "wait_for" in keys and row["wait_for"]:
+            try:
+                parsed_wait = json.loads(row["wait_for"])
+                if isinstance(parsed_wait, dict):
+                    wait_for_value = parsed_wait
+            except Exception:
+                wait_for_value = None
         return cls(
             id=row["id"],
             title=row["title"],
@@ -1310,6 +1428,7 @@ class Task:
             ),
             session_id=(row["session_id"] if "session_id" in keys else None),
             due_at=(row["due_at"] if "due_at" in keys else None),
+            wait_for=wait_for_value,
             epic_id=(row["epic_id"] if "epic_id" in keys else None),
             kind=(row["kind"] if "kind" in keys else None),
             scope_contract=scope_contract_value,
@@ -1406,6 +1525,9 @@ class Run:
     model_state: Optional[str] = None
     model_source: Optional[str] = None
     model_observed_at: Optional[int] = None
+    # Versioned Kanban↔TMAX correlation. Stored in its own column rather than
+    # free-form ``metadata`` so unrelated cost/model backfills cannot clobber it.
+    execution_capsule: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Run":
@@ -1413,6 +1535,18 @@ class Run:
             meta = json.loads(row["metadata"]) if row["metadata"] else None
         except Exception:
             meta = None
+
+        raw_capsule = None
+        try:
+            raw_capsule = row["execution_capsule"]
+        except (IndexError, KeyError):
+            raw_capsule = None
+        try:
+            capsule = json.loads(raw_capsule) if raw_capsule else None
+        except Exception:
+            capsule = None
+        if not isinstance(capsule, dict):
+            capsule = None
 
         def _opt(key: str) -> Any:
             # K5a columns may be absent on rows from narrower SELECTs; tolerate.
@@ -1448,6 +1582,7 @@ class Run:
             model_state=_opt("model_state"),
             model_source=_opt("model_source"),
             model_observed_at=_coerce_int(_opt("model_observed_at")),
+            execution_capsule=capsule,
         )
 
 
@@ -2036,6 +2171,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- immediately (legacy behaviour). recompute_ready holds a task in
     -- ``todo``/``blocked`` until the wall clock reaches a future due_at.
     due_at               INTEGER,
+    -- Closed worker wait union JSON. NULL = no active machine wait.
+    wait_for              TEXT,
     -- N-E3: durable epic this task belongs to (FK-style pointer into the
     -- ``epics`` table, no hard constraint). NULL = not part of an epic =
     -- exactly the pre-E3 behaviour. Decompose propagates the triage root's
@@ -3041,6 +3178,54 @@ def _migrate_refresh_review_gate_trigger(conn: sqlite3.Connection) -> None:
     )
 
 
+def _backfill_legacy_dependency_waits(conn: sqlite3.Connection) -> int:
+    """Upgrade legacy dependency parks that already have concrete parent edges.
+
+    Before ``wait_for`` existed, ``block_kind='dependency'`` stored only the
+    mode and relied on ``task_links``. Preserve those real waits by snapshotting
+    their non-empty parent set into the closed union. Parentless legacy rows are
+    deliberately left NULL: treating ``all([])`` as satisfied would recreate
+    the duplicate-work bug, so the normal evaluator surfaces them as
+    ``needs_input`` instead.  Terminal tasks (archived/canceled/done/failed)
+    are skipped: a typed wait on a terminal owner can never be released or
+    unblocked and would make the referenced parents impossible to purge.
+    """
+    # Ancient/minimal schemas (concurrent-migration window, #21708) may not
+    # have ``status`` yet — degrade to the unfiltered legacy selection there.
+    task_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    status_filter = (
+        "AND status NOT IN ('archived', 'canceled', 'done', 'failed')"
+        if "status" in task_cols
+        else ""
+    )
+    rows = conn.execute(
+        "SELECT id FROM tasks "
+        "WHERE block_kind = 'dependency' AND wait_for IS NULL " + status_filter
+    ).fetchall()
+    migrated = 0
+    for row in rows:
+        task_id = str(row["id"])
+        parent_rows = conn.execute(
+            "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+            (task_id,),
+        ).fetchall()
+        parent_ids = sorted({str(parent["parent_id"]) for parent in parent_rows})
+        if not parent_ids:
+            continue
+        payload = json.dumps(
+            {"type": "parents_all_done", "task_ids": parent_ids},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        updated = conn.execute(
+            "UPDATE tasks SET wait_for = ? "
+            "WHERE id = ? AND block_kind = 'dependency' AND wait_for IS NULL",
+            (payload, task_id),
+        )
+        migrated += int(updated.rowcount or 0)
+    return migrated
+
+
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns that were introduced after v1 release to legacy DBs.
 
@@ -3242,6 +3427,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # future.
         _add_column_if_missing(conn, "tasks", "due_at", "due_at INTEGER")
 
+    if "wait_for" not in cols:
+        _add_column_if_missing(conn, "tasks", "wait_for", "wait_for TEXT")
+    # Idempotent and intentionally also runs after a partially completed prior
+    # startup: every legacy dependency row with real parent edges retains its
+    # pre-upgrade self-healing behaviour under the new typed contract.
+    _backfill_legacy_dependency_waits(conn)
+
     if "epic_id" not in cols:
         # N-E3: durable epic pointer. NULL on every legacy row = not part of
         # an epic = the exact pre-E3 behaviour. Decompose propagates a triage
@@ -3437,6 +3629,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # (block). Distinct from metadata['verdict'] which stays untouched.
         if "verdict" not in run_cols:
             _add_column_if_missing(conn, "task_runs", "verdict", "verdict TEXT")
+        if "execution_capsule" not in run_cols:
+            _add_column_if_missing(
+                conn,
+                "task_runs",
+                "execution_capsule",
+                "execution_capsule TEXT",
+            )
 
     notify_table_exists = (
         conn.execute(
@@ -3628,7 +3827,8 @@ _REBUILD_SPECS = {
         " input_tokens INTEGER, output_tokens INTEGER,"
         " cost_usd REAL,"
         " cost_status TEXT CHECK (cost_status IN ('actual','estimated')),"
-        " verdict TEXT)",
+        " verdict TEXT,"
+        " execution_capsule TEXT)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",
@@ -5307,19 +5507,31 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
 
 
 def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
+    conflict: Optional[WaitMutationConflictInfo] = None
+    removed = False
     with write_txn(conn):
-        cur = conn.execute(
-            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-            (parent_id, child_id),
+        conflict = _prepare_edge_removal_wait_in_txn(
+            conn,
+            parent_id=parent_id,
+            child_id=child_id,
+            operation="unlink_tasks",
+            now=int(time.time()),
         )
-        if cur.rowcount:
-            _append_event(
-                conn,
-                child_id,
-                "unlinked",
-                {"parent": parent_id, "child": child_id},
+        if conflict is None:
+            cur = conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (parent_id, child_id),
             )
-        removed = cur.rowcount > 0
+            if cur.rowcount:
+                _append_event(
+                    conn,
+                    child_id,
+                    "unlinked",
+                    {"parent": parent_id, "child": child_id},
+                )
+            removed = cur.rowcount > 0
+    if conflict is not None:
+        raise WaitMutationConflict(conflict)
     if removed:
         # Dependency edge removed — re-evaluate promotion eligibility for the
         # child immediately.  Matches the contract of complete_task and
@@ -5386,38 +5598,53 @@ def rewire_superseding_review_parent(
             f"linking {new_review_task} -> {source_task} would create a cycle"
         )
 
+    conflict: Optional[WaitMutationConflictInfo] = None
+    payload: dict[str, Any] = {}
     with write_txn(conn):
-        old_cur = conn.execute(
-            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-            (old_review_task, source_task),
+        conflict = _rewire_parent_wait_in_txn(
+            conn,
+            child_id=source_task,
+            old_parent_id=old_review_task,
+            new_parent_id=new_review_task,
+            operation="rewire_superseding_review_parent",
+            now=int(time.time()),
         )
-        old_parent_removed = old_cur.rowcount > 0
-        already_new = conn.execute(
-            "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ? LIMIT 1",
-            (new_review_task, source_task),
-        ).fetchone()
-        conn.execute(
-            "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-            (new_review_task, source_task),
-        )
-        new_parent_added = already_new is None
-        parent_status = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (new_review_task,)
-        ).fetchone()["status"]
-        if parent_status != "done":
-            conn.execute(
-                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
-                (source_task,),
+        if conflict is None:
+            old_cur = conn.execute(
+                "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (old_review_task, source_task),
             )
-        payload = {
-            "source_task": source_task,
-            "old_review_task": old_review_task,
-            "new_review_task": new_review_task,
-            "old_parent_removed": old_parent_removed,
-            "new_parent_added": new_parent_added,
-            "reason": reason,
-        }
-        _append_event(conn, source_task, _SUPERSEDING_REVIEW_REWIRED_EVENT, payload)
+            old_parent_removed = old_cur.rowcount > 0
+            already_new = conn.execute(
+                "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ? LIMIT 1",
+                (new_review_task, source_task),
+            ).fetchone()
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (new_review_task, source_task),
+            )
+            new_parent_added = already_new is None
+            parent_status = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?", (new_review_task,)
+            ).fetchone()["status"]
+            if parent_status != "done":
+                conn.execute(
+                    "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                    (source_task,),
+                )
+            payload = {
+                "source_task": source_task,
+                "old_review_task": old_review_task,
+                "new_review_task": new_review_task,
+                "old_parent_removed": old_parent_removed,
+                "new_parent_added": new_parent_added,
+                "reason": reason,
+            }
+            _append_event(
+                conn, source_task, _SUPERSEDING_REVIEW_REWIRED_EVENT, payload
+            )
+    if conflict is not None:
+        raise WaitMutationConflict(conflict)
     recompute_ready(conn)
     return payload
 
@@ -9079,6 +9306,787 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class WaitEvaluation:
+    state: str  # none | waiting | satisfied | invalid
+    wait_for: Optional[dict[str, object]] = None
+    reason: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class WaitMutationConflictInfo:
+    """A typed refusal produced before a mutation can orphan a wait.
+
+    The information is intentionally small and contains no task body or other
+    free-form context.  API/CLI callers can therefore surface the conflict
+    without scraping an event string or leaking unrelated payloads.
+    """
+
+    operation: str
+    wait_task_id: str
+    reason: str
+    target_task_ids: tuple[str, ...]
+    wait_for: Optional[dict[str, object]] = None
+
+
+class WaitMutationConflict(RuntimeError):
+    """Raised when a graph/status mutation would invalidate an active wait."""
+
+    def __init__(self, info: WaitMutationConflictInfo):
+        self.info = info
+        targets = ", ".join(info.target_task_ids)
+        super().__init__(
+            f"{info.operation} refused: task {info.wait_task_id} has an active "
+            f"wait ({info.reason}) referencing {targets or 'the mutation target'}"
+        )
+
+
+def _parse_wait_timestamp(value: object) -> int:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("not_before.at must be an RFC3339 timestamp")
+    try:
+        parsed = _dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("not_before.at must be an RFC3339 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("not_before.at must include a timezone")
+    return int(parsed.timestamp())
+
+
+def _wait_timestamp(epoch: int) -> str:
+    return (
+        _dt.datetime.fromtimestamp(int(epoch), tz=_dt.timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _normalize_wait_for_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    wait_for: object,
+    *,
+    now: int,
+) -> tuple[dict[str, object], Optional[int], str]:
+    """Validate and register any parent edges for a closed worker wait union.
+
+    Caller owns an active write transaction. All references are validated before
+    the first edge is inserted, so a rejected request cannot leave a partial graph.
+    """
+    if not isinstance(wait_for, dict):
+        raise ValueError("wait_for is required")
+    wait_type = wait_for.get("type")
+    if wait_type not in VALID_WAIT_TYPES:
+        raise ValueError(
+            f"wait_for.type must be one of {sorted(VALID_WAIT_TYPES)}"
+        )
+
+    if wait_type == "parents_all_done":
+        if set(wait_for) != {"type", "task_ids"}:
+            raise ValueError("parents_all_done accepts only type and task_ids")
+        raw_ids = wait_for.get("task_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise ValueError("parents_all_done.task_ids must be a non-empty list")
+        if any(not isinstance(value, str) or not value.strip() for value in raw_ids):
+            raise ValueError("parents_all_done.task_ids must contain task ids")
+        task_ids = sorted(value.strip() for value in raw_ids)
+        if len(set(task_ids)) != len(task_ids):
+            raise ValueError("parents_all_done.task_ids must be unique")
+        if task_id in task_ids:
+            raise ValueError("a task cannot wait for itself")
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            task_ids,
+        ).fetchall()
+        by_id = {str(row["id"]): str(row["status"]) for row in rows}
+        missing = [parent_id for parent_id in task_ids if parent_id not in by_id]
+        if missing:
+            raise ValueError(f"unknown wait parent(s): {', '.join(missing)}")
+        unavailable = [
+            parent_id
+            for parent_id in task_ids
+            if by_id[parent_id] in {"archived", "canceled", "failed"}
+            or by_id[parent_id] not in VALID_STATUSES
+        ]
+        if unavailable:
+            raise ValueError(
+                f"unavailable wait parent(s): {', '.join(unavailable)}"
+            )
+        for parent_id in task_ids:
+            if _would_cycle(conn, parent_id, task_id):
+                raise ValueError(
+                    f"linking {parent_id} -> {task_id} would create a cycle"
+                )
+        for parent_id in task_ids:
+            edge = conn.execute(
+                "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (parent_id, task_id),
+            ).fetchone()
+            if edge is None:
+                _link_tasks_in_txn(conn, parent_id, task_id)
+        state = (
+            "satisfied"
+            if all(by_id[parent_id] == "done" for parent_id in task_ids)
+            else "waiting"
+        )
+        return {"type": wait_type, "task_ids": task_ids}, None, state
+
+    if wait_type == "not_before":
+        if set(wait_for) != {"type", "at"}:
+            raise ValueError("not_before accepts only type and at")
+        requested = _parse_wait_timestamp(wait_for.get("at"))
+        if requested <= now:
+            raise ValueError("not_before.at must be in the future")
+        existing = conn.execute(
+            "SELECT due_at FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        effective = max(requested, int(existing["due_at"] or 0))
+        return {"type": wait_type, "at": _wait_timestamp(effective)}, effective, "waiting"
+
+    if set(wait_for) != {"type", "task_id", "event_kind"}:
+        raise ValueError("event_seen accepts only type, task_id, and event_kind")
+    source_task_id = str(wait_for.get("task_id") or "").strip()
+    event_kind = str(wait_for.get("event_kind") or "").strip()
+    if not source_task_id:
+        raise ValueError("event_seen.task_id is required")
+    if event_kind not in VALID_WAIT_EVENT_KINDS:
+        raise ValueError(
+            f"event_seen.event_kind must be one of {sorted(VALID_WAIT_EVENT_KINDS)}"
+        )
+    source = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (source_task_id,)
+    ).fetchone()
+    if source is None:
+        raise ValueError(f"unknown event task: {source_task_id}")
+    if source["status"] in {"archived", "canceled", "failed"}:
+        raise ValueError(f"event task is unavailable: {source_task_id}")
+    seen = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
+        (source_task_id, event_kind),
+    ).fetchone()
+    return (
+        {
+            "type": wait_type,
+            "task_id": source_task_id,
+            "event_kind": event_kind,
+        },
+        None,
+        "satisfied" if seen else "waiting",
+    )
+
+
+def _evaluate_task_wait_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: int,
+) -> WaitEvaluation:
+    row = conn.execute(
+        "SELECT wait_for, block_kind, due_at FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row is None:
+        return WaitEvaluation("none")
+    raw = row["wait_for"]
+    if not raw:
+        if row["block_kind"] == "dependency":
+            return WaitEvaluation("invalid", reason="dependency_wait_missing")
+        return WaitEvaluation("none")
+    try:
+        wait_for = json.loads(raw)
+    except (TypeError, ValueError):
+        return WaitEvaluation("invalid", reason="wait_json_invalid")
+    if not isinstance(wait_for, dict):
+        return WaitEvaluation("invalid", reason="wait_json_invalid")
+    wait_type = wait_for.get("type")
+
+    if wait_type == "parents_all_done":
+        task_ids = wait_for.get("task_ids")
+        if (
+            set(wait_for) != {"type", "task_ids"}
+            or not isinstance(task_ids, list)
+            or not task_ids
+            or any(not isinstance(value, str) or not value for value in task_ids)
+            or task_ids != sorted(set(task_ids))
+        ):
+            return WaitEvaluation("invalid", wait_for, "parent_wait_shape_invalid")
+        placeholders = ",".join("?" for _ in task_ids)
+        rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})", task_ids
+        ).fetchall()
+        by_id = {str(parent["id"]): str(parent["status"]) for parent in rows}
+        for parent_id in task_ids:
+            status = by_id.get(parent_id)
+            if status is None:
+                return WaitEvaluation("invalid", wait_for, f"parent_missing:{parent_id}")
+            if status in {"archived", "canceled", "failed"} or status not in VALID_STATUSES:
+                return WaitEvaluation(
+                    "invalid", wait_for, f"parent_unavailable:{parent_id}"
+                )
+            edge = conn.execute(
+                "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
+                (parent_id, task_id),
+            ).fetchone()
+            if edge is None:
+                return WaitEvaluation("invalid", wait_for, f"parent_edge_missing:{parent_id}")
+        return WaitEvaluation(
+            "satisfied"
+            if all(by_id[parent_id] == "done" for parent_id in task_ids)
+            else "waiting",
+            wait_for,
+        )
+
+    if wait_type == "not_before":
+        if set(wait_for) != {"type", "at"}:
+            return WaitEvaluation("invalid", wait_for, "not_before_shape_invalid")
+        try:
+            wait_epoch = _parse_wait_timestamp(wait_for.get("at"))
+        except ValueError as exc:
+            return WaitEvaluation("invalid", wait_for, str(exc))
+        effective = max(wait_epoch, int(row["due_at"] or 0))
+        return WaitEvaluation(
+            "satisfied" if now >= effective else "waiting", wait_for
+        )
+
+    if wait_type == "event_seen":
+        if set(wait_for) != {"type", "task_id", "event_kind"}:
+            return WaitEvaluation("invalid", wait_for, "event_wait_shape_invalid")
+        source_task_id = wait_for.get("task_id")
+        event_kind = wait_for.get("event_kind")
+        if not isinstance(source_task_id, str) or not source_task_id:
+            return WaitEvaluation("invalid", wait_for, "event_task_invalid")
+        if event_kind not in VALID_WAIT_EVENT_KINDS:
+            return WaitEvaluation("invalid", wait_for, "event_kind_invalid")
+        source = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (source_task_id,)
+        ).fetchone()
+        if source is None or source["status"] in {"archived", "canceled", "failed"}:
+            return WaitEvaluation("invalid", wait_for, "event_task_unavailable")
+        seen = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
+            (source_task_id, event_kind),
+        ).fetchone()
+        return WaitEvaluation("satisfied" if seen else "waiting", wait_for)
+
+    return WaitEvaluation("invalid", wait_for, "wait_type_invalid")
+
+
+def _release_task_wait_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    evaluation: WaitEvaluation,
+    *,
+    source: str,
+) -> None:
+    wait_for = evaluation.wait_for or {}
+    clear_due = wait_for.get("type") == "not_before"
+    # Only clear ``due_at`` when it still holds the wait's own timestamp.  The
+    # normalizer deliberately keeps a later operator-set ``due_at`` (max of
+    # both); releasing the wait must not silently delete that deadline.
+    wait_due_epoch: Optional[int] = None
+    if clear_due:
+        try:
+            wait_due_epoch = _parse_wait_timestamp(wait_for.get("at"))
+        except ValueError:
+            wait_due_epoch = None
+    conn.execute(
+        "UPDATE tasks SET wait_for = NULL, "
+        "due_at = CASE WHEN ? = 1 AND due_at IS NOT NULL AND due_at = ? "
+        "THEN NULL ELSE due_at END, "
+        "block_kind = CASE WHEN block_kind = 'dependency' THEN NULL ELSE block_kind END, "
+        "block_recurrences = CASE WHEN block_kind = 'dependency' THEN 0 ELSE block_recurrences END "
+        "WHERE id = ?",
+        (
+            1 if clear_due else 0,
+            wait_due_epoch if wait_due_epoch is not None else -1,
+            task_id,
+        ),
+    )
+    _append_event(
+        conn,
+        task_id,
+        "wait_released",
+        {"source": source, "wait_for": wait_for},
+    )
+
+
+def _wait_referenced_task_ids(wait_for: object) -> set[str]:
+    """Return task ids whose continued existence is part of a typed wait.
+
+    ``not_before`` deliberately returns an empty set: it is owned by the waiting
+    task itself and has no external task reference to protect.
+    """
+    if not isinstance(wait_for, dict):
+        return set()
+    wait_type = wait_for.get("type")
+    if wait_type == "parents_all_done":
+        values = wait_for.get("task_ids")
+        if not isinstance(values, list):
+            return set()
+        return {value for value in values if isinstance(value, str) and value}
+    if wait_type == "event_seen":
+        value = wait_for.get("task_id")
+        return {value} if isinstance(value, str) and value else set()
+    return set()
+
+
+def _wait_mutation_conflict(
+    *,
+    operation: str,
+    wait_task_id: str,
+    reason: str,
+    target_task_ids: Iterable[str],
+    wait_for: Optional[dict[str, object]],
+) -> WaitMutationConflictInfo:
+    return WaitMutationConflictInfo(
+        operation=str(operation),
+        wait_task_id=str(wait_task_id),
+        reason=str(reason),
+        target_task_ids=tuple(sorted({str(value) for value in target_task_ids})),
+        wait_for=wait_for,
+    )
+
+
+def _record_wait_mutation_refusal_in_txn(
+    conn: sqlite3.Connection,
+    conflict: WaitMutationConflictInfo,
+) -> None:
+    _append_event(
+        conn,
+        conflict.wait_task_id,
+        "wait_mutation_refused",
+        {
+            "operation": conflict.operation,
+            "reason": conflict.reason,
+            "target_task_ids": list(conflict.target_task_ids),
+            "wait_for": conflict.wait_for,
+        },
+    )
+
+
+def _plan_task_removal_waits_in_txn(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    operation: str,
+    now: int,
+) -> tuple[list[tuple[str, WaitEvaluation]], Optional[WaitMutationConflictInfo]]:
+    """Plan releases/refusal before tasks or all their edges disappear.
+
+    The caller owns a write transaction.  No wait is released until the entire
+    set has been inspected, so one unsatisfied dependent cannot leave siblings
+    partially changed.  This covers both a target's own wait and other tasks'
+    ``parents_all_done``/``event_seen`` references to a target.
+    """
+    targets = {str(task_id).strip() for task_id in task_ids if str(task_id).strip()}
+    if not targets:
+        return [], None
+
+    rows = conn.execute(
+        "SELECT id FROM tasks WHERE wait_for IS NOT NULL OR block_kind = 'dependency'"
+    ).fetchall()
+    candidate_ids = {str(row["id"]) for row in rows} | targets
+    releases: list[tuple[str, WaitEvaluation]] = []
+    seen_release: set[str] = set()
+
+    for wait_task_id in sorted(candidate_ids):
+        evaluation = _evaluate_task_wait_in_txn(conn, wait_task_id, now=now)
+        owns_target = wait_task_id in targets
+        references_target = bool(
+            _wait_referenced_task_ids(evaluation.wait_for) & targets
+        )
+        if not owns_target and not references_target:
+            continue
+        if evaluation.state == "none":
+            continue
+        if evaluation.state == "satisfied":
+            if wait_task_id not in seen_release:
+                releases.append((wait_task_id, evaluation))
+                seen_release.add(wait_task_id)
+            continue
+        reason = evaluation.reason or (
+            "active_wait" if evaluation.state == "waiting" else "invalid_wait"
+        )
+        return [], _wait_mutation_conflict(
+            operation=operation,
+            wait_task_id=wait_task_id,
+            reason=reason,
+            target_task_ids=targets,
+            wait_for=evaluation.wait_for,
+        )
+    return releases, None
+
+
+def _apply_task_removal_wait_plan_in_txn(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    operation: str,
+    now: int,
+) -> Optional[WaitMutationConflictInfo]:
+    releases, conflict = _plan_task_removal_waits_in_txn(
+        conn, task_ids, operation=operation, now=now
+    )
+    if conflict is not None:
+        _record_wait_mutation_refusal_in_txn(conn, conflict)
+        return conflict
+    for wait_task_id, evaluation in releases:
+        _release_task_wait_in_txn(
+            conn,
+            wait_task_id,
+            evaluation,
+            source=f"{operation}:preflight",
+        )
+    return None
+
+
+def preflight_task_removals(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    operation: str,
+) -> None:
+    """Commit a wait-aware removal preflight, then raise a typed conflict.
+
+    This public primitive lets compound callers (PlanSpec chain archive, Funnel
+    revision) prove the entire set is safe before their first irreversible
+    sub-operation.  A refusal event is committed while task/edge state remains
+    unchanged, then the exception is raised outside the transaction.
+    """
+    conflict: Optional[WaitMutationConflictInfo]
+    with write_txn(conn):
+        conflict = _apply_task_removal_wait_plan_in_txn(
+            conn,
+            task_ids,
+            operation=operation,
+            now=int(time.time()),
+        )
+    if conflict is not None:
+        raise WaitMutationConflict(conflict)
+
+
+def preflight_task_respec(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    operation: str = "respec_task",
+) -> None:
+    """Validate every wait affected by replacing ``task_id``.
+
+    A waiting source-owned wait and downstream ``parents_all_done`` references
+    are transferable and therefore allowed.  ``event_seen`` references from a
+    different task are semantic references to the old task's event stream; an
+    unsatisfied one cannot be silently redirected to the replacement.
+    """
+    conflict: Optional[WaitMutationConflictInfo] = None
+    releases: list[tuple[str, WaitEvaluation]] = []
+    now = int(time.time())
+    with write_txn(conn):
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE wait_for IS NOT NULL OR block_kind = 'dependency'"
+        ).fetchall()
+        candidate_ids = {str(row["id"]) for row in rows} | {str(task_id)}
+        for wait_task_id in sorted(candidate_ids):
+            evaluation = _evaluate_task_wait_in_txn(conn, wait_task_id, now=now)
+            wait_for = evaluation.wait_for or {}
+            owns_source = wait_task_id == task_id
+            references_source = task_id in _wait_referenced_task_ids(wait_for)
+            if not owns_source and not references_source:
+                continue
+            if evaluation.state in {"none", "waiting"}:
+                if (
+                    evaluation.state == "waiting"
+                    and not owns_source
+                    and wait_for.get("type") != "parents_all_done"
+                ):
+                    conflict = _wait_mutation_conflict(
+                        operation=operation,
+                        wait_task_id=wait_task_id,
+                        reason="event_wait_source_cannot_be_rewired",
+                        target_task_ids=[task_id],
+                        wait_for=evaluation.wait_for,
+                    )
+                    break
+                continue
+            if evaluation.state == "satisfied":
+                releases.append((wait_task_id, evaluation))
+                continue
+            conflict = _wait_mutation_conflict(
+                operation=operation,
+                wait_task_id=wait_task_id,
+                reason=evaluation.reason or "invalid_wait",
+                target_task_ids=[task_id],
+                wait_for=evaluation.wait_for,
+            )
+            break
+        if conflict is not None:
+            _record_wait_mutation_refusal_in_txn(conn, conflict)
+        else:
+            for wait_task_id, evaluation in releases:
+                _release_task_wait_in_txn(
+                    conn,
+                    wait_task_id,
+                    evaluation,
+                    source=f"{operation}:preflight",
+                )
+    if conflict is not None:
+        raise WaitMutationConflict(conflict)
+
+
+def _prepare_edge_removal_wait_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    parent_id: str,
+    child_id: str,
+    operation: str,
+    now: int,
+) -> Optional[WaitMutationConflictInfo]:
+    evaluation = _evaluate_task_wait_in_txn(conn, child_id, now=now)
+    wait_for = evaluation.wait_for or {}
+    referenced = (
+        wait_for.get("type") == "parents_all_done"
+        and parent_id in _wait_referenced_task_ids(wait_for)
+    )
+    if not referenced:
+        return None
+    if evaluation.state == "satisfied":
+        _release_task_wait_in_txn(conn, child_id, evaluation, source=operation)
+        return None
+    conflict = _wait_mutation_conflict(
+        operation=operation,
+        wait_task_id=child_id,
+        reason=evaluation.reason or "active_wait",
+        target_task_ids=[parent_id],
+        wait_for=evaluation.wait_for,
+    )
+    _record_wait_mutation_refusal_in_txn(conn, conflict)
+    return conflict
+
+
+def prepare_wait_owner_mutation_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    operation: str,
+    now: Optional[int] = None,
+) -> Optional[WaitMutationConflictInfo]:
+    """Guard a status mutation on the task that owns a typed wait.
+
+    Public for dashboard adapters that already own a ``write_txn``.  They must
+    commit the returned refusal event and raise/return conflict only after the
+    transaction exits.
+    """
+    evaluation = _evaluate_task_wait_in_txn(
+        conn, task_id, now=int(time.time()) if now is None else int(now)
+    )
+    if evaluation.state == "none":
+        return None
+    if evaluation.state == "satisfied":
+        _release_task_wait_in_txn(conn, task_id, evaluation, source=operation)
+        return None
+    conflict = _wait_mutation_conflict(
+        operation=operation,
+        wait_task_id=task_id,
+        reason=evaluation.reason or "active_wait",
+        target_task_ids=[task_id],
+        wait_for=evaluation.wait_for,
+    )
+    _record_wait_mutation_refusal_in_txn(conn, conflict)
+    return conflict
+
+
+def preflight_wait_owner_mutation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    operation: str,
+) -> None:
+    conflict: Optional[WaitMutationConflictInfo]
+    with write_txn(conn):
+        conflict = prepare_wait_owner_mutation_in_txn(
+            conn, task_id, operation=operation
+        )
+    if conflict is not None:
+        raise WaitMutationConflict(conflict)
+
+
+def _rewire_parent_wait_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    child_id: str,
+    old_parent_id: str,
+    new_parent_id: str,
+    operation: str,
+    now: int,
+) -> Optional[WaitMutationConflictInfo]:
+    """Atomically rewrite a concrete parent reference in a child wait payload.
+
+    Edge statements remain caller-owned so compound graph rewrites can preserve
+    their existing event/status semantics.  Any later exception rolls this JSON
+    update and its ``wait_rewired`` event back with those edge statements.
+    """
+    evaluation = _evaluate_task_wait_in_txn(conn, child_id, now=now)
+    wait_for = evaluation.wait_for or {}
+    if not (
+        wait_for.get("type") == "parents_all_done"
+        and old_parent_id in _wait_referenced_task_ids(wait_for)
+    ):
+        # ``event_seen`` is not a graph edge and changing its source would alter
+        # meaning.  Callers removing that source must use removal preflight.
+        return None
+    if evaluation.state == "satisfied":
+        _release_task_wait_in_txn(conn, child_id, evaluation, source=operation)
+        return None
+    if evaluation.state != "waiting":
+        conflict = _wait_mutation_conflict(
+            operation=operation,
+            wait_task_id=child_id,
+            reason=evaluation.reason or "invalid_wait",
+            target_task_ids=[old_parent_id],
+            wait_for=evaluation.wait_for,
+        )
+        _record_wait_mutation_refusal_in_txn(conn, conflict)
+        return conflict
+    new_parent = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (new_parent_id,)
+    ).fetchone()
+    if new_parent is None or new_parent["status"] in {"archived", "canceled", "failed"}:
+        conflict = _wait_mutation_conflict(
+            operation=operation,
+            wait_task_id=child_id,
+            reason=f"replacement_parent_unavailable:{new_parent_id}",
+            target_task_ids=[old_parent_id, new_parent_id],
+            wait_for=evaluation.wait_for,
+        )
+        _record_wait_mutation_refusal_in_txn(conn, conflict)
+        return conflict
+    old_ids = list(wait_for.get("task_ids") or [])
+    new_ids = sorted(
+        {new_parent_id if parent_id == old_parent_id else parent_id for parent_id in old_ids}
+    )
+    if not new_ids:
+        conflict = _wait_mutation_conflict(
+            operation=operation,
+            wait_task_id=child_id,
+            reason="parent_wait_would_be_empty",
+            target_task_ids=[old_parent_id, new_parent_id],
+            wait_for=evaluation.wait_for,
+        )
+        _record_wait_mutation_refusal_in_txn(conn, conflict)
+        return conflict
+    next_wait: dict[str, object] = {
+        "type": "parents_all_done",
+        "task_ids": new_ids,
+    }
+    conn.execute(
+        "UPDATE tasks SET wait_for = ? WHERE id = ?",
+        (json.dumps(next_wait, ensure_ascii=False, sort_keys=True), child_id),
+    )
+    _append_event(
+        conn,
+        child_id,
+        "wait_rewired",
+        {
+            "operation": operation,
+            "old_parent_id": old_parent_id,
+            "new_parent_id": new_parent_id,
+            "wait_for": next_wait,
+        },
+    )
+    return None
+
+
+def prepare_event_reference_removal_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    operation: str,
+    now: Optional[int] = None,
+) -> Optional[WaitMutationConflictInfo]:
+    """Guard removal of an event stream referenced by another task.
+
+    Unlike parent waits, ``event_seen`` has no graph edge and cannot be given a
+    replacement source without changing its meaning.
+    """
+    evaluated_at = int(time.time()) if now is None else int(now)
+    rows = conn.execute("SELECT id FROM tasks WHERE wait_for IS NOT NULL").fetchall()
+    for row in rows:
+        wait_task_id = str(row["id"])
+        if wait_task_id == task_id:
+            continue
+        evaluation = _evaluate_task_wait_in_txn(
+            conn, wait_task_id, now=evaluated_at
+        )
+        wait_for = evaluation.wait_for or {}
+        if wait_for.get("type") != "event_seen" or wait_for.get("task_id") != task_id:
+            continue
+        if evaluation.state == "satisfied":
+            _release_task_wait_in_txn(
+                conn, wait_task_id, evaluation, source=operation
+            )
+            continue
+        conflict = _wait_mutation_conflict(
+            operation=operation,
+            wait_task_id=wait_task_id,
+            reason=evaluation.reason or "event_wait_source_cannot_be_rewired",
+            target_task_ids=[task_id],
+            wait_for=evaluation.wait_for,
+        )
+        _record_wait_mutation_refusal_in_txn(conn, conflict)
+        return conflict
+    return None
+
+
+def _mark_invalid_task_wait_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    evaluation: WaitEvaluation,
+    *,
+    source: str,
+) -> None:
+    current = conn.execute(
+        "SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if current is None:
+        return
+    already_visible = (
+        current["status"] == "blocked" and current["block_kind"] == "needs_input"
+    )
+    conn.execute(
+        "UPDATE tasks SET status = 'blocked', block_kind = 'needs_input', "
+        "block_recurrences = CASE WHEN block_recurrences > 0 THEN block_recurrences ELSE 1 END, "
+        "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+        "WHERE id = ?",
+        (task_id,),
+    )
+    if not already_visible:
+        _append_event(
+            conn,
+            task_id,
+            "wait_reference_invalid",
+            {
+                "source": source,
+                "reason": evaluation.reason,
+                "wait_for": evaluation.wait_for,
+            },
+        )
+
+
+def _prepare_task_wait_for_ready_in_txn(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    now: int,
+    source: str,
+) -> WaitEvaluation:
+    evaluation = _evaluate_task_wait_in_txn(conn, task_id, now=now)
+    if evaluation.state == "satisfied":
+        _release_task_wait_in_txn(conn, task_id, evaluation, source=source)
+    elif evaluation.state == "invalid":
+        _mark_invalid_task_wait_in_txn(conn, task_id, evaluation, source=source)
+    return evaluation
+
+
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return True when ``task_id`` is sticky-blocked by an explicit
     worker/operator ``kanban_block`` call (#28712).
@@ -9305,12 +10313,21 @@ def recompute_ready(
     now = int(time.time())
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries, due_at "
+            "SELECT id, status, consecutive_failures, max_retries, due_at, "
+            "wait_for, block_kind "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            wait_evaluation = _prepare_task_wait_for_ready_in_txn(
+                conn,
+                task_id,
+                now=now,
+                source="recompute_ready",
+            )
+            if wait_evaluation.state in {"waiting", "invalid"}:
+                continue
             # K9 time-based scheduling gate: hold a task whose due_at is still
             # in the future, regardless of status or parent state — it is not
             # yet eligible for promotion. NULL due_at (the common case) is
@@ -9418,6 +10435,40 @@ def claim_task(
             source="claim_task",
         )
         if contract_reason is not None:
+            return None
+        claim_candidate = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if claim_candidate is None or claim_candidate["status"] != "ready":
+            return None
+        wait_evaluation = _prepare_task_wait_for_ready_in_txn(
+            conn,
+            task_id,
+            now=now,
+            source="claim_task",
+        )
+        if wait_evaluation.state == "waiting":
+            conn.execute(
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
+                (task_id,),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {"reason": "active_wait", "wait_for": wait_evaluation.wait_for},
+            )
+            return None
+        if wait_evaluation.state == "invalid":
+            _append_event(
+                conn,
+                task_id,
+                "claim_rejected",
+                {
+                    "reason": "invalid_wait",
+                    "detail": wait_evaluation.reason,
+                },
+            )
             return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. Archived parents intentionally remain
@@ -14810,10 +15861,18 @@ def block_task(
     *,
     reason: Optional[str] = None,
     kind: Optional[str] = None,
+    wait_for: Optional[dict[str, object]] = None,
     expected_run_id: Optional[int] = None,
     reviewer_metadata: Optional[dict] = None,
 ) -> bool:
     """Transition ``running -> blocked``.
+
+    ``kind='dependency'`` accepts a typed ``wait_for`` from the closed union
+    (``parents_all_done`` / ``not_before`` / ``event_seen``).  A waiting wait
+    parks the task on ``todo`` with the normalized payload; an immediately
+    satisfied wait transitions straight to ``ready`` and leaves no dependency
+    marker behind; a malformed payload becomes ``needs_input``.  ``wait_for``
+    with any other kind raises ``ValueError``.
 
     ``reviewer_metadata`` (B): structured reviewer findings (e.g.
     ``{"blocking_findings": [...], "required_verification": [...]}``) persisted
@@ -14849,11 +15908,32 @@ def block_task(
                 else:
                     block_kind = "needs_input"
         existing = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
+            "SELECT status, block_kind, block_recurrences, wait_for, due_at "
+            "FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
         if existing is None or existing["status"] not in ("running", "ready"):
             return False
+        requested_block_kind = block_kind
+        normalized_wait: Optional[dict[str, object]] = None
+        wait_due_at: Optional[int] = None
+        wait_state: Optional[str] = None
+        wait_rejection: Optional[str] = None
+        if requested_block_kind == "dependency":
+            try:
+                normalized_wait, wait_due_at, wait_state = _normalize_wait_for_in_txn(
+                    conn,
+                    task_id,
+                    wait_for,
+                    now=int(time.time()),
+                )
+            except ValueError as exc:
+                # Old clients still end the run deterministically, but surface the
+                # malformed dependency as human input instead of a vacuous todo.
+                wait_rejection = str(exc)
+                block_kind = "needs_input"
+        elif wait_for is not None:
+            raise ValueError("wait_for is only valid with kind='dependency'")
         previous_kind = existing["block_kind"] if "block_kind" in existing.keys() else None
         previous_recurrences = (
             int(existing["block_recurrences"] or 0)
@@ -14865,12 +15945,12 @@ def block_task(
                 _latest_unblocked_block_recurrence(conn, task_id, block_kind) or 0
             )
             previous_kind = block_kind if previous_recurrences > 0 else previous_kind
-        if block_kind == "dependency":
+        if requested_block_kind == "dependency" and normalized_wait is not None:
             # Dependency waits are a normal scheduling state, not an error
             # recurrence.  Do not count them toward the recurrence limit that
             # triggers triage escalation.
             recurrences = 1
-            next_status = "todo"
+            next_status = "ready" if wait_state == "satisfied" else "todo"
         else:
             recurrences = (
                 previous_recurrences + 1
@@ -14887,6 +15967,22 @@ def block_task(
                 # They must never leak into the generic repeated-failure triage
                 # lane merely because the same reviewer verdict recurred.
                 next_status = "blocked"
+        next_wait_json = existing["wait_for"]
+        next_due_at = existing["due_at"]
+        next_block_kind = block_kind
+        if requested_block_kind == "dependency":
+            next_wait_json = (
+                json.dumps(normalized_wait, ensure_ascii=False, sort_keys=True)
+                if normalized_wait is not None and wait_state == "waiting"
+                else None
+            )
+            if wait_due_at is not None:
+                next_due_at = wait_due_at
+            if normalized_wait is not None and wait_state == "satisfied":
+                # An immediately satisfied wait is resolved, not parked: leave
+                # no dependency marker the legacy backfill could re-stamp after
+                # a process restart.
+                next_block_kind = None
         if expected_run_id is None:
             cur = conn.execute(
                 """
@@ -14896,11 +15992,20 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = ?,
-                       block_recurrences = ?
+                       block_recurrences = ?,
+                       wait_for     = ?,
+                       due_at       = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                 """,
-                (next_status, block_kind, recurrences, task_id),
+                (
+                    next_status,
+                    next_block_kind,
+                    recurrences,
+                    next_wait_json,
+                    next_due_at,
+                    task_id,
+                ),
             )
         else:
             cur = conn.execute(
@@ -14911,12 +16016,22 @@ def block_task(
                        claim_expires= NULL,
                        worker_pid   = NULL,
                        block_kind   = ?,
-                       block_recurrences = ?
+                       block_recurrences = ?,
+                       wait_for     = ?,
+                       due_at       = ?
                  WHERE id = ?
                    AND status IN ('running', 'ready')
                    AND current_run_id = ?
                 """,
-                (next_status, block_kind, recurrences, task_id, int(expected_run_id)),
+                (
+                    next_status,
+                    next_block_kind,
+                    recurrences,
+                    next_wait_json,
+                    next_due_at,
+                    task_id,
+                    int(expected_run_id),
+                ),
             )
         if cur.rowcount != 1:
             return False
@@ -14947,6 +16062,31 @@ def block_task(
             # Metadata can carry findings, but can never turn a blocked run
             # into an APPROVED verdict.
             _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
+        if requested_block_kind == "dependency":
+            if wait_rejection is not None:
+                _append_event(
+                    conn,
+                    task_id,
+                    "dependency_wait_rejected",
+                    {"reason": wait_rejection},
+                    run_id=run_id,
+                )
+            elif normalized_wait is not None:
+                _append_event(
+                    conn,
+                    task_id,
+                    "wait_registered",
+                    {"wait_for": normalized_wait, "state": wait_state},
+                    run_id=run_id,
+                )
+                if wait_state == "satisfied":
+                    _append_event(
+                        conn,
+                        task_id,
+                        "wait_released",
+                        {"source": "block_task", "wait_for": normalized_wait},
+                        run_id=run_id,
+                    )
         blocked_payload = {
             "reason": reason,
             "kind": block_kind,
@@ -14959,6 +16099,10 @@ def block_task(
                 ).fetchone()[0]
             ),
         }
+        if normalized_wait is not None:
+            blocked_payload["wait_for"] = normalized_wait
+        if wait_rejection is not None:
+            blocked_payload["wait_rejection"] = wait_rejection
         if review_originated:
             submission = _latest_review_submission(conn, task_id) or {}
             review_meta = reviewer_metadata if isinstance(reviewer_metadata, dict) else {}
@@ -15000,7 +16144,15 @@ def block_task(
         and block_kind != "review_revision"
         and not _run_originated_from_review(conn, task_id, run_id)
     ):
-        if archive_task(conn, task_id):
+        # The block itself is already committed above; a wait-guard refusal of
+        # the auto-archive (e.g. a freshly registered waiting ``dependency``
+        # wait) must not surface as a failed block.  Skip archiving in that
+        # case, mirroring ``funnel.archive_stale``.
+        try:
+            archived = archive_task(conn, task_id)
+        except WaitMutationConflict:
+            archived = False
+        if archived:
             with write_txn(conn):
                 _append_event(
                     conn,
@@ -15048,6 +16200,14 @@ def promote_task(
             f"'todo' or 'blocked'"
         )
 
+    wait_evaluation = _evaluate_task_wait_in_txn(
+        conn, task_id, now=int(time.time())
+    )
+    if wait_evaluation.state == "waiting":
+        return False, "active dependency wait is not satisfied"
+    if wait_evaluation.state == "invalid":
+        return False, f"invalid worker wait: {wait_evaluation.reason}"
+
     parents = conn.execute(
         "SELECT t.id, t.status FROM tasks t "
         "JOIN task_links l ON l.parent_id = t.id "
@@ -15072,6 +16232,18 @@ def promote_task(
         return True, None
 
     with write_txn(conn):
+        wait_evaluation = _prepare_task_wait_for_ready_in_txn(
+            conn,
+            task_id,
+            now=int(time.time()),
+            source="promote_task",
+        )
+        if wait_evaluation.state in {"waiting", "invalid"}:
+            return False, (
+                "active dependency wait is not satisfied"
+                if wait_evaluation.state == "waiting"
+                else f"invalid worker wait: {wait_evaluation.reason}"
+            )
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready', "
             "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
@@ -15701,8 +16873,21 @@ def budget_runaway_unblock_refusal(
     }
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    override_wait: bool = False,
+    actor: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
+
+    A satisfied typed wait is released normally.  A still-waiting or invalid
+    wait refuses the unblock (returns ``False``) unless ``override_wait=True``
+    is passed — the audited operator path, which requires a non-empty
+    ``actor`` and ``reason`` and removes the concrete wait-referenced parent
+    edges in the same transaction.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
     status. In the common path (``block_task`` closed the run already) this
@@ -15713,11 +16898,66 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     now = int(time.time())
     with write_txn(conn):
+        wait_evaluation = _evaluate_task_wait_in_txn(conn, task_id, now=now)
+        released_wait = wait_evaluation.state == "satisfied" or (
+            override_wait and wait_evaluation.state in {"waiting", "invalid"}
+        )
+        if wait_evaluation.state in {"waiting", "invalid"}:
+            if not override_wait:
+                return False
+            if not actor or not actor.strip() or not reason or not reason.strip():
+                raise ValueError(
+                    "override_wait requires a non-empty operator actor and reason"
+                )
+            old_due = conn.execute(
+                "SELECT due_at FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            removed_parent_edges: list[str] = []
+            active_wait = wait_evaluation.wait_for
+            if (
+                isinstance(active_wait, dict)
+                and active_wait.get("type") == "parents_all_done"
+                and isinstance(active_wait.get("task_ids"), list)
+            ):
+                # The typed parent wait owns the concrete edges it registered.
+                # An audited operator override must release the actual gate, not
+                # merely erase its JSON while leaving claim_task's structural
+                # parent backstop to park the task forever.
+                for parent_id in active_wait["task_ids"]:
+                    if not isinstance(parent_id, str) or not parent_id:
+                        continue
+                    removed = conn.execute(
+                        "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                        (parent_id, task_id),
+                    )
+                    if removed.rowcount:
+                        removed_parent_edges.append(parent_id)
+            conn.execute(
+                "UPDATE tasks SET wait_for = NULL, due_at = NULL WHERE id = ?",
+                (task_id,),
+            )
+            _append_event(
+                conn,
+                task_id,
+                "wait_overridden",
+                {
+                    "actor": actor.strip(),
+                    "reason": reason.strip(),
+                    "wait_for": wait_evaluation.wait_for,
+                    "old_due_at": old_due["due_at"] if old_due else None,
+                    "removed_parent_edges": removed_parent_edges,
+                },
+            )
+        elif wait_evaluation.state == "satisfied":
+            _release_task_wait_in_txn(
+                conn, task_id, wait_evaluation, source="unblock_task"
+            )
         stale = conn.execute(
             "SELECT current_run_id FROM tasks WHERE id = ? "
             "AND (status IN ('blocked', 'scheduled') "
-            "OR (status = 'todo' AND block_kind IS NOT NULL))",
-            (task_id,),
+            "OR (status = 'todo' AND block_kind IS NOT NULL) "
+            "OR (? = 1 AND status = 'todo'))",
+            (task_id, 1 if released_wait else 0),
         ).fetchone()
         if stale and stale["current_run_id"]:
             conn.execute(
@@ -15757,8 +16997,9 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             "last_failure_error = NULL, block_kind = NULL, "
             "block_recurrences = 0 "
             "WHERE id = ? AND (status IN ('blocked', 'scheduled') "
-            "OR (status = 'todo' AND block_kind IS NOT NULL))",
-            (new_status, task_id),
+            "OR (status = 'todo' AND block_kind IS NOT NULL) "
+            "OR (? = 1 AND status = 'todo'))",
+            (new_status, task_id, 1 if released_wait else 0),
         )
         if cur.rowcount != 1:
             return False
@@ -15963,6 +17204,13 @@ def respec_task(
                 "bullet — refusing to clear the criteria silently"
             )
 
+    candidate = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if candidate is None or candidate["status"] not in RESPEC_ALLOWED_STATUSES:
+        return None
+    preflight_task_respec(conn, task_id)
+
     with write_txn(conn):
         existing = conn.execute(
             "SELECT * FROM tasks WHERE id = ?",
@@ -15972,6 +17220,56 @@ def respec_task(
             return None
         if existing["status"] not in RESPEC_ALLOWED_STATUSES:
             return None
+
+        source_wait = _evaluate_task_wait_in_txn(
+            conn, task_id, now=int(time.time())
+        )
+        if source_wait.state == "invalid":
+            # A concurrent writer changed the wait after the committed preflight.
+            # Raising inside this transaction rolls the entire replacement back.
+            raise WaitMutationConflict(
+                _wait_mutation_conflict(
+                    operation="respec_task",
+                    wait_task_id=task_id,
+                    reason=source_wait.reason or "invalid_wait",
+                    target_task_ids=[task_id],
+                    wait_for=source_wait.wait_for,
+                )
+            )
+        if source_wait.state == "satisfied":
+            # A writer can register a wait after the committed preflight but
+            # before this transaction begins.  If that late wait is already
+            # satisfied, release it through the normal audited path and reload
+            # the source snapshot before copying due/block fields.  Otherwise
+            # the archived source would retain stale wait JSON (and a satisfied
+            # not_before could leak its obsolete due_at to the replacement).
+            _release_task_wait_in_txn(
+                conn,
+                task_id,
+                source_wait,
+                source="respec_task:final",
+            )
+            existing = conn.execute(
+                "SELECT * FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if existing is None:  # pragma: no cover - guarded by the write lock
+                return None
+            source_wait = WaitEvaluation("none")
+        concurrent_event_conflict = prepare_event_reference_removal_in_txn(
+            conn,
+            task_id,
+            operation="respec_task",
+        )
+        if concurrent_event_conflict is not None:
+            raise WaitMutationConflict(concurrent_event_conflict)
+        transfer_wait = source_wait.state == "waiting"
+        transferred_wait_for = source_wait.wait_for if transfer_wait else None
+        transferred_due_at = existing["due_at"] if transfer_wait else None
+        transferred_block_kind = existing["block_kind"] if transfer_wait else None
+        transferred_recurrences = (
+            int(existing["block_recurrences"] or 0) if transfer_wait else 0
+        )
 
         new_title = (title if title is not None else existing["title"]).strip()
         if not new_title:
@@ -16005,7 +17303,9 @@ def respec_task(
         # readiness is derived from its (copied) true parents — never inherited
         # blindly from the archived source.
         copied_due_at = existing["due_at"]
-        if existing["status"] in {"triage", "scheduled"}:
+        if transfer_wait:
+            replacement_status = "todo"
+        elif existing["status"] in {"triage", "scheduled"}:
             replacement_status = existing["status"]
         elif copied_due_at is not None and int(copied_due_at) > now:
             # K9 time-based scheduling gate: a replacement that copies a
@@ -16033,27 +17333,6 @@ def respec_task(
             )
         author_name = (author or "").strip() or "user"
         pointer = f"respecced → {new_id}"
-
-        conn.execute(
-            """
-            UPDATE tasks
-               SET status = 'archived',
-                   completed_at = ?,
-                   result = ?,
-                   claim_lock = NULL,
-                   claim_expires = NULL,
-                   worker_pid = NULL,
-                   current_run_id = NULL
-             WHERE id = ?
-            """,
-            (now, pointer, task_id),
-        )
-        _append_event(
-            conn,
-            task_id,
-            "completed",
-            {"result": pointer, "respecced_to": new_id},
-        )
 
         conn.execute(
             """
@@ -16118,6 +17397,22 @@ def respec_task(
                 "tenant": existing["tenant"],
             },
         )
+        if transfer_wait and transferred_wait_for is not None:
+            conn.execute(
+                "UPDATE tasks SET wait_for = ?, due_at = ?, block_kind = ?, "
+                "block_recurrences = ?, status = 'todo' WHERE id = ?",
+                (
+                    json.dumps(
+                        transferred_wait_for,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                    transferred_due_at,
+                    transferred_block_kind,
+                    transferred_recurrences,
+                    new_id,
+                ),
+            )
 
         # Rewire the dependency graph so the replacement is the executable node:
         # it inherits the source's true parents, and every downstream child is
@@ -16127,12 +17422,84 @@ def respec_task(
         # an archived (never-``done``) parent.
         for parent_id in old_parent_ids:
             _link_tasks_in_txn(conn, parent_id, new_id)
+        if (
+            transfer_wait
+            and transferred_wait_for is not None
+            and transferred_wait_for.get("type") == "parents_all_done"
+        ):
+            # The concrete dependency belongs to the replacement now.  Keep
+            # provenance in events/comments, not as a live edge to an archived
+            # wait owner that can confuse future graph and purge operations.
+            for parent_id in _wait_referenced_task_ids(transferred_wait_for):
+                conn.execute(
+                    "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
+                    (parent_id, task_id),
+                )
         for child_id in old_child_ids:
+            conflict = _rewire_parent_wait_in_txn(
+                conn,
+                child_id=child_id,
+                old_parent_id=task_id,
+                new_parent_id=new_id,
+                operation="respec_task",
+                now=now,
+            )
+            if conflict is not None:
+                raise WaitMutationConflict(conflict)
             conn.execute(
                 "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
                 (task_id, child_id),
             )
             _link_tasks_in_txn(conn, new_id, child_id)
+
+        # Archive only after every wait payload and dependency edge has been
+        # transferred.  The evaluator must still see the old parent as live
+        # while `_rewire_parent_wait_in_txn` proves the old wait is transferable;
+        # the enclosing transaction keeps this ordering invisible to readers.
+        conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'archived',
+                   completed_at = ?,
+                   result = ?,
+                   claim_lock = NULL,
+                   claim_expires = NULL,
+                   worker_pid = NULL,
+                   current_run_id = NULL,
+                   wait_for = CASE WHEN ? THEN NULL ELSE wait_for END,
+                   due_at = CASE WHEN ? THEN NULL ELSE due_at END,
+                   block_kind = CASE WHEN ? THEN NULL ELSE block_kind END,
+                   block_recurrences = CASE WHEN ? THEN 0 ELSE block_recurrences END
+             WHERE id = ?
+            """,
+            (
+                now,
+                pointer,
+                1 if transfer_wait else 0,
+                1 if transfer_wait else 0,
+                1 if transfer_wait else 0,
+                1 if transfer_wait else 0,
+                task_id,
+            ),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "completed",
+            {"result": pointer, "respecced_to": new_id},
+        )
+
+        if transfer_wait and transferred_wait_for is not None:
+            transfer_payload = {
+                "from_task_id": task_id,
+                "to_task_id": new_id,
+                "wait_for": transferred_wait_for,
+                "due_at": transferred_due_at,
+                "block_kind": transferred_block_kind,
+                "block_recurrences": transferred_recurrences,
+            }
+            _append_event(conn, task_id, "wait_transferred", transfer_payload)
+            _append_event(conn, new_id, "wait_received", transfer_payload)
 
         conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at, kind) "
@@ -16621,6 +17988,10 @@ def archive_task(
     ).fetchone()
     if fence_row is None or fence_row["status"] == "archived":
         return False
+    # Refuse before touching a live process: terminating a worker and only then
+    # discovering that another task's typed wait depends on it would preserve
+    # the graph but still destroy the execution generation.
+    preflight_task_removals(conn, [task_id], operation="archive_task")
     archive_snapshot = (
         fence_row["status"],
         fence_row["claim_lock"],
@@ -16659,6 +18030,16 @@ def archive_task(
             )
             return False
     with write_txn(conn):
+        # Close the preflight→process-fence race. A wait registered while the
+        # bounded worker barrier ran must still win over graph destruction.
+        final_wait_conflict = _apply_task_removal_wait_plan_in_txn(
+            conn,
+            [task_id],
+            operation="archive_task",
+            now=int(time.time()),
+        )
+        if final_wait_conflict is not None:
+            raise WaitMutationConflict(final_wait_conflict)
         if fenced_owner is not None:
             claim_lock, worker_pid, run_id = fenced_owner
             # The process barrier ran outside the transaction. Revalidate the
@@ -16745,10 +18126,24 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     tasks must be explicitly archived first so accidental data loss requires a
     second deliberate action.
     """
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if not row or row["status"] != "archived":
+        return False
+    preflight_task_removals(conn, [task_id], operation="delete_archived_task")
     with write_txn(conn):
+        final_wait_conflict = _apply_task_removal_wait_plan_in_txn(
+            conn,
+            [task_id],
+            operation="delete_archived_task",
+            now=int(time.time()),
+        )
+        if final_wait_conflict is not None:
+            raise WaitMutationConflict(final_wait_conflict)
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?",
-            (task_id,),
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if not row or row["status"] != "archived":
             return False
@@ -16774,7 +18169,18 @@ def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     Returns ``True`` if the task existed and was deleted, ``False``
     if the task was not found.
     """
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone() is None:
+        return False
+    preflight_task_removals(conn, [task_id], operation="delete_task")
     with write_txn(conn):
+        final_wait_conflict = _apply_task_removal_wait_plan_in_txn(
+            conn,
+            [task_id],
+            operation="delete_task",
+            now=int(time.time()),
+        )
+        if final_wait_conflict is not None:
+            raise WaitMutationConflict(final_wait_conflict)
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
@@ -17259,6 +18665,16 @@ def schedule_task(
     to ``ready`` (or ``todo`` if parents are still incomplete).
     """
     with write_txn(conn):
+        wait_conflict = prepare_wait_owner_mutation_in_txn(
+            conn, task_id, operation="schedule_task"
+        )
+        if wait_conflict is not None:
+            # Scheduling is not an implicit worker-wait override. The explicit
+            # operator unblock override is the only early-release surface.  A
+            # satisfied wait was released above (same as promote_task); only
+            # waiting/invalid waits refuse, and the refusal event commits with
+            # this transaction.
+            return False
         assignments = [
             "status       = 'scheduled'",
             "claim_lock   = NULL",
@@ -17879,6 +19295,34 @@ def _pid_alive(pid: Optional[int]) -> bool:
         except (OSError, subprocess.SubprocessError, TimeoutError):
             # If the secondary probe fails, keep the kill(0) answer.
             pass
+    return True
+
+
+def _worker_process_group_alive(pid: Optional[int]) -> bool:
+    """Probe the dispatcher worker's process group without sending a signal.
+
+    Workers are session leaders, so their persisted PID is also the PGID. A
+    dead leader with live children is still an active worker group and must not
+    be reported failed while the reclaim path deliberately keeps its claim.
+    """
+    try:
+        group_id = int(pid) if pid is not None else 0
+    except (TypeError, ValueError):
+        return False
+    if group_id <= 0:
+        return False
+    if os.name != "posix":
+        return _pid_alive(group_id)
+    import errno
+
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError as exc:
+        return exc.errno != errno.ESRCH
     return True
 
 
@@ -28787,6 +30231,30 @@ def _render_prior_attempts(
                     lines.append(f"_metadata_: `{meta_str}`")
                 except Exception:
                     pass
+            capsule = run.execution_capsule
+            if isinstance(capsule, dict) and capsule.get("state") == "active":
+                context = capsule.get("context")
+                if isinstance(context, dict):
+                    lines.append(
+                        "_execution capsule handoff_ "
+                        f"(`{capsule.get('correlation_id', 'unknown')}`, "
+                        f"profile `{context.get('profile', 'unknown')}`):"
+                    )
+                    summary = context.get("summary")
+                    if isinstance(summary, str) and summary.strip():
+                        lines.append(_cap(summary, field_bytes))
+                    for key, label in (
+                        ("decisions", "Decisions"),
+                        ("next_steps", "Next steps"),
+                        ("risks", "Risks"),
+                    ):
+                        values = context.get(key)
+                        if isinstance(values, list) and values:
+                            rendered = "; ".join(
+                                str(value) for value in values if str(value).strip()
+                            )
+                            if rendered:
+                                lines.append(f"_{label}_: {_cap(rendered, field_bytes)}")
             lines.append("")
     return lines
 
@@ -34049,6 +35517,421 @@ def get_run(conn: sqlite3.Connection, run_id: int) -> Optional[Run]:
         (int(run_id),),
     ).fetchone()
     return Run.from_row(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Durable Kanban ↔ TMAX execution capsule
+# ---------------------------------------------------------------------------
+
+EXECUTION_CAPSULE_SCHEMA_VERSION = 1
+EXECUTION_CAPSULE_CONTEXT_PROFILES = frozenset(
+    {"implementation", "review", "recovery", "operator_handoff"}
+)
+_EXECUTION_CAPSULE_SUMMARY_MAX = 1200
+_EXECUTION_CAPSULE_LIST_MAX = 8
+_EXECUTION_CAPSULE_ITEM_MAX = 240
+_EXECUTION_CAPSULE_SERVER_RE = re.compile(r"^[a-f0-9]{16,64}$")
+_EXECUTION_CAPSULE_PANE_RE = re.compile(r"^%\d+$")
+
+
+class ExecutionCapsuleConflict(RuntimeError):
+    """A run already owns a different capsule or lost active ownership."""
+
+
+def _capsule_text(value: object, *, field: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"execution capsule {field} must be a string")
+    normalized = " ".join(value.split()).strip()
+    if not normalized:
+        raise ValueError(f"execution capsule {field} must not be blank")
+    if len(normalized) > limit:
+        raise ValueError(
+            f"execution capsule {field} exceeds {limit} characters"
+        )
+    return normalized
+
+
+def _capsule_string_list(value: object, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"execution capsule {field} must be a list")
+    if len(value) > _EXECUTION_CAPSULE_LIST_MAX:
+        raise ValueError(
+            f"execution capsule {field} accepts at most "
+            f"{_EXECUTION_CAPSULE_LIST_MAX} items"
+        )
+    return [
+        _capsule_text(item, field=f"{field}[{index}]", limit=_EXECUTION_CAPSULE_ITEM_MAX)
+        for index, item in enumerate(value)
+    ]
+
+
+def normalize_execution_capsule_context(value: object) -> dict[str, object]:
+    """Validate the closed, bounded handoff object stored in a capsule.
+
+    There is intentionally no ``content``, ``capture`` or ``raw`` member.  Pane
+    text belongs to the terminal and may contain secrets; the bridge stores only
+    an operator-authored compact handoff.
+    """
+    if not isinstance(value, dict):
+        raise ValueError("execution capsule context_handoff must be an object")
+    allowed = {"profile", "summary", "decisions", "next_steps", "risks"}
+    extra = set(value) - allowed
+    if extra:
+        raise ValueError(
+            "execution capsule context_handoff has unsupported field(s): "
+            + ", ".join(sorted(extra))
+        )
+    profile = value.get("profile")
+    if profile not in EXECUTION_CAPSULE_CONTEXT_PROFILES:
+        raise ValueError(
+            "execution capsule context profile must be one of "
+            + ", ".join(sorted(EXECUTION_CAPSULE_CONTEXT_PROFILES))
+        )
+    normalized: dict[str, object] = {
+        "profile": profile,
+        "summary": _capsule_text(
+            value.get("summary"),
+            field="summary",
+            limit=_EXECUTION_CAPSULE_SUMMARY_MAX,
+        ),
+        "decisions": _capsule_string_list(value.get("decisions"), field="decisions"),
+        "next_steps": _capsule_string_list(
+            value.get("next_steps"), field="next_steps"
+        ),
+        "risks": _capsule_string_list(value.get("risks"), field="risks"),
+    }
+    canonical = json.dumps(
+        normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    normalized["fingerprint"] = hashlib.sha256(canonical).hexdigest()
+    return normalized
+
+
+def _execution_capsule_json(value: dict[str, object]) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+
+
+def _execution_capsule_from_raw(raw: object) -> Optional[dict[str, object]]:
+    try:
+        parsed = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _execution_capsule_active_owner(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT t.id AS task_id, t.status AS task_status,
+               t.current_run_id, t.workspace_path, t.branch_name,
+               r.status AS run_status, r.ended_at, r.pre_run_commit_sha,
+               r.execution_capsule
+          FROM tasks t
+          JOIN task_runs r ON r.id = ? AND r.task_id = t.id
+         WHERE t.id = ?
+        """,
+        (int(run_id), task_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"run {run_id} does not belong to task {task_id}")
+    if (
+        row["task_status"] != "running"
+        or row["current_run_id"] is None
+        or int(row["current_run_id"]) != int(run_id)
+        or row["run_status"] != "running"
+        or row["ended_at"] is not None
+    ):
+        raise ExecutionCapsuleConflict(
+            f"task {task_id} run {run_id} is not the active execution generation"
+        )
+    return row
+
+
+def _execution_capsule_workspace(
+    row: sqlite3.Row,
+    *,
+    terminal_cwd: str,
+) -> dict[str, Optional[str]]:
+    try:
+        observed_path = Path(terminal_cwd).expanduser()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("execution capsule terminal cwd is invalid") from exc
+    if not observed_path.is_absolute():
+        raise ValueError("execution capsule terminal cwd must be absolute")
+    observed_cwd = observed_path.resolve(strict=False)
+    raw_workspace = row["workspace_path"]
+    if raw_workspace:
+        workspace = Path(str(raw_workspace)).expanduser().resolve(strict=False)
+        if observed_cwd != workspace and workspace not in observed_cwd.parents:
+            raise ExecutionCapsuleConflict(
+                f"terminal cwd {observed_cwd} is outside task workspace {workspace}"
+            )
+    else:
+        # Server-observed tmux cwd is the best available local workspace for a
+        # scratch/non-provisioned task.  It is never accepted from browser data.
+        workspace = observed_cwd
+    head_sha = _git_head_sha_for_workspace(str(workspace))
+    actual_branch = _git_current_branch(workspace)
+    requested_branch = str(row["branch_name"] or "").strip() or None
+    if requested_branch and actual_branch and requested_branch != actual_branch:
+        raise ExecutionCapsuleConflict(
+            f"terminal workspace branch {actual_branch} does not match task branch "
+            f"{requested_branch}"
+        )
+    return {
+        "path": str(workspace),
+        "branch": actual_branch or requested_branch,
+        "pre_run_commit_sha": row["pre_run_commit_sha"],
+        "head_sha": head_sha,
+    }
+
+
+def begin_execution_capsule_binding(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    terminal_server_id: str,
+    terminal_session: str,
+    terminal_window: str,
+    pane_id: str,
+    terminal_cwd: str,
+    context_handoff: object,
+    now: Optional[int] = None,
+) -> dict[str, object]:
+    """Persist the pending half of a generation-safe DB↔tmux binding saga."""
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise ValueError("execution capsule task_id is required")
+    run_id = int(run_id)
+    terminal_server_id = str(terminal_server_id or "").strip()
+    terminal_session = str(terminal_session or "").strip()
+    terminal_window = str(terminal_window or "").strip()
+    pane_id = str(pane_id or "").strip()
+    if not _EXECUTION_CAPSULE_SERVER_RE.fullmatch(terminal_server_id):
+        raise ValueError("execution capsule terminal_server_id is invalid")
+    if not terminal_session or not terminal_window:
+        raise ValueError("execution capsule terminal session/window are required")
+    if not _EXECUTION_CAPSULE_PANE_RE.fullmatch(pane_id):
+        raise ValueError("execution capsule pane_id is invalid")
+    context = normalize_execution_capsule_context(context_handoff)
+    bound_at = int(time.time()) if now is None else int(now)
+
+    with write_txn(conn):
+        row = _execution_capsule_active_owner(
+            conn, task_id=task_id, run_id=run_id
+        )
+        workspace = _execution_capsule_workspace(row, terminal_cwd=terminal_cwd)
+        identity_seed = "\0".join(
+            [
+                str(EXECUTION_CAPSULE_SCHEMA_VERSION),
+                task_id,
+                str(run_id),
+                terminal_server_id,
+                pane_id,
+            ]
+        ).encode("utf-8")
+        correlation_id = hashlib.sha256(identity_seed).hexdigest()[:24]
+        existing = _execution_capsule_from_raw(row["execution_capsule"])
+        replace_pending_raw: Optional[str] = None
+        if existing is not None:
+            existing_context = existing.get("context")
+            same_binding = bool(
+                existing.get("correlation_id") == correlation_id
+                and isinstance(existing_context, dict)
+                and existing_context.get("fingerprint") == context["fingerprint"]
+            )
+            if same_binding:
+                return existing
+            if existing.get("state") == "pending":
+                # A crash between begin and activate (or a pane respawn before
+                # the retry) leaves a stale pending capsule.  Pending means the
+                # binding was never activated, so replacing it is the
+                # documented "visibly repairable" path; an ``active`` capsule
+                # stays immutable history and still conflicts.
+                replace_pending_raw = (
+                    row["execution_capsule"]
+                    if isinstance(row["execution_capsule"], str)
+                    else _execution_capsule_json(existing)
+                )
+            else:
+                raise ExecutionCapsuleConflict(
+                    f"run {run_id} already has a different execution capsule"
+                )
+        capsule: dict[str, object] = {
+            "schema_version": EXECUTION_CAPSULE_SCHEMA_VERSION,
+            "state": "pending",
+            "correlation_id": correlation_id,
+            "revision": 1,
+            "task_id": task_id,
+            "run_id": run_id,
+            "terminal": {
+                "server_id": terminal_server_id,
+                "session": terminal_session,
+                "window": terminal_window,
+                "pane_id": pane_id,
+            },
+            "workspace": workspace,
+            "context": context,
+            "bound_at": bound_at,
+            "updated_at": bound_at,
+        }
+        if replace_pending_raw is not None:
+            cur = conn.execute(
+                "UPDATE task_runs SET execution_capsule = ? "
+                "WHERE id = ? AND task_id = ? AND status = 'running' "
+                "AND ended_at IS NULL AND execution_capsule = ?",
+                (
+                    _execution_capsule_json(capsule),
+                    run_id,
+                    task_id,
+                    replace_pending_raw,
+                ),
+            )
+            if cur.rowcount == 1:
+                _append_event(
+                    conn,
+                    task_id,
+                    "execution_capsule_aborted",
+                    {
+                        "run_id": run_id,
+                        "correlation_id": existing.get("correlation_id"),
+                        "reason": "superseded_by_rebind",
+                    },
+                    run_id=run_id,
+                )
+        else:
+            cur = conn.execute(
+                "UPDATE task_runs SET execution_capsule = ? "
+                "WHERE id = ? AND task_id = ? AND status = 'running' "
+                "AND ended_at IS NULL AND execution_capsule IS NULL",
+                (_execution_capsule_json(capsule), run_id, task_id),
+            )
+        if cur.rowcount != 1:
+            raise ExecutionCapsuleConflict("execution capsule binding lost its run CAS")
+        _append_event(
+            conn,
+            task_id,
+            "execution_capsule_pending",
+            {
+                "run_id": run_id,
+                "correlation_id": correlation_id,
+                "pane_id": pane_id,
+                "context_fingerprint": context["fingerprint"],
+            },
+            run_id=run_id,
+        )
+        return capsule
+
+
+def activate_execution_capsule(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    correlation_id: str,
+    now: Optional[int] = None,
+) -> dict[str, object]:
+    activated_at = int(time.time()) if now is None else int(now)
+    with write_txn(conn):
+        row = _execution_capsule_active_owner(
+            conn, task_id=task_id, run_id=int(run_id)
+        )
+        capsule = _execution_capsule_from_raw(row["execution_capsule"])
+        if capsule is None or capsule.get("correlation_id") != correlation_id:
+            raise ExecutionCapsuleConflict("execution capsule activation CAS failed")
+        if capsule.get("state") == "active":
+            return capsule
+        if capsule.get("state") != "pending":
+            raise ExecutionCapsuleConflict("execution capsule is not pending")
+        capsule["state"] = "active"
+        capsule["updated_at"] = activated_at
+        cur = conn.execute(
+            "UPDATE task_runs SET execution_capsule = ? "
+            "WHERE id = ? AND task_id = ? AND status = 'running' "
+            "AND ended_at IS NULL",
+            (_execution_capsule_json(capsule), int(run_id), task_id),
+        )
+        if cur.rowcount != 1:
+            raise ExecutionCapsuleConflict("execution capsule activation lost its run CAS")
+        context = capsule.get("context")
+        context_fingerprint = (
+            context.get("fingerprint") if isinstance(context, dict) else None
+        )
+        _append_event(
+            conn,
+            task_id,
+            "execution_capsule_bound",
+            {
+                "run_id": int(run_id),
+                "correlation_id": correlation_id,
+                "context_fingerprint": context_fingerprint,
+            },
+            run_id=int(run_id),
+        )
+        return capsule
+
+
+def abort_execution_capsule_binding(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    run_id: int,
+    correlation_id: str,
+    reason: str,
+) -> bool:
+    """Compensate only the matching pending generation; active history is immutable."""
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT execution_capsule FROM task_runs WHERE id = ? AND task_id = ?",
+            (int(run_id), task_id),
+        ).fetchone()
+        capsule = _execution_capsule_from_raw(
+            row["execution_capsule"] if row is not None else None
+        )
+        if (
+            capsule is None
+            or capsule.get("state") != "pending"
+            or capsule.get("correlation_id") != correlation_id
+        ):
+            return False
+        conn.execute(
+            "UPDATE task_runs SET execution_capsule = NULL WHERE id = ? AND task_id = ?",
+            (int(run_id), task_id),
+        )
+        _append_event(
+            conn,
+            task_id,
+            "execution_capsule_aborted",
+            {
+                "run_id": int(run_id),
+                "correlation_id": correlation_id,
+                "reason": str(reason or "binding_failed")[:200],
+            },
+            run_id=int(run_id),
+        )
+        return True
+
+
+def get_execution_capsule(
+    conn: sqlite3.Connection,
+    run_id: int,
+) -> Optional[dict[str, object]]:
+    row = conn.execute(
+        "SELECT execution_capsule FROM task_runs WHERE id = ?", (int(run_id),)
+    ).fetchone()
+    return _execution_capsule_from_raw(
+        row["execution_capsule"] if row is not None else None
+    )
 
 
 def run_timeline(

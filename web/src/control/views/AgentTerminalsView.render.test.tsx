@@ -23,6 +23,7 @@ const apiMock = {
   terminateAgentTerminalWindow: vi.fn(),
   renameAgentTerminalWindow: vi.fn(),
   captureAgentTerminalWindow: vi.fn(),
+  bindAgentTerminalExecutionCapsule: vi.fn(),
   getAgentTerminalOverview: vi.fn(),
   sendAgentTerminalKeys: vi.fn(),
   getSkills: vi.fn(),
@@ -309,6 +310,10 @@ beforeEach(() => {
   apiMock.renameAgentTerminalWindow.mockResolvedValue({ window: windows[0] });
   apiMock.terminateAgentTerminalWindow.mockResolvedValue({ ok: true });
   apiMock.captureAgentTerminalWindow.mockResolvedValue({ content: "" });
+  apiMock.bindAgentTerminalExecutionCapsule.mockResolvedValue({
+    capsule: {},
+    window: windows[0],
+  });
   apiMock.getSkills.mockResolvedValue([
     { name: "firecrawl-search", description: "Search with Firecrawl", category: "web", enabled: true },
     { name: "gmail", description: "Gmail inbox triage", category: "productivity", enabled: false },
@@ -344,6 +349,88 @@ afterEach(() => {
 });
 
 describe("AgentTerminalsView desktop rendering", () => {
+  it("keeps legacy windows unbound and binds a bounded Kanban run handoff", async () => {
+    const boundWindow: AgentTerminalWindow = {
+      ...windows[0],
+      task_id: "t_capsule",
+      run_id: 42,
+      correlation_id: "aabbccddeeff001122334455",
+    };
+    apiMock.bindAgentTerminalExecutionCapsule.mockResolvedValueOnce({
+      capsule: { state: "active" },
+      window: boundWindow,
+    });
+    await renderView();
+
+    expect(screen.queryByTestId("desktop-execution-capsule-binding")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Mit Kanban-Run verknüpfen" }));
+    fireEvent.change(screen.getByLabelText("Execution Capsule Task-ID"), {
+      target: { value: "t_capsule" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Run-ID"), {
+      target: { value: "42" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Kurz-Handoff"), {
+      target: { value: "Verified implementation can continue" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Entscheidungen"), {
+      target: { value: "Keep task_runs authoritative\nDo not capture pane output" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Nächste Schritte"), {
+      target: { value: "Run the affected gate" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Risiken"), {
+      target: { value: "No live activation" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run verknüpfen" }));
+
+    await waitFor(() =>
+      expect(apiMock.bindAgentTerminalExecutionCapsule).toHaveBeenCalledWith(
+        "hermes-agents",
+        "hermes",
+        "t_capsule",
+        42,
+        {
+          profile: "implementation",
+          summary: "Verified implementation can continue",
+          decisions: ["Keep task_runs authoritative", "Do not capture pane output"],
+          next_steps: ["Run the affected gate"],
+          risks: ["No live activation"],
+        },
+      ),
+    );
+    expect(
+      (await screen.findByTestId("desktop-execution-capsule-binding")).textContent,
+    ).toContain("t_capsule");
+    expect(screen.getByTestId("desktop-execution-capsule-binding").textContent).toContain(
+      "Run #42",
+    );
+  });
+
+  it("keeps the capsule dialog open and surfaces a binding conflict", async () => {
+    apiMock.bindAgentTerminalExecutionCapsule.mockRejectedValueOnce(
+      new Error("run is not the active execution generation"),
+    );
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Mit Kanban-Run verknüpfen" }));
+    fireEvent.change(screen.getByLabelText("Execution Capsule Task-ID"), {
+      target: { value: "t_stale" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Run-ID"), {
+      target: { value: "7" },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Kurz-Handoff"), {
+      target: { value: "Resume only if ownership is current" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run verknüpfen" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "run is not the active execution generation",
+    );
+    expect(screen.getByRole("dialog", { name: /Kanban-Run mit/ })).toBeTruthy();
+  });
+
   it("seeds the terminal target from session and window params", async () => {
     await renderView("/control/agent-terminals?session=hermes-agents&window=codex");
 

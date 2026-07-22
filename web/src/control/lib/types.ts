@@ -19,6 +19,7 @@ export type KnownRunOutcome =
 
 export type RunOutcome = KnownRunOutcome | (string & {});
 export type ModelRouteState = "planned" | "in_flight" | "confirmed" | "unknown";
+export type WorkerLivenessState = "running" | "suspect" | "failed";
 
 export interface RunInspect {
   cpu_percent: number;
@@ -52,6 +53,10 @@ export interface Worker {
   run_status: RunStatus;
   run_outcome: RunOutcome | null;
   block_reason?: string | null;
+  /** Backend-owned fusion of run, claim, heartbeat, and host process signals. */
+  liveness_state?: WorkerLivenessState;
+  liveness_reason?: string | null;
+  liveness_observed_at?: number | null;
   inspect?: RunInspect | null;
   /** Phase A (Fortschritt): jüngste Heartbeat-Note („macht gerade: X"). */
   last_heartbeat_note?: string | null;

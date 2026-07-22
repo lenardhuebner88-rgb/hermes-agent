@@ -881,7 +881,43 @@ def _chain_graph(conn: sqlite3.Connection, root_id: str) -> dict[str, Any]:
     }
 
 
+def _wait_conflict_http_detail(
+    conflict: "kanban_db.WaitMutationConflictInfo",
+) -> dict[str, Any]:
+    return {
+        "code": "wait_mutation_conflict",
+        "operation": conflict.operation,
+        "task_id": conflict.wait_task_id,
+        "reason": conflict.reason,
+        "target_task_ids": list(conflict.target_task_ids),
+        "wait_for": conflict.wait_for,
+    }
+
+
 def _merge_flow_children(
+    conn: sqlite3.Connection,
+    root_id: str,
+    keep_id: str,
+    merge_id: str,
+) -> dict[str, Any]:
+    """Wrapper: keep wait-refusals auditable across the merge rollback.
+
+    The merge itself must stay atomic, so a wait conflict rolls the whole
+    transaction back — including the refusal event recorded in-txn.  The
+    wrapper re-commits that refusal in its own transaction before surfacing
+    the 409, per the kanban_db wait-guard contract.
+    """
+    try:
+        return _merge_flow_children_impl(conn, root_id, keep_id, merge_id)
+    except kanban_db.WaitMutationConflict as exc:
+        with kanban_db.write_txn(conn):
+            kanban_db._record_wait_mutation_refusal_in_txn(conn, exc.info)
+        raise HTTPException(
+            status_code=409, detail=_wait_conflict_http_detail(exc.info)
+        ) from exc
+
+
+def _merge_flow_children_impl(
     conn: sqlite3.Connection,
     root_id: str,
     keep_id: str,
@@ -908,6 +944,21 @@ def _merge_flow_children(
             raise HTTPException(
                 status_code=409, detail="only scheduled flow children can be merged"
             )
+        wait_conflict = kanban_db.prepare_wait_owner_mutation_in_txn(
+            conn,
+            merge_id,
+            operation="flow_gate_merge",
+        )
+        if wait_conflict is None:
+            wait_conflict = kanban_db.prepare_event_reference_removal_in_txn(
+                conn,
+                merge_id,
+                operation="flow_gate_merge",
+            )
+        if wait_conflict is not None:
+            # Raised as a typed domain conflict; the outer wrapper commits the
+            # refusal event after rollback and converts it to a 409.
+            raise kanban_db.WaitMutationConflict(wait_conflict)
         keep_body = keep.body or ""
         merged_body = merged.body or ""
         next_body = (
@@ -941,6 +992,18 @@ def _merge_flow_children(
         ).fetchall():
             child_id = row["child_id"]
             if child_id != keep_id:
+                wait_conflict = kanban_db._rewire_parent_wait_in_txn(
+                    conn,
+                    child_id=child_id,
+                    old_parent_id=merge_id,
+                    new_parent_id=keep_id,
+                    operation="flow_gate_merge",
+                    now=int(time.time()),
+                )
+                if wait_conflict is not None:
+                    # Atomic merge rollback; the outer wrapper commits the
+                    # refusal event and converts this to a 409.
+                    raise kanban_db.WaitMutationConflict(wait_conflict)
                 conn.execute(
                     "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
                     (keep_id, child_id),

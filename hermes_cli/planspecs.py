@@ -1908,7 +1908,24 @@ def _archive_planspec_chain(conn, root_id: str) -> None:
     Reuses :func:`kanban_db.archive_task` so the existing archive bookkeeping
     (run reclaim, ``archived`` event, ``recompute_ready``) runs per task.
     """
-    for sid in kanban_db.parent_ids(conn, root_id):
+    subtask_ids = kanban_db.parent_ids(conn, root_id)
+    try:
+        kanban_db.preflight_task_removals(
+            conn,
+            [*subtask_ids, root_id],
+            operation="archive_planspec_chain",
+        )
+    except kanban_db.WaitMutationConflict as exc:
+        info = exc.info
+        raise PlanSpecBlocked(
+            [
+                "cannot archive the prior PlanSpec chain while a typed worker wait "
+                "still depends on it",
+                f"wait owner {info.wait_task_id}: {info.reason}; "
+                f"targets {', '.join(info.target_task_ids)}",
+            ]
+        ) from exc
+    for sid in subtask_ids:
         kanban_db.archive_task(conn, sid)
     kanban_db.archive_task(conn, root_id)
 

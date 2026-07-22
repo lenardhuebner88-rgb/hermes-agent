@@ -350,6 +350,63 @@ describe("agent terminal worker contract", () => {
       }),
     );
   });
+
+  it("bindAgentTerminalExecutionCapsule sends only the closed handoff contract", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        mockResponse(200, {
+          jsonBody: {
+            capsule: { state: "active" },
+            window: { session: "work", window: "codex" },
+          },
+        }),
+      ),
+    );
+
+    await api.bindAgentTerminalExecutionCapsule(
+      "work",
+      "codex",
+      "t_123",
+      9,
+      {
+        profile: "implementation",
+        summary: "Continue from verified state",
+        decisions: ["Keep the existing DB"],
+        next_steps: ["Run targeted tests"],
+        risks: ["No live activation"],
+      },
+    );
+
+    const expectedBody = {
+      session: "work",
+      window: "codex",
+      task_id: "t_123",
+      run_id: 9,
+      context_handoff: {
+        profile: "implementation",
+        summary: "Continue from verified state",
+        decisions: ["Keep the existing DB"],
+        next_steps: ["Run targeted tests"],
+        risks: ["No live activation"],
+      },
+    };
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/agent-terminals/execution-capsule",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify(expectedBody),
+        headers: expect.any(Headers),
+      }),
+    );
+    const body = JSON.parse(
+      ((fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].body as string),
+    );
+    expect(body).not.toHaveProperty("pane_id");
+    expect(body).not.toHaveProperty("workspace");
+    expect(body).not.toHaveProperty("commit");
+    expect(body.context_handoff).not.toHaveProperty("content");
+  });
 });
 
 describe("answerAgentQuestion via_suggestion (Feature A Slice 2)", () => {

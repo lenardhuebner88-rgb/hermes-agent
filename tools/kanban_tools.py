@@ -395,6 +395,9 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "block_kind": task.block_kind,
+        "due_at": task.due_at,
+        "wait_for": task.wait_for,
         "parents": parents,
         "children": children,
         "parent_count": len(parents),
@@ -440,6 +443,9 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "block_kind": t.block_kind,
+                    "due_at": t.due_at,
+                    "wait_for": t.wait_for,
                 }
 
             def _run_dict(r):
@@ -821,6 +827,7 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 kind=kind,
+                wait_for=args.get("wait_for"),
                 expected_run_id=_worker_run_id(tid),
                 reviewer_metadata=reviewer_metadata,
             )
@@ -835,7 +842,8 @@ def _handle_block(args: dict, **kw) -> str:
                 task_id=tid,
                 run_id=run.id if run else None,
                 status=landed.status if landed else "blocked",
-                block_kind=kind,
+                block_kind=landed.block_kind if landed else kind,
+                wait_for=landed.wait_for if landed else None,
             )
         finally:
             conn.close()
@@ -1731,6 +1739,8 @@ KANBAN_BLOCK_SCHEMA = {
         "Use ``kind`` to distinguish a dependency, needed human input, a "
         "capability wall, or a transient failure. ``reason`` is shown on the "
         "board and included in context when someone unblocks you. "
+        "A dependency block MUST also provide a typed ``wait_for`` condition; "
+        "human ambiguity is ``needs_input``, not a dependency. "
         "Use for genuine blockers only — don't block on things you can "
         "resolve yourself."
     ),
@@ -1757,9 +1767,66 @@ KANBAN_BLOCK_SCHEMA = {
                 "enum": ["dependency", "needs_input", "capability", "transient"],
                 "description": (
                     "Why you are blocked. 'dependency' waits in todo and "
-                    "resumes automatically; the others surface to a human. "
+                    "resumes automatically and requires wait_for; the others "
+                    "surface to a human. "
                     "Goal-mode tasks may use only dependency or needs_input."
                 ),
+            },
+            "wait_for": {
+                "description": (
+                    "Required when kind='dependency'. A closed, machine-readable "
+                    "condition; free-form commands or predicates are not accepted."
+                ),
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "parents_all_done"},
+                            "task_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 1,
+                                "uniqueItems": True,
+                            },
+                        },
+                        "required": ["type", "task_ids"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "not_before"},
+                            "at": {
+                                "type": "string",
+                                "format": "date-time",
+                            },
+                        },
+                        "required": ["type", "at"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "event_seen"},
+                            "task_id": {"type": "string"},
+                            "event_kind": {
+                                "type": "string",
+                                "enum": [
+                                    "completed",
+                                    "commented",
+                                    "unblocked",
+                                    "promoted_manual",
+                                    "review_approved",
+                                    "operator_approved",
+                                    "approved",
+                                    "planspec_released",
+                                ],
+                            },
+                        },
+                        "required": ["type", "task_id", "event_kind"],
+                        "additionalProperties": False,
+                    },
+                ],
             },
             "blocking_findings": {
                 "type": "array",

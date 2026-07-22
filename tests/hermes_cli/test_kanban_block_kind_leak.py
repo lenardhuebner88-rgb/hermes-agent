@@ -49,15 +49,32 @@ def test_unblock_dependency_task_clears_visible_block_metadata(
 ) -> None:
     with kb.connect_closing() as conn:
         task_id = _running_task(conn)
+        signal_id = kb.create_task(conn, title="signal", assignee="coder")
 
-        assert kb.block_task(conn, task_id, reason="wait for parent", kind="dependency")
+        assert kb.block_task(
+            conn,
+            task_id,
+            reason="wait for signal",
+            kind="dependency",
+            wait_for={
+                "type": "event_seen",
+                "task_id": signal_id,
+                "event_kind": "completed",
+            },
+        )
         assert _block_fields(conn, task_id) == {
             "status": "todo",
             "block_kind": "dependency",
             "block_recurrences": 1,
         }
 
-        assert kb.unblock_task(conn, task_id)
+        assert kb.unblock_task(
+            conn,
+            task_id,
+            override_wait=True,
+            actor="test-operator",
+            reason="signal no longer required",
+        )
 
         assert _block_fields(conn, task_id) == {
             "status": "ready",
@@ -155,7 +172,13 @@ def test_recompute_ready_clears_dependency_block_metadata(
         parent_id = kb.create_task(conn, title="parent", assignee="coder")
         child_id = _running_task(conn, title="child waits on parent")
         kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
-        assert kb.block_task(conn, child_id, reason="wait", kind="dependency")
+        assert kb.block_task(
+            conn,
+            child_id,
+            reason="wait",
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent_id]},
+        )
 
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent_id,))

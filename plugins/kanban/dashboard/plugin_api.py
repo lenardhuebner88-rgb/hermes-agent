@@ -1646,6 +1646,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
 
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(updated) if updated else None}
+    except kanban_db.WaitMutationConflict as exc:
+        raise HTTPException(status_code=409, detail=_wait_conflict_detail(exc)) from exc
     finally:
         conn.close()
 
@@ -1663,8 +1665,22 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
         if not ok:
             raise HTTPException(status_code=404, detail=f"task {task_id} not found")
         return {"deleted": True, "task_id": task_id}
+    except kanban_db.WaitMutationConflict as exc:
+        raise HTTPException(status_code=409, detail=_wait_conflict_detail(exc)) from exc
     finally:
         conn.close()
+
+
+def _wait_conflict_detail(exc: kanban_db.WaitMutationConflict) -> dict[str, Any]:
+    info = exc.info
+    return {
+        "code": "wait_mutation_conflict",
+        "operation": info.operation,
+        "task_id": info.wait_task_id,
+        "reason": info.reason,
+        "target_task_ids": list(info.target_task_ids),
+        "wait_for": info.wait_for,
+    }
 
 
 def _parents_blocking_ready(
@@ -1703,92 +1719,118 @@ def _set_status_direct(
     orphaned. ``running -> ready`` via drag-drop is the common case
     (user yanking a stuck worker back to the queue).
     """
+    kanban_db.preflight_wait_owner_mutation(
+        conn,
+        task_id,
+        operation=f"dashboard_status:{new_status}",
+    )
+    # The wait-guard contract: the in-txn prepare records the refusal event,
+    # the transaction commits it, and the conflict raises only after the
+    # transaction exits — never inside, which would roll the refusal back.
+    final_wait_conflict = None
+    applied = False
     with kanban_db.write_txn(conn):
-        # Snapshot current state so we know whether to close a run.
-        prev = conn.execute(
-            "SELECT status, current_run_id FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if prev is None:
-            return False
-
-        # Guard: don't allow promoting to 'ready' unless all parents are done.
-        # Prevents the dispatcher from spawning a child whose upstream work
-        # hasn't completed (e.g. T4 dispatched while T3 is still blocked).
-        if new_status == "ready":
-            parent_statuses = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
-            ).fetchall()
-            if parent_statuses and not all(
-                p["status"] == "done" for p in parent_statuses
-            ):
-                return False
-
-        was_running = prev["status"] == "running"
-        reopening_satisfied_parent = (
-            prev["status"] in {"done", "archived"}
-            and new_status not in {"done", "archived"}
+        final_wait_conflict = kanban_db.prepare_wait_owner_mutation_in_txn(
+            conn,
+            task_id,
+            operation=f"dashboard_status:{new_status}",
         )
-
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, "
-            "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
-            "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
-            "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
-            "WHERE id = ?",
-            (new_status, new_status, new_status, new_status, task_id),
-        )
-        if cur.rowcount != 1:
-            return False
-        run_id = None
-        if was_running and new_status != "running" and prev["current_run_id"]:
-            run_id = kanban_db._end_run(
-                conn, task_id,
-                outcome="reclaimed", status="reclaimed",
-                summary=f"status changed to {new_status} (dashboard/direct)",
-            )
-        conn.execute(
-            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-            "VALUES (?, ?, 'status', ?, ?)",
-            (task_id, run_id, json.dumps({"status": new_status}), int(time.time())),
-        )
-        if reopening_satisfied_parent:
-            # A parent leaving done/archived invalidates any direct child that
-            # was sitting in ready solely because that parent used to satisfy
-            # the dependency gate. Demote those children immediately so the
-            # dashboard does not keep advertising stale-ready work.
-            for row in conn.execute(
-                "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
-                (task_id,),
-            ).fetchall():
-                child_id = row["child_id"]
-                demoted = conn.execute(
-                    "UPDATE tasks SET status = 'todo' "
-                    "WHERE id = ? AND status = 'ready'",
-                    (child_id,),
-                )
-                if demoted.rowcount == 1:
-                    conn.execute(
-                        "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                        "VALUES (?, 'status', ?, ?)",
-                        (
-                            child_id,
-                            json.dumps(
-                                {
-                                    "status": "todo",
-                                    "reason": "parent_reopened",
-                                    "parent": task_id,
-                                }
-                            ),
-                            int(time.time()),
-                        ),
-                    )
+        if final_wait_conflict is None:
+            applied = _set_status_direct_in_txn(conn, task_id, new_status)
+    if final_wait_conflict is not None:
+        raise kanban_db.WaitMutationConflict(final_wait_conflict)
     # If we re-opened something, children may have gone stale.
-    if new_status in {"done", "ready"}:
+    if applied and new_status in {"done", "ready"}:
         kanban_db.recompute_ready(conn)
+    return applied
+
+
+def _set_status_direct_in_txn(
+    conn: sqlite3.Connection, task_id: str, new_status: str,
+) -> bool:
+    """In-transaction body of :func:`_set_status_direct` (wait-guard cleared)."""
+    # Snapshot current state so we know whether to close a run.
+    prev = conn.execute(
+        "SELECT status, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if prev is None:
+        return False
+
+    # Guard: don't allow promoting to 'ready' unless all parents are done.
+    # Prevents the dispatcher from spawning a child whose upstream work
+    # hasn't completed (e.g. T4 dispatched while T3 is still blocked).
+    if new_status == "ready":
+        parent_statuses = conn.execute(
+            "SELECT t.status FROM tasks t "
+            "JOIN task_links l ON l.parent_id = t.id "
+            "WHERE l.child_id = ?",
+            (task_id,),
+        ).fetchall()
+        if parent_statuses and not all(
+            p["status"] == "done" for p in parent_statuses
+        ):
+            return False
+
+    was_running = prev["status"] == "running"
+    reopening_satisfied_parent = (
+        prev["status"] in {"done", "archived"}
+        and new_status not in {"done", "archived"}
+    )
+
+    cur = conn.execute(
+        "UPDATE tasks SET status = ?, "
+        "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
+        "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
+        "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
+        "WHERE id = ?",
+        (new_status, new_status, new_status, new_status, task_id),
+    )
+    if cur.rowcount != 1:
+        return False
+    run_id = None
+    if was_running and new_status != "running" and prev["current_run_id"]:
+        run_id = kanban_db._end_run(
+            conn, task_id,
+            outcome="reclaimed", status="reclaimed",
+            summary=f"status changed to {new_status} (dashboard/direct)",
+        )
+    conn.execute(
+        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+        "VALUES (?, ?, 'status', ?, ?)",
+        (task_id, run_id, json.dumps({"status": new_status}), int(time.time())),
+    )
+    if reopening_satisfied_parent:
+        # A parent leaving done/archived invalidates any direct child that
+        # was sitting in ready solely because that parent used to satisfy
+        # the dependency gate. Demote those children immediately so the
+        # dashboard does not keep advertising stale-ready work.
+        for row in conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+            (task_id,),
+        ).fetchall():
+            child_id = row["child_id"]
+            demoted = conn.execute(
+                "UPDATE tasks SET status = 'todo' "
+                "WHERE id = ? AND status = 'ready'",
+                (child_id,),
+            )
+            if demoted.rowcount == 1:
+                conn.execute(
+                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
+                    "VALUES (?, 'status', ?, ?)",
+                    (
+                        child_id,
+                        json.dumps(
+                            {
+                                "status": "todo",
+                                "reason": "parent_reopened",
+                                "parent": task_id,
+                            }
+                        ),
+                        int(time.time()),
+                    ),
+                )
     return True
 
 
@@ -1880,6 +1922,8 @@ def delete_link(
     try:
         ok = kanban_db.unlink_tasks(conn, parent_id, child_id)
         return {"ok": bool(ok)}
+    except kanban_db.WaitMutationConflict as exc:
+        raise HTTPException(status_code=409, detail=_wait_conflict_detail(exc)) from exc
     finally:
         conn.close()
 
@@ -1989,6 +2033,12 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             (tid, json.dumps({"priority": int(payload.priority)}),
                              int(time.time())),
                         )
+            except kanban_db.WaitMutationConflict as exc:
+                entry.update(
+                    ok=False,
+                    error="wait mutation conflict",
+                    detail=_wait_conflict_detail(exc),
+                )
             except Exception as e:  # defensive — one bad id shouldn't kill the batch
                 entry.update(ok=False, error=str(e))
             results.append(entry)
@@ -2246,6 +2296,28 @@ def list_active_workers(
             else:
                 token_status = "no_live_sample"
                 token_status_reason = "task_runs has no live token counters for this active worker yet"
+            owner_host = str(row["claim_lock"] or "").split(":", 1)[0]
+            local_host = kanban_db._claimer_id().split(":", 1)[0]
+            process_alive = (
+                kanban_db._pid_alive(row["worker_pid"])
+                if owner_host and owner_host == local_host
+                else None
+            )
+            process_group_alive = (
+                kanban_db._worker_process_group_alive(row["worker_pid"])
+                if owner_host and owner_host == local_host
+                else None
+            )
+            liveness = kanban_db.derive_worker_liveness(
+                run_status=row["run_status"],
+                claim_expires=row["claim_expires"],
+                last_heartbeat_at=row["last_heartbeat_at"],
+                worker_pid=row["worker_pid"],
+                now=now_ts,
+                started_at=row["started_at"],
+                process_alive=process_alive,
+                process_group_alive=process_group_alive,
+            )
             workers.append({
                 "run_id": row["run_id"],
                 "task_id": row["task_id"],
@@ -2265,6 +2337,11 @@ def list_active_workers(
                 "run_status": row["run_status"],
                 "run_outcome": row["run_outcome"],
                 "block_reason": row["block_reason"],
+                # One backend-owned contract replaces divergent UI/runtime
+                # threshold guesses. Additive for older Fleet clients.
+                "liveness_state": liveness["state"],
+                "liveness_reason": liveness["reason"],
+                "liveness_observed_at": now_ts,
                 "last_heartbeat_note": note.get("note"),
                 "last_heartbeat_note_at": note.get("at"),
                 "heartbeat_ticks": heartbeat_ticks.get(int(row["run_id"]), []),

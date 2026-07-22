@@ -487,6 +487,53 @@ export interface AgentTerminalWindow {
   cwd?: string | null;
   dead?: boolean;
   activity?: number | null;
+  /** Durable Kanban↔terminal pointers; absent on every legacy/unbound window. */
+  task_id?: string | null;
+  run_id?: number | null;
+  correlation_id?: string | null;
+}
+
+export type AgentTerminalExecutionProfile =
+  | "implementation"
+  | "review"
+  | "recovery"
+  | "operator_handoff";
+
+export interface AgentTerminalExecutionContext {
+  profile: AgentTerminalExecutionProfile;
+  summary: string;
+  decisions: string[];
+  next_steps: string[];
+  risks: string[];
+}
+
+export interface AgentTerminalExecutionCapsule {
+  schema_version: number;
+  state: "pending" | "active";
+  correlation_id: string;
+  revision: number;
+  task_id: string;
+  run_id: number;
+  terminal: {
+    server_id: string;
+    session: string;
+    window: string;
+    pane_id: string;
+  };
+  workspace: {
+    path: string;
+    branch: string | null;
+    pre_run_commit_sha: string | null;
+    head_sha: string | null;
+  };
+  context: AgentTerminalExecutionContext & { fingerprint: string };
+  bound_at: number;
+  updated_at: number;
+}
+
+export interface AgentTerminalExecutionCapsuleResponse {
+  capsule: AgentTerminalExecutionCapsule;
+  window: AgentTerminalWindow;
 }
 
 export type AgentTerminalOverviewState = "dead" | "frage" | "laeuft" | "wartet" | "idle";
@@ -1128,6 +1175,29 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session, window, ...(start !== undefined ? { start } : {}) }),
     }),
+  bindAgentTerminalExecutionCapsule: (
+    session: string,
+    window: string,
+    taskId: string,
+    runId: number,
+    contextHandoff: AgentTerminalExecutionContext,
+    board?: string,
+  ) =>
+    fetchJSON<AgentTerminalExecutionCapsuleResponse>(
+      "/api/agent-terminals/execution-capsule",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session,
+          window,
+          task_id: taskId,
+          run_id: runId,
+          context_handoff: contextHandoff,
+          ...(board ? { board } : {}),
+        }),
+      },
+    ),
   detachAgentTerminalClient: (clientId: string) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/detach-client", {
       method: "POST",

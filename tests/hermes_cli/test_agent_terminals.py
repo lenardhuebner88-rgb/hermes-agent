@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections.abc import Generator
 
@@ -15,6 +18,8 @@ from hermes_cli.agent_terminals import (
     AgentTerminalError,
     CapabilityError,
     InvalidTarget,
+    PaneCaptureCache,
+    TmuxWindow,
     TmuxAgentSessionService,
     classify_agent_pane,
     strip_ansi,
@@ -28,8 +33,10 @@ pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is re
 @pytest.fixture(autouse=True)
 def reset_workdir_options_cache() -> Generator[None, None, None]:
     agent_terminals._reset_workdir_options_cache()
+    agent_terminals._reset_pane_capture_cache()
     yield
     agent_terminals._reset_workdir_options_cache()
+    agent_terminals._reset_pane_capture_cache()
 
 
 @pytest.fixture
@@ -1223,6 +1230,172 @@ def test_set_window_identity_optionally_stamps_correlation_ids(
     ]
 
 
+def test_execution_server_id_is_opaque_stable_and_socket_scoped(tmp_path: Path) -> None:
+    first = TmuxAgentSessionService(
+        socket_path=tmp_path / "one.sock", hermes_home=tmp_path
+    )
+    same = TmuxAgentSessionService(
+        socket_path=tmp_path / "one.sock", hermes_home=tmp_path / "other-home"
+    )
+    other = TmuxAgentSessionService(
+        socket_path=tmp_path / "two.sock", hermes_home=tmp_path
+    )
+
+    assert first.execution_server_id == same.execution_server_id
+    assert first.execution_server_id != other.execution_server_id
+    assert len(first.execution_server_id) == 64
+    assert str(tmp_path) not in first.execution_server_id
+
+
+def test_execution_correlation_reads_one_exact_window_option_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = TmuxAgentSessionService(
+        socket_path=tmp_path / "tmux.sock", hermes_home=tmp_path
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(*args: str, **_kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                "@hermes_task_id t_123\n"
+                "@hermes_run_id 17\n"
+                "@hermes_correlation_id aabbccddeeff001122334455\n"
+                "@unrelated ignored\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    assert service.execution_correlation_for("work", "codex") == {
+        "task_id": "t_123",
+        "run_id": 17,
+        "correlation_id": "aabbccddeeff001122334455",
+    }
+    assert calls == [("show-options", "-w", "-t", "work:=codex")]
+
+
+def test_execution_correlation_stamp_is_pane_generation_cas_and_restorable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = TmuxAgentSessionService(
+        socket_path=tmp_path / "tmux.sock", hermes_home=tmp_path
+    )
+    current = TmuxWindow("work", "codex", True, "%7", 123, "node", str(tmp_path))
+    previous = {
+        "task_id": "t_old",
+        "run_id": 3,
+        "correlation_id": "00112233445566778899aabb",
+    }
+    writes: list[tuple[str, object | None]] = []
+    monkeypatch.setattr(service, "show", lambda *_args: current)
+    monkeypatch.setattr(
+        service, "execution_correlation_for", lambda *_args: dict(previous)
+    )
+    monkeypatch.setattr(
+        service,
+        "_set_or_unset_window_option",
+        lambda _session, _window, name, value: writes.append((name, value)),
+    )
+    monkeypatch.setattr(service, "_log_event", lambda *_args, **_kwargs: None)
+
+    returned = service.stamp_execution_correlation(
+        "work",
+        "codex",
+        expected_pane_id="%7",
+        task_id="t_new",
+        run_id=19,
+        correlation_id="aabbccddeeff001122334455",
+    )
+    assert returned == previous
+    assert writes == [
+        ("@hermes_task_id", "t_new"),
+        ("@hermes_run_id", 19),
+        ("@hermes_correlation_id", "aabbccddeeff001122334455"),
+    ]
+
+    writes.clear()
+    service.restore_execution_correlation(
+        "work", "codex", previous, expected_pane_id="%7"
+    )
+    assert writes == [
+        ("@hermes_task_id", "t_old"),
+        ("@hermes_run_id", 3),
+        ("@hermes_correlation_id", "00112233445566778899aabb"),
+    ]
+
+    writes.clear()
+    service.restore_execution_correlation(
+        "work",
+        "codex",
+        {"task_id": None, "run_id": None, "correlation_id": None},
+        expected_pane_id="%7",
+    )
+    assert writes == [
+        ("@hermes_task_id", None),
+        ("@hermes_run_id", None),
+        ("@hermes_correlation_id", None),
+    ]
+
+    monkeypatch.setattr(
+        service,
+        "show",
+        lambda *_args: TmuxWindow("work", "codex", True, "%8", 456, "node"),
+    )
+    writes.clear()
+    with pytest.raises(CapabilityError, match="changed pane generation"):
+        service.stamp_execution_correlation(
+            "work",
+            "codex",
+            expected_pane_id="%7",
+            task_id="t_new",
+            run_id=19,
+            correlation_id="aabbccddeeff001122334455",
+        )
+    assert writes == []
+
+
+def test_execution_correlation_survives_window_rename_in_temp_tmux(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService
+) -> None:
+    service = TmuxAgentSessionService(
+        socket_path=tmux_service.socket_path, hermes_home=tmp_path
+    )
+    service._run(
+        "new-session",
+        "-d",
+        "-s",
+        "work",
+        "-n",
+        "codex",
+        "sh",
+        "-c",
+        "sleep 60",
+    )
+    service._set_window_identity(
+        "work", "codex", kind="codex", workdir_key="home"
+    )
+    before = service.show("work", "codex")
+    service.stamp_execution_correlation(
+        "work",
+        "codex",
+        expected_pane_id=before.pane_id,
+        task_id="t_rename",
+        run_id=23,
+        correlation_id="11223344556677889900aabb",
+    )
+
+    renamed = service.rename("work", "codex", "codex-bound")
+    assert renamed.pane_id == before.pane_id
+    assert renamed.task_id == "t_rename"
+    assert renamed.run_id == 23
+    assert renamed.correlation_id == "11223344556677889900aabb"
+
+
 def test_identity_for_falls_back_to_name_parsing_without_window_options(
     tmp_path: Path, tmux_service: TmuxAgentSessionService
 ) -> None:
@@ -1491,6 +1664,206 @@ def test_overview_capture_does_not_log_per_window_capture_events(
     log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
     assert '"event": "capture"' not in log
     assert '"event": "overview"' in log
+
+
+def test_automatic_pane_snapshot_is_shared_across_services_and_single_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard/poller readers share one canonical capture per pane activity."""
+    clock = {"now": 100.0}
+    cache = PaneCaptureCache(ttl_seconds=2.0, max_entries=8)
+    socket = tmp_path / "shared.sock"
+    first = TmuxAgentSessionService(
+        socket_path=socket,
+        hermes_home=tmp_path / "one",
+        now=lambda: clock["now"],
+        capture_cache=cache,
+    )
+    second = TmuxAgentSessionService(
+        socket_path=socket,
+        hermes_home=tmp_path / "two",
+        now=lambda: clock["now"],
+        capture_cache=cache,
+    )
+    calls: list[tuple[str, ...]] = []
+    calls_lock = threading.Lock()
+
+    def fake_run(
+        _self: TmuxAgentSessionService, *args: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        with calls_lock:
+            calls.append(tuple(args))
+        # Keep the leader in-flight long enough for the second reader to join it.
+        time.sleep(0.05)
+        return subprocess.CompletedProcess(args, 0, stdout="same pane\n", stderr="")
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshots = list(
+            pool.map(
+                lambda service: service.capture_pane_snapshot(
+                    "%7", window_activity=90
+                ),
+                (first, second),
+            )
+        )
+
+    assert [snapshot.raw for snapshot in snapshots] == ["same pane\n", "same pane\n"]
+    assert len(calls) == 1
+    assert calls[0][-2:] == ("-S", "-25")
+
+    # A changed tmux activity generation is a new snapshot.
+    second.capture_pane_snapshot("%7", window_activity=91)
+    assert len(calls) == 2
+    # Expiry also refreshes even when activity did not change.
+    clock["now"] = 103.0
+    first.capture_pane_snapshot("%7", window_activity=91)
+    assert len(calls) == 3
+    # Activity from the current second is intentionally never cached.
+    first.capture_pane_snapshot("%7", window_activity=103)
+    second.capture_pane_snapshot("%7", window_activity=103)
+    assert len(calls) == 5
+    # Explicit safety/recheck captures always bypass the automatic cache.
+    first.capture_pane("%7", start=-25)
+    assert len(calls) == 6
+
+
+def test_inflight_snapshot_is_not_reused_after_send_invalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture completing after input was sent must not repopulate the cache."""
+    cache = PaneCaptureCache(ttl_seconds=30.0, max_entries=8)
+    service = TmuxAgentSessionService(
+        socket_path=tmp_path / "shared.sock",
+        hermes_home=tmp_path,
+        now=lambda: 100.0,
+        capture_cache=cache,
+    )
+    capture_started = threading.Event()
+    release_capture = threading.Event()
+    calls = 0
+
+    def fake_run(
+        _self: TmuxAgentSessionService, *args: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            capture_started.set()
+            assert release_capture.wait(timeout=2)
+        return subprocess.CompletedProcess(
+            args, 0, stdout=f"capture-{calls}\n", stderr=""
+        )
+
+    monkeypatch.setattr(TmuxAgentSessionService, "_run", fake_run)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(
+            service.capture_pane_snapshot, "%7", window_activity=90
+        )
+        assert capture_started.wait(timeout=2)
+        cache.invalidate_pane(service._capture_server_id, "%7")
+        release_capture.set()
+        assert pending.result(timeout=2).raw == "capture-1\n"
+
+    refreshed = service.capture_pane_snapshot("%7", window_activity=90)
+    assert refreshed.raw == "capture-2\n"
+    assert calls == 2
+
+
+def test_overview_uses_canonical_snapshot_and_clamps_requested_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = PaneCaptureCache(ttl_seconds=2.0, max_entries=8)
+    service = TmuxAgentSessionService(
+        socket_path=tmp_path / "overview.sock",
+        hermes_home=tmp_path,
+        now=lambda: 200.0,
+        capture_cache=cache,
+    )
+    monkeypatch.setattr(
+        service,
+        "list_windows",
+        lambda: [
+            TmuxWindow(
+                "work",
+                "claude",
+                True,
+                "%8",
+                123,
+                "claude",
+                activity=190,
+            )
+        ],
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        calls.append(tuple(args))
+        body = "\n".join(f"line-{i}" for i in range(1, 31)) + "\n"
+        return subprocess.CompletedProcess(args, 0, stdout=body, stderr="")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+
+    short = service.overview(tail_lines=2)["windows"][0]["tail"]
+    deep = service.overview(tail_lines=200)["windows"][0]["tail"]
+
+    assert short == "line-29\nline-30"
+    assert deep.startswith("line-6\n")
+    assert deep.endswith("line-30")
+    assert len(calls) == 1
+    assert calls[0][-2:] == ("-S", "-25")
+
+
+def test_send_keys_invalidates_automatic_pane_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = PaneCaptureCache(ttl_seconds=2.0, max_entries=8)
+    service = TmuxAgentSessionService(
+        socket_path=tmp_path / "invalidate.sock",
+        hermes_home=tmp_path,
+        now=lambda: 300.0,
+        capture_cache=cache,
+    )
+    captures = 0
+
+    def fake_run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        nonlocal captures
+        if args and args[0] == "capture-pane":
+            captures += 1
+        return subprocess.CompletedProcess(args, 0, stdout="pane\n", stderr="")
+
+    monkeypatch.setattr(service, "_run", fake_run)
+    service.capture_pane_snapshot("%9", window_activity=290)
+    service.capture_pane_snapshot("%9", window_activity=290)
+    assert captures == 1
+
+    service.send_keys_to_pane("%9", "not-logged", enter=True)
+    service.capture_pane_snapshot("%9", window_activity=290)
+    assert captures == 2
+
+    log = (tmp_path / "agent-terminals" / "events.jsonl").read_text(encoding="utf-8")
+    assert "not-logged" not in log
+
+
+def test_event_log_rotation_preserves_complete_jsonl_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_terminals, "_EVENT_LOG_MAX_BYTES", 180)
+    service = TmuxAgentSessionService(hermes_home=tmp_path, now=lambda: 400.0)
+
+    for seq in range(20):
+        service._log_event("probe", seq=seq, bytes=32)
+
+    log_dir = tmp_path / "agent-terminals"
+    paths = [log_dir / "events.jsonl", log_dir / "events.jsonl.1", log_dir / "events.jsonl.2"]
+    assert all(path.exists() for path in paths)
+    decoded: list[dict[str, object]] = []
+    for path in paths:
+        data = path.read_text(encoding="utf-8")
+        assert data.endswith("\n")
+        decoded.extend(json.loads(line) for line in data.splitlines())
+    assert any(record.get("seq") == 19 for record in decoded)
+    assert not (log_dir / "events.jsonl.3").exists()
 
 
 def _tmux_show_option(service: TmuxAgentSessionService, session: str, option: str) -> str:

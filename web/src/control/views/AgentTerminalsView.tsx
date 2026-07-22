@@ -27,6 +27,7 @@ import {
   Inbox,
   Keyboard,
   LayoutGrid,
+  Link2,
   Maximize2,
   Minimize2,
   PanelRightOpen,
@@ -49,6 +50,7 @@ import {
   api,
   buildWsUrl,
   type AgentTerminalCapabilityState,
+  type AgentTerminalExecutionProfile,
   type AgentTerminalKind,
   type AgentTerminalOverviewState,
   type AgentTerminalOverviewWindow,
@@ -272,6 +274,17 @@ export function AgentTerminalsView() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [attachNonce, setAttachNonce] = useState(0);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [executionCapsuleOpen, setExecutionCapsuleOpen] = useState(false);
+  const [executionCapsuleTaskId, setExecutionCapsuleTaskId] = useState("");
+  const [executionCapsuleRunId, setExecutionCapsuleRunId] = useState("");
+  const [executionCapsuleProfile, setExecutionCapsuleProfile] =
+    useState<AgentTerminalExecutionProfile>("implementation");
+  const [executionCapsuleSummary, setExecutionCapsuleSummary] = useState("");
+  const [executionCapsuleDecisions, setExecutionCapsuleDecisions] = useState("");
+  const [executionCapsuleNextSteps, setExecutionCapsuleNextSteps] = useState("");
+  const [executionCapsuleRisks, setExecutionCapsuleRisks] = useState("");
+  const [executionCapsuleBusy, setExecutionCapsuleBusy] = useState(false);
+  const [executionCapsuleError, setExecutionCapsuleError] = useState<string | null>(null);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
   const [controlContext, setControlContext] = useState<ReadOnlyControlContext>(EMPTY_CONTROL_CONTEXT);
@@ -1216,6 +1229,97 @@ export function AgentTerminalsView() {
     }
   }, [activePane, refresh, renameValue, selectPaneTarget, selectedWindow]);
 
+  const openExecutionCapsule = useCallback(() => {
+    if (!selectedWindow) return;
+    setExecutionCapsuleTaskId(selectedWindow.task_id ?? "");
+    setExecutionCapsuleRunId(selectedWindow.run_id ? String(selectedWindow.run_id) : "");
+    setExecutionCapsuleProfile("implementation");
+    setExecutionCapsuleSummary("");
+    setExecutionCapsuleDecisions("");
+    setExecutionCapsuleNextSteps("");
+    setExecutionCapsuleRisks("");
+    setExecutionCapsuleError(null);
+    setExecutionCapsuleOpen(true);
+    setSessionSheetOpen(false);
+  }, [selectedWindow]);
+
+  const bindExecutionCapsule = useCallback(async () => {
+    if (!selectedWindow || selectedWindow.correlation_id) return;
+    const taskId = executionCapsuleTaskId.trim();
+    const runId = Number(executionCapsuleRunId);
+    const summary = executionCapsuleSummary.trim();
+    const lines = (value: string) =>
+      value
+        .split(/\r?\n/u)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    const decisions = lines(executionCapsuleDecisions);
+    const nextSteps = lines(executionCapsuleNextSteps);
+    const risks = lines(executionCapsuleRisks);
+    if (!taskId || /\s/u.test(taskId)) {
+      setExecutionCapsuleError("Bitte eine gültige Task-ID ohne Leerzeichen angeben.");
+      return;
+    }
+    if (!Number.isSafeInteger(runId) || runId <= 0) {
+      setExecutionCapsuleError("Bitte eine gültige positive Run-ID angeben.");
+      return;
+    }
+    if (!summary || summary.length > 1200) {
+      setExecutionCapsuleError("Der Kurz-Handoff muss 1–1200 Zeichen lang sein.");
+      return;
+    }
+    if ([decisions, nextSteps, risks].some((items) => items.length > 8)) {
+      setExecutionCapsuleError("Je Liste sind höchstens acht nichtleere Zeilen erlaubt.");
+      return;
+    }
+    if ([decisions, nextSteps, risks].some((items) => items.some((item) => item.length > 240))) {
+      setExecutionCapsuleError("Eine Listenzeile darf höchstens 240 Zeichen enthalten.");
+      return;
+    }
+
+    setExecutionCapsuleBusy(true);
+    setExecutionCapsuleError(null);
+    try {
+      const response = await api.bindAgentTerminalExecutionCapsule(
+        selectedWindow.session,
+        selectedWindow.window,
+        taskId,
+        runId,
+        {
+          profile: executionCapsuleProfile,
+          summary,
+          decisions,
+          next_steps: nextSteps,
+          risks,
+        },
+      );
+      setWindows((current) => {
+        const next = current.map((candidate) =>
+          candidate.session === response.window.session &&
+          candidate.window === response.window.window
+            ? response.window
+            : candidate,
+        );
+        windowsJsonRef.current = JSON.stringify(next);
+        return next;
+      });
+      setExecutionCapsuleOpen(false);
+    } catch (err) {
+      setExecutionCapsuleError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExecutionCapsuleBusy(false);
+    }
+  }, [
+    executionCapsuleDecisions,
+    executionCapsuleNextSteps,
+    executionCapsuleProfile,
+    executionCapsuleRisks,
+    executionCapsuleRunId,
+    executionCapsuleSummary,
+    executionCapsuleTaskId,
+    selectedWindow,
+  ]);
+
   const sendRaw = useCallback((sequence: string) => {
     if (activePane > 0) {
       extraPaneRefs[activePane - 1]?.current?.sendRaw(sequence);
@@ -2137,6 +2241,17 @@ export function AgentTerminalsView() {
         </div>
         <div className="flex items-center justify-between gap-2"><span>Prozess</span><span className="min-w-0 truncate font-mono text-ink-2">{terminalProcessLabel(selectedWindow, sessionSheetKind)}</span></div>
         <div className="flex items-center justify-between gap-2"><span>Status</span><TerminalStatusChip state={state} /></div>
+        {selectedWindow.task_id && selectedWindow.run_id && (
+          <div
+            data-testid="mobile-execution-capsule-binding"
+            className="flex items-center justify-between gap-2"
+          >
+            <span>Kanban-Run</span>
+            <span className="min-w-0 truncate font-mono text-live">
+              {selectedWindow.task_id} · #{selectedWindow.run_id}
+            </span>
+          </div>
+        )}
       </div>
       <div className="mt-3 grid grid-cols-3 gap-2 text-sec">
         <button type="button" onClick={() => { if (activePane > 0) extraPaneRefs[activePane - 1]?.current?.reconnect(); else setAttachNonce((n) => n + 1); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
@@ -2193,6 +2308,12 @@ export function AgentTerminalsView() {
         <button type="button" onClick={() => { setHandoffOpen(true); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <Share2 className="h-4 w-4" /><span>Handoff öffnen</span>
         </button>
+        {!sessionSheetDead && (
+          <button type="button" onClick={openExecutionCapsule} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:border-live/40 hover:text-live">
+            <Link2 className="h-4 w-4" />
+            <span>{selectedWindow.correlation_id ? "Kanban-Run anzeigen" : "Kanban-Run verknüpfen"}</span>
+          </button>
+        )}
         <button type="button" onClick={() => adjustFont(-1)} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
           <span className="font-data text-sec">A−</span><span>Schrift kleiner</span>
         </button>
@@ -2713,6 +2834,21 @@ export function AgentTerminalsView() {
                 >
                   <PanelRightOpen className="h-3.5 w-3.5" />
                 </button>
+                {selectedWindow && (
+                  <button
+                    type="button"
+                    aria-label={selectedWindow.correlation_id ? "Kanban-Run-Verknüpfung anzeigen" : "Mit Kanban-Run verknüpfen"}
+                    title={selectedWindow.correlation_id ? "Kanban-Run-Verknüpfung anzeigen" : "Mit Kanban-Run verknüpfen"}
+                    disabled={isDeadWindow(selectedWindow)}
+                    onClick={openExecutionCapsule}
+                    className={cn(
+                      "grid h-12 w-12 place-items-center rounded-card border text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live disabled:cursor-not-allowed disabled:opacity-35",
+                      selectedWindow.correlation_id ? "border-live/50 bg-live/10 text-live" : "border-line bg-surface-2",
+                    )}
+                  >
+                    <Link2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 <button type="button" aria-label="Schrift kleiner" title="Schrift kleiner" onClick={() => adjustFont(-1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A−</button>
                 <button type="button" aria-label="Schrift größer" title="Schrift größer" onClick={() => adjustFont(1)} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 font-mono text-[11px] text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">A+</button>
                 <button type="button" aria-label={zen ? "Vollbild verlassen" : "Vollbild"} title={zen ? "Vollbild verlassen" : "Vollbild"} onClick={toggleZen} className="grid h-12 w-12 place-items-center rounded-card border border-line bg-surface-2 text-ink-2 transition hover:border-live/40 hover:bg-surface-3 hover:text-live">
@@ -2732,6 +2868,19 @@ export function AgentTerminalsView() {
           ) : (
             <div className={cn("flex w-full flex-col", immersive ? "min-h-0 flex-1" : "h-[calc(100svh-25rem)] min-h-[360px] md:h-[calc(100svh-23rem)] md:min-h-[500px] lg:h-[calc(100vh-17rem)]")}>
               {!compactLayout && <TerminalIdentityBar window={selectedWindow} selectedKind={selectedKind} state={state} />}
+              {!compactLayout && selectedWindow?.task_id && selectedWindow.run_id && (
+                <button
+                  type="button"
+                  data-testid="desktop-execution-capsule-binding"
+                  onClick={openExecutionCapsule}
+                  className="flex shrink-0 items-center gap-2 border-b border-live/15 bg-live/[0.04] px-3 py-1.5 text-left text-[10px] text-ink-3 hover:bg-live/[0.08]"
+                >
+                  <Link2 className="h-3 w-3 shrink-0 text-live" />
+                  <span>Kanban</span>
+                  <span className="truncate font-mono text-live">{selectedWindow.task_id}</span>
+                  <span className="font-mono text-ink-2">Run #{selectedWindow.run_id}</span>
+                </button>
+              )}
               {!compactLayout && selectedOverview && (
                 // Ticker line: only the fields we actually have data for. The
                 // mockup also shows model/effort, session-token-budget and
@@ -2775,6 +2924,150 @@ export function AgentTerminalsView() {
       {sessionSheet}
       {createSheet}
       {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />{toolsDrawer}</div>}
+
+      {executionCapsuleOpen && selectedWindow && (
+        <div className="fixed inset-0 z-[70] grid place-items-end bg-black/65 p-0 sm:place-items-center sm:p-4">
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="execution-capsule-title"
+            className="max-h-[92svh] w-full overflow-y-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl sm:max-w-2xl sm:rounded-panel sm:p-5"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <Eyebrow>Execution Capsule</Eyebrow>
+                <h2 id="execution-capsule-title" className="mt-1 truncate font-display text-base font-semibold text-ink">
+                  Kanban-Run mit {selectedWindow.session}:{selectedWindow.window} verknüpfen
+                </h2>
+                <p className="mt-1 text-xs leading-relaxed text-ink-3">
+                  tmux speichert nur Task-, Run- und Korrelationszeiger. Der begrenzte Handoff bleibt in der Run-Historie.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Execution Capsule schließen"
+                disabled={executionCapsuleBusy}
+                onClick={() => setExecutionCapsuleOpen(false)}
+                className="grid min-h-[44px] min-w-[44px] shrink-0 place-items-center rounded-card border border-line text-ink-2 hover:bg-surface-3 disabled:opacity-40"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {selectedWindow.correlation_id && selectedWindow.task_id && selectedWindow.run_id ? (
+              <div className="mt-4 grid gap-2 rounded-card border border-live/25 bg-live/[0.06] p-4 text-xs">
+                <div className="flex items-center gap-2 text-live"><CheckCircle2 className="h-4 w-4" /><strong>Aktiv verknüpft</strong></div>
+                <div className="grid gap-1.5 text-ink-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
+                  <span className="text-ink-3">Task</span><code className="truncate">{selectedWindow.task_id}</code>
+                  <span className="text-ink-3">Run</span><code>#{selectedWindow.run_id}</code>
+                  <span className="text-ink-3">Pane</span><code>{selectedWindow.pane_id}</code>
+                  <span className="text-ink-3">Korrelation</span><code className="truncate">{selectedWindow.correlation_id}</code>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 grid gap-3">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_9rem_12rem]">
+                  <label className="grid gap-1 text-xs text-ink-2">
+                    <span>Task-ID</span>
+                    <input
+                      aria-label="Execution Capsule Task-ID"
+                      value={executionCapsuleTaskId}
+                      maxLength={128}
+                      disabled={executionCapsuleBusy}
+                      onChange={(event) => setExecutionCapsuleTaskId(event.target.value)}
+                      placeholder="t_…"
+                      className="min-h-[44px] rounded-card border border-line bg-surface-2 px-3 font-mono text-xs text-ink focus:border-live/50 focus:outline-none"
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs text-ink-2">
+                    <span>Run-ID</span>
+                    <input
+                      aria-label="Execution Capsule Run-ID"
+                      inputMode="numeric"
+                      value={executionCapsuleRunId}
+                      disabled={executionCapsuleBusy}
+                      onChange={(event) => setExecutionCapsuleRunId(event.target.value)}
+                      placeholder="42"
+                      className="min-h-[44px] rounded-card border border-line bg-surface-2 px-3 font-mono text-xs text-ink focus:border-live/50 focus:outline-none"
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs text-ink-2">
+                    <span>Handoff-Profil</span>
+                    <select
+                      aria-label="Execution Capsule Profil"
+                      value={executionCapsuleProfile}
+                      disabled={executionCapsuleBusy}
+                      onChange={(event) => setExecutionCapsuleProfile(event.target.value as AgentTerminalExecutionProfile)}
+                      className="min-h-[44px] rounded-card border border-line bg-surface-2 px-3 text-xs text-ink focus:border-live/50 focus:outline-none"
+                    >
+                      <option value="implementation">Umsetzung</option>
+                      <option value="review">Review</option>
+                      <option value="recovery">Recovery</option>
+                      <option value="operator_handoff">Operator-Handoff</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="grid gap-1 text-xs text-ink-2">
+                  <span>Kurz-Handoff <span className="text-ink-3">(max. 1.200 Zeichen)</span></span>
+                  <textarea
+                    aria-label="Execution Capsule Kurz-Handoff"
+                    value={executionCapsuleSummary}
+                    maxLength={1200}
+                    rows={4}
+                    disabled={executionCapsuleBusy}
+                    onChange={(event) => setExecutionCapsuleSummary(event.target.value)}
+                    placeholder="Was ist verifiziert, und wo soll diese Session weiterarbeiten?"
+                    className="resize-y rounded-card border border-line bg-surface-2 px-3 py-2 text-sm text-ink focus:border-live/50 focus:outline-none"
+                  />
+                </label>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {([
+                    ["Entscheidungen", executionCapsuleDecisions, setExecutionCapsuleDecisions],
+                    ["Nächste Schritte", executionCapsuleNextSteps, setExecutionCapsuleNextSteps],
+                    ["Risiken", executionCapsuleRisks, setExecutionCapsuleRisks],
+                  ] as const).map(([label, value, setter]) => (
+                    <label key={label} className="grid gap-1 text-xs text-ink-2">
+                      <span>{label} <span className="text-ink-3">(eine Zeile je Punkt)</span></span>
+                      <textarea
+                        aria-label={`Execution Capsule ${label}`}
+                        value={value}
+                        rows={4}
+                        disabled={executionCapsuleBusy}
+                        onChange={(event) => setter(event.target.value)}
+                        className="resize-y rounded-card border border-line bg-surface-2 px-3 py-2 text-xs text-ink focus:border-live/50 focus:outline-none"
+                      />
+                    </label>
+                  ))}
+                </div>
+                {executionCapsuleError && (
+                  <div role="alert" className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3 text-xs text-status-alert">
+                    {executionCapsuleError}
+                  </div>
+                )}
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  <button
+                    type="button"
+                    disabled={executionCapsuleBusy}
+                    onClick={() => setExecutionCapsuleOpen(false)}
+                    className="min-h-[44px] rounded-card border border-line px-4 text-xs font-medium text-ink-2 hover:bg-surface-3 disabled:opacity-40"
+                  >
+                    Abbrechen
+                  </button>
+                  <button
+                    type="button"
+                    disabled={executionCapsuleBusy}
+                    onClick={() => void bindExecutionCapsule()}
+                    className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-card border border-live/50 bg-live/10 px-4 text-xs font-semibold text-live hover:bg-live/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {executionCapsuleBusy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                    {executionCapsuleBusy ? "Verknüpfe …" : "Run verknüpfen"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
 
       {handoffOpen && (
         <TerminalHandoffPanel

@@ -510,7 +510,13 @@ def test_dependency_wait_block_kind_is_todo_not_reclaimable(kanban_home):
             "UPDATE tasks SET status='todo' WHERE id=?", (parent,)
         )
         conn.commit()
-        assert kb.block_task(conn, child, reason="waiting for parent", kind="dependency")
+        assert kb.block_task(
+            conn,
+            child,
+            reason="waiting for parent",
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent]},
+        )
         task = kb.get_task(conn, child)
         assert task.status == "todo"
         assert task.block_kind == "dependency"
@@ -540,7 +546,13 @@ def test_dependency_wait_promotes_when_parent_done_and_resets_block_kind(kanban_
             "UPDATE tasks SET status='todo' WHERE id=?", (parent,)
         )
         conn.commit()
-        assert kb.block_task(conn, child, reason="waiting for parent", kind="dependency")
+        assert kb.block_task(
+            conn,
+            child,
+            reason="waiting for parent",
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent]},
+        )
         task = kb.get_task(conn, child)
         assert task.status == "todo"
         assert task.block_kind == "dependency"
@@ -577,7 +589,13 @@ def test_dependency_wait_does_not_escalate_loop_or_recurrence(kanban_home):
             # Reopen parent to trigger the dependency wait.
             conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (parent,))
             conn.commit()
-            assert kb.block_task(conn, child, reason="waiting", kind="dependency")
+            assert kb.block_task(
+                conn,
+                child,
+                reason="waiting",
+                kind="dependency",
+                wait_for={"type": "parents_all_done", "task_ids": [parent]},
+            )
             assert kb.get_task(conn, child).status == "todo"
             assert kb.get_task(conn, child).block_recurrences == 1
             event_count = conn.execute(
@@ -1088,4 +1106,3 @@ def test_no_directive_block_without_directives(kanban_home):
         kb.add_comment(conn, t, "worker", "just a note")
         ctx = kb.build_worker_context(conn, t)
     assert "OPERATOR DIRECTIVE" not in ctx
-

@@ -59,6 +59,11 @@ export const WorkerSchema = z.object({
   run_status: RunStatusSchema,
   run_outcome: RunOutcomeSchema,
   block_reason: z.string().nullable().optional(),
+  // Additive read-model: a future backend state must fall back to the legacy
+  // health derivation instead of invalidating the entire Fleet payload.
+  liveness_state: z.enum(["running", "suspect", "failed"]).optional().catch(undefined),
+  liveness_reason: z.string().nullable().optional(),
+  liveness_observed_at: nullableEpochSeconds.optional(),
   inspect: RunInspectSchema.nullable().optional(),
   // Phase A (Fortschritt): Tätigkeits-Note + ehrliche ETA (p50/p90).
   last_heartbeat_note: z.string().nullable().catch(null),

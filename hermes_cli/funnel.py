@@ -131,8 +131,14 @@ def archive_stale(
     """Auto-Archiv: alte offene Vorschläge archivieren, archivierte zurückgeben."""
     archived: List[dict] = []
     for p in stale_proposals(conn, max_age_days=max_age_days, now=now):
-        if kb.archive_task(conn, p["id"]):
-            archived.append(p)
+        try:
+            if kb.archive_task(conn, p["id"]):
+                archived.append(p)
+        except kb.WaitMutationConflict:
+            # The domain guard already wrote a bounded refusal event.  One
+            # protected proposal must not abort archival of unrelated stale
+            # proposals in this maintenance batch.
+            continue
     return archived
 
 
@@ -365,9 +371,13 @@ def dismiss_draft(conn: sqlite3.Connection, task_id: str) -> None:
     Freigabe-Queue (fertiger Funnel-Root ohne Build-Kind) sind verwerfbar.
     """
     _require_funnel_draft(conn, task_id)
+    kb.preflight_task_removals(
+        conn, [task_id], operation="funnel_dismiss_draft"
+    )
+    if not kb.archive_task(conn, task_id):
+        raise RuntimeError(f"Funnel draft {task_id} changed state during dismissal")
     kb.add_comment(conn, task_id, "operator",
                    "Verworfen über die Funnel-Freigabe-Queue — kein Build.")
-    kb.archive_task(conn, task_id)
 
 
 def save_draft_edit(
@@ -394,6 +404,9 @@ def request_revision(
 ) -> str:
     """Archive the current draft and create a new root for re-specification."""
     task = _require_funnel_draft(conn, task_id)
+    kb.preflight_task_removals(
+        conn, [task_id], operation="funnel_request_revision"
+    )
     text = _validate_operator_draft_text(draft_text)
     note = (operator_note or "").strip() or "(kein separater Operator-Input)"
     new_id = kb.create_task(
@@ -412,8 +425,17 @@ def request_revision(
         assignee=task.assignee or assignee_fallback,
         parents=(),
     )
+    try:
+        archived = kb.archive_task(conn, task_id)
+    except Exception:
+        # Compensate the newly-created, still-unlinked replacement so a late
+        # wait conflict cannot leave two live Funnel roots.
+        kb.delete_task(conn, new_id)
+        raise
+    if not archived:
+        kb.delete_task(conn, new_id)
+        raise RuntimeError(f"Funnel draft {task_id} changed state during revision")
     kb.add_comment(conn, task_id, "operator", f"{REVISION_REQUEST_MARKER} → {new_id}")
-    kb.archive_task(conn, task_id)
     return new_id
 
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import signal
 
+import pytest
+
 from hermes_cli import kanban_db as kb
 
 
@@ -74,6 +76,136 @@ def test_archive_task_releases_outgoing_dependencies_and_promotes_remaining_chai
         root_task = kb.get_task(conn, root)
         assert root_task is not None
         assert root_task.status == "ready"
+
+
+def test_archive_and_delete_refuse_parent_referenced_by_active_typed_wait(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        child = kb.create_task(conn, title="child", assignee="alice")
+        assert kb.claim_task(conn, child) is not None
+        kb.link_tasks(conn, parent, child)
+        assert kb.block_task(
+            conn,
+            child,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent]},
+        )
+        before_links = {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        }
+
+        with pytest.raises(kb.WaitMutationConflict) as archive_exc:
+            kb.archive_task(conn, parent)
+        assert archive_exc.value.info.operation == "archive_task"
+        with pytest.raises(kb.WaitMutationConflict) as delete_exc:
+            kb.delete_task(conn, parent)
+        assert delete_exc.value.info.operation == "delete_task"
+
+        assert kb.get_task(conn, parent).status == "ready"
+        waiting = kb.get_task(conn, child)
+        assert waiting.status == "todo"
+        assert waiting.wait_for == {
+            "type": "parents_all_done",
+            "task_ids": [parent],
+        }
+        assert {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        } == before_links
+        refusals = _events(conn, child, "wait_mutation_refused")
+        assert [event["operation"] for event in refusals] == [
+            "archive_task",
+            "delete_task",
+        ]
+
+
+def test_unlink_refuses_active_typed_wait_but_releases_after_parent_done(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        child = kb.create_task(conn, title="child", assignee="alice")
+        assert kb.claim_task(conn, child) is not None
+        kb.link_tasks(conn, parent, child)
+        assert kb.block_task(
+            conn,
+            child,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent]},
+        )
+        with pytest.raises(kb.WaitMutationConflict):
+            kb.unlink_tasks(conn, parent, child)
+        assert (parent, child) in {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        }
+
+        assert kb.complete_task(conn, parent)
+        assert kb.unlink_tasks(conn, parent, child)
+        assert kb.get_task(conn, child).wait_for is None
+        assert _events(conn, child, "wait_released")
+
+
+def test_delete_archived_refuses_legacy_wait_reference_without_partial_purge(
+    kanban_home, all_assignees_spawnable
+):
+    with kb.connect_closing() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="alice")
+        child = kb.create_task(conn, title="child", assignee="alice")
+        assert kb.claim_task(conn, child) is not None
+        kb.link_tasks(conn, parent, child)
+        assert kb.block_task(
+            conn,
+            child,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [parent]},
+        )
+        # Legacy/racy state from before the typed guard: archived parent still
+        # referenced by a persisted wait. Purge must preserve the evidence.
+        conn.execute("UPDATE tasks SET status = 'archived' WHERE id = ?", (parent,))
+
+        with pytest.raises(kb.WaitMutationConflict) as exc:
+            kb.delete_archived_task(conn, parent)
+        assert exc.value.info.reason == f"parent_unavailable:{parent}"
+        assert kb.get_task(conn, parent) is not None
+        assert kb.get_task(conn, child).wait_for["task_ids"] == [parent]
+
+
+def test_delete_final_guard_closes_wait_registration_race(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    with kb.connect_closing() as conn:
+        target = kb.create_task(conn, title="delete target", assignee="alice")
+        waiter = kb.create_task(conn, title="late waiter", assignee="alice")
+        real_preflight = kb.preflight_task_removals
+        injected = False
+
+        def preflight_then_register(db, task_ids, *, operation):
+            nonlocal injected
+            real_preflight(db, task_ids, operation=operation)
+            if not injected:
+                injected = True
+                assert kb.block_task(
+                    db,
+                    waiter,
+                    kind="dependency",
+                    wait_for={
+                        "type": "event_seen",
+                        "task_id": target,
+                        "event_kind": "operator_approved",
+                    },
+                )
+
+        monkeypatch.setattr(kb, "preflight_task_removals", preflight_then_register)
+
+        with pytest.raises(kb.WaitMutationConflict):
+            kb.delete_task(conn, target)
+
+        assert kb.get_task(conn, target) is not None
+        assert kb.get_task(conn, waiter).wait_for["task_id"] == target
 
 
 def test_silent_block_sweep_escalates_legacy_archived_dependency_waits(

@@ -96,6 +96,26 @@ export const STUCK_HEARTBEAT_S = 600;
  * Genau diese Logik bildet die UI-Stati in allen drei Richtungen ab.
  */
 export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
+  // Explicit terminal/blocked runtime states keep their established UI meaning.
+  if (w.run_status === 'timed_out' || w.run_status === 'crashed' || (w.inspect ? !w.inspect.alive : false)) {
+    return { key: 'offline', tone: 'zinc', label: 'Offline', dot: 'offline' };
+  }
+  if (w.run_status === 'blocked') {
+    return { key: 'blocked', tone: 'red', label: 'Blockiert', dot: 'error' };
+  }
+  // New servers fuse claim, heartbeat, run and process observations once in the
+  // backend. Do not re-interpret their thresholds independently in the browser.
+  if (w.liveness_state === 'failed') {
+    return { key: 'offline', tone: 'zinc', label: 'Offline', dot: 'offline' };
+  }
+  if (w.liveness_state === 'suspect') {
+    return { key: 'stuck', tone: 'amber', label: 'Hängt', dot: 'warn' };
+  }
+  if (w.liveness_state === 'running') {
+    return { key: 'healthy', tone: 'cyan', label: 'Läuft', dot: 'live' };
+  }
+
+  // Compatibility fallback for older servers without liveness_state.
   // Most workers never write a heartbeat (last_heartbeat_at stays NULL, coerced
   // to 0 here), so a missing heartbeat must NOT read as "ancient" — that made
   // healthy running workers show "Stuck". A heartbeat only counts when present.
@@ -110,12 +130,6 @@ export function workerHealth(w: Worker, now: number = nowSec()): WorkerHealth {
   const claimInvalid = claimProvided && !claimInspection?.valid;
   const expired = claimInspection?.valid === true && w.claim_expires < now;
 
-  if (w.run_status === 'timed_out' || w.run_status === 'crashed' || (w.inspect ? !w.inspect.alive : false)) {
-    return { key: 'offline', tone: 'zinc', label: 'Offline', dot: 'offline' };
-  }
-  if (w.run_status === 'blocked') {
-    return { key: 'blocked', tone: 'red', label: 'Blockiert', dot: 'error' };
-  }
   if (expired || claimInvalid || heartbeatStale || heartbeatInvalid || startedInvalid) {
     return { key: 'stuck', tone: 'amber', label: 'Hängt', dot: 'warn' };
   }

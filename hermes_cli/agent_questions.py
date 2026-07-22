@@ -1528,8 +1528,9 @@ def answer_question(
 class QuestionScrapeIngestor:
     """Poll tmux panes for standing questions; write stable open events.
 
-    Uses ``list_windows`` + per-pane ``capture_pane`` (not dashboard
-    ``overview()``, which caps tails at 600 chars). Double-capture stability:
+    Uses ``list_windows`` + the shared canonical per-pane snapshot (not dashboard
+    ``overview()``, which caps its rendered tails at 600 chars). The raw 25-line
+    snapshot stays untruncated for parsing. Double-capture stability:
     an event is only inserted when the same fingerprint was already seen on
     the previous ``poll_once`` *and* ``activity_age > 3`` seconds. Expiry is
     also two-poll confirmed so a single empty/transient list does not wipe
@@ -1597,7 +1598,9 @@ class QuestionScrapeIngestor:
         standing_panes: set[str] = set()
         scanned_panes: set[str] = set()
         next_pending: dict[str, str] = {}
-        tail_start = -abs(self.overview_tail_lines)
+        # One canonical raw capture feeds both this parser and dashboard overview.
+        # Keep explicit answer/recheck calls on capture_pane(), which is always fresh.
+        tail_start = -_CAPTURE_TAIL_LINES
 
         for win_obj in raw_windows:
             win = _window_as_dict(win_obj)
@@ -1612,7 +1615,15 @@ class QuestionScrapeIngestor:
             scanned_panes.add(pane_id)
 
             try:
-                raw = svc.capture_pane(pane_id, start=tail_start)
+                capture_snapshot = getattr(svc, "capture_pane_snapshot", None)
+                if callable(capture_snapshot):
+                    raw = capture_snapshot(
+                        pane_id,
+                        window_activity=win.get("activity"),
+                    ).raw
+                else:
+                    # Compatibility for injected/third-party service doubles.
+                    raw = svc.capture_pane(pane_id, start=tail_start)
             except Exception:
                 summary["capture_errors"] += 1
                 logger.debug(

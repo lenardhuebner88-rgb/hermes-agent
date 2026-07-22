@@ -1017,6 +1017,11 @@ def test_kanban_block_schema_exposes_findings():
     props = KANBAN_BLOCK_SCHEMA["parameters"]["properties"]
     assert "blocking_findings" in props
     assert "required_verification" in props
+    assert "wait_for" in props
+    variants = props["wait_for"]["oneOf"]
+    assert {
+        variant["properties"]["type"]["const"] for variant in variants
+    } == {"parents_all_done", "not_before", "event_seen"}
     # reason stays the only required field — findings are optional.
     assert KANBAN_BLOCK_SCHEMA["parameters"]["required"] == ["reason"]
 
@@ -1086,22 +1091,43 @@ def test_block_goal_mode_rejects_missing_or_internal_kind(monkeypatch, tmp_path)
 
 
 @pytest.mark.parametrize(
-    ("kind", "expected_status"),
-    [("dependency", "todo"), ("needs_input", "blocked")],
+    ("args", "expected_status", "expected_kind"),
+    [
+        (
+            {
+                "reason": "external wait",
+                "kind": "dependency",
+                "wait_for": {
+                    "type": "not_before",
+                    "at": "2999-01-01T00:00:00Z",
+                },
+            },
+            "todo",
+            "dependency",
+        ),
+        (
+            {"reason": "external wait", "kind": "needs_input"},
+            "blocked",
+            "needs_input",
+        ),
+    ],
 )
 def test_block_goal_mode_allows_external_blockers(
-    monkeypatch, tmp_path, kind, expected_status
+    monkeypatch, tmp_path, args, expected_status, expected_kind
 ):
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
     tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
-    result = json.loads(kt._handle_block({"reason": "external wait", "kind": kind}))
+    result = json.loads(kt._handle_block(args))
     assert result["ok"] is True
     assert result["status"] == expected_status
-    assert result["block_kind"] == kind
+    assert result["block_kind"] == expected_kind
     with kb.connect() as conn:
-        assert kb.get_task(conn, tid).status == expected_status
+        task = kb.get_task(conn, tid)
+        assert task.status == expected_status
+        if expected_kind == "dependency":
+            assert task.wait_for == args["wait_for"]
 
 
 def test_heartbeat_happy_path(worker_env):

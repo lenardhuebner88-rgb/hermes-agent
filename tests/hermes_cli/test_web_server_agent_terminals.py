@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import hermes_cli.web_server as web_server
-from hermes_cli.agent_terminals import AgentTerminalError, TmuxAgentSessionService
+from hermes_cli import kanban_db as kb
+from hermes_cli.agent_terminals import (
+    AgentTerminalError,
+    TmuxAgentSessionService,
+    TmuxWindow,
+)
 
 
 class FakeAgentTerminalService:
@@ -105,6 +110,111 @@ class FakeAgentTerminalService:
         }
 
 
+class FakeExecutionCapsuleService:
+    execution_server_id = "a" * 64
+
+    def __init__(self, cwd: Path, *, stamp_error: Exception | None = None):
+        self.cwd = cwd
+        self.stamp_error = stamp_error
+        self.correlation: dict[str, object | None] = {
+            "task_id": None,
+            "run_id": None,
+            "correlation_id": None,
+        }
+        self.stamps: list[dict[str, object]] = []
+        self.restores: list[dict[str, object | None]] = []
+
+    def show(self, session: str, window: str) -> TmuxWindow:
+        assert (session, window) == ("work", "codex")
+        return TmuxWindow(
+            session,
+            window,
+            True,
+            "%7",
+            123,
+            "node",
+            str(self.cwd),
+            task_id=self.correlation["task_id"],
+            run_id=self.correlation["run_id"],
+            correlation_id=self.correlation["correlation_id"],
+        )
+
+    def stamp_execution_correlation(self, session, window, **kwargs):
+        if self.stamp_error is not None:
+            raise self.stamp_error
+        assert kwargs["expected_pane_id"] == "%7"
+        previous = dict(self.correlation)
+        self.stamps.append(dict(kwargs))
+        self.correlation = {
+            "task_id": kwargs["task_id"],
+            "run_id": kwargs["run_id"],
+            "correlation_id": kwargs["correlation_id"],
+        }
+        return previous
+
+    def restore_execution_correlation(
+        self, session, window, previous, *, expected_pane_id
+    ):
+        assert (session, window, expected_pane_id) == ("work", "codex", "%7")
+        self.restores.append(dict(previous))
+        self.correlation = dict(previous)
+
+
+@pytest.fixture
+def execution_capsule_web_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=repo, check=True
+    )
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True
+    )
+    kb.init_db()
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="capsule API",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            branch_name="main",
+        )
+        task = kb.claim_task(conn, task_id, claimer="api-test:1")
+        assert task is not None and task.current_run_id is not None
+        run_id = int(task.current_run_id)
+    return repo, task_id, run_id
+
+
+def _capsule_payload(task_id: str, run_id: int) -> dict:
+    return {
+        "session": "work",
+        "window": "codex",
+        "task_id": task_id,
+        "run_id": run_id,
+        "context_handoff": {
+            "profile": "implementation",
+            "summary": "Continue from verified state",
+            "decisions": ["Keep task_runs authoritative"],
+            "next_steps": ["Run the targeted gate"],
+            "risks": ["No live activation"],
+        },
+    }
+
+
 def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_fields(monkeypatch):
     monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: FakeAgentTerminalService())
     client = TestClient(web_server.app)
@@ -172,6 +282,139 @@ def test_agent_terminal_sessions_maps_tmux_timeout_to_structured_503(monkeypatch
 
     assert response.status_code == 503
     assert response.json() == {"detail": "tmux command timed out: 10 seconds"}
+
+
+def test_execution_capsule_api_saga_binds_and_reads_consistent_generation(
+    execution_capsule_web_env, monkeypatch: pytest.MonkeyPatch
+):
+    repo, task_id, run_id = execution_capsule_web_env
+    service = FakeExecutionCapsuleService(repo)
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    response = client.post(
+        "/api/agent-terminals/execution-capsule",
+        json=_capsule_payload(task_id, run_id),
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["capsule"]["state"] == "active"
+    assert body["capsule"]["task_id"] == task_id
+    assert body["capsule"]["run_id"] == run_id
+    assert body["window"]["pane_id"] == "%7"
+    assert body["window"]["correlation_id"] == body["capsule"]["correlation_id"]
+    assert service.stamps == [
+        {
+            "expected_pane_id": "%7",
+            "task_id": task_id,
+            "run_id": run_id,
+            "correlation_id": body["capsule"]["correlation_id"],
+        }
+    ]
+    read = client.get(
+        "/api/agent-terminals/execution-capsule",
+        params={"session": "work", "window": "codex"},
+        headers=headers,
+    )
+    assert read.status_code == 200, read.text
+    assert read.json()["consistent"] is True
+    assert read.json()["capsule"]["state"] == "active"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"context_handoff": {"content": "raw pane output"}},
+        {"workspace": "/browser/claimed/path"},
+        {"commit": "browser-claimed-sha"},
+        {"pane_id": "%99"},
+        {"correlation_id": "browser-claimed"},
+    ],
+)
+def test_execution_capsule_api_rejects_browser_claimed_identity_and_raw_content(
+    execution_capsule_web_env, monkeypatch: pytest.MonkeyPatch, extra
+):
+    repo, task_id, run_id = execution_capsule_web_env
+    service = FakeExecutionCapsuleService(repo)
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+    payload = _capsule_payload(task_id, run_id)
+    if "context_handoff" in extra:
+        payload["context_handoff"].update(extra["context_handoff"])
+    else:
+        payload.update(extra)
+
+    response = client.post(
+        "/api/agent-terminals/execution-capsule", json=payload, headers=headers
+    )
+
+    assert response.status_code == 422
+    assert service.stamps == []
+    with kb.connect_closing() as conn:
+        assert kb.get_execution_capsule(conn, run_id) is None
+
+
+def test_execution_capsule_api_aborts_pending_binding_when_tmux_stamp_fails(
+    execution_capsule_web_env, monkeypatch: pytest.MonkeyPatch
+):
+    repo, task_id, run_id = execution_capsule_web_env
+    service = FakeExecutionCapsuleService(
+        repo, stamp_error=AgentTerminalError("tmux stamp unavailable")
+    )
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    response = client.post(
+        "/api/agent-terminals/execution-capsule",
+        json=_capsule_payload(task_id, run_id),
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    with kb.connect_closing() as conn:
+        assert kb.get_execution_capsule(conn, run_id) is None
+        events = kb.list_events(conn, task_id)
+        assert any(event.kind == "execution_capsule_aborted" for event in events)
+
+
+def test_execution_capsule_api_restores_tmux_when_run_ownership_changes_before_activation(
+    execution_capsule_web_env, monkeypatch: pytest.MonkeyPatch
+):
+    repo, task_id, run_id = execution_capsule_web_env
+    service = FakeExecutionCapsuleService(repo)
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    real_activate = kb.activate_execution_capsule
+
+    def lose_run_before_activate(conn, **kwargs):
+        assert kb.complete_task(conn, task_id, expected_run_id=run_id)
+        return real_activate(conn, **kwargs)
+
+    monkeypatch.setattr(kb, "activate_execution_capsule", lose_run_before_activate)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    response = client.post(
+        "/api/agent-terminals/execution-capsule",
+        json=_capsule_payload(task_id, run_id),
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert service.restores == [
+        {"task_id": None, "run_id": None, "correlation_id": None}
+    ]
+    assert service.correlation == {
+        "task_id": None,
+        "run_id": None,
+        "correlation_id": None,
+    }
+    with kb.connect_closing() as conn:
+        assert kb.get_execution_capsule(conn, run_id) is None
 
 
 def test_agent_terminal_terminate_external_flag_reaches_service(monkeypatch):

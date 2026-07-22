@@ -393,16 +393,67 @@ def test_run_slash_block_with_dependency_kind_routes_to_todo(kanban_home):
     """A ``--kind dependency`` block routes to ``todo`` (parent-gated,
     auto-resumed) instead of the human ``blocked`` bucket — and the CLI
     reports where it actually landed."""
+    parent_out = kc.run_slash("create 'parent' --assignee alice")
+    parent_id = re.search(r"(t_[a-f0-9]+)", parent_out).group(1)
     out = kc.run_slash("create 'x' --assignee alice")
-    import re
     tid = re.search(r"(t_[a-f0-9]+)", out).group(1)
     kc.run_slash(f"claim {tid}")
-    result = kc.run_slash(f"block {tid} 'waiting on sibling' --kind dependency")
+    wait_for = json.dumps(
+        {"type": "parents_all_done", "task_ids": [parent_id]},
+        separators=(",", ":"),
+    )
+    result = kc.run_slash(
+        f"block {tid} 'waiting on sibling' --kind dependency "
+        f"--wait-for '{wait_for}'"
+    )
     assert "todo" in result
     with kb.connect() as conn:
         task = kb.get_task(conn, tid)
     assert task.status == "todo"
     assert task.block_kind == "dependency"
+    assert task.wait_for == {"type": "parents_all_done", "task_ids": [parent_id]}
+
+
+def test_cli_wait_override_is_explicit_audited_and_operator_only(
+    kanban_home, monkeypatch
+):
+    parent_id = re.search(
+        r"(t_[a-f0-9]+)", kc.run_slash("create 'parent' --assignee alice")
+    ).group(1)
+    task_id = re.search(
+        r"(t_[a-f0-9]+)", kc.run_slash("create 'waiter' --assignee alice")
+    ).group(1)
+    kc.run_slash(f"claim {task_id}")
+    wait_for = json.dumps(
+        {"type": "parents_all_done", "task_ids": [parent_id]},
+        separators=(",", ":"),
+    )
+    assert "todo" in kc.run_slash(
+        f"block {task_id} waiting --kind dependency --wait-for '{wait_for}'"
+    )
+
+    assert "cannot unblock" in kc.run_slash(f"unblock {task_id}")
+    assert "requires --reason" in kc.run_slash(
+        f"unblock --override-wait {task_id}"
+    )
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    assert "operator-only" in kc.run_slash(
+        f"unblock --override-wait --reason operator {task_id}"
+    )
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
+    assert "Unblocked" in kc.run_slash(
+        f"unblock --override-wait --reason 'no longer needed' {task_id}"
+    )
+
+    with kb.connect() as conn:
+        task = kb.get_task(conn, task_id)
+        assert task.wait_for is None
+        override = [
+            event
+            for event in kb.list_events(conn, task_id)
+            if event.kind == "wait_overridden"
+        ][-1]
+    assert override.payload["reason"] == "no longer needed"
 
 
 def _goal_mode_worker_task(conn):

@@ -3101,6 +3101,172 @@ def test_add_link_and_delete_link(client):
     assert r.json()["ok"] is True
 
 
+def test_dashboard_mutations_surface_typed_wait_conflicts_without_partial_changes(
+    client,
+):
+    parent = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "wait parent"}
+    ).json()["task"]
+    child = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "wait child"}
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, child["id"]) is not None
+        kb.link_tasks(conn, parent["id"], child["id"])
+        assert kb.block_task(
+            conn,
+            child["id"],
+            kind="dependency",
+            wait_for={
+                "type": "parents_all_done",
+                "task_ids": [parent["id"]],
+            },
+        )
+
+    responses = [
+        client.delete(
+            "/api/plugins/kanban/links",
+            params={"parent_id": parent["id"], "child_id": child["id"]},
+        ),
+        client.patch(
+            f"/api/plugins/kanban/tasks/{child['id']}", json={"status": "triage"}
+        ),
+        client.patch(
+            f"/api/plugins/kanban/tasks/{parent['id']}",
+            json={"status": "archived"},
+        ),
+        client.delete(f"/api/plugins/kanban/tasks/{parent['id']}"),
+    ]
+    assert [response.status_code for response in responses] == [409, 409, 409, 409]
+    assert all(
+        response.json()["detail"]["code"] == "wait_mutation_conflict"
+        for response in responses
+    )
+
+    bulk = client.post(
+        "/api/plugins/kanban/tasks/bulk",
+        json={"ids": [parent["id"]], "archive": True},
+    )
+    assert bulk.status_code == 200
+    assert bulk.json()["results"] == [
+        {
+            "id": parent["id"],
+            "ok": False,
+            "error": "wait mutation conflict",
+            "detail": {
+                "code": "wait_mutation_conflict",
+                "operation": "archive_task",
+                "task_id": child["id"],
+                "reason": "active_wait",
+                "target_task_ids": [parent["id"]],
+                "wait_for": {
+                    "type": "parents_all_done",
+                    "task_ids": [parent["id"]],
+                },
+            },
+        }
+    ]
+    with kb.connect() as conn:
+        assert kb.get_task(conn, parent["id"]).status == "ready"
+        waiting = kb.get_task(conn, child["id"])
+        assert waiting.status == "todo"
+        assert waiting.wait_for["task_ids"] == [parent["id"]]
+        assert (parent["id"], child["id"]) in {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        }
+
+
+def test_dashboard_direct_status_releases_satisfied_wait_before_drag(client):
+    parent = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "done parent"}
+    ).json()["task"]
+    child = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "waiting child"}
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, child["id"]) is not None
+        kb.link_tasks(conn, parent["id"], child["id"])
+        assert kb.block_task(
+            conn,
+            child["id"],
+            kind="dependency",
+            wait_for={
+                "type": "parents_all_done",
+                "task_ids": [parent["id"]],
+            },
+        )
+        # Keep the satisfied wait persisted so the dashboard guard, rather than
+        # the normal completion sweep, is the component that releases it.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (parent["id"],)
+            )
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{child['id']}", json={"status": "triage"}
+    )
+    assert response.status_code == 200, response.text
+    with kb.connect() as conn:
+        moved = kb.get_task(conn, child["id"])
+        assert moved.status == "triage"
+        assert moved.wait_for is None
+        assert any(event.kind == "wait_released" for event in kb.list_events(conn, child["id"]))
+
+
+def test_dashboard_direct_status_final_guard_closes_wait_registration_race(
+    client, monkeypatch
+):
+    parent = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "late parent"}
+    ).json()["task"]
+    child = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "late child"}
+    ).json()["task"]
+    with kb.connect() as conn:
+        assert kb.claim_task(conn, child["id"]) is not None
+        kb.link_tasks(conn, parent["id"], child["id"])
+
+    real_preflight = kb.preflight_wait_owner_mutation
+    injected = False
+
+    def preflight_then_register(conn, task_id, *, operation):
+        nonlocal injected
+        real_preflight(conn, task_id, operation=operation)
+        if not injected:
+            injected = True
+            assert kb.block_task(
+                conn,
+                child["id"],
+                kind="dependency",
+                wait_for={
+                    "type": "parents_all_done",
+                    "task_ids": [parent["id"]],
+                },
+            )
+
+    monkeypatch.setattr(kb, "preflight_wait_owner_mutation", preflight_then_register)
+
+    response = client.patch(
+        f"/api/plugins/kanban/tasks/{child['id']}", json={"status": "triage"}
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "wait_mutation_conflict"
+    with kb.connect() as conn:
+        waiting = kb.get_task(conn, child["id"])
+        assert waiting.status == "todo"
+        assert waiting.wait_for["task_ids"] == [parent["id"]]
+        # The in-txn final guard commits its refusal event instead of rolling
+        # it back with the refused mutation (audit visibility of the race).
+        refused = [
+            event
+            for event in kb.list_events(conn, child["id"])
+            if event.kind == "wait_mutation_refused"
+        ]
+        assert refused
+        assert refused[-1].payload["operation"] == "dashboard_status:triage"
+
+
 def test_add_link_cycle_rejected(client):
     a = client.post("/api/plugins/kanban/tasks", json={"title": "a"}).json()["task"]
     b = client.post("/api/plugins/kanban/tasks", json={"title": "b"}).json()["task"]
@@ -7052,6 +7218,88 @@ def _patch_stale_scheduled_read(monkeypatch, target_id, actual_status="in_progre
     return fired
 
 
+def test_flow_gate_merge_rewires_downstream_typed_wait_and_edge(client):
+    root, child_ids = _setup_gated_root()
+    keep_id, merge_id = child_ids[0], child_ids[1]
+    with kb.connect() as conn:
+        downstream = kb.create_task(conn, title="downstream wait")
+        assert kb.claim_task(conn, downstream) is not None
+        kb.link_tasks(conn, merge_id, downstream)
+        assert kb.block_task(
+            conn,
+            downstream,
+            kind="dependency",
+            wait_for={"type": "parents_all_done", "task_ids": [merge_id]},
+        )
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "merge", "task_ids": [keep_id, merge_id]},
+    )
+    assert response.status_code == 200, response.text
+    with kb.connect() as conn:
+        waiting = kb.get_task(conn, downstream)
+        assert waiting.wait_for == {
+            "type": "parents_all_done",
+            "task_ids": [keep_id],
+        }
+        links = {
+            (row["parent_id"], row["child_id"])
+            for row in conn.execute("SELECT parent_id, child_id FROM task_links")
+        }
+        assert (merge_id, downstream) not in links
+        assert (keep_id, downstream) in links
+        assert any(
+            event.kind == "wait_rewired"
+            and event.payload["operation"] == "flow_gate_merge"
+            for event in kb.list_events(conn, downstream)
+        )
+
+
+def test_flow_gate_merge_refuses_external_event_wait_without_partial_mutation(client):
+    root, child_ids = _setup_gated_root()
+    keep_id, merge_id = child_ids[0], child_ids[1]
+    with kb.connect() as conn:
+        waiter = kb.create_task(conn, title="event waiter")
+        assert kb.block_task(
+            conn,
+            waiter,
+            kind="dependency",
+            wait_for={
+                "type": "event_seen",
+                "task_id": merge_id,
+                "event_kind": "operator_approved",
+            },
+        )
+        before_keep = kb.get_task(conn, keep_id)
+
+    response = client.post(
+        f"/api/plugins/kanban/tasks/{root}/flow-gate/sizing",
+        json={"action": "merge", "task_ids": [keep_id, merge_id]},
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail["code"] == "wait_mutation_conflict"
+    assert detail["task_id"] == waiter
+    assert detail["reason"] == "event_wait_source_cannot_be_rewired"
+    with kb.connect() as conn:
+        assert kb.get_task(conn, merge_id).status == "scheduled"
+        after_keep = kb.get_task(conn, keep_id)
+        assert after_keep.title == before_keep.title
+        assert after_keep.body == before_keep.body
+        assert kb.get_task(conn, waiter).wait_for["task_id"] == merge_id
+        assert merge_id in kb.parent_ids(conn, root)
+        # The refusal stays auditable even though the merge rolled back: the
+        # route wrapper re-commits the refusal event in its own transaction.
+        refused = [
+            event
+            for event in kb.list_events(conn, waiter)
+            if event.kind == "wait_mutation_refused"
+        ]
+        assert refused
+        assert refused[-1].payload["operation"] == "flow_gate_merge"
+
+
 @pytest.mark.parametrize("racing", ["keep", "merged"])
 def test_flow_gate_merge_409s_when_child_status_changes_before_write(
     client, monkeypatch, racing
@@ -7922,6 +8170,112 @@ def test_workers_active_carries_note_and_eta(client):
     assert worker["last_heartbeat_note_at"] is not None
     assert worker["eta_p50_seconds"] == 240
     assert worker["eta_p90_seconds"] == 600
+
+
+def test_worker_liveness_contract_combines_claim_heartbeat_run_and_process():
+    now = 1_700_000_000
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        process_alive=True,
+    ) == {"state": "running", "reason": "heartbeat_fresh"}
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now - 1,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        process_alive=True,
+    ) == {"state": "running", "reason": "claim_refresh_pending"}
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        process_alive=False,
+    ) == {"state": "failed", "reason": "worker_process_not_alive"}
+    assert kb.derive_worker_liveness(
+        run_status="crashed",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        process_alive=True,
+    ) == {"state": "failed", "reason": "run_crashed"}
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        started_at=now - 5,
+        process_alive=False,
+        process_group_alive=False,
+    ) == {"state": "running", "reason": "launch_grace"}
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        started_at=now - 60,
+        process_alive=False,
+        process_group_alive=True,
+    ) == {"state": "running", "reason": "worker_group_alive"}
+    assert kb.derive_worker_liveness(
+        run_status="running",
+        claim_expires=now + 60,
+        last_heartbeat_at=now - 5,
+        worker_pid=42,
+        now=now,
+        started_at=now * 1000,
+        process_alive=True,
+    ) == {"state": "suspect", "reason": "started_at_invalid"}
+
+
+def test_workers_active_exposes_backend_liveness_contract(client, monkeypatch):
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: int(pid) == 6001)
+    monkeypatch.setattr(
+        kb, "_worker_process_group_alive", lambda pid: int(pid) == 6001
+    )
+    now = int(time.time())
+    with kb.connect() as conn:
+        healthy_task = kb.create_task(conn, title="healthy")
+        failed_task = kb.create_task(conn, title="failed")
+        with kb.write_txn(conn):
+            claim_lock = kb._claimer_id()
+            healthy_run = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid, claim_lock, claim_expires, last_heartbeat_at) "
+                "VALUES (?, 'coder', 'running', ?, 6001, ?, ?, ?)",
+                (healthy_task, now - 30, claim_lock, now + 300, now - 5),
+            ).lastrowid
+            failed_run = conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, started_at, "
+                "worker_pid, claim_lock, claim_expires, last_heartbeat_at) "
+                "VALUES (?, 'coder', 'running', ?, 6002, ?, ?, ?)",
+                (failed_task, now - 30, claim_lock, now + 300, now - 5),
+            ).lastrowid
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (healthy_run, healthy_task),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='running', current_run_id=? WHERE id=?",
+                (failed_run, failed_task),
+            )
+
+    data = client.get("/api/plugins/kanban/workers/active").json()
+    by_run = {worker["run_id"]: worker for worker in data["workers"]}
+    assert by_run[healthy_run]["liveness_state"] == "running"
+    assert by_run[healthy_run]["liveness_reason"] == "heartbeat_fresh"
+    assert by_run[failed_run]["liveness_state"] == "failed"
+    assert by_run[failed_run]["liveness_reason"] == "worker_process_not_alive"
+    assert abs(by_run[healthy_run]["liveness_observed_at"] - now) <= 2
 
 
 def test_workers_active_run_progress_from_runtime_cap(client):
