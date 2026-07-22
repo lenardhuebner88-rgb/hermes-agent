@@ -54,7 +54,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SRC_HOME="${HERMES_SRC_HOME:-$HOME/.hermes}"
+SRC_HOME="${HERMES_SRC_HOME:-${HOME:-/tmp}/.hermes}"
 
 SEED_HOME=""
 PORT=""
@@ -127,7 +127,50 @@ if [ "$SCENARIO" = "terminal_bridge" ]; then
   chmod 600 "$SEED_HOME/kanban.db"
   mkdir -p "$SEED_HOME/tmux"
   chmod 700 "$SEED_HOME/tmux"
-  log "Terminal-Bridge-Fixture: isoliertes Home/Board/tmux"
+  TERMINAL_RUN_ID="ui-terminal-bridge"
+  TERMINAL_RUN_DIR="$SEED_HOME/terminal-runs/$TERMINAL_RUN_ID"
+  FIXTURE_SCRIPT="$SEED_HOME/terminal-bridge-fixture.sh"
+  mkdir -p "$TERMINAL_RUN_DIR"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "\033[2J\033[H"' \
+    'printf "Hermes terminal_bridge fixture\n"' \
+    'printf "Handoff: available\n"' \
+    'printf "Candidate status: HELD (record-only, no submit)\n"' \
+    'while :; do sleep 60; done' >"$FIXTURE_SCRIPT"
+  chmod 700 "$FIXTURE_SCRIPT"
+  TMUX_TMPDIR="$SEED_HOME/tmux" tmux new-session -d -s work -n codex "$FIXTURE_SCRIPT"
+  TMUX_TMPDIR="$SEED_HOME/tmux" tmux set-option -w -t work:codex @hermes_terminal_run_id "$TERMINAL_RUN_ID"
+  TMUX_TMPDIR="$SEED_HOME/tmux" tmux set-option -w -t work:codex @hermes_kind agent
+  TMUX_TMPDIR="$SEED_HOME/tmux" tmux set-option -w -t work:codex @hermes_workdir "$REPO_ROOT"
+  python3 - "$TERMINAL_RUN_DIR/manifest.json" "$REPO_ROOT" "$(git -C "$REPO_ROOT" rev-parse HEAD)" "$(git -C "$REPO_ROOT" branch --show-current)" <<'PYFIXTURE'
+import json
+import os
+import sys
+
+path, root, head, branch = sys.argv[1:]
+payload = {
+    "terminal_run_id": "ui-terminal-bridge",
+    "run_id": "ui-terminal-bridge",
+    "agent_kind": "codex",
+    "start_mode": "isolated_write",
+    "context_profile": "full",
+    "cwd": root,
+    "repo_root": root,
+    "base_sha": head,
+    "worktree_path": root,
+    "worktree_branch": branch,
+    "action": "fresh",
+    "tmux_session": "work",
+    "tmux_window": "codex",
+    "candidate_status": "held",
+}
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, sort_keys=True)
+    handle.write("\n")
+os.chmod(path, 0o600)
+PYFIXTURE
+  log "Terminal-Bridge-Fixture: isoliertes Home/Board/tmux; held candidate"
 else
   [ "$SCENARIO" = "realdata" ] || die "unbekanntes Scenario: $SCENARIO"
   log "Seed-Home: $SEED_HOME (Quelle: $SRC_HOME, read-only)"
@@ -144,15 +187,17 @@ mkdir -p "$SEED_HOME/tmux"
 chmod 700 "$SEED_HOME/tmux"
 
 # ------------------------------------------------------------------ build
+WEB_DIST="$SEED_HOME/web-dist"
 if [ "$NO_BUILD" = "0" ]; then
   [ -d "$REPO_ROOT/web/node_modules" ] || die \
-    "web/node_modules fehlt — erst 'cd web && npm ci' (oder --no-build mit vorhandenem hermes_cli/web_dist)"
-  log "Baue Frontend (cd web && npm run build) ..."
-  ( cd "$REPO_ROOT/web" && npm run build )
+    "web/node_modules fehlt — erst 'cd web && npm ci'"
+  log "Baue Branch-Frontend isoliert nach $WEB_DIST ..."
+  ( cd "$REPO_ROOT/web" && HERMES_WEB_DIST="$WEB_DIST" npm run build )
 else
-  [ -d "$REPO_ROOT/hermes_cli/web_dist" ] || die \
-    "--no-build gesetzt, aber $REPO_ROOT/hermes_cli/web_dist fehlt"
-  log "Nutze bestehendes hermes_cli/web_dist (--no-build)"
+  WEB_DIST="${HERMES_WEB_DIST:-$REPO_ROOT/hermes_cli/web_dist}"
+  [ -f "$WEB_DIST/index.html" ] || die \
+    "--no-build gesetzt, aber $WEB_DIST/index.html fehlt"
+  log "Nutze bestehendes HERMES_WEB_DIST (--no-build): $WEB_DIST"
 fi
 
 # ----------------------------------------------------------------- python
@@ -168,8 +213,9 @@ fi
 
 # ----------------------------------------------------------------- launch
 SERVER_PID=""
+READY_FOR_OWNER=0
 cleanup() {
-  if [ "$KEEP" = "0" ]; then
+  if [ "$KEEP" = "0" ] || [ "$READY_FOR_OWNER" = "0" ]; then
     if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
       kill -INT "$SERVER_PID" 2>/dev/null || true  # Unit-Kontrakt: SIGINT, nicht SIGTERM
       for _ in $(seq 1 20); do
@@ -177,6 +223,9 @@ cleanup() {
         sleep 0.5
       done
       kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
+    if [ "$SCENARIO" = "terminal_bridge" ]; then
+      TMUX_TMPDIR="$SEED_HOME/tmux" tmux kill-server 2>/dev/null || true
     fi
     if [ "$CREATED_HOME" = "1" ]; then rm -rf "$SEED_HOME"; fi
   fi
@@ -189,11 +238,12 @@ log "Starte Dashboard auf 127.0.0.1:$PORT (HERMES_HOME=$SEED_HOME) ..."
 # </dev/null: kein geerbter stdout/stdin-fd haelt die Pipe des Aufrufers offen
 # (sonst haengt $(preview-realdata.sh --keep) beim Command-Substitution).
 ( cd "$REPO_ROOT" && \
-  env -u HERMES_KANBAN_TASK -u HERMES_KANBAN_WORKSPACE -u HERMES_KANBAN_BOARD \
+  exec env -u HERMES_KANBAN_TASK -u HERMES_KANBAN_WORKSPACE -u HERMES_KANBAN_BOARD \
       -u HERMES_KANBAN_BRANCH -u HERMES_KANBAN_WORKTREE \
       HERMES_HOME="$SEED_HOME" HERMES_KANBAN_DB="$SEED_HOME/kanban.db" \
-      HERMES_SANDBOX_MODE=1 TMUX_TMPDIR="$SEED_HOME/tmux" PYTHONPATH="$REPO_ROOT" \
-  exec "$PY" -m hermes_cli.main dashboard \
+      HERMES_SANDBOX_MODE=1 HERMES_WEB_DIST="$WEB_DIST" \
+      TMUX_TMPDIR="$SEED_HOME/tmux" PYTHONPATH="$REPO_ROOT" \
+  "$PY" -m hermes_cli.main dashboard \
     --host 127.0.0.1 --port "$PORT" --no-open --skip-build --isolated \
 ) >"$SEED_HOME/server.log" 2>&1 </dev/null &
 SERVER_PID=$!
@@ -221,6 +271,7 @@ TOKEN="$(curl -fsS --max-time 5 "http://127.0.0.1:$PORT/control" \
 log "bereit. Die SPA erhaelt den Token automatisch per HTML-Injektion;"
 log "PREVIEW_TOKEN nur fuer curl/API noetig (Header siehe web/src/lib/api.ts)."
 if [ "$KEEP" = "1" ]; then
+  READY_FOR_OWNER=1
   log "--keep: Server laeuft weiter. Stop: kill -INT $SERVER_PID ; Seed-Home bleibt: $SEED_HOME"
 else
   log "ohne --keep stoppt der Exit-Trap den Server jetzt beim Verlassen."
@@ -229,3 +280,4 @@ echo "PREVIEW_TOKEN=$TOKEN"
 echo "PREVIEW_HOME=$SEED_HOME"
 echo "PREVIEW_PID=$SERVER_PID"
 echo "PREVIEW_URL=http://127.0.0.1:$PORT/control"
+echo "PREVIEW_WEB_DIST=$WEB_DIST"
