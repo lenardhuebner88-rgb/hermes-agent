@@ -1233,6 +1233,9 @@ _CATEGORY_MERGE: Dict[str, str] = {
     # The answer-suggestion backend intentionally has one operator-facing
     # setting (its model). Keep that single key in the existing agent tab.
     "agent_questions": "agent",
+    # TMAX lean allowlist is a single nested config object — keep it on the
+    # existing terminal tab rather than spawning a one-field orphan category.
+    "agent_terminals": "terminal",
 }
 
 # Display order for tabs — unlisted categories sort alphabetically after these.

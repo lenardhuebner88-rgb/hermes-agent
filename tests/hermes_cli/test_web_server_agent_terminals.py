@@ -38,17 +38,17 @@ class FakeAgentTerminalService:
         assert (session, window) == ("work", "hermes")
         return SimpleNamespace(to_dict=lambda: {"session": session, "window": window})
 
-    def ensure(self, kind, workdir=None):
+    def ensure(self, kind, workdir=None, **kwargs):
         assert kind == "hermes"
         assert workdir in (None, "hermes-agent")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
 
-    def create_new(self, kind, workdir=None):
+    def create_new(self, kind, workdir=None, **kwargs):
         assert kind == "hermes"
         assert workdir in (None, "hermes-agent")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes-2"})
 
-    def respawn_dead(self, session, window):
+    def respawn_dead(self, session, window, **kwargs):
         assert (session, window) == ("work", "hermes")
         return SimpleNamespace(to_dict=lambda: {"session": "work", "window": "hermes"})
 
