@@ -1584,6 +1584,90 @@ def test_persistent_red_triage_all_leaker_window_is_idle():
     assert cause is None
 
 
+# Vitest-style detail: no Python ``tests/*.py`` failure tokens for the extractor.
+_VITEST_DETAIL_A = (
+    "FAIL  src/components/JarvisGraph.test.tsx > renders nodes\n"
+    "AssertionError: expected 1 to be 2"
+)
+_VITEST_DETAIL_B = (
+    "FAIL  src/components/OtherPanel.test.tsx > loads data\n"
+    "Error: Network Error"
+)
+
+
+def test_persistent_red_triage_mixed_gates_does_not_blame_older_python():
+    # RCA 2026-07-21: Python fully green while head was Vitest without extractable
+    # ``tests/*.py`` paths. Cross-gate file fallback must NOT mint gate=python.
+    records = [
+        _red("2026-07-18", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-19", gate="python", detail=_REAL_DETAIL_B),
+        _red("2026-07-20", gate="vitest", detail=_VITEST_DETAIL_A),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    # Single vitest red night → below gate-local threshold; never python.
+    assert cause is None
+
+
+def test_persistent_red_triage_gate_local_min_reds_ignores_other_gates():
+    # AC-2: >=N reds must be for the same head/anchor gate. Older python reds
+    # in the window must not help a lone vitest head clear the threshold.
+    records = [
+        _red("2026-07-18", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-19", gate="python", detail=_REAL_DETAIL_B),
+        _red("2026-07-20", gate="vitest", detail=_VITEST_DETAIL_A),
+    ]
+    assert vm.derive_persistent_red_triage(records, min_reds=2, window=3) is None
+
+
+def test_persistent_red_triage_same_gate_changing_causes_still_fire():
+    # AC-2: same-gate changing first-fail causes continue to trigger.
+    records = [
+        _red("2026-07-18", gate="vitest", detail=_VITEST_DETAIL_A),
+        _red("2026-07-19", gate="vitest", detail=_VITEST_DETAIL_B),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["gate"] == "vitest"
+    assert cause["red_count"] == 2
+    assert cause["dates"] == ["2026-07-18", "2026-07-19"]
+    # No Python files smuggled in; extractor still finds none for vitest text.
+    assert cause["red_files"] == set()
+    assert cause["red_files_window_union"] == set()
+
+
+def test_persistent_red_triage_attributed_head_no_cross_gate_file_fallback():
+    # AC-3: unextractable attributed head must keep its own gate and must not
+    # fall back to an older different-gate file set (even when min_reds=1).
+    records = [
+        _red("2026-07-19", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-20", gate="vitest", detail=_VITEST_DETAIL_A),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=1, window=3)
+    assert cause is not None
+    assert cause["gate"] == "vitest"
+    assert cause["red_files"] == set()
+    assert "tests/hermes_cli/test_planspecs.py" not in cause["red_files_window_union"]
+    assert cause["red_count"] == 1
+    assert cause["dates"] == ["2026-07-20"]
+
+
+def test_persistent_red_triage_mixed_window_counts_only_head_gate_nights():
+    # Two vitest reds fire even when the window also holds a python red; dates
+    # and file surfaces stay gate-local to the head.
+    records = [
+        _red("2026-07-18", gate="python", detail=_REAL_DETAIL_A),
+        _red("2026-07-19", gate="vitest", detail=_VITEST_DETAIL_A),
+        _red("2026-07-20", gate="vitest", detail=_VITEST_DETAIL_B),
+    ]
+    cause = vm.derive_persistent_red_triage(records, min_reds=2, window=3)
+    assert cause is not None
+    assert cause["gate"] == "vitest"
+    assert cause["red_count"] == 2
+    assert cause["dates"] == ["2026-07-19", "2026-07-20"]
+    assert "tests/hermes_cli/test_planspecs.py" not in cause["red_files_window_union"]
+    assert all(n["date"] != "2026-07-18" for n in cause["red_files_by_night"])
+
+
 def test_consecutive_red_cause_suspect_range_mixed_with_and_without_sha():
     # Mixed ledger: an older pass record with NO head_sha, then two same-cause
     # red nights that DO carry one.
