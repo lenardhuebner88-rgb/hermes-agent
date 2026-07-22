@@ -218,6 +218,7 @@ export const FleetCard = memo(function FleetCard({
   broadcastMode,
   onToggleSelect,
   onOpen,
+  canRespawn,
   onRespawn,
   onKill,
   onTerminate,
@@ -232,6 +233,7 @@ export const FleetCard = memo(function FleetCard({
   broadcastMode: boolean;
   onToggleSelect: () => void;
   onOpen: () => void;
+  canRespawn: boolean;
   onRespawn: () => void;
   onKill: () => void;
   /** Arms the close guard (step 1) — it never kills on its own. */
@@ -293,7 +295,7 @@ export const FleetCard = memo(function FleetCard({
         <div className="flex gap-1.5">
           {/* Respawn only for dashboard-managed dead windows — foreign dead panes
               keep Entfernen (kill-dead) but must not recreate under work. */}
-          {managed && (
+          {managed && canRespawn && (
             <button
               type="button"
               onClick={(event) => {

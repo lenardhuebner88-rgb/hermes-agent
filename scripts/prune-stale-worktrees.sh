@@ -196,8 +196,11 @@ done
 # Separate from the regular fifteen worktree slots. Only prune when:
 # - matching ended terminal-runs/{id}/manifest.json exists
 # - no live tmux holder stamped with @hermes_terminal_run_id
-# - clean tree, HEAD already contained in main, age exceeded
-# Dirty/ahead is never auto-removed. Free manifests have no cleanup path.
+# - path is the exact registered non-main worktree under
+#   <PRUNE_REPO>/.worktrees/terminal/<terminal_run_id> (never trust worktree_path)
+# - clean tree, HEAD already contained in main, age exceeded (PlanSpec: 7d UTC)
+# Dirty/ahead/unmerged is never auto-removed. Free manifests have no cleanup path.
+# NEVER fall back to raw rm -rf.
 TERMINAL_RUNS_ROOT="${HERMES_TERMINAL_RUNS_ROOT:-}"
 if [[ -z "${TERMINAL_RUNS_ROOT}" ]]; then
   if [[ -n "${HERMES_HOME:-}" ]]; then
@@ -225,14 +228,84 @@ is_live_tmux_holder_for_run() {
   return 1
 }
 
+# Resolve the only deletable path for a terminal_run_id: the exact registered
+# non-main worktree at <repo>/.worktrees/terminal/<run_id>. Empty on any mismatch.
+terminal_canonical_registered_path() {
+  local repo="$1"
+  local run_id="$2"
+  local expected canonical main_wt main_canon registered wt_path wt_canon
+  local common common_abs repo_canon common_real
+
+  [[ "${run_id}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]{1,63}$ ]] || return 0
+  expected="${repo}/.worktrees/terminal/${run_id}"
+  [[ -d "${expected}" ]] || return 0
+  # Reject symlink escape: physical path must still be the expected leaf.
+  canonical="$(cd "${expected}" 2>/dev/null && pwd -P || true)"
+  [[ -n "${canonical}" ]] || return 0
+  [[ "${canonical}" == "$(cd "${repo}/.worktrees/terminal/${run_id}" 2>/dev/null && pwd -P)" ]] || return 0
+  case "${canonical}" in
+    "${repo}/.worktrees/terminal/${run_id}") ;;
+    *)
+      # Allow when repo itself is a symlink-resolved path.
+      local repo_phys expected_phys
+      repo_phys="$(cd "${repo}" 2>/dev/null && pwd -P || true)"
+      expected_phys="${repo_phys}/.worktrees/terminal/${run_id}"
+      [[ -n "${repo_phys}" && "${canonical}" == "${expected_phys}" ]] || return 0
+      ;;
+  esac
+
+  main_wt="$(git -C "${repo}" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "${main_wt}" ]] || return 0
+  main_canon="$(cd "${main_wt}" 2>/dev/null && pwd -P || true)"
+  if [[ -n "${main_canon}" && "${canonical}" == "${main_canon}" ]]; then
+    return 0
+  fi
+
+  registered=0
+  while IFS= read -r line; do
+    case "${line}" in
+      worktree\ *)
+        wt_path="${line#worktree }"
+        wt_canon="$(cd "${wt_path}" 2>/dev/null && pwd -P || true)"
+        if [[ "${wt_canon}" == "${canonical}" ]]; then
+          registered=1
+          break
+        fi
+        ;;
+    esac
+  done < <(git -C "${repo}" worktree list --porcelain 2>/dev/null || true)
+  [[ "${registered}" -eq 1 ]] || return 0
+
+  # Foreign-repo guard via git-common-dir.
+  common="$(git -C "${canonical}" rev-parse --git-common-dir 2>/dev/null || true)"
+  [[ -n "${common}" ]] || return 0
+  case "${common}" in
+    /*) common_abs="${common}" ;;
+    *) common_abs="${canonical}/${common}" ;;
+  esac
+  common_real="$(cd "${common_abs}" 2>/dev/null && pwd -P || true)"
+  repo_canon="$(cd "${repo}" 2>/dev/null && pwd -P || true)"
+  [[ -n "${common_real}" && -n "${repo_canon}" ]] || return 0
+  case "${common_real}" in
+    "${repo_canon}"/.git|"${repo_canon}"/.git/*) ;;
+    *) return 0 ;;
+  esac
+
+  printf '%s\n' "${canonical}"
+}
+
 if [[ -d "${TERMINAL_RUNS_ROOT}" ]] && command -v python3 >/dev/null 2>&1; then
   shopt -s nullglob
+  # Default PlanSpec age: 7 days. Do NOT inherit the generic 6h kanban MIN_AGE.
+  : "${TERMINAL_PRUNE_MIN_AGE_SECONDS:=$((7 * 24 * 3600))}"
   for manifest in "${TERMINAL_RUNS_ROOT}"/*/manifest.json; do
     parsed="$(
-      TERMINAL_PRUNE_MIN_AGE_SECONDS="${TERMINAL_PRUNE_MIN_AGE_SECONDS:-$((MIN_AGE_HOURS * 3600))}" \
+      TERMINAL_PRUNE_MIN_AGE_SECONDS="${TERMINAL_PRUNE_MIN_AGE_SECONDS}" \
       python3 - "$manifest" <<'PY'
-import json, os, sys, time
+import json, os, re, sys
+from datetime import datetime, timezone
 from pathlib import Path
+
 path = Path(sys.argv[1])
 try:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -240,70 +313,100 @@ except Exception:
     raise SystemExit(0)
 if not isinstance(data, dict):
     raise SystemExit(0)
-wt = data.get("worktree_path")
-if not isinstance(wt, str) or not wt:
-    raise SystemExit(0)  # free manifests: no worktree cleanup path
+# Free manifests have no worktree cleanup path (ignore any adversarial path).
 if data.get("start_mode") != "isolated_write":
     raise SystemExit(0)
 if data.get("status") != "ended":
     raise SystemExit(0)
-run_id = str(data.get("terminal_run_id") or path.parent.name)
-created = str(data.get("ended_at") or data.get("created_at") or "")
-min_age = int(os.environ.get("TERMINAL_PRUNE_MIN_AGE_SECONDS", str(7 * 24 * 3600)))
-ts = None
-for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"):
-    try:
-        ts = time.mktime(time.strptime(created, fmt))
-        break
-    except Exception:
-        pass
-if ts is None:
-    try:
-        ts = path.stat().st_mtime
-    except OSError:
-        raise SystemExit(0)
-if time.time() - ts < min_age:
+run_id = str(path.parent.name).strip()
+manifest_run = str(data.get("terminal_run_id") or "").strip()
+if manifest_run and manifest_run != run_id:
     raise SystemExit(0)
-print(f"{run_id}\t{wt}")
+if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{1,63}", run_id):
+    raise SystemExit(0)
+ended = data.get("ended_at")
+if not ended:
+    raise SystemExit(0)
+# UTC-only age policy; reject naive or non-UTC timestamps.
+try:
+    ended_text = str(ended)
+    if not ended_text.endswith("Z"):
+        raise ValueError("ended_at must be UTC Z time")
+    text = ended_text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None or dt.utcoffset() != timezone.utc.utcoffset(dt):
+        raise ValueError("ended_at must be UTC")
+    ts = dt.timestamp()
+except Exception:
+    raise SystemExit(0)
+min_age = int(os.environ.get("TERMINAL_PRUNE_MIN_AGE_SECONDS", str(7 * 24 * 3600)))
+now = datetime.now(timezone.utc).timestamp()
+if now - ts < min_age:
+    raise SystemExit(0)
+declared = data.get("worktree_path")
+if not isinstance(declared, str) or not declared or "\n" in declared or "\t" in declared:
+    raise SystemExit(0)
+# The shell derives the only deletable path from run_id, then requires this
+# untrusted declaration to canonicalize to that exact registered worktree.
+print(f"{run_id}\t{declared}")
 PY
     )" || true
     [[ -z "${parsed}" ]] && continue
     run_id="${parsed%%$'\t'*}"
-    wt_path="${parsed#*$'\t'}"
-    [[ -d "${wt_path}" ]] || continue
+    manifest_wt_path="${parsed#*$'\t'}"
     if is_live_tmux_holder_for_run "${run_id}"; then
-      echo "kept(tmux-holder): $wt_path"
+      echo "kept(tmux-holder): run ${run_id}"
       continue
     fi
-    repo="$(git -C "${wt_path}" rev-parse --show-toplevel 2>/dev/null || true)"
-    [[ -n "${repo}" ]] || continue
-    # Never auto-remove dirty or ahead worktrees.
-    if [[ -n "$(git -C "${wt_path}" status --porcelain 2>/dev/null || true)" ]]; then
-      echo "kept(dirty): $wt_path"
-      continue
-    fi
-    head_sha="$(git -C "${wt_path}" rev-parse HEAD 2>/dev/null || true)"
-    [[ -n "${head_sha}" ]] || continue
-    main_ref=""
-    if git -C "${repo}" rev-parse --verify main >/dev/null 2>&1; then
-      main_ref="main"
-    elif git -C "${repo}" rev-parse --verify master >/dev/null 2>&1; then
-      main_ref="master"
-    fi
-    [[ -n "${main_ref}" ]] || continue
-    if ! git -C "${repo}" merge-base --is-ancestor "${head_sha}" "${main_ref}" 2>/dev/null; then
-      echo "kept(ahead-or-diverged): $wt_path"
-      continue
-    fi
-    if (( APPLY )); then
-      if git -C "${repo}" worktree remove "${wt_path}" >/dev/null 2>&1; then
-        echo "removed(terminal): $wt_path (run ${run_id})"
-      else
-        rm -rf "${wt_path}" 2>/dev/null || true
-        echo "removed(terminal-path): $wt_path (run ${run_id})"
+
+    removed_or_planned=0
+    for repo in ${PRUNE_REPOS}; do
+      [[ -d "${repo}/.git" || -f "${repo}/.git" ]] || continue
+      wt_path="$(terminal_canonical_registered_path "${repo}" "${run_id}")"
+      [[ -n "${wt_path}" ]] || continue
+      manifest_wt_canon="$(cd "${manifest_wt_path}" 2>/dev/null && pwd -P || true)"
+      if [[ -z "${manifest_wt_canon}" || "${manifest_wt_canon}" != "${wt_path}" ]]; then
+        echo "kept(manifest-path-mismatch): run ${run_id}"
+        continue
       fi
-    else
-      echo "would remove(terminal): $wt_path (run ${run_id})"
+
+      # Never auto-remove dirty / ahead / unmerged worktrees.
+      if [[ -n "$(git -C "${wt_path}" status --porcelain 2>/dev/null || true)" ]]; then
+        echo "kept(dirty): $wt_path"
+        continue
+      fi
+      head_sha="$(git -C "${wt_path}" rev-parse HEAD 2>/dev/null || true)"
+      [[ -n "${head_sha}" ]] || continue
+      main_ref=""
+      if git -C "${repo}" rev-parse --verify main >/dev/null 2>&1; then
+        main_ref="main"
+      elif git -C "${repo}" rev-parse --verify master >/dev/null 2>&1; then
+        main_ref="master"
+      fi
+      [[ -n "${main_ref}" ]] || continue
+      if ! git -C "${repo}" merge-base --is-ancestor "${head_sha}" "${main_ref}" 2>/dev/null; then
+        echo "kept(ahead-or-diverged): $wt_path"
+        continue
+      fi
+      if [[ -n "$(git -C "${wt_path}" ls-files -u 2>/dev/null || true)" ]]; then
+        echo "kept(unmerged): $wt_path"
+        continue
+      fi
+      if (( APPLY )); then
+        if git -C "${repo}" worktree remove "${wt_path}" >/dev/null 2>&1; then
+          echo "removed(terminal): $wt_path (run ${run_id})"
+          removed_or_planned=1
+        else
+          # No rm -rf fallback — refuse unsafe cleanup.
+          echo "kept(remove-failed): $wt_path (run ${run_id})"
+        fi
+      else
+        echo "would remove(terminal): $wt_path (run ${run_id})"
+        removed_or_planned=1
+      fi
+    done
+    if (( removed_or_planned == 0 )); then
+      :
     fi
   done
   shopt -u nullglob

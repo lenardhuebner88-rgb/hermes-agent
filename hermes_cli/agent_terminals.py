@@ -70,6 +70,7 @@ _ACTION_LEAN = "lean"
 _TERMINAL_MANIFEST_SCHEMA_VERSION = 1
 _TERMINAL_WORKTREE_DIRNAME = "terminal"
 _TERMINAL_WORKTREE_GROUP = "terminal_worktree"
+_TERMINAL_WORKTREE_LIMIT = 15
 _TERMINAL_PRUNE_MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 _VALID_START_MODES = frozenset({_START_MODE_FREE, _START_MODE_ISOLATED_WRITE})
 _VALID_CONTEXT_PROFILES = frozenset({_CONTEXT_PROFILE_FULL, _CONTEXT_PROFILE_LEAN})
@@ -77,6 +78,9 @@ _VALID_RESPAWN_ACTIONS = frozenset({_ACTION_FRESH, _ACTION_RESUME, _ACTION_FORK}
 # Closed capability matrix: only proven installed CLI semantics are enabled.
 # Lean is a start-time context profile, never a free-form flag approximation.
 _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
+    # Static baseline only. Resume/Fork are fail-closed at runtime via the
+    # short-timeout version/help probe against a closed allowlist. Lean/Compact
+    # are never inferred from help text — only from DEFAULT_CONFIG mapping.
     "hermes": {
         "fresh": True,
         "resume": False,
@@ -110,7 +114,7 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
     "grok": {
         "fresh": True,
         "resume": True,
-        # Fork is bound to resume/continue and requires a native session id.
+        # Fork requires an unambiguous stamped native_session_id.
         "fork": True,
         "lean": False,
         "compact": False,
@@ -123,6 +127,187 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
         "compact": False,
     },
 }
+
+# Closed allowlist of installed CLI semantics. Unknown version, probe failure,
+# missing flag tokens, or changed help disables Resume/Fork. Lean/Compact are
+# intentionally absent — never inferred from help.
+_CLI_PROBE_TIMEOUT_SECONDS = 1.5
+_CLI_CAPABILITY_ALLOWLIST: dict[str, dict[str, object]] = {
+    "claude": {
+        "version_re": re.compile(
+            r"^\s*(?P<version>\d+\.\d+\.\d+)\s+\(Claude Code\)\s*$",
+            re.IGNORECASE,
+        ),
+        "versions": frozenset({"2.1.217"}),
+        "help_patterns": {
+            "resume": re.compile(r"^\s*-r,\s*--resume(?:\s|\[|<)", re.MULTILINE),
+            "fork": re.compile(r"^\s*--fork-session\b", re.MULTILINE),
+            "session_id": re.compile(
+                r"^\s*--session-id\s+<uuid>(?:\s|$)",
+                re.MULTILINE,
+            ),
+        },
+    },
+    "codex": {
+        "version_re": re.compile(
+            r"^\s*codex-cli\s+(?P<version>\d+\.\d+\.\d+)\s*$",
+            re.IGNORECASE,
+        ),
+        "versions": frozenset({"0.144.6"}),
+        "help_patterns": {
+            "resume": re.compile(r"^\s*resume\s+", re.MULTILINE),
+            "fork": re.compile(r"^\s*fork\s+", re.MULTILINE),
+        },
+    },
+    "grok": {
+        "version_re": re.compile(
+            r"^\s*grok\s+(?P<version>\d+\.\d+\.\d+)(?:\s+.*)?$",
+            re.IGNORECASE,
+        ),
+        "versions": frozenset({"0.2.106"}),
+        "help_patterns": {
+            "resume": re.compile(r"^\s*-r,\s*--resume(?:\s|\[|<)", re.MULTILINE),
+            "fork": re.compile(r"^\s*--fork-session\b", re.MULTILINE),
+            "session_id": re.compile(
+                r"^\s*-s,\s*--session-id\s+<SESSION_ID>(?:\s|$)",
+                re.MULTILINE,
+            ),
+        },
+    },
+    "qwen": {
+        "version_re": re.compile(r"^\s*(?P<version>\d+\.\d+\.\d+)\s*$"),
+        "versions": frozenset({"0.20.0"}),
+        "help_patterns": {
+            "resume": re.compile(r"^\s*-r,\s*--resume\b", re.MULTILINE),
+        },
+    },
+    "kimi": {
+        "version_re": re.compile(r"^\s*(?P<version>\d+\.\d+\.\d+)\s*$"),
+        "versions": frozenset({"0.28.1"}),
+        "help_patterns": {},
+    },
+}
+
+# (agent kind, resolved binary path) -> (mtime_ns, size, actions dict)
+_CLI_PROBE_CACHE: dict[tuple[str, str], tuple[int, int, dict[str, bool]]] = {}
+
+
+def clear_cli_probe_cache() -> None:
+    """Test helper: drop cached version/help probes."""
+    _CLI_PROBE_CACHE.clear()
+
+
+def seed_cli_probe_cache(
+    kind: str, binary: str | Path, actions: Mapping[str, bool]
+) -> None:
+    """Test helper: pin capability probe results for a fake binary."""
+    path = Path(binary)
+    try:
+        st = path.stat()
+        key = (kind, str(path.resolve()))
+        _CLI_PROBE_CACHE[key] = (
+            int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))),
+            int(st.st_size),
+            dict(actions),
+        )
+    except OSError:
+        _CLI_PROBE_CACHE[(kind, str(path))] = (0, 0, dict(actions))
+
+
+def _run_cli_probe(binary: Path, flag: str) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            [str(binary), flag],
+            capture_output=True,
+            text=True,
+            timeout=_CLI_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+    return completed.returncode == 0, output
+
+
+def probe_agent_cli_actions(kind: str, binary: Path | None) -> dict[str, bool]:
+    """Fail-closed Fresh/Resume/Fork availability from version+help allowlist."""
+    base = {
+        "fresh": kind == "hermes",
+        "resume": False,
+        "fork": False,
+        "lean": False,
+        "compact": False,
+        # Internal adapter fact used to mint a native ID for a fresh launch.
+        "session_id": False,
+    }
+    static = _AGENT_CONTEXT_ACTIONS.get(kind)
+    if not isinstance(static, dict):
+        return base
+    # Hermes is our own stable entrypoint. Every external CLI, including a
+    # plain Fresh launch, stays disabled until exact version+help semantics
+    # match the closed allowlist below.
+    if kind == "hermes":
+        base["fresh"] = bool(static.get("fresh", True))
+        return base
+    if binary is None:
+        return base
+    allow = _CLI_CAPABILITY_ALLOWLIST.get(kind)
+    if not isinstance(allow, dict):
+        # Agents without a probe allowlist keep static resume/fork disabled
+        # unless the static matrix already disables them (hermes/kimi).
+        return base
+    try:
+        resolved = Path(binary).expanduser().resolve()
+    except OSError:
+        return base
+    if not resolved.is_file():
+        return base
+    try:
+        st = resolved.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        size = int(st.st_size)
+    except OSError:
+        return base
+    cache_key = (kind, str(resolved))
+    cached = _CLI_PROBE_CACHE.get(cache_key)
+    if cached is not None and cached[0] == mtime_ns and cached[1] == size:
+        return dict(cached[2])
+
+    version_ok, version_out = _run_cli_probe(resolved, "--version")
+    help_ok, help_out = _run_cli_probe(resolved, "--help")
+    version_re = allow.get("version_re")
+    versions = allow.get("versions")
+    if (
+        not version_ok
+        or not help_ok
+        or not isinstance(version_re, re.Pattern)
+        or not isinstance(versions, frozenset)
+        or not version_out.strip()
+    ):
+        _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+        return base
+    first_line = next((ln.strip() for ln in version_out.splitlines() if ln.strip()), "")
+    version_match = version_re.fullmatch(first_line)
+    if version_match is None or version_match.group("version") not in versions:
+        _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+        return base
+    base["fresh"] = bool(static.get("fresh", True))
+    help_patterns = (
+        allow.get("help_patterns")
+        if isinstance(allow.get("help_patterns"), dict)
+        else {}
+    )
+    assert isinstance(help_patterns, dict)
+    for action_name in ("resume", "fork", "session_id"):
+        if action_name != "session_id" and not static.get(action_name):
+            continue
+        pattern = help_patterns.get(action_name)
+        if not isinstance(pattern, re.Pattern):
+            continue
+        if pattern.search(help_out):
+            base[action_name] = True
+    _CLI_PROBE_CACHE[cache_key] = (mtime_ns, size, dict(base))
+    return base
 
 # Substrings in tmux stderr that mean "target/server is gone" (case-insensitive).
 # Used by window_exists / show / idempotent kill to distinguish not-found from
@@ -359,6 +544,9 @@ class TerminalLaunchContext:
     action: str = _ACTION_FRESH
     capsule_correlation_id: str | None = None
     argv: tuple[str, ...] = ()
+    generation: int = 1
+    task_id: str | None = None
+    run_id: int | None = None
 
     def to_manifest(self, *, window: str, session: str, status: str = "running") -> dict[str, object]:
         return {
@@ -379,6 +567,9 @@ class TerminalLaunchContext:
             "session": session,
             "status": status,
             "capsule_correlation_id": self.capsule_correlation_id,
+            "generation": int(self.generation or 1),
+            "task_id": self.task_id,
+            "run_id": self.run_id,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -399,6 +590,9 @@ class TmuxWindow:
     # foreign (visible/attachable, but close would 503); None = unknown (callers
     # that did not compute it — safe default so older constructors stay valid).
     managed: bool | None = None
+    # Server-resolved identity survives arbitrary window renames; clients must
+    # prefer it over parsing the display name.
+    agent_kind: str | None = None
     task_id: str | None = None
     run_id: int | None = None
     correlation_id: str | None = None
@@ -422,6 +616,7 @@ class TmuxWindow:
             "dead": self.dead,
             "activity": self.activity,
             "managed": self.managed,
+            "agent_kind": self.agent_kind,
             "task_id": self.task_id,
             "run_id": self.run_id,
             "correlation_id": self.correlation_id,
@@ -915,13 +1110,12 @@ class TmuxAgentSessionService:
             return [dict(option) for option in _workdir_cache[1]]
 
     def workdir_options_with_terminal(self) -> list[dict[str, object]]:
-        """Regular workdirs plus terminal-worktree group (separate from the 15-slot cap)."""
+        """Regular workdirs plus an independently capped terminal-worktree group."""
         options = self.workdir_options()
         options.extend(self._enumerate_terminal_worktree_options())
         return options
 
-    @staticmethod
-    def resolve_workdir(workdir: str | None) -> tuple[str, Path]:
+    def resolve_workdir(self, workdir: str | None) -> tuple[str, Path]:
         key = workdir or "home"
         entry = _WORKDIR_BY_KEY.get(key)
         if entry is not None:
@@ -930,19 +1124,12 @@ class TmuxAgentSessionService:
         elif key.startswith("dir:"):
             enumerated = {
                 option["key"]: Path(str(option["path"]))
-                for option in TmuxAgentSessionService.workdir_options()
+                for option in self.workdir_options_with_terminal()
                 if isinstance(option.get("key"), str) and isinstance(option.get("path"), str)
             }
             path = enumerated.get(key)
             if path is None:
-                # Terminal isolated-write worktrees are outside the regular
-                # 15-slot cache; accept an existing .worktrees/terminal path.
-                candidate = Path(key[4:]).expanduser()
-                posix = candidate.as_posix()
-                if candidate.is_dir() and "/.worktrees/terminal/" in f"{posix}/":
-                    path = candidate
-                else:
-                    raise InvalidTarget(f"unknown workdir: {workdir!r}")
+                raise InvalidTarget(f"unknown workdir: {workdir!r}")
         else:
             raise InvalidTarget(f"unknown workdir: {workdir!r}")
         if not path.is_dir():
@@ -1169,29 +1356,61 @@ class TmuxAgentSessionService:
         """Profile-independent root for this service instance."""
         return terminal_runs_root(explicit_home=self.hermes_home)
 
-    def _lean_context_allowlist(self) -> set[str]:
+    def _lean_context_profile_map(self) -> dict[str, str]:
+        """Agent-kind -> concrete allowlisted profile name. Empty by default.
+
+        Only Codex may receive an injected profile, emitted exactly as ``-p``.
+        Foreign CLI configs are never read; the mapping is Hermes DEFAULT_CONFIG only.
+        """
         try:
             from hermes_cli.config import load_config
             cfg = load_config() or {}
         except Exception:
-            return set()
+            return {}
         raw = cfg.get("agent_terminals") if isinstance(cfg, dict) else None
         if not isinstance(raw, dict):
-            return set()
-        items = raw.get("lean_context_profiles") or []
-        if not isinstance(items, list):
-            return set()
-        return {str(item).strip() for item in items if str(item).strip()}
+            return {}
+        items = raw.get("lean_context_profiles") or {}
+        # Backward-compat: legacy list-of-kinds form treated as empty (disabled).
+        if isinstance(items, list):
+            return {}
+        if not isinstance(items, dict):
+            return {}
+        out: dict[str, str] = {}
+        for kind, profile in items.items():
+            k = str(kind).strip()
+            p = str(profile).strip()
+            if k != "codex":
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", p):
+                continue
+            out[k] = p
+        return out
 
-    def agent_context_actions(self, kind: str) -> dict[str, bool]:
-        base = dict(_AGENT_CONTEXT_ACTIONS.get(kind, {
+    def _lean_context_allowlist(self) -> set[str]:
+        return set(self._lean_context_profile_map())
+
+    def agent_context_actions(self, kind: str, *, binary: Path | None = None) -> dict[str, bool]:
+        static = dict(_AGENT_CONTEXT_ACTIONS.get(kind, {
             "fresh": True,
             "resume": False,
             "fork": False,
             "lean": False,
             "compact": False,
         }))
-        # Lean requires both a proven adapter and an operator allowlist entry.
+        resolved_binary = binary
+        if resolved_binary is None:
+            with contextlib.suppress(Exception):
+                resolved_binary = self.resolve_agent_binary(kind)
+        probed = probe_agent_cli_actions(kind, resolved_binary)
+        base = {
+            "fresh": bool(static.get("fresh", True) and probed.get("fresh", True)),
+            "resume": bool(static.get("resume") and probed.get("resume")),
+            "fork": bool(static.get("fork") and probed.get("fork")),
+            # Lean/Compact never inferred from help — config mapping only.
+            "lean": bool(static.get("lean") and probed.get("fresh")),
+            "compact": bool(static.get("compact")),
+        }
         if base.get("lean") and kind not in self._lean_context_allowlist():
             base["lean"] = False
         return base
@@ -1206,7 +1425,8 @@ class TmuxAgentSessionService:
         native_session_id: str | None = None,
     ) -> tuple[str, ...]:
         """Return closed argv for a proven action; never invent approximate flags."""
-        actions = self.agent_context_actions(kind)
+        actions = self.agent_context_actions(kind, binary=binary)
+        probed = probe_agent_cli_actions(kind, binary)
         effective_action = action
         if context_profile == _CONTEXT_PROFILE_LEAN:
             # Lean is a start option, not a mutation of a running context.
@@ -1219,39 +1439,49 @@ class TmuxAgentSessionService:
         if effective_action == _ACTION_FRESH:
             if not actions.get("fresh", True):
                 raise CapabilityError(f"fresh start is not available for agent {kind!r}")
+            sid = (native_session_id or "").strip() or None
+            if sid is not None:
+                try:
+                    uuid.UUID(sid)
+                except (ValueError, AttributeError) as exc:
+                    raise CapabilityError(
+                        f"{kind} fresh start requires a valid server-stamped UUID"
+                    ) from exc
+                if not probed.get("session_id") or kind not in {"claude", "grok"}:
+                    raise CapabilityError(
+                        f"fresh native_session_id is not available for agent {kind!r}"
+                    )
             if kind == "hermes":
                 return (str(binary), "--tui")
+            if kind == "claude" and sid:
+                return (str(binary), "--session-id", sid)
             if kind == "grok":
-                return (str(binary), "--model", "grok-4.5")
+                argv = (str(binary), "--model", "grok-4.5")
+                return (*argv, "--session-id", sid) if sid else argv
             return (str(binary),)
         if effective_action == _ACTION_RESUME:
             if not actions.get("resume"):
                 raise CapabilityError(f"resume is not available for agent {kind!r}")
             sid = (native_session_id or "").strip() or None
+            if not sid or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", sid):
+                raise CapabilityError(
+                    f"{kind} resume requires an unambiguous stamped native_session_id"
+                )
             if kind == "claude":
-                # Prefer stamped session id when available; otherwise continue.
-                if sid:
-                    return (str(binary), "--resume", sid)
-                return (str(binary), "--continue")
+                return (str(binary), "--resume", sid)
             if kind == "codex":
-                if not sid:
-                    raise CapabilityError("codex resume requires a stamped native_session_id")
                 return (str(binary), "resume", sid)
             if kind == "grok":
-                if sid:
-                    return (str(binary), "--model", "grok-4.5", "--resume", sid)
-                return (str(binary), "--model", "grok-4.5", "--continue")
+                return (str(binary), "--model", "grok-4.5", "--resume", sid)
             if kind == "qwen":
-                if sid:
-                    return (str(binary), "--resume", sid)
-                return (str(binary), "--continue")
+                return (str(binary), "--resume", sid)
             raise CapabilityError(f"resume is not available for agent {kind!r}")
         if effective_action == _ACTION_FORK:
             if not actions.get("fork"):
                 raise CapabilityError(f"fork is not available for agent {kind!r}")
             # Fail-closed: fork never uses picker/--last; needs unambiguous id.
             sid = (native_session_id or "").strip() or None
-            if not sid:
+            if not sid or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}", sid):
                 raise CapabilityError(
                     f"{kind} fork requires an unambiguous stamped native_session_id"
                 )
@@ -1274,8 +1504,11 @@ class TmuxAgentSessionService:
             if not actions.get("lean"):
                 raise CapabilityError(f"lean is not available for agent {kind!r}")
             if kind == "codex":
-                # Closed proven form: explicit profile flag, never free-form flags.
-                return (str(binary), "--profile", "lean")
+                profile = self._lean_context_profile_map().get("codex")
+                if not profile:
+                    raise CapabilityError("codex lean requires explicit allowlisted -p profile name")
+                # Closed proven form: exact -p <profile>, never foreign CLI config reads.
+                return (str(binary), "-p", profile)
             raise CapabilityError(f"lean is not available for agent {kind!r}")
         raise CapabilityError(f"unknown context action: {effective_action!r}")
 
@@ -1293,7 +1526,14 @@ class TmuxAgentSessionService:
             return None
         return data if isinstance(data, dict) else None
 
-    def write_terminal_manifest(self, launch: TerminalLaunchContext, *, window: str, session: str, status: str = "running") -> Path:
+    def write_terminal_manifest(
+        self,
+        launch: TerminalLaunchContext,
+        *,
+        window: str,
+        session: str,
+        status: str = "running",
+    ) -> Path:
         run_dir = self.terminal_runs_root() / launch.terminal_run_id
         run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
@@ -1302,6 +1542,15 @@ class TmuxAgentSessionService:
             pass
         path = run_dir / "manifest.json"
         payload = launch.to_manifest(window=window, session=session, status=status)
+        current = self.read_terminal_manifest(launch.terminal_run_id)
+        if current is not None:
+            # Respawn updates one durable identity instead of replacing it.
+            # Preserve additive fields and the original creation timestamp.
+            created_at = current.get("created_at")
+            current.update(payload)
+            if isinstance(created_at, str) and created_at:
+                current["created_at"] = created_at
+            payload = current
         atomic_json_write(path, payload, mode=0o600)
         return path
 
@@ -1317,8 +1566,16 @@ class TmuxAgentSessionService:
     def mark_terminal_run_ended(self, terminal_run_id: str | None) -> None:
         if not terminal_run_id:
             return
-        with contextlib.suppress(Exception):
-            self.update_terminal_manifest(terminal_run_id, status="ended", ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        updated = self.update_terminal_manifest(
+            terminal_run_id,
+            status="ended",
+            ended_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )
+        if updated is None:
+            raise CapabilityError(
+                f"terminal-run manifest missing for {terminal_run_id}; "
+                "window closed but lifecycle update failed"
+            )
 
     def _git_output(self, *args: str, cwd: Path | None = None) -> str | None:
         try:
@@ -1343,16 +1600,28 @@ class TmuxAgentSessionService:
     def _current_head_sha(self, path: Path) -> str | None:
         return self._git_output("rev-parse", "HEAD", cwd=path)
 
-    def _create_isolated_write_worktree(self, *, base_cwd: Path, terminal_run_id: str, base_sha: str) -> tuple[Path, str]:
+    def _create_isolated_write_worktree(
+        self,
+        *,
+        base_cwd: Path,
+        terminal_run_id: str,
+        base_sha: str,
+        before_create: Callable[[Path, str], None] | None = None,
+    ) -> tuple[Path, str]:
         repo = self._repo_root_for(base_cwd)
         if repo is None:
             raise CapabilityError(f"isolated write requires a git repository under {base_cwd}")
         branch = f"terminal/{terminal_run_id}"
         worktree_root = repo / ".worktrees" / _TERMINAL_WORKTREE_DIRNAME
-        worktree_root.mkdir(parents=True, exist_ok=True)
         worktree_path = worktree_root / terminal_run_id
         if worktree_path.exists():
             raise CapabilityError(f"terminal worktree already exists: {worktree_path}")
+        # Establish durable ownership before the first filesystem/git mutation.
+        # A caller crash or failed `git worktree add` then leaves a manifest that
+        # identifies the intended path instead of an anonymous checkout.
+        if before_create is not None:
+            before_create(worktree_path, branch)
+        worktree_root.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(
             ["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree_path), base_sha],
             capture_output=True,
@@ -1395,9 +1664,44 @@ class TmuxAgentSessionService:
         workdir_key, cwd = self.resolve_workdir(workdir)
         run_id = terminal_run_id or uuid.uuid4().hex
         base_sha = reuse_base_sha or self._current_head_sha(cwd)
+        # Validate binary + action + argv BEFORE creating any worktree so a
+        # capability failure cannot leave an unowned isolated checkout.
+        binary = self.resolve_agent_binary(kind)
+        probed_actions = probe_agent_cli_actions(kind, binary)
+        if (
+            action == _ACTION_FRESH
+            and native_session_id is None
+            and probed_actions.get("session_id")
+            and kind in {"claude", "grok"}
+        ):
+            native_session_id = str(uuid.uuid4())
+        argv = self.build_agent_argv(
+            kind,
+            binary=binary,
+            action=action,
+            context_profile=context_profile,
+            native_session_id=native_session_id,
+        )
+        generation = 1
+        task_id = None
+        corr_run_id = None
+        if terminal_run_id:
+            existing = self.read_terminal_manifest(terminal_run_id)
+            if isinstance(existing, dict):
+                try:
+                    generation = int(existing.get("generation") or 1)
+                except (TypeError, ValueError):
+                    generation = 1
+                task_id = existing.get("task_id") if isinstance(existing.get("task_id"), str) else None
+                raw_run = existing.get("run_id")
+                if isinstance(raw_run, int):
+                    corr_run_id = raw_run
+                elif isinstance(raw_run, str) and raw_run.isdigit():
+                    corr_run_id = int(raw_run)
         worktree_path: str | None = None
         worktree_branch: str | None = None
         launch_cwd = cwd
+        window = self.window_name_for(kind, workdir_key)
         if start_mode == _START_MODE_ISOLATED_WRITE:
             if reuse_worktree_path:
                 wt = Path(reuse_worktree_path)
@@ -1409,11 +1713,53 @@ class TmuxAgentSessionService:
             else:
                 if not base_sha:
                     raise CapabilityError("isolated write requires a resolvable base SHA")
-                wt, branch = self._create_isolated_write_worktree(
-                    base_cwd=cwd,
-                    terminal_run_id=run_id,
-                    base_sha=base_sha,
-                )
+
+                def record_worktree_intent(path: Path, branch: str) -> None:
+                    provisional = TerminalLaunchContext(
+                        terminal_run_id=run_id,
+                        agent_kind=kind,
+                        start_mode=start_mode,
+                        context_profile=context_profile,
+                        cwd=str(path),
+                        base_sha=base_sha,
+                        native_session_id=native_session_id,
+                        worktree_path=str(path),
+                        worktree_branch=branch,
+                        action=(
+                            _ACTION_LEAN
+                            if context_profile == _CONTEXT_PROFILE_LEAN
+                            else action
+                        ),
+                        capsule_correlation_id=capsule_correlation_id,
+                        argv=argv,
+                        generation=generation,
+                        task_id=task_id,
+                        run_id=corr_run_id,
+                    )
+                    self.write_terminal_manifest(
+                        provisional,
+                        window=window,
+                        session="work",
+                        status="provisioning",
+                    )
+
+                try:
+                    wt, branch = self._create_isolated_write_worktree(
+                        base_cwd=cwd,
+                        terminal_run_id=run_id,
+                        base_sha=base_sha,
+                        before_create=record_worktree_intent,
+                    )
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        self.update_terminal_manifest(
+                            run_id,
+                            status="worktree_failed",
+                            ended_at=time.strftime(
+                                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                            ),
+                        )
+                    raise
                 worktree_path = str(wt)
                 worktree_branch = branch
                 launch_cwd = wt
@@ -1421,16 +1767,7 @@ class TmuxAgentSessionService:
             # Free/Exploration: existing directory only, never create a worktree.
             worktree_path = None
             worktree_branch = None
-        binary = self.resolve_agent_binary(kind)
-        argv = self.build_agent_argv(
-            kind,
-            binary=binary,
-            action=action,
-            context_profile=context_profile,
-            native_session_id=native_session_id,
-        )
         env = self._safe_env({"HERMES_TUI_INLINE": "1"} if kind == "hermes" else None)
-        window = self.window_name_for(kind, workdir_key)
         definition = AgentWindowDefinition(
             kind=kind,
             session="work",
@@ -1453,7 +1790,17 @@ class TmuxAgentSessionService:
             action=_ACTION_LEAN if context_profile == _CONTEXT_PROFILE_LEAN else action,
             capsule_correlation_id=capsule_correlation_id,
             argv=argv,
+            generation=generation,
+            task_id=task_id,
+            run_id=corr_run_id,
         )
+        if start_mode == _START_MODE_ISOLATED_WRITE and not reuse_worktree_path:
+            self.write_terminal_manifest(
+                launch,
+                window=window,
+                session="work",
+                status="prepared",
+            )
         return definition, launch
 
     def _read_window_option(self, session: str, window: str, option: str) -> str | None:
@@ -1495,6 +1842,38 @@ class TmuxAgentSessionService:
         for option, value in pairs:
             self._run("set-option", "-w", "-t", target, option, value)
 
+    @staticmethod
+    def _registered_terminal_worktree(path: Path, terminal_run_id: str) -> Path | None:
+        """Return one exact registered terminal worktree, fail-closed."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", terminal_run_id):
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            return None
+        if (
+            resolved.name != terminal_run_id
+            or resolved.parent.name != _TERMINAL_WORKTREE_DIRNAME
+            or resolved.parent.parent.name != ".worktrees"
+            or len(resolved.parents) < 3
+        ):
+            return None
+        repo = resolved.parents[2]
+        if not (repo / ".git").exists():
+            return None
+        result = _run_git(
+            ["git", "-C", str(repo), "worktree", "list", "--porcelain"]
+        )
+        if result is None or result.returncode != 0:
+            return None
+        for registered, _branch in _parse_worktree_porcelain(result.stdout):
+            try:
+                if registered.resolve(strict=True) == resolved:
+                    return resolved
+            except OSError:
+                continue
+        return None
+
     def _enumerate_terminal_worktree_options(self) -> list[dict[str, object]]:
         root = self.terminal_runs_root()
         if not root.is_dir():
@@ -1507,16 +1886,32 @@ class TmuxAgentSessionService:
         for run_dir in run_dirs:
             if not run_dir.is_dir():
                 continue
+            try:
+                if self._manifest_path(run_dir.name).stat().st_mode & 0o777 != 0o600:
+                    continue
+            except OSError:
+                continue
             manifest = self.read_terminal_manifest(run_dir.name)
-            if not manifest:
+            if (
+                not manifest
+                or manifest.get("schema_version") != _TERMINAL_MANIFEST_SCHEMA_VERSION
+                or manifest.get("terminal_run_id") != run_dir.name
+                or manifest.get("start_mode") != _START_MODE_ISOLATED_WRITE
+            ):
                 continue
             wt = manifest.get("worktree_path")
             if not isinstance(wt, str) or not wt:
                 continue
-            path = Path(wt)
-            if not path.is_dir():
+            path = self._registered_terminal_worktree(Path(wt), run_dir.name)
+            if path is None:
                 continue
-            branch = manifest.get("worktree_branch") or path.name
+            raw_branch = manifest.get("worktree_branch")
+            branch = (
+                raw_branch
+                if isinstance(raw_branch, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", raw_branch)
+                else path.name
+            )
             label = f"terminal · {branch}"
             options.append(
                 {
@@ -1527,15 +1922,17 @@ class TmuxAgentSessionService:
                     "terminal_run_id": run_dir.name,
                 }
             )
+            if len(options) >= _TERMINAL_WORKTREE_LIMIT:
+                break
         return options
 
     def capabilities(self) -> CapabilityState:
         tmux_available = shutil.which(self.tmux_binary) is not None or Path(self.tmux_binary).exists()
         agents: dict[str, dict[str, object]] = {}
         for kind in _AGENT_KINDS:
-            actions = self.agent_context_actions(kind)
             try:
                 binary = self.resolve_agent_binary(kind)
+                actions = self.agent_context_actions(kind, binary=binary)
                 agents[kind] = {
                     "available": True,
                     "binary": str(binary),
@@ -1544,6 +1941,7 @@ class TmuxAgentSessionService:
                     "prerequisites": self._agent_prerequisites(kind, actions),
                 }
             except (CapabilityError, InvalidTarget) as exc:
+                actions = self.agent_context_actions(kind, binary=None)
                 agents[kind] = {
                     "available": False,
                     "binary": None,
@@ -1775,6 +2173,12 @@ class TmuxAgentSessionService:
             # managed gates the UI terminate affordance only; kill_dead stays
             # available for dead foreign panes (intentional cleanup path).
             managed = self.is_managed_window(session_name, window_name)
+            agent_kind = None
+            if managed:
+                with contextlib.suppress(CapabilityError, InvalidTarget):
+                    agent_kind, _workdir_key = self.identity_for(
+                        session_name, window_name
+                    )
             try:
                 correlation = self.execution_correlation_for(
                     session_name, window_name
@@ -1809,6 +2213,7 @@ class TmuxAgentSessionService:
                     dead,
                     activity,
                     managed,
+                    agent_kind=agent_kind,
                     task_id=correlation["task_id"],
                     run_id=correlation["run_id"],
                     correlation_id=correlation["correlation_id"],
@@ -1904,51 +2309,84 @@ class TmuxAgentSessionService:
         self,
         definition: AgentWindowDefinition,
         launch: "TerminalLaunchContext | None" = None,
+        *,
+        failure_status: str = "spawn_failed",
     ) -> TmuxWindow:
         """Create a tmux window from a server-side definition and optional launch context.
 
         Browser payloads never set tmux options or argv here. When ``launch`` is
         provided, the service stamps terminal_run identity into window options
         and writes an atomic 0600 manifest under ``terminal_runs_root``.
+        On tmux failure after an isolated worktree exists, still write a
+        ``spawn_failed``/``respawn_failed`` manifest so the worktree is owned.
         """
         if not definition.argv:
             raise CapabilityError(f"baseline window {definition.session}:{definition.window} is missing")
-        if definition.session not in self.list_sessions():
-            self._run("new-session", "-d", "-s", definition.session, "-c", str(definition.cwd))
-        self.ensure_session_options(definition.session)
-        env_args: list[str] = []
-        for key, value in definition.env.items():
-            env_args.extend(["-e", f"{key}={value}"])
-        self._run(
-            "new-window",
-            "-d",
-            "-t",
-            f"{definition.session}:",
-            "-n",
-            definition.window,
-            "-c",
-            str(definition.cwd),
-            *env_args,
-            shlex.join(definition.argv),
-        )
-        # Window options survive rename() — unlike the name-based parsing in
-        # `_identity_from_window`, they let identity_for() recover kind/workdir
-        # for a window whose name a user has since changed.
-        self._set_window_identity(
-            definition.session,
-            definition.window,
-            kind=definition.kind,
-            workdir_key=definition.workdir_key,
-        )
         if launch is not None:
-            self._stamp_launch_options(definition.session, definition.window, launch)
+            # Establish durable ownership before any tmux mutation. If this
+            # atomic 0600 write fails, no window is created.
             self.write_terminal_manifest(
                 launch,
                 window=definition.window,
                 session=definition.session,
-                status="running",
+                status="spawning",
             )
-        return self.show(definition.session, definition.window)
+        window_created = False
+        try:
+            if definition.session not in self.list_sessions():
+                self._run("new-session", "-d", "-s", definition.session, "-c", str(definition.cwd))
+            self.ensure_session_options(definition.session)
+            env_args: list[str] = []
+            for key, value in definition.env.items():
+                env_args.extend(["-e", f"{key}={value}"])
+            self._run(
+                "new-window",
+                "-d",
+                "-t",
+                f"{definition.session}:",
+                "-n",
+                definition.window,
+                "-c",
+                str(definition.cwd),
+                *env_args,
+                shlex.join(definition.argv),
+            )
+            window_created = True
+            # Window options survive rename() — unlike the name-based parsing in
+            # `_identity_from_window`, they let identity_for() recover kind/workdir
+            # for a window whose name a user has since changed.
+            self._set_window_identity(
+                definition.session,
+                definition.window,
+                kind=definition.kind,
+                workdir_key=definition.workdir_key,
+            )
+            if launch is not None:
+                self._stamp_launch_options(definition.session, definition.window, launch)
+                self.write_terminal_manifest(
+                    launch,
+                    window=definition.window,
+                    session=definition.session,
+                    status="running",
+                )
+            return self.show(definition.session, definition.window)
+        except Exception:
+            if window_created:
+                with contextlib.suppress(Exception):
+                    self._run(
+                        "kill-window",
+                        "-t",
+                        self._cmd_target(definition.session, definition.window),
+                    )
+            if launch is not None:
+                with contextlib.suppress(Exception):
+                    self.write_terminal_manifest(
+                        launch,
+                        window=definition.window,
+                        session=definition.session,
+                        status=failure_status,
+                    )
+            raise
 
     def ensure(
         self,
@@ -2080,31 +2518,140 @@ class TmuxAgentSessionService:
         kind, workdir_key = self.identity_for(session, info.window)
         stamped = self.terminal_launch_state_for(session, info.window)
         terminal_run_id = stamped.get("terminal_run_id")
-        start_mode = stamped.get("start_mode") or _START_MODE_FREE
+        stamped_start_mode = stamped.get("start_mode")
+        start_mode = stamped_start_mode or _START_MODE_FREE
+        stamped_context = stamped.get("context_profile")
+        context_profile = stamped_context or _CONTEXT_PROFILE_FULL
         native_session_id = stamped.get("native_session_id")
         base_sha = stamped.get("base_sha")
         worktree_path = stamped.get("worktree_path")
         worktree_branch = stamped.get("worktree_branch")
+        stamped_cwd = stamped.get("cwd")
         actions = self.agent_context_actions(kind)
         if action != _ACTION_FRESH and not actions.get(action):
             raise CapabilityError(
                 f"{action} is not available for agent {kind!r}; "
                 "adapter does not prove installed CLI semantics"
             )
-        # Validate binary + workdir BEFORE killing: a failing recreate must not
-        # destroy the dead pane's scrollback for nothing.
+        if action in {_ACTION_RESUME, _ACTION_FORK}:
+            sid = (native_session_id or "").strip()
+            if not sid:
+                raise CapabilityError(
+                    f"{action} requires an unambiguous stamped native_session_id"
+                )
+        # Validate binary + workdir + manifest BEFORE killing: a failing recreate
+        # must not destroy the dead pane's scrollback for nothing.
         if terminal_run_id:
+            if start_mode not in _VALID_START_MODES:
+                raise CapabilityError(
+                    f"respawn refused: invalid stamped start_mode {start_mode!r}"
+                )
+            if context_profile not in _VALID_CONTEXT_PROFILES:
+                raise CapabilityError(
+                    f"respawn refused: invalid stamped context_profile {context_profile!r}"
+                )
+            manifest_path = self._manifest_path(terminal_run_id)
+            try:
+                manifest_mode = manifest_path.stat().st_mode & 0o777
+            except OSError as exc:
+                raise CapabilityError(
+                    f"respawn refused: missing terminal-run manifest for {terminal_run_id}"
+                ) from exc
+            if manifest_mode != 0o600:
+                raise CapabilityError(
+                    f"respawn refused: terminal-run manifest mode is {manifest_mode:o}, expected 600"
+                )
+            manifest = self.read_terminal_manifest(terminal_run_id)
+            if not isinstance(manifest, dict):
+                raise CapabilityError(
+                    f"respawn refused: missing terminal-run manifest for {terminal_run_id}"
+                )
+            if manifest.get("schema_version") != _TERMINAL_MANIFEST_SCHEMA_VERSION:
+                raise CapabilityError("respawn refused: terminal-run manifest schema mismatch")
+            # Validate every stamped tmux field against the durable 0600 manifest.
+            checks = {
+                "terminal_run_id": (terminal_run_id, manifest.get("terminal_run_id")),
+                "agent_kind": (kind, manifest.get("agent_kind")),
+                "start_mode": (stamped_start_mode, manifest.get("start_mode")),
+                "context_profile": (stamped_context, manifest.get("context_profile")),
+                "cwd": (stamped_cwd, manifest.get("cwd")),
+                "worktree_path": (worktree_path, manifest.get("worktree_path")),
+                "worktree_branch": (worktree_branch, manifest.get("worktree_branch")),
+                "base_sha": (base_sha, manifest.get("base_sha")),
+                "native_session_id": (native_session_id, manifest.get("native_session_id")),
+                "window": (info.window, manifest.get("window")),
+                "session": (info.session, manifest.get("session")),
+            }
+            for field, (left, right) in checks.items():
+                left_n = (str(left).strip() if left is not None else "") or None
+                right_n = (str(right).strip() if right is not None else "") or None
+                if left_n != right_n:
+                    raise CapabilityError(
+                        f"respawn refused: stamped {field} mismatch vs manifest "
+                        f"({left_n!r} != {right_n!r})"
+                    )
+            try:
+                prev_generation = int(manifest.get("generation") or 1)
+            except (TypeError, ValueError):
+                raise CapabilityError("respawn refused: invalid manifest generation") from None
+            if prev_generation < 1:
+                raise CapabilityError("respawn refused: invalid manifest generation")
+            argv_context_profile = (
+                context_profile if action == _ACTION_FRESH else _CONTEXT_PROFILE_FULL
+            )
+            argv_native_session_id = native_session_id
+            manifest_native_session_id = native_session_id
+            if action == _ACTION_FRESH:
+                binary = self.resolve_agent_binary(kind)
+                probed_actions = probe_agent_cli_actions(kind, binary)
+                if probed_actions.get("session_id") and kind in {"claude", "grok"}:
+                    argv_native_session_id = str(uuid.uuid4())
+                    manifest_native_session_id = argv_native_session_id
+                else:
+                    argv_native_session_id = None
+                    manifest_native_session_id = None
+            elif action == _ACTION_FORK:
+                # The proven fork argv lets the CLI mint its successor ID. Do
+                # not falsely stamp the resumed source ID onto the fork.
+                manifest_native_session_id = None
             definition, launch = self.definition_and_launch(
                 kind,
                 workdir_key,
                 start_mode=start_mode,
-                context_profile=_CONTEXT_PROFILE_FULL,
+                context_profile=argv_context_profile,
                 action=action,
-                native_session_id=native_session_id,
+                native_session_id=argv_native_session_id,
                 terminal_run_id=terminal_run_id,
+                capsule_correlation_id=(
+                    str(manifest.get("capsule_correlation_id"))
+                    if manifest.get("capsule_correlation_id")
+                    else None
+                ),
                 reuse_worktree_path=worktree_path,
                 reuse_worktree_branch=worktree_branch,
                 reuse_base_sha=base_sha,
+            )
+            # Atomic generation increment on the same terminal_run_id.
+            launch = replace(
+                launch,
+                generation=prev_generation + 1,
+                context_profile=context_profile,
+                native_session_id=manifest_native_session_id,
+                task_id=manifest.get("task_id") if isinstance(manifest.get("task_id"), str) else launch.task_id,
+                run_id=(
+                    int(manifest["run_id"])
+                    if isinstance(manifest.get("run_id"), int)
+                    else (
+                        int(manifest["run_id"])
+                        if isinstance(manifest.get("run_id"), str) and str(manifest.get("run_id")).isdigit()
+                        else launch.run_id
+                    )
+                ),
+                capsule_correlation_id=(
+                    str(manifest.get("capsule_correlation_id"))
+                    if manifest.get("capsule_correlation_id")
+                    else launch.capsule_correlation_id
+                ),
             )
         else:
             if action != _ACTION_FRESH:
@@ -2131,8 +2678,29 @@ class TmuxAgentSessionService:
             workdir=workdir_key,
             action=action,
             terminal_run_id=terminal_run_id,
+            generation=getattr(launch, "generation", None) if launch is not None else None,
         )
-        return self._spawn_window(definition, launch=launch)
+        result = self._spawn_window(
+            definition,
+            launch=launch,
+            failure_status="respawn_failed",
+        )
+        if launch is not None:
+            with contextlib.suppress(Exception):
+                self.update_terminal_manifest(
+                    launch.terminal_run_id,
+                    respawned_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    generation=launch.generation,
+                    status="running",
+                )
+            self._log_event(
+                "respawn_completed",
+                session=session,
+                window=window,
+                terminal_run_id=launch.terminal_run_id,
+                generation=launch.generation,
+            )
+        return result
 
     def _kill_window_idempotent(
         self, session: str, window: str, *, pane_id: str | None = None
@@ -2185,10 +2753,21 @@ class TmuxAgentSessionService:
             return
         if not info.dead:
             raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
+        terminal_run_id = None
+        with contextlib.suppress(Exception):
+            terminal_run_id = self._read_window_option(
+                info.session, info.window, _TERMINAL_RUN_ID_OPTION
+            )
         self.cleanup_related_isolated_attaches(info.session, info.window)
         if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
             raise AgentTerminalError(f"failed to kill window {session}:{window}")
-        self._log_event("kill_dead", session=session, window=window)
+        self.mark_terminal_run_ended(terminal_run_id)
+        self._log_event(
+            "kill_dead",
+            session=session,
+            window=window,
+            terminal_run_id=terminal_run_id,
+        )
 
     def terminate_live(
         self, session: str, window: str, *, allow_external: bool = False
@@ -2253,12 +2832,49 @@ class TmuxAgentSessionService:
         if self.window_exists(session, new_name):
             raise CapabilityError(f"window {session}:{new_name} already exists")
         target = self._cmd_target(session, window)
+        terminal_run_id = self._read_window_option(
+            session, window, _TERMINAL_RUN_ID_OPTION
+        )
+        if terminal_run_id:
+            manifest = self.read_terminal_manifest(terminal_run_id)
+            if not isinstance(manifest, dict):
+                raise CapabilityError(
+                    f"rename refused: missing terminal-run manifest for {terminal_run_id}"
+                )
+            if manifest.get("session") != session or manifest.get("window") != window:
+                raise CapabilityError(
+                    "rename refused: terminal-run manifest target mismatch"
+                )
         # Old windows resolved via the name-based fallback have no @hermes_*
         # options yet — set them now so the rename doesn't strand the window
         # without a respawn identity.
         self._run("set-option", "-w", "-t", target, "@hermes_kind", kind)
         self._run("set-option", "-w", "-t", target, "@hermes_workdir", workdir_key)
         self._run("rename-window", "-t", target, new_name)
+        if terminal_run_id:
+            try:
+                updated = self.update_terminal_manifest(
+                    terminal_run_id,
+                    window=new_name,
+                    renamed_at=time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+                    ),
+                )
+                if updated is None:
+                    raise CapabilityError(
+                        f"rename refused: missing terminal-run manifest for {terminal_run_id}"
+                    )
+            except Exception:
+                # Keep tmux + durable identity aligned if the atomic manifest
+                # update cannot be completed.
+                with contextlib.suppress(Exception):
+                    self._run(
+                        "rename-window",
+                        "-t",
+                        self._cmd_target(session, new_name),
+                        window,
+                    )
+                raise
         self._log_event("rename", session=session, window=window, new_window=new_name, kind=kind, workdir=workdir_key)
         return self.show(session, new_name)
 
@@ -2295,6 +2911,12 @@ class TmuxAgentSessionService:
         # Cheap for a single window (two show-options + optional name parse) —
         # same rule as list_windows so show/ensure/respawn payloads stay consistent.
         managed = self.is_managed_window(session_name, window_name)
+        agent_kind = None
+        if managed:
+            with contextlib.suppress(CapabilityError, InvalidTarget):
+                agent_kind, _workdir_key = self.identity_for(
+                    session_name, window_name
+                )
         try:
             correlation = self.execution_correlation_for(
                 session_name, window_name
@@ -2328,6 +2950,7 @@ class TmuxAgentSessionService:
             dead,
             activity,
             managed,
+            agent_kind=agent_kind,
             task_id=correlation["task_id"],
             run_id=correlation["run_id"],
             correlation_id=correlation["correlation_id"],

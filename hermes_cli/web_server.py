@@ -1463,8 +1463,13 @@ class AgentTerminalEnsureRequest(BaseModel):
     workdir: Optional[str] = None
     start_mode: Optional[str] = "free"
     context_profile: Optional[str] = "full"
-    native_session_id: Optional[str] = None
-    capsule_correlation_id: Optional[str] = None
+
+
+class AgentTerminalCreateRequest(AgentTerminalEnsureRequest):
+    """Browser-selectable launch shape; durable identities are server-owned."""
+
+    class Config:
+        extra = "forbid"
 
 
 class AgentTerminalTargetRequest(BaseModel):
@@ -17902,7 +17907,7 @@ async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, ob
 
 
 @app.post("/api/agent-terminals/create")
-async def agent_terminal_create(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
+async def agent_terminal_create(req: AgentTerminalCreateRequest) -> Dict[str, object]:
     try:
         return {
             "window": _agent_terminal_service()
@@ -17911,8 +17916,6 @@ async def agent_terminal_create(req: AgentTerminalEnsureRequest) -> Dict[str, ob
                 req.workdir,
                 start_mode=req.start_mode or "free",
                 context_profile=req.context_profile or "full",
-                native_session_id=req.native_session_id,
-                capsule_correlation_id=req.capsule_correlation_id,
             )
             .to_dict()
         }

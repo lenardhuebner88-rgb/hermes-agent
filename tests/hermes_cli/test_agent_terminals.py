@@ -7,6 +7,7 @@ import stat
 import subprocess
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from collections.abc import Generator
@@ -36,9 +37,11 @@ pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is re
 def reset_workdir_options_cache() -> Generator[None, None, None]:
     agent_terminals._reset_workdir_options_cache()
     agent_terminals._reset_pane_capture_cache()
+    agent_terminals.clear_cli_probe_cache()
     yield
     agent_terminals._reset_workdir_options_cache()
     agent_terminals._reset_pane_capture_cache()
+    agent_terminals.clear_cli_probe_cache()
 
 
 @pytest.fixture
@@ -169,17 +172,18 @@ def test_resolve_workdir_accepts_only_enumerated_dir_keys_and_checks_live_direct
         "group": "projekt",
     }
     monkeypatch.setattr(TmuxAgentSessionService, "workdir_options", staticmethod(lambda: [option]))
+    service = TmuxAgentSessionService(hermes_home=tmp_path / "hermes")
 
-    assert TmuxAgentSessionService.resolve_workdir(f"dir:{allowed}") == (
+    assert service.resolve_workdir(f"dir:{allowed}") == (
         f"dir:{allowed}",
         allowed,
     )
     with pytest.raises(InvalidTarget, match="unknown workdir"):
-        TmuxAgentSessionService.resolve_workdir(f"dir:{unknown}")
+        service.resolve_workdir(f"dir:{unknown}")
 
     allowed.rmdir()
     with pytest.raises(CapabilityError, match="workdir not available"):
-        TmuxAgentSessionService.resolve_workdir(f"dir:{allowed}")
+        service.resolve_workdir(f"dir:{allowed}")
 
 
 def test_static_workdir_keys_and_order_remain_unchanged(
@@ -256,6 +260,94 @@ def test_worktree_enumeration_is_capped_at_fifteen_newest(
     assert [option["path"] for option in worktree_options] == [
         str(path) for path in reversed(paths[2:])
     ]
+
+
+def test_terminal_worktree_group_is_validated_and_independently_capped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path / "hermes")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    terminal_root = repo / ".worktrees" / "terminal"
+    terminal_root.mkdir(parents=True)
+    run_ids = [f"run{index:02d}" for index in range(17)]
+    worktrees: list[Path] = []
+    for index, run_id in enumerate(run_ids):
+        worktree = terminal_root / run_id
+        worktree.mkdir()
+        worktrees.append(worktree)
+        run_dir = service.terminal_runs_root() / run_id
+        run_dir.mkdir(parents=True)
+        manifest = run_dir / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "terminal_run_id": run_id,
+                    "start_mode": "isolated_write",
+                    "worktree_path": str(worktree),
+                    "worktree_branch": f"terminal/{run_id}",
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest.chmod(0o600)
+        os.utime(run_dir, (index, index))
+
+    invalid_dir = service.terminal_runs_root() / "invalid01"
+    invalid_dir.mkdir()
+    invalid_manifest = invalid_dir / "manifest.json"
+    invalid_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 999,
+                "terminal_run_id": "invalid01",
+                "start_mode": "isolated_write",
+                "worktree_path": str(worktrees[-1]),
+            }
+        ),
+        encoding="utf-8",
+    )
+    invalid_manifest.chmod(0o600)
+    os.utime(invalid_dir, (100, 100))
+
+    porcelain = (
+        f"worktree {repo}\nHEAD {'a' * 40}\nbranch refs/heads/main\n\n"
+        + "".join(
+            f"worktree {path}\nHEAD {'b' * 40}\nbranch refs/heads/terminal/{path.name}\n\n"
+            for path in worktrees
+        )
+    )
+
+    def fake_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "-C", str(repo), "worktree", "list", "--porcelain"]:
+            return subprocess.CompletedProcess(
+                args, 0, stdout=porcelain, stderr=""
+            )
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="not a repo")
+
+    monkeypatch.setattr(agent_terminals, "_run_git", fake_git)
+    normal = [
+        {
+            "key": f"dir:/normal/{index}",
+            "label": f"normal-{index}",
+            "path": f"/normal/{index}",
+            "group": "worktree",
+        }
+        for index in range(15)
+    ]
+    monkeypatch.setattr(service, "workdir_options", lambda: list(normal))
+
+    options = service.workdir_options_with_terminal()
+    terminal_options = [
+        option for option in options if option["group"] == "terminal_worktree"
+    ]
+    assert len([option for option in options if option["group"] == "worktree"]) == 15
+    assert len(terminal_options) == 15
+    assert [option["terminal_run_id"] for option in terminal_options] == list(
+        reversed(run_ids[2:])
+    )
+    assert all(option["terminal_run_id"] != "invalid01" for option in terminal_options)
 
 
 def test_broken_or_transient_hermes_binary_reports_capability_state(tmp_path: Path) -> None:
@@ -389,7 +481,28 @@ def test_ensure_existing_window_does_not_overwrite_process(tmp_path: Path, tmux_
 def _fake_agent_cli(home: Path, name: str) -> Path:
     path = home / ".local" / "bin" / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"#!/bin/sh\nprintf 'fake {name} cli\\n'\nsleep 60\n", encoding="utf-8")
+    version_line = {
+        "claude": "2.1.217 (Claude Code)",
+        "codex": "codex-cli 0.144.6",
+        "grok": "grok 0.2.106 (fake) [stable]",
+        "qwen": "0.20.0",
+        "kimi": "0.28.1",
+    }.get(name, "0.0.0")
+    help_text = {
+        "claude": "  -r, --resume [value]\\n  --fork-session",
+        "codex": "  resume          Resume a previous session\\n  fork            Fork a previous session",
+        "grok": "  -r, --resume [<SESSION_ID>]\\n      --fork-session",
+        "qwen": "  -r, --resume              Resume a specific session",
+        "kimi": "  fresh only",
+    }.get(name, "")
+    path.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "--version" ]; then printf "%s\\n" "{version_line}"; exit 0; fi\n'
+        f'if [ "$1" = "--help" ]; then printf "%b\\n" "{help_text}"; exit 0; fi\n'
+        f"printf 'fake {name} cli\\n'\n"
+        "sleep 60\n",
+        encoding="utf-8",
+    )
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
     return path
 
@@ -432,16 +545,27 @@ def test_grok_uses_subscription_cli_and_grok_build_model(
     monkeypatch.setattr(shutil, "which", lambda name: None)
     grok = home / ".npm-global" / "bin" / "grok"
     grok.parent.mkdir(parents=True)
-    grok.write_text("#!/bin/sh\nprintf 'fake grok args: %s\\n' \"$*\"\nsleep 60\n", encoding="utf-8")
+    grok.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "grok 0.2.106 (fake)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [<SESSION_ID>]\\n  --fork-session\\n  -s, --session-id <SESSION_ID>\\n"; exit 0; fi\n'
+        "printf 'fake grok args: %s\\n' \"$*\"\n"
+        "sleep 60\n",
+        encoding="utf-8",
+    )
     grok.chmod(grok.stat().st_mode | stat.S_IXUSR)
 
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     definition = service.definition_for("grok")
 
-    assert definition.argv == (str(grok.resolve()), "--model", "grok-4.5")
+    assert definition.argv[:3] == (str(grok.resolve()), "--model", "grok-4.5")
+    assert definition.argv[3] == "--session-id"
+    uuid.UUID(definition.argv[4])
     created = service.ensure("grok")
     assert created.window == "grok"
-    assert "fake grok args: --model grok-4.5" in service.capture("work", "grok")
+    assert "fake grok args: --model grok-4.5 --session-id" in service.capture(
+        "work", "grok"
+    )
     assert service.identity_for("work", "grok") == ("grok", "home")
     assert service.capabilities().to_dict()["agents"]["grok"]["available"] is True
 
@@ -453,7 +577,14 @@ def test_qwen_uses_qwen_code_cli(
     monkeypatch.setattr(shutil, "which", lambda name: None)
     qwen = home / ".npm-global" / "bin" / "qwen"
     qwen.parent.mkdir(parents=True)
-    qwen.write_text("#!/bin/sh\nprintf 'fake qwen args: %s\\n' \"$*\"\nsleep 60\n", encoding="utf-8")
+    qwen.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "0.20.0"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume Resume\\n"; exit 0; fi\n'
+        "printf 'fake qwen args: %s\\n' \"$*\"\n"
+        "sleep 60\n",
+        encoding="utf-8",
+    )
     qwen.chmod(qwen.stat().st_mode | stat.S_IXUSR)
 
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
@@ -645,7 +776,9 @@ def test_list_windows_managed_flag_true_for_spawned_false_for_foreign(
 
     spawned = service.ensure("claude")
     assert spawned.managed is True
+    assert spawned.agent_kind == "claude"
     assert spawned.to_dict()["managed"] is True
+    assert spawned.to_dict()["agent_kind"] == "claude"
 
     # Non-parseable name in the work session (same pattern as terminate guard tests).
     service._run("new-window", "-d", "-t", "work:", "-n", "scratch-thing", "sleep 60")
@@ -1176,6 +1309,67 @@ def test_kill_dead_kills_when_pane_dead_flag_set_even_with_pid_present(
     assert not service.window_exists("work", "claude")
 
 
+def test_kill_dead_marks_terminal_manifest_ended(
+    tmp_path: Path,
+    tmux_service: TmuxAgentSessionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(
+        socket_path=tmux_service.socket_path, hermes_home=tmp_path
+    )
+    created = service.ensure("claude")
+    terminal_run_id = service._read_window_option(
+        "work", created.window, "@hermes_terminal_run_id"
+    )
+    assert terminal_run_id
+
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("send-keys", "-t", created.pane_id, "C-c")
+    time.sleep(0.3)
+    assert service.show("work", created.window).dead
+    service.kill_dead("work", created.window)
+
+    manifest = service.read_terminal_manifest(terminal_run_id)
+    assert manifest is not None
+    assert manifest["status"] == "ended"
+    assert isinstance(manifest.get("ended_at"), str)
+
+
+def test_kill_dead_surfaces_manifest_lifecycle_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path)
+    dead = TmuxWindow(
+        "work",
+        "claude",
+        True,
+        "%7",
+        None,
+        "sh",
+        dead=True,
+        managed=True,
+        agent_kind="claude",
+    )
+    monkeypatch.setattr(service, "_show_if_present", lambda *_args: dead)
+    monkeypatch.setattr(
+        service,
+        "_read_window_option",
+        lambda *_args: "run-manifest-failure",
+    )
+    monkeypatch.setattr(service, "cleanup_related_isolated_attaches", lambda *_args: [])
+    monkeypatch.setattr(service, "_kill_window_idempotent", lambda *_args, **_kwargs: True)
+
+    def fail_update(_terminal_run_id: str, **_fields: object) -> dict[str, object]:
+        raise OSError("injected manifest write failure")
+
+    monkeypatch.setattr(service, "update_terminal_manifest", fail_update)
+    with pytest.raises(OSError, match="injected manifest write failure"):
+        service.kill_dead("work", "claude")
+
+
 def test_spawn_sets_hermes_kind_and_workdir_window_options(
     tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1433,14 +1627,30 @@ def test_rename_happy_path_returns_window_with_new_name(
     monkeypatch.setattr(shutil, "which", lambda name: None)
     _fake_agent_cli(home, "claude")
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
-    service.ensure("claude")
+    created = service.ensure("claude")
+    terminal_run_id = service._read_window_option(
+        "work", created.window, "@hermes_terminal_run_id"
+    )
+    assert terminal_run_id
 
     renamed = service.rename("work", "claude", "my-claude")
     assert renamed.session == "work"
     assert renamed.window == "my-claude"
+    assert renamed.agent_kind == "claude"
     assert service.window_exists("work", "my-claude")
     assert not service.window_exists("work", "claude")
     assert service.identity_for("work", "my-claude") == ("claude", "home")
+    manifest = service.read_terminal_manifest(terminal_run_id)
+    assert manifest is not None
+    assert manifest["window"] == "my-claude"
+
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("send-keys", "-t", renamed.pane_id, "C-c")
+    time.sleep(0.3)
+    assert service.show("work", "my-claude").dead
+    respawned = service.respawn_dead("work", "my-claude", action="fresh")
+    assert respawned.window == "my-claude"
+    assert not respawned.dead
 
 
 def test_rename_rejects_collision_with_existing_window(
@@ -1912,11 +2122,33 @@ def test_ensure_session_options_swallows_failure_for_missing_session(
 
 
 def test_build_agent_argv_closed_matrix_exact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    service = TmuxAgentSessionService(hermes_home=tmp_path)
-    binary = tmp_path / "fake-codex"
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
+    from hermes_cli import agent_terminals as at
 
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    claude.chmod(0o755)
+    grok = tmp_path / "grok"
+    grok.write_text("#!/bin/sh\n", encoding="utf-8")
+    grok.chmod(0o755)
+    qwen = tmp_path / "qwen"
+    qwen.write_text("#!/bin/sh\n", encoding="utf-8")
+    qwen.chmod(0o755)
+    # Seed probe allowlist so Resume/Fork stay available without live CLIs.
+    for kind, path, actions in (
+        ("codex", binary, {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False}),
+        ("claude", claude, {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False}),
+        ("grok", grok, {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False}),
+        ("qwen", qwen, {"fresh": True, "resume": True, "fork": False, "lean": False, "compact": False}),
+    ):
+        at.seed_cli_probe_cache(kind, path, actions)
+
+    service = at.TmuxAgentSessionService(hermes_home=tmp_path / "hh")
     assert service.build_agent_argv("codex", binary=binary, action="fresh") == (str(binary),)
     assert service.build_agent_argv(
         "codex", binary=binary, action="resume", native_session_id="sess-1"
@@ -1924,21 +2156,16 @@ def test_build_agent_argv_closed_matrix_exact(tmp_path: Path, monkeypatch: pytes
     assert service.build_agent_argv(
         "codex", binary=binary, action="fork", native_session_id="sess-1"
     ) == (str(binary), "fork", "sess-1")
-
-    claude = tmp_path / "fake-claude"
-    claude.write_text("#!/bin/sh\n")
-    claude.chmod(0o755)
-    assert service.build_agent_argv("claude", binary=claude, action="resume") == (str(claude), "--continue")
+    assert service.build_agent_argv("claude", binary=claude, action="fresh") == (str(claude),)
+    # No global --continue fallback when native_session_id is missing.
+    with pytest.raises(at.CapabilityError):
+        service.build_agent_argv("claude", binary=claude, action="resume")
     assert service.build_agent_argv(
         "claude", binary=claude, action="resume", native_session_id="sess-c"
     ) == (str(claude), "--resume", "sess-c")
     assert service.build_agent_argv(
         "claude", binary=claude, action="fork", native_session_id="sess-c"
     ) == (str(claude), "--resume", "sess-c", "--fork-session")
-
-    grok = tmp_path / "fake-grok"
-    grok.write_text("#!/bin/sh\n")
-    grok.chmod(0o755)
     assert service.build_agent_argv("grok", binary=grok, action="fresh") == (
         str(grok),
         "--model",
@@ -1947,43 +2174,54 @@ def test_build_agent_argv_closed_matrix_exact(tmp_path: Path, monkeypatch: pytes
     assert service.build_agent_argv(
         "grok", binary=grok, action="fork", native_session_id="g1"
     ) == (str(grok), "--model", "grok-4.5", "--resume", "g1", "--fork-session")
-
-    qwen = tmp_path / "fake-qwen"
-    qwen.write_text("#!/bin/sh\n")
-    qwen.chmod(0o755)
-    assert service.build_agent_argv("qwen", binary=qwen, action="resume") == (
-        str(qwen),
-        "--continue",
-    )
-
-    with pytest.raises(CapabilityError):
+    with pytest.raises(at.CapabilityError):
+        service.build_agent_argv("qwen", binary=qwen, action="resume")
+    assert service.build_agent_argv(
+        "qwen", binary=qwen, action="resume", native_session_id="q1"
+    ) == (str(qwen), "--resume", "q1")
+    with pytest.raises(at.CapabilityError):
         service.build_agent_argv("kimi", binary=binary, action="resume")
-    with pytest.raises(CapabilityError):
+    with pytest.raises(at.CapabilityError):
         service.build_agent_argv("claude", binary=claude, action="fork")
-    with pytest.raises(CapabilityError):
+    with pytest.raises(at.CapabilityError):
         service.build_agent_argv("codex", binary=binary, action="fork")
-    with pytest.raises(CapabilityError):
+    with pytest.raises(at.CapabilityError):
         service.build_agent_argv("qwen", binary=qwen, action="fork")
-    with pytest.raises(CapabilityError):
+    with pytest.raises(at.CapabilityError):
         service.build_agent_argv("codex", binary=binary, context_profile="lean")
 
 
 def test_build_agent_argv_lean_requires_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    service = TmuxAgentSessionService(hermes_home=tmp_path)
-    binary = tmp_path / "fake-codex"
-    binary.write_text("#!/bin/sh\n")
-    binary.chmod(0o755)
+    from hermes_cli import agent_terminals as at
+    from hermes_cli import config as hermes_config
 
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    at.seed_cli_probe_cache(
+        "codex",
+        binary,
+        {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False},
+    )
+    service = at.TmuxAgentSessionService(hermes_home=tmp_path / "hh")
     monkeypatch.setattr(
-        service,
-        "_lean_context_allowlist",
-        lambda: {"codex"},
+        hermes_config,
+        "load_config",
+        lambda: {
+            "agent_terminals": {
+                "lean_context_profiles": {
+                    "codex": "operator-lean",
+                    "claude": "must-stay-disabled",
+                }
+            }
+        },
     )
     assert service.build_agent_argv("codex", binary=binary, context_profile="lean") == (
         str(binary),
-        "--profile",
-        "lean",
+        "-p",
+        "operator-lean",
     )
+    assert hermes_config.DEFAULT_CONFIG["agent_terminals"]["lean_context_profiles"] == {}
 
 
 def test_write_terminal_manifest_free_mode_null_worktree(tmp_path: Path) -> None:
@@ -2010,8 +2248,22 @@ def test_write_terminal_manifest_free_mode_null_worktree(tmp_path: Path) -> None
 
 
 def test_capabilities_include_closed_actions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hermes_cli import agent_terminals as at
+
     service = TmuxAgentSessionService(hermes_home=tmp_path)
-    monkeypatch.setattr(service, "resolve_agent_binary", lambda kind: tmp_path / kind)
+    bins = {}
+    for kind in ("claude", "codex", "grok", "qwen", "kimi", "hermes"):
+        p = tmp_path / kind
+        p.write_text("#!/bin/sh\n", encoding="utf-8")
+        p.chmod(0o755)
+        bins[kind] = p
+    at.seed_cli_probe_cache("claude", bins["claude"], {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False})
+    at.seed_cli_probe_cache("codex", bins["codex"], {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False})
+    at.seed_cli_probe_cache("grok", bins["grok"], {"fresh": True, "resume": True, "fork": True, "lean": False, "compact": False})
+    at.seed_cli_probe_cache("qwen", bins["qwen"], {"fresh": True, "resume": True, "fork": False, "lean": False, "compact": False})
+    at.seed_cli_probe_cache("kimi", bins["kimi"], {"fresh": True, "resume": False, "fork": False, "lean": False, "compact": False})
+    at.seed_cli_probe_cache("hermes", bins["hermes"], {"fresh": True, "resume": False, "fork": False, "lean": False, "compact": False})
+    monkeypatch.setattr(service, "resolve_agent_binary", lambda kind: bins[kind])
     monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/tmux")
     caps = service.capabilities().to_dict()
     agents = caps["agents"]
@@ -2035,8 +2287,24 @@ def _argv_logging_cli(home: Path, name: str) -> tuple[Path, Path]:
     log = home / f"{name}-argv.log"
     if log.exists():
         log.unlink()
+    version_line = {
+        "claude": "2.1.217 (Claude Code)",
+        "codex": "codex-cli 0.144.6",
+        "grok": "grok 0.2.106 (fake) [stable]",
+        "qwen": "0.20.0",
+        "kimi": "0.28.1",
+    }.get(name, "0.0.0")
+    help_text = {
+        "claude": "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
+        "codex": "  resume          Resume a previous session\\n  fork            Fork a previous session",
+        "grok": "  -r, --resume [<SESSION_ID>]\\n      --fork-session\\n  -s, --session-id <SESSION_ID>",
+        "qwen": "  -r, --resume              Resume a specific session",
+        "kimi": "  fresh only",
+    }.get(name, "")
     path.write_text(
         "#!/usr/bin/env bash\n"
+        f'if [[ "$1" == "--version" ]]; then printf "%s\\n" "{version_line}"; exit 0; fi\n'
+        f'if [[ "$1" == "--help" ]]; then printf "%b\\n" "{help_text}"; exit 0; fi\n'
         f'printf "%s\\n" "$0" "$@" >> "{log}"\n'
         f"printf 'fake {name} ready\\n'\n"
         "sleep 60\n",
@@ -2247,6 +2515,7 @@ def test_isolated_write_temp_git_e2e_preserves_dirty_and_ahead_on_terminate_and_
             "KANBAN_DB_PATH": str(tmp_path / "missing-kanban.db"),
             "HERMES_HOME": str(tmp_path),
             "MIN_AGE_HOURS": "0",
+            "TERMINAL_PRUNE_MIN_AGE_SECONDS": "0",
         }
     )
     result = subprocess.run(
@@ -2261,3 +2530,317 @@ def test_isolated_write_temp_git_e2e_preserves_dirty_and_ahead_on_terminate_and_
     assert "kept" in result.stdout
     assert (wt / "untracked-note.txt").exists()
     assert (wt / "tracked.txt").read_text(encoding="utf-8") == "dirty-ahead\n"
+
+
+def test_isolated_write_spawn_failure_keeps_owned_worktree(
+    tmp_path: Path,
+    tmux_service: TmuxAgentSessionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed tmux spawn leaves one identified, recoverable worktree."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=repo, check=True
+    )
+    (repo / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    service = TmuxAgentSessionService(
+        socket_path=tmux_service.socket_path, hermes_home=tmp_path
+    )
+    monkeypatch.setattr(
+        service, "resolve_workdir", lambda workdir=None: ("home", repo)
+    )
+    definition, launch = service.definition_and_launch(
+        "claude", "home", start_mode="isolated_write"
+    )
+    worktree = Path(str(launch.worktree_path))
+    prepared = service.read_terminal_manifest(launch.terminal_run_id)
+    assert prepared is not None
+    assert prepared["status"] == "prepared"
+    assert prepared["worktree_path"] == str(worktree)
+    assert worktree.is_dir()
+    assert service._manifest_path(launch.terminal_run_id).stat().st_mode & 0o777 == 0o600
+
+    real_run = service._run
+
+    def fail_new_window(*args: str, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args and args[0] == "new-window":
+            raise AgentTerminalError("injected new-window failure")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_run", fail_new_window)
+    with pytest.raises(AgentTerminalError, match="injected new-window failure"):
+        service._spawn_window(definition, launch)
+
+    failed = service.read_terminal_manifest(launch.terminal_run_id)
+    assert failed is not None
+    assert failed["status"] == "spawn_failed"
+    assert failed["terminal_run_id"] == launch.terminal_run_id
+    assert failed["worktree_path"] == str(worktree)
+    assert worktree.is_dir()
+    assert not service.window_exists("work", definition.window)
+
+
+def test_isolated_write_validates_binary_before_worktree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    service = TmuxAgentSessionService(hermes_home=tmp_path / "hermes-home")
+    monkeypatch.setattr(
+        service, "resolve_workdir", lambda workdir=None: ("home", repo)
+    )
+
+    def unavailable(_kind: str) -> Path:
+        raise CapabilityError("injected unavailable CLI")
+
+    monkeypatch.setattr(service, "resolve_agent_binary", unavailable)
+    with pytest.raises(CapabilityError, match="injected unavailable CLI"):
+        service.definition_and_launch(
+            "claude", "home", start_mode="isolated_write"
+        )
+    assert not (repo / ".worktrees" / "terminal").exists()
+    assert not service.terminal_runs_root().exists()
+
+
+def test_cli_probe_fail_closed_unknown_version_and_missing_help(tmp_path: Path) -> None:
+    from hermes_cli import agent_terminals as at
+
+    at.clear_cli_probe_cache()
+    good = tmp_path / "claude-good"
+    good.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>\\n"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    good.chmod(0o755)
+    unknown = tmp_path / "claude-unknown"
+    unknown.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "2.1.218 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n  --fork-session\\n"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    unknown.chmod(0o755)
+    no_fork = tmp_path / "claude-nofork"
+    no_fork.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n"; exit 0; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    no_fork.chmod(0o755)
+
+    good_actions = at.probe_agent_cli_actions("claude", good)
+    assert good_actions["fresh"] is True
+    assert good_actions["resume"] is True
+    assert good_actions["fork"] is True
+    assert good_actions["session_id"] is True
+    assert good_actions["lean"] is False
+    assert good_actions["compact"] is False
+
+    unknown_actions = at.probe_agent_cli_actions("claude", unknown)
+    assert unknown_actions["fresh"] is False
+    assert unknown_actions["resume"] is False
+    assert unknown_actions["fork"] is False
+    service = at.TmuxAgentSessionService(hermes_home=tmp_path / "hermes")
+    with pytest.raises(at.CapabilityError, match="fresh start is not available"):
+        service.build_agent_argv("claude", binary=unknown, action="fresh")
+
+    no_fork_actions = at.probe_agent_cli_actions("claude", no_fork)
+    assert no_fork_actions["fresh"] is True
+    assert no_fork_actions["resume"] is True
+    assert no_fork_actions["fork"] is False
+
+    # Cache entries are adapter-specific even when two kinds resolve to the
+    # exact same executable path.
+    codex_on_claude_binary = at.probe_agent_cli_actions("codex", good)
+    assert codex_on_claude_binary["fresh"] is False
+    assert codex_on_claude_binary["resume"] is False
+    assert codex_on_claude_binary["fork"] is False
+
+
+def test_resolve_workdir_rejects_non_manifest_terminal_path(tmp_path: Path) -> None:
+    service = TmuxAgentSessionService(hermes_home=tmp_path / "hh")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    adversarial = repo / ".worktrees" / "terminal" / "evilpath"
+    adversarial.mkdir(parents=True)
+    with pytest.raises(InvalidTarget):
+        service.resolve_workdir(f"dir:{adversarial}")
+
+
+def test_respawn_dead_manifest_mismatch_refuses_before_kill(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-10: mismatch vs 0600 manifest refuses before kill."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _argv_logging_cli(home, "claude")
+    service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
+    definition, launch = service.definition_and_launch("claude", "home", action="fresh")
+    definition = AgentWindowDefinition(
+        kind=definition.kind,
+        session=definition.session,
+        window="claude-mm",
+        argv=definition.argv,
+        cwd=definition.cwd,
+        env=definition.env,
+        workdir_key=definition.workdir_key,
+    )
+    win = service._spawn_window(definition, launch)
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    service._run("send-keys", "-t", win.pane_id, "C-c")
+    time.sleep(0.3)
+    assert service.show("work", "claude-mm").dead
+    service.update_terminal_manifest(launch.terminal_run_id, agent_kind="codex")
+    before = service.read_terminal_manifest(launch.terminal_run_id)
+    assert before is not None
+    with pytest.raises(CapabilityError, match="mismatch|refused"):
+        service.respawn_dead("work", "claude-mm", action="fresh")
+    assert service.window_exists("work", "claude-mm")
+    after = service.read_terminal_manifest(launch.terminal_run_id)
+    assert after is not None
+    assert int(after.get("generation") or 1) == int(before.get("generation") or 1)
+
+
+def test_respawn_dead_free_and_isolated_increment_generation(
+    tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-10: dead Free/Isolated keep identity and one incremented generation."""
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _argv_logging_cli(home, "claude")
+    hermes_home = tmp_path / "profiles" / "coder"
+    hermes_home.mkdir(parents=True)
+    env_home = tmp_path / "live-sentinel-should-not-be-used"
+    env_home.mkdir()
+    sentinel = env_home / "KEEP"
+    sentinel.write_text("live\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(env_home))
+    import hermes_constants
+
+    context_home = tmp_path / "context-override"
+    token = hermes_constants.set_hermes_home_override(context_home)
+    try:
+        service = TmuxAgentSessionService(
+            socket_path=tmux_service.socket_path,
+            hermes_home=hermes_home,
+        )
+        assert service.hermes_home == hermes_home
+        assert service.terminal_runs_root() == tmp_path / "terminal-runs"
+    finally:
+        hermes_constants.reset_hermes_home_override(token)
+
+    definition, launch = service.definition_and_launch("claude", "home", action="fresh")
+    assert launch.native_session_id is not None
+    free_native_before = launch.native_session_id
+    free_window = "claude-free-r"
+    definition = AgentWindowDefinition(
+        kind=definition.kind,
+        session=definition.session,
+        window=free_window,
+        argv=definition.argv,
+        cwd=definition.cwd,
+        env=definition.env,
+        workdir_key=definition.workdir_key,
+    )
+    win = service._spawn_window(definition, launch)
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    free_run = launch.terminal_run_id
+    service._run("send-keys", "-t", win.pane_id, "C-c")
+    time.sleep(0.3)
+    assert service.show("work", free_window).dead
+    m0 = service.read_terminal_manifest(free_run)
+    assert m0 is not None
+    assert int(m0.get("generation") or 1) == 1
+    service.respawn_dead("work", free_window, action="fresh")
+    m1 = service.read_terminal_manifest(free_run)
+    assert m1 is not None
+    assert m1["terminal_run_id"] == free_run
+    assert int(m1["generation"]) == 2
+    assert m1["start_mode"] == "free"
+    assert m1["native_session_id"] != free_native_before
+    assert isinstance(m1["native_session_id"], str)
+    assert m1.get("worktree_path") is None
+    assert (tmp_path / "terminal-runs" / free_run / "manifest.json").is_file()
+    assert not (env_home / "terminal-runs" / free_run / "manifest.json").exists()
+    assert not (context_home / "terminal-runs" / free_run / "manifest.json").exists()
+    assert sentinel.read_text(encoding="utf-8") == "live\n"
+
+    repo = tmp_path / "iso-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+    (repo / "README").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setattr(service, "resolve_workdir", lambda workdir=None: ("home", repo))
+    definition, launch = service.definition_and_launch(
+        "claude", "home", action="fresh", start_mode="isolated_write"
+    )
+    assert launch.native_session_id is not None
+    iso_native_before = launch.native_session_id
+    iso_window = "claude-iso-r"
+    definition = AgentWindowDefinition(
+        kind=definition.kind,
+        session=definition.session,
+        window=iso_window,
+        argv=definition.argv,
+        cwd=definition.cwd,
+        env=definition.env,
+        workdir_key=definition.workdir_key,
+    )
+    win = service._spawn_window(definition, launch)
+    iso_run = launch.terminal_run_id
+    assert launch.worktree_path is not None
+    service._run("send-keys", "-t", win.pane_id, "C-c")
+    time.sleep(0.3)
+    assert service.show("work", iso_window).dead
+    m0 = service.read_terminal_manifest(iso_run)
+    assert m0 is not None
+    assert m0["start_mode"] == "isolated_write"
+    assert Path(str(m0["worktree_path"])).is_dir()
+    service.respawn_dead("work", iso_window, action="fresh")
+    m1 = service.read_terminal_manifest(iso_run)
+    assert m1 is not None
+    assert m1["terminal_run_id"] == iso_run
+    assert int(m1["generation"]) == 2
+    assert m1["worktree_path"] == m0["worktree_path"]
+    assert m1["native_session_id"] != iso_native_before
+    assert isinstance(m1["native_session_id"], str)
+    assert Path(str(m1["worktree_path"])).is_dir()

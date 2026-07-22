@@ -150,6 +150,23 @@ const capability: AgentTerminalCapabilityState = {
   hermes_tui_available: true,
   hermes_binary: "/usr/bin/hermes",
   reason: null,
+  agents: Object.fromEntries(
+    ["hermes", "claude", "codex", "kimi", "grok", "qwen"].map((kind) => [
+      kind,
+      {
+        available: true,
+        binary: `/usr/bin/${kind}`,
+        reason: null,
+        actions: {
+          fresh: true,
+          resume: kind === "claude" || kind === "codex" || kind === "grok" || kind === "qwen",
+          fork: kind === "claude" || kind === "codex" || kind === "grok",
+          lean: false,
+          compact: false,
+        },
+      },
+    ]),
+  ),
 };
 
 const windows: AgentTerminalWindow[] = [
@@ -699,10 +716,86 @@ describe("AgentTerminalsView desktop rendering", () => {
     });
     await renderView();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Neu starten hermes-agents:claude" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Fresh neu starten hermes-agents:claude" }));
     await waitFor(() =>
       expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("hermes-agents", "claude", "fresh"),
     );
+  });
+
+  it("offers Resume/Fork only for a capability-backed stamped native session", async () => {
+    const nativeDead = {
+      ...windows[2],
+      session: "work",
+      window: "renamed-worker",
+      managed: true,
+      agent_kind: "claude",
+      terminal_run_id: "terminal-run-1",
+      native_session_id: "34b8d5e6-d05d-45fb-8206-88a7cbd11f4c",
+    } as AgentTerminalWindow;
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        claude: {
+          available: true,
+          binary: "/usr/bin/claude",
+          reason: null,
+          actions: { fresh: true, resume: true, fork: true, lean: false, compact: false },
+        },
+      },
+    });
+    apiMock.getAgentTerminalWindows.mockResolvedValue({ windows: [nativeDead] });
+    apiMock.respawnAgentTerminalWindow.mockResolvedValue({ window: nativeDead });
+
+    await renderView();
+
+    fireEvent.click(await screen.findByTestId("respawn-resume-work:renamed-worker"));
+    await waitFor(() =>
+      expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("work", "renamed-worker", "resume"),
+    );
+    fireEvent.click(await screen.findByTestId("respawn-fork-work:renamed-worker"));
+    await waitFor(() =>
+      expect(apiMock.respawnAgentTerminalWindow).toHaveBeenCalledWith("work", "renamed-worker", "fork"),
+    );
+  });
+
+  it("keeps Resume/Fork absent when the dead window has no native session id", async () => {
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        claude: {
+          available: true,
+          binary: "/usr/bin/claude",
+          reason: null,
+          actions: { fresh: true, resume: true, fork: true, lean: false, compact: false },
+        },
+      },
+    });
+
+    await renderView();
+
+    expect(screen.queryByTestId("respawn-resume-hermes-agents:claude")).toBeNull();
+    expect(screen.queryByTestId("respawn-fork-hermes-agents:claude")).toBeNull();
+    expect(await screen.findByTestId("respawn-fresh-hermes-agents:claude")).toBeTruthy();
+  });
+
+  it("keeps all respawn actions absent when the adapter is unavailable", async () => {
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        claude: {
+          available: false,
+          binary: null,
+          reason: "CLI probe mismatch",
+          actions: { fresh: true, resume: true, fork: true, lean: false, compact: false },
+        },
+      },
+    });
+
+    await renderView();
+
+    expect(screen.queryByTestId("respawn-fresh-hermes-agents:claude")).toBeNull();
+    expect(screen.queryByTestId("respawn-resume-hermes-agents:claude")).toBeNull();
+    expect(screen.queryByTestId("respawn-fork-hermes-agents:claude")).toBeNull();
   });
 
   // window.confirm() blocks the whole renderer thread; against a live tmux the
@@ -992,7 +1085,7 @@ describe("AgentTerminalsView desktop rendering", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Fenster schließen work:scratch-thing" })).toBeTruthy();
     });
-    expect(screen.queryByRole("button", { name: "Neu starten work:scratch-thing" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fresh neu starten work:scratch-thing" })).toBeNull();
     expect(apiMock.respawnAgentTerminalWindow).not.toHaveBeenCalled();
   });
 
@@ -1220,6 +1313,25 @@ describe("AgentTerminalsView desktop rendering", () => {
     const kimiButton = screen.getByRole("button", { name: /Kimi/ });
     expect(kimiButton.textContent).toContain("CLI fehlt");
     expect(kimiButton.querySelector(".text-status-warn")).toBeTruthy();
+  });
+
+  it("disables Fresh create when the installed adapter probe is not allowed", async () => {
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        hermes: {
+          available: true,
+          binary: "/usr/bin/hermes",
+          reason: null,
+          actions: { fresh: false, resume: false, fork: false, lean: false, compact: false },
+        },
+      },
+    });
+    await renderView();
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+
+    expect((screen.getByRole("button", { name: "Session starten" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/installierte CLI-Version oder Hilfe/)).toBeTruthy();
   });
 
   it("opens the create-session modal and resets a disappeared worktree localStorage key to home after capability load", async () => {
@@ -1569,6 +1681,27 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Terminal-Ansicht" }));
     expect(screen.queryByText("Zustände: Heuristik aus Terminal-Ausgabe")).toBeNull();
+  });
+
+  it("hides fleet Fresh respawn when the dead adapter capability is unavailable", async () => {
+    installDom(true);
+    apiMock.getAgentTerminalCapabilities.mockResolvedValue({
+      ...capability,
+      agents: {
+        claude: {
+          available: false,
+          binary: null,
+          reason: "CLI probe mismatch",
+          actions: { fresh: false, resume: false, fork: false, lean: false, compact: false },
+        },
+      },
+    });
+    await renderView();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Flotten-Übersicht" }));
+    await screen.findByText("Tot");
+    expect(screen.queryByRole("button", { name: "Respawn" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Entfernen" })).toBeTruthy();
   });
 
   it("jumps back into the terminal view when a fleet card is tapped outside broadcast mode", async () => {

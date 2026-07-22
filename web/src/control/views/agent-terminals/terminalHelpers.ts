@@ -158,14 +158,11 @@ export function isDeadWindow(window: AgentTerminalWindow): boolean {
 /**
  * Whether the UI may offer terminate (close) for this window.
  *
- * Backend additive field (`managed` on TmuxWindow.to_dict). api.ts is claimed
- * by a parallel session, so we read the optional field via a safe cast rather
- * than extending the shared type. Absent / non-false → treated as managed
- * (legacy payloads keep the close affordance).
+ * Backend additive field (`managed` on TmuxWindow.to_dict). Absent / non-false
+ * remains managed for legacy payloads so their close affordance stays intact.
  */
 export function isManagedWindow(window: AgentTerminalWindow): boolean {
-  const managed = (window as { managed?: unknown }).managed;
-  return managed !== false;
+  return window.managed !== false;
 }
 
 export function pickInitialTarget(
@@ -300,6 +297,8 @@ export function orderOverviewForFleet(entries: AgentTerminalOverviewWindow[]): A
 }
 
 export function kindFromWindow(window: AgentTerminalWindow | null, fallback: AgentTerminalKind): AgentTerminalKind {
+  const stamped = window?.agent_kind;
+  if (stamped && AGENT_KINDS.has(stamped)) return stamped;
   // Suffix-Fenster (claude-fo, hermes-agent, …) gehören zum Basis-Kind.
   const base = (window?.window ?? "").split("-")[0] as AgentTerminalKind;
   return AGENT_KINDS.has(base) ? base : fallback;

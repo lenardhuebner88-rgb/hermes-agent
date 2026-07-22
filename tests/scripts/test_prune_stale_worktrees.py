@@ -398,6 +398,7 @@ def _write_terminal_manifest(
     worktree: Path | None,
     status: str = "ended",
     start_mode: str = "isolated_write",
+    age_seconds: int = 8 * 24 * 3600,
 ) -> Path:
     import json
     import time
@@ -410,11 +411,19 @@ def _write_terminal_manifest(
         "terminal_run_id": run_id,
         "start_mode": start_mode,
         "status": status,
+        # worktree_path is intentionally untrusted by the pruner; still stamp it
+        # so adversarial values can be regression-tested.
         "worktree_path": str(worktree) if worktree is not None else None,
-        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600)),
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 7200)),
+        "ended_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_seconds)
+        ),
+        "created_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(time.time() - age_seconds - 3600),
+        ),
     }
     path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -433,7 +442,8 @@ def test_pruner_terminal_isolated_write_removes_clean_ended_aged(tmp_path: Path)
     result = _prune(repo, db_path, hermes_home=hermes_home)
 
     assert not worktree.exists()
-    assert f"removed(terminal): {worktree}" in result.stdout or f"removed(terminal-path): {worktree}" in result.stdout
+    assert f"removed(terminal): {worktree}" in result.stdout
+    assert "removed(terminal-path)" not in result.stdout
 
 
 def test_pruner_terminal_free_manifest_has_no_cleanup_path(tmp_path: Path) -> None:
@@ -477,3 +487,89 @@ def test_pruner_terminal_keeps_dirty(tmp_path: Path) -> None:
 
     assert worktree.exists()
     assert f"kept(dirty): {worktree}" in result.stdout
+
+
+def test_pruner_terminal_adversarial_worktree_path_cannot_remove_normal_checkout(
+    tmp_path: Path,
+) -> None:
+    """P0: adversarial ended manifest worktree_path must not delete a normal checkout."""
+    import json
+
+    run_id = "advrun01"
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "kanban.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
+        )
+
+    victim = tmp_path / "important-checkout"
+    victim.mkdir()
+    (victim / "KEEP_ME").write_text("precious\n", encoding="utf-8")
+
+    repo, _wt = _make_terminal_worktree(tmp_path, "unrelated")
+    # Write adversarial free-form path into an ended isolated manifest.
+    root = hermes_home / "terminal-runs" / run_id
+    root.mkdir(parents=True)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "terminal_run_id": run_id,
+                "start_mode": "isolated_write",
+                "status": "ended",
+                "worktree_path": str(victim),
+                "ended_at": "2000-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "manifest.json").chmod(0o600)
+
+    result = _prune(repo, db_path, hermes_home=hermes_home)
+    assert victim.is_dir()
+    assert (victim / "KEEP_ME").read_text(encoding="utf-8") == "precious\n"
+    assert f"removed(terminal): {victim}" not in result.stdout
+    assert "removed(terminal-path)" not in result.stdout
+
+
+def test_pruner_terminal_manifest_path_must_match_registered_run_leaf(
+    tmp_path: Path,
+) -> None:
+    """A mismatched declaration cannot authorize deletion of the run-id leaf."""
+    import json
+
+    run_id = "goodrun1"
+    repo, worktree = _make_terminal_worktree(tmp_path, run_id)
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    db_path = hermes_home / "kanban.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
+        )
+    root = hermes_home / "terminal-runs" / run_id
+    root.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "terminal_run_id": run_id,
+                "start_mode": "isolated_write",
+                "status": "ended",
+                "worktree_path": str(elsewhere),
+                "ended_at": "2000-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "manifest.json").chmod(0o600)
+
+    result = _prune(repo, db_path, hermes_home=hermes_home)
+    assert worktree.exists()
+    assert elsewhere.exists()
+    assert "kept(manifest-path-mismatch)" in result.stdout
+    assert f"removed(terminal): {worktree}" not in result.stdout

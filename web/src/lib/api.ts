@@ -507,6 +507,10 @@ export interface AgentTerminalWindow {
   cwd?: string | null;
   dead?: boolean;
   activity?: number | null;
+  /** Server verdict for dashboard-owned lifecycle actions. */
+  managed?: boolean | null;
+  /** Server-resolved adapter identity; stable across arbitrary window renames. */
+  agent_kind?: AgentTerminalKind | null;
   /** Durable Kanban↔terminal pointers; absent on every legacy/unbound window. */
   task_id?: string | null;
   run_id?: number | null;
@@ -1194,8 +1198,6 @@ export const api = {
     opts?: {
       start_mode?: AgentTerminalStartMode;
       context_profile?: AgentTerminalContextProfile;
-      native_session_id?: string;
-      capsule_correlation_id?: string;
     },
   ) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/create", {
@@ -1206,10 +1208,6 @@ export const api = {
         ...(workdir ? { workdir } : {}),
         ...(opts?.start_mode ? { start_mode: opts.start_mode } : {}),
         ...(opts?.context_profile ? { context_profile: opts.context_profile } : {}),
-        ...(opts?.native_session_id ? { native_session_id: opts.native_session_id } : {}),
-        ...(opts?.capsule_correlation_id
-          ? { capsule_correlation_id: opts.capsule_correlation_id }
-          : {}),
       }),
     }),
   respawnAgentTerminalWindow: (

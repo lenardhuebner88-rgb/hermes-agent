@@ -3648,11 +3648,12 @@ DEFAULT_CONFIG = {
     # Config schema version - bump this when adding new required fields
     "_config_version": 33,
 
-    # Agent Terminals (TMAX) — closed lean-context allowlist. Lean/Fresh is only
-    # offered when the agent adapter proves safe CLI semantics AND the kind is
-    # listed here. Host-wide profiles are never auto-created by Hermes.
+    # Agent Terminals (TMAX) — empty agent->profile mapping by default.
+    # Only Codex may receive an explicitly injected concrete allowlisted
+    # profile name, emitted exactly as `-p <profile>`. Host-wide foreign CLI
+    # configs are never read or auto-created by Hermes.
     "agent_terminals": {
-        "lean_context_profiles": [],
+        "lean_context_profiles": {},
     },
 }
 

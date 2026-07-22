@@ -234,6 +234,16 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     assert client.post("/api/agent-terminals/ensure", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/create", json={"kind": "hermes"}, headers=headers).json()["window"]["window"] == "hermes-2"
     assert client.post("/api/agent-terminals/create", json={"kind": "hermes", "workdir": "hermes-agent"}, headers=headers).json()["window"]["window"] == "hermes-2"
+    rejected_identity = client.post(
+        "/api/agent-terminals/create",
+        json={
+            "kind": "hermes",
+            "native_session_id": "browser-controlled",
+            "capsule_correlation_id": "0123456789abcdef01234567",
+        },
+        headers=headers,
+    )
+    assert rejected_identity.status_code == 422
     assert client.post("/api/agent-terminals/respawn", json={"session": "work", "window": "hermes"}, headers=headers).json()["window"]["window"] == "hermes"
     assert client.post("/api/agent-terminals/rename", json={"session": "work", "window": "hermes", "name": "hermes-renamed"}, headers=headers).json()["window"]["window"] == "hermes-renamed"
     assert client.post("/api/agent-terminals/kill-dead", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
@@ -253,6 +263,7 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     schema = client.get("/openapi.json", headers=headers).json()
     names = {
         "AgentTerminalEnsureRequest",
+        "AgentTerminalCreateRequest",
         "AgentTerminalTargetRequest",
         "AgentTerminalTerminateRequest",
         "AgentTerminalRenameRequest",
@@ -266,6 +277,12 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     for name in names:
         fields = set(schemas[name].get("properties", {}))
         assert fields.isdisjoint(forbidden), (name, fields)
+    create_fields = set(
+        schemas["AgentTerminalCreateRequest"].get("properties", {})
+    )
+    assert create_fields.isdisjoint(
+        {"native_session_id", "capsule_correlation_id"}
+    )
     assert "external" in schemas["AgentTerminalTerminateRequest"].get("properties", {})
 
 

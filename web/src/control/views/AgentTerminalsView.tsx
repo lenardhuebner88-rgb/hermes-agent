@@ -274,9 +274,8 @@ export function AgentTerminalsView() {
   const [createBusy, setCreateBusy] = useState(false);
   const [createStartMode, setCreateStartMode] = useState<AgentTerminalStartMode>("free");
   const [createContextProfile, setCreateContextProfile] = useState<AgentTerminalContextProfile>("full");
-  // Default respawn action stays server-closed ("fresh"); UI selection is not
-  // wired yet, so keep a constant instead of an unused React setter.
-  const respawnAction: AgentTerminalRespawnAction = "fresh";
+  // Dead-window controls offer only server-supported Fresh/Resume/Fork.
+  // Resume/Fork stay disabled unless an unambiguous stamped native_session_id exists.
   const [createError, setCreateError] = useState<string | null>(null);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -983,7 +982,7 @@ export function AgentTerminalsView() {
   }, [activePane, createContextProfile, createKind, createStartMode, refresh, selectPaneTarget, workdir]);
 
   const respawnWindow = useCallback(
-    async (win: { session: string; window: string }, action: AgentTerminalRespawnAction = respawnAction) => {
+    async (win: { session: string; window: string }, action: AgentTerminalRespawnAction = "fresh") => {
       setError(null);
       try {
         const response = await api.respawnAgentTerminalWindow(win.session, win.window, action);
@@ -993,7 +992,24 @@ export function AgentTerminalsView() {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [activePane, refresh, respawnAction, selectPaneTarget],
+    [activePane, refresh, selectPaneTarget],
+  );
+
+  const deadWindowActions = useCallback(
+    (win: AgentTerminalWindow) => {
+      const kind = kindFromWindow(win, selectedKind);
+      const agent = capability?.agents?.[kind];
+      const actions = agent?.actions;
+      const nativeId = (win.native_session_id ?? "").trim();
+      const hasNative = nativeId.length > 0;
+      const available = agent?.available === true;
+      return {
+        fresh: available && actions?.fresh === true,
+        resume: available && actions?.resume === true && hasNative,
+        fork: available && actions?.fork === true && hasNative,
+      };
+    },
+    [capability?.agents, selectedKind],
   );
 
   const killWindow = useCallback(
@@ -1730,15 +1746,53 @@ export function AgentTerminalsView() {
                     </button>
                     {dead && (
                       <>
-                        {/* WCAG 2.5.8 Desktop-Pointer-Ausnahme: 32×45 px bleibt hier nötig,
-                            damit zwei redundante Row-Aktionen im 260-px-Rail nicht die
-                            Zielzeile verdrängen; 24×24 px Mindestfläche bleibt erfüllt.
-                            Respawn only for managed dead windows; kill-dead stays for foreign. */}
-                        {managed && (
-                          <button type="button" aria-label={`Neu starten ${win.session}:${win.window}`} title="Fenster neu starten" onClick={() => void respawnWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live">
-                            <RotateCcw className="h-3.5 w-3.5" />
-                          </button>
-                        )}
+                        {/* WCAG 2.5.8 Desktop-Pointer-Ausnahme: compact 32×45 px row actions.
+                            Dead managed windows offer only server-supported Fresh/Resume/Fork.
+                            Resume/Fork stay absent/disabled without stamped native_session_id.
+                            Running windows remain immutable (no respawn controls). */}
+                        {managed && (() => {
+                          const acts = deadWindowActions(win);
+                          return (
+                            <>
+                              {acts.fresh && (
+                                <button
+                                  type="button"
+                                  data-testid={`respawn-fresh-${win.session}:${win.window}`}
+                                  aria-label={`Fresh neu starten ${win.session}:${win.window}`}
+                                  title="Fresh neu starten"
+                                  onClick={() => void respawnWindow(win, "fresh")}
+                                  className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live"
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                              {acts.resume && (
+                                <button
+                                  type="button"
+                                  data-testid={`respawn-resume-${win.session}:${win.window}`}
+                                  aria-label={`Resume ${win.session}:${win.window}`}
+                                  title="Resume (native session)"
+                                  onClick={() => void respawnWindow(win, "resume")}
+                                  className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live"
+                                >
+                                  <RefreshCw className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                              {acts.fork && (
+                                <button
+                                  type="button"
+                                  data-testid={`respawn-fork-${win.session}:${win.window}`}
+                                  aria-label={`Fork ${win.session}:${win.window}`}
+                                  title="Fork (native session)"
+                                  onClick={() => void respawnWindow(win, "fork")}
+                                  className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-live"
+                                >
+                                  <Share2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </>
+                          );
+                        })()}
                         <button type="button" aria-label={`Fenster schließen ${win.session}:${win.window}`} title="Totes Fenster entfernen" onClick={() => void killWindow(win)} className="grid w-8 shrink-0 place-items-center border-l border-line-soft text-ink-3 hover:bg-surface-3 hover:text-status-alert">
                           <Trash2 className="h-3.5 w-3.5" />
                         </button>
@@ -2269,9 +2323,19 @@ export function AgentTerminalsView() {
         <button type="button" disabled={!activeSocketReady} onClick={() => sendKey("\x03")} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-35">
           <span className="font-data text-sec">^C</span><span>^C senden</span>
         </button>
-        {sessionSheetDead && sessionSheetManaged && (
-          <button type="button" onClick={() => { void respawnWindow(selectedWindow); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
-            <RotateCcw className="h-4 w-4" /><span>Neu starten</span>
+        {sessionSheetDead && sessionSheetManaged && deadWindowActions(selectedWindow).fresh && (
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow, "fresh"); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+            <RotateCcw className="h-4 w-4" /><span>Fresh</span>
+          </button>
+        )}
+        {sessionSheetDead && sessionSheetManaged && deadWindowActions(selectedWindow).resume && (
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow, "resume"); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+            <RefreshCw className="h-4 w-4" /><span>Resume</span>
+          </button>
+        )}
+        {sessionSheetDead && sessionSheetManaged && deadWindowActions(selectedWindow).fork && (
+          <button type="button" onClick={() => { void respawnWindow(selectedWindow, "fork"); setSessionSheetOpen(false); }} className="flex min-h-[44px] flex-col items-center gap-1 rounded-card border border-line bg-surface-2 px-2 py-2.5 text-center leading-tight text-ink-2 hover:bg-surface-3">
+            <Share2 className="h-4 w-4" /><span>Fork</span>
           </button>
         )}
         {sessionSheetDead && (
@@ -2343,6 +2407,9 @@ export function AgentTerminalsView() {
   const selectedCreateWorkdir = createWorkdirOptions.find((option) => option.key === workdir) ?? null;
   const createAgentCapability = capability?.agents?.[createKind];
   const createActions = createAgentCapability?.actions;
+  const freshEnabled = Boolean(
+    createAgentCapability?.available && createActions?.fresh,
+  );
   const leanEnabled = Boolean(createActions?.lean);
   const leanPrerequisite = (createAgentCapability?.prerequisites ?? []).find((item) =>
     (item.blocks ?? []).includes("lean"),
@@ -2437,6 +2504,11 @@ export function AgentTerminalsView() {
           Lean/Fresh ist für {createKind} disabled — kein belegter sicherer Lean-Adapter (oder nicht allowlisted).
         </div>
       )}
+      {!freshEnabled && (
+        <div className="rounded-card border border-status-warn/30 bg-status-warn/10 p-2 text-micro text-status-warn" role="status">
+          Fresh ist für {createKind} disabled — installierte CLI-Version oder Hilfe entspricht nicht der serverseitigen Allowlist.
+        </div>
+      )}
       {leanPrerequisite && (
         <div className="rounded-card border border-line bg-surface-2 p-2 text-micro text-ink-3" role="note">
           Operator-Prerequisite: {leanPrerequisite.message}
@@ -2451,7 +2523,7 @@ export function AgentTerminalsView() {
       <button
         type="button"
         onClick={() => void submitCreateSession()}
-        disabled={createBusy || (createContextProfile === "lean" && !leanEnabled)}
+        disabled={createBusy || !freshEnabled || (createContextProfile === "lean" && !leanEnabled)}
         className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-card border border-live/50 bg-live/15 px-3 py-2.5 text-sec font-medium text-live hover:bg-live/25 disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0"
       >
         {createBusy ? "Startet…" : "Session starten"}
@@ -2529,6 +2601,7 @@ export function AgentTerminalsView() {
                 broadcastMode={broadcastOpen}
                 onToggleSelect={() => toggleBroadcastSelection(key)}
                 onOpen={() => openFromFleet(win)}
+                canRespawn={deadWindowActions(win).fresh}
                 onRespawn={() => void respawnWindow(win)}
                 onKill={() => void killWindow(win)}
                 onTerminate={() => requestTerminate(win)}
@@ -2951,10 +3024,39 @@ export function AgentTerminalsView() {
               )}
               {state === "dead pane" && selectedWindow && isManagedWindow(selectedWindow) && (
                 <div className="flex shrink-0 items-center justify-between gap-2 border-b border-status-warn/20 bg-status-warn/10 px-3 py-1.5 text-[11px] text-status-warn">
-                  <span className="min-w-0 truncate">Prozess beendet — Fenster neu starten?</span>
-                  <button type="button" onClick={() => void respawnWindow(selectedWindow)} className="inline-flex shrink-0 items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15">
-                    <RotateCcw className="h-3 w-3" />Neu starten
-                  </button>
+                  <span className="min-w-0 truncate">Prozess beendet — Startaktion wählen</span>
+                  <span className="inline-flex shrink-0 items-center gap-1">
+                    {deadWindowActions(selectedWindow).fresh && (
+                      <button
+                        type="button"
+                        data-testid="dead-banner-fresh"
+                        onClick={() => void respawnWindow(selectedWindow, "fresh")}
+                        className="inline-flex items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15"
+                      >
+                        <RotateCcw className="h-3 w-3" />Fresh
+                      </button>
+                    )}
+                    {deadWindowActions(selectedWindow).resume && (
+                      <button
+                        type="button"
+                        data-testid="dead-banner-resume"
+                        onClick={() => void respawnWindow(selectedWindow, "resume")}
+                        className="inline-flex items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15"
+                      >
+                        <RefreshCw className="h-3 w-3" />Resume
+                      </button>
+                    )}
+                    {deadWindowActions(selectedWindow).fork && (
+                      <button
+                        type="button"
+                        data-testid="dead-banner-fork"
+                        onClick={() => void respawnWindow(selectedWindow, "fork")}
+                        className="inline-flex items-center gap-1 rounded-card border border-status-warn/40 px-2 py-1 hover:bg-status-warn/15"
+                      >
+                        <Share2 className="h-3 w-3" />Fork
+                      </button>
+                    )}
+                  </span>
                 </div>
               )}
               {terminalPaneSurface}
