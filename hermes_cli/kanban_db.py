@@ -9332,6 +9332,24 @@ def _end_run(
     # historical task_runs.cost_status column NULL (its live CHECK constraint
     # only accepts actual/estimated). Never hard-error on cost.
     metadata_for_store = dict(metadata) if isinstance(metadata, dict) else metadata
+    # Keep the immutable Wave-2 brief manifest across completion. Completion
+    # metadata historically replaced spawn metadata wholesale, which made every
+    # finished run ineligible for read-only shadow cohorts.
+    prior_row = conn.execute(
+        "SELECT metadata FROM task_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    try:
+        prior_metadata = json.loads(prior_row["metadata"] or "{}") if prior_row else {}
+    except (TypeError, ValueError):
+        prior_metadata = {}
+    if isinstance(prior_metadata, dict) and "brief" in prior_metadata:
+        if not isinstance(metadata_for_store, dict):
+            metadata_for_store = {}
+        metadata_for_store.setdefault("brief", prior_metadata["brief"])
+        if "brief_artifacts" in prior_metadata:
+            metadata_for_store.setdefault(
+                "brief_artifacts", prior_metadata["brief_artifacts"]
+            )
     if cost is None and isinstance(metadata_for_store, dict):
         provider, model = _run_metadata_provider_model(metadata_for_store, profile=None)
         est = _equiv_from_tokens(provider, model, in_tok, out_tok)
@@ -30433,6 +30451,30 @@ def _prepare_worker_brief_launch(
             },
             run_id=task.current_run_id,
         )
+        # Shadow routing is deliberately fail-open and record-only. A telemetry
+        # failure must never alter or prevent the already selected launch route.
+        try:
+            from hermes_cli.config import load_config_readonly
+            from hermes_cli.kanban_shadow_routing import (
+                record_routing_shadow_decision,
+            )
+
+            kanban_config = load_config_readonly().get("kanban", {})
+            record_routing_shadow_decision(
+                conn,
+                task_id=task.id,
+                run_id=int(task.current_run_id),
+                window=kanban_config.get("routing_shadow_window", 40),
+                value_classifier=value_class,
+                now=int(time.time()),
+            )
+        except Exception:
+            _log.warning(
+                "routing shadow telemetry failed for task %s run %s",
+                task.id,
+                task.current_run_id,
+                exc_info=True,
+            )
         conn.commit()
         return render_worker_brief_for_task(conn, task.id, audience=audience)
 
