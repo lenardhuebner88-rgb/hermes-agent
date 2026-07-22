@@ -1,5 +1,6 @@
 """Tests for hermes_cli configuration management."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -156,6 +157,24 @@ class TestLoadConfigDefaults:
             config = load_config()
 
         assert config["kanban"]["auto_subscribe_on_create"] is True
+
+    @pytest.mark.parametrize(
+        ("configured", "expected"),
+        [(30, 30), (50, 50), (29, 40), (51, 40), (True, 40), ("40", 40)],
+    )
+    def test_routing_shadow_window_accepts_only_thirty_to_fifty(
+        self, tmp_path, configured, expected
+    ):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            (tmp_path / "config.yaml").write_text(
+                f"kanban:\n  routing_shadow_window: {json.dumps(configured)}\n",
+                encoding="utf-8",
+            )
+
+            config = load_config()
+
+        assert DEFAULT_CONFIG["kanban"]["routing_shadow_window"] == 40
+        assert config["kanban"]["routing_shadow_window"] == expected
 
     def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
