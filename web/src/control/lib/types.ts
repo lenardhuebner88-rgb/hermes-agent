@@ -1309,6 +1309,12 @@ export interface LoopModelsResponse {
   engines: Record<string, LoopEngineCatalog>;
 }
 
+export interface LoopNightOverridesResponse {
+  pack: string;
+  overrides: Record<string, string>;
+  ok?: boolean;
+}
+
 export interface LoopDetailResponse extends LoopPackSummary {
   ledger_tail: string[];
   queue_entries: Record<string, string[]> | null;

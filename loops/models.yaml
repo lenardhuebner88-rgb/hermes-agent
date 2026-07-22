@@ -12,7 +12,7 @@ engines:
     models: [claude-fable-5, claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5]
   kimi:
     label: "Kimi (Coding-Abo)"
-    models: [kimi-code/kimi-for-coding]
+    models: [kimi-code/kimi-for-coding, k3]
   codex:
     label: "Codex (ChatGPT-Abo)"
     models: [gpt-5.6-sol, gpt-5.5, gpt-5.3-codex]
@@ -40,3 +40,6 @@ engines:
   xai:
     label: "xAI / Grok (Abo)"
     models: [grok-4.5]
+  alibaba-token-plan:
+    label: "Alibaba Token Plan (Abo)"
+    models: [qwen3.8-max-preview]

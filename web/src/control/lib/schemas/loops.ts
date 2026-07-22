@@ -143,3 +143,9 @@ export const LoopLandResultSchema = z.object({
   log: z.string().catch(""),
   note: z.string().catch(""),
 });
+
+export const LoopNightOverridesResponseSchema = z.object({
+  pack: z.string(),
+  overrides: z.record(z.string(), z.string()).catch({}),
+  ok: z.boolean().optional(),
+});
