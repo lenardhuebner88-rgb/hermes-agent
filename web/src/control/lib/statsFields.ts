@@ -53,7 +53,7 @@ export const DEFAULT_STATS_CONFIG: StatsFieldConfig = {
     { id: "anthropic", label: "Claude", lane: "claude", usage_role: "subscription", visible: true },
     { id: "openai-codex", label: "ChatGPT / Codex", lane: "chatgpt", usage_role: "subscription", visible: true },
     { id: "kimi", label: "Kimi", lane: "kimi", usage_role: "subscription", visible: true },
-    { id: "xai", label: "Grok", lane: null, usage_role: "subscription", visible: true },
+    { id: "xai", label: "Grok", lane: "grok", usage_role: "subscription", visible: true },
     { id: "openrouter", label: "OpenRouter", lane: null, usage_role: "spend", visible: true },
   ],
   windows: [
@@ -67,6 +67,7 @@ export const DEFAULT_STATS_CONFIG: StatsFieldConfig = {
     { key: "chatgpt", label: "ChatGPT/Codex Abo", visible: true },
     { key: "claude", label: "Claude Max Abo", visible: true },
     { key: "kimi", label: "Kimi Abo", visible: true },
+    { key: "grok", label: "Grok Abo", visible: true },
   ],
 };
 

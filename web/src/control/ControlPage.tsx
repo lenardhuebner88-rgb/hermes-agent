@@ -20,9 +20,10 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OfflineStaleBanner } from "./components/OfflineStaleBanner";
 import { RouteTransition } from "./components/primitives";
 import { CommandHome } from "./views/CommandHome";
+import { StartMissionControl } from "./views/start/StartMissionControl";
 
-// The Decision-Inbox is the /control landing → keep it eager. Every other tab is
-// lazy-loaded (its own chunk, fetched on first visit) so opening /control no
+// Start and the Decision-Inbox are eager. Every other tab is lazy-loaded
+// (its own chunk, fetched on first visit) so opening /control no
 // longer ships all 10 views up front — FlowView + AutoresearchView are the
 // fattest, and most visits never open them.
 const FleetView = lazy(() =>
@@ -275,7 +276,7 @@ export default function ControlPage() {
       <ErrorBoundary>
       <Suspense fallback={<ControlViewFallback />}>
       <Routes location={location}>
-        <Route index element={<CommandHome density={density.density} />} />
+        <Route index element={<StartMissionControl density={density.density} />} />
         <Route path="fleet" element={<FleetView />} />
         <Route path="inbox" element={<CommandHome density={density.density} />} />
         {/* Abriss S5: Übersicht → Bibliothek (Vault-Provenienz zog dorthin um). */}

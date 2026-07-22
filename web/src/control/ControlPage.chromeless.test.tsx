@@ -66,6 +66,9 @@ vi.mock("./components/primitives", () => ({
 vi.mock("./views/CommandHome", () => ({
   CommandHome: () => <div data-testid="command-home" />,
 }));
+vi.mock("./views/start/StartMissionControl", () => ({
+  StartMissionControl: () => <div data-testid="start-mission-control" />,
+}));
 vi.mock("./views/CronView", () => ({
   CronView: () => <div data-testid="cron-view" />,
 }));
@@ -105,6 +108,16 @@ function expectControlShell() {
 
 describe("ControlPage chromeless Jarvis route", () => {
   afterEach(cleanup);
+
+  it("uses A4.2 for Start and keeps the decision inbox at /control/inbox", async () => {
+    const start = renderControl("/control");
+    expect(await screen.findByTestId("start-mission-control")).toBeTruthy();
+    expect(screen.queryByTestId("command-home")).toBeNull();
+    start.unmount();
+
+    renderControl("/control/inbox");
+    expect(await screen.findByTestId("command-home")).toBeTruthy();
+  });
 
   for (const path of ["/control/projekte", "/control/projekte/"]) {
     it(`renders ${path} without rail, masthead, or bottom bar`, async () => {

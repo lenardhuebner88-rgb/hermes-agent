@@ -25,6 +25,7 @@ describe("config lookups (default config)", () => {
 
   it("laneForProvider maps to the worker-run lane, null for API-billed/undeclared", () => {
     expect(laneForProvider(cfg, "anthropic")).toBe("claude");
+    expect(laneForProvider(cfg, "xai")).toBe("grok");
     expect(laneForProvider(cfg, "openrouter")).toBeNull();
     expect(laneForProvider(cfg, "mystery")).toBeNull();
   });
@@ -45,7 +46,7 @@ describe("config lookups (default config)", () => {
   });
 
   it("visibleSubscriptionLanes returns visible lanes in config order", () => {
-    expect(visibleSubscriptionLanes(cfg).map((l) => l.key)).toEqual(["chatgpt", "claude", "kimi"]);
+    expect(visibleSubscriptionLanes(cfg).map((l) => l.key)).toEqual(["chatgpt", "claude", "kimi", "grok"]);
   });
 });
 

@@ -614,6 +614,7 @@ class TestAccountUsageEndpoint:
 
         monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
         ws._ACCOUNT_USAGE_CACHE.clear()
+        ws._ACCOUNT_USAGE_LAST_GOOD.clear()
 
         first = self.client.get("/api/account-usage")
         second = self.client.get("/api/account-usage")
@@ -639,6 +640,45 @@ class TestAccountUsageEndpoint:
         assert all(row["signal_at"] is None for row in first.json()["providers"])
         assert len(calls) == 5
 
+    def test_transient_failure_reuses_recent_verified_percent(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+        import agent.account_usage as account_usage
+        import hermes_cli.web_server as ws
+
+        def live_fetch(provider, **_kwargs):
+            return AccountUsageSnapshot(
+                provider=provider,
+                source="usage_api",
+                fetched_at=datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc),
+                windows=(
+                    AccountUsageWindow(
+                        label="Diese Woche",
+                        window_key="weekly",
+                        used_percent=42.0,
+                    ),
+                ),
+            )
+
+        monkeypatch.setattr(account_usage, "fetch_account_usage", live_fetch)
+        ws._ACCOUNT_USAGE_CACHE.clear()
+        ws._ACCOUNT_USAGE_LAST_GOOD.clear()
+        first = self.client.get("/api/account-usage")
+        assert first.status_code == 200
+        assert all(row["fallback"] is False for row in first.json()["providers"])
+
+        monkeypatch.setattr(account_usage, "fetch_account_usage", lambda *_args, **_kwargs: None)
+        ws._ACCOUNT_USAGE_CACHE.clear()
+        second = self.client.get("/api/account-usage")
+
+        assert second.status_code == 200
+        subscriptions = second.json()["providers"][:4]
+        assert all(row["available"] is True for row in subscriptions)
+        assert all(row["cached"] is True for row in subscriptions)
+        assert all(row["fallback"] is True for row in subscriptions)
+        assert all(row["windows"][0]["used_percent"] == 42.0 for row in subscriptions)
+
     def test_account_usage_payload_signal_at_iso_and_unavailable_none(self):
         from datetime import datetime, timezone
 
@@ -657,10 +697,12 @@ class TestAccountUsageEndpoint:
         payload = ws._account_usage_payload(snapshot, "xai")
         assert "signal_at" in payload
         assert payload["signal_at"] == signal.isoformat()
+        assert payload["fallback"] is False
 
         unavail = ws._account_usage_unavailable("xai")
         assert "signal_at" in unavail
         assert unavail["signal_at"] is None
+        assert unavail["fallback"] is False
 
     def test_unavailable_reason_replaces_500_and_scrubs_exception_secrets(self, monkeypatch):
         import agent.account_usage as account_usage
@@ -675,6 +717,7 @@ class TestAccountUsageEndpoint:
             return None
 
         monkeypatch.setattr(account_usage, "fetch_account_usage", fake_fetch)
+        ws._ACCOUNT_USAGE_LAST_GOOD.clear()
 
         r = self.client.get("/api/account-usage")
 

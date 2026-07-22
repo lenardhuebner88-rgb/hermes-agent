@@ -69,16 +69,18 @@ def _insert_token_run(
     input_tokens: int | None,
     output_tokens: int | None,
     metadata: dict | None = None,
+    outcome: str = "completed",
 ):
     conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, started_at, ended_at, "
         "outcome, input_tokens, output_tokens, metadata) "
-        "VALUES (?, ?, 'done', ?, ?, 'completed', ?, ?, ?)",
+        "VALUES (?, ?, 'done', ?, ?, ?, ?, ?, ?)",
         (
             task_id,
             profile,
             started_at,
             ended_at,
+            outcome,
             input_tokens,
             output_tokens,
             json.dumps(metadata) if metadata is not None else None,
@@ -631,6 +633,9 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
     assert writes == []
     assert burn["totals"] == {
         "runs": 3,
+        "completed_runs": 3,
+        "failed_runs": 0,
+        "blocked_runs": 0,
         "input_tokens": 600,
         "output_tokens": 60,
         "total_tokens": 660,
@@ -640,6 +645,9 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "subscription": "chatgpt",
             "profile": "premium",
             "runs": 1,
+            "completed_runs": 1,
+            "failed_runs": 0,
+            "blocked_runs": 0,
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
@@ -648,6 +656,9 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "subscription": "claude",
             "profile": "coder-claude",
             "runs": 2,
+            "completed_runs": 2,
+            "failed_runs": 0,
+            "blocked_runs": 0,
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
@@ -664,6 +675,9 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "value_class": "haertung",
             "date": "2023-11-14",
             "runs": 1,
+            "completed_runs": 1,
+            "failed_runs": 0,
+            "blocked_runs": 0,
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
@@ -674,6 +688,9 @@ def test_subscription_token_burn_batches_by_lane_class_and_day(
             "value_class": "nutzer",
             "date": "2023-11-14",
             "runs": 2,
+            "completed_runs": 2,
+            "failed_runs": 0,
+            "blocked_runs": 0,
             "input_tokens": 300,
             "output_tokens": 30,
             "total_tokens": 330,
@@ -705,12 +722,52 @@ def test_subscription_token_burn_prefers_run_metadata_after_lane_flip(
 
     assert burn["totals"] == {
         "runs": 1,
+        "completed_runs": 1,
+        "failed_runs": 0,
+        "blocked_runs": 0,
         "input_tokens": 123,
         "output_tokens": 45,
         "total_tokens": 168,
     }
     assert burn["by_class"][0]["subscription"] == "chatgpt"
     assert burn["by_lane"][0]["subscription"] == "chatgpt"
+
+
+def test_subscription_token_burn_exposes_outcomes_per_provider(
+    kanban_home, monkeypatch,
+):
+    now = 1_700_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: now)
+    monkeypatch.setattr(kb, "_profile_subscription", lambda profile: "claude")
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="provider outcomes", assignee="coder")
+        with kb.write_txn(conn):
+            for offset, outcome in enumerate(("completed", "blocked", "timed_out")):
+                _insert_token_run(
+                    conn,
+                    task_id=task_id,
+                    profile="premium",
+                    started_at=now - 90 + offset,
+                    ended_at=now - 60 + offset,
+                    input_tokens=100,
+                    output_tokens=10,
+                    outcome=outcome,
+                )
+
+        burn = kb.subscription_token_burn(conn, days=7)
+
+    assert burn["totals"] == {
+        "runs": 3,
+        "completed_runs": 1,
+        "failed_runs": 1,
+        "blocked_runs": 1,
+        "input_tokens": 300,
+        "output_tokens": 30,
+        "total_tokens": 330,
+    }
+    assert burn["by_lane"][0]["completed_runs"] == 1
+    assert burn["by_lane"][0]["failed_runs"] == 1
+    assert burn["by_lane"][0]["blocked_runs"] == 1
 
 
 def test_profile_outcome_stats_aggregates_recent_profile_runs(kanban_home):
@@ -923,3 +980,45 @@ def test_k5b_state_db_without_sessions_table_is_fail_soft(kanban_home):
         )
         assert kb.list_runs(conn, tid)[0].cost_usd is None
 
+
+def test_runs_issues_explains_review_and_dependency_causes(kanban_home):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        review_task = kb.create_task(conn, title="Prüfung reparieren", assignee="coder")
+        dependency_task = kb.create_task(conn, title="Nach P1 integrieren", assignee="premium")
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='blocked', block_kind='review_revision' WHERE id=?",
+                (review_task,),
+            )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, summary, metadata) "
+                "VALUES (?, 'reviewer', 'done', 'blocked', ?, ?, ?, ?)",
+                (
+                    review_task,
+                    now - 30,
+                    now - 20,
+                    "REQUEST_CHANGES: Nachweis für den Grenzfall fehlt",
+                    json.dumps({"review_verdict": "REQUEST_CHANGES", "blocking_findings": ["Grenzfall"]}),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO task_runs (task_id, profile, status, outcome, started_at, ended_at, summary) "
+                "VALUES (?, 'premium', 'done', 'blocked', ?, ?, ?)",
+                (
+                    dependency_task,
+                    now - 10,
+                    now - 5,
+                    "Wartet auf vorgelagerte P1-Integration",
+                ),
+            )
+
+        payload = kb.runs_issues(conn, days=1)
+
+    by_cause = {issue["cause_key"]: issue for issue in payload["issues"]}
+    assert by_cause["review"]["cause_label"] == "Review-Korrektur"
+    assert by_cause["review"]["example_task_title"] == "Prüfung reparieren"
+    assert by_cause["review"]["example_assignee"] == "coder"
+    assert by_cause["review"]["example_block_kind"] == "review_revision"
+    assert by_cause["dependency"]["cause_label"] == "Abhängigkeit"
+    assert "vorgelagerte Arbeit" in by_cause["dependency"]["cause_hint"]

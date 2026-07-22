@@ -5,10 +5,11 @@ import {
   RunsCostsResponseSchema,
   RunsCostsSeriesResponseSchema,
   SubscriptionTokenBurnResponseSchema,
+  HostUsageResponseSchema,
   ChainCostsResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCostsResponse } from "../lib/schemas";
+import type { RunsCostsResponse, RunsCostsSeriesResponse, SubscriptionTokenBurnResponse, ChainCostsResponse, HostUsageResponse } from "../lib/schemas";
 import type { AccountUsageResponse } from "../lib/types";
 import { nowSec } from "../lib/derive";
 import { withBoardParam } from "../lib/multiBoard";
@@ -19,6 +20,18 @@ export function useAccountUsage() {
     "account-usage",
     async () => parseOrThrow(AccountUsageResponseSchema, await fetchJSON<unknown>("/api/account-usage"), "account-usage"),
     60000,
+  );
+}
+
+export function useHostUsage(days = 7) {
+  return usePolling<HostUsageResponse>(
+    `start/host-usage:${days}`,
+    async () => parseOrThrow(
+      HostUsageResponseSchema,
+      await fetchJSON<unknown>(`/api/start/host-usage?days=${encodeURIComponent(days)}`),
+      "start/host-usage",
+    ),
+    120000,
   );
 }
 
@@ -120,4 +133,3 @@ export function useHermesChainCosts(taskId: string | null, board: string | null 
   }, [taskId, reload]);
   return { data, loading, error, lastUpdated, isStale: Boolean(error && data), reload };
 }
-

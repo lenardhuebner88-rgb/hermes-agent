@@ -427,7 +427,8 @@ def _annotate_commit_attribution(
                 FROM task_runs
                 WHERE task_id IN ({placeholders})
             )
-            SELECT tasks.id AS task_id, tasks.assignee AS lane,
+            SELECT tasks.id AS task_id, tasks.title AS task_title,
+                   tasks.assignee AS lane,
                    ranked_runs.active_model, ranked_runs.requested_model
             FROM tasks
             LEFT JOIN ranked_runs
@@ -441,11 +442,17 @@ def _annotate_commit_attribution(
     finally:
         conn.close()
 
-    resolved: dict[str, tuple[str | None, str | None]] = {}
+    resolved: dict[str, tuple[str | None, str | None, str | None]] = {}
     for row in rows:
+        title_raw = row["task_title"]
         lane_raw = row["lane"]
         active_model_raw = row["active_model"]
         requested_model_raw = row["requested_model"]
+        title = (
+            title_raw.strip()
+            if isinstance(title_raw, str) and title_raw.strip()
+            else None
+        )
         lane = (
             lane_raw.strip()
             if isinstance(lane_raw, str) and lane_raw.strip()
@@ -461,10 +468,13 @@ def _annotate_commit_attribution(
             if isinstance(requested_model_raw, str) and requested_model_raw.strip()
             else None
         )
-        resolved[row["task_id"]] = (lane, active_model or requested_model)
+        resolved[row["task_id"]] = (title, lane, active_model or requested_model)
 
     for attribution in task_attributions:
-        lane, model = resolved.get(attribution["task_id"], (None, None))
+        title, lane, model = resolved.get(
+            attribution["task_id"], (None, None, None)
+        )
+        attribution["label"] = title
         attribution["lane"] = lane
         attribution["model"] = model
 

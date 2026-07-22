@@ -138,6 +138,8 @@ export interface AccountUsageProvider {
   details: string[];
   unavailable_reason: string | null;
   cached: boolean;
+  /** True only when a short provider outage is bridged with a recent verified snapshot. */
+  fallback?: boolean;
 }
 
 export interface AccountUsageResponse {

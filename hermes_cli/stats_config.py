@@ -32,7 +32,7 @@ DEFAULT_STATS_CONFIG: dict[str, Any] = {
         {"id": "anthropic", "label": "Claude", "lane": "claude", "usage_role": "subscription", "visible": True},
         {"id": "openai-codex", "label": "ChatGPT / Codex", "lane": "chatgpt", "usage_role": "subscription", "visible": True},
         {"id": "kimi", "label": "Kimi", "lane": "kimi", "usage_role": "subscription", "visible": True},
-        {"id": "xai", "label": "Grok", "lane": None, "usage_role": "subscription", "visible": True},
+        {"id": "xai", "label": "Grok", "lane": "grok", "usage_role": "subscription", "visible": True},
         {"id": "openrouter", "label": "OpenRouter", "lane": None, "usage_role": "spend", "visible": True},
     ],
     "windows": [
@@ -46,6 +46,7 @@ DEFAULT_STATS_CONFIG: dict[str, Any] = {
         {"key": "chatgpt", "label": "ChatGPT/Codex Abo", "visible": True},
         {"key": "claude", "label": "Claude Max Abo", "visible": True},
         {"key": "kimi", "label": "Kimi Abo", "visible": True},
+        {"key": "grok", "label": "Grok Abo", "visible": True},
     ],
 }
 

@@ -30134,6 +30134,9 @@ def subscription_token_totals(
 def _empty_token_burn_bucket() -> dict:
     return {
         "runs": 0,
+        "completed_runs": 0,
+        "failed_runs": 0,
+        "blocked_runs": 0,
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
@@ -30141,7 +30144,12 @@ def _empty_token_burn_bucket() -> dict:
 
 
 def _token_burn_add(
-    bucket: dict, *, runs: int, input_tokens: int, output_tokens: int
+    bucket: dict,
+    *,
+    runs: int,
+    input_tokens: int,
+    output_tokens: int,
+    outcome: Optional[str] = None,
 ) -> None:
     in_tok = int(input_tokens or 0)
     out_tok = int(output_tokens or 0)
@@ -30149,6 +30157,13 @@ def _token_burn_add(
     bucket["input_tokens"] += in_tok
     bucket["output_tokens"] += out_tok
     bucket["total_tokens"] += in_tok + out_tok
+    normalized_outcome = (outcome or "").strip()
+    if normalized_outcome == "completed":
+        bucket["completed_runs"] += int(runs or 0)
+    elif normalized_outcome == "blocked":
+        bucket["blocked_runs"] += int(runs or 0)
+    elif normalized_outcome in _RELIABILITY_FAIL_OUTCOMES:
+        bucket["failed_runs"] += int(runs or 0)
 
 
 def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
@@ -30181,6 +30196,7 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
             COALESCE(t.title, '') AS title,
             COALESCE(t.epic_id, '') AS epic_id,
             DATE(tr.ended_at, 'unixepoch', 'localtime') AS day,
+            tr.outcome AS outcome,
             COALESCE(tr.input_tokens, 0) AS input_tokens,
             COALESCE(tr.output_tokens, 0) AS output_tokens
         FROM task_runs tr
@@ -30210,12 +30226,14 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
         runs = 1
         input_tokens = int(row["input_tokens"] or 0)
         output_tokens = int(row["output_tokens"] or 0)
+        outcome = (row["outcome"] or "").strip()
 
         _token_burn_add(
             totals,
             runs=runs,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            outcome=outcome,
         )
         lane_bucket = by_lane.setdefault(
             (subscription, profile),
@@ -30253,6 +30271,7 @@ def subscription_token_burn(conn: sqlite3.Connection, *, days: int = 7) -> dict:
                 runs=runs,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                outcome=outcome,
             )
 
     def _token_sort(row: dict) -> tuple:
@@ -30602,6 +30621,89 @@ def review_value_by_stage(conn: sqlite3.Connection, *, window_start: int) -> lis
 # = ein Issue. blocked zählt mit (sein Grund steht in summary, nicht error).
 _ISSUE_OUTCOMES = _RELIABILITY_FAIL_OUTCOMES + ("blocked",)
 
+_ISSUE_CAUSES = {
+    "review": ("Review-Korrektur", "Reviewer fordert Änderungen oder belastbare Nachweise."),
+    "dependency": ("Abhängigkeit", "Wartet auf vorgelagerte Arbeit oder deren Integration."),
+    "needs_input": ("Entscheidung / Input", "Eine Entscheidung, Freigabe oder Eingabe fehlt."),
+    "integration": ("Integration", "Die Umsetzung wartet auf eine saubere Zusammenführung."),
+    "capacity": ("Kapazität / Limit", "Ein Provider- oder Parallelitätslimit hält den Lauf an."),
+    "budget": ("Zeit / Iterationen", "Zeit- oder Iterationsbudget wurde ausgeschöpft."),
+    "runtime": ("Start / Laufzeit", "Der Worker konnte nicht sauber starten oder ist abgebrochen."),
+    "other": ("Sonstige", "Noch keiner belastbaren Ursachenklasse zugeordnet."),
+}
+
+
+def _issue_cause(
+    *,
+    outcome: Optional[str],
+    profile: Optional[str],
+    block_kind: Optional[str],
+    reason: Optional[str],
+    metadata: dict,
+) -> tuple[str, str, str]:
+    """Classify one historical issue from current structured evidence.
+
+    ``tasks.block_kind`` is the current board classification.  Older runs often
+    predate it, so review verdict/findings and conservative reason signatures
+    fill the gap.  The output remains deterministic and explainable; no LLM or
+    opaque similarity score is involved.
+    """
+    resolved_outcome = (outcome or "").strip().lower()
+    resolved_profile = (profile or "").strip().lower()
+    kind = (block_kind or "").strip().lower()
+    text = (reason or "").strip().lower()
+    verdict = str(
+        metadata.get("review_verdict") or metadata.get("verdict") or ""
+    ).strip().lower()
+    has_review_evidence = any(
+        metadata.get(key)
+        for key in (
+            "blocking_findings",
+            "review_findings",
+            "required_verification",
+        )
+    )
+
+    if (
+        kind == "review_revision"
+        or verdict in {"request_changes", "needs_revision", "blocked"}
+        or has_review_evidence
+        or (
+            resolved_outcome == "blocked"
+            and resolved_profile in {"reviewer", "verifier"}
+            and any(token in text for token in ("request_changes", "needs_revision", "urteil", "review"))
+        )
+    ):
+        key = "review"
+    elif kind in {"dependency", "waiting_dependency"} or any(
+        token in text
+        for token in (
+            "wartet",
+            "waiting for",
+            "depends on",
+            "dependency",
+            "abhängig",
+            "vorgelagert",
+        )
+    ):
+        key = "dependency"
+    elif kind in {"needs_input", "operator", "approval"}:
+        key = "needs_input"
+    elif kind == "integration" or resolved_outcome == "integration_parked":
+        key = "integration"
+    elif kind in {"capacity", "rate_limit"} or any(
+        token in text for token in ("rate limit", "quota", "capacity", "kapazität", "provider limit")
+    ):
+        key = "capacity"
+    elif resolved_outcome in {"timed_out", "gave_up", "iteration_budget_exhausted"}:
+        key = "budget"
+    elif resolved_outcome in {"spawn_failed", "crashed"}:
+        key = "runtime"
+    else:
+        key = "other"
+    label, hint = _ISSUE_CAUSES[key]
+    return key, label, hint
+
 
 def _issue_signature(text: Optional[str]) -> str:
     """Normalisierte Fehler-Signatur: erste nicht-leere Zeile, volatile Teile
@@ -30673,28 +30775,49 @@ def runs_issues(
     now = int(time.time())
     window_start = now - days * 86400
     placeholders = ",".join("?" for _ in _ISSUE_OUTCOMES)
-    groups: dict[tuple[str, str], dict] = {}
+    groups: dict[tuple[str, str, str], dict] = {}
     total_runs = 0
     for row in conn.execute(
-        f"SELECT id, task_id, profile, outcome, started_at, "
-        f"COALESCE(NULLIF(TRIM(error), ''), summary) AS reason "
-        f"FROM task_runs WHERE outcome IN ({placeholders}) AND started_at >= ?",
+        f"SELECT r.id, r.task_id, r.profile, r.outcome, r.started_at, r.metadata, "
+        f"COALESCE(NULLIF(TRIM(r.error), ''), r.summary) AS reason, "
+        f"t.title AS task_title, t.assignee, t.block_kind "
+        f"FROM task_runs r LEFT JOIN tasks t ON t.id = r.task_id "
+        f"WHERE r.outcome IN ({placeholders}) AND r.started_at >= ?",
         (*_ISSUE_OUTCOMES, window_start),
     ).fetchall():
         total_runs += 1
         profile = (row["profile"] or "").strip() or "(ohne profil)"
         sig = _issue_signature(row["reason"])
+        try:
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+        except (TypeError, ValueError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        cause_key, cause_label, cause_hint = _issue_cause(
+            outcome=row["outcome"],
+            profile=profile,
+            block_kind=row["block_kind"],
+            reason=row["reason"],
+            metadata=metadata,
+        )
         g = groups.setdefault(
-            (profile, sig),
+            (profile, sig, cause_key),
             {
                 "signature": sig,
                 "profile": profile,
+                "cause_key": cause_key,
+                "cause_label": cause_label,
+                "cause_hint": cause_hint,
                 "count": 0,
                 "first_seen": int(row["started_at"]),
                 "last_seen": int(row["started_at"]),
                 "outcomes": {},
                 "example_run_id": int(row["id"]),
                 "example_task_id": row["task_id"],
+                "example_task_title": (row["task_title"] or "").strip(),
+                "example_assignee": (row["assignee"] or "").strip(),
+                "example_block_kind": (row["block_kind"] or "").strip() or None,
                 "example_text": (row["reason"] or "").strip()[:500],
             },
         )
@@ -30709,6 +30832,9 @@ def runs_issues(
             g["last_seen"] = at
             g["example_run_id"] = int(row["id"])
             g["example_task_id"] = row["task_id"]
+            g["example_task_title"] = (row["task_title"] or "").strip()
+            g["example_assignee"] = (row["assignee"] or "").strip()
+            g["example_block_kind"] = (row["block_kind"] or "").strip() or None
             g["example_text"] = (row["reason"] or "").strip()[:500]
     issues = sorted(
         groups.values(),

@@ -247,12 +247,18 @@ export type ChainCompletionResponse = z.infer<typeof ChainCompletionResponseSche
 const IssueGroupSchema = z.object({
   signature: z.string().catch(""),
   profile: z.string().catch("unbekannt"),
+  cause_key: z.string().catch("other"),
+  cause_label: z.string().catch("Sonstige"),
+  cause_hint: z.string().catch("Noch keiner belastbaren Ursachenklasse zugeordnet."),
   count: z.coerce.number().catch(0),
   first_seen: nullableNumber,
   last_seen: nullableNumber,
   outcomes: z.record(z.string(), z.coerce.number()).catch({}),
   example_run_id: nullableNumber,
   example_task_id: z.coerce.string().catch(""),
+  example_task_title: z.string().catch(""),
+  example_assignee: z.string().catch(""),
+  example_block_kind: z.string().nullable().catch(null),
   example_text: z.string().catch(""),
 });
 export const RunsIssuesResponseSchema = z.object({
@@ -263,5 +269,13 @@ export const RunsIssuesResponseSchema = z.object({
   truncated: z.boolean().catch(false),
   issues: z.array(IssueGroupSchema).catch([]),
 });
-export type IssueGroup = z.infer<typeof IssueGroupSchema>;
-export type RunsIssuesResponse = z.infer<typeof RunsIssuesResponseSchema>;
+type ParsedIssueGroup = z.infer<typeof IssueGroupSchema>;
+export type IssueGroup = Omit<ParsedIssueGroup, "cause_key" | "cause_label" | "cause_hint" | "example_task_title" | "example_assignee" | "example_block_kind"> & {
+  cause_key?: string;
+  cause_label?: string;
+  cause_hint?: string;
+  example_task_title?: string;
+  example_assignee?: string;
+  example_block_kind?: string | null;
+};
+export type RunsIssuesResponse = Omit<z.infer<typeof RunsIssuesResponseSchema>, "issues"> & { issues: IssueGroup[] };

@@ -25,6 +25,7 @@ const AccountUsageProviderSchema = z.object({
   details: z.array(z.string()).catch([]),
   unavailable_reason: z.string().nullable().catch(null),
   cached: z.boolean().catch(false),
+  fallback: z.boolean().catch(false),
 });
 
 export const AccountUsageResponseSchema = z.object({
@@ -34,8 +35,9 @@ export const AccountUsageResponseSchema = z.object({
 export type AccountUsageWindow = z.infer<typeof AccountUsageWindowSchema>;
 // signal_at optional on the TS surface so pre-existing Partial fixtures keep
 // typechecking (8-file slice); runtime parse always materializes string|null via .catch.
-export type AccountUsageProvider = Omit<z.infer<typeof AccountUsageProviderSchema>, "signal_at"> & {
+export type AccountUsageProvider = Omit<z.infer<typeof AccountUsageProviderSchema>, "signal_at" | "fallback"> & {
   signal_at?: string | null;
+  fallback?: boolean;
 };
 export const ChainCostsResponseSchema = z.object({
   schema: z.string().catch("kanban-chain-costs-v1"),
@@ -130,6 +132,9 @@ export type RunsCostsResponse = z.infer<typeof RunsCostsResponseSchema>;
 
 const TokenBurnBucketSchema = z.object({
   runs: z.coerce.number().catch(0),
+  completed_runs: z.coerce.number().catch(0).optional(),
+  failed_runs: z.coerce.number().catch(0).optional(),
+  blocked_runs: z.coerce.number().catch(0).optional(),
   input_tokens: z.coerce.number().catch(0),
   output_tokens: z.coerce.number().catch(0),
   total_tokens: z.coerce.number().catch(0),
@@ -164,3 +169,39 @@ export type TokenBurnBucket = z.infer<typeof TokenBurnBucketSchema>;
 export type SubscriptionBurnLane = z.infer<typeof SubscriptionBurnLaneSchema>;
 export type SubscriptionBurnClass = z.infer<typeof SubscriptionBurnClassSchema>;
 export type SubscriptionTokenBurnResponse = z.infer<typeof SubscriptionTokenBurnResponseSchema>;
+
+const HostUsageDailySchema = z.object({
+  date: z.string().catch(""),
+  tokens: z.coerce.number().catch(0),
+  sessions: z.coerce.number().catch(0),
+});
+const HostUsageProviderSchema = z.object({
+  provider: z.string().catch("unknown"),
+  label: z.string().catch("Provider"),
+  total_tokens: z.coerce.number().catch(0),
+  sessions: z.coerce.number().catch(0),
+  daily: z.array(HostUsageDailySchema).catch([]),
+});
+const HostUsageSourceSchema = z.object({
+  source: z.string().catch("unknown"),
+  label: z.string().catch("Quelle"),
+  tokens: z.coerce.number().catch(0),
+  sessions: z.coerce.number().catch(0),
+});
+export const HostUsageResponseSchema = z.object({
+  generated_at: epochSeconds,
+  days: z.coerce.number().catch(7),
+  dates: z.array(z.string()).catch([]),
+  total_tokens: z.coerce.number().catch(0),
+  total_sessions: z.coerce.number().catch(0),
+  active_tmux_panes: z.coerce.number().catch(0),
+  sources: z.array(HostUsageSourceSchema).catch([]),
+  providers: z.array(HostUsageProviderSchema).catch([]),
+  errors: z.array(z.string()).catch([]),
+  accounting_note: z.string().catch("Aktive Ein-/Ausgabe ohne Cache"),
+  cached: z.boolean().catch(false),
+});
+export type HostUsageDaily = z.infer<typeof HostUsageDailySchema>;
+export type HostUsageProvider = z.infer<typeof HostUsageProviderSchema>;
+export type HostUsageSource = z.infer<typeof HostUsageSourceSchema>;
+export type HostUsageResponse = z.infer<typeof HostUsageResponseSchema>;

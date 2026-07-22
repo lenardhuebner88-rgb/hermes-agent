@@ -4417,6 +4417,8 @@ _ACCOUNT_USAGE_PROVIDERS: Tuple[str, ...] = (
 )
 _ACCOUNT_USAGE_CACHE_TTL_SECONDS = 60
 _ACCOUNT_USAGE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_ACCOUNT_USAGE_LAST_GOOD_MAX_AGE_SECONDS = 6 * 60 * 60
+_ACCOUNT_USAGE_LAST_GOOD: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _ACCOUNT_USAGE_CACHE_LOCK = threading.Lock()
 
 
@@ -4440,6 +4442,7 @@ def _account_usage_unavailable(provider: str, reason: str = "usage_unavailable")
         "windows": [],
         "details": [],
         "unavailable_reason": reason,
+        "fallback": False,
     }
 
 
@@ -4468,7 +4471,19 @@ def _account_usage_payload(snapshot: Any, provider: str) -> Dict[str, Any]:
         "windows": windows,
         "details": [str(detail) for detail in (getattr(snapshot, "details", ()) or ())],
         "unavailable_reason": getattr(snapshot, "unavailable_reason", None),
+        "fallback": False,
     }
+
+
+def _account_usage_has_percent(payload: Dict[str, Any]) -> bool:
+    if not payload.get("available"):
+        return False
+    return any(
+        isinstance(window.get("used_percent"), (int, float))
+        and not isinstance(window.get("used_percent"), bool)
+        for window in payload.get("windows", [])
+        if isinstance(window, dict)
+    )
 
 
 async def _cached_account_usage_payload(provider: str) -> Dict[str, Any]:
@@ -4493,11 +4508,21 @@ async def _cached_account_usage_payload(provider: str) -> Dict[str, Any]:
         payload = _account_usage_unavailable(provider)
 
     with _ACCOUNT_USAGE_CACHE_LOCK:
+        if _account_usage_has_percent(payload):
+            _ACCOUNT_USAGE_LAST_GOOD[provider] = (now, payload)
+        else:
+            last_good = _ACCOUNT_USAGE_LAST_GOOD.get(provider)
+            if last_good is not None:
+                stored_at, stored_payload = last_good
+                if now - stored_at <= _ACCOUNT_USAGE_LAST_GOOD_MAX_AGE_SECONDS:
+                    payload = {**stored_payload, "fallback": True}
+                else:
+                    _ACCOUNT_USAGE_LAST_GOOD.pop(provider, None)
         _ACCOUNT_USAGE_CACHE[provider] = (
             time.monotonic() + _ACCOUNT_USAGE_CACHE_TTL_SECONDS,
             payload,
         )
-    return {**payload, "cached": False}
+    return {**payload, "cached": bool(payload.get("fallback"))}
 
 
 @app.get("/api/account-usage")
@@ -4515,6 +4540,14 @@ async def get_account_usage():
 @app.get("/api/stats-config")
 async def get_stats_config():
     return load_stats_config()
+
+
+@app.get("/api/start/host-usage")
+async def get_start_host_usage(days: int = 7):
+    """Host-wide token/session telemetry for the Start mission-control view."""
+    from hermes_cli.host_usage import get_host_usage
+
+    return await asyncio.to_thread(get_host_usage, days=days)
 
 
 # ---------------------------------------------------------------------------

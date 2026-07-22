@@ -2530,6 +2530,7 @@ def test_commit_attribution_resolves_lane_and_latest_run_model_on_all_payloads(
     }
     assert last_commit["attribution"]["lane"] == "grok-builder"
     assert last_commit["attribution"]["model"] == "model-new"
+    assert last_commit["attribution"]["label"] == "newest run"
 
     monkeypatch.setattr("hermes_cli.projects_overview.get_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(
@@ -2554,6 +2555,7 @@ def test_commit_attribution_resolves_lane_and_latest_run_model_on_all_payloads(
     }
     assert newest["attribution"]["lane"] == "grok-builder"
     assert newest["attribution"]["model"] == "model-new"
+    assert newest["attribution"]["label"] == "newest run"
     loop_attribution = commits[
         "loop(hermes-feature-forge): loop build"
     ]["attribution"]

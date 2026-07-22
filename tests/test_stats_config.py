@@ -24,6 +24,8 @@ def test_missing_file_falls_back_to_defaults(config_file):
     # Returned object is a copy — mutating it must not poison the module default.
     cfg["providers"].clear()
     assert len(DEFAULT_STATS_CONFIG["providers"]) == 5
+    assert next(p for p in DEFAULT_STATS_CONFIG["providers"] if p["id"] == "xai")["lane"] == "grok"
+    assert any(lane["key"] == "grok" for lane in DEFAULT_STATS_CONFIG["subscription_lanes"])
 
 
 def test_valid_yaml_is_parsed_and_normalized(config_file):

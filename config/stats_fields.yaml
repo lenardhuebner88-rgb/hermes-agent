@@ -33,7 +33,7 @@ providers:
     visible: true
   - id: xai
     label: Grok
-    lane: null
+    lane: grok
     usage_role: subscription
     visible: true
   - id: openrouter
@@ -79,4 +79,7 @@ subscription_lanes:
     visible: true
   - key: kimi
     label: Kimi Abo
+    visible: true
+  - key: grok
+    label: Grok Abo
     visible: true
