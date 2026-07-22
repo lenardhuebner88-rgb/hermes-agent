@@ -13,7 +13,7 @@ const DEFAULT_VIEWPORTS = [
 function usage() {
   process.stderr.write(
     "usage: visual_verify_runner.mjs --base-url URL --output-dir DIR --git-head SHA "
-    + "[--viewports WxH[,name=WxH...]] <route> [<route>...]\n",
+    + "[--viewports WxH[,name=WxH...]] [--scenario terminal_bridge] <route> [<route>...]\n",
   );
 }
 
@@ -62,6 +62,7 @@ function parseArgs(argv) {
   let outputDir = "";
   let gitHead = "";
   let viewportsSpec = null;
+  let scenario = "default";
   const routes = [];
   for (let index = 2; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -73,6 +74,8 @@ function parseArgs(argv) {
       gitHead = argv[++index] || "";
     } else if (arg === "--viewports") {
       viewportsSpec = argv[++index] || "";
+    } else if (arg === "--scenario") {
+      scenario = argv[++index] || "";
     } else if (arg === "--help" || arg === "-h") {
       usage();
       process.exit(0);
@@ -82,7 +85,8 @@ function parseArgs(argv) {
       routes.push(arg);
     }
   }
-  if (!baseUrl || !outputDir || !/^[0-9a-f]{40}$/.test(gitHead) || routes.length === 0) {
+  if (!baseUrl || !outputDir || !/^[0-9a-f]{40}$/.test(gitHead) || routes.length === 0
+      || !["default", "terminal_bridge"].includes(scenario)) {
     usage();
     process.exit(2);
   }
@@ -96,7 +100,7 @@ function parseArgs(argv) {
       process.exit(2);
     }
   }
-  return { baseUrl, outputDir, gitHead, routes, viewports };
+  return { baseUrl, outputDir, gitHead, routes, viewports, scenario };
 }
 
 function routeUrl(baseUrl, route) {
@@ -168,7 +172,63 @@ async function readUxSignals() {
   };
 }
 
-async function checkOne(browser, baseUrl, outputDir, route, viewport) {
+async function clickFirstVisible(locator) {
+  const count = await locator.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) {
+      await candidate.click();
+      return true;
+    }
+  }
+  return false;
+}
+
+async function readTerminalGeometry(viewport) {
+  const visible = (element) => {
+    if (!element) return false;
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+  };
+  const terminals = Array.from(document.querySelectorAll('[data-testid^="terminal-pane-host-"]')).filter(visible);
+  const terminal = terminals[0] || null;
+  const terminalRect = terminal?.getBoundingClientRect() || null;
+  const bottomNav = Array.from(document.querySelectorAll('nav[aria-label="Navigation"]')).find(visible) || null;
+  const navRect = bottomNav?.getBoundingClientRect() || null;
+  const minimumWidth = viewport.width < 500 ? 280 : viewport.width < 1000 ? 420 : 520;
+  const clearance = terminalRect && navRect ? navRect.top - terminalRect.bottom : null;
+  return {
+    terminal_width_px: terminalRect ? Math.round(terminalRect.width * 10) / 10 : 0,
+    terminal_width_min_px: minimumWidth,
+    terminal_width_usable: Boolean(terminalRect && terminalRect.width >= minimumWidth),
+    bottom_navigation_clearance_px: clearance === null ? null : Math.round(clearance * 10) / 10,
+    bottom_navigation_clear: clearance === null || clearance >= 0,
+  };
+}
+
+async function openTerminalBridgeFixture(page) {
+  await page.locator('[data-testid^="terminal-pane-host-"]').first().waitFor({ state: "visible", timeout: CONNECT_TIMEOUT_MS });
+  const handoff = page.getByRole("button", { name: /Handoff öffnen/ });
+  if (!await clickFirstVisible(handoff)) {
+    const tools = page.getByRole("button", { name: "Werkzeuge umschalten" });
+    if (!await clickFirstVisible(tools)) {
+      await clickFirstVisible(page.locator('button[aria-label*="codex" i], button[title*="codex" i]'));
+    }
+    if (!await clickFirstVisible(handoff)) {
+      await clickFirstVisible(page.locator('button[aria-label*="codex" i], button[title*="codex" i]'));
+      if (!await clickFirstVisible(handoff)) throw new Error("terminal_bridge Handoff button is not visible");
+    }
+  }
+  const heldCandidate = page.getByText("Kandidaten gehalten einreichen", { exact: false });
+  await heldCandidate.first().waitFor({ state: "visible", timeout: CONNECT_TIMEOUT_MS });
+  return {
+    handoff_visible: true,
+    held_candidate_visible: true,
+  };
+}
+
+async function checkOne(browser, baseUrl, outputDir, route, viewport, scenario) {
   const consoleErrors = [];
   const pageErrors = [];
   const screenshotPath = path.join(outputDir, safeName(route, viewport));
@@ -189,6 +249,7 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
   let overflow = null;
   let uxSignals = null;
   let ariaSnapshotError = null;
+  let checks = {};
   let ok = true;
   let error = null;
   try {
@@ -197,19 +258,34 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
     await page.waitForTimeout(250);
     overflow = await page.evaluate(readOverflow);
     uxSignals = await page.evaluate(readUxSignals);
+    const geometry = scenario === "terminal_bridge"
+      ? await page.evaluate(readTerminalGeometry, viewport)
+      : {};
+    const fixture = scenario === "terminal_bridge"
+      ? await openTerminalBridgeFixture(page)
+      : {};
     try {
       const ariaSnapshot = await page.locator("body").ariaSnapshot();
       await fs.writeFile(ariaSnapshotPath, `${ariaSnapshot.trimEnd()}\n`, "utf8");
     } catch (caught) {
       ariaSnapshotError = caught instanceof Error ? caught.message : String(caught);
     }
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    ok = consoleErrors.length === 0 && pageErrors.length === 0 && Boolean(overflow?.ok);
+    await page.screenshot({ path: screenshotPath, fullPage: scenario !== "terminal_bridge" });
+    checks = {
+      console_error_count: consoleErrors.length,
+      page_error_count: pageErrors.length,
+      horizontal_overflow: !Boolean(overflow?.ok),
+      ...geometry,
+      ...fixture,
+    };
+    ok = consoleErrors.length === 0 && pageErrors.length === 0 && Boolean(overflow?.ok)
+      && Object.values(geometry).filter((value) => typeof value === "boolean").every(Boolean)
+      && Object.values(fixture).every(Boolean);
   } catch (caught) {
     ok = false;
     error = caught instanceof Error ? caught.message : String(caught);
     try {
-      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await page.screenshot({ path: screenshotPath, fullPage: scenario !== "terminal_bridge" });
     } catch {
       // Best-effort failure artifact only.
     }
@@ -229,12 +305,17 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport) {
     pageErrors,
     overflow,
     uxSignals,
+    checks,
+    status: ok ? "passed" : "failed",
+    screenshot: path.basename(screenshotPath),
+    viewport: viewport.name,
+    viewportSize: { width: viewport.width, height: viewport.height },
     error,
   };
 }
 
 async function main() {
-  const { baseUrl, outputDir, gitHead, routes, viewports } = parseArgs(process.argv);
+  const { baseUrl, outputDir, gitHead, routes, viewports, scenario } = parseArgs(process.argv);
   await fs.mkdir(outputDir, { recursive: true });
   const chromium = requirePlaywrightChromium();
   const browser = await chromium.launch({
@@ -246,7 +327,7 @@ async function main() {
   try {
     for (const route of routes) {
       for (const viewport of viewports) {
-        results.push(await checkOne(browser, baseUrl, outputDir, route, viewport));
+        results.push(await checkOne(browser, baseUrl, outputDir, route, viewport, scenario));
       }
     }
   } finally {
@@ -254,6 +335,8 @@ async function main() {
   }
   const summary = {
     ok: results.every((result) => result.ok),
+    allPassed: results.every((result) => result.ok),
+    scenario,
     generatedAt: new Date().toISOString(),
     gitHead,
     baseUrl,

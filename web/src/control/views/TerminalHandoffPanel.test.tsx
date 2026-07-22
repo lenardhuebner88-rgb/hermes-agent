@@ -43,7 +43,7 @@ vi.mock("lucide-react", () => {
 
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
 
-const target = { session: "hermes-agents", window: "hermes" };
+const target = { session: "hermes-agents", window: "hermes", terminal_run_id: "tr_wave2" };
 
 function renderPanel(getSelection: () => string = () => "echo hello\nworld") {
   return render(
@@ -111,7 +111,10 @@ describe("TerminalHandoffPanel", () => {
     await waitFor(() => expect(fetchJSONMock).toHaveBeenCalled());
     const [url, init] = fetchJSONMock.mock.calls[0];
     expect(url).toBe("/api/plugins/kanban/planspecs/validate");
-    expect(JSON.parse(init.body)).toMatchObject({ slug: expect.any(String), content: expect.stringContaining("freigabe: operator") });
+    expect(JSON.parse(init.body)).toMatchObject({
+      terminal_run_id: "tr_wave2",
+      draft: { body: expect.stringContaining("freigabe: operator") },
+    });
     expect(await screen.findByText(/Validate-Ergebnis: invalid/)).toBeTruthy();
     expect(screen.getByText(/taskgraph_hints.binding must be true/)).toBeTruthy();
   });
@@ -164,7 +167,7 @@ describe("TerminalHandoffPanel", () => {
     expect(screen.getByText("kein AC referenziert")).toBeTruthy();
   });
 
-  it("creates a Kanban triage task via the existing task API with triage=true (AC-5)", async () => {
+  it("creates a held Kanban task via the existing task API (AC-5)", async () => {
     fetchJSONMock.mockResolvedValue({ task: { id: "t_triage1", status: "triage" } });
     renderPanel();
     fireEvent.click(screen.getByRole("button", { name: /Kanban-Triage/ }));
@@ -176,7 +179,11 @@ describe("TerminalHandoffPanel", () => {
     await waitFor(() => expect(fetchJSONMock).toHaveBeenCalled());
     const [url, init] = fetchJSONMock.mock.calls[0];
     expect(url).toBe("/api/plugins/kanban/tasks");
-    expect(JSON.parse(init.body)).toMatchObject({ triage: true });
+    expect(JSON.parse(init.body)).toMatchObject({
+      status: "scheduled",
+      freigabe: "operator",
+      live_test_depth: "contract",
+    });
     expect(await screen.findByText(/t_triage1/)).toBeTruthy();
   });
 
@@ -194,5 +201,32 @@ describe("TerminalHandoffPanel", () => {
       }
     }
     expect(await screen.findByText(/Würde dispatchen: 1/)).toBeTruthy();
+  });
+
+  it("submits an isolated-write candidate only through the held intake endpoint", async () => {
+    fetchJSONMock.mockResolvedValue({
+      root_task_id: "t_root",
+      intake_task_id: "t_intake",
+      imported_commit: "a".repeat(40),
+      idempotent: false,
+    });
+    render(
+      <TerminalHandoffPanel
+        target={{ ...target, terminal_run_id: "tr_candidate" }}
+        getSelection={() => ""}
+        onClose={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Kandidaten gehalten einreichen" }));
+
+    await waitFor(() => expect(fetchJSONMock).toHaveBeenCalledTimes(1));
+    const [url, options] = fetchJSONMock.mock.calls[0];
+    expect(url).toBe("/api/plugins/kanban/terminal-candidates/submit");
+    expect(JSON.parse(options.body)).toEqual({ terminal_run_id: "tr_candidate" });
+    expect(await screen.findByText(/Root t_root/)).toBeTruthy();
+    expect(fetchJSONMock.mock.calls.some(([calledUrl]) =>
+      String(calledUrl).includes("integrate"),
+    )).toBe(false);
   });
 });

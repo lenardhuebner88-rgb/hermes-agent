@@ -74,6 +74,7 @@ import { de } from "../i18n/de";
 import { Eyebrow } from "../components/primitives";
 import { Sparkline } from "../components/fleet/Sparkline";
 import { TerminalHandoffPanel } from "./TerminalHandoffPanel";
+import { canHandoffFromInventory } from "../lib/terminalHandoff";
 import { TerminalPane, type TerminalPaneConnectionState, type TerminalPaneHandle } from "./agent-terminals/TerminalPane";
 import {
   extractTerminalBufferText,
@@ -254,7 +255,7 @@ export function AgentTerminalsView() {
   const [capability, setCapability] = useState<AgentTerminalCapabilityState | null>(null);
   const [windows, setWindows] = useState<AgentTerminalWindow[]>([]);
   const [selectedKind, setSelectedKind] = useState<AgentTerminalKind>("hermes");
-  const [target, setTarget] = useState<{ session: string; window: string } | null>(() => {
+  const [target, setTarget] = useState<{ session: string; window: string; terminal_run_id?: string | null } | null>(() => {
     try {
       const raw = window.localStorage.getItem(TARGET_STORAGE_KEY);
       if (!raw) return null;
@@ -2094,7 +2095,10 @@ export function AgentTerminalsView() {
       <button
         type="button"
         onClick={() => { setHandoffOpen(true); setToolsOpen(false); }}
-        disabled={!target}
+        disabled={!target || !canHandoffFromInventory({
+          terminal_run_id: target.terminal_run_id ?? selectedWindow?.terminal_run_id,
+          has_manifest: Boolean(target.terminal_run_id ?? selectedWindow?.terminal_run_id),
+        })}
         className="flex w-full items-center justify-center gap-1.5 whitespace-normal text-center rounded-card border border-live/50 bg-live/10 px-3 py-2 text-xs text-live hover:bg-live/20 disabled:opacity-40"
       >
         <Share2 className="h-3.5 w-3.5" />
@@ -3395,7 +3399,18 @@ export function AgentTerminalsView() {
 
       {handoffOpen && (
         <TerminalHandoffPanel
-          target={target}
+          target={
+            target
+              ? {
+                  session: target.session,
+                  window: target.window,
+                  terminal_run_id:
+                    target.terminal_run_id ??
+                    selectedWindow?.terminal_run_id ??
+                    null,
+                }
+              : null
+          }
           getSelection={readActiveSelection}
           onClose={() => setHandoffOpen(false)}
         />

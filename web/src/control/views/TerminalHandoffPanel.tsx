@@ -6,15 +6,17 @@ import { cn } from "@/lib/utils";
 import { Eyebrow } from "../components/primitives";
 import {
   buildPlanSpecDraft,
-  defaultSlug,
+  buildStructuredHandoffRequest,
+  canHandoffFromInventory,
   findingsFromError,
+  handoffRequestKey,
   LIVE_TEST_DEPTHS,
   stripAnsi,
   type LiveTestDepth,
 } from "../lib/terminalHandoff";
 
 interface TerminalHandoffPanelProps {
-  target: { session: string; window: string } | null;
+  target: { session: string; window: string; terminal_run_id?: string | null } | null;
   /** Reads the current xterm selection (plain text) from the parent. */
   getSelection: () => string;
   onClose: () => void;
@@ -41,6 +43,12 @@ interface IngestResult {
 }
 interface TaskCreateResult {
   task: { id: string; title?: string; status?: string };
+}
+interface CandidateSubmitResult {
+  root_task_id: string;
+  intake_task_id: string;
+  imported_commit: string;
+  idempotent: boolean;
 }
 interface DispatchPreview {
   spawned: Array<[string, string, string]>;
@@ -79,6 +87,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
   const [validateResult, setValidateResult] = useState<ValidateResult | null>(null);
   const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
   const [taskResult, setTaskResult] = useState<TaskCreateResult | null>(null);
+  const [candidateResult, setCandidateResult] = useState<CandidateSubmitResult | null>(null);
   const [dispatchPreview, setDispatchPreview] = useState<DispatchPreview | null>(null);
 
   const [busy, setBusy] = useState<string | null>(null);
@@ -127,28 +136,77 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
     setDraft(buildPlanSpecDraft(captured, { title, liveTestDepth }));
   }, [captured, title, liveTestDepth]);
 
+  const handoffEnabled = canHandoffFromInventory({
+    terminal_run_id: target?.terminal_run_id,
+    has_manifest: Boolean(target?.terminal_run_id),
+  });
+
+  const structuredPayload = useCallback(() => {
+    if (!target?.session || !target.window) {
+      throw new Error("Kein Terminal-Fenster gewählt.");
+    }
+    if (!target.terminal_run_id) {
+      throw new Error("Legacy-Fenster ohne terminal_run_id — bitte neues Wave-2-Fenster starten.");
+    }
+    return buildStructuredHandoffRequest({
+      session: target.session,
+      window: target.window,
+      title: title.trim() || `Terminal handoff ${target.session}/${target.window}`,
+      body: draft,
+      rawText: captured || draft,
+      terminalRunId: target.terminal_run_id,
+    });
+  }, [target, title, draft, captured]);
+
   const doValidate = useCallback(
     () =>
       run("validate", async () => {
+        const frozenKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "validate",
+        });
         const result = await fetchJSON<ValidateResult>(`${KANBAN}/planspecs/validate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: draft, slug: defaultSlug(title) }),
+          body: JSON.stringify(structuredPayload()),
         });
+        // Ignore stale responses if target changed mid-flight.
+        const nowKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "validate",
+        });
+        if (nowKey !== frozenKey) return;
         setValidateResult(result);
       }),
-    [run, draft, title],
+    [run, structuredPayload, target],
   );
 
   const doIngest = useCallback(
     () =>
       run("ingest", async () => {
+        const frozenKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "ingest",
+        });
         try {
           const result = await fetchJSON<IngestResult>(`${KANBAN}/planspecs/ingest-draft`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: draft, slug: defaultSlug(title), author: "dashboard" }),
+            body: JSON.stringify(structuredPayload()),
           });
+          const nowKey = handoffRequestKey({
+            session: target?.session,
+            window: target?.window,
+            terminal_run_id: target?.terminal_run_id,
+            requestId: "ingest",
+          });
+          if (nowKey !== frozenKey) return;
           setIngestResult(result);
         } catch (err) {
           const findings = findingsFromError(err);
@@ -165,24 +223,31 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
           throw err;
         }
       }),
-    [run, draft, title],
+    [run, structuredPayload, target],
   );
 
   const doCreateTask = useCallback(
     () =>
       run("task", async () => {
+        if (!target?.terminal_run_id) {
+          throw new Error("Legacy-Fenster ohne terminal_run_id — bitte neues Wave-2-Fenster starten.");
+        }
+        // Direct create stays held operator/contract; no triage intermediate.
         const result = await fetchJSON<TaskCreateResult>(`${KANBAN}/tasks`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            title: title.trim() || "Terminal-Handoff Triage",
+            title: title.trim() || "Terminal-Handoff",
             body: taskBody,
-            triage: true,
+            freigabe: "operator",
+            live_test_depth: "contract",
+            status: "scheduled",
+            handoff: structuredPayload(),
           }),
         });
         setTaskResult(result);
       }),
-    [run, title, taskBody],
+    [run, title, taskBody, target, structuredPayload],
   );
 
   // Optional, clearly SEPARATE from real dispatch: always dry_run=true. There is
@@ -198,6 +263,22 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
         setDispatchPreview(result);
       }),
     [run],
+  );
+
+  const doCandidateSubmit = useCallback(
+    () =>
+      run("candidate", async () => {
+        if (!target?.terminal_run_id) {
+          throw new Error("Candidate Submit benötigt eine serverseitig bekannte terminal_run_id.");
+        }
+        const result = await fetchJSON<CandidateSubmitResult>(`${KANBAN}/terminal-candidates/submit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal_run_id: target.terminal_run_id }),
+        });
+        setCandidateResult(result);
+      }),
+    [run, target],
   );
 
   const hasText = mode === "planspec" ? draft.trim().length > 0 : taskBody.trim().length > 0;
@@ -225,9 +306,39 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
             Opt-in: Auswahl/Capture füllt nur Text. Nichts wird erstellt, validiert, ingestet oder
             dispatcht ohne expliziten Klick. Kein Auto-Dispatch von Terminal-Output.
           </div>
+          {!handoffEnabled && (
+            <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3 text-xs text-status-alert">
+              Handoff deaktiviert: Fenster hat keine <code>terminal_run_id</code>/Manifest (Wave&nbsp;2).
+              Bitte ein neues Terminal-Fenster starten.
+            </div>
+          )}
 
           {/* Source */}
           <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3">
+          {target?.terminal_run_id && (
+            <div className="rounded-card border border-status-warn/30 bg-status-warn/5 p-3 text-xs">
+              <div className="font-medium text-ink">Isolated-Write Candidate Intake</div>
+              <p className="mt-1 text-ink-2">
+                Separate Operator-Aktion: serverseitiger Preflight und Import in eine gehaltene
+                Kanban-Chain. Dieser Schritt mergt niemals in den Live-Zielbranch.
+              </p>
+              <button
+                type="button"
+                onClick={() => void doCandidateSubmit()}
+                disabled={busy !== null}
+                className="mt-2 rounded-card border border-status-warn/40 px-3 py-1.5 text-status-warn disabled:opacity-50"
+              >
+                {busy === "candidate" ? "Prüfe und importiere…" : "Kandidaten gehalten einreichen"}
+              </button>
+              {candidateResult && (
+                <div className="mt-2 font-mono text-[11px] text-status-ok">
+                  Root {candidateResult.root_task_id} · Intake {candidateResult.intake_task_id} ·{" "}
+                  {candidateResult.imported_commit}
+                  {candidateResult.idempotent ? " · bereits vorhanden" : ""}
+                </div>
+              )}
+            </div>
+          )}
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5">
                 <input
