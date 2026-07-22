@@ -1023,7 +1023,14 @@ class LoopRunner:
         self._heartbeat(None, done=done)
         log_file = self.state / "logs" / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{phase}.log"
         log_file.write_text(result.output, encoding="utf-8")
-        subscription_engine = cfg.engine in {"claude", "codex", "kimi", "neuralwatt", "xai"}
+        subscription_engine = cfg.engine in {
+            "alibaba-token-plan",
+            "claude",
+            "codex",
+            "kimi",
+            "neuralwatt",
+            "xai",
+        }
         self.ledger_event(
             event="phase_usage",
             round=round_,

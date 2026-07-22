@@ -41,6 +41,11 @@ KIMI_BIN = os.environ.get(
     "KIMI_BIN", str(Path("~/.kimi-code/bin/kimi").expanduser())
 )
 KIMI_DEFAULT_MODEL = "kimi-code/kimi-for-coding"
+KIMI_MODEL_ALIASES = {
+    # Looptap exposes the short catalog id, while Kimi Code's managed OAuth
+    # config requires the fully-qualified alias reported by Kimi Code.
+    "k3": "kimi-code/k3",
+}
 
 KIMI_LIMIT_RE = re.compile(
     r"provider\.rate_limit|PROVIDER_RATE_LIMIT|rate_limit_exceeded", re.IGNORECASE
@@ -49,10 +54,11 @@ KIMI_LIMIT_RE = re.compile(
 
 @register("kimi")
 def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
+    effective_model = KIMI_MODEL_ALIASES.get(model, model)
     cmd = [
         KIMI_BIN,
         "--model",
-        model,
+        effective_model,
         "-p",
         prompt,
     ]

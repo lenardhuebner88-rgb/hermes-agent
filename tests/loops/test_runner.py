@@ -1265,6 +1265,54 @@ def test_night_overrides_persist_and_lose_to_one_shot(tmp_path, fake_engine):
     assert cfg2.model == "k3"
 
 
+def test_dedicated_pack_live_e2e_night_one_shot_then_night_again(
+    tmp_path, fake_engine, monkeypatch
+):
+    seen_models: list[str] = []
+
+    def bounded_engine(model, prompt, cwd, timeout_s):
+        seen_models.append(model)
+        return engines.EngineResult(rc=0, output="bounded-ok", usage_limit=False)
+
+    monkeypatch.setitem(engines.ENGINES, "fake", bounded_engine)
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "night-live-e2e", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "night-live-e2e")
+    state_root = tmp_path / "state"
+    state = state_root / pack.name
+    state.mkdir(parents=True)
+    night_path = state / "night-overrides.env"
+    night_path.write_text("""PHASE_PLAN_ENGINE=fake
+PHASE_PLAN_MODEL=m2
+""", encoding="utf-8")
+
+    night_runner = LoopRunner(pack, state_root=state_root)
+    night_runner.ensure_dirs()
+    night_runner.wt.mkdir(parents=True)
+    assert night_runner.run_phase("plan").rc == 0
+
+    (state / "overrides.env").write_text(
+        """PHASE_PLAN_ENGINE=fake
+PHASE_PLAN_MODEL=m3
+""", encoding="utf-8"
+    )
+    one_shot_runner = LoopRunner(pack, state_root=state_root)
+    assert one_shot_runner.run_phase("plan").rc == 0
+    one_shot_runner.consume_overrides()
+
+    next_runner = LoopRunner(pack, state_root=state_root)
+    assert next_runner.run_phase("plan").rc == 0
+
+    assert seen_models == ["m2", "m3", "m2"]
+    assert not (state / "overrides.env").exists()
+    assert (state / "overrides.consumed.env").is_file()
+    assert night_path.read_text(encoding="utf-8") == (
+        """PHASE_PLAN_ENGINE=fake
+PHASE_PLAN_MODEL=m2
+"""
+    )
+
+
 def test_night_overrides_partial_pair_resolves_from_pack(tmp_path, fake_engine):
     repo = init_repo(tmp_path / "repo")
     write_pack(tmp_path / "packs", "nightpart", "pipeline", repo)

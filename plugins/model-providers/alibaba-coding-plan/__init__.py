@@ -9,7 +9,12 @@ from providers.base import ProviderProfile
 
 alibaba_coding_plan = ProviderProfile(
     name="alibaba-coding-plan",
-    aliases=("alibaba_coding", "alibaba-coding", "dashscope-coding"),
+    aliases=(
+        "alibaba_coding",
+        "alibaba-coding",
+        "dashscope-coding",
+        "alibaba-token-plan",
+    ),
     display_name="Alibaba Cloud (Coding Plan)",
     description="Alibaba Cloud Coding Plan (Dedicated coding tier)",
     signup_url="https://help.aliyun.com/zh/model-studio/",

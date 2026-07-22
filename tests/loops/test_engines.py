@@ -337,6 +337,20 @@ def test_kimi_cli_builds_headless_command(monkeypatch, tmp_path):
     assert cmd[-1] == "sag OK"
 
 
+def test_kimi_cli_maps_catalog_k3_to_managed_oauth_alias(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="OK", stderr="")
+
+    monkeypatch.setattr(kimi_cli.subprocess, "run", fake_run)
+    result = kimi_cli.run("k3", "sag OK", tmp_path, 60)
+
+    assert result.rc == 0
+    assert seen["cmd"][seen["cmd"].index("--model") + 1] == "kimi-code/k3"
+
+
 def test_kimi_cli_timeout_maps_to_timed_out(monkeypatch, tmp_path):
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, 60, output=b"teil", stderr=b"")
