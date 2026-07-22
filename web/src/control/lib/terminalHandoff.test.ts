@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildPlanSpecDraft,
+  buildStructuredHandoffRequest,
+  canHandoffFromInventory,
   defaultSlug,
   findingsFromError,
+  handoffRequestKey,
+  HANDOFF_SCHEMA_VERSION,
   stripAnsi,
 } from "./terminalHandoff";
 
@@ -52,5 +56,37 @@ describe("findingsFromError", () => {
   });
   it("returns null when there is no JSON detail", () => {
     expect(findingsFromError(new Error("500: Internal Server Error"))).toBeNull();
+  });
+});
+
+describe("W3-S2 structured handoff helpers", () => {
+  it("disables handoff without terminal_run_id/manifest", () => {
+    expect(canHandoffFromInventory({})).toBe(false);
+    expect(canHandoffFromInventory({ terminal_run_id: "tr1", has_manifest: false })).toBe(false);
+    expect(canHandoffFromInventory({ terminal_run_id: "tr1", has_manifest: true })).toBe(true);
+    expect(canHandoffFromInventory({ upgrade_required: true, terminal_run_id: "tr1" })).toBe(false);
+  });
+
+  it("builds structured request without content field", () => {
+    const req = buildStructuredHandoffRequest({
+      session: "work",
+      window: "hermes",
+      title: "T",
+      rawText: "capture",
+      terminalRunId: "tr1",
+    });
+    expect(req.schema_version).toBe(HANDOFF_SCHEMA_VERSION);
+    expect((req as { content?: string }).content).toBeUndefined();
+    expect(req.raw.text).toBe("capture");
+    expect(req.terminal_run_id).toBe("tr1");
+  });
+
+  it("freezes request keys for race isolation", () => {
+    expect(
+      handoffRequestKey({ session: "a", window: "b", terminal_run_id: "tr", requestId: "1" }),
+    ).toBe("a::b::tr::1");
+    expect(
+      handoffRequestKey({ session: "a", window: "b", terminal_run_id: "tr", requestId: "2" }),
+    ).not.toBe("a::b::tr::1");
   });
 });

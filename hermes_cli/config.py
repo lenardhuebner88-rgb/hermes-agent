@@ -2928,6 +2928,22 @@ DEFAULT_CONFIG = {
     # each claimable ready task. One dispatcher per profile is sufficient;
     # running more than one on the same kanban.db will race for claims.
     "kanban": {
+        # Explicitly opt-in: isolated-write commits enter only through the
+        # held candidate adapter, and only from a canonical allowlisted repo.
+        "candidate_submit": {
+            "enabled": False,
+            "repo_allowlist": [],
+            "intake_assignee": "coder",
+        },
+
+        # Gate evidence is record-only unless reuse is explicitly enabled.
+        # Production activation is deliberately outside Wave 3.
+        "gate_evidence_reuse": False,
+
+        # Record-only routing recommendations use a bounded comparable cohort.
+        # Values outside 30..50 are rejected to this default by the loader.
+        "routing_shadow_window": 40,
+
         # Run the dispatcher inside the gateway process. On by default —
         # the cost is ~300µs every `dispatch_interval_seconds` when idle,
         # and gateway is the supervisor users already have. Set to false
@@ -7404,6 +7420,13 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         if managed_config:
             managed_expanded = _expand_env_vars(managed_config)
             expanded = _deep_merge(expanded, managed_expanded)
+        from hermes_cli.kanban_shadow_routing import normalize_routing_shadow_window
+
+        kanban_config = expanded.get("kanban")
+        if isinstance(kanban_config, dict):
+            kanban_config["routing_shadow_window"] = normalize_routing_shadow_window(
+                kanban_config.get("routing_shadow_window")
+            )
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``

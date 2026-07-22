@@ -1328,7 +1328,7 @@ def test_ac_w2_s5_2_supersede_crash_between_archive_and_create_auto_recovers(
         encoding="utf-8",
     )
 
-    real_create = kb.create_task
+    real_create = kb.create_held_decompose_root
     calls = {"n": 0}
 
     def boom_once(conn, *args, **kwargs):
@@ -1337,8 +1337,8 @@ def test_ac_w2_s5_2_supersede_crash_between_archive_and_create_auto_recovers(
             raise RuntimeError("injected crash between archive and create")
         return real_create(conn, *args, **kwargs)
 
-    monkeypatch.setattr(kb, "create_task", boom_once)
-    monkeypatch.setattr(planspecs.kanban_db, "create_task", boom_once)
+    monkeypatch.setattr(kb, "create_held_decompose_root", boom_once)
+    monkeypatch.setattr(planspecs.kanban_db, "create_held_decompose_root", boom_once)
 
     with pytest.raises(RuntimeError, match="injected crash"):
         planspecs.ingest_planspec(path, plans_root=plans_root, supersede=True)

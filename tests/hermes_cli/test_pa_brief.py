@@ -21,7 +21,7 @@ def isolated_brief_home(
     home = tmp_path / "home"
     hermes_home = home / ".hermes"
     vault = tmp_path / "vault"
-    db_path = tmp_path / "kanban.db"
+    db_path = hermes_home / "kanban.db"
     hermes_home.mkdir(parents=True)
     (vault / "03-Agents").mkdir(parents=True)
     monkeypatch.setenv("HOME", str(home))
