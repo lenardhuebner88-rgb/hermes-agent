@@ -174,6 +174,37 @@ export {
 } from "./agent-terminals/terminalHelpers";
 export type { TerminalUiState } from "./agent-terminals/terminalHelpers";
 
+function isActiveExecutionCapsuleForWindow(
+  capsule: unknown,
+  window: AgentTerminalWindow,
+): capsule is AgentTerminalExecutionCapsule {
+  if (!capsule || typeof capsule !== "object") return false;
+  const candidate = capsule as Partial<AgentTerminalExecutionCapsule>;
+  const terminal = candidate.terminal;
+  const context = candidate.context;
+  const validProfile =
+    context != null &&
+    ["implementation", "review", "recovery", "operator_handoff"].includes(
+      context.profile,
+    );
+  const stringList = (value: unknown): value is string[] =>
+    Array.isArray(value) && value.every((item) => typeof item === "string");
+  return Boolean(
+    candidate.state === "active" &&
+      candidate.correlation_id === window.correlation_id &&
+      candidate.task_id === window.task_id &&
+      candidate.run_id === window.run_id &&
+      terminal?.session === window.session &&
+      terminal.window === window.window &&
+      terminal.pane_id === window.pane_id &&
+      validProfile &&
+      typeof context?.summary === "string" &&
+      stringList(context.decisions) &&
+      stringList(context.next_steps) &&
+      stringList(context.risks),
+  );
+}
+
 export function pickDeepLinkedTarget(
   windows: AgentTerminalWindow[],
   session: string,
@@ -296,6 +327,8 @@ export function AgentTerminalsView() {
   const [executionCapsuleLoading, setExecutionCapsuleLoading] = useState(false);
   const [executionCapsuleDetail, setExecutionCapsuleDetail] =
     useState<AgentTerminalExecutionCapsule | null>(null);
+  const [executionCapsuleTarget, setExecutionCapsuleTarget] =
+    useState<AgentTerminalWindow | null>(null);
   const [executionCapsuleError, setExecutionCapsuleError] = useState<string | null>(null);
   const [socketReady, setSocketReady] = useState(false);
   const [socketConnecting, setSocketConnecting] = useState(false);
@@ -1273,6 +1306,7 @@ export function AgentTerminalsView() {
     setExecutionCapsuleNextSteps("");
     setExecutionCapsuleRisks("");
     setExecutionCapsuleDetail(null);
+    setExecutionCapsuleTarget(targetWindow);
     setExecutionCapsuleError(null);
     setExecutionCapsuleOpen(true);
     setSessionSheetOpen(false);
@@ -1287,10 +1321,9 @@ export function AgentTerminalsView() {
         if (executionCapsuleLoadSeqRef.current !== loadSeq) return;
         if (
           !response.consistent ||
-          !response.capsule ||
-          response.capsule.correlation_id !== targetWindow.correlation_id
+          !isActiveExecutionCapsuleForWindow(response.capsule, targetWindow)
         ) {
-          throw new Error("Die gespeicherte Execution Capsule ist nicht konsistent gebunden.");
+          throw new Error("Die gespeicherte Execution Capsule ist nicht aktiv und konsistent gebunden.");
         }
         setExecutionCapsuleDetail(response.capsule);
       })
@@ -1309,10 +1342,11 @@ export function AgentTerminalsView() {
     executionCapsuleLoadSeqRef.current += 1;
     setExecutionCapsuleLoading(false);
     setExecutionCapsuleOpen(false);
+    setExecutionCapsuleTarget(null);
   }, []);
 
   const bindExecutionCapsule = useCallback(async () => {
-    if (!selectedWindow || selectedWindow.correlation_id) return;
+    if (!executionCapsuleTarget || executionCapsuleTarget.correlation_id) return;
     const taskId = executionCapsuleTaskId.trim();
     const runId = Number(executionCapsuleRunId);
     const summary = executionCapsuleSummary.trim();
@@ -1349,8 +1383,8 @@ export function AgentTerminalsView() {
     setExecutionCapsuleError(null);
     try {
       const response = await api.bindAgentTerminalExecutionCapsule(
-        selectedWindow.session,
-        selectedWindow.window,
+        executionCapsuleTarget.session,
+        executionCapsuleTarget.window,
         taskId,
         runId,
         {
@@ -1361,6 +1395,11 @@ export function AgentTerminalsView() {
           risks,
         },
       );
+      if (!isActiveExecutionCapsuleForWindow(response.capsule, response.window)) {
+        throw new Error("Die neue Execution Capsule wurde nicht aktiv und konsistent bestätigt.");
+      }
+      const mutationSeq = ++windowsSeqRef.current;
+      windowsAppliedSeqRef.current = mutationSeq;
       setWindows((current) => {
         const next = current.map((candidate) =>
           candidate.session === response.window.session &&
@@ -1371,6 +1410,7 @@ export function AgentTerminalsView() {
         windowsJsonRef.current = JSON.stringify(next);
         return next;
       });
+      setExecutionCapsuleTarget(response.window);
       setExecutionCapsuleDetail(response.capsule);
     } catch (err) {
       setExecutionCapsuleError(err instanceof Error ? err.message : String(err));
@@ -1385,7 +1425,7 @@ export function AgentTerminalsView() {
     executionCapsuleRunId,
     executionCapsuleSummary,
     executionCapsuleTaskId,
-    selectedWindow,
+    executionCapsuleTarget,
   ]);
 
   const sendRaw = useCallback((sequence: string) => {
@@ -2137,7 +2177,13 @@ export function AgentTerminalsView() {
               void uploadFiles(files);
             }
           }}
-          placeholder={activeSocketReady ? "Prompt oder Befehl … (Enter sendet)" : "Terminal nicht verbunden"}
+          placeholder={
+            activeSocketReady
+              ? compactLayout
+                ? "Prompt oder Befehl …"
+                : "Prompt oder Befehl … (Enter sendet)"
+              : "Terminal nicht verbunden"
+          }
           disabled={!activeSocketReady}
           rows={Math.min(4, Math.max(1, composerText.split("\n").length))}
           enterKeyHint="send"
@@ -3125,7 +3171,7 @@ export function AgentTerminalsView() {
       {createSheet}
       {compactLayout && toolsOpen && <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85svh] overflow-auto rounded-t-panel border border-line bg-surface-1 p-4 shadow-2xl"><div className="mx-auto mb-3 h-1 w-12 rounded-full bg-ink-3/20" />{toolsDrawer}</div>}
 
-      {executionCapsuleOpen && selectedWindow && (
+      {executionCapsuleOpen && executionCapsuleTarget && (
         <div className="fixed inset-0 z-[70] grid place-items-end bg-black/65 p-0 sm:place-items-center sm:p-4">
           <section
             role="dialog"
@@ -3137,7 +3183,7 @@ export function AgentTerminalsView() {
               <div className="min-w-0">
                 <Eyebrow>Execution Capsule</Eyebrow>
                 <h2 id="execution-capsule-title" className="mt-1 truncate font-display text-base font-semibold text-ink">
-                  Kanban-Run mit {selectedWindow.session}:{selectedWindow.window} verknüpfen
+                  Kanban-Run mit {executionCapsuleTarget.session}:{executionCapsuleTarget.window} verknüpfen
                 </h2>
                 <p className="mt-1 text-xs leading-relaxed text-ink-3">
                   tmux speichert nur Task-, Run- und Korrelationszeiger. Der begrenzte Handoff bleibt in der Run-Historie.
@@ -3154,18 +3200,51 @@ export function AgentTerminalsView() {
               </button>
             </div>
 
-            {selectedWindow.correlation_id && selectedWindow.task_id && selectedWindow.run_id ? (
-              <div className="mt-4 grid gap-2 rounded-card border border-live/25 bg-live/[0.06] p-4 text-xs">
-                <div className="flex items-center gap-2 text-live"><CheckCircle2 className="h-4 w-4" /><strong>Aktiv verknüpft</strong></div>
+            {executionCapsuleTarget.correlation_id && executionCapsuleTarget.task_id && executionCapsuleTarget.run_id ? (
+              <div
+                className={cn(
+                  "mt-4 grid gap-2 rounded-card border p-4 text-xs",
+                  executionCapsuleDetail
+                    ? "border-live/25 bg-live/[0.06]"
+                    : executionCapsuleError
+                      ? "border-status-alert/30 bg-status-alert/[0.06]"
+                      : "border-line bg-surface-2",
+                )}
+              >
+                <div
+                  className={cn(
+                    "flex items-center gap-2",
+                    executionCapsuleDetail
+                      ? "text-live"
+                      : executionCapsuleError
+                        ? "text-status-alert"
+                        : "text-ink-3",
+                  )}
+                >
+                  {executionCapsuleDetail ? (
+                    <CheckCircle2 className="h-4 w-4" />
+                  ) : executionCapsuleLoading ? (
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <AlertTriangle className="h-4 w-4" />
+                  )}
+                  <strong>
+                    {executionCapsuleDetail
+                      ? "Aktiv verknüpft"
+                      : executionCapsuleLoading
+                        ? "Verknüpfung wird geprüft"
+                        : "Verknüpfung nicht bestätigt"}
+                  </strong>
+                </div>
                 <div className="grid gap-1.5 text-ink-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
-                  <span className="text-ink-3">Task</span><span className="truncate font-mono text-ink-2">{selectedWindow.task_id}</span>
-                  <span className="text-ink-3">Run</span><span className="font-mono text-ink-2">#{selectedWindow.run_id}</span>
-                  <span className="text-ink-3">Pane</span><span className="font-mono text-ink-2">{selectedWindow.pane_id}</span>
-                  <span className="text-ink-3">Korrelation</span><span className="truncate font-mono text-ink-2">{selectedWindow.correlation_id}</span>
+                  <span className="text-ink-3">Task</span><span className="truncate font-mono text-ink-2">{executionCapsuleTarget.task_id}</span>
+                  <span className="text-ink-3">Run</span><span className="font-mono text-ink-2">#{executionCapsuleTarget.run_id}</span>
+                  <span className="text-ink-3">Pane</span><span className="font-mono text-ink-2">{executionCapsuleTarget.pane_id}</span>
+                  <span className="text-ink-3">Korrelation</span><span className="truncate font-mono text-ink-2">{executionCapsuleTarget.correlation_id}</span>
                 </div>
                 {executionCapsuleLoading && (
-                  <div className="inline-flex items-center gap-2 border-t border-live/15 pt-3 text-ink-3">
-                    <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Context-Handoff wird geladen …
+                  <div className="inline-flex items-center gap-2 border-t border-line pt-3 text-ink-3">
+                    Context-Handoff wird geladen …
                   </div>
                 )}
                 {executionCapsuleDetail && (
@@ -3192,7 +3271,7 @@ export function AgentTerminalsView() {
                           <span className="text-[10px] font-semibold uppercase tracking-wide text-ink-3">{label}</span>
                           {items.length > 0 ? (
                             <ul className="grid gap-1 text-xs leading-relaxed">
-                              {items.map((item) => <li key={item}>• {item}</li>)}
+                              {items.map((item, index) => <li key={`${label}-${index}`}>• {item}</li>)}
                             </ul>
                           ) : (
                             <span className="text-xs text-ink-3">Keine</span>

@@ -513,6 +513,159 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(handoff.textContent).toContain("Verified implementation can continue");
   });
 
+  it.each([
+    ["pending", { ...executionCapsuleFixture, state: "pending" }, true],
+    ["inconsistent", executionCapsuleFixture, false],
+  ])("never labels a %s capsule as actively linked", async (_case, capsule, consistent) => {
+    const boundWindow: AgentTerminalWindow = {
+      ...windows[0],
+      task_id: executionCapsuleFixture.task_id,
+      run_id: executionCapsuleFixture.run_id,
+      correlation_id: executionCapsuleFixture.correlation_id,
+    };
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [boundWindow, ...windows.slice(1)],
+    });
+    apiMock.getAgentTerminalExecutionCapsule.mockResolvedValueOnce({
+      capsule,
+      window: boundWindow,
+      consistent,
+      terminal_run_id: null,
+    });
+    await renderView();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Kanban-Run-Verknüpfung anzeigen" }),
+    );
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "nicht aktiv und konsistent gebunden",
+    );
+    expect(screen.getByText("Verknüpfung nicht bestätigt")).toBeTruthy();
+    expect(screen.queryByText("Aktiv verknüpft")).toBeNull();
+    expect(screen.queryByTestId("execution-capsule-context-handoff")).toBeNull();
+  });
+
+  it("keeps a delayed capsule response attached to the window that opened the dialog", async () => {
+    type CapsulePayload = {
+      capsule: AgentTerminalExecutionCapsule;
+      window: AgentTerminalWindow;
+      consistent: boolean;
+      terminal_run_id: null;
+    };
+    let resolveCapsule: ((value: CapsulePayload) => void) | null = null;
+    const boundHermes: AgentTerminalWindow = {
+      ...windows[0],
+      task_id: executionCapsuleFixture.task_id,
+      run_id: executionCapsuleFixture.run_id,
+      correlation_id: executionCapsuleFixture.correlation_id,
+    };
+    const boundCodex: AgentTerminalWindow = {
+      ...windows[1],
+      task_id: "t_other",
+      run_id: 43,
+      correlation_id: "ffeeddccbbaa009988776655",
+    };
+    apiMock.getAgentTerminalWindows
+      .mockResolvedValueOnce({ windows: [boundHermes, boundCodex, windows[2]] })
+      .mockResolvedValue({ windows: [boundCodex, windows[2]] });
+    apiMock.getAgentTerminalExecutionCapsule.mockImplementationOnce(
+      () =>
+        new Promise<CapsulePayload>((resolve) => {
+          resolveCapsule = resolve;
+        }),
+    );
+    await renderView();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Kanban-Run-Verknüpfung anzeigen" }),
+    );
+    await waitFor(() => expect(resolveCapsule).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh agent terminals" }));
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi
+        .mocked(buildWsUrl)
+        .mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.at(-1)?.[1]?.window).toBe("codex");
+    });
+
+    await act(async () => {
+      resolveCapsule?.({
+        capsule: executionCapsuleFixture,
+        window: boundHermes,
+        consistent: true,
+        terminal_run_id: null,
+      });
+    });
+
+    expect(
+      await screen.findByRole("dialog", {
+        name: "Kanban-Run mit hermes-agents:hermes verknüpfen",
+      }),
+    ).toBeTruthy();
+    expect(screen.getByTestId("execution-capsule-context-handoff").textContent).toContain(
+      "Verified implementation can continue",
+    );
+    expect(
+      screen.queryByRole("dialog", {
+        name: "Kanban-Run mit hermes-agents:codex verknüpfen",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps a successful bind when an older inventory request resolves afterward", async () => {
+    type WindowsPayload = { windows: AgentTerminalWindow[] };
+    let resolveStaleInventory: ((value: WindowsPayload) => void) | null = null;
+    const boundWindow: AgentTerminalWindow = {
+      ...windows[0],
+      task_id: executionCapsuleFixture.task_id,
+      run_id: executionCapsuleFixture.run_id,
+      correlation_id: executionCapsuleFixture.correlation_id,
+    };
+    apiMock.getAgentTerminalWindows
+      .mockResolvedValueOnce({ windows })
+      .mockImplementationOnce(
+        () =>
+          new Promise<WindowsPayload>((resolve) => {
+            resolveStaleInventory = resolve;
+          }),
+      );
+    apiMock.bindAgentTerminalExecutionCapsule.mockResolvedValueOnce({
+      capsule: executionCapsuleFixture,
+      window: boundWindow,
+    });
+    await renderView();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh agent terminals" }));
+    await waitFor(() => expect(resolveStaleInventory).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Mit Kanban-Run verknüpfen" }));
+    fireEvent.change(screen.getByLabelText("Execution Capsule Task-ID"), {
+      target: { value: executionCapsuleFixture.task_id },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Run-ID"), {
+      target: { value: String(executionCapsuleFixture.run_id) },
+    });
+    fireEvent.change(screen.getByLabelText("Execution Capsule Kurz-Handoff"), {
+      target: { value: executionCapsuleFixture.context.summary },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run verknüpfen" }));
+
+    expect(await screen.findByText("Aktiv verknüpft")).toBeTruthy();
+    expect(screen.getByTestId("execution-capsule-context-handoff")).toBeTruthy();
+
+    await act(async () => {
+      resolveStaleInventory?.({ windows });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Aktiv verknüpft")).toBeTruthy();
+    expect(screen.getByTestId("execution-capsule-context-handoff")).toBeTruthy();
+    expect(screen.queryByLabelText("Execution Capsule Task-ID")).toBeNull();
+  });
+
   it("keeps the capsule dialog open and surfaces a binding conflict", async () => {
     apiMock.bindAgentTerminalExecutionCapsule.mockRejectedValueOnce(
       new Error("run is not the active execution generation"),
