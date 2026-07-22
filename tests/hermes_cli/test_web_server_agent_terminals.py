@@ -73,7 +73,7 @@ class FakeAgentTerminalService:
 
     def handoff_draft(self, session, window, *, start=-120):
         assert (session, window, start) == ("work", "hermes", -12)
-        return {"target": "work:hermes", "content": "# handoff"}
+        return {"schema_version": 1, "target": "work:hermes", "terminal_run_id": "tr_test", "upgrade_required": False, "capture": {"text": "captured", "encoding": "utf-8"}}
 
     def send_keys(self, session, window, text):
         assert (session, window, text) == ("work", "hermes", "abc")
@@ -255,7 +255,11 @@ def test_agent_terminal_rest_routes_and_schemas_have_no_prompt_or_approval_field
     ).json() == {"ok": True}
     assert client.post("/api/agent-terminals/capture", json={"session": "work", "window": "hermes", "start": -10}, headers=headers).json() == {"content": "captured"}
     assert client.post("/api/agent-terminals/attach-metadata", json={"session": "work", "window": "hermes"}, headers=headers).json()["metadata"]["target"] == "work:hermes"
-    assert client.post("/api/agent-terminals/handoff-draft", json={"session": "work", "window": "hermes", "start": -12}, headers=headers).json()["draft"]["content"] == "# handoff"
+    handoff = client.post("/api/agent-terminals/handoff-draft", json={"session": "work", "window": "hermes", "start": -12}, headers=headers).json()["draft"]
+    assert handoff.get("schema_version") == 1
+    assert "content" not in handoff
+    assert handoff.get("terminal_run_id") == "tr_test"
+
     assert client.post("/api/agent-terminals/send-keys", json={"session": "work", "window": "hermes", "text": "abc"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/interrupt", json={"session": "work", "window": "hermes"}, headers=headers).json() == {"ok": True}
     assert client.post("/api/agent-terminals/detach-client", json={"client_id": "client1"}, headers=headers).json() == {"ok": True}

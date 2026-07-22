@@ -6,15 +6,18 @@ import { cn } from "@/lib/utils";
 import { Eyebrow } from "../components/primitives";
 import {
   buildPlanSpecDraft,
+  buildStructuredHandoffRequest,
+  canHandoffFromInventory,
   defaultSlug,
   findingsFromError,
+  handoffRequestKey,
   LIVE_TEST_DEPTHS,
   stripAnsi,
   type LiveTestDepth,
 } from "../lib/terminalHandoff";
 
 interface TerminalHandoffPanelProps {
-  target: { session: string; window: string } | null;
+  target: { session: string; window: string; terminal_run_id?: string | null } | null;
   /** Reads the current xterm selection (plain text) from the parent. */
   getSelection: () => string;
   onClose: () => void;
@@ -127,28 +130,77 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
     setDraft(buildPlanSpecDraft(captured, { title, liveTestDepth }));
   }, [captured, title, liveTestDepth]);
 
+  const handoffEnabled = canHandoffFromInventory({
+    terminal_run_id: target?.terminal_run_id,
+    has_manifest: Boolean(target?.terminal_run_id),
+  });
+
+  const structuredPayload = useCallback(() => {
+    if (!target?.session || !target.window) {
+      throw new Error("Kein Terminal-Fenster gewählt.");
+    }
+    if (!target.terminal_run_id) {
+      throw new Error("Legacy-Fenster ohne terminal_run_id — bitte neues Wave-2-Fenster starten.");
+    }
+    return buildStructuredHandoffRequest({
+      session: target.session,
+      window: target.window,
+      title: title.trim() || `Terminal handoff ${target.session}/${target.window}`,
+      body: draft,
+      rawText: captured || draft,
+      terminalRunId: target.terminal_run_id,
+    });
+  }, [target, title, draft, captured]);
+
   const doValidate = useCallback(
     () =>
       run("validate", async () => {
+        const frozenKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "validate",
+        });
         const result = await fetchJSON<ValidateResult>(`${KANBAN}/planspecs/validate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: draft, slug: defaultSlug(title) }),
+          body: JSON.stringify(structuredPayload()),
         });
+        // Ignore stale responses if target changed mid-flight.
+        const nowKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "validate",
+        });
+        if (nowKey !== frozenKey) return;
         setValidateResult(result);
       }),
-    [run, draft, title],
+    [run, structuredPayload, target],
   );
 
   const doIngest = useCallback(
     () =>
       run("ingest", async () => {
+        const frozenKey = handoffRequestKey({
+          session: target?.session,
+          window: target?.window,
+          terminal_run_id: target?.terminal_run_id,
+          requestId: "ingest",
+        });
         try {
           const result = await fetchJSON<IngestResult>(`${KANBAN}/planspecs/ingest-draft`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: draft, slug: defaultSlug(title), author: "dashboard" }),
+            body: JSON.stringify(structuredPayload()),
           });
+          const nowKey = handoffRequestKey({
+            session: target?.session,
+            window: target?.window,
+            terminal_run_id: target?.terminal_run_id,
+            requestId: "ingest",
+          });
+          if (nowKey !== frozenKey) return;
           setIngestResult(result);
         } catch (err) {
           const findings = findingsFromError(err);
@@ -165,24 +217,31 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
           throw err;
         }
       }),
-    [run, draft, title],
+    [run, structuredPayload, target],
   );
 
   const doCreateTask = useCallback(
     () =>
       run("task", async () => {
+        if (!target?.terminal_run_id) {
+          throw new Error("Legacy-Fenster ohne terminal_run_id — bitte neues Wave-2-Fenster starten.");
+        }
+        // Direct create stays held operator/contract; no triage intermediate.
         const result = await fetchJSON<TaskCreateResult>(`${KANBAN}/tasks`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            title: title.trim() || "Terminal-Handoff Triage",
+            title: title.trim() || "Terminal-Handoff",
             body: taskBody,
-            triage: true,
+            freigabe: "operator",
+            live_test_depth: "contract",
+            status: "scheduled",
+            handoff: structuredPayload(),
           }),
         });
         setTaskResult(result);
       }),
-    [run, title, taskBody],
+    [run, title, taskBody, target, structuredPayload],
   );
 
   // Optional, clearly SEPARATE from real dispatch: always dry_run=true. There is
@@ -225,6 +284,12 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
             Opt-in: Auswahl/Capture füllt nur Text. Nichts wird erstellt, validiert, ingestet oder
             dispatcht ohne expliziten Klick. Kein Auto-Dispatch von Terminal-Output.
           </div>
+          {!handoffEnabled && (
+            <div className="rounded-card border border-status-alert/30 bg-status-alert/10 p-3 text-xs text-status-alert">
+              Handoff deaktiviert: Fenster hat keine <code>terminal_run_id</code>/Manifest (Wave&nbsp;2).
+              Bitte ein neues Terminal-Fenster starten.
+            </div>
+          )}
 
           {/* Source */}
           <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3">

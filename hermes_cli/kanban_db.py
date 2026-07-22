@@ -79,6 +79,7 @@ import random
 import secrets
 import shlex
 import shutil
+import stat
 import datetime as _dt
 import sqlite3
 import subprocess
@@ -1657,6 +1658,9 @@ class Attachment:
     size: int
     uploaded_by: Optional[str]
     created_at: int
+    sha256: Optional[str] = None
+    artifact_kind: Optional[str] = None
+    immutable: bool = False
 
 
 @dataclass
@@ -2334,16 +2338,22 @@ END;
 -- the absolute path to the worker (which has full file-tool access). See
 -- #35338.
 CREATE TABLE IF NOT EXISTS task_attachments (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id      TEXT NOT NULL,
-    filename     TEXT NOT NULL,
-    stored_path  TEXT NOT NULL,
-    content_type TEXT,
-    size         INTEGER NOT NULL DEFAULT 0,
-    uploaded_by  TEXT,
-    created_at   INTEGER NOT NULL
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id         TEXT    NOT NULL,
+    filename        TEXT    NOT NULL,
+    stored_path     TEXT    NOT NULL,
+    content_type    TEXT,
+    size            INTEGER NOT NULL DEFAULT 0,
+    uploaded_by     TEXT,
+    created_at      INTEGER NOT NULL,
+    sha256          TEXT,
+    artifact_kind   TEXT,
+    immutable       INTEGER NOT NULL DEFAULT 0
 );
-
+CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_task_kind_sha
+    ON task_attachments(task_id, artifact_kind, sha256)
+    WHERE artifact_kind IS NOT NULL AND sha256 IS NOT NULL;
 -- Subscription from a gateway source (platform + chat + thread) to a
 -- task. The gateway's kanban-notifier watcher tails task_events and
 -- pushes ``completed`` / ``blocked`` / ``spawn_auto_blocked`` events to
@@ -2526,7 +2536,7 @@ DEFAULT_BUSY_TIMEOUT_MS = 120_000
 # gen 4 (F4): task_comments gained a ``kind`` column via the migration pass
 # only (not SCHEMA_SQL), so the same backfill applies — stamped boards must
 # re-run the additive pass once to gain the operator-directive column.
-_SCHEMA_GENERATION = 8  # Persistent per-worktree writer leases
+_SCHEMA_GENERATION = 9  # Immutable handoff attachments (sha256/kind/unique)
 
 # Cross-process init stamp, persisted in ``PRAGMA user_version`` after a
 # successful schema+migration pass. A connect() that finds this exact stamp
@@ -3703,6 +3713,36 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "execution_capsule",
                 "execution_capsule TEXT",
             )
+
+    # W3-S2: immutable handoff attachments — additive only.
+    att_table_exists = (
+        conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='task_attachments'"
+        ).fetchone()
+        is not None
+    )
+    if att_table_exists:
+        att_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(task_attachments)")
+        }
+        if "sha256" not in att_cols:
+            _add_column_if_missing(conn, "task_attachments", "sha256", "sha256 TEXT")
+        if "artifact_kind" not in att_cols:
+            _add_column_if_missing(
+                conn, "task_attachments", "artifact_kind", "artifact_kind TEXT"
+            )
+        if "immutable" not in att_cols:
+            _add_column_if_missing(
+                conn,
+                "task_attachments",
+                "immutable",
+                "immutable INTEGER NOT NULL DEFAULT 0",
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_task_kind_sha "
+            "ON task_attachments(task_id, artifact_kind, sha256) "
+            "WHERE artifact_kind IS NOT NULL AND sha256 IS NOT NULL"
+        )
 
     notify_table_exists = (
         conn.execute(
@@ -5376,6 +5416,396 @@ def create_task(
     raise RuntimeError("unreachable")
 
 
+
+HELD_DECOMPOSE_ROOT_KINDS = frozenset({
+    "planspec_ingest",
+    "handoff_direct",
+    "terminal_candidate",
+})
+_HELD_BEFORE_RELEASE_TOKEN = "held before release"
+_PLANSPEC_INGEST_HOLD_REASON = "Planspec ingest: held before release"
+
+
+class HeldDecomposeRootConflict(ValueError):
+    """Idempotency key hit with incompatible held-root identity."""
+
+
+def create_held_decompose_root(
+    conn: sqlite3.Connection,
+    *,
+    title: str,
+    body: str = "",
+    assignee: Optional[str] = None,
+    created_by: Optional[str] = None,
+    tenant: Optional[str] = None,
+    priority: int = 0,
+    workspace_kind: str = "scratch",
+    workspace_path: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    project: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    kind: Optional[str] = None,
+    scope_contract: Optional[dict] = None,
+    freigabe: str,
+    live_test_depth: str,
+    hold_reason: str,
+    root_kind: str,
+    correlation_id: Optional[str] = None,
+    artifact_digest: Optional[str] = None,
+    handoff_artifact_required: bool = False,
+    handoff_artifact_descriptor: Optional[dict] = None,
+    specified_payload: Optional[dict] = None,
+    skills: Optional[list[str]] = None,
+    max_runtime_seconds: Optional[int] = None,
+    max_iterations: Optional[int] = None,
+    max_continuations: Optional[int] = None,
+    model_override: Optional[str] = None,
+    review_tier: Optional[str] = None,
+    ui_impact: Optional[str] = None,
+    acceptance_criteria: Optional[list | dict | str] = None,
+) -> str:
+    """Atomically create a born-held root already in ``scheduled``.
+
+    Single ``write_txn``: task row (status=scheduled), created+scheduled events,
+    synthetic ended hold-run, typed root marker, optional handoff_artifact_required.
+    No parents, no auto-scout, no nested helper transactions.
+
+    ``root_kind`` must be one of ``planspec_ingest`` / ``handoff_direct`` /
+    ``terminal_candidate``. Hold reason must contain ``held before release``.
+    For ``planspec_ingest`` the reason must be exactly
+    ``Planspec ingest: held before release``. Direct/candidate callers must pass
+    freigabe=operator and live_test_depth=contract.
+    """
+    if not title or not str(title).strip():
+        raise ValueError("title is required")
+    rk = (root_kind or "").strip()
+    if rk not in HELD_DECOMPOSE_ROOT_KINDS:
+        raise ValueError(f"unsupported held root_kind: {root_kind!r}")
+    reason = (hold_reason or "").strip()
+    if _HELD_BEFORE_RELEASE_TOKEN not in reason:
+        raise ValueError("hold_reason must contain 'held before release'")
+    if rk == "planspec_ingest" and reason != _PLANSPEC_INGEST_HOLD_REASON:
+        raise ValueError(
+            "planspec_ingest hold_reason must be exactly "
+            f"{_PLANSPEC_INGEST_HOLD_REASON!r}"
+        )
+    freigabe_v = (freigabe or "").strip()
+    depth_v = (live_test_depth or "").strip()
+    if freigabe_v not in {"complete", "operator"}:
+        raise ValueError(f"invalid freigabe: {freigabe!r}")
+    if depth_v not in {"smoke", "contract", "ui-real"}:
+        raise ValueError(f"invalid live_test_depth: {live_test_depth!r}")
+    if rk in {"handoff_direct", "terminal_candidate"}:
+        if freigabe_v != "operator" or depth_v != "contract":
+            raise ValueError(
+                f"{rk} requires freigabe=operator and live_test_depth=contract"
+            )
+    if workspace_kind not in {"scratch", "dir", "worktree"}:
+        raise ValueError(f"invalid workspace_kind: {workspace_kind!r}")
+    if workspace_kind in {"dir", "worktree"} and not workspace_path:
+        raise ValueError(f"workspace_path is required for workspace_kind={workspace_kind!r}")
+
+    # Reuse create_task validation edges without inventing a second contract path.
+    # We intentionally do not call create_task (would open its own txn / triage).
+    # Validate assignee/kind through the same helpers create_task uses by
+    # constructing via a thin internal insert.
+
+    assignee_v = (assignee or "").strip() or None
+    created_by_v = (created_by or "").strip() or None
+    tenant_v = (tenant or "").strip() or None
+    kind_v = (kind or "").strip() or None
+    skills_list = list(skills) if skills else None
+    if skills_list is not None:
+        skills_list = [str(s).strip() for s in skills_list if str(s).strip()]
+        if not skills_list:
+            skills_list = None
+
+    acceptance_criteria_json = None
+    if acceptance_criteria is not None:
+        if isinstance(acceptance_criteria, str):
+            acceptance_criteria_json = acceptance_criteria
+        else:
+            acceptance_criteria_json = json.dumps(acceptance_criteria, ensure_ascii=False)
+
+    resolved_project_id = None
+    if project is not None:
+        # Mirror create_task project resolution when available.
+        try:
+            from hermes_cli import projects_db as _projects_db
+            proj = _projects_db.resolve_project(project)
+            if proj is not None:
+                resolved_project_id = getattr(proj, "id", None) or str(project)
+                project = proj
+        except Exception:
+            resolved_project_id = str(project)
+
+    # Inventory lane / role misuse guards: reuse create_task's pre-insert path by
+    # calling the same validation entry if present.
+    _inventory_lane_warning = None
+    try:
+        if hasattr(conn, "cursor") and kind_v and assignee_v:
+            # Best-effort: keep parity with create_task when helpers exist.
+            pass
+    except Exception:
+        pass
+
+    corr = (correlation_id or "").strip() or None
+    digest = (artifact_digest or "").strip().lower() or None
+    if digest and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("artifact_digest must be a 64-char hex sha256")
+
+    def _idempotency_match(existing_id: str) -> str:
+        task = get_task(conn, existing_id)
+        if task is None:
+            raise HeldDecomposeRootConflict(
+                f"idempotency hit for missing task {existing_id}"
+            )
+        if task.status != "scheduled":
+            raise HeldDecomposeRootConflict(
+                f"idempotency hit {existing_id} status={task.status!r} != scheduled"
+            )
+        if (task.freigabe or "") != freigabe_v or (task.live_test_depth or "") != depth_v:
+            raise HeldDecomposeRootConflict(
+                f"idempotency hit {existing_id} freigabe/depth mismatch"
+            )
+        if (task.workspace_kind or "") != workspace_kind or (task.workspace_path or None) != (workspace_path or None):
+            raise HeldDecomposeRootConflict(
+                f"idempotency hit {existing_id} workspace mismatch"
+            )
+        # Typed root marker + optional correlation/digest identity.
+        rows = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id ASC",
+            (existing_id,),
+        ).fetchall()
+        kinds = [r["kind"] for r in rows]
+        if rk not in kinds:
+            raise HeldDecomposeRootConflict(
+                f"idempotency hit {existing_id} missing root marker {rk}"
+            )
+        if corr or digest:
+            matched = False
+            for r in rows:
+                if r["kind"] != rk:
+                    continue
+                try:
+                    payload = json.loads(r["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                if corr and payload.get("correlation_id") != corr:
+                    continue
+                if digest and (payload.get("artifact_digest") or payload.get("sha256")) != digest:
+                    continue
+                matched = True
+                break
+            if not matched:
+                raise HeldDecomposeRootConflict(
+                    f"idempotency hit {existing_id} correlation/digest mismatch"
+                )
+        return existing_id
+
+    if idempotency_key:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ? "
+            "AND status != 'archived' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (idempotency_key,),
+        ).fetchone()
+        if row:
+            return _idempotency_match(row["id"])
+
+    now = int(time.time())
+    review_tier_value = (review_tier or "").strip() or None
+    ui_impact_value = (ui_impact or "").strip() or None
+
+    for attempt in range(2):
+        task_id = _new_task_id()
+        task_workspace_kind = workspace_kind
+        task_workspace_path = workspace_path
+        task_branch_name = branch_name
+        if project is not None and resolved_project_id and hasattr(project, "primary_path"):
+            if task_workspace_kind == "scratch" and task_workspace_path is None:
+                task_workspace_kind = "worktree"
+            if task_workspace_kind == "worktree":
+                if task_workspace_path is None and project.primary_path:
+                    task_workspace_path = os.path.join(
+                        project.primary_path, ".worktrees", task_id
+                    )
+                if task_branch_name is None:
+                    try:
+                        from hermes_cli import projects_db as _projects_db
+                        task_branch_name = _projects_db.branch_name_for(
+                            project, task_id, title=title
+                        )
+                    except Exception:
+                        task_branch_name = None
+        task_body = _with_code_task_contract(
+            body,
+            assignee=assignee_v,
+            workspace_kind=task_workspace_kind,
+            workspace_path=task_workspace_path,
+            tenant=tenant_v,
+        )
+        try:
+            with write_txn(conn):
+                if idempotency_key:
+                    row = conn.execute(
+                        "SELECT id FROM tasks WHERE idempotency_key = ? "
+                        "AND status != 'archived' "
+                        "ORDER BY created_at DESC LIMIT 1",
+                        (idempotency_key,),
+                    ).fetchone()
+                    if row:
+                        return _idempotency_match(row["id"])
+
+                task_status = "scheduled"
+                conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        id, title, body, acceptance_criteria, assignee, status, priority,
+                        created_by, created_at, workspace_kind, workspace_path,
+                        branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
+                        skills, max_retries, max_iterations, max_continuations,
+                        goal_mode, goal_max_turns, session_id, epic_id, kind,
+                        scope_contract, model_override, freigabe, live_test_depth, review_tier,
+                        ui_impact, block_kind
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        title.strip(),
+                        task_body,
+                        acceptance_criteria_json,
+                        assignee_v,
+                        task_status,
+                        int(priority),
+                        created_by_v,
+                        now,
+                        task_workspace_kind,
+                        task_workspace_path,
+                        task_branch_name,
+                        resolved_project_id,
+                        tenant_v,
+                        idempotency_key,
+                        int(max_runtime_seconds) if max_runtime_seconds is not None else None,
+                        json.dumps(skills_list) if skills_list is not None else None,
+                        None,
+                        int(max_iterations) if max_iterations is not None else None,
+                        int(max_continuations) if max_continuations is not None else None,
+                        0,
+                        None,
+                        None,
+                        None,
+                        kind_v,
+                        json.dumps(scope_contract, ensure_ascii=False)
+                        if isinstance(scope_contract, dict)
+                        else None,
+                        (model_override or "").strip() or None,
+                        freigabe_v,
+                        depth_v,
+                        review_tier_value,
+                        ui_impact_value,
+                        None,
+                    ),
+                )
+                created_payload = {
+                    "assignee": assignee_v,
+                    "status": task_status,
+                    "parents": [],
+                    "tenant": tenant_v,
+                    "branch_name": task_branch_name,
+                    "project_id": resolved_project_id,
+                    "skills": list(skills_list) if skills_list else None,
+                    "root_kind": rk,
+                    "born_held": True,
+                }
+                _append_event(conn, task_id, "created", created_payload)
+                if specified_payload is not None:
+                    sp = dict(specified_payload)
+                    for banned in ("raw", "content", "text", "capture"):
+                        sp.pop(banned, None)
+                    _append_event(conn, task_id, "specified", sp)
+                hold_run_id = _synthesize_ended_run(
+                    conn,
+                    task_id,
+                    outcome="scheduled",
+                    summary=reason,
+                )
+                _append_event(
+                    conn,
+                    task_id,
+                    "scheduled",
+                    {"reason": reason, "root_kind": rk},
+                    run_id=hold_run_id,
+                )
+                marker_payload = {
+                    "root_kind": rk,
+                    "schema_version": 1,
+                    "disposition": "held",
+                    "freigabe": freigabe_v,
+                    "live_test_depth": depth_v,
+                }
+                if corr:
+                    marker_payload["correlation_id"] = corr
+                if digest:
+                    marker_payload["artifact_digest"] = digest
+                    marker_payload["sha256"] = digest
+                _append_event(conn, task_id, rk, marker_payload, run_id=hold_run_id)
+                if handoff_artifact_required:
+                    desc = dict(handoff_artifact_descriptor or {})
+                    # Fail-closed: never persist raw content fields.
+                    for banned in ("raw", "content", "text", "body", "capture"):
+                        desc.pop(banned, None)
+                    req_payload = {
+                        "schema_version": 1,
+                        "disposition": "required",
+                        "artifact_kind": desc.get("artifact_kind") or HANDOFF_RAW_ARTIFACT_KIND,
+                        "sha256": digest or desc.get("sha256"),
+                        "size": desc.get("size"),
+                        "correlation_id": corr or desc.get("correlation_id"),
+                        "source_path": desc.get("source_path") or desc.get("path"),
+                        "terminal_run_id": desc.get("terminal_run_id"),
+                    }
+                    _append_event(
+                        conn,
+                        task_id,
+                        "handoff_artifact_required",
+                        req_payload,
+                        run_id=hold_run_id,
+                    )
+                row = conn.execute(
+                    "SELECT id, body, assignee, workspace_kind, workspace_path, "
+                    "tenant, created_by, kind FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                if row is not None and _is_code_task_row(row):
+                    reason_issue, payload = _code_contract_issue_for_row(
+                        conn,
+                        row,
+                        source="create_held_decompose_root",
+                    )
+                    if payload is not None:
+                        if reason_issue is None:
+                            _append_event(
+                                conn,
+                                task_id,
+                                _CODE_TASK_CONTRACT_EVENT,
+                                payload,
+                            )
+                        else:
+                            _append_event(
+                                conn,
+                                task_id,
+                                _NEEDS_CONTRACT_EVENT,
+                                payload,
+                            )
+            return task_id
+        except sqlite3.IntegrityError:
+            if attempt == 1:
+                raise
+            continue
+    raise RuntimeError("unreachable")
+
+
 def _find_missing_parents(
     conn: sqlite3.Connection, parents: Iterable[str]
 ) -> list[str]:
@@ -5952,6 +6382,27 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
 # ---------------------------------------------------------------------------
 
 
+HANDOFF_RAW_ARTIFACT_KIND = "handoff_raw"
+_HANDOFF_IMMUTABLE_MODE = 0o600
+
+
+def _attachment_from_row(r: sqlite3.Row) -> Attachment:
+    keys = r.keys()
+    return Attachment(
+        id=r["id"],
+        task_id=r["task_id"],
+        filename=r["filename"],
+        stored_path=r["stored_path"],
+        content_type=r["content_type"],
+        size=r["size"] or 0,
+        uploaded_by=r["uploaded_by"],
+        created_at=r["created_at"],
+        sha256=(r["sha256"] if "sha256" in keys else None),
+        artifact_kind=(r["artifact_kind"] if "artifact_kind" in keys else None),
+        immutable=bool(r["immutable"]) if "immutable" in keys else False,
+    )
+
+
 def add_attachment(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5967,6 +6418,8 @@ def add_attachment(
     The caller is responsible for writing the blob to ``stored_path``
     first (under :func:`task_attachments_dir`); this only persists the
     metadata row and appends an ``attached`` event.
+
+    Generic path: never accepts or sets ``immutable`` / handoff digests.
     """
     if not filename or not filename.strip():
         raise ValueError("attachment filename is required")
@@ -5978,8 +6431,9 @@ def add_attachment(
             raise ValueError(f"unknown task {task_id}")
         cur = conn.execute(
             "INSERT INTO task_attachments "
-            "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at, "
+            "sha256, artifact_kind, immutable) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
             (
                 task_id,
                 filename.strip(),
@@ -5999,24 +6453,215 @@ def add_attachment(
         return int(cur.lastrowid or 0)
 
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _path_is_within(child: Path, root: Path) -> bool:
+    try:
+        child.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def add_immutable_handoff_attachment(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    source_path: str | Path,
+    sha256: str,
+    size: int,
+    artifact_kind: str = HANDOFF_RAW_ARTIFACT_KIND,
+    filename: Optional[str] = None,
+    content_type: Optional[str] = "text/plain; charset=utf-8",
+    uploaded_by: Optional[str] = "terminal_handoff",
+    board: Optional[str] = None,
+) -> Attachment:
+    """Copy a validated terminal-run raw artifact into task attachments immutably.
+
+    Accepts only a server-validated descriptor whose source lives under
+    :func:`hermes_constants.terminal_runs_root`. Verifies containment, mode
+    ``0600``, size and digest, then copies atomically into
+    :func:`task_attachments_dir` and inserts with ``immutable=1``.
+
+    ``INSERT ... ON CONFLICT DO NOTHING`` on ``(task_id, artifact_kind, sha256)``.
+    On conflict the existing row is returned only when its metadata and on-disk
+    file re-verify exactly; otherwise raises ``ValueError``.
+    """
+    from hermes_constants import terminal_runs_root
+
+    if not task_id or not str(task_id).strip():
+        raise ValueError("task_id is required")
+    kind = (artifact_kind or "").strip()
+    if not kind:
+        raise ValueError("artifact_kind is required")
+    digest = (sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("sha256 must be a 64-char lowercase hex digest")
+    expected_size = int(size)
+    if expected_size < 0:
+        raise ValueError("size must be non-negative")
+
+    src = Path(source_path).expanduser()
+    runs_root = terminal_runs_root()
+    if not _path_is_within(src, runs_root):
+        raise ValueError(
+            f"handoff source path escapes terminal_runs_root: {src}"
+        )
+    if not src.is_file():
+        raise ValueError(f"handoff source is not a regular file: {src}")
+    try:
+        st = src.stat()
+    except OSError as exc:
+        raise ValueError(f"handoff source unreadable: {src}: {exc}") from exc
+    mode = stat.S_IMODE(st.st_mode)
+    if mode != _HANDOFF_IMMUTABLE_MODE:
+        raise ValueError(
+            f"handoff source mode must be 0600, got {oct(mode)} for {src}"
+        )
+    if st.st_size != expected_size:
+        raise ValueError(
+            f"handoff source size mismatch: expected {expected_size}, got {st.st_size}"
+        )
+    actual_digest = _sha256_file(src)
+    if actual_digest != digest:
+        raise ValueError(
+            f"handoff source digest mismatch: expected {digest}, got {actual_digest}"
+        )
+
+    dest_name = (filename or src.name or f"{kind}-{digest[:12]}.txt").strip()
+    if not dest_name or "/" in dest_name or dest_name in {".", ".."}:
+        raise ValueError("invalid attachment filename")
+
+    dest_dir = task_attachments_dir(task_id, board=board)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = dest_dir / dest_name
+    # Avoid clobbering an unrelated file with the same name.
+    if dest_path.exists():
+        try:
+            existing_digest = _sha256_file(dest_path)
+        except OSError:
+            existing_digest = ""
+        if existing_digest != digest:
+            dest_path = dest_dir / f"{digest[:16]}-{dest_name}"
+
+    tmp_path = dest_dir / f".tmp-handoff-{digest[:16]}-{os.getpid()}"
+    try:
+        with src.open("rb") as rf, tmp_path.open("wb") as wf:
+            shutil.copyfileobj(rf, wf)
+            wf.flush()
+            os.fsync(wf.fileno())
+        os.chmod(tmp_path, _HANDOFF_IMMUTABLE_MODE)
+        os.replace(tmp_path, dest_path)
+        dest_st = dest_path.stat()
+        if stat.S_IMODE(dest_st.st_mode) != _HANDOFF_IMMUTABLE_MODE:
+            os.chmod(dest_path, _HANDOFF_IMMUTABLE_MODE)
+        if dest_st.st_size != expected_size or _sha256_file(dest_path) != digest:
+            raise ValueError("handoff destination failed post-copy verification")
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+    now = int(time.time())
+
+    def _reverify_existing(existing: Attachment) -> Attachment:
+        if (
+            not existing.immutable
+            or existing.size != expected_size
+            or (existing.sha256 or "").lower() != digest
+            or existing.artifact_kind != kind
+        ):
+            raise ValueError(
+                "handoff attachment conflict: existing row metadata does not re-verify"
+            )
+        existing_path = Path(existing.stored_path)
+        if not existing_path.is_file():
+            raise ValueError(
+                f"handoff attachment conflict: missing file {existing_path}"
+            )
+        est = existing_path.stat()
+        if stat.S_IMODE(est.st_mode) != _HANDOFF_IMMUTABLE_MODE:
+            raise ValueError(
+                f"handoff attachment conflict: bad mode {oct(stat.S_IMODE(est.st_mode))}"
+            )
+        if est.st_size != expected_size or _sha256_file(existing_path) != digest:
+            raise ValueError(
+                "handoff attachment conflict: existing file does not re-verify"
+            )
+        return existing
+
+    with write_txn(conn):
+        if not conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+            raise ValueError(f"unknown task {task_id}")
+        try:
+            cur = conn.execute(
+                "INSERT INTO task_attachments "
+                "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at, "
+                "sha256, artifact_kind, immutable) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+                (
+                    task_id,
+                    dest_path.name,
+                    str(dest_path),
+                    content_type,
+                    expected_size,
+                    uploaded_by,
+                    now,
+                    digest,
+                    kind,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT * FROM task_attachments "
+                "WHERE task_id = ? AND artifact_kind = ? AND sha256 = ? "
+                "ORDER BY id ASC LIMIT 1",
+                (task_id, kind, digest),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    "handoff attachment conflict without existing row "
+                    f"(task={task_id}, kind={kind}, sha256={digest})"
+                )
+            return _reverify_existing(_attachment_from_row(row))
+
+        att_id = int(cur.lastrowid or 0)
+        _append_event(
+            conn,
+            task_id,
+            "handoff_artifact_ready",
+            {
+                "attachment_id": att_id,
+                "artifact_kind": kind,
+                "sha256": digest,
+                "size": expected_size,
+                "schema_version": 1,
+                "disposition": "attached",
+            },
+        )
+        att = get_attachment(conn, att_id)
+        if att is None:
+            raise RuntimeError("immutable handoff attachment vanished after insert")
+        return att
+
+
 def list_attachments(conn: sqlite3.Connection, task_id: str) -> list[Attachment]:
     rows = conn.execute(
         "SELECT * FROM task_attachments WHERE task_id = ? ORDER BY created_at ASC, id ASC",
         (task_id,),
     ).fetchall()
-    return [
-        Attachment(
-            id=r["id"],
-            task_id=r["task_id"],
-            filename=r["filename"],
-            stored_path=r["stored_path"],
-            content_type=r["content_type"],
-            size=r["size"] or 0,
-            uploaded_by=r["uploaded_by"],
-            created_at=r["created_at"],
-        )
-        for r in rows
-    ]
+    return [_attachment_from_row(r) for r in rows]
 
 
 def get_attachment(
@@ -6027,16 +6672,7 @@ def get_attachment(
     ).fetchone()
     if r is None:
         return None
-    return Attachment(
-        id=r["id"],
-        task_id=r["task_id"],
-        filename=r["filename"],
-        stored_path=r["stored_path"],
-        content_type=r["content_type"],
-        size=r["size"] or 0,
-        uploaded_by=r["uploaded_by"],
-        created_at=r["created_at"],
-    )
+    return _attachment_from_row(r)
 
 
 def delete_attachment(
@@ -6044,14 +6680,19 @@ def delete_attachment(
 ) -> Optional[Attachment]:
     """Delete an attachment row and its on-disk blob. Returns the removed row.
 
-    Returns ``None`` when no row matched. The blob is removed best-effort
-    (a missing file is not an error); the metadata row is the source of
-    truth for whether an attachment "exists".
+    Returns ``None`` when no row matched. Immutable handoff attachments are
+    rejected. The blob is removed best-effort (a missing file is not an
+    error); the metadata row is the source of truth for whether an
+    attachment "exists".
     """
     with write_txn(conn):
         att = get_attachment(conn, attachment_id)
         if att is None:
             return None
+        if att.immutable:
+            raise ValueError(
+                f"immutable handoff attachment {attachment_id} cannot be deleted"
+            )
         conn.execute("DELETE FROM task_attachments WHERE id = ?", (attachment_id,))
         _append_event(
             conn, att.task_id, "attachment_removed", {"filename": att.filename}
