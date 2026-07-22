@@ -1,9 +1,10 @@
-"""Engine: Hermes-CLI One-Shot mit direkter Alibaba-Token-Plan-Bindung.
+"""Engine: Qwen Code CLI headless via the authenticated Alibaba Token Plan.
 
-Schmal analog zu ``neuralwatt_cli``: explizit
-``hermes -m <model> --provider alibaba-token-plan -z "<prompt>"`` im
-Sandbox-Env. Keine Auth-/Credential-Konfiguration hier — Abo-Route muss
-bereits greifen.
+The loop catalog keeps the product-facing engine id ``alibaba-token-plan``,
+but execution intentionally uses the installed ``qwen`` subscription CLI rather
+than a Hermes API-key provider. ``--safe-mode`` disables user context, hooks,
+extensions, skills, and MCP servers; ``--sandbox`` keeps tool execution isolated.
+Authentication and credential configuration are left untouched.
 """
 
 from __future__ import annotations
@@ -14,17 +15,24 @@ from pathlib import Path
 
 from . import EngineResult, detect_usage_limit, register
 
-HERMES_BIN = os.environ.get(
-    "HERMES_BIN", "/home/piet/.hermes/hermes-agent/venv/bin/hermes"
-)
-PROVIDER = "alibaba-token-plan"
+QWEN_BIN = os.environ.get("QWEN_BIN", "qwen")
 
 
 @register("alibaba-token-plan")
 def run(model: str, prompt: str, cwd: Path, timeout_s: int) -> EngineResult:
-    cmd = [HERMES_BIN, "-m", model, "--provider", PROVIDER, "-z", prompt]
+    cmd = [
+        QWEN_BIN,
+        "-m",
+        model,
+        "--safe-mode",
+        "--sandbox",
+        "--output-format",
+        "text",
+        "-p",
+        prompt,
+    ]
     env = dict(os.environ)
-    env["HERMES_SANDBOX_MODE"] = "1"  # Kanban-Writes des Laufs nie aufs Live-Board
+    env["HERMES_SANDBOX_MODE"] = "1"
     try:
         proc = subprocess.run(
             cmd,

@@ -507,38 +507,30 @@ def test_alibaba_token_plan_engine_registered_and_command_shape(tmp_path, monkey
     assert "alibaba-token-plan" in engines.ENGINES
     assert engines.ENGINES["alibaba-token-plan"] is alibaba_token_plan_cli.run
 
-    monkeypatch.setenv("HERMES_BIN", "/opt/hermes-bin")
-    # Module caches HERMES_BIN at import — re-read via run path / inspect cmd build.
-    # Match neuralwatt: hermes -m <model> --provider alibaba-token-plan -z <prompt>
-    # and HERMES_SANDBOX_MODE=1. Capture the subprocess argv.
     captured: dict = {}
 
-    def fake_run(cmd, cwd=None, env=None, capture_output=None, encoding=None, errors=None, timeout=None, check=None):
+    def fake_run(cmd, **kwargs):
         captured["cmd"] = list(cmd)
-        captured["env"] = dict(env or {})
-        captured["cwd"] = cwd
-
-        class _P:
-            returncode = 0
-            stdout = "ok"
-            stderr = ""
-
-        return _P()
+        captured["env"] = dict(kwargs.get("env") or {})
+        captured["cwd"] = kwargs.get("cwd")
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(alibaba_token_plan_cli.subprocess, "run", fake_run)
-    # Force bin after env set (module-level constant may be stale).
-    monkeypatch.setattr(alibaba_token_plan_cli, "HERMES_BIN", "/opt/hermes-bin")
+    monkeypatch.setattr(alibaba_token_plan_cli, "QWEN_BIN", "/opt/qwen-bin")
     result = alibaba_token_plan_cli.run(
         "qwen3.8-max-preview", "do work", tmp_path, 90
     )
+
     assert result.rc == 0
     assert captured["cmd"] == [
-        "/opt/hermes-bin",
+        "/opt/qwen-bin",
         "-m",
         "qwen3.8-max-preview",
-        "--provider",
-        "alibaba-token-plan",
-        "-z",
+        "--safe-mode",
+        "--sandbox",
+        "--output-format",
+        "text",
+        "-p",
         "do work",
     ]
     assert captured["env"].get("HERMES_SANDBOX_MODE") == "1"
