@@ -85,6 +85,7 @@ def _insert_control_task(
 def db_path(tmp_path, monkeypatch):
     path = tmp_path / "kanban.db"
     _build_fixture_db(path)
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_KANBAN_DB", str(path))
     return path
 
