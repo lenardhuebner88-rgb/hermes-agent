@@ -8,7 +8,6 @@ import {
   buildPlanSpecDraft,
   buildStructuredHandoffRequest,
   canHandoffFromInventory,
-  defaultSlug,
   findingsFromError,
   handoffRequestKey,
   LIVE_TEST_DEPTHS,
@@ -44,6 +43,12 @@ interface IngestResult {
 }
 interface TaskCreateResult {
   task: { id: string; title?: string; status?: string };
+}
+interface CandidateSubmitResult {
+  root_task_id: string;
+  intake_task_id: string;
+  imported_commit: string;
+  idempotent: boolean;
 }
 interface DispatchPreview {
   spawned: Array<[string, string, string]>;
@@ -82,6 +87,7 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
   const [validateResult, setValidateResult] = useState<ValidateResult | null>(null);
   const [ingestResult, setIngestResult] = useState<IngestResult | null>(null);
   const [taskResult, setTaskResult] = useState<TaskCreateResult | null>(null);
+  const [candidateResult, setCandidateResult] = useState<CandidateSubmitResult | null>(null);
   const [dispatchPreview, setDispatchPreview] = useState<DispatchPreview | null>(null);
 
   const [busy, setBusy] = useState<string | null>(null);
@@ -259,6 +265,22 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
     [run],
   );
 
+  const doCandidateSubmit = useCallback(
+    () =>
+      run("candidate", async () => {
+        if (!target?.terminal_run_id) {
+          throw new Error("Candidate Submit benötigt eine serverseitig bekannte terminal_run_id.");
+        }
+        const result = await fetchJSON<CandidateSubmitResult>(`${KANBAN}/terminal-candidates/submit`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ terminal_run_id: target.terminal_run_id }),
+        });
+        setCandidateResult(result);
+      }),
+    [run, target],
+  );
+
   const hasText = mode === "planspec" ? draft.trim().length > 0 : taskBody.trim().length > 0;
 
   return (
@@ -293,6 +315,30 @@ export function TerminalHandoffPanel({ target, getSelection, onClose }: Terminal
 
           {/* Source */}
           <div className="grid gap-2 rounded-card border border-line bg-surface-2 p-3">
+          {target?.terminal_run_id && (
+            <div className="rounded-card border border-status-warn/30 bg-status-warn/5 p-3 text-xs">
+              <div className="font-medium text-ink">Isolated-Write Candidate Intake</div>
+              <p className="mt-1 text-ink-2">
+                Separate Operator-Aktion: serverseitiger Preflight und Import in eine gehaltene
+                Kanban-Chain. Dieser Schritt mergt niemals in den Live-Zielbranch.
+              </p>
+              <button
+                type="button"
+                onClick={() => void doCandidateSubmit()}
+                disabled={busy !== null}
+                className="mt-2 rounded-card border border-status-warn/40 px-3 py-1.5 text-status-warn disabled:opacity-50"
+              >
+                {busy === "candidate" ? "Prüfe und importiere…" : "Kandidaten gehalten einreichen"}
+              </button>
+              {candidateResult && (
+                <div className="mt-2 font-mono text-[11px] text-status-ok">
+                  Root {candidateResult.root_task_id} · Intake {candidateResult.intake_task_id} ·{" "}
+                  {candidateResult.imported_commit}
+                  {candidateResult.idempotent ? " · bereits vorhanden" : ""}
+                </div>
+              )}
+            </div>
+          )}
             <div className="flex flex-wrap items-center gap-3 text-xs">
               <label className="flex items-center gap-1.5">
                 <input

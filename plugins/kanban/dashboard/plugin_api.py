@@ -3396,6 +3396,16 @@ for _extension_name in _planspec_flow_routes.__all__:
     globals()[_extension_name] = getattr(_planspec_flow_routes, _extension_name)
 
 
+_terminal_candidate_routes = load_api_extension(
+    Path(__file__).with_name("terminal_candidate_routes.py"),
+    globals(),
+    extension_name="terminal_candidate_routes",
+)
+
+for _extension_name in _terminal_candidate_routes.__all__:
+    globals()[_extension_name] = getattr(_terminal_candidate_routes, _extension_name)
+
+
 @core_routes.websocket("/events")
 async def stream_events(ws: WebSocket):
     # Authorize the upgrade via the dashboard's canonical WS gate so the

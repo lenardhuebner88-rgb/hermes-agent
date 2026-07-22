@@ -2073,3 +2073,10 @@ class TestCodexAppServerAutoConfig:
 
             raw = yaml.safe_load((tmp_path / "config.yaml").read_text())
             assert raw["compression"]["codex_app_server_auto"] == "hermes"
+
+
+def test_terminal_candidate_submit_is_default_off_with_empty_allowlist():
+    candidate = DEFAULT_CONFIG["kanban"]["candidate_submit"]
+
+    assert candidate["enabled"] is False
+    assert candidate["repo_allowlist"] == []

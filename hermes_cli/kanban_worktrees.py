@@ -4069,7 +4069,7 @@ def finalize_decompose_root_at_dispatch(
     return "auto_completed_commitless"
 
 
-def provision_for_task(
+def _provision_task_workspace(
     conn: sqlite3.Connection,
     task,
     resolved,
@@ -4173,7 +4173,85 @@ def provision_for_task(
             "UPDATE tasks SET branch_name = ? WHERE id = ?",
             (info["branch"], task.id),
         )
+    candidate = conn.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND kind='terminal_candidate_pending' LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if candidate:
+        pin_candidate_chain_workspace(
+            conn, root_id, repo_root, info["path"], task_ids=(task.id,),
+        )
     return workspace
+
+
+def provision_for_task(
+    conn: sqlite3.Connection,
+    task,
+    resolved,
+    *,
+    board: Optional[str] = None,
+) -> Path:
+    """Dispatcher-facing wrapper around the shared provisioning primitive."""
+    return _provision_task_workspace(
+        conn,
+        task,
+        resolved,
+        board=board,
+    )
+
+
+def provision_candidate_intake(
+    conn: sqlite3.Connection,
+    task,
+    repo_root: Path,
+    *,
+    board: Optional[str] = None,
+) -> Path:
+    """Provision a held candidate intake through the normal chain primitive."""
+    return _provision_task_workspace(
+        conn,
+        task,
+        Path(repo_root).resolve(),
+        board=board,
+    )
+
+
+def pin_candidate_chain_workspace(
+    conn: sqlite3.Connection,
+    root_id: str,
+    repo_root: Path,
+    workspace_path: Path,
+    *,
+    task_ids: tuple[str, ...] = (),
+) -> None:
+    """Pin every provisioned candidate stage to its validated repository."""
+    from hermes_cli import kanban_db as kb
+
+    canonical_repo = Path(repo_root).resolve()
+    canonical_workspace = Path(workspace_path).resolve()
+    split = split_provisioned_path(canonical_workspace)
+    if split is None or split[0].resolve() != canonical_repo:
+        raise WorktreeError("candidate chain workspace is not canonical for its validated repo")
+    pending = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='terminal_candidate_pending' "
+        "ORDER BY id DESC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if pending is None:
+        raise WorktreeError("candidate chain root is missing terminal_candidate_pending")
+    try:
+        payload = json.loads(pending["payload"] or "{}")
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise WorktreeError("candidate chain repo pin is invalid") from exc
+    if Path(str(payload.get("repo_root") or "")).resolve() != canonical_repo:
+        raise WorktreeError("candidate chain repo pin changed")
+    branch = chain_branch(root_id)
+    with kb.write_txn(conn):
+        for task_id in dict.fromkeys((root_id, *task_ids)):
+            conn.execute(
+                "UPDATE tasks SET workspace_kind='worktree', workspace_path=?, branch_name=? WHERE id=?",
+                (str(canonical_workspace), branch, task_id),
+            )
 
 
 def note_dirty_worktree(conn: sqlite3.Connection, task_id: str, workspace) -> None:
@@ -4242,6 +4320,28 @@ def _acquire_file_lock(lock_path: Path, timeout: int = LOCK_TIMEOUT_SECONDS):
                         f"integrator lock {lock_path} not acquired in {timeout}s"
                     )
                 time.sleep(1.0)
+
+
+def _try_acquire_file_lock(lock_path: Path):
+    """Attempt the integrator lock exactly once and never poll or sleep."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+
+        fh = open(lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return None
+        return fh
+    except ImportError:
+        marker = str(lock_path) + ".x"
+        try:
+            fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return None
+        return ("excl", fd, marker)
 
 
 def _integrator_lock_path(repo_root: Path) -> Path:
