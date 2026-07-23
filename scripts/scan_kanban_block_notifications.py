@@ -108,9 +108,31 @@ def candidate_for_event(events: list[sqlite3.Row], index: int) -> str | None:
     return None
 
 
+def review_epoch_for_event(events: list[sqlite3.Row], index: int) -> tuple[int | None, int | None]:
+    """Return lifecycle and submission boundaries governing an event.
+
+    A submission is an epoch boundary even when it did not carry a candidate:
+    later blocks must not inherit candidate or stage context across it.
+    """
+    lifecycle_boundary = None
+    for row in reversed(events[: index + 1]):
+        if row["kind"] in REVIEW_CYCLE_BOUNDARIES:
+            lifecycle_boundary = int(row["id"])
+            break
+        if row["kind"] == "submitted_for_review":
+            return lifecycle_boundary, int(row["id"])
+    return lifecycle_boundary, None
+
+
 def review_stage_for_event(events: list[sqlite3.Row], index: int) -> str:
     """Return stage from the current review cycle, or an explicit missing-data bucket."""
-    event_candidate = candidate_from_payload(parse_payload(events[index]["payload"]))
+    event_payload = parse_payload(events[index]["payload"])
+    review_revision = event_payload.get("review_revision")
+    if isinstance(review_revision, dict):
+        resume_stage = review_revision.get("resume_stage")
+        if resume_stage not in (None, ""):
+            return str(resume_stage)
+    event_candidate = candidate_from_payload(event_payload)
     for row in reversed(events[: index + 1]):
         if row["kind"] in REVIEW_CYCLE_BOUNDARIES:
             return "unmatched"
@@ -122,7 +144,7 @@ def review_stage_for_event(events: list[sqlite3.Row], index: int) -> str:
             event_candidate, review_candidate
         ):
             return "unmatched"
-        stage = payload.get("review_stage")
+        stage = payload.get("resume_stage") or payload.get("review_stage")
         return str(stage) if stage not in (None, "") else "unknown"
     return "unmatched"
 
@@ -192,6 +214,7 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
             recovery = next((r for r in following if r["kind"] in RECOVERY_KINDS), None)
             markers = [r["kind"] for r in following if r["kind"] in EXPLICIT_HUMAN_MARKERS]
             run = runs_by_id.get(int(event["run_id"])) if event["run_id"] is not None else None
+            lifecycle_epoch, submission_epoch = review_epoch_for_event(task_events, index)
             blocks.append(
                 {
                     "event_id": int(event["id"]),
@@ -200,6 +223,8 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
                     "kind": str(payload.get("kind") or "unclassified"),
                     "class": class_for_block(payload, following),
                     "candidate": candidate_from_payload(payload) or candidate_for_event(task_events, index),
+                    "lifecycle_epoch": lifecycle_epoch,
+                    "submission_epoch": submission_epoch,
                     "run_outcome": run_field_bucket(run, task_id, "outcome"),
                     "profile": run_field_bucket(run, task_id, "profile"),
                     "review_stage": review_stage_for_event(task_events, index),
@@ -234,30 +259,38 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     autonomous_recoveries = [
         b for b in recoveries if not b["explicit_human_marker_before_recovery"]
     ]
-    grouped: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+    full_candidates_by_epoch: dict[tuple[str, int | None, int | None], set[str]] = collections.defaultdict(set)
     for block in blocks:
         candidate = block["candidate"]
-        key = next(
-            (
-                key
-                for key in grouped
-                if key[0] == block["task_id"]
-                and (
-                    (key[1] is None and candidate is None)
-                    or candidates_refer_to_same_candidate(key[1], candidate)
-                )
-            ),
-            None,
-        )
-        if key is None:
-            key = (block["task_id"], candidate)
-            grouped[key] = []
+        if isinstance(candidate, str) and len(candidate) >= 40:
+            full_candidates_by_epoch[
+                (block["task_id"], block["lifecycle_epoch"], block["submission_epoch"])
+            ].add(candidate)
+
+    def repeat_key(block: dict[str, Any]) -> tuple[object, ...]:
+        """Build a non-transitive, epoch-scoped identity for repeat counting."""
+        epoch = (block["task_id"], block["lifecycle_epoch"], block["submission_epoch"])
+        candidate = block["candidate"]
+        if candidate is None:
+            return (*epoch, "candidate-less")
+        matches = [full for full in full_candidates_by_epoch[epoch] if full.startswith(candidate)]
+        if len(candidate) < 40 and len(matches) == 1:
+            candidate = matches[0]
+        elif len(candidate) < 40 and len(matches) > 1:
+            # A prefix shared by multiple full SHAs cannot safely bridge them.
+            candidate = f"ambiguous:{block['event_id']}"
+        return (*epoch, candidate)
+
+    grouped: dict[tuple[object, ...], list[dict[str, Any]]] = {}
+    for block in blocks:
+        key = repeat_key(block)
+        grouped.setdefault(key, [])
         grouped[key].append(block)
 
     repeats: dict[str, int] = {}
     for minutes in (5, 15, 60):
         repeated_task_ids: set[str] = set()
-        for (task_id, _candidate), group in grouped.items():
+        for (task_id, *_identity), group in grouped.items():
             if any(
                 later["created_at"] - earlier["created_at"] <= minutes * 60
                 for earlier, later in zip(group, group[1:])
@@ -293,7 +326,7 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
             row["block_kind"] = payload.get("kind") or "unclassified"
             row["class"] = class_for_block(payload, focus_events[index + 1 :])
         if event["kind"] == "submitted_for_review":
-            row["review_stage"] = payload.get("review_stage")
+            row["review_stage"] = payload.get("resume_stage") or payload.get("review_stage")
             row["review_tier"] = payload.get("review_tier")
             row["candidate"] = (payload.get("diff_candidate_commit") or payload.get("reviewed_commit") or "")[:64]
         if event["kind"] == "task_ping_sent":

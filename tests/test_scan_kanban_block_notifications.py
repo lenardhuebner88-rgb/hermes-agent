@@ -381,3 +381,82 @@ def test_repeated_blocks_use_payload_candidate_with_prefix_equivalence():
     conn.execute("DELETE FROM task_events WHERE task_id = ?", ("different",))
     equivalent_report = scanner.run_report(conn, days=1, focus_task="equivalent")
     assert equivalent_report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1
+
+
+def test_review_revision_resume_stage_is_authoritative_over_submission_stage():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            run_id INTEGER, kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            profile TEXT, outcome TEXT, verdict TEXT, status TEXT NOT NULL);
+        """
+    )
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, 'resume-stage', NULL, ?, ?, ?)",
+        [
+            (1, "submitted_for_review", json.dumps({"review_stage": 1, "diff_candidate_commit": "old-candidate"}), 100),
+            (2, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"resume_stage": 3, "reviewed_commit": "different-candidate"}}), 101),
+        ],
+    )
+    report = scanner.run_report(conn, days=1, focus_task="resume-stage")
+    assert report["metrics"]["blocks_by_review_stage"] == {"3": 1, "unknown": 0, "unmatched": 0}
+
+
+def test_repeat_groups_do_not_cross_submission_or_lifecycle_epochs():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            run_id INTEGER, kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            profile TEXT, outcome TEXT, verdict TEXT, status TEXT NOT NULL);
+        """
+    )
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, 'epochs', NULL, ?, ?, ?)",
+        [
+            (1, "submitted_for_review", json.dumps({"diff_candidate_commit": "same-candidate"}), 100),
+            (2, "blocked", json.dumps({"kind": "review_revision"}), 101),
+            (3, "submitted_for_review", "{}", 102),
+            (4, "blocked", json.dumps({"kind": "review_revision"}), 103),
+            (5, "completed", "{}", 104),
+            (6, "submitted_for_review", json.dumps({"diff_candidate_commit": "same-candidate"}), 105),
+            (7, "blocked", json.dumps({"kind": "review_revision"}), 106),
+            (8, "blocked", json.dumps({"kind": "review_revision"}), 107),
+        ],
+    )
+    report = scanner.run_report(conn, days=1, focus_task="epochs")
+    # Only the two blocks within the final submission epoch are repeats.
+    assert report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1
+    assert scanner.candidate_for_event(conn.execute("SELECT * FROM task_events ORDER BY id").fetchall(), 3) is None
+
+
+def test_ambiguous_short_sha_does_not_transitively_group_distinct_full_shas():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            run_id INTEGER, kind TEXT NOT NULL, payload TEXT, created_at INTEGER NOT NULL);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL,
+            profile TEXT, outcome TEXT, verdict TEXT, status TEXT NOT NULL);
+        """
+    )
+    prefix = "deadbee"
+    full_a = prefix + "a" * 33
+    full_b = prefix + "b" * 33
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, 'ambiguous', NULL, ?, ?, ?)",
+        [
+            (1, "submitted_for_review", json.dumps({"diff_candidate_commit": full_a}), 100),
+            (2, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": full_a}}), 101),
+            (3, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": prefix}}), 102),
+            (4, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": full_b}}), 103),
+        ],
+    )
+    report = scanner.run_report(conn, days=1, focus_task="ambiguous")
+    assert report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 0
