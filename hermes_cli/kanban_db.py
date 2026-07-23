@@ -14309,6 +14309,32 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     return None
 
 
+_WORKFLOW_ID_BODY_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?workflow_id\s*(?:=|:)\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_WORKFLOW_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9._:-]*$")
+
+
+def _resolved_review_workflow_identity(task: Task) -> Optional[tuple[str, str]]:
+    """Return the explicit body ID, or the validated board-ID fallback.
+
+    A present but malformed or contradictory body declaration is intentionally
+    not repaired: review handoff must stay fail-closed rather than masking an
+    identity conflict with the board key.
+    """
+    values = [match.group("value").strip() for match in _WORKFLOW_ID_BODY_RE.finditer(task.body or "")]
+    if values:
+        if any(not _WORKFLOW_ID_RE.fullmatch(value) for value in values):
+            return None
+        if len(set(values)) != 1:
+            return None
+        return values[0], "explicit task-body"
+    if not _WORKFLOW_ID_RE.fullmatch(task.id):
+        return None
+    return task.id, "board-native fallback"
+
+
 def _submit_for_review(
     conn: sqlite3.Connection,
     task_id: str,
@@ -14332,6 +14358,17 @@ def _submit_for_review(
     and does NOT clean up the scratch workspace (the verifier inspects it; a
     REQUEST_CHANGES keeps it for the follow-up fix).
     """
+    task = get_task(conn, task_id)
+    workflow_identity = _resolved_review_workflow_identity(task) if task else None
+    if workflow_identity is None:
+        block_task(
+            conn,
+            task_id,
+            reason="Review workflow identity is missing, malformed, or contradictory.",
+            expected_run_id=expected_run_id,
+        )
+        return True
+    workflow_id, _workflow_identity_source = workflow_identity
     # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
     # must not run under the txn). Empty dict when no/non-git workspace.
     diff_snapshot = _capture_review_diff_snapshot(
@@ -14482,9 +14519,7 @@ def _submit_for_review(
         payload: dict = {
             "result_len": len(result) if result else 0,
             "summary": ev_summary or None,
-            # The board task ID is stable across review stages and is the
-            # canonical fallback when an ad-hoc body declares no workflow ID.
-            "workflow_id": task_id,
+            "workflow_id": workflow_id,
         }
         if verified_cards:
             payload["verified_cards"] = verified_cards
@@ -14832,6 +14867,40 @@ def _maybe_advance_review_chain(
     payload = _latest_review_submission(conn, task_id)
     if not payload:
         return None
+    task = get_task(conn, task_id)
+    workflow_identity = _resolved_review_workflow_identity(task) if task else None
+    has_stage_workflow_id = "workflow_id" in payload
+    stage_workflow_id = payload.get("workflow_id")
+    if (
+        workflow_identity is None
+        or (
+            has_stage_workflow_id
+            and (
+                not isinstance(stage_workflow_id, str)
+                or not _WORKFLOW_ID_RE.fullmatch(stage_workflow_id)
+                or stage_workflow_id != workflow_identity[0]
+            )
+        )
+    ):
+        # A missing key is the sole legacy migration case: resolve it once
+        # from the current task contract. Present malformed or conflicting
+        # values are evidence of an identity breach and must remain blocked.
+        block_task(
+            conn,
+            task_id,
+            reason="Review workflow identity is missing, malformed, or contradictory.",
+            expected_run_id=run_id,
+            reviewer_metadata={
+                "blocking_findings": [
+                    "The submitted review stage has a malformed or conflicting workflow_id."
+                ],
+                "required_verification": [
+                    "Restore one canonical workflow_id before advancing the review chain."
+                ],
+            },
+        )
+        return True
+    workflow_id = workflow_identity[0]
     tier = str(payload.get("review_tier") or "standard")
     stage = int(payload.get("review_stage") or 0)
     cfg = _review_gate_config()
@@ -14871,10 +14940,9 @@ def _maybe_advance_review_chain(
             "review_stage": next_stage,
             "target_profile": next_profile,
             "advanced_from_stage": stage,
-            # Preserve the canonical initial identity.  Falling back to the
-            # board key repairs pre-field submissions without using any
-            # heuristic source such as a commit SHA.
-            "workflow_id": payload.get("workflow_id") or task_id,
+            # Preserve the resolved canonical identity. A missing legacy field
+            # was normalized above; present malformed values never reach here.
+            "workflow_id": workflow_id,
         }
         if reviewed_commit:
             next_payload["reviewed_commit"] = reviewed_commit
@@ -31904,10 +31972,16 @@ def _worker_brief_input(
     profile: str,
 ) -> _kanban_context.WorkerBriefInput:
     now = int(time.time())
+    workflow_identity = _resolved_review_workflow_identity(task)
+    workflow_header = (
+        f"Workflow identity ({workflow_identity[1]}): workflow_id={workflow_identity[0]}"
+        if workflow_identity
+        else "Workflow identity: unavailable (fail-closed)"
+    )
     header = [
         f"# Kanban task {task.id}: {task.title}",
         "",
-        f"Workflow identity (board-native fallback): workflow_id={task.id}",
+        workflow_header,
         f"Assignee: {task.assignee or '(unassigned)'}",
         f"Status:   {task.status}",
     ]
