@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,23 @@ from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
 )
+
+_REAL_GATEWAY_RUNTIME_RESOLVER = gateway_cli._resolve_gateway_python_runtime
+_REAL_GATEWAY_PYTHON_EXECUTABLE_CHECK = (
+    gateway_cli._gateway_python_path_is_executable
+)
+
+
+@pytest.fixture(autouse=True)
+def _use_synthetic_runtime_for_service_rendering(monkeypatch):
+    """Keep renderer tests independent of the shared worktree venv provenance."""
+    runtime = gateway_cli._GatewayPythonRuntime(sys.executable, None)
+    monkeypatch.setattr(
+        gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+    )
+    monkeypatch.setattr(
+        gateway_cli, "_gateway_python_path_is_executable", lambda path: True
+    )
 
 
 class TestUserSystemdPrivateSocketPreflight:
@@ -342,6 +360,75 @@ class TestSystemdServiceRefresh:
         assert not any(
             "daemon-reload" in str(c) for c in ran
         ), "daemon-reload must not run when write was refused"
+
+    def test_refresh_restores_previous_unit_when_daemon_reload_fails(
+        self, tmp_path, monkeypatch
+    ):
+        unit_path = tmp_path / "hermes-gateway.service"
+        unit_path.write_text("old unit\n", encoding="utf-8")
+        calls = []
+
+        monkeypatch.setattr(
+            gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path
+        )
+        monkeypatch.setattr(
+            gateway_cli, "systemd_unit_is_current", lambda system=False: False
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: "new unit\n",
+        )
+
+        def fake_systemctl(args, **kwargs):
+            calls.append((args, kwargs.get("check")))
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(1, args)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(gateway_cli, "_run_systemctl", fake_systemctl)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            gateway_cli.refresh_systemd_unit_if_needed(system=False)
+
+        assert unit_path.read_text(encoding="utf-8") == "old unit\n"
+        assert calls == [
+            (["daemon-reload"], True),
+            (["daemon-reload"], False),
+        ]
+        assert list(tmp_path.glob(".hermes-gateway.service.*.tmp")) == []
+
+    def test_refresh_leaves_unit_untouched_when_runtime_resolution_fails(
+        self, tmp_path, monkeypatch
+    ):
+        unit_path = tmp_path / "hermes-gateway.service"
+        unit_path.write_text("old unit\n", encoding="utf-8")
+        calls = []
+
+        monkeypatch.setattr(
+            gateway_cli, "get_systemd_unit_path", lambda system=False: unit_path
+        )
+        monkeypatch.setattr(
+            gateway_cli, "systemd_unit_is_current", lambda system=False: False
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: (_ for _ in ()).throw(
+                RuntimeError("no usable gateway runtime")
+            ),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_run_systemctl",
+            lambda *args, **kwargs: calls.append((args, kwargs)),
+        )
+
+        with pytest.raises(RuntimeError, match="no usable gateway runtime"):
+            gateway_cli.refresh_systemd_unit_if_needed(system=False)
+
+        assert unit_path.read_text(encoding="utf-8") == "old unit\n"
+        assert calls == []
 
 
 class TestTempHomeServiceDefinitionGuard:
@@ -955,8 +1042,15 @@ class TestLaunchdServiceRecovery:
     def test_launchd_status_reports_local_stale_plist_when_unloaded(self, tmp_path, monkeypatch, capsys):
         plist_path = tmp_path / "ai.hermes.gateway.plist"
         plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
+        runtime = gateway_cli._GatewayPythonRuntime(
+            sys.executable,
+            Path(sys.prefix) if sys.prefix != sys.base_prefix else None,
+        )
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+        )
         monkeypatch.setattr(
             gateway_cli.subprocess,
             "run",
@@ -1973,6 +2067,260 @@ class TestDetectVenvDir:
         assert result is None
 
 
+class TestGatewayPythonRuntimeResolver:
+    @pytest.fixture(autouse=True)
+    def _use_real_runtime_resolver(self, monkeypatch):
+        monkeypatch.setattr(
+            gateway_cli,
+            "_resolve_gateway_python_runtime",
+            _REAL_GATEWAY_RUNTIME_RESOLVER,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_gateway_python_path_is_executable",
+            _REAL_GATEWAY_PYTHON_EXECUTABLE_CHECK,
+        )
+
+    @staticmethod
+    def _make_python(venv: Path) -> Path:
+        python_path = venv / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+        return python_path
+
+    def test_skips_broken_dot_venv_and_uses_valid_venv(
+        self, tmp_path, monkeypatch
+    ):
+        dot_python = self._make_python(tmp_path / ".venv")
+        valid_python = self._make_python(tmp_path / "venv")
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("sys.prefix", "/usr")
+        monkeypatch.setattr("sys.base_prefix", "/usr")
+        monkeypatch.setattr("sys.executable", "/usr/bin/python3")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_gateway_python_is_usable",
+            lambda path: path == valid_python,
+        )
+
+        runtime = gateway_cli._resolve_gateway_python_runtime()
+
+        assert runtime.python_path == str(valid_python)
+        assert runtime.venv_dir == tmp_path / "venv"
+        assert runtime.python_path != str(dot_python)
+        assert gateway_cli.get_python_path() == str(valid_python)
+
+    def test_skips_broken_virtual_env_before_project_venv(
+        self, tmp_path, monkeypatch
+    ):
+        broken_python = self._make_python(tmp_path / "broken-env")
+        valid_python = self._make_python(tmp_path / "venv")
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("sys.prefix", "/usr")
+        monkeypatch.setattr("sys.base_prefix", "/usr")
+        monkeypatch.setattr("sys.executable", "/usr/bin/python3")
+        monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "broken-env"))
+        monkeypatch.setattr(
+            gateway_cli,
+            "_gateway_python_is_usable",
+            lambda path: path == valid_python,
+        )
+
+        runtime = gateway_cli._resolve_gateway_python_runtime()
+
+        assert runtime.python_path == str(valid_python)
+        assert runtime.python_path != str(broken_python)
+
+    def test_distinct_venv_launchers_are_not_realpath_deduplicated(
+        self, tmp_path, monkeypatch
+    ):
+        base_python = tmp_path / "base-python"
+        base_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        dot_python = tmp_path / ".venv" / "bin" / "python"
+        valid_python = tmp_path / "venv" / "bin" / "python"
+        dot_python.parent.mkdir(parents=True)
+        valid_python.parent.mkdir(parents=True)
+        dot_python.symlink_to(base_python)
+        valid_python.symlink_to(base_python)
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("sys.prefix", "/usr")
+        monkeypatch.setattr("sys.base_prefix", "/usr")
+        monkeypatch.setattr("sys.executable", "/usr/bin/python3")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_gateway_python_is_usable",
+            lambda path: path == valid_python,
+        )
+
+        runtime = gateway_cli._resolve_gateway_python_runtime()
+
+        assert dot_python.resolve() == valid_python.resolve()
+        assert runtime.python_path == str(valid_python)
+
+    def test_fails_closed_when_no_candidate_can_run_gateway(
+        self, tmp_path, monkeypatch
+    ):
+        self._make_python(tmp_path / ".venv")
+        self._make_python(tmp_path / "venv")
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr("sys.prefix", "/usr")
+        monkeypatch.setattr("sys.base_prefix", "/usr")
+        monkeypatch.setattr("sys.executable", "/usr/bin/python3")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(
+            gateway_cli, "_gateway_python_is_usable", lambda path: False
+        )
+
+        with pytest.raises(RuntimeError, match="Refusing to generate or rewrite"):
+            gateway_cli._resolve_gateway_python_runtime()
+
+    def test_probe_excludes_cwd_and_python_environment(
+        self, tmp_path, monkeypatch
+    ):
+        python_path = tmp_path / "python"
+        python_path.write_text("", encoding="utf-8")
+        python_path.chmod(0o755)
+        stable_home = tmp_path / "hermes-home"
+        stable_home.mkdir()
+        captured = {}
+
+        monkeypatch.setenv("PYTHONHOME", "/poisoned/home")
+        monkeypatch.setenv("PYTHONPATH", "/poisoned/path")
+        monkeypatch.setattr(
+            gateway_cli, "_gateway_python_path_is_temporary", lambda path: False
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_stable_service_working_dir",
+            lambda: str(stable_home),
+        )
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        assert gateway_cli._gateway_python_is_usable(python_path) is True
+        assert captured["cmd"][:4] == [str(python_path), "-E", "-P", "-c"]
+        assert "hermes_cli.main" in captured["cmd"][4]
+        assert "hermes_cli.gateway" in captured["cmd"][4]
+        assert "gateway.cgroup_cleanup" in captured["cmd"][4]
+        assert captured["cmd"][5] == str(gateway_cli.PROJECT_ROOT.resolve())
+        assert captured["kwargs"]["cwd"] == str(stable_home)
+        assert "PYTHONHOME" not in captured["kwargs"]["env"]
+        assert "PYTHONPATH" not in captured["kwargs"]["env"]
+        assert captured["kwargs"]["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+        assert captured["kwargs"]["timeout"] == 5
+
+    def test_probe_rejects_modules_from_a_different_checkout(
+        self, tmp_path, monkeypatch
+    ):
+        wrong_checkout = tmp_path / "wrong-checkout"
+        wrong_checkout.mkdir()
+        stable_home = tmp_path / "hermes-home"
+        stable_home.mkdir()
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", wrong_checkout)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_stable_service_working_dir",
+            lambda: str(stable_home),
+        )
+
+        assert gateway_cli._gateway_python_is_usable(Path(sys.executable)) is False
+
+    def test_probe_rejects_temporary_interpreter_without_launching_it(
+        self, tmp_path, monkeypatch
+    ):
+        python_path = tmp_path / "venv" / "bin" / "python"
+        python_path.parent.mkdir(parents=True)
+        python_path.write_text("#!/bin/sh\n", encoding="utf-8")
+        python_path.chmod(0o755)
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda *args, **kwargs: pytest.fail(
+                "temporary interpreter must not be launched"
+            ),
+        )
+
+        assert gateway_cli._gateway_python_is_usable(python_path) is False
+
+    def test_generated_unit_uses_one_validated_runtime_consistently(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        selected_venv = tmp_path / "venv"
+        selected_python = self._make_python(selected_venv)
+        stale_venv = tmp_path / ".venv"
+        self._make_python(stale_venv)
+        runtime = gateway_cli._GatewayPythonRuntime(
+            str(selected_python), selected_venv
+        )
+
+        monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(
+            gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+        )
+        monkeypatch.setattr(
+            gateway_cli, "get_hermes_home", lambda: hermes_home
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_build_user_local_paths", lambda home, existing: []
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_build_wsl_interop_paths", lambda existing: []
+        )
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda name: None)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+
+        assert f"ExecStart={selected_python} -m hermes_cli.main gateway run" in unit
+        assert (
+            f"ExecStopPost=-{selected_python} -m gateway.cgroup_cleanup" in unit
+        )
+        assert f'Environment="VIRTUAL_ENV={selected_venv}"' in unit
+        path_line = next(
+            line for line in unit.splitlines() if line.startswith('Environment="PATH=')
+        )
+        assert str(selected_venv / "bin") in path_line
+        assert str(stale_venv / "bin") not in path_line
+
+    def test_non_venv_runtime_omits_virtual_env_from_service_definitions(
+        self, tmp_path, monkeypatch
+    ):
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        runtime = gateway_cli._GatewayPythonRuntime("/usr/bin/python3", None)
+
+        monkeypatch.setattr(
+            gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+        )
+        monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: hermes_home)
+        monkeypatch.setattr(
+            gateway_cli, "_build_user_local_paths", lambda home, existing: []
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_build_wsl_interop_paths", lambda existing: []
+        )
+        monkeypatch.setattr(gateway_cli.shutil, "which", lambda name: None)
+
+        unit = gateway_cli.generate_systemd_unit(system=False)
+        plist = gateway_cli.generate_launchd_plist()
+
+        assert "VIRTUAL_ENV" not in unit
+        assert "VIRTUAL_ENV" not in plist
+
+
 class TestSystemUnitHermesHome:
     """HERMES_HOME in system units must reference the target user, not root."""
 
@@ -1996,8 +2344,15 @@ class TestSystemUnitHermesHome:
 
     def test_system_unit_remaps_profile_to_target_user(self, monkeypatch):
         # Simulate sudo with a profile: HERMES_HOME was resolved under root
+        runtime = gateway_cli._GatewayPythonRuntime(
+            sys.executable,
+            Path(sys.prefix) if sys.prefix != sys.base_prefix else None,
+        )
         monkeypatch.setattr(Path, "home", staticmethod(lambda: Path("/root")))
         monkeypatch.setenv("HERMES_HOME", "/root/.hermes/profiles/coder")
+        monkeypatch.setattr(
+            gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+        )
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
             lambda run_as_user=None: ("alice", "alice", "/home/alice"),
@@ -2206,8 +2561,13 @@ class TestGeneratedUnitUsesDetectedVenv:
         dot_venv.mkdir()
         (dot_venv / "bin").mkdir()
 
-        monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: dot_venv)
-        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(dot_venv / "bin" / "python"))
+        monkeypatch.setattr(
+            gateway_cli,
+            "_resolve_gateway_python_runtime",
+            lambda: gateway_cli._GatewayPythonRuntime(
+                str(dot_venv / "bin" / "python"), dot_venv
+            ),
+        )
 
         unit = gateway_cli.generate_systemd_unit(system=False)
 
@@ -2660,11 +3020,19 @@ class TestSystemUnitPathRemapping:
         monkeypatch.setenv("HERMES_HOME", str(root_home / ".hermes"))
         monkeypatch.setattr(gateway_cli, "get_hermes_home", lambda: root_home / ".hermes")
         monkeypatch.setattr(gateway_cli, "PROJECT_ROOT", project)
-        monkeypatch.setattr(gateway_cli, "_detect_venv_dir", lambda: project / "venv")
-        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(venv_bin / "python"))
+        monkeypatch.setattr(
+            gateway_cli,
+            "_resolve_gateway_python_runtime",
+            lambda: gateway_cli._GatewayPythonRuntime(
+                str(venv_bin / "python"), project / "venv"
+            ),
+        )
         monkeypatch.setattr(
             gateway_cli, "_system_service_identity",
             lambda run_as_user=None: ("alice", "alice", target_home),
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_gateway_python_path_is_executable", lambda path: True
         )
 
         unit = gateway_cli.generate_systemd_unit(system=True)
@@ -2679,6 +3047,35 @@ class TestSystemUnitPathRemapping:
         # checkout would crash-loop the unit on CHDIR (status=200).
         assert "WorkingDirectory=/home/alice/.hermes" in unit
         assert "WorkingDirectory=/home/alice/.hermes/hermes-agent" not in unit
+
+    def test_system_unit_refuses_unavailable_remapped_python(
+        self, monkeypatch, tmp_path
+    ):
+        caller_home = tmp_path / "root"
+        caller_home.mkdir()
+        python_path = caller_home / ".hermes" / "hermes-agent" / "venv" / "bin" / "python"
+        runtime = gateway_cli._GatewayPythonRuntime(
+            str(python_path), python_path.parent.parent
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: caller_home)
+        monkeypatch.setattr(
+            gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda run_as_user=None: ("alice", "alice", "/home/alice"),
+        )
+        monkeypatch.setattr(
+            gateway_cli, "_gateway_python_path_is_executable", lambda path: False
+        )
+
+        with pytest.raises(
+            gateway_cli.GatewayPythonRuntimeError,
+            match="becomes unavailable after remapping",
+        ):
+            gateway_cli.generate_systemd_unit(system=True)
 
 
 class TestDockerAwareGateway:

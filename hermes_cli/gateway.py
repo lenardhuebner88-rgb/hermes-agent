@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from dataclasses import dataclass
@@ -2469,49 +2470,184 @@ def get_launchd_plist_path() -> Path:
     return _launchd_user_home() / "Library" / "LaunchAgents" / f"{name}.plist"
 
 
+@dataclass(frozen=True)
+class _GatewayPythonRuntime:
+    python_path: str
+    venv_dir: Path | None
+
+
+class GatewayPythonRuntimeError(RuntimeError):
+    """No Python candidate can safely run the generated gateway service."""
+
+
+def _candidate_venv_dirs() -> list[Path]:
+    """Return existing virtualenv candidates in compatibility order."""
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def _append(path: str | Path | None) -> None:
+        if not path:
+            return
+        candidate = Path(path).expanduser()
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key in seen or not candidate.is_dir():
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    # If we're running inside a virtualenv, sys.prefix points to it.
+    if sys.prefix != sys.base_prefix:
+        _append(sys.prefix)
+
+    # uv and some other tools set VIRTUAL_ENV without changing sys.prefix.
+    _append(os.environ.get("VIRTUAL_ENV"))
+
+    # Preserve the historical project fallback order. A broken candidate is
+    # skipped later by the isolated gateway import probe.
+    _append(PROJECT_ROOT / ".venv")
+    _append(PROJECT_ROOT / "venv")
+    return candidates
+
+
 def _detect_venv_dir() -> Path | None:
-    """Detect the active virtualenv directory.
+    """Detect the first existing virtualenv directory.
 
     Checks ``sys.prefix`` first (works regardless of the directory name),
     then ``VIRTUAL_ENV`` env var (covers uv-managed environments where
     sys.prefix == sys.base_prefix), then falls back to probing common
     directory names under PROJECT_ROOT.
+
+    This helper intentionally reports existence only for compatibility.
+    Service generation uses ``_resolve_gateway_python_runtime()``, which
+    validates every candidate and skips environments that cannot import the
+    gateway from a stable service working directory.
+
     Returns ``None`` when no virtualenv can be found.
     """
-    # If we're running inside a virtualenv, sys.prefix points to it.
-    if sys.prefix != sys.base_prefix:
-        venv = Path(sys.prefix)
-        if venv.is_dir():
-            return venv
+    candidates = _candidate_venv_dirs()
+    return candidates[0] if candidates else None
 
-    # uv and some other tools set VIRTUAL_ENV without changing sys.prefix.
-    # This catches `uv run` where sys.prefix == sys.base_prefix but the
-    # environment IS a venv.  (#8620)
-    _virtual_env = os.environ.get("VIRTUAL_ENV")
-    if _virtual_env:
-        venv = Path(_virtual_env)
-        if venv.is_dir():
-            return venv
 
-    # Fallback: check common virtualenv directory names under the project root.
-    for candidate in (".venv", "venv"):
-        venv = PROJECT_ROOT / candidate
-        if venv.is_dir():
-            return venv
+def _venv_python_path(venv: Path) -> Path:
+    if is_windows():
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
 
-    return None
+
+def _gateway_python_path_is_temporary(python_path: Path) -> bool:
+    """Reject service interpreters launched from an ephemeral temp directory."""
+    candidate = Path(os.path.abspath(str(python_path.expanduser())))
+    temp_roots = {
+        Path(os.path.abspath(tempfile.gettempdir())),
+        Path("/tmp"),
+        Path("/var/tmp"),
+        Path("/private/tmp"),
+        Path("/private/var/tmp"),
+    }
+    return any(candidate == root or root in candidate.parents for root in temp_roots)
+
+
+def _gateway_python_path_is_executable(python_path: Path) -> bool:
+    return python_path.is_file() and (
+        is_windows() or os.access(python_path, os.X_OK)
+    )
+
+
+def _gateway_python_is_usable(python_path: Path) -> bool:
+    """Return whether *python_path* can launch the gateway in service conditions.
+
+    ``-E -P`` is load-bearing: it ignores ``PYTHON*`` environment variables and
+    prevents the caller's cwd from being prepended to ``sys.path`` while still
+    allowing legitimate user-site installations. Without it, a half-created
+    venv can appear healthy only because the command was launched from the
+    source checkout, then crash-loop as soon as systemd starts it from the
+    stable HERMES_HOME working directory.
+    """
+    if (
+        not _gateway_python_path_is_executable(python_path)
+        or _gateway_python_path_is_temporary(python_path)
+    ):
+        return False
+
+    env = os.environ.copy()
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    # Importability alone is insufficient: an unrelated or stale Hermes
+    # installation in a candidate venv would otherwise pass the probe and be
+    # persisted into the service definition. Require every load-bearing module
+    # to originate from this exact checkout.
+    probe = (
+        "import pathlib, sys; "
+        "import hermes_cli.main as main; "
+        "import hermes_cli.gateway as cli_gateway; "
+        "import gateway.cgroup_cleanup as cleanup; "
+        "root = pathlib.Path(sys.argv[1]).resolve(); "
+        "origins = tuple(pathlib.Path(module.__file__).resolve() "
+        "for module in (main, cli_gateway, cleanup)); "
+        "raise SystemExit(0 if all(origin == root or root in origin.parents "
+        "for origin in origins) else 86)"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                str(python_path),
+                "-E",
+                "-P",
+                "-c",
+                probe,
+                str(PROJECT_ROOT.resolve()),
+            ],
+            cwd=_stable_service_working_dir(),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _resolve_gateway_python_runtime() -> _GatewayPythonRuntime:
+    """Select an importable Python runtime without trusting directory names."""
+    attempted: list[str] = []
+    seen: set[str] = set()
+
+    def _try(python_path: Path, venv_dir: Path | None) -> _GatewayPythonRuntime | None:
+        key = os.path.normcase(os.path.abspath(str(python_path)))
+        if key in seen:
+            return None
+        seen.add(key)
+        attempted.append(str(python_path))
+        if _gateway_python_is_usable(python_path):
+            return _GatewayPythonRuntime(str(python_path), venv_dir)
+        return None
+
+    for venv in _candidate_venv_dirs():
+        runtime = _try(_venv_python_path(venv), venv)
+        if runtime is not None:
+            return runtime
+
+    runtime = _try(Path(sys.executable), None)
+    if runtime is not None:
+        return runtime
+
+    tried = ", ".join(attempted) if attempted else "(no Python candidates found)"
+    raise GatewayPythonRuntimeError(
+        "No usable Python runtime can import the Hermes gateway in isolated "
+        "service conditions. Refusing to generate or rewrite the service "
+        f"definition. Tried: {tried}. Run this command through a working "
+        "Hermes installation or repair its virtualenv first."
+    )
 
 
 def get_python_path() -> str:
-    venv = _detect_venv_dir()
-    if venv is not None:
-        if is_windows():
-            venv_python = venv / "Scripts" / "python.exe"
-        else:
-            venv_python = venv / "bin" / "python"
-        if venv_python.exists():
-            return str(venv_python)
-    return sys.executable
+    return _resolve_gateway_python_runtime().python_path
 
 
 # =============================================================================
@@ -2622,7 +2758,13 @@ def _hermes_home_for_target_user(target_home_dir: str) -> str:
         return str(current_hermes)
 
 
-def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
+_AUTO_SERVICE_VENV = object()
+
+
+def _build_service_path_dirs(
+    project_root: Path | None = None,
+    venv_dir: Path | None | object = _AUTO_SERVICE_VENV,
+) -> list[str]:
     """Build PATH directory list for service units, excluding non-existent dirs."""
     if project_root is None:
         project_root = PROJECT_ROOT
@@ -2635,11 +2777,19 @@ def _build_service_path_dirs(project_root: Path | None = None) -> list[str]:
 
     candidates = []
 
-    venv_bin = project_root / "venv" / "bin"
-    if _is_dir(venv_bin):
-        candidates.append(str(venv_bin))
-    elif sys.prefix != sys.base_prefix:
-        candidates.append(str(Path(sys.prefix) / "bin"))
+    if venv_dir is _AUTO_SERVICE_VENV:
+        # Backward-compatible standalone behavior for callers that only want
+        # the conventional service PATH. Unit/plist generation passes its
+        # validated runtime explicitly so PATH cannot disagree with ExecStart.
+        venv_bin = project_root / "venv" / "bin"
+        if _is_dir(venv_bin):
+            candidates.append(str(venv_bin))
+        elif sys.prefix != sys.base_prefix:
+            candidates.append(str(Path(sys.prefix) / "bin"))
+    elif isinstance(venv_dir, Path):
+        selected_bin = venv_dir / ("Scripts" if is_windows() else "bin")
+        if _is_dir(selected_bin):
+            candidates.append(str(selected_bin))
 
     node_bin = project_root / "node_modules" / ".bin"
     if _is_dir(node_bin):
@@ -2685,12 +2835,12 @@ def _stable_service_working_dir() -> str:
 
 
 def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) -> str:
-    python_path = get_python_path()
+    runtime = _resolve_gateway_python_runtime()
+    python_path = runtime.python_path
     working_dir = _stable_service_working_dir()
-    detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
+    venv_dir = str(runtime.venv_dir) if runtime.venv_dir else None
 
-    path_entries = _build_service_path_dirs()
+    path_entries = _build_service_path_dirs(venv_dir=runtime.venv_dir)
     resolved_node = shutil.which("node")
     if resolved_node:
         # Use the directory where ``node`` is *found on PATH*, NOT the
@@ -2730,16 +2880,26 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         # (e.g. /root/) to the target user's home so the service can
         # actually access them.
         python_path = _remap_path_for_user(python_path, home_dir)
+        if not _gateway_python_path_is_executable(Path(python_path)):
+            raise GatewayPythonRuntimeError(
+                "The validated gateway Python path becomes unavailable after "
+                f"remapping it for system service user {username}: {python_path}. "
+                "Refusing to write the service definition."
+            )
         # Anchor cwd to the target user's HERMES_HOME (stable, always exists)
         # rather than a remapped source-checkout path that can rot. See
         # _stable_service_working_dir() for the full rationale.
         working_dir = str(hermes_home) if hermes_home else _remap_path_for_user(working_dir, home_dir)
-        venv_dir = _remap_path_for_user(venv_dir, home_dir)
+        if venv_dir is not None:
+            venv_dir = _remap_path_for_user(venv_dir, home_dir)
         path_entries = [_remap_path_for_user(p, home_dir) for p in path_entries]
         path_entries.extend(_build_user_local_paths(Path(home_dir), path_entries))
         path_entries.extend(_build_wsl_interop_paths(path_entries))
         path_entries.extend(common_bin_paths)
         sane_path = ":".join(path_entries)
+        venv_environment = (
+            f'Environment="VIRTUAL_ENV={venv_dir}"\n' if venv_dir else ""
+        )
         return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2756,8 +2916,7 @@ Environment="HOME={home_dir}"
 Environment="USER={username}"
 Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
-Environment="VIRTUAL_ENV={venv_dir}"
-Environment="HERMES_HOME={hermes_home}"
+{venv_environment}Environment="HERMES_HOME={hermes_home}"
 Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
@@ -2779,6 +2938,9 @@ WantedBy=multi-user.target
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(common_bin_paths)
     sane_path = ":".join(path_entries)
+    venv_environment = (
+        f'Environment="VIRTUAL_ENV={venv_dir}"\n' if venv_dir else ""
+    )
     return f"""[Unit]
 Description={SERVICE_DESCRIPTION}
 After=network-online.target
@@ -2790,8 +2952,7 @@ Type=simple
 ExecStart={python_path} -m hermes_cli.main{f" {profile_arg}" if profile_arg else ""} gateway run
 WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
-Environment="VIRTUAL_ENV={venv_dir}"
-Environment="HERMES_HOME={hermes_home}"
+{venv_environment}Environment="HERMES_HOME={hermes_home}"
 Restart=always
 RestartSec=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
@@ -2951,6 +3112,29 @@ def _refuse_temp_home_service_write(definition: str, kind: str) -> bool:
     return True
 
 
+def _atomic_write_service_definition(path: Path, definition: str) -> None:
+    """Atomically replace a service definition while preserving its mode."""
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o644
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(definition)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     """Rewrite the installed systemd unit when the generated definition has changed."""
     unit_path = get_systemd_unit_path(system=system)
@@ -2994,8 +3178,22 @@ def refresh_systemd_unit_if_needed(system: bool = False) -> bool:
     if _refuse_temp_home_service_write(new_unit, "systemd unit"):
         return False
 
-    unit_path.write_text(new_unit, encoding="utf-8")
-    _run_systemctl(["daemon-reload"], system=system, check=True, timeout=30)
+    previous_unit = unit_path.read_text(encoding="utf-8")
+    _atomic_write_service_definition(unit_path, new_unit)
+    try:
+        _run_systemctl(["daemon-reload"], system=system, check=True, timeout=30)
+    except Exception:
+        # A failed daemon-reload must not strand a previously valid install on
+        # an unaccepted definition. Restore the exact prior unit atomically,
+        # then best-effort reload it while preserving the original exception.
+        _atomic_write_service_definition(unit_path, previous_unit)
+        try:
+            _run_systemctl(
+                ["daemon-reload"], system=system, check=False, timeout=30
+            )
+        except Exception:
+            logger.exception("Failed to reload restored gateway systemd unit")
+        raise
     print(
         f"↻ Updated gateway {_service_scope_label(system)} service definition to match the current Hermes install"
     )
@@ -3870,7 +4068,8 @@ def _launchd_fallback_to_detached(reason: str, *, exit_on_failure: bool = True) 
 
 
 def generate_launchd_plist() -> str:
-    python_path = get_python_path()
+    runtime = _resolve_gateway_python_runtime()
+    python_path = runtime.python_path
     # Stable cwd anchor — never the volatile source checkout. See
     # _stable_service_working_dir() for the rationale (same rot risk applies
     # to launchd's WorkingDirectory as to systemd's).
@@ -3885,11 +4084,9 @@ def generate_launchd_plist() -> str:
     # nvm, cargo, etc.  We prepend venv/bin and node_modules/.bin (matching
     # the systemd unit), then capture the user's full shell PATH so every
     # user-installed tool (node, ffmpeg, …) is reachable.
-    detected_venv = _detect_venv_dir()
-    venv_dir = str(detected_venv) if detected_venv else str(PROJECT_ROOT / "venv")
     # Resolve the directory containing the node binary (e.g. Homebrew, nvm)
     # so it's explicitly in PATH even if the user's shell PATH changes later.
-    priority_dirs = _build_service_path_dirs()
+    priority_dirs = _build_service_path_dirs(venv_dir=runtime.venv_dir)
     resolved_node = shutil.which("node")
     if resolved_node:
         # Use the directory where ``node`` is *found on PATH*, NOT the symlink's
@@ -3924,6 +4121,12 @@ def generate_launchd_plist() -> str:
         ]
     )
     prog_args_xml = "\n        ".join(prog_args)
+    venv_environment_xml = (
+        "        <key>VIRTUAL_ENV</key>\n"
+        f"        <string>{runtime.venv_dir}</string>\n"
+        if runtime.venv_dir
+        else ""
+    )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3944,9 +4147,7 @@ def generate_launchd_plist() -> str:
     <dict>
         <key>PATH</key>
         <string>{sane_path}</string>
-        <key>VIRTUAL_ENV</key>
-        <string>{venv_dir}</string>
-        <key>HERMES_HOME</key>
+{venv_environment_xml}        <key>HERMES_HOME</key>
         <string>{hermes_home}</string>
     </dict>
 
@@ -6520,6 +6721,9 @@ def gateway_command(args):
         # intercept the same condition with friendlier guidance before the
         # error is raised.
         print(str(e))
+        sys.exit(1)
+    except GatewayPythonRuntimeError as e:
+        print_error(str(e))
         sys.exit(1)
 
 
