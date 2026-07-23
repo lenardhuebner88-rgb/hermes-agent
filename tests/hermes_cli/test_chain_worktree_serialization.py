@@ -100,7 +100,7 @@ def kanban_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def repo(tmp_path):
-    """Real git repo on branch ``main`` with one base commit."""
+    """Real git repo on ``main`` with a reviewable two-commit history."""
     import subprocess
     r = tmp_path / "repo"
     r.mkdir()
@@ -115,6 +115,9 @@ def repo(tmp_path):
     _git("config", "user.email", "t@example.com")
     _git("config", "user.name", "tester")
     (r / "a.txt").write_text("base\n")
+    _git("add", "-A")
+    _git("commit", "-m", "root")
+    (r / "review-base.txt").write_text("reviewable base\n")
     _git("add", "-A")
     _git("commit", "-m", "base")
     return r
