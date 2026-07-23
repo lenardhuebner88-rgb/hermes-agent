@@ -69,6 +69,25 @@ def copy_readonly_snapshot(path: Path) -> sqlite3.Connection:
         source.close()
     snapshot.row_factory = sqlite3.Row
     return snapshot
+def normalize_candidate(value: object) -> str | None:
+    """Return the bounded canonical spelling used for candidate comparisons."""
+    candidate = str(value or "").strip().lower()
+    return candidate[:64] if candidate else None
+
+
+def candidates_refer_to_same_candidate(left: object, right: object) -> bool:
+    """Mirror the producer contract for abbreviated and full commit SHAs."""
+    left_candidate = normalize_candidate(left)
+    right_candidate = normalize_candidate(right)
+    if not left_candidate or not right_candidate:
+        return False
+    if len(left_candidate) < 7 or len(right_candidate) < 7:
+        return False
+    return left_candidate.startswith(right_candidate) or right_candidate.startswith(
+        left_candidate
+    )
+
+
 
 
 def candidate_from_payload(payload: dict[str, Any]) -> str | None:
@@ -76,7 +95,7 @@ def candidate_from_payload(payload: dict[str, Any]) -> str | None:
     review_revision = payload.get("review_revision")
     if not candidate and isinstance(review_revision, dict):
         candidate = review_revision.get("reviewed_commit")
-    return candidate[:64] if isinstance(candidate, str) and candidate else None
+    return normalize_candidate(candidate)
 
 
 def candidate_for_event(events: list[sqlite3.Row], index: int) -> str | None:
@@ -99,7 +118,9 @@ def review_stage_for_event(events: list[sqlite3.Row], index: int) -> str:
             continue
         payload = parse_payload(row["payload"])
         review_candidate = candidate_from_payload(payload)
-        if event_candidate and review_candidate and event_candidate != review_candidate:
+        if event_candidate and review_candidate and not candidates_refer_to_same_candidate(
+            event_candidate, review_candidate
+        ):
             return "unmatched"
         stage = payload.get("review_stage")
         return str(stage) if stage not in (None, "") else "unknown"
@@ -178,7 +199,7 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
                     "created_at": int(event["created_at"]),
                     "kind": str(payload.get("kind") or "unclassified"),
                     "class": class_for_block(payload, following),
-                    "candidate": candidate_for_event(task_events, index),
+                    "candidate": candidate_from_payload(payload) or candidate_for_event(task_events, index),
                     "run_outcome": run_field_bucket(run, task_id, "outcome"),
                     "profile": run_field_bucket(run, task_id, "profile"),
                     "review_stage": review_stage_for_event(task_events, index),
@@ -213,12 +234,29 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     autonomous_recoveries = [
         b for b in recoveries if not b["explicit_human_marker_before_recovery"]
     ]
+    grouped: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
+    for block in blocks:
+        candidate = block["candidate"]
+        key = next(
+            (
+                key
+                for key in grouped
+                if key[0] == block["task_id"]
+                and (
+                    (key[1] is None and candidate is None)
+                    or candidates_refer_to_same_candidate(key[1], candidate)
+                )
+            ),
+            None,
+        )
+        if key is None:
+            key = (block["task_id"], candidate)
+            grouped[key] = []
+        grouped[key].append(block)
+
     repeats: dict[str, int] = {}
     for minutes in (5, 15, 60):
         repeated_task_ids: set[str] = set()
-        grouped: dict[tuple[str, str | None], list[dict[str, Any]]] = collections.defaultdict(list)
-        for block in blocks:
-            grouped[(block["task_id"], block["candidate"])].append(block)
         for (task_id, _candidate), group in grouped.items():
             if any(
                 later["created_at"] - earlier["created_at"] <= minutes * 60

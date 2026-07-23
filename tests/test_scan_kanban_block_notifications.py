@@ -141,7 +141,9 @@ def test_review_stage_requires_matching_nested_review_revision_candidate():
             (
                 1,
                 "submitted_for_review",
-                json.dumps({"review_stage": 2, "diff_candidate_commit": "candidate-a"}),
+                json.dumps(
+                    {"review_stage": 2, "diff_candidate_commit": "83BCC9A"}
+                ),
                 100,
             ),
             (
@@ -150,7 +152,9 @@ def test_review_stage_requires_matching_nested_review_revision_candidate():
                 json.dumps(
                     {
                         "kind": "review_revision",
-                        "review_revision": {"reviewed_commit": "candidate-a"},
+                        "review_revision": {
+                            "reviewed_commit": "83bcc9a72001a3c2fd0de5e3ed7566ae5fb990e3"
+                        },
                     }
                 ),
                 101,
@@ -161,7 +165,9 @@ def test_review_stage_requires_matching_nested_review_revision_candidate():
                 json.dumps(
                     {
                         "kind": "review_revision",
-                        "review_revision": {"reviewed_commit": "candidate-b"},
+                        "review_revision": {
+                            "reviewed_commit": "93bcc9a72001a3c2fd0de5e3ed7566ae5fb990e3"
+                        },
                     }
                 ),
                 102,
@@ -322,3 +328,56 @@ def test_repeated_blocks_count_unique_tasks_across_candidates():
     report = scanner.run_report(conn, days=1, focus_task="same-task")
 
     assert report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1
+
+
+def test_repeated_blocks_use_payload_candidate_with_prefix_equivalence():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    candidate_a = "83bcc9a72001a3c2fd0de5e3ed7566ae5fb990e3"
+    candidate_b = "93bcc9a72001a3c2fd0de5e3ed7566ae5fb990e3"
+    candidate_c = "a3bcc9a72001a3c2fd0de5e3ed7566ae5fb990e3"
+
+    # Different payload candidates must not form a false repeat even when the
+    # open submission candidate would have paired them under the old keying.
+    different_events = [
+        (1, "different", None, "submitted_for_review", json.dumps({"diff_candidate_commit": candidate_a}), 100),
+        (2, "different", None, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": candidate_b}}), 101),
+        (3, "different", None, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": candidate_a}}), 102),
+    ]
+    conn.executemany("INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)", different_events)
+    different_report = scanner.run_report(conn, days=1, focus_task="different")
+    assert different_report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 0
+
+    # Short/full forms of the same candidate must pair as one repeat group.
+    equivalent_events = [
+        (4, "equivalent", None, "submitted_for_review", json.dumps({"diff_candidate_commit": candidate_c}), 1_000),
+        (5, "equivalent", None, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": candidate_c[:7]}}), 1_001),
+        (6, "equivalent", None, "blocked", json.dumps({"kind": "review_revision", "review_revision": {"reviewed_commit": candidate_c}}), 1_002),
+    ]
+    conn.executemany("INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)", equivalent_events)
+    both_report = scanner.run_report(conn, days=1, focus_task="equivalent")
+    assert both_report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1
+
+    conn.execute("DELETE FROM task_events WHERE task_id = ?", ("different",))
+    equivalent_report = scanner.run_report(conn, days=1, focus_task="equivalent")
+    assert equivalent_report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1
