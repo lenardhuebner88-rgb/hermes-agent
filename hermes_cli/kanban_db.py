@@ -30438,26 +30438,19 @@ def _resolve_worker_cli_toolsets(
         if Path(hermes_home).name in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES:
             # Verdict-only lanes (reviewer, critic, ...) judge submitted
             # evidence and write a verdict, but must not run commands, mutate
-            # files, execute code, or delegate. A review contract can explicitly
-            # opt into its two source-inspection tools. Profile config can still
-            # drift (for example via ``toolsets: [hermes-cli]``), so keep a
-            # dispatcher-side backstop. Sourced from the same set the claude-cli
-            # path uses (``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES``) so a lane
-            # flip (e.g. critic -> worker_runtime hermes) cannot lose its cage.
-            scope_contract = task.scope_contract if task else None
-            allowed_tools = (
-                scope_contract.get("allowed_tools")
-                if isinstance(scope_contract, dict)
-                else None
-            )
-            if (
-                isinstance(allowed_tools, list)
-                and all(isinstance(name, str) for name in allowed_tools)
-                and {"read_file", "search_files"}
-                <= {name.strip() for name in allowed_tools}
-            ):
-                return ["kanban", "review-read-only"]
-            return ["kanban"]
+            # files, execute code, or delegate. The native review phase must
+            # always inspect the immutable review snapshot, including a diff
+            # stored as a brief-overflow artifact. Do not make that capability
+            # depend on the reviewed task's scope contract: code tasks commonly
+            # omit read tools while their independent reviewer still needs them.
+            # ``review-read-only`` exposes only read_file and search_files and
+            # is preserved against the generic ``file`` deny in model_tools.
+            # Profile config can still drift (for example via
+            # ``toolsets: [hermes-cli]``), so keep this dispatcher-side backstop.
+            # It is sourced from the same set the claude-cli path uses
+            # (``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES``), so a lane flip (e.g.
+            # critic -> worker_runtime hermes) cannot lose its cage.
+            return ["kanban", "review-read-only"]
         scope_contract = task.scope_contract if task else None
         denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
         if scope_contract is not None and not isinstance(scope_contract, dict):

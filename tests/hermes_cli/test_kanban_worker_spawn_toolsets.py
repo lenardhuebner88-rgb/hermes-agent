@@ -461,7 +461,7 @@ agent:
 
     resolved = kb._resolve_worker_cli_toolsets(str(profile))
 
-    assert resolved == ["kanban"]
+    assert resolved == ["kanban", "review-read-only"]
 
 
 def test_critic_worker_cli_toolsets_are_verdict_only(monkeypatch, tmp_path):
@@ -493,7 +493,7 @@ agent:
 
     resolved = kb._resolve_worker_cli_toolsets(str(profile))
 
-    assert resolved == ["kanban"]
+    assert resolved == ["kanban", "review-read-only"]
 
 
 def test_verdict_read_only_profiles_are_all_caged_via_hermes_native_spawn(
@@ -529,10 +529,10 @@ toolsets:
 
         resolved = kb._resolve_worker_cli_toolsets(str(profile))
 
-        assert resolved == ["kanban"], profile_name
+        assert resolved == ["kanban", "review-read-only"], profile_name
 
 
-def test_reviewer_verdict_only_toolsets_keep_completion_without_execution_tools(
+def test_reviewer_verdict_toolsets_keep_read_access_without_execution_tools(
     monkeypatch, tmp_path
 ):
     root = tmp_path / ".hermes"
@@ -566,7 +566,8 @@ toolsets:
     assert "kanban_block" in names
     assert "kanban_show" in names
     assert "terminal" not in names
-    assert "read_file" not in names
+    assert "read_file" in names
+    assert "search_files" in names
     assert "write_file" not in names
     assert "patch" not in names
     assert "execute_code" not in names
