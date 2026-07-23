@@ -30,7 +30,7 @@ import time
 from typing import Dict, Any, List, Optional, Tuple
 
 from tools.registry import discover_builtin_tools, registry
-from toolsets import get_toolset, resolve_toolset, validate_toolset
+from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
 
@@ -363,7 +363,6 @@ def _compute_tool_definitions(
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
     tools_to_include: set = set()
-    deny_preserved_tools: set = set()
 
     if enabled_toolsets is not None:
         effective_enabled_toolsets = list(enabled_toolsets)
@@ -378,12 +377,6 @@ def _compute_tool_definitions(
             if validate_toolset(toolset_name):
                 resolved = resolve_toolset(toolset_name)
                 tools_to_include.update(resolved)
-                if (get_toolset(toolset_name) or {}).get(
-                    "preserve_against_generic_denies"
-                ):
-                    # An explicitly enabled least-privilege posture owns this
-                    # small read surface even when its broader parent is denied.
-                    deny_preserved_tools.update(resolved)
                 if not quiet_mode:
                     print(f"✅ Enabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
@@ -406,7 +399,7 @@ def _compute_tool_definitions(
     if disabled_toolsets:
         for toolset_name in disabled_toolsets:
             if validate_toolset(toolset_name):
-                from toolsets import bundle_non_core_tools
+                from toolsets import bundle_non_core_tools, get_toolset
                 if toolset_name.startswith("hermes-") or (get_toolset(toolset_name) or {}).get("posture"):
                     # Platform bundles (hermes-*) include _HERMES_CORE_TOOLS, and
                     # posture toolsets (`posture: True`, e.g. `coding`) re-list
@@ -431,9 +424,7 @@ def _compute_tool_definitions(
                         )
                 else:
                     resolved = resolve_toolset(toolset_name)
-                    tools_to_include.difference_update(
-                        set(resolved) - deny_preserved_tools
-                    )
+                    tools_to_include.difference_update(resolved)
                 if not quiet_mode:
                     print(f"🚫 Disabled toolset '{toolset_name}': {', '.join(resolved) if resolved else 'no tools'}")
             elif toolset_name in _LEGACY_TOOLSET_MAP:
