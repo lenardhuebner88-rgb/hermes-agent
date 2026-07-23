@@ -588,6 +588,15 @@ def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         assert kb.get_task(conn, tid).status == "review"  # stage 0 (verifier) pending
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [tid]
+        assert f"Workflow identity (board-native fallback): workflow_id={tid}" in (
+            kb.build_worker_context(conn, tid, audience="hermes")
+        )
 
         # stage 0: verifier APPROVED → re-park for stage 1 (reviewer)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
@@ -617,6 +626,16 @@ def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on
         assert (
             kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
         )
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [
+            tid,
+            tid,
+            tid,
+        ]
 
         # stage 2: critic APPROVED → terminal done.
         kb.claim_review_task(conn, tid, reviewer_profile="critic")

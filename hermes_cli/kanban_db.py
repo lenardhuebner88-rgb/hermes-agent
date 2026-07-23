@@ -14482,6 +14482,9 @@ def _submit_for_review(
         payload: dict = {
             "result_len": len(result) if result else 0,
             "summary": ev_summary or None,
+            # The board task ID is stable across review stages and is the
+            # canonical fallback when an ad-hoc body declares no workflow ID.
+            "workflow_id": task_id,
         }
         if verified_cards:
             payload["verified_cards"] = verified_cards
@@ -14868,6 +14871,10 @@ def _maybe_advance_review_chain(
             "review_stage": next_stage,
             "target_profile": next_profile,
             "advanced_from_stage": stage,
+            # Preserve the canonical initial identity.  Falling back to the
+            # board key repairs pre-field submissions without using any
+            # heuristic source such as a commit SHA.
+            "workflow_id": payload.get("workflow_id") or task_id,
         }
         if reviewed_commit:
             next_payload["reviewed_commit"] = reviewed_commit
@@ -31900,6 +31907,7 @@ def _worker_brief_input(
     header = [
         f"# Kanban task {task.id}: {task.title}",
         "",
+        f"Workflow identity (board-native fallback): workflow_id={task.id}",
         f"Assignee: {task.assignee or '(unassigned)'}",
         f"Status:   {task.status}",
     ]
