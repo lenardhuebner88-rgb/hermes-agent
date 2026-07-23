@@ -13981,37 +13981,9 @@ def _capture_review_diff_snapshot(
     candidate_commit = _git("rev-parse", "--verify", "HEAD")
     if candidate_commit and candidate_commit.strip():
         snapshot["diff_candidate_commit"] = candidate_commit.strip()
-    effective_baseline = pre_run_sha
-    effective_baseline_kind = baseline_kind
-    candidate_sha = candidate_commit.strip() if candidate_commit else None
-    if (
-        baseline_kind == "pre_run_commit_sha"
-        and pre_run_sha
-        and candidate_sha
-        and candidate_sha != pre_run_sha
-    ):
-        # A same-card squash rewrites the commit while preserving the tree.  A
-        # persisted pre-run SHA from before that rewrite would produce an empty
-        # diff, even though the singleton candidate still has a real task diff
-        # against its parent.  Restrict this fallback to one-parent candidates;
-        # merge commits retain the normal bounded pre-run range semantics.
-        pre_run_tree = _git("rev-parse", "--verify", f"{pre_run_sha}^{{tree}}")
-        candidate_tree = _git("rev-parse", "--verify", f"{candidate_sha}^{{tree}}")
-        candidate_parents = _git("show", "-s", "--format=%P", candidate_sha)
-        if (
-            pre_run_tree
-            and candidate_tree
-            and pre_run_tree.strip() == candidate_tree.strip()
-            and candidate_parents
-            and len(candidate_parents.split()) == 1
-        ):
-            candidate_parent = candidate_parents.strip()
-            if _git("rev-parse", "--verify", f"{candidate_parent}^{{commit}}"):
-                effective_baseline = candidate_parent
-                effective_baseline_kind = "candidate_parent_same_tree_fallback"
     changed: list = []
-    if effective_baseline:
-        committed_and_worktree = _git("diff", "--name-only", effective_baseline)
+    if pre_run_sha:
+        committed_and_worktree = _git("diff", "--name-only", pre_run_sha)
         if committed_and_worktree is not None:
             for entry in committed_and_worktree.splitlines():
                 entry = entry.strip().strip('"')
@@ -14019,16 +13991,13 @@ def _capture_review_diff_snapshot(
                     changed.append(entry)
                 if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
                     break
-        stat = _git("diff", "--stat", effective_baseline)
+        stat = _git("diff", "--stat", pre_run_sha)
         if stat and stat.strip():
             snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
-        snapshot["diff_base_commit"] = effective_baseline
-        snapshot["diff_baseline"] = effective_baseline_kind
+        snapshot["diff_base_commit"] = pre_run_sha
+        snapshot["diff_baseline"] = baseline_kind
     raw_diff = _git(
-        "diff",
-        "--no-ext-diff",
-        "--unified=3",
-        *((effective_baseline,) if effective_baseline else ()),
+        "diff", "--no-ext-diff", "--unified=3", *((pre_run_sha,) if pre_run_sha else ())
     )
     porcelain = _git("status", "--porcelain")
     if porcelain:

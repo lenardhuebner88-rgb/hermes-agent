@@ -839,69 +839,6 @@ def test_stage_resubmit_unchanged_candidate_carries_exact_snapshot(
 
 
 @requires_git
-def test_same_tree_squash_candidate_uses_candidate_parent_snapshot(
-    kanban_home, tmp_path
-):
-    """A rewritten squash must not make a stale same-tree run base render empty."""
-    repo = tmp_path / "same-tree-squash-workspace"
-    repo.mkdir()
-
-    def run_git(*args: str) -> str:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return proc.stdout.strip()
-
-    run_git("init", "-b", "main")
-    run_git("config", "user.email", "t@t")
-    run_git("config", "user.name", "t")
-    (repo / "base.py").write_text("base = True\n", encoding="utf-8")
-    run_git("add", "base.py")
-    run_git("commit", "-m", "main base")
-    main_commit = run_git("rev-parse", "HEAD")
-    run_git("switch", "-c", "work")
-    (repo / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
-    run_git("add", "candidate.py")
-    run_git("commit", "-m", "pre-squash candidate")
-    pre_squash_tree = run_git("rev-parse", "HEAD^{tree}")
-
-    with kb.connect_closing() as conn:
-        task_id = kb.create_task(
-            conn,
-            title="same-tree squash review",
-            assignee="coder",
-            kind="code",
-            review_tier="critical",
-            workspace_kind="dir",
-            workspace_path=str(repo),
-        )
-        claim = kb.claim_task(conn, task_id)
-        assert claim is not None
-        assert claim.current_run_id is not None
-
-        run_git("reset", "--hard", "main")
-        (repo / "candidate.py").write_text("candidate = True\n", encoding="utf-8")
-        run_git("add", "candidate.py")
-        run_git("commit", "-m", "squashed candidate")
-        candidate = run_git("rev-parse", "HEAD")
-        assert run_git("rev-parse", "HEAD^{tree}") == pre_squash_tree
-
-        snapshot = kb._capture_review_diff_snapshot(
-            conn, task_id, expected_run_id=claim.current_run_id
-        )
-
-    assert snapshot["diff_candidate_commit"] == candidate
-    assert snapshot["diff_base_commit"] == main_commit
-    assert snapshot["diff_baseline"] == "candidate_parent_same_tree_fallback"
-    assert snapshot["changed_files"] == ["candidate.py"]
-    assert "candidate.py" in snapshot["diff_text"]
-
-
-@requires_git
 def test_stage_resubmit_without_main_ancestor_keeps_fresh_snapshot(
     kanban_home, tmp_path
 ):
