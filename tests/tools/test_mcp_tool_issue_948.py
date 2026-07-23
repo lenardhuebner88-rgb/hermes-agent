@@ -4,8 +4,15 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
-from tools.mcp_tool import MCPServerTask, _format_connect_error, _resolve_stdio_command, _MCP_AVAILABLE
+from tools.mcp_tool import (
+    MCPServerTask,
+    StdioCommandNotFoundError,
+    _format_connect_error,
+    _resolve_stdio_command,
+    _MCP_AVAILABLE,
+)
 
 # Ensure the mcp module symbols exist for patching even when the SDK isn't installed
 if not _MCP_AVAILABLE:
@@ -66,18 +73,17 @@ def test_resolve_stdio_command_falls_back_to_usr_local_bin():
     assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(target)
 
 
-def test_resolve_stdio_command_respects_explicit_empty_path():
+def test_resolve_stdio_command_reports_unresolvable_empty_path():
     seen_paths = []
 
     def _fake_which(_cmd, path=None):
         seen_paths.append(path)
         return None
 
-    with patch("tools.mcp_tool.shutil.which", side_effect=_fake_which):
-        command, env = _resolve_stdio_command("python", {"PATH": ""})
+    with patch("tools.mcp_tool.shutil.which", side_effect=_fake_which), \
+         pytest.raises(StdioCommandNotFoundError, match="python"):
+        _resolve_stdio_command("python", {"PATH": ""})
 
-    assert command == "python"
-    assert env["PATH"] == ""
     assert seen_paths == [""]
 
 
