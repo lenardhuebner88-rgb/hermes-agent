@@ -1076,6 +1076,11 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
     p_bfcost.add_argument("--since-hours", type=int, default=None,
                           help="Only runs ended within the last H hours (default: all)")
     p_bfcost.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report token-priced candidate count and total cost without writing",
+    )
+    p_bfcost.add_argument(
         "--repair-frozen-equivalent",
         action="store_true",
         help=(
@@ -4099,6 +4104,18 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
         if getattr(args, "apply", False):
             print("--apply is only valid with --audited-claude-equivalent or --audited-non-claude-equivalent", file=sys.stderr)
             return 2
+        token_report = kb.backfill_run_costs_from_tokens(
+            conn,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            limit=args.limit,
+            since_seconds=since_seconds,
+        )
+        if getattr(args, "dry_run", False):
+            print(
+                f"Dry run: {token_report['rows_affected']} run(s) would be updated; "
+                f"total cost_usd ${token_report['total_cost_usd']:.6f}."
+            )
+            return 0
         n = kb.backfill_run_costs(
             conn,
             limit=args.limit,
@@ -4118,7 +4135,10 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
                 since_seconds=since_seconds,
                 board=getattr(args, "board", None),
             )
-        print(f"Backfilled cost_usd for {n + n_sessions} closed run(s).")
+        print(
+            "Backfilled cost_usd for "
+            f"{token_report['rows_affected'] + n + n_sessions} run(s)."
+        )
         if n_repair:
             print(f"Repaired cost_usd_equivalent for {n_repair} frozen closed run(s).")
     return 0

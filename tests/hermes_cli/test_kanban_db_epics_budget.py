@@ -5,7 +5,9 @@ Split from test_kanban_db.py (pure move; no test logic changes).
 
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
+from decimal import Decimal
 import json
 import os
 import re
@@ -17,6 +19,8 @@ import types
 import unittest.mock
 from pathlib import Path
 import pytest
+from agent.usage_pricing import PricingEntry
+from hermes_cli import kanban as kanban_cli
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
@@ -794,6 +798,168 @@ def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
             "SELECT verdict FROM task_runs WHERE id = ?", (r,)
         ).fetchone()
     assert row["verdict"] == "APPROVED"
+
+
+def test_backfill_run_costs_from_tokens_selects_dry_runs_and_is_idempotent(
+    kanban_home, monkeypatch
+):
+    prices = PricingEntry(
+        input_cost_per_million=Decimal("2"),
+        output_cost_per_million=Decimal("8"),
+        source="official_docs",
+    )
+    seen_models = []
+
+    def fake_get_pricing_entry(model_name, provider=None):
+        seen_models.append((model_name, provider))
+        return prices
+
+    monkeypatch.setattr("agent.usage_pricing.get_pricing_entry", fake_get_pricing_entry)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="historical costs")
+
+        def insert_run(
+            *, input_tokens, output_tokens, cost_usd, cost_status,
+            requested_model=None, active_model=None,
+        ):
+            return conn.execute(
+                "INSERT INTO task_runs ("
+                "task_id, profile, status, started_at, ended_at, input_tokens, "
+                "output_tokens, cost_usd, cost_status, requested_model, active_model"
+                ") VALUES (?, 'coder', 'done', 100, 200, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    input_tokens,
+                    output_tokens,
+                    cost_usd,
+                    cost_status,
+                    requested_model,
+                    active_model,
+                ),
+            ).lastrowid
+
+        requested_id = insert_run(
+            input_tokens=1000,
+            output_tokens=500,
+            cost_usd=0.0,
+            cost_status=None,
+            requested_model="priced-requested",
+            active_model="ignored-active",
+        )
+        active_id = insert_run(
+            input_tokens=2000,
+            output_tokens=1000,
+            cost_usd=None,
+            cost_status="estimated",
+            active_model="priced-active",
+        )
+        actual_id = insert_run(
+            input_tokens=1000,
+            output_tokens=1000,
+            cost_usd=0.0,
+            cost_status="actual",
+            requested_model="actual-model",
+        )
+        no_tokens_id = insert_run(
+            input_tokens=None,
+            output_tokens=1000,
+            cost_usd=0.0,
+            cost_status=None,
+            requested_model="missing-tokens",
+        )
+        existing_id = insert_run(
+            input_tokens=1000,
+            output_tokens=1000,
+            cost_usd=0.5,
+            cost_status="estimated",
+            requested_model="existing-cost",
+        )
+        conn.commit()
+
+        dry_run = kb.backfill_run_costs_from_tokens(conn, dry_run=True)
+        assert dry_run == {"rows_affected": 2, "total_cost_usd": 0.018}
+        assert tuple(
+            conn.execute(
+                "SELECT cost_usd, cost_status FROM task_runs WHERE id = ?",
+                (requested_id,),
+            ).fetchone()
+        ) == (0.0, None)
+
+        applied = kb.backfill_run_costs_from_tokens(conn)
+        assert applied == {"rows_affected": 2, "total_cost_usd": 0.018}
+        assert kb.backfill_run_costs_from_tokens(conn) == {
+            "rows_affected": 0,
+            "total_cost_usd": 0.0,
+        }
+
+        rows = conn.execute(
+            "SELECT id, cost_usd, cost_status FROM task_runs "
+            "WHERE id IN (?, ?, ?, ?, ?) ORDER BY id",
+            (requested_id, active_id, actual_id, no_tokens_id, existing_id),
+        ).fetchall()
+
+    assert [(row["cost_usd"], row["cost_status"]) for row in rows] == [
+        (0.006, "estimated"),
+        (0.012, "estimated"),
+        (0.0, "actual"),
+        (0.0, None),
+        (0.5, "estimated"),
+    ]
+    assert {model for model, _provider in seen_models} == {
+        "priced-requested",
+        "priced-active",
+    }
+
+
+def test_backfill_costs_cli_dry_run_reports_without_writing(
+    kanban_home, monkeypatch, capsys
+):
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    kanban_cli.build_parser(subparsers)
+    parsed = parser.parse_args(["kanban", "backfill-costs", "--dry-run"])
+    assert parsed.dry_run is True
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.get_pricing_entry",
+        lambda model_name, provider=None: PricingEntry(
+            input_cost_per_million=Decimal("1"),
+            output_cost_per_million=Decimal("3"),
+            source="official_docs",
+        ),
+    )
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="CLI dry run")
+        run_id = conn.execute(
+            "INSERT INTO task_runs ("
+            "task_id, profile, status, started_at, ended_at, input_tokens, "
+            "output_tokens, cost_usd, requested_model"
+            ") VALUES (?, 'coder', 'done', 100, 200, 1000, 1000, 0.0, 'priced')",
+            (task_id,),
+        ).lastrowid
+        conn.commit()
+
+    args = types.SimpleNamespace(
+        dry_run=True,
+        since_hours=None,
+        audited_claude_equivalent=False,
+        audited_non_claude_equivalent=False,
+        repair_frozen_equivalent=False,
+        apply=False,
+        limit=500,
+        board=None,
+    )
+    assert kanban_cli._cmd_backfill_costs(args) == 0
+    assert capsys.readouterr().out == (
+        "Dry run: 1 run(s) would be updated; total cost_usd $0.004000.\n"
+    )
+
+    with kb.connect_closing() as conn:
+        row = conn.execute(
+            "SELECT cost_usd, cost_status FROM task_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+    assert tuple(row) == (0.0, None)
 
 
 def test_review_iterations_score_counts_revision_verdicts_before_approval(kanban_home):
