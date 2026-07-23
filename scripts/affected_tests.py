@@ -174,11 +174,16 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
-            modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
-            continue
         mapped_tests = _mapped_monolith_tests(repo_root, f)
         if mapped_tests:
+            # Known monoliths are feature-split: the maintained pattern set is
+            # the complete blast radius. Adding import-based siblings on top
+            # re-selects the whole package directory (hundreds of unrelated
+            # tests), defeating the explicit mapping.
             modules.update(mapped_tests)
+            continue
+        if (repo_root / candidate).is_file():
+            modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
             continue
         modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
         # Last-resort fallback: no 1:1 test and no explicit mapping. Select the
