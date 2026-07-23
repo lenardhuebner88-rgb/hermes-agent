@@ -5,6 +5,7 @@ import type { Density } from "../hooks/useDensity";
 import {
   activateLane,
   applyChoice,
+  choiceForModel,
   createLane,
   editorRows,
   FALLBACK_MODELS,
@@ -18,12 +19,15 @@ import {
   type EditorRow,
   type Lane,
   type LaneFallbackProvider,
+  type LaneModelOption,
   type LanesResponse,
   type ModelProbeResult,
 } from "./lanes/api";
+import type { CompassRole } from "./lanes/fit";
 import { LaneBar } from "./lanes/LaneBar";
 import { ProfileMatrix } from "./lanes/ProfileMatrix";
 import { SmokePanel } from "./lanes/SmokePanel";
+import { Compass } from "./lanes/Compass";
 import { t } from "./lanes/strings";
 import "./lanes/lanes.css";
 
@@ -70,6 +74,8 @@ function LanesPlatform({
   const [probes, setProbes] = useState<Record<string, ModelProbeResult>>({});
   const [probing, setProbing] = useState<Record<string, boolean>>({});
   const [batchRunning, setBatchRunning] = useState(false);
+  const [benchRunning, setBenchRunning] = useState(false);
+  const [benchResults, setBenchResults] = useState<ModelProbeResult[]>([]);
 
   const updateRow = useCallback((profile: string, patch: Partial<EditorRow>) => {
     setRows((prev) => prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)));
@@ -128,6 +134,40 @@ function LanesPlatform({
     }
   }, [models, onReload]);
 
+  // Compass „Übernehmen": stage the picked model into the role's matrix row
+  // (the operator still confirms via SaveBar — adopt stages, persist commits).
+  const handleAdopt = useCallback(
+    (role: CompassRole, model: LaneModelOption) => {
+      const row = rows.find((r) => r.profile === role);
+      if (!row) return;
+      updateRow(role, applyChoice(row, choiceForModel(model), models));
+    },
+    [rows, models, updateRow],
+  );
+
+  const handleBench = useCallback(async (selected: LaneModelOption[]) => {
+    if (selected.length < 2) return;
+    setBenchRunning(true);
+    try {
+      const { results } = await runCatalogProbe({
+        models: selected.map((m) => ({ provider: m.provider ?? "", model: m.id })),
+        profile: null,
+        timeoutSeconds: 45,
+        limit: selected.length,
+      });
+      setBenchResults(results);
+      setProbes((prev) => {
+        const next = { ...prev };
+        for (const result of results) next[probeKey(result.provider, result.model)] = result;
+        return next;
+      });
+    } catch {
+      // fail-soft: keep the previous bench comparison
+    } finally {
+      setBenchRunning(false);
+    }
+  }, []);
+
   return (
     <div className="space-y-4">
       <LaneBar
@@ -170,10 +210,16 @@ function LanesPlatform({
               onCatalogProbe={() => void handleCatalogProbe()}
             />
           ) : (
-            <div className="rounded-card border border-dashed border-line p-4">
-              <p className="text-sec text-ink-2">{t.kompass}</p>
-              <p className="mt-1 text-micro text-ink-3">{t.compassHint}</p>
-            </div>
+            <Compass
+              models={models}
+              rows={rows}
+              probes={probes}
+              busy={busy}
+              benchRunning={benchRunning}
+              benchResults={benchResults}
+              onAdopt={handleAdopt}
+              onBench={(selected) => void handleBench(selected)}
+            />
           )}
         </div>
       </div>

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LanesView } from "./LanesView";
 import type { LanesResponse } from "./lanes/api";
@@ -118,6 +118,16 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     await screen.findAllByText("Katalog messen · 5 sinnvolle Modelle");
     // empty-state doctrine: situation → bewertung → aktion (no ok-green)
     expect(screen.getAllByText("Noch keine Messungen").length).toBeGreaterThan(0);
+  });
+
+  it("switches to the Kompass and renders the fit ranking for a role", async () => {
+    render(<LanesView density="airy" />);
+    await screen.findAllByText("Rauch");
+    fireEvent.click(screen.getAllByText("Kompass")[0]);
+    await screen.findAllByText("Top-Modelle für diese Rolle");
+    // role subtabs render against the curated set
+    expect(screen.getAllByText("Coder").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Reviewer").length).toBeGreaterThan(0);
   });
 
   it("logs no console errors while loading and rendering", async () => {
