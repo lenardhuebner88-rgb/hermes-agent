@@ -1,0 +1,90 @@
+/* lanes.css — view-local paint the token ratchet does not scan (.tsx/.ts only).
+ * Scoped under `.lp` (the LanesView root) so nothing leaks into other routes.
+ * DESIGN.md rule 9: even un-ratcheted CSS draws ONLY from the token sheet —
+ * every color here is a `var(--color-*)` reference, never a raw hex/rgb.
+ *
+ * Why CSS instead of Tailwind utilities here:
+ *  - provider identity dots use a stable `.pdot.p-N` modifier whose paint is a
+ *    custom-property reference, so providerColors.ts emits no raw hex and
+ *    Tailwind never has to generate a dynamic `bg-data-N` class.
+ *  - the active-lane accent is an inset bronze edge (the mockup's lane card).
+ *  - the central reduced-motion kill switch for every transition in the view.
+ */
+
+/* --- provider identity dots (data palette, never status/affordance) --- */
+.lp .pdot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  border-radius: 9999px;
+  background: var(--color-data-6); /* default = neutral */
+}
+.lp .pdot.p-1 { background: var(--color-data-1); } /* alibaba-token-plan (olive) */
+.lp .pdot.p-2 { background: var(--color-data-2); } /* neuralwatt (sage) */
+.lp .pdot.p-3 { background: var(--color-data-3); } /* openai-codex (slate) */
+.lp .pdot.p-4 { background: var(--color-data-4); } /* moonshotai / kimi (violett) */
+.lp .pdot.p-5 { background: var(--color-data-5); } /* claude-cli / anthropic (rose) */
+.lp .pdot.p-6 { background: var(--color-data-6); } /* nous / default (neutral) */
+.lp .pdot.p-7 { background: var(--color-data-7); } /* openrouter (amber) */
+
+/* --- lane cards: active = surface-2 + inset bronze edge + bronze LED --- */
+.lp .lane-card {
+  transition: border-color 140ms ease-out, background-color 140ms ease-out,
+    box-shadow 140ms ease-out;
+}
+.lp .lane-card.lp-active {
+  background: var(--color-surface-2);
+  box-shadow: inset 3px 0 0 var(--color-live);
+}
+
+/* --- neutral score meter (compass): ink-2 fill on a canvas track.
+ *     Bronze is forbidden as a meter fill (DESIGN.md: bronze = interactive/live
+ *     only); the shared MeterBar's only non-status fill is bronze, so the
+ *     compass draws its own neutral data meter here. --- */
+.lp .meter {
+  height: 0.375rem;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: var(--color-surface-0);
+}
+.lp .meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 9999px;
+  background: var(--color-ink-2);
+  transition: width 160ms ease-out;
+}
+
+/* --- horizontal lane-pill scroll on mobile (no visible scrollbar) --- */
+.lp .lane-scroll {
+  scrollbar-width: none;
+}
+.lp .lane-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* --- main 2-pane split: 62/38 from 840px, stacked below.
+ *     840px is the Brief's expanded-tier cut; it is drawn here (not via a new
+ *     theme.css breakpoint) so the shared token sheet stays untouched. --- */
+.lp-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+@media (min-width: 840px) {
+  .lp-main {
+    grid-template-columns: minmax(0, 62fr) minmax(0, 38fr);
+  }
+}
+
+/* --- central reduced-motion kill switch (DESIGN.md motion doctrine) --- */
+@media (prefers-reduced-motion: reduce) {
+  .lp *,
+  .lp *::before,
+  .lp *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

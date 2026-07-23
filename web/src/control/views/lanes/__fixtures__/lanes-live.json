@@ -1,0 +1,864 @@
+{
+ "lanes": [
+  {
+   "id": "lane_46bba8a4",
+   "name": "api-standard",
+   "profiles": {
+    "coder": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra",
+     "fallback_providers": [
+      {
+       "provider": "kimi",
+       "model": "k3"
+      },
+      {
+       "provider": "openai-codex",
+       "model": "gpt-5.6-sol"
+      }
+     ]
+    },
+    "critic": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-sol",
+     "fallback_providers": []
+    },
+    "premium": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-sol",
+     "fallback_providers": []
+    },
+    "research": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra",
+     "fallback_providers": [
+      {
+       "provider": "openai-codex",
+       "model": "gpt-5.6-luna"
+      }
+     ]
+    },
+    "reviewer": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-sol",
+     "fallback_providers": [
+      {
+       "provider": "kimi",
+       "model": "k3"
+      }
+     ]
+    },
+    "scout": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra",
+     "fallback_providers": []
+    },
+    "verifier": {
+     "worker_runtime": "hermes",
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra",
+     "fallback_providers": [
+      {
+       "provider": "openai-codex",
+       "model": "gpt-5.6-luna"
+      }
+     ]
+    }
+   },
+   "active": true,
+   "builtin": true,
+   "created_at": 1781125652,
+   "updated_at": 1784840909
+  },
+  {
+   "id": "lane_4e03437c",
+   "name": "max-abo",
+   "profiles": {
+    "coder": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": null,
+     "fallback_providers": []
+    },
+    "reviewer": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": null,
+     "fallback_providers": []
+    },
+    "critic": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": null,
+     "fallback_providers": []
+    },
+    "research": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": null,
+     "fallback_providers": []
+    },
+    "verifier": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": null,
+     "fallback_providers": []
+    },
+    "coder-claude": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": "claude-opus-4-8",
+     "fallback_providers": []
+    },
+    "premium": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": "claude-fable-5",
+     "fallback_providers": []
+    }
+   },
+   "active": false,
+   "builtin": true,
+   "created_at": 1781125652,
+   "updated_at": 1781161204
+  },
+  {
+   "id": "lane_68121bfc",
+   "name": "Premium",
+   "profiles": {
+    "coder": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "gpt-5.5",
+     "fallback_providers": []
+    },
+    "coder-claude": {
+     "worker_runtime": "claude-cli",
+     "provider": null,
+     "model": "claude-opus-4-8",
+     "fallback_providers": []
+    },
+    "critic": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "moonshotai/kimi-k2.6",
+     "fallback_providers": []
+    },
+    "premium": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "qwen/qwen3.7-max",
+     "fallback_providers": []
+    },
+    "research": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "gpt-5.5",
+     "fallback_providers": []
+    },
+    "reviewer": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "moonshotai/kimi-k2.6",
+     "fallback_providers": []
+    },
+    "verifier": {
+     "worker_runtime": "hermes",
+     "provider": null,
+     "model": "moonshotai/kimi-k2.6",
+     "fallback_providers": []
+    }
+   },
+   "active": false,
+   "builtin": false,
+   "created_at": 1781206068,
+   "updated_at": 1781206068
+  }
+ ],
+ "count": 3,
+ "active_id": "lane_46bba8a4",
+ "profiles": [
+  {
+   "name": "admin",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-luna",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra"
+    }
+   ],
+   "description": "Lokale Hermes/Homeserver-Operations: systemd/cron/config/file-Inspektion, Health-Checks, Backup-Triage, Service-Restarts. Read-only by default, Mutationen nur wenn explizit autorisiert. Avoid for: Anwendungscode, externe Reports.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "coder",
+   "worker_runtime": "hermes",
+   "default_model": "qwen3.8-max-preview",
+   "default_provider": "alibaba-token-plan",
+   "fallback_providers": [
+    {
+     "provider": "kimi",
+     "model": "k3"
+    },
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-sol"
+    }
+   ],
+   "description": "Code-Implementation im Hermes-Repository (~/.hermes/hermes-agent/): neue Module, Refactor, Tests, CLI-Wires, Bugfixes. Bevorzugt für \"implement X\", \"add CLI subcommand\", \"fix Y in module Z\". Avoid for: Audits, Reviews, externe Recherche.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "critic",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-sol",
+   "default_provider": "openai-codex",
+   "fallback_providers": [],
+   "description": "Adversariale Zweitmeinung: kritische Notiz/REQUEST_CHANGES zu Findings & Outputs, sucht Lücken und Gegenargumente (bewusst fremde Modellfamilie via OpenRouter zur Coder-Lane). Bevorzugt für 'kritisiere X', 'zweitmeinung zu Y'. Profilname exakt: critic.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "family-ui",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-terra",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra"
+    }
+   ],
+   "description": "UI/UX-Spezialist für den Family Organizer (~/projects/family-organizer): hochwertige Tablet-first-Views, Küchen-Querformat, heller warmer Stil, deutsche user-facing Texte. Bevorzugt für 'baue/poliere FO-View X', 'UI-Feinschliff Familien-App'. Avoid for: Hermes-Repo, Backend-Logik, Reviews. KEIN Kanban-Worker (dispatch_in_gateway:false) — interaktives FO-Profil, nicht als Kanban-Assignee nutzen. Profilname exakt: family-ui.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "fo-brain",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-terra",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-terra"
+    }
+   ],
+   "description": "Family-Organizer NL-Brain hinter der HermesBar (Chat/Voice). Schreibt via family-organizer-Tool ueber die geschuetzte FO-Hermes-API in echte Familiendaten. Phase 0077, loopback :8643. KEIN Kanban-Worker (dispatch_in_gateway:false) — interaktive FO-Gateway, nicht als Kanban-Assignee nutzen.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "premium",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-sol",
+   "default_provider": "openai-codex",
+   "fallback_providers": [],
+   "description": "Claude-Quality-Lane (Top-Tier): anspruchsvolle Mehrdatei-Implementierung mit höchster Sorgfalt, wenn der coder nicht reicht. Kanban-Dispatch via `claude -p` auf der Claude Max-Subscription; sparsam einsetzen. Profilname exakt: premium.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "research",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-terra",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-luna"
+    }
+   ],
+   "description": "Recherche-Worker: liest Code/Doku/Web und schreibt Findings/Zusammenfassungen (eigene Modellfamilie mit OpenRouter-Fallbacks). Bevorzugt für 'fasse X zusammen', 'recherchiere Y', 'lies Z und berichte'. Profilname exakt: research — NICHT 'researcher'.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "reviewer",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-sol",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "kimi",
+     "model": "k3"
+    }
+   ],
+   "description": "Verdikt-Gate: prüft ausführungsreife Pläne/Coder-Output und gibt genau EIN Urteil APPROVED/NEEDS_REVISION/BLOCKED (bewusst eine fremde Modellfamilie zur Coder-Lane). Bevorzugt für 'review X', 'verdikt zu Y'. Profilname exakt: reviewer.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "scout",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-terra",
+   "default_provider": "openai-codex",
+   "fallback_providers": [],
+   "description": "Read-only Code-Recon-Vorlauf: liest das Repo (Dateien, Caller, Risiken) und legt einen Grounding-Brief als Task-Kommentar ab, BEVOR ein coder/premium die schwere Slice baut. Implementiert NICHT, editiert NICHT, committet NICHT — nur Lesen + Brief. Opt-in via PlanSpec-Vorgänger-Subtask (lane: scout, deps []). NICHT 'dep-scout' (das ist ein Claude-Code-Instrument). Profilname exakt: scout.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  },
+  {
+   "name": "verifier",
+   "worker_runtime": "hermes",
+   "default_model": "gpt-5.6-terra",
+   "default_provider": "openai-codex",
+   "fallback_providers": [
+    {
+     "provider": "openai-codex",
+     "model": "gpt-5.6-luna"
+    }
+   ],
+   "description": "Unabhaengige Verifikation von Code-Completions vor 'done': laeuft scripts/run_tests.sh + lint + build mit ECHTEM Output, urteilt APPROVED (kanban_complete) / REQUEST_CHANGES (kanban_block). Implementiert NICHT. Profilname exakt: verifier.",
+   "locked": false,
+   "locked_reason": null,
+   "kanban_spawn_health": {
+    "status": "healthy",
+    "reason": null
+   }
+  }
+ ],
+ "models": [
+  {
+   "id": "claude-fable-5",
+   "label": "Claude Fable 5",
+   "runtime": "claude-cli",
+   "group": "Claude (Max-Abo)",
+   "provider": null,
+   "locked": false,
+   "source": "claude-cli"
+  },
+  {
+   "id": "claude-opus-4-8",
+   "label": "Claude Opus 4.8",
+   "runtime": "claude-cli",
+   "group": "Claude (Max-Abo)",
+   "provider": null,
+   "locked": false,
+   "source": "claude-cli"
+  },
+  {
+   "id": "claude-sonnet-5",
+   "label": "Claude Sonnet 5",
+   "runtime": "claude-cli",
+   "group": "Claude (Max-Abo)",
+   "provider": null,
+   "locked": false,
+   "source": "claude-cli"
+  },
+  {
+   "id": "claude-sonnet-4-6",
+   "label": "Claude Sonnet 4.6",
+   "runtime": "claude-cli",
+   "group": "Claude (Max-Abo)",
+   "provider": null,
+   "locked": false,
+   "source": "claude-cli"
+  },
+  {
+   "id": "claude-haiku-4-5",
+   "label": "Claude Haiku 4.5",
+   "runtime": "claude-cli",
+   "group": "Claude (Max-Abo)",
+   "provider": null,
+   "locked": false,
+   "source": "claude-cli"
+  },
+  {
+   "id": "default",
+   "label": "default",
+   "runtime": "hermes",
+   "group": "Mixture of Agents",
+   "provider": "moa",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "coding-clan",
+   "label": "coding-clan",
+   "runtime": "hermes",
+   "group": "Mixture of Agents",
+   "provider": "moa",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-sol",
+   "label": "gpt-5.6-sol",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-terra",
+   "label": "gpt-5.6-terra",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-luna",
+   "label": "gpt-5.6-luna",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.5",
+   "label": "gpt-5.5",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.4",
+   "label": "gpt-5.4",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.4-mini",
+   "label": "gpt-5.4-mini",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.3-codex-spark",
+   "label": "gpt-5.3-codex-spark",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-sol-pro",
+   "label": "gpt-5.6-sol-pro",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-terra-pro",
+   "label": "gpt-5.6-terra-pro",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "gpt-5.6-luna-pro",
+   "label": "gpt-5.6-luna-pro",
+   "runtime": "hermes",
+   "group": "OpenAI Codex",
+   "provider": "openai-codex",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-fable-5",
+   "label": "anthropic/claude-fable-5",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "label": "anthropic/claude-opus-4.8",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-sonnet-5",
+   "label": "anthropic/claude-sonnet-5",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5",
+   "label": "anthropic/claude-haiku-4.5",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-sol",
+   "label": "openai/gpt-5.6-sol",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-sol-pro",
+   "label": "openai/gpt-5.6-sol-pro",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-terra",
+   "label": "openai/gpt-5.6-terra",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-terra-pro",
+   "label": "openai/gpt-5.6-terra-pro",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-luna",
+   "label": "openai/gpt-5.6-luna",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-luna-pro",
+   "label": "openai/gpt-5.6-luna-pro",
+   "runtime": "hermes",
+   "group": "Nous Portal",
+   "provider": "nous",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-fable-5",
+   "label": "anthropic/claude-fable-5",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8",
+   "label": "anthropic/claude-opus-4.8",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-opus-4.8-fast",
+   "label": "anthropic/claude-opus-4.8-fast",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-sonnet-5",
+   "label": "anthropic/claude-sonnet-5",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "anthropic/claude-haiku-4.5",
+   "label": "anthropic/claude-haiku-4.5",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-sol",
+   "label": "openai/gpt-5.6-sol",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-sol-pro",
+   "label": "openai/gpt-5.6-sol-pro",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "openai/gpt-5.6-terra",
+   "label": "openai/gpt-5.6-terra",
+   "runtime": "hermes",
+   "group": "OpenRouter",
+   "provider": "openrouter",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "moonshotai/Kimi-K2.5",
+   "label": "moonshotai/Kimi-K2.5",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen3.6-35b-fast",
+   "label": "qwen3.6-35b-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen3.5-397b-fast",
+   "label": "qwen3.5-397b-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "kimi-k2.6-fast",
+   "label": "kimi-k2.6-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "glm-5.2-fast",
+   "label": "glm-5.2-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "kimi-k2.5-fast",
+   "label": "kimi-k2.5-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "glm-5.2-short",
+   "label": "glm-5.2-short",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "glm-5.2-short-fast",
+   "label": "glm-5.2-short-fast",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "kimi-k2.7-code",
+   "label": "kimi-k2.7-code",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen3.5-397b",
+   "label": "qwen3.5-397b",
+   "runtime": "hermes",
+   "group": "Neuralwatt",
+   "provider": "neuralwatt",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen3.6-plus",
+   "label": "qwen3.6-plus",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen-image-2.0",
+   "label": "qwen-image-2.0",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "qwen-image-2.0-pro",
+   "label": "qwen-image-2.0-pro",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "wan2.7-image",
+   "label": "wan2.7-image",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "wan2.7-image-pro",
+   "label": "wan2.7-image-pro",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "deepseek-v3.2",
+   "label": "deepseek-v3.2",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "glm-5",
+   "label": "glm-5",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "MiniMax-M2.5",
+   "label": "MiniMax-M2.5",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "kimi-k2.5",
+   "label": "kimi-k2.5",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  },
+  {
+   "id": "kimi-k2.6",
+   "label": "kimi-k2.6",
+   "runtime": "hermes",
+   "group": "alibaba-token-plan",
+   "provider": "alibaba-token-plan",
+   "locked": false,
+   "source": "inventory"
+  }
+ ]
+}

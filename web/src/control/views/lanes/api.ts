@@ -135,6 +135,29 @@ export interface LaneCatalogProfile {
   locked_reason?: string | null;
   /** Optional backend evidence: can this profile actually spawn Kanban workers? */
   kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
+  /** Current `agent.reasoning_effort` for this profile (S1); null = config default. */
+  reasoning_effort?: string | null;
+  /** Reasoning-effort values the profile-default model can transport (S1); [] = no control. */
+  reasoning_support?: string[];
+}
+
+/** Result of a single model reachability/latency probe (S1). The backend always
+ *  fills `profile`/`duration_ms`/`at`; they are typed optional here so cached
+ *  probes embedded in older GET /lanes payloads render fail-soft. */
+export type LaneProbeStatus = LaneAuthSmokeStatus;
+
+export interface ModelProbeResult {
+  provider: string;
+  model: string;
+  profile?: string;
+  status: LaneProbeStatus;
+  duration_ms?: number;
+  observed_provider?: string | null;
+  observed_model?: string | null;
+  error_class?: string | null;
+  reason?: string | null;
+  /** Epoch seconds the probe ran. */
+  at?: number;
 }
 
 export interface LaneModelOption {
@@ -148,6 +171,21 @@ export interface LaneModelOption {
   group: string;
   locked?: boolean;
   source?: string;
+  // --- S1 model-platform metadata (all optional: older payloads omit them) ---
+  /** Provider credential present (inventory). Fail-soft when absent. */
+  authenticated?: boolean;
+  configured?: boolean;
+  price_in_per_mtok_usd?: number | null;
+  price_out_per_mtok_usd?: number | null;
+  context_window?: number | null;
+  /** Reasoning-effort values this model can transport; [] = no Reasoning control. */
+  reasoning_support?: string[];
+  /** Last cached probe result, echoed back by GET /lanes. */
+  probe?: ModelProbeResult | null;
+  /** Backend-curated working-model flag; absent on older payloads. */
+  sinnvoll?: boolean;
+  used_in_profiles?: boolean;
+  admitted?: boolean;
 }
 
 export interface LanesResponse {
@@ -164,6 +202,9 @@ export interface LanePersistProfileEntry {
   provider?: string | null;
   model: string;
   fallback_providers: Array<{ provider: string; model: string }>;
+  /** S1: omit = leave `agent.reasoning_effort` untouched; a value must be in the
+   *  target model's reasoning_support (the backend 400s otherwise). */
+  reasoning_effort?: string | null;
 }
 
 export interface LanePersistResult {
@@ -428,6 +469,46 @@ export function runLaneAuthSmoke(input: {
   });
 }
 
+/** S2: probe a single model (reachability + latency). Backend caches the result
+ *  and echoes it back on the next GET /lanes as `models[].probe`. */
+export function runModelProbe(input: {
+  provider: string;
+  model: string;
+  profile?: string;
+  timeoutSeconds?: number;
+}): Promise<ModelProbeResult> {
+  return fetchJSON<ModelProbeResult>(`${BASE}/model-probe`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      provider: input.provider,
+      model: input.model,
+      profile: input.profile ?? "coder",
+      timeout_seconds: input.timeoutSeconds ?? 45,
+    }),
+  });
+}
+
+/** S2: probe a batch of models sequentially (capped server-side). Returns the
+ *  per-model results plus whether the request was truncated to `limit`. */
+export function runCatalogProbe(input: {
+  models: Array<{ provider: string; model: string }>;
+  profile?: string | null;
+  timeoutSeconds?: number;
+  limit?: number;
+}): Promise<{ results: ModelProbeResult[]; truncated: boolean }> {
+  return fetchJSON<{ results: ModelProbeResult[]; truncated: boolean }>(`${BASE}/catalog-probe`, {
+    method: "POST",
+    headers: JSON_HEADERS,
+    body: JSON.stringify({
+      models: input.models,
+      profile: input.profile ?? null,
+      timeout_seconds: input.timeoutSeconds ?? 45,
+      limit: input.limit ?? 8,
+    }),
+  });
+}
+
 export function importOpenRouterModels(rawText: string): Promise<OpenRouterModelImportResult> {
   return fetchJSON<OpenRouterModelImportResult>(`${BASE}/openrouter-models/import`, {
     method: "POST",
@@ -559,6 +640,43 @@ export function modelsForProvider(provider: string | null | undefined, models: L
   return models.filter((m) => m.runtime === "hermes" && m.provider === id);
 }
 
+/** Probe statuses that mean a model is currently NOT reachable for work.
+ *  `quota_or_rate_limit` is deliberately excluded — it is transient, not broken. */
+export const UNREACHABLE_PROBE_STATUSES: ReadonlySet<LaneProbeStatus> = new Set<LaneProbeStatus>([
+  "auth_error",
+  "timeout",
+  "error",
+  "config_error",
+]);
+
+/** ModelSelect default filter „sinnvoll & erreichbar": fail-soft on missing
+ *  `sinnvoll`/`probe` (older payloads), so an un-flagged model still shows. */
+export function isModelReachable(model: LaneModelOption): boolean {
+  if (model.sinnvoll === false) return false;
+  const probe = model.probe;
+  if (probe && UNREACHABLE_PROBE_STATUSES.has(probe.status)) return false;
+  return true;
+}
+
+/** Stable cache/lookup key for a probe result, shared by GET /lanes
+ *  (`models[].probe`), live model/catalog probes, and the compass scoring. */
+export function probeKey(provider: string | null | undefined, model: string): string {
+  return `${(provider ?? "").trim()}::${model.trim()}`;
+}
+
+/** Curated working-model set for batch probes and the compass. Live payloads
+ *  carry a backend-computed `sinnvoll`; older payloads (and the captured live
+ *  fixture) don't, so fall back to a conservative heuristic (claude-cli
+ *  runtime/source, or an authenticated provider) instead of the whole catalog. */
+export function filterSinnvoll(models: LaneModelOption[]): LaneModelOption[] {
+  if (models.some((m) => m.sinnvoll !== undefined)) {
+    return models.filter((m) => m.sinnvoll === true);
+  }
+  return models.filter(
+    (m) => m.runtime === "claude-cli" || m.source === "claude-cli" || m.authenticated === true,
+  );
+}
+
 function cloneFallbacks(value: LaneFallbackProvider[] | undefined): LaneFallbackProvider[] {
   return (value ?? []).map((entry) => ({
     provider: entry.provider,
@@ -578,6 +696,8 @@ export interface EditorRow {
    *  is currently switched to. */
   defaultRuntime: LaneRuntime;
   defaultProvider: string | null;
+  /** Profile-default model id — the persist fallback target for reasoning-only rows. */
+  defaultModel?: string | null;
   defaultFallbackProviders: LaneFallbackProvider[];
   worker_runtime: LaneRuntime;
   provider: string | null;
@@ -586,6 +706,15 @@ export interface EditorRow {
   locked: boolean;
   lockedReason: string | null;
   choice: string;
+  // --- S1 reasoning stage (all optional: older payloads/catalogs omit them) ---
+  /** Reasoning values the row's EFFECTIVE model can transport; [] = no control. */
+  reasoningSupport?: string[];
+  /** Reasoning values of the profile-DEFAULT model — the "Standard" revert target. */
+  defaultReasoningSupport?: string[];
+  /** Staged reasoning effort; null = "Standard" = leave config untouched on persist. */
+  reasoning?: string | null;
+  /** The profile's current agent.reasoning_effort, for "aktuell: X" display. */
+  defaultReasoning?: string | null;
 }
 
 /** One row per catalog profile (catalog order) plus any extra profiles the
@@ -600,12 +729,25 @@ export function editorRows(
   const rows: EditorRow[] = catalog.map((p) => {
     const entry = lane.profiles[p.name];
     const runtime = entry?.worker_runtime ?? p.worker_runtime;
+    // Reasoning stage: the control reflects the EFFECTIVE model's transport
+    // support (lane-override model wins over the profile default). The staged
+    // value only ever holds a value that is valid for that support, so a later
+    // persist can never 400 on a reasoning/model mismatch (S1 contract).
+    const effectiveModelId = entry?.model ?? p.default_model;
+    const effectiveModel = effectiveModelId
+      ? models.find((m) => m.id === effectiveModelId) ?? null
+      : null;
+    const profileReasoning = p.reasoning_effort ?? null;
+    const support = effectiveModel?.reasoning_support ?? p.reasoning_support ?? [];
+    const reasoning =
+      profileReasoning != null && support.includes(profileReasoning) ? profileReasoning : null;
     return {
       profile: p.name,
       description: p.description,
       defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
       defaultRuntime: p.worker_runtime,
       defaultProvider: p.default_provider ?? null,
+      defaultModel: p.default_model,
       defaultFallbackProviders: cloneFallbacks(p.fallback_providers),
       worker_runtime: runtime,
       provider: runtime === "claude-cli" ? null : entry?.provider ?? null,
@@ -614,6 +756,10 @@ export function editorRows(
       locked: p.locked === true,
       lockedReason: p.locked_reason ?? null,
       choice: choiceFromEntry(entry),
+      reasoningSupport: support,
+      defaultReasoningSupport: p.reasoning_support ?? [],
+      reasoning,
+      defaultReasoning: profileReasoning,
     };
   });
   const extras = Object.keys(lane.profiles)
@@ -628,6 +774,7 @@ export function editorRows(
       defaultLabel: "automatisch",
       defaultRuntime: runtime,
       defaultProvider: null,
+      defaultModel: null,
       defaultFallbackProviders: [],
       worker_runtime: runtime,
       provider: entry.provider ?? null,
@@ -636,6 +783,10 @@ export function editorRows(
       locked: runtime === "claude-cli",
       lockedReason: runtime === "claude-cli" ? "Claude-CLI / claude -p excluded from this slice" : null,
       choice: choiceFromEntry(entry),
+      reasoningSupport: [],
+      defaultReasoningSupport: [],
+      reasoning: null,
+      defaultReasoning: null,
     });
   }
   return rows;
@@ -645,6 +796,13 @@ function modelOptionValue(option: LaneModelOption): string {
   return `${option.runtime}|${option.provider ?? ""}|${option.id}`;
 }
 
+/** Provider-aware choice value for a catalog model (the value `applyChoice`
+ *  parses). Exported so the matrix ModelSelect builds choices without
+ *  duplicating the `runtime|provider|id` format. */
+export function choiceForModel(option: LaneModelOption): string {
+  return modelOptionValue(option);
+}
+
 /** Applies a Fleet quick-switch dropdown choice to a row. Empty choice ("" =
  *  "Standard") reverts to the profile's catalog default runtime, not whatever
  *  runtime the row is currently switched to — otherwise a lane stays trapped
@@ -652,6 +810,7 @@ function modelOptionValue(option: LaneModelOption): string {
 export function applyChoice(row: EditorRow, choice: string, models: LaneModelOption[]): EditorRow {
   const entry = entryFromProviderAwareChoice(choice);
   if (!entry) {
+    const support = row.defaultReasoningSupport ?? row.reasoningSupport ?? [];
     return {
       ...row,
       choice: "",
@@ -659,10 +818,20 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
       provider: null,
       model: null,
       fallbackProviders: [],
+      reasoningSupport: support,
+      reasoning: row.reasoning != null && support.includes(row.reasoning) ? row.reasoning : null,
     };
   }
   const model = models.find((candidate) => modelOptionValue(candidate) === choice);
   const runtime = entry.worker_runtime ?? row.worker_runtime;
+  // Switching the model switches the reasoning transport surface with it: the
+  // control now offers the chosen model's support, and a staged value that the
+  // new model cannot transport is dropped back to "Standard" (persist stays valid).
+  const nextSupport = choice === ""
+    ? row.defaultReasoningSupport ?? row.reasoningSupport ?? []
+    : model?.reasoning_support ?? [];
+  const nextReasoning =
+    row.reasoning != null && nextSupport.includes(row.reasoning) ? row.reasoning : null;
   return {
     ...row,
     choice,
@@ -670,6 +839,8 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
     provider: runtime === "hermes" ? model?.provider ?? entry.provider ?? row.defaultProvider ?? null : null,
     model: entry.model ?? null,
     fallbackProviders: runtime === "hermes" ? row.fallbackProviders : [],
+    reasoningSupport: nextSupport,
+    reasoning: nextReasoning,
   };
 }
 
@@ -678,24 +849,33 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
  *  block saving the primary choice. */
 export function profilesFromEditorRows(
   rows: EditorRow[],
-): Record<string, Partial<LaneProfileEntry>> {
-  const out: Record<string, Partial<LaneProfileEntry>> = {};
+): Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> {
+  const out: Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> = {};
   for (const row of rows) {
     const fallbackProviders = cloneFallbacks(row.fallbackProviders).filter(
       (fallback) => fallback.provider && fallback.model,
     );
+    // "Standard" (null / empty) is omitted so an unchanged profile keeps its
+    // config; only a concrete, transport-valid value is sent (S1 persist 400s
+    // on a value outside the target model's reasoning_support).
+    const reasoningEffort =
+      row.reasoning != null && row.reasoning !== "" && row.reasoning !== "Standard"
+        ? row.reasoning
+        : undefined;
     const hasStructuredOverride =
       row.provider !== null ||
       row.model !== null ||
       fallbackProviders.length > 0 ||
-      row.choice !== "";
+      row.choice !== "" ||
+      reasoningEffort !== undefined;
     if (!hasStructuredOverride) continue;
     if (row.locked || row.worker_runtime === "claude-cli") {
       const entry = entryFromProviderAwareChoice(row.choice);
-      out[row.profile] = entry ?? {
-        worker_runtime: "claude-cli",
+      const base = entry ?? {
+        worker_runtime: "claude-cli" as const,
         model: row.model,
       };
+      out[row.profile] = reasoningEffort !== undefined ? { ...base, reasoning_effort: reasoningEffort } : base;
       continue;
     }
     out[row.profile] = {
@@ -703,7 +883,42 @@ export function profilesFromEditorRows(
       provider: row.provider,
       model: row.model,
       fallback_providers: fallbackProviders,
+      ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
     };
+  }
+  return out;
+}
+
+/** Normalizes `profilesFromEditorRows` output into full persist entries.
+ *  Reasoning-only rows (model still "Standard") fall back to the profile-default
+ *  model so the payload is always a valid `{worker_runtime, model}` the backend
+ *  can validate the reasoning value against; entries with neither a model nor a
+ *  reasoning value are dropped (nothing to persist). */
+export function persistPayloadFromEditorRows(
+  rows: EditorRow[],
+): Record<string, LanePersistProfileEntry> {
+  const structured = profilesFromEditorRows(rows);
+  const rowByProfile = new Map(rows.map((row) => [row.profile, row]));
+  const out: Record<string, LanePersistProfileEntry> = {};
+  for (const [profile, entry] of Object.entries(structured)) {
+    const row = rowByProfile.get(profile);
+    const fallbackProviders = (entry.fallback_providers ?? [])
+      .filter((fallback): fallback is LaneFallbackProvider & { provider: string; model: string } =>
+        Boolean(fallback.provider && fallback.model),
+      )
+      .map((fallback) => ({ provider: fallback.provider, model: fallback.model }));
+    const model = entry.model ?? row?.defaultModel ?? "";
+    if (!model && (entry.reasoning_effort == null || entry.reasoning_effort === "")) continue;
+    const payload: LanePersistProfileEntry = {
+      worker_runtime: entry.worker_runtime ?? row?.defaultRuntime ?? "hermes",
+      provider: entry.provider ?? null,
+      model,
+      fallback_providers: fallbackProviders,
+    };
+    if (entry.reasoning_effort != null && entry.reasoning_effort !== "") {
+      payload.reasoning_effort = entry.reasoning_effort;
+    }
+    out[profile] = payload;
   }
   return out;
 }
