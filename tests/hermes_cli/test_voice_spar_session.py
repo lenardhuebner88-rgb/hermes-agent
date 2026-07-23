@@ -1,3 +1,4 @@
+import asyncio
 import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -469,6 +470,28 @@ async def test_persistent_claude_lane_raises_after_second_crash():
             await lane.turn("CRASH-B", history=[])
     finally:
         await lane.aclose()
+
+
+@pytest.mark.asyncio
+async def test_persistent_claude_lane_reaps_child_before_reporting_eof():
+    lane = _fake_persistent_lane()
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+
+    class ExitedProcess:
+        returncode = None
+
+        async def wait(self):
+            self.returncode = 17
+            return self.returncode
+
+    process = ExitedProcess()
+    process.stdout = stdout
+
+    with pytest.raises(LlmLaneError, match="unerwartet beendet"):
+        await lane._read_result(process)
+
+    assert process.returncode == 17
 
 
 @pytest.mark.asyncio
