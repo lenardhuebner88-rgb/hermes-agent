@@ -1745,6 +1745,15 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
 
 
+_TOOL_REQUEST_CONTRACT_KEYS = ("tools", "tool_choice", "parallel_tool_calls")
+
+
+def _strip_tool_request_contract(api_kwargs: dict) -> None:
+    """Remove the coupled tool fields from an intentionally tool-less request."""
+    for key in _TOOL_REQUEST_CONTRACT_KEYS:
+        api_kwargs.pop(key, None)
+
+
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     """Request a summary when max iterations are reached. Returns the final response text."""
     print(f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary...")
@@ -1845,7 +1854,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
         if agent.api_mode == "codex_responses":
             codex_kwargs = agent._build_api_kwargs(api_messages)
-            codex_kwargs.pop("tools", None)
+            _strip_tool_request_contract(codex_kwargs)
             summary_response = agent._run_codex_stream(codex_kwargs)
             _ct_sum = agent._get_transport()
             _cnr_sum = _ct_sum.normalize_response(summary_response)
@@ -1938,7 +1947,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
             # Retry summary generation
             if agent.api_mode == "codex_responses":
                 codex_kwargs = agent._build_api_kwargs(api_messages)
-                codex_kwargs.pop("tools", None)
+                _strip_tool_request_contract(codex_kwargs)
                 retry_response = agent._run_codex_stream(codex_kwargs)
                 _ct_retry = agent._get_transport()
                 _cnr_retry = _ct_retry.normalize_response(retry_response)
