@@ -52,6 +52,9 @@ def client(plugin_module, kanban_home):
     plugin_module._lane_profile_cache = None
     plugin_module._lane_model_probe_cache = {}
     plugin_module._lane_model_probe_cache_loaded = False
+    # Reset the module-global resilience cache so mock rows from one endpoint
+    # test cannot leak into a later GET /lanes test in the same process.
+    plugin_module._LANE_INVENTORY_CACHE = []
     app = FastAPI()
     app.include_router(plugin_module.router, prefix="/api/plugins/kanban")
     return TestClient(app)
@@ -141,6 +144,10 @@ def test_persist_reasoning_effort_writes_yaml_and_rejects_unsupported(
     assert ok.status_code == 200, ok.text
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert config["agent"]["reasoning_effort"] == "high"
+    # Merge semantics: a reasoning write must NOT clobber the existing model
+    # block (persist uses a dotted-path roundtrip, verified by review).
+    assert config["model"]["provider"] == "openai-codex"
+    assert config["model"]["default"] == "gpt-5.6-sol"
 
     rejected = client.post(
         "/api/plugins/kanban/lanes/persist",
