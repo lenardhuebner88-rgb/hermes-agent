@@ -35,7 +35,7 @@ The detailed shared runbook lives in:
    hermes kanban diagnostics --task <task_id> --json
    hermes kanban assignees
    ```
-6. Let the gateway dispatch in production. Do not start detached dispatch loops. Manual `hermes kanban dispatch --once` is for local tests or scoped recovery only.
+6. Let the gateway dispatch in production. Do not start detached dispatch loops. Manual `hermes kanban dispatch` is for local tests or scoped recovery only.
 7. Observe with evidence: `stats`, `runs`, `log`, `tail`, `diagnostics` before changing state.
 8. Recover narrowly: reclaim stale claims, unblock resolved cards, reassign wrong lanes, or respec non-running cards. Escalate for secrets, destructive changes, force/reset/push-upstream, or outward production mutations not covered by standing authorization.
 
@@ -45,6 +45,7 @@ Exercise real CLI/DB code without touching the production board:
 
 ```bash
 export HERMES_HOME="$(mktemp -d)"
+export HERMES_SANDBOX_MODE=1
 for p in coder premium research reviewer critic default; do
   mkdir -p "$HERMES_HOME/profiles/$p"
   printf "model:\n  provider: test\n  name: test\n" > "$HERMES_HOME/profiles/$p/config.yaml"
@@ -57,7 +58,7 @@ hermes kanban diagnostics --json
 hermes kanban stats
 ```
 
-Pass when every command exits 0 and the temp board contains the expected root/child graph.
+Pass when every command exits 0, the temp board contains the expected root/child graph, and live-board env vars such as `HERMES_KANBAN_DB`/`HERMES_KANBAN_BOARD` do not redirect writes back to production.
 
 ## Completion criteria
 

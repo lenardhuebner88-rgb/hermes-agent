@@ -11,10 +11,10 @@ This runbook is command-first and names the live code surfaces that implement ea
 | Task ingest | `hermes_cli/kanban.py` -> `create`, `specify`, `decompose`; `plugins/kanban/dashboard/plugin_api.py` -> `/api/plugins/kanban/tasks` | Capturing root tasks, triage, body, assignee, dependencies, idempotency, notification subscription. |
 | Task DB contract | `hermes_cli/kanban_db.py` | Status machine, dependencies, events, run rows, scope contract persistence, retries, diagnostics. |
 | Decomposition | `hermes_cli/kanban_decompose.py`; PlanSpec hints in `hermes_cli/planspecs.py` | Root -> child graph, assignee routing, dependency shape, audit comments. |
-| Worker runtime | `hermes_cli/kanban_worker_runtime.py` | Worker context, `HERMES_KANBAN_TASK`, heartbeat, completion/blocking, continuation behavior. |
+| Worker runtime | `hermes_cli/kanban_worker_runtime.py` | Worker launch spec and env (`build_worker_env`), Claude-profile detection, reviewer allowlists. `HERMES_KANBAN_TASK` injection (~:30745) and heartbeats (`heartbeat_claim` ~:11526, `heartbeat_worker` ~:20664) live in `hermes_cli/kanban_db.py`. |
 | Dispatch loop | `hermes_cli/kanban.py dispatch`; gateway config `kanban.dispatch_in_gateway` | Reclaim stale claims, promote ready tasks, spawn workers within profile caps. Gateway owns the loop in production. |
 | Observability | `hermes kanban show/tail/runs/log/diagnostics/stats`; dashboard Kanban APIs | Current task state, worker logs, run outcomes, diagnostics and rollups. |
-| Safety | `tasks.scope_contract`; `guard-dangerous-ops.sh`; worker profile config | Tool/file scope narrowing and dangerous-operation blocking. Prose alone is not security-authoritative. |
+| Safety | `tasks.scope_contract`; `guard-dangerous-ops.sh` (hook outside the repo at `~/.claude/hooks/guard-dangerous-ops.sh`); worker profile config | Tool/file scope narrowing and dangerous-operation blocking. Prose alone is not security-authoritative. |
 
 ## Golden path: ingest a goal
 
@@ -206,3 +206,16 @@ Offen: <residual risks / next decision>
 ```
 
 Record receipts under `vault/03-Agents/Hermes/receipts/` for operator work, then close/complete the Kanban root when all children and gates are settled.
+
+## Troubleshooting: worktree writer leases / release_deferred loop
+
+Symptom: `worktree_writer_release_deferred` events with reason class `worktree_state_unverified` recur roughly every minute in `task_events`, and the log shows repeated dead-writer-recovery warnings.
+
+Typical cause: an orphaned writer lease left behind when the worktree was removed after the task reached a terminal status.
+
+Diagnose:
+
+- Inspect the `worktree_writer_leases` table in `~/.hermes/kanban.db` for the affected task id.
+- Cross-check the lease's worktree path under `.worktrees/kanban/` against the task status — a terminal task with a deleted worktree is the giveaway.
+
+Resolution: as of the 2026-07-23 reaper fix, leases of terminal tasks whose worktree was deleted are released automatically, so the loop clears on its own. Investigate any remaining leases manually before touching the DB.
