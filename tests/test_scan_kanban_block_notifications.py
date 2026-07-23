@@ -68,3 +68,100 @@ def test_run_report_groups_blocks_by_run_context_with_explicit_buckets():
         "unknown": 1,
         "unmatched": 1,
     }
+
+
+def test_review_stage_does_not_cross_completion_boundary():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, 'reopened-task', NULL, ?, ?, ?)",
+        [
+            (1, "submitted_for_review", json.dumps({"review_stage": 1}), 100),
+            (2, "completed", "{}", 101),
+            (3, "unblocked", "{}", 102),
+            (4, "blocked", json.dumps({"kind": "needs_input"}), 103),
+        ],
+    )
+
+    report = scanner.run_report(conn, days=1, focus_task="reopened-task")
+
+    assert report["metrics"]["blocks_by_review_stage"] == {
+        "unknown": 0,
+        "unmatched": 1,
+    }
+
+
+def test_review_stage_requires_matching_candidate_when_block_provides_one():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO task_events VALUES (?, 'candidate-task', NULL, ?, ?, ?)",
+        [
+            (
+                1,
+                "submitted_for_review",
+                json.dumps({"review_stage": 2, "diff_candidate_commit": "candidate-a"}),
+                100,
+            ),
+            (
+                2,
+                "blocked",
+                json.dumps({"kind": "review_revision", "diff_candidate_commit": "candidate-a"}),
+                101,
+            ),
+            (
+                3,
+                "blocked",
+                json.dumps({"kind": "review_revision", "diff_candidate_commit": "candidate-b"}),
+                102,
+            ),
+        ],
+    )
+
+    report = scanner.run_report(conn, days=1, focus_task="candidate-task")
+
+    assert report["metrics"]["blocks_by_review_stage"] == {
+        "2": 1,
+        "unknown": 0,
+        "unmatched": 1,
+    }

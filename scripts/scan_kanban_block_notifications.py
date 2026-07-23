@@ -32,6 +32,7 @@ EXPLICIT_HUMAN_MARKERS = {
     "wait_overridden",
 }
 RECOVERY_KINDS = {"unblocked", "completed", "archived"}
+REVIEW_CYCLE_BOUNDARIES = {"completed", "archived"}
 FOCUS_KINDS = {
     "submitted_for_review",
     "blocked",
@@ -70,23 +71,34 @@ def copy_readonly_snapshot(path: Path) -> sqlite3.Connection:
     return snapshot
 
 
+def candidate_from_payload(payload: dict[str, Any]) -> str | None:
+    candidate = payload.get("diff_candidate_commit") or payload.get("reviewed_commit")
+    return candidate[:64] if isinstance(candidate, str) and candidate else None
+
+
 def candidate_for_event(events: list[sqlite3.Row], index: int) -> str | None:
     for row in reversed(events[: index + 1]):
+        if row["kind"] in REVIEW_CYCLE_BOUNDARIES:
+            return None
         if row["kind"] != "submitted_for_review":
             continue
-        payload = parse_payload(row["payload"])
-        candidate = payload.get("diff_candidate_commit") or payload.get("reviewed_commit")
-        if isinstance(candidate, str) and candidate:
-            return candidate[:64]
+        return candidate_from_payload(parse_payload(row["payload"]))
     return None
 
 
 def review_stage_for_event(events: list[sqlite3.Row], index: int) -> str:
-    """Return the preceding review stage, preserving missing-data semantics."""
+    """Return stage from the current review cycle, or an explicit missing-data bucket."""
+    event_candidate = candidate_from_payload(parse_payload(events[index]["payload"]))
     for row in reversed(events[: index + 1]):
+        if row["kind"] in REVIEW_CYCLE_BOUNDARIES:
+            return "unmatched"
         if row["kind"] != "submitted_for_review":
             continue
-        stage = parse_payload(row["payload"]).get("review_stage")
+        payload = parse_payload(row["payload"])
+        review_candidate = candidate_from_payload(payload)
+        if event_candidate and review_candidate and event_candidate != review_candidate:
+            return "unmatched"
+        stage = payload.get("review_stage")
         return str(stage) if stage not in (None, "") else "unknown"
     return "unmatched"
 
