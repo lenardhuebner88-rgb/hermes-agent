@@ -241,9 +241,12 @@ def test_i5_review_diff_survives_block_promote_resubmit(kanban_home, tmp_path):
         promoted, reason = kb.promote_task(conn, task_id, actor="test")
         assert promoted, reason
         run2 = kb.claim_task(conn, task_id).current_run_id
-        assert not kb._capture_review_diff_snapshot(
-            conn, task_id, expected_run_id=run2
-        ).get("diff_text")
+        # A no-op resubmit still renders the singleton candidate against its
+        # parent. This keeps review evidence complete rather than relying on
+        # the write-time carry from the prior submission.
+        fresh = kb._capture_review_diff_snapshot(conn, task_id, expected_run_id=run2)
+        assert fresh.get("diff_baseline") == "candidate_parent_same_tree_fallback"
+        assert fresh.get("diff_text") == first["diff_text"]
         assert kb._submit_for_review(
             conn,
             task_id,

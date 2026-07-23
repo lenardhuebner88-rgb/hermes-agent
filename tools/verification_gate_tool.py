@@ -73,7 +73,8 @@ def _safe_workspace(value: str | Path) -> Path:
         if not root.is_dir() or not (root / ".git").is_file():
             raise ValueError("workspace must be a git worktree")
     subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=root, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
     return root
 
 
@@ -125,8 +126,8 @@ def _run_commands(specs: Sequence[tuple[str, list[str]]], root: Path) -> list[di
         started = time.monotonic()
         try:
             completed = subprocess.run(argv, cwd=root, env=_safe_env(), text=True,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       check=False, timeout=3600)
+                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, check=False, timeout=3600)
             exit_code: int | None = completed.returncode
             timed_out = False
         except subprocess.TimeoutExpired:
