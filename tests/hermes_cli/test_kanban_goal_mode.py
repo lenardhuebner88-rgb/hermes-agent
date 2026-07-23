@@ -151,6 +151,8 @@ def test_spawn_sets_goal_env_only_when_enabled(kanban_home, monkeypatch):
 
 def test_spawn_no_goal_env_for_plain_task(kanban_home, monkeypatch):
     captured = {}
+    monkeypatch.setenv("HERMES_KANBAN_GOAL_MODE", "1")
+    monkeypatch.setenv("HERMES_KANBAN_GOAL_MAX_TURNS", "99")
 
     class _FakeProc:
         pid = 4243

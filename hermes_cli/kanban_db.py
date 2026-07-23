@@ -30336,14 +30336,26 @@ def _resolve_worker_cli_toolsets(
             reset_hermes_home_override(token)
         if Path(hermes_home).name in _CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES:
             # Verdict-only lanes (reviewer, critic, ...) judge submitted
-            # evidence and write a verdict, but must not run commands, inspect
-            # arbitrary files, execute code, or delegate. Profile config can
-            # still drift (for example via ``toolsets: [hermes-cli]``), so keep
-            # a dispatcher-side backstop that pins these Kanban workers to the
-            # lifecycle/verdict surface only. Sourced from the same set the
-            # claude-cli path uses (``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES``)
-            # so a lane flip (e.g. critic -> worker_runtime hermes) can't lose
-            # its cage by only being known to one of the two spawn paths.
+            # evidence and write a verdict, but must not run commands, mutate
+            # files, execute code, or delegate. A review contract can explicitly
+            # opt into its two source-inspection tools. Profile config can still
+            # drift (for example via ``toolsets: [hermes-cli]``), so keep a
+            # dispatcher-side backstop. Sourced from the same set the claude-cli
+            # path uses (``_CLAUDE_CLI_VERDICT_READ_ONLY_PROFILES``) so a lane
+            # flip (e.g. critic -> worker_runtime hermes) cannot lose its cage.
+            scope_contract = task.scope_contract if task else None
+            allowed_tools = (
+                scope_contract.get("allowed_tools")
+                if isinstance(scope_contract, dict)
+                else None
+            )
+            if (
+                isinstance(allowed_tools, list)
+                and all(isinstance(name, str) for name in allowed_tools)
+                and {"read_file", "search_files"}
+                <= {name.strip() for name in allowed_tools}
+            ):
+                return ["kanban", "review-read-only"]
             return ["kanban"]
         scope_contract = task.scope_contract if task else None
         denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
@@ -30673,8 +30685,11 @@ def _default_spawn(
     if task.max_iterations is not None:
         env["HERMES_MAX_ITERATIONS"] = str(int(task.max_iterations))
     # Goal-loop mode: the worker reads these and wraps its run in the
-    # Ralph-style /goal judge loop (see cli.py quiet-mode path). Only set
-    # when enabled so non-goal tasks keep a clean env.
+    # Ralph-style /goal judge loop (see cli.py quiet-mode path). These are
+    # per-task controls, so strip any values inherited from a goal-mode parent
+    # before adding the current task's values.
+    env.pop("HERMES_KANBAN_GOAL_MODE", None)
+    env.pop("HERMES_KANBAN_GOAL_MAX_TURNS", None)
     if task.goal_mode:
         env["HERMES_KANBAN_GOAL_MODE"] = "1"
         if task.goal_max_turns is not None:
