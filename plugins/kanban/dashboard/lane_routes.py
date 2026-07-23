@@ -417,6 +417,72 @@ def _lane_profile_catalog() -> list[dict]:
     return out
 
 
+def _annotate_lane_model_relevance(
+    models: list[dict],
+    profiles: list[dict],
+    lanes: list[dict],
+) -> None:
+    """Add operator-relevance flags to every GET /lanes model row."""
+    used_providers = {
+        str(profile.get("default_provider") or "").strip()
+        for profile in profiles
+        if str(profile.get("default_provider") or "").strip()
+    }
+    lane_providers: set[str] = set()
+    lane_models: set[str] = set()
+    for lane in lanes:
+        for entry in ((lane.get("profiles") or {}).values()):
+            if not isinstance(entry, dict):
+                continue
+            provider = str(entry.get("provider") or "").strip()
+            model = str(entry.get("model") or "").strip()
+            if provider:
+                lane_providers.add(provider)
+            if model:
+                lane_models.add(model)
+            for fallback in entry.get("fallback_providers") or []:
+                if not isinstance(fallback, dict):
+                    continue
+                fallback_provider = str(fallback.get("provider") or "").strip()
+                fallback_model = str(fallback.get("model") or "").strip()
+                if fallback_provider:
+                    lane_providers.add(fallback_provider)
+                if fallback_model:
+                    lane_models.add(fallback_model)
+
+    admitted_by_provider: dict[str, set[str]] = {}
+    try:
+        from hermes_cli.model_catalog import get_configured_provider_extra_models
+
+        for provider in {
+            str(row.get("provider") or "").strip()
+            for row in models
+            if str(row.get("provider") or "").strip()
+        }:
+            admitted_by_provider[provider] = set(
+                get_configured_provider_extra_models(provider)
+            )
+    except Exception:
+        log.exception("lanes: failed to load admitted model metadata")
+
+    for row in models:
+        provider = str(row.get("provider") or "").strip()
+        model = str(row.get("id") or "").strip()
+        used_in_profiles = bool(provider and provider in used_providers)
+        admitted = bool(
+            provider and model and model in admitted_by_provider.get(provider, set())
+        )
+        row["used_in_profiles"] = used_in_profiles
+        row["admitted"] = admitted
+        row["sinnvoll"] = bool(
+            row.get("runtime") == "claude-cli"
+            or used_in_profiles
+            or admitted
+            or (provider and provider in lane_providers)
+            or (model and model in lane_models)
+        )
+
+
 @lane_routes.get("/lanes")
 def list_lanes_endpoint(
     board: Optional[str] = Query(None, description="Kanban board slug (omit for current)"),
@@ -430,6 +496,7 @@ def list_lanes_endpoint(
         active_lane = next((l for l in lanes if l["active"]), None)
         profiles = _lane_profile_catalog()
         models = _lane_model_catalog(profiles, active_lane)
+        _annotate_lane_model_relevance(models, profiles, lanes)
         profiles = [
             {**p, "kanban_spawn_health": _profile_spawn_health(p, profiles, models)}
             for p in profiles

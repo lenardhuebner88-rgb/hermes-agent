@@ -303,6 +303,114 @@ def test_model_probe_status_cache_and_get_lanes_join(
     } <= model.keys()
 
 
+def test_get_lanes_model_sinnvoll_rule(
+    plugin_module,
+    kanban_home,
+    client,
+    monkeypatch,
+):
+    profile_dir = kanban_home / "profiles" / "coder"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text(
+        "model:\n"
+        "  provider: openai-codex\n"
+        "  default: gpt-5.6-sol\n",
+        encoding="utf-8",
+    )
+    (kanban_home / "config.yaml").write_text(
+        "model_catalog:\n"
+        "  providers:\n"
+        "    neuralwatt:\n"
+        "      extra_models:\n"
+        "        - glm-5.2-fast\n",
+        encoding="utf-8",
+    )
+
+    from agent import models_dev
+    from hermes_cli import inventory
+
+    monkeypatch.setattr(inventory, "load_picker_context", lambda: object())
+    monkeypatch.setattr(
+        inventory,
+        "build_models_payload",
+        lambda *_args, **_kwargs: {
+            "providers": [
+                {
+                    "slug": "openai-codex",
+                    "models": ["gpt-5.6-sol"],
+                    "authenticated": True,
+                    "configured": True,
+                },
+                {
+                    "slug": "nous",
+                    "models": ["hermes-4-405b"],
+                    "authenticated": True,
+                    "configured": False,
+                },
+                {
+                    "slug": "neuralwatt",
+                    "models": ["glm-5.2-fast"],
+                    "authenticated": True,
+                    "configured": True,
+                },
+                {
+                    "slug": "openrouter",
+                    "models": ["unadmitted/openrouter-model"],
+                    "authenticated": True,
+                    "configured": True,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        models_dev,
+        "get_model_capabilities",
+        lambda _provider, _model: None,
+    )
+    monkeypatch.setattr(
+        models_dev,
+        "get_model_info",
+        lambda _provider, _model: None,
+    )
+    plugin_module._lane_profile_cache = None
+
+    response = client.get("/api/plugins/kanban/lanes")
+    assert response.status_code == 200, response.text
+    models = response.json()["models"]
+
+    def model(provider, model_id):
+        return next(
+            row
+            for row in models
+            if row["provider"] == provider and row["id"] == model_id
+        )
+
+    codex = model("openai-codex", "gpt-5.6-sol")
+    assert codex["used_in_profiles"] is True
+    assert codex["admitted"] is False
+    assert codex["sinnvoll"] is True
+
+    nous = model("nous", "hermes-4-405b")
+    assert nous["used_in_profiles"] is False
+    assert nous["admitted"] is False
+    assert nous["sinnvoll"] is False
+
+    neuralwatt = model("neuralwatt", "glm-5.2-fast")
+    assert neuralwatt["used_in_profiles"] is False
+    assert neuralwatt["admitted"] is True
+    assert neuralwatt["sinnvoll"] is True
+
+    claude = model(None, "claude-fable-5")
+    assert claude["used_in_profiles"] is False
+    assert claude["admitted"] is False
+    assert claude["sinnvoll"] is True
+
+    openrouter = model("openrouter", "unadmitted/openrouter-model")
+    assert openrouter["used_in_profiles"] is False
+    assert openrouter["admitted"] is False
+    assert openrouter["sinnvoll"] is False
+
+
 def test_catalog_probe_honors_limit_and_marks_truncated(
     plugin_module,
     client,
