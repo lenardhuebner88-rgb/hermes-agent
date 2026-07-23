@@ -9406,7 +9406,6 @@ def _end_run(
             run_id,
         ),
     )
-    _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
     conn.execute(
         "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
         (task_id,),
@@ -10041,9 +10040,7 @@ def _synthesize_ended_run(
             now,
         ),
     )
-    run_id = int(cur.lastrowid or 0)
-    _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
-    return run_id
+    return int(cur.lastrowid or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -13722,111 +13719,6 @@ def _extract_review_verdict(
     return None
 
 
-def _record_run_outcome_score(
-    conn: sqlite3.Connection,
-    task_id: str,
-    run_id: Optional[int],
-    outcome: str,
-    *,
-    created_at: Optional[int] = None,
-) -> bool:
-    """Mirror a final run outcome into scores without breaking finalization.
-
-    The codes are deliberately stable and local to this write path: completed=1,
-    blocked=2, iteration_budget_exhausted=3, spawn_failed=4, gave_up=5,
-    crashed=6, reclaimed=7, scheduled=8, scout_blocking_chain=9,
-    spawn_retry=10, stale=11, timed_out=12, and unknown=0.
-    """
-    if run_id is None:
-        return False
-    values = {
-        "completed": 1.0,
-        "blocked": 2.0,
-        "iteration_budget_exhausted": 3.0,
-        "spawn_failed": 4.0,
-        "gave_up": 5.0,
-        "crashed": 6.0,
-        "reclaimed": 7.0,
-        "scheduled": 8.0,
-        "scout_blocking_chain": 9.0,
-        "spawn_retry": 10.0,
-        "stale": 11.0,
-        "timed_out": 12.0,
-    }
-    try:
-        exists = conn.execute(
-            "SELECT 1 FROM scores WHERE run_id = ? AND name = 'run_outcome_kind' LIMIT 1",
-            (int(run_id),),
-        ).fetchone()
-        if exists is not None:
-            return False
-        conn.execute(
-            "INSERT INTO scores (run_id, task_id, name, value, value_type, source, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (
-                int(run_id),
-                task_id,
-                "run_outcome_kind",
-                values.get(outcome, 0.0),
-                "numeric",
-                "run_finalization",
-                int(created_at) if created_at is not None else int(time.time()),
-            ),
-        )
-        return True
-    except sqlite3.Error:
-        return False
-
-
-def _record_review_iterations_score(
-    conn: sqlite3.Connection, run_id: Optional[int]
-) -> bool:
-    """Record revisions preceding this task's first approval, fail-soft."""
-    if run_id is None:
-        return False
-    try:
-        run = conn.execute(
-            "SELECT task_id FROM task_runs WHERE id = ?", (int(run_id),)
-        ).fetchone()
-        if run is None:
-            return False
-        exists = conn.execute(
-            "SELECT 1 FROM scores WHERE run_id = ? "
-            "AND name = 'review_iterations_to_approval' LIMIT 1",
-            (int(run_id),),
-        ).fetchone()
-        if exists is not None:
-            return False
-        prior_approval = conn.execute(
-            "SELECT 1 FROM task_runs WHERE task_id = ? AND id < ? "
-            "AND verdict = 'APPROVED' LIMIT 1",
-            (run["task_id"], int(run_id)),
-        ).fetchone()
-        if prior_approval is not None:
-            return False
-        revisions = conn.execute(
-            "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND id < ? "
-            "AND verdict IN ('REQUEST_CHANGES', 'NEEDS_REVISION')",
-            (run["task_id"], int(run_id)),
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT INTO scores (run_id, task_id, name, value, value_type, source, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (
-                int(run_id),
-                run["task_id"],
-                "review_iterations_to_approval",
-                float(revisions),
-                "numeric",
-                "review_gate",
-                int(time.time()),
-            ),
-        )
-        return True
-    except sqlite3.Error:
-        return False
-
-
 def _set_run_verdict(
     conn: sqlite3.Connection, run_id: Optional[int], verdict: str
 ) -> bool:
@@ -13849,8 +13741,6 @@ def _set_run_verdict(
     if cur.rowcount != 1:
         return False
     _record_verdict_score(conn, run_id, verdict)
-    if verdict == "APPROVED":
-        _record_review_iterations_score(conn, run_id)
     return True
 
 
