@@ -1121,3 +1121,47 @@ def test_prepare_integration_disk_runs_hygiene_then_preflight(repo, monkeypatch)
     out = kwt.prepare_integration_disk(repo)
     assert calls == ["hygiene", "disk"]
     assert out["disk"]["free"] == 9_999_999_999
+
+
+def test_drop_writer_lease_for_removed_worktree_deletes_row(kanban_home, tmp_path):
+    """Fix 2026-07-23: integrator cleanup removed the worktree but left the
+    ``worktree_writer_leases`` row behind; the reaper then deferred the
+    release forever. The cleanup helper deletes the row for the removed
+    workspace path."""
+    wt = tmp_path / "removed-wt"
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="writer", assignee="coder", kind="code",
+        )
+        run_id = _insert_ended_run(conn, tid, profile="coder", metadata=None)
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, "
+                " worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"chain:{tid}", tid, tid, run_id, "test-host:1", None,
+                 str(wt), None, 1, 1),
+            )
+        kwt._drop_writer_lease_for_removed_worktree(conn, wt)
+        assert conn.execute(
+            "SELECT count(*) FROM worktree_writer_leases"
+        ).fetchone()[0] == 0
+
+
+def test_drop_writer_lease_for_removed_worktree_fail_soft(kanban_home, tmp_path, caplog):
+    """Fail-soft by contract: no matching row, ``conn=None`` and even a
+    broken (closed) connection must never raise into the integration path —
+    a warning is logged instead."""
+    with kb.connect_closing() as conn:
+        # No lease row for this path: plain no-op.
+        kwt._drop_writer_lease_for_removed_worktree(conn, tmp_path / "gone")
+        # conn=None (integrator without a board connection): skipped.
+        kwt._drop_writer_lease_for_removed_worktree(None, tmp_path / "gone")
+    broken = kb.connect()
+    broken.close()
+    with caplog.at_level("WARNING", logger="hermes_cli.kanban_worktrees"):
+        kwt._drop_writer_lease_for_removed_worktree(broken, tmp_path / "gone")
+    assert any(
+        "writer lease cleanup failed" in rec.message for rec in caplog.records
+    )

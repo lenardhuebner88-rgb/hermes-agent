@@ -3310,6 +3310,7 @@ def _run_release_gate_fixer_cycle(
             branch,
             target,
             gate_runner=merged_release_gate,
+            conn=conn,
         )
     except Exception as exc:
         integration = {
@@ -4371,6 +4372,28 @@ def _release_file_lock(handle) -> None:
             handle.close()
     except Exception:
         pass
+
+
+def _drop_writer_lease_for_removed_worktree(
+    conn: Optional[sqlite3.Connection], wt_path: Path
+) -> None:
+    """Best-effort: delete the worktree_writer_leases rows for a worktree
+    the integrator just removed. The lease row would otherwise linger until
+    the reaper's terminal-task fallback clears it (one dispatcher tick of
+    deferred-release warnings per cycle). Fail-soft by contract: a lease
+    cleanup error must never break an already-landed integration."""
+    if conn is None:
+        return
+    try:
+        from hermes_cli import kanban_db as kb
+
+        kb.delete_worktree_writer_leases_for_workspace(conn, str(wt_path))
+    except Exception:
+        _log.warning(
+            "writer lease cleanup failed for removed worktree %s",
+            wt_path,
+            exc_info=True,
+        )
 
 
 def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
@@ -5499,6 +5522,7 @@ def integrate_chain(
     *,
     gate_runner: Optional[Callable[[Path, list[str]], tuple[bool, str]]] = None,
     cleanup: bool = True,
+    conn: Optional[sqlite3.Connection] = None,
 ) -> dict:
     """Merge a finished chain branch into the live branch — THE single
     serialized integration point. Never pushes.
@@ -5545,10 +5569,13 @@ def integrate_chain(
 
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
-                return _integrate_empty_or_already_merged(
+                result = _integrate_empty_or_already_merged(
                     repo_root, wt_path, branch, cur, gate_runner,
                     artifact_receipt, cleanup=cleanup,
                 )
+                if cleanup and result.get("action") in {"merged", "clean"}:
+                    _drop_writer_lease_for_removed_worktree(conn, wt_path)
+                return result
 
             diff_files = [
                 f for f in _git(
@@ -5572,10 +5599,13 @@ def integrate_chain(
             if early is not None:
                 return early
 
-            return _integrate_merge_and_gate(
+            result = _integrate_merge_and_gate(
                 repo_root, wt_path, branch, cur, diff_files,
                 gate_runner, artifact_receipt, cleanup=cleanup,
             )
+            if cleanup and result.get("action") in {"merged", "clean"}:
+                _drop_writer_lease_for_removed_worktree(conn, wt_path)
+            return result
         finally:
             _release_file_lock(lock)
 
@@ -6210,4 +6240,5 @@ def maybe_integrate_on_complete(
     )
     if outcome.get("action") in {"merged", "clean"}:
         remove_worktree(repo_root, wt, branch)
+        _drop_writer_lease_for_removed_worktree(conn, wt)
     return outcome

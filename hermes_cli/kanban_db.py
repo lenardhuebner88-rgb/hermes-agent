@@ -2351,9 +2351,12 @@ CREATE TABLE IF NOT EXISTS task_attachments (
     immutable       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_task      ON task_attachments(task_id, created_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_attachments_task_kind_sha
-    ON task_attachments(task_id, artifact_kind, sha256)
-    WHERE artifact_kind IS NOT NULL AND sha256 IS NOT NULL;
+-- idx_attachments_task_kind_sha can't live here: artifact_kind/sha256 are
+-- absent on legacy task_attachments tables (created before W3-S2) and
+-- CREATE TABLE IF NOT EXISTS no-ops on those, so a CREATE INDEX over the
+-- missing columns aborts executescript before the additive migration can
+-- backfill them. It is created in _migrate_add_optional_columns after the
+-- column backfill instead (same pattern as idx_runs_task_ended above).
 -- Subscription from a gateway source (platform + chat + thread) to a
 -- task. The gateway's kanban-notifier watcher tails task_events and
 -- pushes ``completed`` / ``blocked`` / ``spawn_auto_blocked`` events to
@@ -19940,6 +19943,33 @@ def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
             if not bool(termination.get("terminated")):
                 continue
         observed_head, clean = _workspace_release_state(lease["workspace_path"])
+        if observed_head is None and not Path(lease["workspace_path"]).exists():
+            # Workspace directory is gone (e.g. removed by integrator
+            # cleanup). There is no HEAD to verify and nothing to recover —
+            # when the owner task is already terminal the lease is orphaned
+            # and can be dropped outright instead of deferring forever.
+            # Blocked/in-progress tasks keep their lease untouched: a dirty
+            # worktree there is deliberately preserved WIP.
+            owner = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?",
+                (lease["task_id"],),
+            ).fetchone()
+            if owner is not None and owner["status"] in ("done", "archived"):
+                deleted = conn.execute(
+                    "DELETE FROM worktree_writer_leases WHERE worktree_key = ? AND run_id = ? AND claim_lock = ?",
+                    (lease["worktree_key"], lease["run_id"], lease["claim_lock"]),
+                ).rowcount
+                if deleted:
+                    _append_event(conn, lease["task_id"], "worktree_writer_released", {
+                        "reason_class": "workspace_removed_task_terminal",
+                        "worktree_key": lease["worktree_key"],
+                        "candidate_sha": lease["candidate_sha"],
+                        "observed_sha": None,
+                        "clean": True,
+                        "recovered_wip": False,
+                    })
+                    released.append(lease["task_id"])
+                continue
         recovered_wip = False
         if not clean:
             try:
@@ -19985,6 +20015,25 @@ def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
     if released:
         conn.commit()
     return released
+
+
+def delete_worktree_writer_leases_for_workspace(
+    conn: sqlite3.Connection, workspace_path: str
+) -> int:
+    """Drop writer-lease rows for a worktree the integrator just removed.
+
+    Companion of ``kanban_worktrees.remove_worktree``: once the worktree
+    directory is gone the lease can never be verified clean again, so the
+    reaper would otherwise only clear it via the terminal-task fallback.
+    Returns the number of deleted rows (0 when no lease exists — callers
+    treat this as best-effort cleanup, never as an error).
+    """
+    cur = conn.execute(
+        "DELETE FROM worktree_writer_leases WHERE workspace_path = ?",
+        (str(workspace_path),),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 @dataclass

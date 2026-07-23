@@ -20,6 +20,7 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 from tests.hermes_cli._kanban_test_helpers import (
+    _insert_ended_run,
     _operator_escalations,
 )
 
@@ -1196,3 +1197,98 @@ def test_read_only_task_bypasses_active_worktree_writer_lease(
         assert result.skipped_worktree_writer_active == []
         leases = conn.execute("SELECT task_id FROM worktree_writer_leases").fetchall()
         assert [row[0] for row in leases] == [writer]
+
+
+def test_worktree_writer_lease_reaped_when_workspace_removed_and_task_terminal(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Regression 2026-07-23: after integrator cleanup removed the worktree
+    of a DONE chain task, the lease reaper deferred the release forever
+    (``worktree_writer_release_deferred`` + ``dead writer recovery failed``
+    every 60s tick) because recovery via ``prepare_reused_task_worktree``
+    needs a live ``tasks.current_run_id``. A lease whose workspace is gone
+    AND whose owner task is terminal is orphaned — drop it outright with a
+    ``workspace_removed_task_terminal`` release event instead."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    missing = tmp_path / "removed-worktree"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("recovery must not run for terminal tasks")
+
+    monkeypatch.setattr(kwt, "prepare_reused_task_worktree", _boom)
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="done writer", assignee="coder", kind="code",
+        )
+        run_id = _insert_ended_run(conn, tid, profile="coder", metadata=None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='done' WHERE id=?", (tid,))
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, "
+                " worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"chain:{tid}", tid, tid, run_id, "test-host:1", None,
+                 str(missing), None, 1, 1),
+            )
+        released = kb._reap_worktree_writer_leases(conn)
+        assert released == [tid]
+        assert conn.execute(
+            "SELECT count(*) FROM worktree_writer_leases"
+        ).fetchone()[0] == 0
+        events = kb.list_events(conn, tid)
+        released_events = [
+            e for e in events if e.kind == "worktree_writer_released"
+        ]
+        assert len(released_events) == 1
+        assert (
+            released_events[0].payload["reason_class"]
+            == "workspace_removed_task_terminal"
+        )
+        assert not any(
+            e.kind == "worktree_writer_release_deferred" for e in events
+        )
+
+
+def test_worktree_writer_lease_kept_when_workspace_removed_but_task_blocked(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """The terminal-task escape hatch must NOT swallow leases of tasks that
+    may still resume: a blocked owner keeps its lease and the deferred path
+    (event + warning) stays exactly as before."""
+    from hermes_cli import kanban_worktrees as kwt
+
+    missing = tmp_path / "removed-worktree"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("current task run is missing before worker base preparation")
+
+    monkeypatch.setattr(kwt, "prepare_reused_task_worktree", _boom)
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="blocked writer", assignee="coder", kind="code",
+        )
+        run_id = _insert_ended_run(conn, tid, profile="coder", metadata=None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, "
+                " worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"chain:{tid}", tid, tid, run_id, "test-host:1", None,
+                 str(missing), None, 1, 1),
+            )
+        released = kb._reap_worktree_writer_leases(conn)
+        assert released == []
+        assert conn.execute(
+            "SELECT count(*) FROM worktree_writer_leases"
+        ).fetchone()[0] == 1
+        events = kb.list_events(conn, tid)
+        deferred = [
+            e for e in events if e.kind == "worktree_writer_release_deferred"
+        ]
+        assert len(deferred) == 1
+        assert deferred[0].payload["reason_class"] == "worktree_state_unverified"
+        assert not any(e.kind == "worktree_writer_released" for e in events)

@@ -1034,3 +1034,80 @@ def test_runs_issues_explains_review_and_dependency_causes(kanban_home):
     assert by_cause["review"]["example_block_kind"] == "review_revision"
     assert by_cause["dependency"]["cause_label"] == "Abhängigkeit"
     assert "vorgelagerte Arbeit" in by_cause["dependency"]["cause_hint"]
+
+
+def test_connect_migrates_legacy_task_attachments_before_unique_index(
+    kanban_home, tmp_path,
+):
+    """Regression 2026-07-23: boards whose ``task_attachments`` table
+    predates the W3-S2 sha256/artifact_kind/immutable columns crashed every
+    connect() with ``sqlite3.OperationalError: no such column: sha256``
+    because SCHEMA_SQL created the unique index over columns the additive
+    migration had not backfilled yet (``CREATE TABLE IF NOT EXISTS`` no-ops
+    on the legacy table, then the index blew up before
+    ``_migrate_add_optional_columns`` ran). The index now lives in the
+    migration pass, after the column backfill."""
+    legacy_db = tmp_path / "legacy.db"
+    raw = sqlite3.connect(legacy_db)
+    raw.execute(
+        "CREATE TABLE task_attachments ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_id TEXT NOT NULL, "
+        "filename TEXT NOT NULL, "
+        "stored_path TEXT NOT NULL, "
+        "content_type TEXT, "
+        "size INTEGER NOT NULL DEFAULT 0, "
+        "uploaded_by TEXT, "
+        "created_at INTEGER NOT NULL)"
+    )
+    raw.commit()
+    raw.close()
+
+    with kb.connect_closing(db_path=legacy_db) as conn:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(task_attachments)")
+        }
+        assert {"sha256", "artifact_kind", "immutable"} <= cols
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_attachments_task_kind_sha'"
+        ).fetchone()
+        assert idx is not None
+        # And the fresh-DB fast path still works on the next connect.
+        assert conn.execute(
+            "SELECT count(*) FROM task_attachments"
+        ).fetchone()[0] == 0
+
+
+def test_connect_migrates_real_health_track_board_copy(kanban_home, tmp_path):
+    """Same legacy-schema regression against a COPY of the production
+    ``health-track`` board DB — the Alt-Schema DB whose dispatcher tick
+    failed every minute since 96f0eee43. Read-only backup into tmp; the
+    live file is never opened for writing. Skipped on hosts without the
+    live board."""
+    src = Path("/home/piet/.hermes/kanban/boards/health-track/kanban.db")
+    if not src.exists():
+        pytest.skip("live health-track board DB not present on this host")
+    copy = tmp_path / "health-track-copy.db"
+    src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(copy)
+        try:
+            src_conn.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src_conn.close()
+
+    with kb.connect_closing(db_path=copy) as conn:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(task_attachments)")
+        }
+        assert {"sha256", "artifact_kind", "immutable"} <= cols
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND name='idx_attachments_task_kind_sha'"
+        ).fetchone()
+        assert idx is not None
