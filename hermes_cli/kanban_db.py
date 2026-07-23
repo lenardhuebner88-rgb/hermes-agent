@@ -90,6 +90,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from contextvars import ContextVar, Token
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
@@ -7693,6 +7694,86 @@ def _extract_claude_cli_cost(
     out_tok = _coerce_int(usage.get("output_tokens"))
     equiv = _coerce_float(result.get("total_cost_usd"))
     return in_tok, out_tok, equiv
+
+
+def backfill_run_costs_from_tokens(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = False,
+    limit: Optional[int] = None,
+    since_seconds: Optional[int] = None,
+) -> dict[str, float | int]:
+    """Estimate missing or zero run costs from persisted token counts.
+
+    Only rows without an actual cost are candidates.  A positive, complete
+    pricing entry is required so zero-price or unpriced routes remain untouched
+    and can be retried after pricing data improves.  ``requested_model`` wins
+    over ``active_model`` because it is the immutable claim-time route.
+    """
+    from agent.usage_pricing import get_pricing_entry
+
+    sql = (
+        "SELECT id, input_tokens, output_tokens, "
+        "COALESCE(requested_model, active_model) AS model "
+        "FROM task_runs "
+        "WHERE ended_at IS NOT NULL "
+        "AND input_tokens IS NOT NULL "
+        "AND output_tokens IS NOT NULL "
+        "AND (cost_usd IS NULL OR cost_usd = 0.0) "
+        "AND (cost_status IS NULL OR cost_status = 'estimated') "
+        "AND COALESCE(requested_model, active_model) IS NOT NULL"
+    )
+    params: list[Any] = []
+    if since_seconds is not None:
+        sql += " AND ended_at >= ?"
+        params.append(int(time.time()) - int(since_seconds))
+    sql += " ORDER BY id DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    candidates = conn.execute(sql, params).fetchall()
+
+    million = Decimal(1_000_000)
+    updates: list[tuple[float, int]] = []
+    total = Decimal("0")
+    for row in candidates:
+        pricing = get_pricing_entry(str(row["model"]))
+        if pricing is None:
+            continue
+        input_tokens = int(row["input_tokens"])
+        output_tokens = int(row["output_tokens"])
+        if input_tokens < 0 or output_tokens < 0:
+            continue
+        if input_tokens and pricing.input_cost_per_million is None:
+            continue
+        if output_tokens and pricing.output_cost_per_million is None:
+            continue
+        cost = (
+            Decimal(input_tokens)
+            * (pricing.input_cost_per_million or Decimal("0"))
+            + Decimal(output_tokens)
+            * (pricing.output_cost_per_million or Decimal("0"))
+        ) / million
+        if cost <= 0:
+            continue
+        updates.append((float(cost), int(row["id"])))
+        total += cost
+
+    if not dry_run and updates:
+        with write_txn(conn):
+            for cost, run_id in updates:
+                conn.execute(
+                    "UPDATE task_runs SET cost_usd = ?, cost_status = 'estimated' "
+                    "WHERE id = ? "
+                    "AND (cost_usd IS NULL OR cost_usd = 0.0) "
+                    "AND (cost_status IS NULL OR cost_status = 'estimated')",
+                    (cost, run_id),
+                )
+
+    return {
+        "rows_affected": len(updates),
+        "total_cost_usd": float(total),
+    }
 
 
 def backfill_run_costs(
