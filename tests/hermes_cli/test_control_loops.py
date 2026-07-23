@@ -102,7 +102,7 @@ def api(tmp_path, monkeypatch):
 
     app = FastAPI()
     control_loops.register_loops_routes(app)
-    return TestClient(app), calls, tmp_path
+    return TestClient(app, raise_server_exceptions=False), calls, tmp_path
 
 
 def test_list_loops_shows_packs_hides_templates(api):
@@ -229,6 +229,135 @@ def test_models_endpoint_serves_catalog(api):
     assert "claude-sonnet-5" in models
     assert "claude-opus-4-6" in models  # fixture catalog for partial-pair tests
     assert data["engines"]["claude"]["label"] == "Claude (Abo)"
+
+
+def test_models_endpoint_degrades_non_mapping_catalog(api):
+    client, _calls, tmp = api
+    (tmp / "models.yaml").write_text("- a\n- b\n", encoding="utf-8")
+
+    response = client.get("/api/loops/models")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"engines": {}}
+
+
+def test_models_endpoint_degrades_invalid_yaml_catalog(api):
+    client, _calls, tmp = api
+    (tmp / "models.yaml").write_text("engines: [unclosed\n", encoding="utf-8")
+
+    response = client.get("/api/loops/models")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"engines": {}}
+
+
+def test_detail_replaces_invalid_utf8_in_ledger_tail(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True)
+    (state / "LEDGER.md").write_bytes(b"2026-07-23 PLANNER ok\n\xff\xfe\n")
+
+    response = client.get("/api/loops/fliessband/detail")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ledger_tail"] == ["2026-07-23 PLANNER ok", "\ufffd\ufffd"]
+
+
+def test_detail_preserves_valid_phase_usage_around_invalid_utf8(api):
+    client, _calls, tmp = api
+    state = tmp / "state" / "fliessband"
+    state.mkdir(parents=True)
+    (state / "ledger.jsonl").write_bytes(
+        b'{"event":"phase_usage","total_tokens":17}\n\xff\xfe\n'
+    )
+
+    response = client.get("/api/loops/fliessband/detail")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["phase_usage"] == [
+        {"event": "phase_usage", "total_tokens": 17}
+    ]
+
+
+def test_list_loops_isolates_invalid_utf8_phase_usage_to_one_pack(api):
+    client, _calls, tmp = api
+    broken_state = tmp / "state" / "fliessband"
+    broken_state.mkdir(parents=True)
+    (broken_state / "ledger.jsonl").write_bytes(b"\xff\xfe\n")
+    healthy_state = tmp / "state" / "nacht"
+    healthy_state.mkdir(parents=True)
+    (healthy_state / "ledger.jsonl").write_text(
+        '{"event":"phase_usage","total_tokens":23}\n',
+        encoding="utf-8",
+    )
+
+    response = client.get("/api/loops")
+
+    assert response.status_code == 200, response.text
+    packs = {pack["name"]: pack for pack in response.json()["packs"]}
+    assert set(packs) == {"fliessband", "nacht"}
+    assert packs["fliessband"]["token_usage"]["total_tokens"] is None
+    assert packs["nacht"]["token_usage"]["total_tokens"] == 23
+
+
+def test_files_endpoint_replaces_invalid_utf8_per_file(api):
+    client, _calls, tmp = api
+    bad_file = tmp / "packs" / "nacht" / "NOTES.md"
+    bad_file.write_bytes(b"\xff\xfe not utf8\n")
+
+    response = client.get("/api/loops/nacht/files")
+
+    assert response.status_code == 200, response.text
+    files = {item["name"]: item for item in response.json()["files"]}
+    assert set(files) == {"NOTES.md", "pack.yaml", "round.md"}
+    assert files["NOTES.md"]["content"] == "\ufffd\ufffd not utf8\n"
+    assert files["NOTES.md"]["error"] == "Datei enthält ungültiges UTF-8"
+    assert "error" not in files["pack.yaml"]
+    assert "error" not in files["round.md"]
+
+
+def test_detail_reads_only_bounded_ledger_tail(api, monkeypatch):
+    client, _calls, tmp = api
+    ledger = tmp / "state" / "fliessband" / "LEDGER.md"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(
+        b"discard this old line\n" + b"x" * 8_192 + b"\nkept tail line\n"
+    )
+    original_open = Path.open
+    bytes_read: list[int] = []
+
+    class TrackingReader:
+        def __init__(self, file_obj):
+            self._file_obj = file_obj
+
+        def __enter__(self):
+            self._file_obj.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._file_obj.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self._file_obj, name)
+
+        def read(self, *args):
+            data = self._file_obj.read(*args)
+            bytes_read.append(len(data))
+            return data
+
+    def tracking_open(path, *args, **kwargs):
+        opened = original_open(path, *args, **kwargs)
+        if path == ledger and args and args[0] == "rb":
+            return TrackingReader(opened)
+        return opened
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+
+    response = client.get("/api/loops/fliessband/detail")
+
+    assert response.status_code == 200, response.text
+    assert bytes_read and max(bytes_read) <= 4_096
+    assert response.json()["ledger_tail"] == ["kept tail line"]
 
 
 def test_list_loops_preserves_round_number_from_heartbeat(api):
