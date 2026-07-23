@@ -24,11 +24,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,18 @@ def _debug(message: str) -> None:
         logger.info("Langfuse tracing: %s", message)
 
 
+def _fail_soft_hook(func: Any) -> Any:
+    """Prevent an optional Langfuse export failure from escaping a Hermes hook."""
+    @wraps(func)
+    def guarded(*args: Any, **kwargs: Any) -> None:
+        try:
+            func(*args, **kwargs)
+        except Exception as exc:
+            _debug(f"{func.__name__} failed: {exc}")
+
+    return guarded
+
+
 # Sentinel: "_get_langfuse() has tried and failed". Lets us short-circuit
 # every subsequent hook call without re-checking env vars or re-attempting
 # SDK init. Tests clear this by reloading the module via
@@ -161,6 +175,14 @@ def _get_langfuse() -> Optional[Langfuse]:
     if _LANGFUSE_CLIENT is not None:
         return _LANGFUSE_CLIENT
 
+    # The plugin manager is the primary opt-in.  A process-level explicit
+    # false gate gives operators a deterministic emergency off-switch even if
+    # credentials or a plugin registration are present.
+    enabled = _env("HERMES_LANGFUSE_ENABLED")
+    if enabled and enabled.strip().lower() not in {"1", "true", "yes", "on"}:
+        _LANGFUSE_CLIENT = _INIT_FAILED
+        return None
+
     if Langfuse is None:
         _LANGFUSE_CLIENT = _INIT_FAILED
         return None
@@ -202,11 +224,21 @@ def _get_langfuse() -> Optional[Langfuse]:
     environment = _env("HERMES_LANGFUSE_ENV") or _env("LANGFUSE_ENV")
     release = _env("HERMES_LANGFUSE_RELEASE") or _env("LANGFUSE_RELEASE")
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
+    timeout_value = _env("HERMES_LANGFUSE_TIMEOUT_SECONDS", "5")
+    try:
+        timeout_seconds = float(timeout_value or "5")
+        if not math.isfinite(timeout_seconds):
+            raise ValueError
+        timeout_seconds = min(max(timeout_seconds, 0.1), 30.0)
+    except ValueError:
+        logger.warning("Invalid HERMES_LANGFUSE_TIMEOUT_SECONDS=%r; using 5s", timeout_value)
+        timeout_seconds = 5.0
 
     kwargs: Dict[str, Any] = {
         "public_key": public_key,
         "secret_key": secret_key,
         "base_url": base_url,
+        "timeout": timeout_seconds,
     }
     if environment:
         kwargs["environment"] = environment
@@ -455,6 +487,29 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
     return _truncate_text(repr(value), max_chars)
 
 
+def _redact_raw_content(value: Any) -> Any:
+    """Describe raw content without exporting it to the observability sidecar.
+
+    Prompts, model outputs and tool payloads can contain secrets even when
+    their field names do not indicate that.  Langfuse is therefore strictly
+    metadata-only: raw values are fail-closed rather than best-effort redacted.
+    """
+    if value is None:
+        return None
+    try:
+        length = len(value)
+    except TypeError:
+        length = None
+    result: dict[str, Any] = {
+        "omitted": True,
+        "reason": "raw_content_not_exported",
+        "type": type(value).__name__,
+    }
+    if length is not None:
+        result["length"] = length
+    return result
+
+
 def _extract_last_user_message(messages: Any) -> Any:
     if not isinstance(messages, list):
         return None
@@ -462,7 +517,7 @@ def _extract_last_user_message(messages: Any) -> Any:
         if isinstance(message, dict) and message.get("role") == "user":
             return {
                 "role": "user",
-                "content": _safe_value(message.get("content")),
+                "content": _redact_raw_content(message.get("content")),
             }
     return None
 
@@ -492,10 +547,7 @@ def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
         role = message.get("role")
         item = {
             "role": role,
-            "content": _safe_value(
-                message.get("content"),
-                parse_json_strings=(role == "tool"),
-            ),
+            "content": _redact_raw_content(message.get("content")),
         }
         if role == "tool":
             if message.get("tool_call_id"):
@@ -503,7 +555,7 @@ def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
             if message.get("name"):
                 item["name"] = _safe_value(message.get("name"))
         if message.get("tool_calls"):
-            item["tool_calls"] = _safe_value(message.get("tool_calls"), parse_json_strings=True)
+            item["tool_calls"] = _redact_raw_content(message.get("tool_calls"))
         serialized.append(item)
     return serialized
 
@@ -516,7 +568,7 @@ def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
         fn = getattr(tool_call, "function", None)
         name = getattr(fn, "name", None) if fn else None
         arguments = getattr(fn, "arguments", None) if fn else None
-        safe_arguments = _safe_value(arguments, parse_json_strings=False)
+        safe_arguments = _redact_raw_content(arguments)
         serialized.append({
             "id": getattr(tool_call, "id", None),
             "type": getattr(tool_call, "type", None) or "function",
@@ -532,8 +584,8 @@ def _serialize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 
 def _serialize_assistant_message(message: Any) -> dict[str, Any]:
     return {
-        "content": _safe_value(getattr(message, "content", None)),
-        "reasoning": _safe_value(getattr(message, "reasoning", None)),
+        "content": _redact_raw_content(getattr(message, "content", None)),
+        "reasoning": _redact_raw_content(getattr(message, "reasoning", None)),
         "tool_calls": _serialize_tool_calls(getattr(message, "tool_calls", None)),
     }
 
@@ -600,9 +652,27 @@ def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, 
     return usage_details, cost_details
 
 
+def _correlation_metadata(*, task_run_id: str = "", task_id: str = "", chain_id: str = "",
+                          lane: str = "", provider: str = "", model: str = "",
+                          billing_snapshot: Any = None) -> dict[str, Any]:
+    """Return only correlation values supplied by the hook caller."""
+    result: Dict[str, Any] = {key: value for key, value in {
+        "task_run_id": task_run_id, "task_id": task_id, "chain_id": chain_id,
+        "lane": lane, "provider": provider, "model": model,
+    }.items() if value}
+    if isinstance(billing_snapshot, dict):
+        billing = {key: value for key, value in billing_snapshot.items()
+                   if key in {"plan", "billing_mode", "subscription", "source"}
+                   and isinstance(value, (str, int, float, bool))}
+        if billing:
+            result["billing_snapshot"] = billing
+    return result
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
-                      turn_id: str = "", api_request_id: str = "") -> TraceState:
+                      turn_id: str = "", api_request_id: str = "", task_run_id: str = "",
+                      chain_id: str = "", lane: str = "", billing_snapshot: Any = None) -> TraceState:
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
     trace_input = _extract_last_user_message(messages)
     metadata = {
@@ -615,6 +685,10 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         "model": model,
         "api_mode": api_mode,
     }
+    metadata.update(_correlation_metadata(
+        task_run_id=task_run_id, task_id=task_id, chain_id=chain_id, lane=lane,
+        provider=provider, model=model, billing_snapshot=billing_snapshot,
+    ))
 
     # session_id must be passed in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
@@ -754,8 +828,12 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
                 _end_observation(observation)
         final_output = _merge_trace_output(output, state)
         if final_output is not None:
-            state.root_span.set_trace_io(output=final_output)
-            state.root_span.update(output=final_output)
+            # ``output`` arrives from hook callers and can be arbitrary raw
+            # content. Root-trace completion must uphold the same fail-closed
+            # contract as generation and tool observations.
+            safe_final_output = _redact_raw_content(final_output)
+            state.root_span.set_trace_io(output=safe_final_output)
+            state.root_span.update(output=safe_final_output)
         state.root_span.end()
     except Exception as exc:  # pragma: no cover - fail-open
         _debug(f"finish trace failed: {exc}")
@@ -774,11 +852,13 @@ def _request_key(api_call_count: Any) -> str:
     return str(api_call_count or 0)
 
 
+@_fail_soft_hook
 def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                     provider: str = "", base_url: str = "", api_mode: str = "",
                     api_call_count: int = 0, messages: Any = None, turn_type: str = "user",
                     conversation_history: Any = None, user_message: Any = None,
-                    turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+                    turn_id: str = "", api_request_id: str = "", task_run_id: str = "",
+                    chain_id: str = "", lane: str = "", billing_snapshot: Any = None, **_: Any) -> None:
     # Older Hermes branches used pre_llm_call for request-scoped tracing and
     # passed the actual API messages. Current Hermes also has a turn-scoped
     # pre_llm_call used for context injection; tracing that hook creates an
@@ -805,24 +885,33 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
         if state is None:
-            state = _start_root_trace(
-                task_key,
-                task_id=task_id,
-                session_id=session_id,
-                platform=platform,
-                provider=provider,
-                model=model,
-                api_mode=api_mode,
-                messages=messages,
-                client=client,
-                turn_id=turn_id,
-                api_request_id=api_request_id,
-            )
+            try:
+                state = _start_root_trace(
+                    task_key,
+                    task_id=task_id,
+                    session_id=session_id,
+                    platform=platform,
+                    provider=provider,
+                    model=model,
+                    api_mode=api_mode,
+                    messages=messages,
+                    client=client,
+                    turn_id=turn_id,
+                    api_request_id=api_request_id,
+                    task_run_id=task_run_id,
+                    chain_id=chain_id,
+                    lane=lane,
+                    billing_snapshot=billing_snapshot,
+                )
+            except Exception as exc:  # Observability must never break the run.
+                _debug(f"start trace failed: {exc}")
+                return
             _evict_stale_locked()
             _TRACE_STATE[task_key] = state
         state.last_updated_at = time.time()
 
 
+@_fail_soft_hook
 def on_pre_llm_request(
     *,
     task_id: str = "",
@@ -845,6 +934,10 @@ def on_pre_llm_request(
     user_message: Any = None,
     turn_id: str = "",
     api_request_id: str = "",
+    task_run_id: str = "",
+    chain_id: str = "",
+    lane: str = "",
+    billing_snapshot: Any = None,
     **_: Any,
 ) -> None:
     client = _get_langfuse()
@@ -869,19 +962,27 @@ def on_pre_llm_request(
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
         if state is None:
-            state = _start_root_trace(
-                task_key,
-                task_id=task_id,
-                session_id=session_id,
-                platform=platform,
-                provider=provider,
-                model=model,
-                api_mode=api_mode,
-                messages=input_messages,
-                client=client,
-                turn_id=turn_id,
-                api_request_id=api_request_id,
-            )
+            try:
+                state = _start_root_trace(
+                    task_key,
+                    task_id=task_id,
+                    session_id=session_id,
+                    platform=platform,
+                    provider=provider,
+                    model=model,
+                    api_mode=api_mode,
+                    messages=input_messages,
+                    client=client,
+                    turn_id=turn_id,
+                    api_request_id=api_request_id,
+                    task_run_id=task_run_id,
+                    chain_id=chain_id,
+                    lane=lane,
+                    billing_snapshot=billing_snapshot,
+                )
+            except Exception as exc:  # Observability must never break the run.
+                _debug(f"start trace failed: {exc}")
+                return
             _evict_stale_locked()
             _TRACE_STATE[task_key] = state
         state.last_updated_at = time.time()
@@ -905,6 +1006,7 @@ def on_pre_llm_request(
         )
 
 
+@_fail_soft_hook
 def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str = "", base_url: str = "",
                      api_mode: str = "", model: str = "", api_call_count: int = 0,
                      assistant_message: Any = None, response: Any = None,
@@ -938,7 +1040,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         output = _serialize_assistant_message(assistant_message)
     elif assistant_response is not None:
         # post_llm_call passes assistant_response as a plain string
-        output = {"content": _safe_value(assistant_response), "reasoning": None, "tool_calls": []}
+        output = {"content": _redact_raw_content(assistant_response), "reasoning": None, "tool_calls": []}
     else:
         # post_api_request path — reconstruct from summary kwargs
         output = {
@@ -1039,6 +1141,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         _finish_trace(task_key, output=output)
 
 
+@_fail_soft_hook
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "",
                      session_id: str = "", tool_call_id: str = "",
                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
@@ -1062,7 +1165,7 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
             client=client,
             name=f"Tool: {tool_name}",
             as_type="tool",
-            input_value=_safe_value(args),
+            input_value=_redact_raw_content(args),
             metadata={"tool_name": tool_name, "tool_call_id": tool_call_id},
         )
         if tool_call_id:
@@ -1071,6 +1174,7 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
             state.pending_tools_by_name.setdefault(tool_name, []).append(observation)
 
 
+@_fail_soft_hook
 def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None,
                       task_id: str = "", session_id: str = "", tool_call_id: str = "",
                       turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
@@ -1103,7 +1207,7 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     else:
         result_value = result
     result_value = _normalize_payload(result_value, tool_name=tool_name, args=args)
-    safe_result_value = _safe_value(result_value, parse_json_strings=True)
+    safe_result_value = _redact_raw_content(result_value)
 
     # Backfill so the generation's tool_call record carries the result alongside arguments.
     if tool_call_id:
@@ -1121,7 +1225,7 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     _end_observation(
         observation,
         output=safe_result_value,
-        metadata={"tool_name": tool_name, "args": _safe_value(args, parse_json_strings=True)},
+        metadata={"tool_name": tool_name, "args": _redact_raw_content(args)},
     )
 
 
