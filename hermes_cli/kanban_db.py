@@ -30685,8 +30685,11 @@ def _default_spawn(
     if task.max_iterations is not None:
         env["HERMES_MAX_ITERATIONS"] = str(int(task.max_iterations))
     # Goal-loop mode: the worker reads these and wraps its run in the
-    # Ralph-style /goal judge loop (see cli.py quiet-mode path). Only set
-    # when enabled so non-goal tasks keep a clean env.
+    # Ralph-style /goal judge loop (see cli.py quiet-mode path). These are
+    # per-task controls, so strip any values inherited from a goal-mode parent
+    # before adding the current task's values.
+    env.pop("HERMES_KANBAN_GOAL_MODE", None)
+    env.pop("HERMES_KANBAN_GOAL_MAX_TURNS", None)
     if task.goal_mode:
         env["HERMES_KANBAN_GOAL_MODE"] = "1"
         if task.goal_max_turns is not None:
