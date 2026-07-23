@@ -8,16 +8,22 @@ import {
   createLane,
   editorRows,
   FALLBACK_MODELS,
+  filterSinnvoll,
   loadLanes,
   persistLaneModels,
   persistPayloadFromEditorRows,
+  probeKey,
+  runCatalogProbe,
+  runModelProbe,
   type EditorRow,
   type Lane,
   type LaneFallbackProvider,
   type LanesResponse,
+  type ModelProbeResult,
 } from "./lanes/api";
 import { LaneBar } from "./lanes/LaneBar";
 import { ProfileMatrix } from "./lanes/ProfileMatrix";
+import { SmokePanel } from "./lanes/SmokePanel";
 import { t } from "./lanes/strings";
 import "./lanes/lanes.css";
 
@@ -41,6 +47,7 @@ function LanesPlatform({
   onActivate,
   onCreate,
   onSave,
+  onReload,
 }: {
   data: LanesResponse;
   lane: Lane;
@@ -48,6 +55,7 @@ function LanesPlatform({
   onActivate: (laneId: string) => void;
   onCreate: (name: string) => void;
   onSave: (rows: EditorRow[]) => Promise<void>;
+  onReload: () => Promise<void>;
 }) {
   const models = useMemo(
     () => (data.models && data.models.length > 0 ? data.models : FALLBACK_MODELS),
@@ -57,6 +65,11 @@ function LanesPlatform({
   const [dirty, setDirty] = useState(false);
   const [subtab, setSubtab] = useState<RightTab>("rauch");
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Fresh probe evidence gathered this session, keyed by probeKey(provider,model).
+  // Layered over the cached models[].probe (GET /lanes echoes the probe cache).
+  const [probes, setProbes] = useState<Record<string, ModelProbeResult>>({});
+  const [probing, setProbing] = useState<Record<string, boolean>>({});
+  const [batchRunning, setBatchRunning] = useState(false);
 
   const updateRow = useCallback((profile: string, patch: Partial<EditorRow>) => {
     setRows((prev) => prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)));
@@ -80,6 +93,41 @@ function LanesPlatform({
     setSaveError(null);
   }, [lane, data.profiles, models]);
 
+  const handleProbeRow = useCallback(async (row: EditorRow) => {
+    const modelId = row.model ?? row.defaultModel ?? null;
+    if (!modelId) return;
+    const provider = row.worker_runtime === "claude-cli" ? "" : row.provider ?? row.defaultProvider ?? "";
+    setProbing((prev) => ({ ...prev, [row.profile]: true }));
+    try {
+      const result = await runModelProbe({ provider, model: modelId, profile: row.profile, timeoutSeconds: 45 });
+      setProbes((prev) => ({ ...prev, [probeKey(provider, modelId)]: result }));
+    } catch {
+      // fail-soft: leave the row ungeprüft; the matrix shows no probe evidence
+    } finally {
+      setProbing((prev) => ({ ...prev, [row.profile]: false }));
+    }
+  }, []);
+
+  const handleCatalogProbe = useCallback(async () => {
+    const targets = filterSinnvoll(models).map((m) => ({ provider: m.provider ?? "", model: m.id }));
+    if (targets.length === 0) return;
+    setBatchRunning(true);
+    try {
+      const { results } = await runCatalogProbe({ models: targets, profile: null, timeoutSeconds: 45, limit: 8 });
+      setProbes((prev) => {
+        const next = { ...prev };
+        for (const result of results) next[probeKey(result.provider, result.model)] = result;
+        return next;
+      });
+      // The backend caches each probe; reload so GET /lanes echoes the cache.
+      await onReload();
+    } catch {
+      // fail-soft: keep whatever per-model evidence already arrived
+    } finally {
+      setBatchRunning(false);
+    }
+  }, [models, onReload]);
+
   return (
     <div className="space-y-4">
       <LaneBar
@@ -96,8 +144,8 @@ function LanesPlatform({
           models={models}
           busy={busy}
           dirty={dirty}
-          probing={{}}
-          probes={{}}
+          probing={probing}
+          probes={probes}
           onModelChange={(profile, choice) =>
             updateRow(profile, applyChoice(rows.find((r) => r.profile === profile)!, choice, models))
           }
@@ -105,9 +153,7 @@ function LanesPlatform({
           onFallbackChange={(profile, fallbackProviders: LaneFallbackProvider[]) =>
             updateRow(profile, { fallbackProviders })
           }
-          onProbeRow={() => {
-            /* Phase B: per-row model probe */
-          }}
+          onProbeRow={(row) => void handleProbeRow(row)}
           onSave={() => void handleSave()}
           onDiscard={handleDiscard}
           saveError={saveError}
@@ -116,11 +162,13 @@ function LanesPlatform({
         <div className="min-w-0 space-y-3">
           <SubtabChips items={RIGHT_TABS} active={subtab} onSelect={setSubtab} ariaLabelPrefix="Bereich" />
           {subtab === "rauch" ? (
-            <div className="rounded-card border border-dashed border-line p-4">
-              <p className="text-sec text-ink-2">{t.smokeEmptyTitle}</p>
-              <p className="mt-1 text-micro text-ink-3">{t.smokeEmptyEval}</p>
-              <p className="mt-1 text-micro text-ink-3">{t.smokeEmptyAction}</p>
-            </div>
+            <SmokePanel
+              models={models}
+              probes={probes}
+              busy={busy}
+              batchRunning={batchRunning}
+              onCatalogProbe={() => void handleCatalogProbe()}
+            />
           ) : (
             <div className="rounded-card border border-dashed border-line p-4">
               <p className="text-sec text-ink-2">{t.kompass}</p>
@@ -242,6 +290,7 @@ export function LanesView(_props: { density?: Density }) {
             })
           }
           onSave={handleSave}
+          onReload={reload}
         />
       )}
     </section>

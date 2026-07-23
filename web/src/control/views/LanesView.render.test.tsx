@@ -112,6 +112,14 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     expect(screen.getAllByText("Kompass").length).toBeGreaterThan(0);
   });
 
+  it("renders the Rauch panel with the catalog-probe CTA for the sinnvoll set", async () => {
+    render(<LanesView density="airy" />);
+    // fixture has no sinnvoll field → curated heuristic = the 5 claude-cli models
+    await screen.findAllByText("Katalog messen · 5 sinnvolle Modelle");
+    // empty-state doctrine: situation → bewertung → aktion (no ok-green)
+    expect(screen.getAllByText("Noch keine Messungen").length).toBeGreaterThan(0);
+  });
+
   it("logs no console errors while loading and rendering", async () => {
     render(<LanesView density="airy" />);
     await screen.findAllByText("api-standard");
