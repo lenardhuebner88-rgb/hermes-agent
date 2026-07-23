@@ -570,6 +570,10 @@ class PersistentClaudeLane(SparLlmLane):
             except TimeoutError as exc:
                 raise LlmLaneError("Claude-Lane hat das Zeitlimit überschritten.") from exc
             if not line:
+                # EOF means the child has exited. Synchronize the asyncio
+                # process handle before cleanup can inspect ``returncode``;
+                # otherwise aclose() may signal a PID the watcher already reaped.
+                await process.wait()
                 raise LlmLaneError("Claude-Lane-Prozess wurde unerwartet beendet.")
             try:
                 event = json.loads(line)

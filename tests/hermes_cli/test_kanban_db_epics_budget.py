@@ -771,7 +771,7 @@ def test_set_run_verdict_records_binary_score(kanban_home):
             kb._set_run_verdict(conn, r_ok, "APPROVED")  # idempotent
         rows = conn.execute(
             "SELECT run_id, task_id, name, value, value_type, source "
-            "FROM scores ORDER BY run_id",
+            "FROM scores WHERE name = 'review_verdict' ORDER BY run_id",
         ).fetchall()
     assert [(r["run_id"], r["value"]) for r in rows] == [(r_ok, 1.0), (r_bad, 0.0)]
     for r in rows:
@@ -794,6 +794,68 @@ def test_set_run_verdict_score_fails_soft_without_table(kanban_home):
             "SELECT verdict FROM task_runs WHERE id = ?", (r,)
         ).fetchone()
     assert row["verdict"] == "APPROVED"
+
+
+def test_review_iterations_score_counts_revision_verdicts_before_approval(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="review iterations", assignee="coder")
+        first = _insert_bare_run(
+            conn, task_id, started_at=100, ended_at=110, verdict="REQUEST_CHANGES"
+        )
+        second = _insert_bare_run(
+            conn, task_id, started_at=120, ended_at=130, verdict="NEEDS_REVISION"
+        )
+        approved = _insert_bare_run(conn, task_id, started_at=140, ended_at=150)
+        conn.commit()
+
+        kb._set_run_verdict(conn, approved, "APPROVED")
+        kb._set_run_verdict(conn, approved, "APPROVED")
+
+        score = conn.execute(
+            "SELECT value, value_type FROM scores "
+            "WHERE run_id = ? AND name = 'review_iterations_to_approval'",
+            (approved,),
+        ).fetchone()
+        assert score is not None
+        assert score["value"] == 2
+        assert score["value_type"] == "numeric"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM scores "
+            "WHERE run_id = ? AND name = 'review_iterations_to_approval'",
+            (approved,),
+        ).fetchone()[0] == 1
+        assert first and second
+
+
+def test_end_run_records_idempotent_numeric_outcome_score(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="outcome score", assignee="coder")
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+        run_id = claimed.current_run_id
+        assert run_id is not None
+
+        assert kb._end_run(conn, task_id, outcome="spawn_failed") == run_id
+        kb._record_run_outcome_score(conn, task_id, run_id, "spawn_failed")
+
+        scores = conn.execute(
+            "SELECT value, value_type FROM scores "
+            "WHERE run_id = ? AND name = 'run_outcome_kind'",
+            (run_id,),
+        ).fetchall()
+        assert [(row["value"], row["value_type"]) for row in scores] == [(4, "numeric")]
+
+
+def test_additive_score_writes_fail_soft_without_scores_table(kanban_home):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="fail soft score", assignee="coder")
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+
+        conn.execute("DROP TABLE scores")
+        conn.commit()
+
+        assert kb._end_run(conn, task_id, outcome="completed") == claimed.current_run_id
 
 
 def test_backfill_verdict_scores_idempotent_with_run_timestamps(kanban_home):
