@@ -1061,6 +1061,11 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
     )
     p_stats.add_argument("--json", action="store_true")
 
+    p_scores = sub.add_parser(
+        "scores", help="Score aggregates and weekly approval rates",
+    )
+    p_scores.add_argument("--json", action="store_true")
+
     p_bfcost = sub.add_parser(
         "backfill-costs",
         help="Deferred profile-aware cost backfill for closed runs with NULL "
@@ -4040,6 +4045,35 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         print(f"\nOldest ready task age: {int(age)}s")
     return 0
 
+
+def _cmd_scores(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        report = kb.scores_report(conn)
+    if getattr(args, "json", False):
+        _emit_json(report)
+        return 0
+
+    print(f"Score rows: {report['rows_total']}")
+    print("By name:")
+    for name, count in report["by_name"].items():
+        print(f"  {name:20s}  {count}")
+    print("By source:")
+    for source, count in report["by_source"].items():
+        print(f"  {source:20s}  {count}")
+    rate = report["approval_rate"]
+    rate_text = f"{rate:.1%}" if rate is not None else "n/a"
+    print(f"Approval rate: {rate_text} ({report['approved_rows']}/{report['rows_total']})")
+    print("Weekly approval rate:")
+    for week in report["weeks"]:
+        weekly_rate = week["approval_rate"]
+        weekly_text = f"{weekly_rate:.1%}" if weekly_rate is not None else "n/a"
+        print(
+            f"  {week['year']}-W{week['week']:02d}  {weekly_text:6s} "
+            f"({week['approved_rows']}/{week['rows_total']})"
+        )
+    return 0
+
+
 def _cmd_backfill_costs(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         since_seconds = args.since_hours * 3600 if args.since_hours else None
@@ -4482,6 +4516,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "daemon":   _cmd_daemon,
     "watch":    _cmd_watch,
     "stats":    _cmd_stats,
+    "scores":   _cmd_scores,
     "backfill-costs": _cmd_backfill_costs,
     "log":      _cmd_log,
     "runs":     _cmd_runs,
