@@ -66,8 +66,7 @@ def _submitted_payloads(conn, task_id: str) -> list[dict]:
 def test_resubmit_after_block_lifecycle_carries_diff_text_write_time(
     kanban_home, tmp_path
 ):
-    """claim → submit (real snapshot) → review-block → promote → reclaim →
-    resubmit with empty fresh capture must write-time-carry diff_text."""
+    """A no-op resubmit must preserve a complete semantic review snapshot."""
     repo = tmp_path / "ws"
     target = _init_repo_with_baseline(repo)
 
@@ -140,11 +139,13 @@ def test_resubmit_after_block_lifecycle_carries_diff_text_write_time(
         run2 = claimed2.current_run_id
         assert run2 is not None and run2 != run1
 
-        # Clean workspace vs new baseline → empty net-diff (the production case).
+        # A clean no-op resubmit still renders the singleton candidate against
+        # its parent; review evidence is complete before write-time carry.
         fresh = kb._capture_review_diff_snapshot(conn, tid, expected_run_id=run2)
-        assert not fresh.get("changed_files")
-        assert not fresh.get("diff_stat")
-        assert not fresh.get("diff_text")
+        assert fresh.get("changed_files") == ["tracked.py"]
+        assert fresh.get("diff_baseline") == "candidate_parent_same_tree_fallback"
+        assert fresh.get("diff_stat") == first.get("diff_stat")
+        assert fresh.get("diff_text") == first_diff_text
 
         assert kb._submit_for_review(
             conn,
@@ -160,7 +161,7 @@ def test_resubmit_after_block_lifecycle_carries_diff_text_write_time(
         assert len(payloads) == 2
         second = payloads[-1]
 
-        # Write-time carry: new event itself holds the predecessor's diff_text.
+        # The new event persists the complete freshly captured semantic diff.
         assert second.get("diff_text") == first_diff_text
         assert second.get("changed_files") == first.get("changed_files")
         assert second.get("diff_stat") == first.get("diff_stat")

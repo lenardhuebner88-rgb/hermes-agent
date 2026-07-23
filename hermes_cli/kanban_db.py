@@ -13988,13 +13988,12 @@ def _capture_review_diff_snapshot(
         baseline_kind == "pre_run_commit_sha"
         and pre_run_sha
         and candidate_sha
-        and candidate_sha != pre_run_sha
     ):
-        # A same-card squash rewrites the commit while preserving the tree.  A
-        # persisted pre-run SHA from before that rewrite would produce an empty
-        # diff, even though the singleton candidate still has a real task diff
-        # against its parent.  Restrict this fallback to one-parent candidates;
-        # merge commits retain the normal bounded pre-run range semantics.
+        # A same-card squash or no-op resubmit can leave the pre-run commit with
+        # the same tree as the singleton candidate.  Diffing that baseline would
+        # hide the real task diff against the candidate parent.  Restrict this
+        # fallback to one-parent candidates; merge commits retain the normal
+        # bounded pre-run range semantics.
         pre_run_tree = _git("rev-parse", "--verify", f"{pre_run_sha}^{{tree}}")
         candidate_tree = _git("rev-parse", "--verify", f"{candidate_sha}^{{tree}}")
         candidate_parents = _git("show", "-s", "--format=%P", candidate_sha)
