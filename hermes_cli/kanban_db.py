@@ -29062,11 +29062,25 @@ def _dispatch_once_locked(
                 source_workspace = Path(workspace)
                 candidate_sha = _git_head_sha_for_workspace(str(source_workspace))
                 if candidate_sha:
+                    # Pre-review read-only dispatch has no submission payload;
+                    # use the verified candidate parent to bound its snapshot.
+                    base_sha = subprocess.run(
+                        [
+                            "git", "-C", str(source_workspace), "rev-parse",
+                            "--verify", f"{candidate_sha}^",
+                        ],
+                        text=True, capture_output=True, timeout=5, check=False,
+                    ).stdout.strip()
+                    if not base_sha:
+                        raise RuntimeError(
+                            "review snapshot requires a submitted base or candidate parent"
+                        )
                     review_snapshot = _kwt.provision_review_snapshot(
                         source_workspace=source_workspace,
                         task_id=claimed.id,
                         run_id=int(claimed.current_run_id or 0),
                         candidate_commit=candidate_sha,
+                        base_commit=base_sha,
                     )
                     workspace = Path(review_snapshot["workspace_path"])
                     claimed.workspace_kind = "worktree"
@@ -29394,9 +29408,21 @@ def _dispatch_once_locked(
                     text=True, capture_output=True, timeout=5, check=False,
                 ).stdout.strip()
             if candidate_commit:
-                base_commit = str(
-                    submission.get("diff_base_commit") or ""
-                ).strip() or None
+                base_commit = submission.get("diff_base_commit")
+                if not isinstance(base_commit, str) or not base_commit:
+                    # A standalone verdict has no submitted_for_review payload.
+                    # Its verified candidate parent bounds the snapshot diff.
+                    base_commit = subprocess.run(
+                        [
+                            "git", "-C", str(source_workspace), "rev-parse",
+                            "--verify", f"{candidate_commit}^",
+                        ],
+                        text=True, capture_output=True, timeout=5, check=False,
+                    ).stdout.strip()
+                    if not base_commit:
+                        raise RuntimeError(
+                            "review snapshot requires a submitted base or candidate parent"
+                        )
                 from hermes_cli import kanban_worktrees as _kwt
 
                 review_snapshot = _kwt.provision_review_snapshot(
