@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -225,7 +226,10 @@ def _get_langfuse() -> Optional[Langfuse]:
     sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
     timeout_value = _env("HERMES_LANGFUSE_TIMEOUT_SECONDS", "5")
     try:
-        timeout_seconds = min(max(float(timeout_value or "5"), 0.1), 30.0)
+        timeout_seconds = float(timeout_value or "5")
+        if not math.isfinite(timeout_seconds):
+            raise ValueError
+        timeout_seconds = min(max(timeout_seconds, 0.1), 30.0)
     except ValueError:
         logger.warning("Invalid HERMES_LANGFUSE_TIMEOUT_SECONDS=%r; using 5s", timeout_value)
         timeout_seconds = 5.0

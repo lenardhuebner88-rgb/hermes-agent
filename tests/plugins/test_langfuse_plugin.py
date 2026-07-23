@@ -169,6 +169,26 @@ class TestRuntimeGate:
         assert plugin_failure_result is plugin_free_result
         assert attempts[0]["timeout"] == 5.0
 
+    def test_nan_timeout_falls_back_and_leaves_hook_result_unchanged(self, monkeypatch):
+        """Non-finite SDK timeouts must not escape the plugin boundary."""
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_ENABLED", "true")
+        monkeypatch.setenv("HERMES_LANGFUSE_TIMEOUT_SECONDS", "NaN")
+        mod = self._fresh_plugin()
+        attempts = []
+
+        class UnreachableClient:
+            def __init__(self, **kwargs):
+                attempts.append(kwargs)
+                raise TimeoutError("synthetic connection timeout")
+
+        monkeypatch.setattr(mod, "Langfuse", UnreachableClient)
+        assert mod.on_pre_llm_request(
+            task_id="synthetic-task", session_id="synthetic-session", request_messages=[]
+        ) is None
+        assert attempts[0]["timeout"] == 5.0
+
     def test_get_langfuse_caches_failure_no_config_load(self, monkeypatch):
         """A miss must be cached — no per-hook config.yaml reads, no env re-reads."""
         for k in (
