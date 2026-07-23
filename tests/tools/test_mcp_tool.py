@@ -47,6 +47,41 @@ def _make_mock_server(name, session=None, tools=None):
     return server
 
 
+class TestStdioCommandResolution:
+    def test_resolves_any_bare_command_from_home_local_bin(self, tmp_path, monkeypatch):
+        """Bare stdio commands use the same fallback directories as node tools."""
+        from tools.mcp_tool import _resolve_stdio_command
+
+        command_path = tmp_path / ".local" / "bin" / "codegraph"
+        command_path.parent.mkdir(parents=True)
+        command_path.write_text("#!/bin/sh\n")
+        command_path.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+        with patch("tools.mcp_tool.shutil.which", return_value=None):
+            command, env = _resolve_stdio_command("codegraph", {"PATH": "/missing"})
+
+        assert command == str(command_path)
+        assert env["PATH"].split(":")[0] == str(command_path.parent)
+
+    def test_missing_bare_command_names_checked_candidates(self, tmp_path, monkeypatch):
+        """Unresolvable commands fail before execvp can enter a retry loop."""
+        from tools.mcp_tool import StdioCommandNotFoundError, _resolve_stdio_command
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+
+        with patch("tools.mcp_tool.shutil.which", return_value=None), \
+             pytest.raises(StdioCommandNotFoundError) as exc_info:
+            _resolve_stdio_command("codegraph", {"PATH": "/missing"})
+
+        message = str(exc_info.value)
+        assert "codegraph" in message
+        assert str(tmp_path / ".local" / "bin" / "codegraph") in message
+        assert "/usr/local/bin/codegraph" in message
+
+
 class TestFilterMCPChildren:
     def test_filters_gateway_children_by_argv_marker(self, monkeypatch):
         """Non-MCP children start with an interpreter/binary, not the marker."""
@@ -2061,6 +2096,33 @@ class TestReconnection:
             assert run_count == 1
             assert server._error is oauth_error
             assert server._ready.is_set()
+            assert mock_sleep.await_count == 0
+
+        asyncio.run(_test())
+
+    def test_missing_stdio_command_does_not_retry(self):
+        """An unresolved executable is a configuration error, not a reconnect."""
+        from tools.mcp_tool import MCPServerTask, StdioCommandNotFoundError
+
+        run_count = 0
+
+        async def patched_run_stdio(_server, _config):
+            nonlocal run_count
+            run_count += 1
+            raise StdioCommandNotFoundError(
+                "Unable to resolve MCP stdio command 'codegraph'; "
+                "checked executable paths: /home/test/.local/bin/codegraph"
+            )
+
+        async def _test():
+            server = MCPServerTask("codegraph")
+            with patch.object(MCPServerTask, "_run_stdio", patched_run_stdio), \
+                 patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                await server.run({"command": "codegraph"})
+
+            assert run_count == 1
+            assert isinstance(server._error, StdioCommandNotFoundError)
+            assert "codegraph" in str(server._error)
             assert mock_sleep.await_count == 0
 
         asyncio.run(_test())

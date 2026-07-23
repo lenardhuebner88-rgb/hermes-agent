@@ -616,11 +616,15 @@ def _prepend_path(env: dict, directory: str) -> dict:
     return updated
 
 
+class StdioCommandNotFoundError(FileNotFoundError):
+    """A bare stdio command cannot be resolved in the subprocess environment."""
+
+
 def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
     """Resolve a stdio MCP command against the exact subprocess environment.
 
-    This primarily exists to make bare ``npx``/``npm``/``node`` commands work
-    reliably even when MCP subprocesses run under a filtered PATH.
+    Bare commands use known executable locations when the subprocess has a
+    filtered PATH, and fail clearly before they reach ``execvp`` unresolved.
     """
     resolved_command = os.path.expanduser(str(command).strip())
     resolved_env = dict(env or {})
@@ -630,7 +634,7 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
         which_hit = shutil.which(resolved_command, path=path_arg)
         if which_hit:
             resolved_command = which_hit
-        elif resolved_command in {"npx", "npm", "node"}:
+        else:
             hermes_home = os.path.expanduser(
                 os.getenv(
                     "HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")
@@ -655,6 +659,11 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
                 if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                     resolved_command = candidate
                     break
+            else:
+                raise StdioCommandNotFoundError(
+                    f"Unable to resolve MCP stdio command {resolved_command!r}; "
+                    f"checked executable paths: {', '.join(candidates)}"
+                )
 
     command_dir = os.path.dirname(resolved_command)
     if command_dir:
@@ -2949,6 +2958,12 @@ class MCPServerTask:
                 # ``await self._task`` completes. See #9930.
                 self.session = None
                 raise
+            except StdioCommandNotFoundError as exc:
+                logger.warning("MCP server '%s' cannot start: %s", self.name, exc)
+                self.session = None
+                self._error = exc
+                self._ready.set()
+                return
             except Exception as exc:
                 self.session = None
                 if self._is_recycled_stdio():
