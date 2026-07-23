@@ -588,6 +588,15 @@ def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="impl", review_gate=True)
         assert kb.get_task(conn, tid).status == "review"  # stage 0 (verifier) pending
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [tid]
+        assert f"Workflow identity (board-native fallback): workflow_id={tid}" in (
+            kb.build_worker_context(conn, tid, audience="hermes")
+        )
 
         # stage 0: verifier APPROVED → re-park for stage 1 (reviewer)
         kb.claim_review_task(conn, tid, reviewer_profile="verifier")
@@ -617,6 +626,16 @@ def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on
         assert (
             kb._review_chain_target(conn, tid, kb._review_gate_config()) == "critic"
         )
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [
+            tid,
+            tid,
+            tid,
+        ]
 
         # stage 2: critic APPROVED → terminal done.
         kb.claim_review_task(conn, tid, reviewer_profile="critic")
@@ -628,6 +647,143 @@ def test_critical_chain_walks_verifier_reviewer_then_critic(kanban_home, gate_on
             review_gate=True,
         )
         assert kb.get_task(conn, tid).status == "done"
+
+
+def test_critical_chain_preserves_explicit_body_workflow_id(kanban_home, gate_on):
+    """An explicit task-body identity wins over the board-native fallback."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="explicit workflow identity",
+            body="workflow_id=wf_123\n\ndatabase migration",
+            assignee="coder",
+            review_tier="critical",
+        )
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [
+            "wf_123"
+        ]
+        assert "Workflow identity (explicit task-body): workflow_id=wf_123" in (
+            kb.build_worker_context(conn, tid, audience="hermes")
+        )
+
+        for profile in ("verifier", "reviewer"):
+            kb.claim_review_task(conn, tid, reviewer_profile=profile)
+            kb.complete_task(
+                conn,
+                tid,
+                summary=f"{profile} ok",
+                metadata={"review_verdict": "APPROVED"},
+                review_gate=True,
+            )
+
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"])["workflow_id"] for row in submissions] == [
+            "wf_123",
+            "wf_123",
+            "wf_123",
+        ]
+
+
+@pytest.mark.parametrize("invalid_workflow_id", ["", None, 0, "other-workflow"])
+def test_review_chain_rejects_invalid_or_conflicting_stage_workflow_id(
+    kanban_home, gate_on, invalid_workflow_id
+):
+    """Present malformed or conflicting stage identity must not be repaired."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="identity integrity",
+            assignee="coder",
+            review_tier="critical",
+        )
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        event = conn.execute(
+            "SELECT id, payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        payload = json.loads(event["payload"])
+        payload["workflow_id"] = invalid_workflow_id
+        conn.execute(
+            "UPDATE task_events SET payload=? WHERE id=?",
+            (json.dumps(payload), event["id"]),
+        )
+        conn.commit()
+
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+
+        assert kb.get_task(conn, tid).status == "blocked"
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert len(submissions) == 1
+
+
+def test_review_chain_migrates_only_absent_legacy_stage_workflow_id(kanban_home, gate_on):
+    """A legacy event missing the key is normalized from the task contract once."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="legacy identity",
+            assignee="coder",
+            review_tier="critical",
+        )
+        kb.claim_task(conn, tid)
+        kb.complete_task(conn, tid, summary="impl", review_gate=True)
+        event = conn.execute(
+            "SELECT id, payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        payload = json.loads(event["payload"])
+        del payload["workflow_id"]
+        conn.execute(
+            "UPDATE task_events SET payload=? WHERE id=?",
+            (json.dumps(payload), event["id"]),
+        )
+        conn.commit()
+
+        kb.claim_review_task(conn, tid, reviewer_profile="verifier")
+        kb.complete_task(
+            conn,
+            tid,
+            summary="verifier ok",
+            metadata={"review_verdict": "APPROVED"},
+            review_gate=True,
+        )
+
+        submissions = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id=? "
+            "AND kind='submitted_for_review' ORDER BY id",
+            (tid,),
+        ).fetchall()
+        assert [json.loads(row["payload"]).get("workflow_id") for row in submissions] == [
+            None,
+            tid,
+        ]
+        assert kb.get_task(conn, tid).status == "review"
 
 
 def test_reviewer_request_changes_resumes_same_task_at_reviewer_stage(
@@ -2752,6 +2908,16 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
     ).stdout.strip()
 
     spawned = {}
+    snapshot_calls = []
+    from hermes_cli import kanban_worktrees as kwt
+
+    real_provision = kwt.provision_review_snapshot
+
+    def capture_snapshot(**kwargs):
+        snapshot_calls.append(kwargs)
+        return real_provision(**kwargs)
+
+    monkeypatch.setattr(kwt, "provision_review_snapshot", capture_snapshot)
     monkeypatch.setenv("HERMES_KANBAN_REVIEW_SNAPSHOT_MIN_FREE_BYTES", "0")
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
@@ -2795,6 +2961,7 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
         assert "VALUE = 2" in spawned["diff"]
         assert not (spawned["workspace"] / "parallel.txt").exists()
         assert (repo / "parallel.txt").exists()
+        assert snapshot_calls[-1]["base_commit"] == base
 
         run_id = kb.get_task(conn, task_id).current_run_id
         kb._cleanup_review_snapshot_for_run(conn, task_id, run_id)
@@ -2814,6 +2981,18 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
         assert critic_id in [row[0] for row in critic_result.spawned], critic_result
         assert spawned["workspace"] != repo
         assert spawned["head"] == candidate
+        # Standalone reviews lack submission evidence: candidate parent must bound the diff.
+        assert snapshot_calls[-1]["candidate_commit"] == candidate
+        assert snapshot_calls[-1]["base_commit"] == base
+        assert snapshot_calls[-1]["base_commit"] is not None
+        assert subprocess.run(
+            ["git", "merge-base", "--is-ancestor", snapshot_calls[-1]["base_commit"], candidate],
+            cwd=repo, check=False,
+        ).returncode == 0
+        assert subprocess.run(
+            ["git", "diff", "--quiet", f"{snapshot_calls[-1]['base_commit']}..{candidate}"],
+            cwd=repo, check=False,
+        ).returncode == 1
         critic_run_id = kb.get_task(conn, critic_id).current_run_id
         kb._cleanup_review_snapshot_for_run(conn, critic_id, critic_run_id)
         assert not spawned["workspace"].exists()
