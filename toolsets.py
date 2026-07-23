@@ -194,6 +194,12 @@ TOOLSETS = {
         "tools": ["read_file", "write_file", "patch", "search_files"],
         "includes": []
     },
+
+    "review-read-only": {
+        "description": "Read and search files for a Kanban review without file or shell mutation tools",
+        "tools": ["read_file", "search_files"],
+        "includes": []
+    },
     
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, OpenAI, or xAI",

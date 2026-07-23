@@ -571,3 +571,32 @@ toolsets:
     assert "patch" not in names
     assert "execute_code" not in names
     assert "delegate_task" not in names
+
+
+def test_reviewer_scope_contract_keeps_only_explicit_file_read_tools(
+    monkeypatch, tmp_path
+):
+    """A review contract may opt into source inspection without write access."""
+    root = tmp_path / ".hermes"
+    profile = root / "profiles" / "reviewer"
+    profile.mkdir(parents=True)
+    profile.joinpath("config.yaml").write_text("toolsets:\n  - hermes-cli\n")
+    monkeypatch.setenv("HERMES_HOME", str(root))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_review")
+
+    from hermes_cli import kanban_db as kb
+    from model_tools import get_tool_definitions
+
+    task = _make_task(
+        kb,
+        assignee="reviewer",
+        scope_contract={"allowed_tools": ["read_file", "search_files"]},
+    )
+    resolved = kb._resolve_worker_cli_toolsets(str(profile), task)
+    tools = get_tool_definitions(enabled_toolsets=resolved, quiet_mode=True)
+    names = {tool["function"]["name"] for tool in tools}
+
+    assert {"read_file", "search_files"} <= names
+    assert "write_file" not in names
+    assert "patch" not in names
+    assert "terminal" not in names
