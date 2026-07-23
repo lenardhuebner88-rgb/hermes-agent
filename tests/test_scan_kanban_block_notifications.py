@@ -250,3 +250,75 @@ def test_in_window_block_uses_review_context_before_cutoff():
     assert report["snapshot"]["window_event_header_sha256"] == hashlib.sha256(
         expected_window_headers.encode()
     ).hexdigest()
+
+
+def test_repeated_blocks_count_unique_tasks_across_candidates():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    events = []
+    event_id = 1
+    for candidate, base_time in (("candidate-a", 100), ("candidate-b", 1_000)):
+        events.extend(
+            [
+                (
+                    event_id,
+                    "same-task",
+                    None,
+                    "submitted_for_review",
+                    json.dumps({"diff_candidate_commit": candidate}),
+                    base_time,
+                ),
+                (
+                    event_id + 1,
+                    "same-task",
+                    None,
+                    "blocked",
+                    json.dumps(
+                        {
+                            "kind": "review_revision",
+                            "review_revision": {"reviewed_commit": candidate},
+                        }
+                    ),
+                    base_time + 1,
+                ),
+                (
+                    event_id + 2,
+                    "same-task",
+                    None,
+                    "blocked",
+                    json.dumps(
+                        {
+                            "kind": "review_revision",
+                            "review_revision": {"reviewed_commit": candidate},
+                        }
+                    ),
+                    base_time + 2,
+                ),
+            ]
+        )
+        event_id += 3
+    conn.executemany("INSERT INTO task_events VALUES (?, ?, ?, ?, ?, ?)", events)
+
+    report = scanner.run_report(conn, days=1, focus_task="same-task")
+
+    assert report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 1

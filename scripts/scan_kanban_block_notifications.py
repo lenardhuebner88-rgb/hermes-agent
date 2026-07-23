@@ -215,17 +215,19 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     ]
     repeats: dict[str, int] = {}
     for minutes in (5, 15, 60):
-        count = 0
+        repeated_task_ids: set[str] = set()
         grouped: dict[tuple[str, str | None], list[dict[str, Any]]] = collections.defaultdict(list)
         for block in blocks:
             grouped[(block["task_id"], block["candidate"])].append(block)
-        for group in grouped.values():
+        for (task_id, _candidate), group in grouped.items():
             if any(
                 later["created_at"] - earlier["created_at"] <= minutes * 60
                 for earlier, later in zip(group, group[1:])
             ):
-                count += 1
-        repeats[f"tasks_with_repeated_blocks_within_{minutes}m"] = count
+                repeated_task_ids.add(task_id)
+        repeats[f"tasks_with_repeated_blocks_within_{minutes}m"] = len(
+            repeated_task_ids
+        )
 
     focus_events = conn.execute(
         "SELECT id, task_id, kind, payload, created_at, run_id FROM task_events "
