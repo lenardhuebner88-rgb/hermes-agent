@@ -12891,7 +12891,15 @@ def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optiona
         return None
     if not isinstance(payload, dict):
         return None
-    reviewed_commit = None
+    # The frozen submission snapshot is the source of truth.  The originating
+    # run metadata can be stale after a review hop and must not overwrite it.
+    reviewed_commit = (
+        payload.get("diff_candidate_commit")
+        or payload.get("reviewed_commit")
+        or payload.get("candidate_commit")
+        or payload.get("commit")
+    )
+    metadata_commit = None
     if row["run_id"] is not None:
         run = conn.execute(
             "SELECT metadata FROM task_runs WHERE id = ?", (int(row["run_id"]),)
@@ -12901,18 +12909,14 @@ def _latest_review_submission(conn: sqlite3.Connection, task_id: str) -> Optiona
         except (TypeError, ValueError):
             run_metadata = {}
         if isinstance(run_metadata, dict):
-            reviewed_commit = (
+            metadata_commit = (
                 run_metadata.get("commit")
                 or run_metadata.get("reviewed_commit")
                 or run_metadata.get("candidate_commit")
             )
     payload["reviewed_commit"] = (
         reviewed_commit
-        or payload.get("reviewed_commit")
-        or payload.get("candidate_commit")
-        or payload.get("diff_candidate_commit")
-        or payload.get("commit")
-        or payload.get("diff_base_commit")
+        or metadata_commit
     )
     payload["event_id"] = int(row["id"])
     return payload

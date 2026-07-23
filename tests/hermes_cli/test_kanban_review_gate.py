@@ -2752,20 +2752,61 @@ def test_review_capability_park_carries_candidate_across_commitless_stage(
         assert park["reviewed_commit"] == commit
 
 
+def test_latest_review_submission_prefers_frozen_candidate_to_stale_run_metadata(
+    kanban_home, gate_on
+):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="candidate", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(
+            conn, tid, summary="candidate", metadata={"commit": "original"}, review_gate=True
+        )
+        event = conn.execute(
+            "SELECT id, run_id FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert event is not None
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps({"diff_candidate_commit": "frozen-candidate", "diff_base_commit": "base"}), event["id"]),
+        )
+        conn.execute(
+            "UPDATE task_runs SET metadata = ? WHERE id = ?",
+            (json.dumps({"commit": "stale-run-metadata"}), event["run_id"]),
+        )
+        submission = kb._latest_review_submission(conn, tid)
+        assert submission is not None
+        assert submission["reviewed_commit"] == "frozen-candidate"
+
+
+def test_latest_review_submission_never_uses_diff_base_as_candidate(kanban_home, gate_on):
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="candidate-less", assignee="coder")
+        assert kb.claim_task(conn, tid) is not None
+        assert kb.complete_task(conn, tid, summary="candidate", metadata={}, review_gate=True)
+        event = conn.execute(
+            "SELECT id, run_id FROM task_events WHERE task_id = ? "
+            "AND kind = 'submitted_for_review' ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert event is not None
+        conn.execute(
+            "UPDATE task_events SET payload = ? WHERE id = ?",
+            (json.dumps({"diff_base_commit": "base-only"}), event["id"]),
+        )
+        conn.execute("UPDATE task_runs SET metadata = ? WHERE id = ?", ("{}", event["run_id"]))
+        submission = kb._latest_review_submission(conn, tid)
+        assert submission is not None
+        assert submission["reviewed_commit"] is None
+
+
 @pytest.mark.parametrize(
     ("reason", "findings", "is_capability_park"),
     [
         (_LIVE_CAPABILITY_REASON, [_LIVE_CAPABILITY_FINDING], True),
-        (
-            "Die API-Validierung fehlt. Review-Evidenz fehlt: per-file cap.",
-            [],
-            False,
-        ),
-        (
-            "Die API-Validierung fehlt / Review-Evidenz fehlt: per-file cap.",
-            [],
-            False,
-        ),
+        ("Die API-Validierung fehlt. Review-Evidenz fehlt: per-file cap.", [], False),
+        ("Die API-Validierung fehlt / Review-Evidenz fehlt: per-file cap.", [], False),
         (
             "Urteil: BLOCKED\nWarum:\nDie Suche liefert bei leerem Graph 500 "
             "statt einer leeren Trefferliste.",
@@ -2773,12 +2814,7 @@ def test_review_capability_park_carries_candidate_across_commitless_stage(
             False,
         ),
     ],
-    ids=[
-        "capability_block",
-        "period_separated_content_finding",
-        "slash_separated_content_finding",
-        "content_verdict",
-    ],
+    ids=["capability_block", "period_separated_content_finding", "slash_separated_content_finding", "content_verdict"],
 )
 def test_review_capability_park_separates_tooling_block_from_content_verdict(
     kanban_home, gate_on, reason, findings, is_capability_park
