@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PendingItem } from "../../lib/fleetHub";
@@ -396,5 +398,91 @@ describe("HeuteTab Disclosure-Stabilität bei Live-Polling", () => {
     fireEvent.click(toggleAfter);
     await waitFor(() => expect(toggleAfter.getAttribute("aria-expanded")).toBe("false"));
     expect(screen.queryByLabelText("Modell")).toBeNull();
+  });
+});
+
+describe("HeuteTab PlanSpec title touch target", () => {
+  function longTitleSpec(): PlanSpecRecord {
+    // Realistischer mehrsätziger PlanSpec-Titel, der beim ExpandableText klappen muss.
+    return {
+      ...planSpec("open"),
+      path: "/plans/long.md",
+      topic:
+        "Kostenreduktion durch Pruning veralteter Modelle und konsolidierte Provider-Abrechnung",
+    };
+  }
+
+  it("CSS contract: .fleet-ps-name has an effective min-height of at least 40px", () => {
+    const cssSource = readFileSync(
+      path.resolve(__dirname, "fleet.css"),
+      "utf-8",
+    );
+    // Isoliere nur die .fleet-ps-name-Regeln, um gegen den realen codebase-Vertrag
+    // zu prüfen und nicht zufällig anderswo vorkommende 40px zu matchen.
+    const matches: string[] = [];
+    const ruleRe = /\.fleet-ps-name\s*\{[^{}]*\}/gs;
+    let m: RegExpExecArray | null;
+    while ((m = ruleRe.exec(cssSource)) !== null) {
+      matches.push(m[0]);
+    }
+    expect(matches.length).toBeGreaterThan(0);
+    const combined = matches.join("\n");
+    const numericValue =
+      /\b(?:min-)?(?:height|block-size)\s*:\s*(\d+(?:\.\d+)?)\s*px\b/i;
+    const found = combined.match(numericValue);
+    expect(
+      found,
+      "expected .fleet-ps-name to declare a min-height of at least 40px",
+    ).toBeTruthy();
+    expect(Number.parseFloat(found![1])).toBeGreaterThanOrEqual(40);
+  });
+
+  it("renders the long plan title as an expandable trigger and toggles expanded on Space/Enter", () => {
+    renderHeute({ plans: [longTitleSpec()] });
+
+    const trigger = screen.getByText(longTitleSpec().topic);
+    expect(trigger).toBeTruthy();
+    expect(trigger.classList.contains("fleet-ps-name")).toBe(true);
+    expect(trigger.getAttribute("role")).toBe("button");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.keyDown(trigger, { key: " " });
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("stops propagation on the title trigger, while the rest of the card still opens the drawer", () => {
+    const ps = longTitleSpec();
+    const onPlanSpecClick = vi.fn();
+
+    const { container } = render(
+      <HeuteTab
+        allWorkers={[]}
+        activeWorkers={[]}
+        blockedCount={0}
+        pendingApprovals={0}
+        allPlanspecs={[ps]}
+        costs={null}
+        daily={null}
+        now={100}
+        pendingItems={[]}
+        onWorkerClick={() => undefined}
+        onPlanSpecClick={onPlanSpecClick}
+        onNavigate={() => undefined}
+      />,
+    );
+
+    const trigger = screen.getByText(ps.topic);
+    fireEvent.click(trigger);
+    expect(onPlanSpecClick).not.toHaveBeenCalled();
+
+    // Außerhalb des ExpandableText, aber innerhalb der Karte klicken.
+    const card = container.querySelector(".fleet-ps");
+    expect(card).toBeTruthy();
+    fireEvent.click(card!);
+    expect(onPlanSpecClick).toHaveBeenCalledTimes(1);
+    expect(onPlanSpecClick).toHaveBeenCalledWith(ps);
   });
 });
