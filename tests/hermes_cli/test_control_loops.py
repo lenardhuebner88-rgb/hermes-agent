@@ -222,6 +222,116 @@ def test_commits_ahead_ignores_patch_equivalent_commits(monkeypatch):
     assert calls == [("cherry", "-v", "main", "loop/dashboard-polish")]
 
 
+@pytest.mark.parametrize(
+    ("failure", "message_fragment"),
+    [
+        (
+            lambda command: subprocess.TimeoutExpired(command, 30),
+            "timed out",
+        ),
+        (
+            lambda _command: FileNotFoundError(
+                2, "No such file or directory: 'git'",
+            ),
+            "No such file or directory",
+        ),
+    ],
+    ids=("timeout", "missing-git"),
+)
+def test_git_probe_failures_degrade_list_response_per_pack(
+    api, monkeypatch, failure, message_fragment,
+):
+    client, _calls, _tmp = api
+    real_run = control_loops.subprocess.run
+
+    def failing_git(command, *args, **kwargs):
+        if command[0] == "git":
+            raise failure(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(control_loops.subprocess, "run", failing_git)
+    with TestClient(client.app, raise_server_exceptions=False) as degraded_client:
+        response = degraded_client.get("/api/loops")
+
+    assert response.status_code == 200, response.text
+    for pack in response.json()["packs"]:
+        assert pack["commits_ahead"] == 0
+        assert "git-Probe fehlgeschlagen" in pack["error"]
+        assert message_fragment in pack["error"]
+
+
+@pytest.mark.parametrize(
+    ("failure", "message_fragment"),
+    [
+        (
+            lambda command: subprocess.TimeoutExpired(command, 30),
+            "timed out",
+        ),
+        (
+            lambda _command: FileNotFoundError(
+                2, "No such file or directory: 'git'",
+            ),
+            "No such file or directory",
+        ),
+    ],
+    ids=("timeout", "missing-git"),
+)
+def test_git_probe_failures_degrade_detail_response(
+    api, monkeypatch, failure, message_fragment,
+):
+    client, _calls, _tmp = api
+    real_run = control_loops.subprocess.run
+
+    def failing_git(command, *args, **kwargs):
+        if command[0] == "git":
+            raise failure(command)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(control_loops.subprocess, "run", failing_git)
+    with TestClient(client.app, raise_server_exceptions=False) as degraded_client:
+        response = degraded_client.get("/api/loops/nacht/detail")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["commits"] == []
+    assert "git-Probe fehlgeschlagen" in response.json()["error"]
+    assert message_fragment in response.json()["error"]
+
+
+def test_git_probe_failure_only_degrades_affected_pack(api, monkeypatch):
+    client, _calls, tmp = api
+    packs = control_loops._packs_dir()
+    healthy_repo = tmp / "healthy-repo"
+    broken_repo = tmp / "broken-repo"
+    write_pack(packs, "healthy", "sweep", healthy_repo)
+    write_pack(packs, "broken", "sweep", broken_repo)
+    real_run = control_loops.subprocess.run
+
+    def selective_git(command, *args, **kwargs):
+        if command[:3] == ["git", "-C", str(broken_repo.resolve())]:
+            raise subprocess.TimeoutExpired(command, 30)
+        if command[0] == "git":
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "+ 1234567890000000000000000000000000000000 "
+                    "fix(control): healthy pack commit\n"
+                ),
+                stderr="",
+            )
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(control_loops.subprocess, "run", selective_git)
+    response = client.get("/api/loops")
+
+    assert response.status_code == 200, response.text
+    by_name = {pack["name"]: pack for pack in response.json()["packs"]}
+    assert by_name["healthy"]["commits_ahead"] == 1
+    assert "error" not in by_name["healthy"]
+    assert by_name["broken"]["commits_ahead"] == 0
+    assert "git-Probe fehlgeschlagen" in by_name["broken"]["error"]
+
+
 def test_models_endpoint_serves_catalog(api):
     client, _calls, _tmp = api
     data = client.get("/api/loops/models").json()
