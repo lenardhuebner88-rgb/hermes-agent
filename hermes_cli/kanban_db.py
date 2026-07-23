@@ -32457,6 +32457,77 @@ def board_stats(conn: sqlite3.Connection) -> dict:
     }
 
 
+def scores_report(
+    conn: sqlite3.Connection, *, now: Optional[int] = None
+) -> dict[str, Any]:
+    """Return read-only aggregates for score rows and the last eight ISO weeks."""
+    now_dt = _dt.datetime.fromtimestamp(now or time.time(), tz=_dt.timezone.utc)
+    current_monday = now_dt.date() - _dt.timedelta(days=now_dt.weekday())
+    week_starts = [
+        current_monday - _dt.timedelta(weeks=offset) for offset in range(7, -1, -1)
+    ]
+    start_epoch = int(
+        _dt.datetime.combine(week_starts[0], _dt.time.min, tzinfo=_dt.timezone.utc).timestamp()
+    )
+
+    overall = conn.execute(
+        "SELECT COUNT(*) AS rows_total, "
+        "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
+        "FROM scores"
+    ).fetchone()
+    by_name = {
+        str(row["name"]): int(row["count"])
+        for row in conn.execute(
+            "SELECT name, COUNT(*) AS count FROM scores GROUP BY name ORDER BY name"
+        )
+    }
+    by_source = {
+        str(row["source"]): int(row["count"])
+        for row in conn.execute(
+            "SELECT source, COUNT(*) AS count FROM scores GROUP BY source ORDER BY source"
+        )
+    }
+
+    weekly_counts: dict[_dt.date, tuple[int, int]] = {}
+    for row in conn.execute(
+        "SELECT created_at, value FROM scores WHERE created_at >= ? ORDER BY created_at",
+        (start_epoch,),
+    ):
+        day = _dt.datetime.fromtimestamp(int(row["created_at"]), tz=_dt.timezone.utc).date()
+        monday = day - _dt.timedelta(days=day.weekday())
+        if monday in week_starts:
+            rows_total, approved_rows = weekly_counts.get(monday, (0, 0))
+            weekly_counts[monday] = (
+                rows_total + 1,
+                approved_rows + int(row["value"] == 1.0),
+            )
+
+    weeks = []
+    for monday in week_starts:
+        rows_total, approved_rows = weekly_counts.get(monday, (0, 0))
+        iso_year, iso_week, _ = monday.isocalendar()
+        weeks.append(
+            {
+                "year": iso_year,
+                "week": iso_week,
+                "rows_total": rows_total,
+                "approved_rows": approved_rows,
+                "approval_rate": approved_rows / rows_total if rows_total else None,
+            }
+        )
+
+    rows_total = int(overall["rows_total"])
+    approved_rows = int(overall["approved_rows"])
+    return {
+        "rows_total": rows_total,
+        "by_name": by_name,
+        "by_source": by_source,
+        "approved_rows": approved_rows,
+        "approval_rate": approved_rows / rows_total if rows_total else None,
+        "weeks": weeks,
+    }
+
+
 def autonomy_stats(conn: sqlite3.Connection) -> dict:
     """Operator-free task acceptance rate from task event history."""
     accepted = int(
