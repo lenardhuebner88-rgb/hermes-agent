@@ -200,6 +200,7 @@ TOOLSETS = {
         "tools": ["read_file", "search_files"],
         "includes": [],
         "posture": True,
+        "preserve_against_generic_denies": True,
     },
     
     "tts": {

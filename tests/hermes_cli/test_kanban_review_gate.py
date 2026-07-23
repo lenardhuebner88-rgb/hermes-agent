@@ -2752,6 +2752,16 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
     ).stdout.strip()
 
     spawned = {}
+    snapshot_calls = []
+    from hermes_cli import kanban_worktrees as kwt
+
+    real_provision = kwt.provision_review_snapshot
+
+    def capture_snapshot(**kwargs):
+        snapshot_calls.append(kwargs)
+        return real_provision(**kwargs)
+
+    monkeypatch.setattr(kwt, "provision_review_snapshot", capture_snapshot)
     monkeypatch.setenv("HERMES_KANBAN_REVIEW_SNAPSHOT_MIN_FREE_BYTES", "0")
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
@@ -2795,6 +2805,7 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
         assert "VALUE = 2" in spawned["diff"]
         assert not (spawned["workspace"] / "parallel.txt").exists()
         assert (repo / "parallel.txt").exists()
+        assert snapshot_calls[-1]["base_commit"] == base
 
         run_id = kb.get_task(conn, task_id).current_run_id
         kb._cleanup_review_snapshot_for_run(conn, task_id, run_id)
@@ -2814,6 +2825,18 @@ def test_review_dispatch_uses_detached_snapshot_when_chain_is_dirty(
         assert critic_id in [row[0] for row in critic_result.spawned], critic_result
         assert spawned["workspace"] != repo
         assert spawned["head"] == candidate
+        # Standalone reviews lack submission evidence: candidate parent must bound the diff.
+        assert snapshot_calls[-1]["candidate_commit"] == candidate
+        assert snapshot_calls[-1]["base_commit"] == base
+        assert snapshot_calls[-1]["base_commit"] is not None
+        assert subprocess.run(
+            ["git", "merge-base", "--is-ancestor", snapshot_calls[-1]["base_commit"], candidate],
+            cwd=repo, check=False,
+        ).returncode == 0
+        assert subprocess.run(
+            ["git", "diff", "--quiet", f"{snapshot_calls[-1]['base_commit']}..{candidate}"],
+            cwd=repo, check=False,
+        ).returncode == 1
         critic_run_id = kb.get_task(conn, critic_id).current_run_id
         kb._cleanup_review_snapshot_for_run(conn, critic_id, critic_run_id)
         assert not spawned["workspace"].exists()
