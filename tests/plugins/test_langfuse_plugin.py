@@ -108,6 +108,67 @@ class TestRuntimeGate:
         langfuse_plugin = self._fresh_plugin()
         assert langfuse_plugin._get_langfuse() is None
 
+    def test_default_disabled_has_zero_client_initializations_and_sends(self, monkeypatch):
+        for key in ("HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY",
+                    "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        mod = self._fresh_plugin()
+        counters = {"client_initializations": 0, "send_calls": 0}
+
+        class GuardClient:
+            def __init__(self, **kwargs):
+                counters["client_initializations"] += 1
+
+            def start_as_current_observation(self, **kwargs):
+                counters["send_calls"] += 1
+                raise AssertionError("disabled plugin attempted egress")
+
+        monkeypatch.setattr(mod, "Langfuse", GuardClient)
+        mod.on_pre_llm_request(task_id="t", session_id="s", request_messages=[{"role": "user", "content": "x"}])
+        assert counters == {"client_initializations": 0, "send_calls": 0}
+
+    def test_explicitly_disabled_gate_blocks_initialized_client_and_egress(self, monkeypatch):
+        """Credentials alone must never opt an installation into telemetry."""
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_ENABLED", "false")
+        mod = self._fresh_plugin()
+        counters = {"client_initializations": 0, "send_calls": 0}
+
+        class GuardClient:
+            def __init__(self, **kwargs):
+                counters["client_initializations"] += 1
+
+            def start_as_current_observation(self, **kwargs):
+                counters["send_calls"] += 1
+
+        monkeypatch.setattr(mod, "Langfuse", GuardClient)
+        assert mod._get_langfuse() is None
+        mod.on_pre_llm_request(task_id="t", session_id="s", request_messages=[])
+        assert counters == {"client_initializations": 0, "send_calls": 0}
+
+    def test_constructor_failure_timeout_and_invalid_config_leave_hook_result_unchanged(self, monkeypatch):
+        """Plugin initialization errors must have the same hook result as no plugin."""
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-synthetic")
+        monkeypatch.setenv("HERMES_LANGFUSE_ENABLED", "true")
+        monkeypatch.setenv("HERMES_LANGFUSE_TIMEOUT_SECONDS", "not-a-number")
+        mod = self._fresh_plugin()
+        attempts = []
+
+        class UnreachableClient:
+            def __init__(self, **kwargs):
+                attempts.append(kwargs)
+                raise TimeoutError("synthetic connection timeout")
+
+        monkeypatch.setattr(mod, "Langfuse", UnreachableClient)
+        plugin_free_result = None
+        plugin_failure_result = mod.on_pre_llm_request(
+            task_id="synthetic-task", session_id="synthetic-session", request_messages=[]
+        )
+        assert plugin_failure_result is plugin_free_result
+        assert attempts[0]["timeout"] == 5.0
+
     def test_get_langfuse_caches_failure_no_config_load(self, monkeypatch):
         """A miss must be cached — no per-hook config.yaml reads, no env re-reads."""
         for k in (
@@ -188,7 +249,47 @@ class TestHooksInert:
         mod.on_post_tool_call(tool_name="read_file", args={}, result="ok", task_id="t", session_id="s")
 
 
+class TestPluginFailureInvariance:
+    @pytest.mark.parametrize("export_error", [ConnectionError, TimeoutError, ValueError])
+    def test_connection_timeout_and_invalid_export_leave_result_and_outcome_unchanged(
+        self, monkeypatch, export_error
+    ):
+        """A broken sidecar must be observational only for a Hermes run."""
+        mod = importlib.import_module("plugins.observability.langfuse")
+        mod._TRACE_STATE.clear()
+
+        class UnavailableClient:
+            def create_trace_id(self, **_kwargs):
+                raise export_error("synthetic export failure")
+
+        def run_with(client):
+            monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+            hook_result = mod.on_pre_llm_request(
+                task_id="task", session_id="session", api_call_count=1,
+                request_messages=[{"role": "user", "content": "synthetic request"}],
+            )
+            # These are the application-owned values the sidecar must not alter.
+            return {"answer": "synthetic result"}, {"status": "completed"}, hook_result
+
+        control = run_with(None)
+        failed_export = run_with(UnavailableClient())
+        assert failed_export == control
+
+
 class TestPayloadSanitization:
+    def test_correlation_allowlist_keeps_only_hook_values(self):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        metadata = mod._correlation_metadata(
+            task_run_id="run-1", task_id="task-1", chain_id="chain-1", lane="coder",
+            provider="openai", model="test-model",
+            billing_snapshot={"plan": "pro", "subscription": "included", "secret": "never-export"},
+        )
+        assert metadata == {
+            "task_run_id": "run-1", "task_id": "task-1", "chain_id": "chain-1",
+            "lane": "coder", "provider": "openai", "model": "test-model",
+            "billing_snapshot": {"plan": "pro", "subscription": "included"},
+        }
+
     def test_safe_value_redacts_base64_data_uri_instead_of_truncating(self):
         sys.modules.pop("plugins.observability.langfuse", None)
         import importlib
@@ -214,12 +315,10 @@ class TestPayloadSanitization:
             {"role": "user", "content": [{"type": "image_url", "image_url": {"url": payload}}]}
         ])
 
-        assert serialized[0]["content"][0]["image_url"]["url"] == {
-            "type": "data_uri",
-            "media_type": "image/jpeg",
-            "omitted": True,
-            "length": len(payload),
-        }
+        assert serialized[0]["content"] == mod._redact_raw_content([
+            {"type": "image_url", "image_url": {"url": payload}}
+        ])
+        assert payload not in repr(serialized)
 
 
 class TestTraceScopeKey:
@@ -772,9 +871,9 @@ class TestToolCallOutputBackfill:
         assert ended["observation"] is observation
         assert state.turn_tool_calls[0]["output"] == ended["output"]
         assert state.turn_tool_calls[0]["function"]["output"] == ended["output"]
-        assert state.turn_tool_calls[0]["output"] == {
+        assert state.turn_tool_calls[0]["output"] == mod._redact_raw_content({
             "results": [{"url": "https://example.com", "content": "Example Domain"}]
-        }
+        })
 
     def test_serialize_messages_keeps_tool_name_and_call_id(self):
         sys.modules.pop("plugins.observability.langfuse", None)
@@ -791,7 +890,7 @@ class TestToolCallOutputBackfill:
             "role": "tool",
             "name": "web_extract",
             "tool_call_id": "call-1",
-            "content": {"ok": True},
+            "content": mod._redact_raw_content('{"ok": true}'),
         }]
 
     def test_serialize_tool_calls_emits_openai_style_function_shape(self):
@@ -811,10 +910,10 @@ class TestToolCallOutputBackfill:
             "id": "call-1",
             "type": "function",
             "name": "web_extract",
-            "arguments": '{"urls": ["https://example.com"]}',
+            "arguments": mod._redact_raw_content('{"urls": ["https://example.com"]}'),
             "function": {
                 "name": "web_extract",
-                "arguments": '{"urls": ["https://example.com"]}',
+                "arguments": mod._redact_raw_content('{"urls": ["https://example.com"]}'),
             },
         }]
 
@@ -853,7 +952,7 @@ class TestToolObservationKeying:
         )
 
         assert ended["obs"] is obs
-        assert ended["output"] == {"ok": True}
+        assert ended["output"] == mod._redact_raw_content({"ok": True})
         assert state.pending_tools_by_name.get("my_tool") is None
 
     def test_empty_tool_call_id_observations_are_fifo_within_tool_name(self, monkeypatch):
@@ -889,8 +988,8 @@ class TestToolObservationKeying:
             task_id="task-1", session_id="sess-1", tool_call_id="",
         )
 
-        assert calls[0] == (obs_a, {"val": "a"})
-        assert calls[1] == (obs_b, {"val": "b"})
+        assert calls[0] == (obs_a, mod._redact_raw_content({"val": "a"}))
+        assert calls[1] == (obs_b, mod._redact_raw_content({"val": "b"}))
         assert state.pending_tools_by_name.get("web_extract") is None
 
     def test_threaded_post_calls_preserve_fifo_under_lock(self, monkeypatch):
@@ -962,8 +1061,70 @@ class TestToolObservationKeying:
         )
 
         assert ended["obs"] is obs
-        assert ended["output"] == {"status": "done"}
+        assert ended["output"] == mod._redact_raw_content({"status": "done"})
         assert not state.tools
+
+
+class TestPrivacyContract:
+    def test_raw_prompt_output_and_tool_arguments_are_never_serialized(self):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        sentinel = "sk-test-never-export-this"
+
+        payload = {
+            "messages": mod._serialize_messages([{"role": "user", "content": sentinel}]),
+            "tool_calls": mod._serialize_tool_calls([type("Call", (), {
+                "id": "call-1", "type": "function",
+                "function": type("Function", (), {"name": "read_file", "arguments": sentinel})(),
+            })()]),
+            "output": mod._redact_raw_content(sentinel),
+        }
+
+        assert sentinel not in repr(payload)
+        assert payload["messages"][0]["content"]["omitted"] is True
+        assert payload["tool_calls"][0]["arguments"]["reason"] == "raw_content_not_exported"
+
+    def test_redaction_is_fail_closed_for_unclassified_values(self):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        assert mod._redact_raw_content({"unclassified": "private"}) == {
+            "omitted": True,
+            "reason": "raw_content_not_exported",
+            "type": "dict",
+            "length": 1,
+        }
+
+    def test_root_trace_completion_never_exports_raw_output(self, monkeypatch):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        sentinel = "sk-root-output-must-not-export"
+        exported = {}
+
+        class RootSpan:
+            def set_trace_io(self, **kwargs):
+                exported["trace_io"] = kwargs
+
+            def update(self, **kwargs):
+                exported["update"] = kwargs
+
+            def end(self):
+                exported["ended"] = True
+
+        class Client:
+            def flush(self):
+                exported["flushed"] = True
+
+        task_key = "privacy-root-output"
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: Client())
+        monkeypatch.setitem(
+            mod._TRACE_STATE,
+            task_key,
+            mod.TraceState(trace_id="trace", root_ctx=None, root_span=RootSpan()),
+        )
+
+        mod._finish_trace(task_key, output={"content": sentinel})
+
+        assert sentinel not in repr(exported)
+        assert exported["trace_io"]["output"]["reason"] == "raw_content_not_exported"
+        assert exported["update"]["output"]["type"] == "dict"
+        assert exported["ended"] and exported["flushed"]
 
 
 class TestUsageFromSanitizedResponse:

@@ -1,0 +1,11 @@
+# Overlay for the official Langfuse v3.224.0 compose release.
+# Base source (pinned):
+# https://github.com/langfuse/langfuse/blob/d044f366816282235898a0673d5700e05ccbee8c/docker-compose.yml
+# Docker Compose >= 2.24 is required for !override.
+services:
+  langfuse-web:
+    image: docker.io/langfuse/langfuse:3.224.0
+    ports: !override
+      - "127.0.0.1:13000:3000"
+  langfuse-worker:
+    image: docker.io/langfuse/langfuse-worker:3.224.0
