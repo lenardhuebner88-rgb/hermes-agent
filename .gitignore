@@ -170,3 +170,7 @@ infographic/
 
 # Graphify knowledge graph (local, reproducible; never commit)
 graphify-out/
+
+# Local agent/tool state (machine-local, reproducible; never commit)
+.qwen/
+.codegraph/
