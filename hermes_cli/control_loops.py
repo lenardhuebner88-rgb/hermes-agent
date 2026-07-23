@@ -70,8 +70,6 @@ _OVERRIDE_VALUE_RE = re.compile(r"[^\r\n\x00]{0,400}")
 _NIGHT_OVERRIDE_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
 _NIGHT_OVERRIDE_KEY_RE = re.compile(r"^PHASE_[A-Z]+_(ENGINE|MODEL)$")
 NIGHT_OVERRIDES_FILENAME = "night-overrides.env"
-_LEDGER_TAIL_BYTES = 4_096
-_LOOP_FILE_MAX_BYTES = 200_000
 
 
 def _packs_dir() -> Path:
@@ -281,44 +279,6 @@ def _write_night_overrides(name: str, overrides: dict[str, str]) -> None:
         raise
 
 
-def _read_file_text(
-    path: Path,
-    *,
-    max_bytes: int | None = None,
-    tail: bool = False,
-) -> tuple[str | None, str | None]:
-    """Read text defensively; optionally bound the read or keep only its tail.
-
-    This mirrors the established tail-reader in ``projects_overview`` without
-    coupling the Loops API to that module. The second tuple item is a stable,
-    user-facing degradation hint.
-    """
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as fh:
-            if tail and max_bytes is not None and size > max_bytes:
-                fh.seek(-max_bytes, 2)
-                data = fh.read()
-                newline = data.find(b"\n")
-                if newline != -1:
-                    data = data[newline + 1 :]
-            elif max_bytes is not None and size > max_bytes:
-                data = fh.read(max_bytes)
-            else:
-                data = fh.read()
-    except OSError:
-        return None, "Datei konnte nicht gelesen werden"
-
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        text = data.decode("utf-8", errors="replace")
-        return text, "Datei enthält ungültiges UTF-8"
-    if max_bytes is not None and not tail and size > max_bytes:
-        return text, f"Datei ist größer als {max_bytes} Bytes; Inhalt wurde gekürzt"
-    return text, None
-
-
 def _timer_schedule(name: str) -> str:
     """Effektiven systemd-Kalender lesen; Datei/Repo-Default sind Fallbacks."""
     effective = _systemctl(
@@ -329,8 +289,10 @@ def _timer_schedule(name: str) -> str:
         if match:
             return match.group(1)
 
-    content, error = _read_file_text(_timer_dropin_path(name))
-    if content is None or error:
+    path = _timer_dropin_path(name)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
         return DEFAULT_TIMER_SCHEDULE
     match = _TIMER_ON_CALENDAR_RE.search(content)
     return match.group(1) if match else DEFAULT_TIMER_SCHEDULE
@@ -551,8 +513,10 @@ def _heartbeat(state: Path) -> dict[str, Any] | None:
 def _phase_usage(state: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     path = state / "ledger.jsonl"
     events: list[dict[str, Any]] = []
-    text, _error = _read_file_text(path)
-    lines = text.splitlines() if text is not None else []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
     for line in lines:
         try:
             event = json.loads(line)
@@ -582,9 +546,7 @@ def _lint_pack_dir(base: Path, name: str) -> str | None:
     except loop_runner.ManifestError as exc:
         return str(exc)
     for pname, phase in pack.phases.items():
-        text, error = _read_file_text(pack.pack_dir / phase.prompt)
-        if text is None or error:
-            return f"Phase {pname} ({phase.prompt}): {error}"
+        text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
         for needle, warum in (
             ("{{STATE_DIR}}", "STATE_DIR-Platzhalter fehlt"),
             ("last-status", "last-status-Protokoll fehlt"),
@@ -710,15 +672,7 @@ def register_loops_routes(app: FastAPI) -> None:
         path = _models_path()
         if not path.is_file():
             return {"engines": {}}
-        text, error = _read_file_text(path)
-        if text is None or error:
-            return {"engines": {}}
-        try:
-            data = yaml.safe_load(text) or {}
-        except (ValueError, yaml.YAMLError):
-            return {"engines": {}}
-        if not isinstance(data, dict):
-            return {"engines": {}}
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         return {"engines": data.get("engines", {})}
 
     @app.get("/api/loops/{pack}/detail")
@@ -727,12 +681,10 @@ def register_loops_routes(app: FastAPI) -> None:
         source = "custom" if _dir_for(loaded.name) == loop_runner.CUSTOM_PACKS_DIR else "repo"
         state = _state_root() / loaded.name
         ledger_path = state / "LEDGER.md"
-        ledger_text, _ledger_error = _read_file_text(
-            ledger_path,
-            max_bytes=_LEDGER_TAIL_BYTES,
-            tail=True,
+        ledger_tail = (
+            ledger_path.read_text(encoding="utf-8").splitlines()[-50:]
+            if ledger_path.is_file() else []
         )
-        ledger_tail = ledger_text.splitlines()[-50:] if ledger_text is not None else []
         queue_entries = {
             stage: sorted(
                 p.name for p in (state / "queue" / stage).glob("*.md")
@@ -834,18 +786,11 @@ def register_loops_routes(app: FastAPI) -> None:
             p.name for p in loaded.pack_dir.glob("*.md") if p.is_file()
         )
         for fname in names:
-            content, error = _read_file_text(
-                loaded.pack_dir / fname,
-                max_bytes=_LOOP_FILE_MAX_BYTES,
-            )
-            item = {
+            files.append({
                 "name": fname,
-                "content": content or "",
+                "content": (loaded.pack_dir / fname).read_text(encoding="utf-8"),
                 "editable": editable,
-            }
-            if error:
-                item["error"] = error
-            files.append(item)
+            })
         return {"pack": loaded.name, "source": source, "files": files}
 
     @app.put("/api/loops/{pack}/files/{filename}")
