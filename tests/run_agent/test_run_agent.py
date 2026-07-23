@@ -4175,6 +4175,90 @@ class TestHandleMaxIterations:
             for item in input_items
         )
 
+    def test_codex_summary_omits_entire_tool_request_contract(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "chatgpt.com"
+        agent.model = "gpt-5.5"
+        captured = []
+
+        def fake_run_codex_stream(kwargs):
+            captured.append(dict(kwargs))
+            return SimpleNamespace(
+                status="completed",
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        status="completed",
+                        content=[SimpleNamespace(type="output_text", text="Summary")],
+                    )
+                ],
+            )
+
+        with patch.object(agent, "_run_codex_stream", side_effect=fake_run_codex_stream):
+            result = agent._handle_max_iterations(
+                [{"role": "user", "content": "do stuff"}], 60
+            )
+
+        assert result == "Summary"
+        assert len(captured) == 1
+        assert not ({"tools", "tool_choice", "parallel_tool_calls"} & captured[0].keys())
+
+    def test_codex_summary_retry_omits_entire_tool_request_contract(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "chatgpt.com"
+        agent.model = "gpt-5.5"
+        captured = []
+        response_texts = iter(["", "Retry summary"])
+
+        def fake_run_codex_stream(kwargs):
+            captured.append(dict(kwargs))
+            return SimpleNamespace(
+                status="completed",
+                output=[
+                    SimpleNamespace(
+                        type="message",
+                        status="completed",
+                        content=[
+                            SimpleNamespace(
+                                type="output_text", text=next(response_texts)
+                            )
+                        ],
+                    )
+                ],
+            )
+
+        with patch.object(agent, "_run_codex_stream", side_effect=fake_run_codex_stream):
+            result = agent._handle_max_iterations(
+                [{"role": "user", "content": "do stuff"}], 60
+            )
+
+        assert result == "Retry summary"
+        assert len(captured) == 2
+        assert all(
+            not ({"tools", "tool_choice", "parallel_tool_calls"} & request.keys())
+            for request in captured
+        )
+
+    def test_codex_normal_tool_request_keeps_entire_tool_request_contract(self, agent):
+        agent.api_mode = "codex_responses"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent._base_url_lower = agent.base_url.lower()
+        agent._base_url_hostname = "chatgpt.com"
+        agent.model = "gpt-5.5"
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "do stuff"}])
+
+        assert kwargs["tools"]
+        assert kwargs["tool_choice"] == "auto"
+        assert kwargs["parallel_tool_calls"] is True
+
     def test_api_sanitizer_matches_responses_call_id_when_id_differs(self, agent):
         messages = [
             {
