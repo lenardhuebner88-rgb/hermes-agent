@@ -17,6 +17,46 @@ _LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = (
 _LANE_CLAUDE_CLI_MODEL_IDS = {str(item["id"]) for item in _LANE_CLAUDE_CLI_MODELS}
 
 
+def reasoning_support_for(provider: str | None, model_id: str) -> list[str]:
+    """Return the reasoning-effort values Hermes can actually transport."""
+    provider = (provider or "").strip().lower()
+    model_id = (model_id or "").strip().lower()
+    if provider in {"openai-codex", "openai"} and model_id.startswith("gpt-5"):
+        return ["minimal", "low", "medium", "high"]
+    if model_id.startswith("claude") or provider == "anthropic":
+        return ["low", "medium", "high"]
+    if provider == "moonshotai" or "kimi" in model_id:
+        return ["low", "medium", "high"]
+    if provider == "google" or "gemini" in model_id:
+        return ["low", "medium", "high"]
+    if provider == "openrouter":
+        return ["low", "medium", "high"]
+    return []
+
+
+def _lane_model_metadata(provider: str | None, model: str) -> dict[str, float | int | None]:
+    metadata: dict[str, float | int | None] = {
+        "price_in_per_mtok_usd": None,
+        "price_out_per_mtok_usd": None,
+        "context_window": None,
+    }
+    if not provider:
+        return metadata
+    try:
+        from agent.models_dev import get_model_capabilities, get_model_info
+
+        capabilities = get_model_capabilities(provider, model)
+        info = get_model_info(provider, model)
+        if capabilities is not None:
+            metadata["context_window"] = capabilities.context_window
+        if info is not None and info.has_cost_data():
+            metadata["price_in_per_mtok_usd"] = info.cost_input
+            metadata["price_out_per_mtok_usd"] = info.cost_output
+    except Exception:
+        log.exception("lanes: failed to load models.dev metadata for %s/%s", provider, model)
+    return metadata
+
+
 def _lane_provider_label(provider_id: str, provider_row: dict[str, Any] | None = None) -> str:
     provider_id = (provider_id or "").strip()
     if provider_row is not None:
@@ -56,6 +96,8 @@ def _append_lane_model_option(
     label: str | None = None,
     locked: bool = False,
     source: str | None = None,
+    authenticated: bool = False,
+    configured: bool = False,
 ) -> None:
     model = (model or "").strip()
     if not model:
@@ -74,6 +116,11 @@ def _append_lane_model_option(
         "group": group,
         "provider": provider,
         "locked": locked,
+        "authenticated": authenticated,
+        "configured": configured,
+        **_lane_model_metadata(provider, model),
+        "reasoning_support": reasoning_support_for(provider, model),
+        "probe": _lane_model_probe_for(provider, model),
     }
     if source:
         row["source"] = source
@@ -172,6 +219,8 @@ def _lane_model_catalog(profiles: list[dict], active_lane: Optional[dict] = None
                     provider=provider,
                     label=model,
                     source="inventory",
+                    authenticated=bool(authenticated),
+                    configured=bool(configured),
                 )
     except Exception:
         log.exception("lanes: failed to build dynamic model catalog")
@@ -194,6 +243,8 @@ def _lane_model_catalog(profiles: list[dict], active_lane: Optional[dict] = None
                 provider=r.get("provider"),
                 label=str(r.get("label") or r.get("id") or ""),
                 source="inventory-cache",
+                authenticated=bool(r.get("authenticated")),
+                configured=bool(r.get("configured")),
             )
 
     _append_openrouter_extra_model_options(out, seen)
@@ -300,17 +351,31 @@ def _scan_lane_profiles() -> list[dict]:
                     elif isinstance(model_cfg, dict):
                         model = model_cfg.get("default") or model_cfg.get("model")
                         provider = model_cfg.get("provider")
+                    agent_cfg = cfg.get("agent")
+                    raw_reasoning_effort = (
+                        agent_cfg.get("reasoning_effort")
+                        if isinstance(agent_cfg, dict)
+                        else None
+                    )
+                    reasoning_effort = (
+                        raw_reasoning_effort.strip()
+                        if isinstance(raw_reasoning_effort, str) and raw_reasoning_effort.strip()
+                        else None
+                    )
                     from hermes_cli.fallback_config import get_fallback_chain
                     fallback_providers = get_fallback_chain(cfg)
                 else:
                     provider = None
                     fallback_providers = []
+                    reasoning_effort = None
             else:
                 provider = None
                 fallback_providers = []
+                reasoning_effort = None
         except Exception:
             provider = None
             fallback_providers = []
+            reasoning_effort = None
             pass
         out.append({
             "name": entry.name,
@@ -320,6 +385,11 @@ def _scan_lane_profiles() -> list[dict]:
                 provider.strip() if isinstance(provider, str) and provider.strip() else None
             ),
             "fallback_providers": [] if runtime == "claude-cli" else fallback_providers,
+            "reasoning_effort": reasoning_effort,
+            "reasoning_support": reasoning_support_for(
+                None if runtime == "claude-cli" else provider,
+                claude_model if runtime == "claude-cli" else (model or ""),
+            ),
             "description": read_profile_meta(entry).get("description", ""),
             "locked": runtime == "claude-cli",
             "locked_reason": "Claude-CLI / claude -p excluded from this slice" if runtime == "claude-cli" else None,
@@ -401,6 +471,109 @@ class LaneAuthSmokeBody(BaseModel):
     lane_id: Optional[ShortText] = None
     roles: Optional[list[ShortText]] = None
     timeout_seconds: Optional[int] = 45
+
+
+class ModelProbeResult(BaseModel):
+    provider: str
+    model: str
+    profile: str
+    status: Literal[
+        "ok",
+        "fallback",
+        "auth_error",
+        "quota_or_rate_limit",
+        "timeout",
+        "config_error",
+        "error",
+        "skipped",
+    ]
+    duration_ms: int
+    observed_provider: str | None
+    observed_model: str | None
+    error_class: str | None
+    reason: str | None
+    at: int
+
+
+class LaneModelProbeBody(BaseModel):
+    provider: ShortText
+    model: ShortText
+    profile: ShortText = "coder"
+    timeout_seconds: int = Field(default=45, ge=1, le=120)
+
+
+class LaneCatalogProbeModel(BaseModel):
+    provider: ShortText
+    model: ShortText
+
+
+class LaneCatalogProbeBody(BaseModel):
+    models: list[LaneCatalogProbeModel] = Field(min_length=1, max_length=16)
+    profile: Optional[ShortText] = None
+    timeout_seconds: int = Field(default=45, ge=1, le=120)
+    limit: int = Field(default=8, ge=1, le=16)
+
+
+_LANE_MODEL_PROBE_CACHE_CAP = 200
+_lane_model_probe_cache: dict[tuple[str, str], ModelProbeResult] = {}
+_lane_model_probe_cache_loaded = False
+
+
+def _lane_model_probe_cache_path() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "cache" / "lanes_model_probes.json"
+
+
+def _load_lane_model_probe_cache() -> None:
+    global _lane_model_probe_cache_loaded
+    if _lane_model_probe_cache_loaded:
+        return
+    _lane_model_probe_cache_loaded = True
+    path = _lane_model_probe_cache_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+        rows = raw if isinstance(raw, list) else []
+        parsed = [ModelProbeResult.model_validate(row) for row in rows]
+        parsed.sort(key=lambda row: row.at)
+        for row in parsed[-_LANE_MODEL_PROBE_CACHE_CAP:]:
+            _lane_model_probe_cache[(row.provider, row.model)] = row
+    except Exception:
+        log.exception("lanes: failed to load model probe cache")
+        _lane_model_probe_cache.clear()
+
+
+def _write_lane_model_probe_cache() -> None:
+    from utils import atomic_json_write
+
+    rows = sorted(_lane_model_probe_cache.values(), key=lambda row: row.at)
+    atomic_json_write(
+        _lane_model_probe_cache_path(),
+        [row.model_dump() for row in rows[-_LANE_MODEL_PROBE_CACHE_CAP:]],
+        indent=2,
+    )
+
+
+def _cache_lane_model_probe(result: ModelProbeResult) -> None:
+    _load_lane_model_probe_cache()
+    key = (result.provider, result.model)
+    _lane_model_probe_cache.pop(key, None)
+    _lane_model_probe_cache[key] = result
+    while len(_lane_model_probe_cache) > _LANE_MODEL_PROBE_CACHE_CAP:
+        oldest_key = min(
+            _lane_model_probe_cache,
+            key=lambda item: _lane_model_probe_cache[item].at,
+        )
+        _lane_model_probe_cache.pop(oldest_key)
+    _write_lane_model_probe_cache()
+
+
+def _lane_model_probe_for(provider: str | None, model: str) -> dict[str, Any] | None:
+    if not provider:
+        return None
+    _load_lane_model_probe_cache()
+    result = _lane_model_probe_cache.get((provider, model))
+    return result.model_dump() if result is not None else None
 
 
 _LANES_PROVIDER_RE = re.compile(r"provider=([A-Za-z0-9_.:/-]+)")
@@ -1114,6 +1287,102 @@ def lane_auth_smoke_endpoint(
     }
 
 
+def _run_lanes_model_probe(
+    *,
+    provider: str,
+    model: str,
+    profile: str,
+    timeout_seconds: int,
+) -> ModelProbeResult:
+    smoke = _run_single_lanes_auth_smoke(
+        {
+            "role": profile,
+            "profile": profile,
+            "provider": provider,
+            "model": model,
+            "runtime": "hermes",
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    status = str(smoke.get("status") or "error")
+    allowed_statuses = {
+        "ok",
+        "fallback",
+        "auth_error",
+        "quota_or_rate_limit",
+        "timeout",
+        "config_error",
+        "error",
+        "skipped",
+    }
+    if status not in allowed_statuses:
+        status = "error"
+    return ModelProbeResult(
+        provider=provider,
+        model=model,
+        profile=profile,
+        status=status,
+        duration_ms=max(int(smoke.get("duration_ms") or 0), 0),
+        observed_provider=smoke.get("observed_provider"),
+        observed_model=smoke.get("observed_model"),
+        error_class=smoke.get("error_class"),
+        reason=smoke.get("reason"),
+        at=int(time.time()),
+    )
+
+
+@lane_routes.post("/lanes/model-probe")
+def lane_model_probe_endpoint(payload: LaneModelProbeBody):
+    try:
+        result = _run_lanes_model_probe(
+            provider=payload.provider.strip(),
+            model=payload.model.strip(),
+            profile=payload.profile.strip(),
+            timeout_seconds=payload.timeout_seconds,
+        )
+        _cache_lane_model_probe(result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from hermes_cli.error_sanitize import safe_detail
+
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Model probe failed", log=log),
+        ) from exc
+
+
+@lane_routes.post("/lanes/catalog-probe")
+def lane_catalog_probe_endpoint(payload: LaneCatalogProbeBody):
+    try:
+        selected = payload.models[:payload.limit]
+        profile = (payload.profile or "coder").strip()
+        results: list[ModelProbeResult] = []
+        for target in selected:
+            result = _run_lanes_model_probe(
+                provider=target.provider.strip(),
+                model=target.model.strip(),
+                profile=profile,
+                timeout_seconds=payload.timeout_seconds,
+            )
+            _cache_lane_model_probe(result)
+            results.append(result)
+        return {
+            "results": results,
+            "truncated": len(payload.models) > len(selected),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        from hermes_cli.error_sanitize import safe_detail
+
+        raise HTTPException(
+            status_code=500,
+            detail=safe_detail(exc, "Catalog probe failed", log=log),
+        ) from exc
+
+
 @lane_routes.post("/lanes/openrouter-models/import")
 def lane_openrouter_model_import_endpoint(payload: LaneOpenRouterModelImportBody):
     """Smoke pasted OpenRouter model IDs and admit successful ones to config."""
@@ -1256,6 +1525,7 @@ class LanePersistProfileEntry(BaseModel):
     # this field. An explicit empty list is materially different: it clears the
     # profile fallback chain and the active-lane override.
     fallback_providers: Optional[list[LanePersistFallbackEntry]] = None
+    reasoning_effort: str | None = None
 
 
 class LanePersistBody(BaseModel):
@@ -1297,6 +1567,8 @@ def persist_lane_models_endpoint(
         bad_models: list[dict[str, str]] = []
         bad_runtime_models: list[dict[str, str]] = []
         bad_claude_providers: list[dict[str, str]] = []
+        bad_reasoning_profiles: list[str] = []
+        catalog_profiles_by_name = {profile["name"]: profile for profile in catalog_profiles}
         for name, entry in payload.profiles.items():
             if entry.model not in known_models:
                 bad_models.append({"profile": name, "model": entry.model})
@@ -1313,6 +1585,28 @@ def persist_lane_models_endpoint(
                 )
             if entry.worker_runtime == "claude-cli" and entry.provider:
                 bad_claude_providers.append({"profile": name, "provider": str(entry.provider)})
+            if entry.reasoning_effort not in {None, ""}:
+                profile = catalog_profiles_by_name[name]
+                model_row = next(
+                    (
+                        row
+                        for row in models
+                        if row.get("id") == entry.model
+                        and row.get("runtime") == entry.worker_runtime
+                    ),
+                    None,
+                )
+                target_provider = (
+                    entry.provider
+                    or (model_row or {}).get("provider")
+                    or profile.get("default_provider")
+                )
+                target_model = entry.model or profile.get("default_model") or ""
+                if entry.reasoning_effort not in reasoning_support_for(
+                    target_provider,
+                    target_model,
+                ):
+                    bad_reasoning_profiles.append(name)
         if bad_models:
             raise HTTPException(
                 status_code=400,
@@ -1327,6 +1621,14 @@ def persist_lane_models_endpoint(
             raise HTTPException(
                 status_code=400,
                 detail={"error": "claude-cli provider must be empty", "profiles": bad_claude_providers},
+            )
+        if bad_reasoning_profiles:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unsupported reasoning effort",
+                    "profiles": bad_reasoning_profiles,
+                },
             )
 
         lanes = kanban_db.list_lanes(conn)
@@ -1411,12 +1713,19 @@ def persist_lane_models_endpoint(
                         "fallback_providers",
                         [row.model_dump() for row in entry.fallback_providers],
                     )
+                if entry.reasoning_effort is not None:
+                    atomic_roundtrip_yaml_update(
+                        config_path,
+                        "agent.reasoning_effort",
+                        entry.reasoning_effort,
+                    )
 
             failed_profile = "__active_lane__"
             if lane_profiles and active_id is not None and active_lane is not None:
                 merged_profiles = dict(active_profiles)
                 merged_profiles.update(lane_profiles)
                 kanban_db.update_lane(conn, active_id, profiles=merged_profiles)
+            _invalidate_lane_profile_caches()
         except Exception as exc:
             log.exception("lanes/persist: transaction failed at %s", failed_profile)
             rollback_errors = rollback_profile_configs()
@@ -1449,6 +1758,18 @@ def persist_lane_models_endpoint(
         }
     finally:
         conn.close()
+
+
+def _invalidate_lane_profile_caches() -> None:
+    global _lane_profile_cache
+    _lane_profile_cache = None
+    try:
+        web_server = sys.modules.get("hermes_cli.web_server")
+        invalidate = getattr(web_server, "_invalidate_profiles_cache", None)
+        if invalidate is not None:
+            invalidate()
+    except Exception:
+        log.debug("lanes: dashboard profile cache invalidation unavailable", exc_info=True)
 
 
 
