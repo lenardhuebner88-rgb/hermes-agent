@@ -73,6 +73,9 @@ def copy_readonly_snapshot(path: Path) -> sqlite3.Connection:
 
 def candidate_from_payload(payload: dict[str, Any]) -> str | None:
     candidate = payload.get("diff_candidate_commit") or payload.get("reviewed_commit")
+    review_revision = payload.get("review_revision")
+    if not candidate and isinstance(review_revision, dict):
+        candidate = review_revision.get("reviewed_commit")
     return candidate[:64] if isinstance(candidate, str) and candidate else None
 
 
@@ -129,9 +132,18 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     ).fetchone()
     window_end = int(max_row["created_at"])
     cutoff = window_end - days * 86400
-    events = conn.execute(
+    window_events = conn.execute(
         "SELECT id, task_id, kind, payload, created_at, run_id FROM task_events "
         "WHERE created_at >= ? ORDER BY task_id, created_at, id",
+        (cutoff,),
+    ).fetchall()
+    events = conn.execute(
+        "WITH window_tasks AS ("
+        "SELECT DISTINCT task_id FROM task_events WHERE created_at >= ?"
+        ") "
+        "SELECT id, task_id, kind, payload, created_at, run_id FROM task_events "
+        "WHERE task_id IN (SELECT task_id FROM window_tasks) "
+        "ORDER BY task_id, created_at, id",
         (cutoff,),
     ).fetchall()
     events_by_task: dict[str, list[sqlite3.Row]] = collections.defaultdict(list)
@@ -147,6 +159,8 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     ping_by_task: collections.Counter[str] = collections.Counter()
     for task_id, task_events in events_by_task.items():
         for index, event in enumerate(task_events):
+            if int(event["created_at"]) < cutoff:
+                continue
             if event["kind"] == "task_ping_sent":
                 task_ping_count += 1
                 ping_by_task[task_id] += 1
@@ -255,7 +269,7 @@ def run_report(conn: sqlite3.Connection, days: int, focus_task: str) -> dict[str
     snapshot_digest = hashlib.sha256(
         "\n".join(
             f"{e['id']}|{e['task_id']}|{e['kind']}|{e['created_at']}|{e['run_id'] or ''}"
-            for e in events
+            for e in window_events
         ).encode()
     ).hexdigest()
     return {
