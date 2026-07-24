@@ -7,15 +7,35 @@
 # Exits non-zero on any failure so the cron wrapper can alert.
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Resolve the hermes CLI.
+# In the repo layout (<repo>/scripts/cron/), prefer the venv next to the repo.
+# In the copied layout (${HERMES_HOME}/scripts/), REPO_ROOT resolves to $HOME;
+# a stale $HOME/.venv must NOT win over the canonical HERMES_HOME venv.
+# Require BOTH the pyproject.toml marker AND the actual path layout
+# <REPO_ROOT>/scripts/cron/<script> to accept repo-relative venvs.
+# Precedence: `venv` is the canonical editable install; `.venv` is a stale
+# legacy env (no current hermes_cli) and must only ever be a last resort.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-# Resolve the hermes CLI — prefer the venv in the repo, fall back to PATH.
-if [[ -x "${REPO_ROOT}/.venv/bin/hermes" ]]; then
-    HERMES="${REPO_ROOT}/.venv/bin/hermes"
-elif [[ -x "${REPO_ROOT}/venv/bin/hermes" ]]; then
-    HERMES="${REPO_ROOT}/venv/bin/hermes"
-else
-    HERMES="hermes"
+HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
+
+HERMES=""
+if [[ "${SCRIPT_DIR}" == "${REPO_ROOT}/scripts/cron" && -f "${REPO_ROOT}/pyproject.toml" ]]; then
+    if [[ -x "${REPO_ROOT}/venv/bin/hermes" ]]; then
+        HERMES="${REPO_ROOT}/venv/bin/hermes"
+    elif [[ -x "${REPO_ROOT}/.venv/bin/hermes" ]]; then
+        HERMES="${REPO_ROOT}/.venv/bin/hermes"
+    fi
+fi
+if [[ -z "${HERMES}" ]]; then
+    if [[ -x "${HERMES_HOME}/hermes-agent/venv/bin/hermes" ]]; then
+        HERMES="${HERMES_HOME}/hermes-agent/venv/bin/hermes"
+    elif [[ -x "${HERMES_HOME}/hermes-agent/.venv/bin/hermes" ]]; then
+        HERMES="${HERMES_HOME}/hermes-agent/.venv/bin/hermes"
+    else
+        HERMES="hermes"
+    fi
 fi
 
 exec "$HERMES" kanban scores --digest "$@"
