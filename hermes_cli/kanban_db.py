@@ -9492,6 +9492,7 @@ def _end_run(
         (task_id,),
     )
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
+    _record_run_metric_scores(conn, run_id, task_id, created_at=now)
     return run_id
 
 
@@ -10124,6 +10125,7 @@ def _synthesize_ended_run(
     )
     run_id = int(cur.lastrowid or 0)
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
+    _record_run_metric_scores(conn, run_id, task_id, created_at=now)
     return run_id
 
 
@@ -13969,6 +13971,81 @@ def _record_verdict_score(
         return False
 
 
+def _record_run_metric_scores(
+    conn: sqlite3.Connection,
+    run_id: int,
+    task_id: str,
+    *,
+    created_at: Optional[int] = None,
+) -> int:
+    """Record run-level metric scores (duration, tokens, cost, attempt index).
+
+    Best-effort: errors are logged, never raised.  Only writes scores for
+    fields actually present in the run row (NULL → skip, never guess).
+    Dedupe: no double-insert per ``(run_id, name)`` — same pattern as
+    ``_record_verdict_score``.  ``value_type='numeric'``, ``source='board-metrics'``.
+    """
+    try:
+        row = conn.execute(
+            "SELECT started_at, ended_at, input_tokens, output_tokens, cost_usd "
+            "FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+
+        ts = int(created_at) if created_at is not None else int(time.time())
+
+        # Attempt index: 1-based count of runs for this task up to this run.
+        attempt_row = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND id <= ?",
+            (task_id, run_id),
+        ).fetchone()
+        attempt_index = int(attempt_row[0]) if attempt_row else None
+
+        metrics: list[tuple[str, float]] = []
+
+        started = row["started_at"]
+        ended = row["ended_at"]
+        if started is not None and ended is not None:
+            duration = int(ended) - int(started)
+            if duration >= 0:
+                metrics.append(("run_duration_seconds", float(duration)))
+
+        in_tok = row["input_tokens"]
+        out_tok = row["output_tokens"]
+        if in_tok is not None or out_tok is not None:
+            total = int(in_tok or 0) + int(out_tok or 0)
+            metrics.append(("run_tokens_total", float(total)))
+
+        cost = row["cost_usd"]
+        if cost is not None:
+            metrics.append(("run_cost_usd", float(cost)))
+
+        if attempt_index is not None:
+            metrics.append(("run_attempt_index", float(attempt_index)))
+
+        inserted = 0
+        for name, value in metrics:
+            existing = conn.execute(
+                "SELECT 1 FROM scores WHERE run_id = ? AND name = ? LIMIT 1",
+                (run_id, name),
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(
+                "INSERT INTO scores "
+                "(run_id, task_id, name, value, value_type, source, created_at) "
+                "VALUES (?, ?, ?, ?, 'numeric', 'board-metrics', ?)",
+                (run_id, task_id, name, value, ts),
+            )
+            inserted += 1
+        return inserted
+    except Exception:
+        _log.debug("run-metric scores: failed for run %s", run_id, exc_info=True)
+        return 0
+
+
 def backfill_verdict_scores(conn: sqlite3.Connection) -> int:
     """F5 one-time (idempotent): mirror pre-existing ``task_runs.verdict``
     rows into ``scores`` so the eval baseline starts with history. Score
@@ -13982,6 +14059,23 @@ def backfill_verdict_scores(conn: sqlite3.Connection) -> int:
         for r in rows:
             if _record_verdict_score(conn, r["id"], r["verdict"], created_at=r["at"]):
                 inserted += 1
+    return inserted
+
+
+def backfill_run_metric_scores(conn: sqlite3.Connection) -> int:
+    """Idempotent backfill: mirror run metrics (duration, tokens, cost,
+    attempt index) from historical ``task_runs`` rows with ``ended_at``
+    into ``scores``.  Second run inserts 0 rows (dedupe by run_id+name)."""
+    rows = conn.execute(
+        "SELECT id, task_id, COALESCE(ended_at, started_at) AS at "
+        "FROM task_runs WHERE ended_at IS NOT NULL",
+    ).fetchall()
+    inserted = 0
+    with write_txn(conn):
+        for r in rows:
+            inserted += _record_run_metric_scores(
+                conn, r["id"], r["task_id"], created_at=r["at"]
+            )
     return inserted
 
 
@@ -32699,6 +32793,179 @@ def scores_report(
         "approved_rows": approved_rows,
         "approval_rate": approved_rows / rows_total if rows_total else None,
         "weeks": weeks,
+    }
+
+
+def scores_digest(
+    conn: sqlite3.Connection, *, weeks: int = 4, now: Optional[int] = None
+) -> dict[str, Any]:
+    """Compact weekly digest: approval rates, per-profile/model breakdown,
+    cost/duration per approved run, and retry hotspots.
+
+    Overall approval rate and weekly values use the same query logic as
+    :func:`scores_report` so the two stay consistent (AC-4).
+    """
+    weeks = max(1, int(weeks))
+    now_dt = _dt.datetime.fromtimestamp(now or time.time(), tz=_dt.timezone.utc)
+    current_monday = now_dt.date() - _dt.timedelta(days=now_dt.weekday())
+    week_starts = [
+        current_monday - _dt.timedelta(weeks=offset)
+        for offset in range(weeks - 1, -1, -1)
+    ]
+    start_epoch = int(
+        _dt.datetime.combine(
+            week_starts[0], _dt.time.min, tzinfo=_dt.timezone.utc
+        ).timestamp()
+    )
+
+    # Overall approval rate — same query as scores_report for consistency
+    overall = conn.execute(
+        "SELECT COUNT(*) AS rows_total, "
+        "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
+        "FROM scores"
+    ).fetchone()
+    rows_total = int(overall["rows_total"])
+    approved_rows = int(overall["approved_rows"])
+    approval_rate = approved_rows / rows_total if rows_total else None
+
+    # Weekly approval rates (last N weeks, same logic as scores_report)
+    weekly_counts: dict[_dt.date, tuple[int, int]] = {}
+    for row in conn.execute(
+        "SELECT created_at, value FROM scores WHERE created_at >= ? ORDER BY created_at",
+        (start_epoch,),
+    ):
+        day = _dt.datetime.fromtimestamp(
+            int(row["created_at"]), tz=_dt.timezone.utc
+        ).date()
+        monday = day - _dt.timedelta(days=day.weekday())
+        if monday in week_starts:
+            rt, ar = weekly_counts.get(monday, (0, 0))
+            weekly_counts[monday] = (rt + 1, ar + int(row["value"] == 1.0))
+
+    weekly: list[dict[str, Any]] = []
+    for monday in week_starts:
+        rt, ar = weekly_counts.get(monday, (0, 0))
+        iso_year, iso_week, _ = monday.isocalendar()
+        weekly.append(
+            {
+                "year": iso_year,
+                "week": iso_week,
+                "rows_total": rt,
+                "approved_rows": ar,
+                "approval_rate": ar / rt if rt else None,
+            }
+        )
+
+    # Week-over-week delta (last two weeks with data)
+    wow_delta: Optional[float] = None
+    rates_with_data = [w for w in weekly if w["approval_rate"] is not None]
+    if len(rates_with_data) >= 2:
+        wow_delta = rates_with_data[-1]["approval_rate"] - rates_with_data[-2]["approval_rate"]
+
+    # Per-profile approval rate (review_verdict joined with task_runs)
+    by_profile: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(tr.profile, '?') AS profile, "
+        "COUNT(*) AS total, "
+        "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
+        "FROM scores s "
+        "JOIN task_runs tr ON s.run_id = tr.id "
+        "WHERE s.name = 'review_verdict' "
+        "GROUP BY tr.profile "
+        "ORDER BY total DESC"
+    ):
+        total = int(row["total"])
+        approved = int(row["approved"])
+        by_profile[str(row["profile"])] = {
+            "total": total,
+            "approved": approved,
+            "approval_rate": approved / total if total else None,
+        }
+
+    # Per-model approval rate
+    by_model: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(tr.active_model, '?') AS model, "
+        "COUNT(*) AS total, "
+        "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
+        "FROM scores s "
+        "JOIN task_runs tr ON s.run_id = tr.id "
+        "WHERE s.name = 'review_verdict' "
+        "GROUP BY tr.active_model "
+        "ORDER BY total DESC"
+    ):
+        total = int(row["total"])
+        approved = int(row["approved"])
+        by_model[str(row["model"])] = {
+            "total": total,
+            "approved": approved,
+            "approval_rate": approved / total if total else None,
+        }
+
+    # Cost and duration per approved run (from F1 metric scores)
+    cost_duration: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT s.run_id, tr.task_id, "
+        "MAX(CASE WHEN s.name = 'run_cost_usd' THEN s.value END) AS cost, "
+        "MAX(CASE WHEN s.name = 'run_duration_seconds' THEN s.value END) AS duration "
+        "FROM scores s "
+        "JOIN task_runs tr ON tr.id = s.run_id "
+        "WHERE s.run_id IN ("
+        "  SELECT run_id FROM scores "
+        "  WHERE name = 'review_verdict' AND value = 1.0"
+        ") "
+        "AND s.name IN ('run_cost_usd', 'run_duration_seconds') "
+        "GROUP BY s.run_id "
+        "ORDER BY s.run_id DESC "
+        "LIMIT 20"
+    ):
+        cost_duration.append(
+            {
+                "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
+                "task_id": str(row["task_id"]) if row["task_id"] is not None else None,
+                "cost_usd": float(row["cost"]) if row["cost"] is not None else None,
+                "duration_seconds": (
+                    float(row["duration"]) if row["duration"] is not None else None
+                ),
+            }
+        )
+
+    # Whether any metric scores exist at all (for fallback message)
+    has_metrics = (
+        conn.execute(
+            "SELECT 1 FROM scores "
+            "WHERE name IN ('run_cost_usd', 'run_duration_seconds') LIMIT 1"
+        ).fetchone()
+        is not None
+    )
+
+    # Top-3 retry hotspots (tasks with highest run_attempt_index)
+    retry_hotspots: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT task_id, MAX(value) AS max_attempt "
+        "FROM scores "
+        "WHERE name = 'run_attempt_index' "
+        "GROUP BY task_id "
+        "ORDER BY max_attempt DESC "
+        "LIMIT 3"
+    ):
+        retry_hotspots.append(
+            {"task_id": str(row["task_id"]), "max_attempt": int(row["max_attempt"])}
+        )
+
+    return {
+        "generated_at": int(now or time.time()),
+        "weeks_requested": weeks,
+        "approval_rate": approval_rate,
+        "approved_rows": approved_rows,
+        "rows_total": rows_total,
+        "wow_delta": wow_delta,
+        "weekly": weekly,
+        "by_profile": by_profile,
+        "by_model": by_model,
+        "cost_duration_per_approved_run": cost_duration,
+        "has_metric_scores": has_metrics,
+        "retry_hotspots": retry_hotspots,
     }
 
 
