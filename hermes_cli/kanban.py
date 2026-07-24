@@ -1074,6 +1074,15 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         help="Number of weeks for --digest (default: 4)",
     )
 
+    p_export_scores = sub.add_parser(
+        "export-langfuse-scores",
+        help="Export board scores to Langfuse traces matched by Kanban metadata",
+    )
+    p_export_scores.add_argument(
+        "--dry-run", action="store_true",
+        help="Report trace matches and score names without writing",
+    )
+
     p_bfcost = sub.add_parser(
         "backfill-costs",
         help="Deferred profile-aware cost backfill for closed runs with NULL "
@@ -4099,6 +4108,29 @@ def _cmd_scores(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
+    """Export the active board's scores without changing its SQLite database."""
+    from hermes_cli.langfuse_scores_export import export_scores
+
+    try:
+        result = export_scores(dry_run=bool(args.dry_run))
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    # AC-2: matched=0/posted=0 with exit 0 is a valid no-op (forward-only:
+    # historical board scores without a trace are expected to be unmatched).
+    matched = result.get("matched", 0)
+    unmatched = result.get("unmatched", 0)
+    posted = result.get("posted", 0)
+    dry = " (dry-run)" if args.dry_run else ""
+    print(
+        f"Langfuse export{dry}: matched={matched} unmatched={unmatched} posted={posted}",
+        file=sys.stderr,
+    )
+    print(json.dumps(result, sort_keys=True))
+    return 0
+
+
 def _fmt_pct(value: Optional[float]) -> str:
     """Format a 0..1 float as percentage string, or 'n/a'."""
     return f"{value:.1%}" if value is not None else "n/a"
@@ -4672,6 +4704,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "watch":    _cmd_watch,
     "stats":    _cmd_stats,
     "scores":   _cmd_scores,
+    "export-langfuse-scores": _cmd_export_langfuse_scores,
     "backfill-costs": _cmd_backfill_costs,
     "backfill-metrics": _cmd_backfill_metrics,
     "log":      _cmd_log,
