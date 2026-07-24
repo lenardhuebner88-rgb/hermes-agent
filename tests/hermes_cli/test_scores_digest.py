@@ -418,3 +418,86 @@ def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
         f"omission marker must precede retained weeks, "
         f"got: {trend_line!r}"
     )
+
+
+# ── Regression: approval counters must count only review_verdict ────────
+
+
+def test_approval_counts_only_review_verdict(tmp_path, monkeypatch):
+    """Critic C-2/C-3: overall and weekly approval counters in both
+    scores_report and scores_digest must count ONLY rows with
+    name='review_verdict'.  Metric scores (run_cost_usd,
+    run_duration_seconds, run_tokens_total, run_attempt_index, F1)
+    must not inflate the denominator.
+
+    Deterministic setup:
+    - Run A: review_verdict=1.0 + run_cost_usd + run_duration_seconds
+    - Run B: review_verdict=0.0 + run_attempt_index
+    - Run C: F1 metric only, NO review_verdict  → must NOT add to denominator
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_usd",
+                       value=0.05, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_duration_seconds",
+                       value=90.0, created_at=ts)
+
+        t2 = kb.create_task(conn, title="t2", assignee="tester")
+        r2 = _create_run(conn, task_id=t2, profile="reviewer", model="gpt5")
+        _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_attempt_index",
+                       value=3.0, created_at=ts)
+
+        # Run C: metric-only, no review_verdict — must NOT affect approval
+        t3 = kb.create_task(conn, title="t3", assignee="tester")
+        r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_usd",
+                       value=0.10, created_at=ts)
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_tokens_total",
+                       value=5000.0, created_at=ts)
+
+        report = kb.scores_report(conn, now=now)
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    # Pure verdict approval: 1 approved out of 2 verdict rows = 0.5
+    assert report["rows_total"] == 2, (
+        f"scores_report rows_total must count only review_verdict rows, "
+        f"got {report['rows_total']}"
+    )
+    assert report["approved_rows"] == 1
+    assert report["approval_rate"] == 0.5
+
+    assert digest["rows_total"] == 2, (
+        f"scores_digest rows_total must count only review_verdict rows, "
+        f"got {digest['rows_total']}"
+    )
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 0.5
+
+    # Weekly approval aggregates must contain only the 2 verdict rows, not
+    # the 7 total score rows.
+    iso_year, iso_week, _ = monday.date().isocalendar()
+    for w in report["weeks"]:
+        if w["year"] == iso_year and w["week"] == iso_week:
+            assert w["rows_total"] == 2, (
+                f"weekly rows_total must count only review_verdict, got {w}"
+            )
+            assert w["approved_rows"] == 1
+            break
+    for w in digest["weekly"]:
+        if w["year"] == iso_year and w["week"] == iso_week:
+            assert w["rows_total"] == 2, (
+                f"digest weekly rows_total must count only review_verdict, got {w}"
+            )
+            assert w["approved_rows"] == 1
+            break
+
+    # by_name still reports all score names (informational, not approval)
+    assert "run_cost_usd" in report["by_name"]
+    assert "run_tokens_total" in report["by_name"]
