@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, ChartSpline, Clock, Command, FlaskConical, FolderGit2, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor } from "lucide-react";
+import { BookOpen, ChartSpline, Clock, Command, FlaskConical, FolderGit2, GitBranch, Hammer, KanbanSquare, LayoutDashboard, Lightbulb, MessageSquare, Mic2, MoreHorizontal, PanelLeft, PenTool, RefreshCw, SearchCheck, Server, Settings, Shield, Sparkles, TerminalSquare, Workflow, Anchor, BadgeCheck } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { de } from "../i18n/de";
@@ -13,7 +13,7 @@ import { PulsLeiste } from "./leitstand";
 import { useClientNowSeconds } from "../lib/clock";
 import { useLiveStatus } from "../hooks/useLiveEvents";
 
-export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat" | "projekte";
+export type ControlTab = "fleet" | "overview" | "inbox" | "pulse" | "workstreams" | "agentTerminals" | "flow" | "ketten" | "statistik" | "scorecard" | "autoresearch" | "backlog" | "orchestrator" | "crons" | "lanes" | "system" | "pressure" | "ops" | "research" | "bibliothek" | "schmiede" | "stratege" | "loops" | "designBoard" | "diktat" | "projekte";
 
 // The daily spine: Fleet · Start · Terminal · Statistik · Regal. Flow/Ketten
 // live in Fleet now, and System remains reachable through "Mehr" + deep-link.
@@ -59,6 +59,7 @@ const moreTabs: Array<{ id: ControlTab; label: string; path: string; icon: React
   { id: "lanes", label: "Lanes", path: "/control/lanes", icon: Shield },
   // System (S1-Fusion): Druck + Ops Radar + Puls in einer Leitstand-Ansicht.
   { id: "system", label: "System", path: "/control/system", icon: Server },
+  { id: "scorecard", label: "Scorecard", path: "/control/scorecard", icon: BadgeCheck },
 
   // Programm 3: Recherche (Wissen beauftragen); Bibliothek sitzt seit
   // 2026-06-11 in der Haupt-Nav, dafür wohnt Autoresearch jetzt hier.

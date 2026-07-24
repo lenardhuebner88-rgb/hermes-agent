@@ -41,6 +41,9 @@ const AgentTerminalsView = lazy(() =>
 const StatistikView = lazy(() =>
   import("./views/StatistikView").then((m) => ({ default: m.StatistikView })),
 );
+const ScorecardView = lazy(() =>
+  import("./views/ScorecardView").then((m) => ({ default: m.ScorecardView })),
+);
 const AutoresearchView = lazy(() =>
   import("./views/AutoresearchView").then((m) => ({ default: m.AutoresearchView })),
 );
@@ -110,6 +113,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/flow")) return "fleet";
   if (pathname.includes("/control/ketten")) return "fleet";
   if (pathname.includes("/control/statistik")) return "statistik";
+  if (pathname.includes("/control/scorecard")) return "scorecard";
   if (pathname.includes("/control/autoresearch")) return "autoresearch";
   if (pathname.includes("/control/backlog")) return "backlog";
   if (pathname.includes("/control/orchestrator")) return "orchestrator";
@@ -143,6 +147,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   workstreams: () => import("./views/AgentOpsView"),
   agentTerminals: () => import("./views/AgentTerminalsView"),
   statistik: () => import("./views/StatistikView"),
+  scorecard: () => import("./views/ScorecardView"),
   autoresearch: () => import("./views/AutoresearchView"),
   backlog: () => import("./views/BacklogView"),
   orchestrator: () => import("./views/OrchestratorBacklogView"),
@@ -175,6 +180,7 @@ const tabPath: Record<ControlTab, string> = {
   flow: "/control/fleet",
   ketten: "/control/fleet",
   statistik: "/control/statistik",
+  scorecard: "/control/scorecard",
   autoresearch: "/control/autoresearch",
   backlog: "/control/backlog",
   orchestrator: "/control/orchestrator",
@@ -288,6 +294,7 @@ export default function ControlPage() {
         {/* hermes wurde in Fleet absorbiert (Phase 2) */}
         <Route path="hermes" element={<QueryPreservingRedirect to="/control/fleet" />} />
         <Route path="statistik" element={<StatistikView />} />
+        <Route path="scorecard" element={<ScorecardView />} />
         {/* Abriss S5: Flow → Fleet (Board/Task-Steuerung/Kette-starten zogen ins Fleet-Cockpit). */}
         <Route path="flow" element={<QueryPreservingRedirect to="/control/fleet" />} />
         {/* Abriss S5: Ketten → Fleet (Ketten-Subtab: Kosten, Cancel-Chain, Graph). */}
