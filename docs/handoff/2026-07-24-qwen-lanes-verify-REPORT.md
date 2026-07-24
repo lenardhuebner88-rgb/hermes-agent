@@ -256,3 +256,65 @@ See §5 — the lines above are copied verbatim from `/tmp/lanes_verify/gate-fro
 - Suggested follow-ups (operator decisions, §4): openai-codex `-pro` catalog curation, exclude image models from
   chat-probe scope, claude-cli reasoning rendering, non-openrouter `extra_models` catalog listing.
 
+---
+
+## 8. Ship addendum — session 2 (verify → improve → land), 2026-07-24
+
+**Session:** interactive Claude (Claude-Code harness, worktree `qwen-lanes-verify`) · **Mandate:** operator grant
+≈10:57 via `docs/handoff/2026-07-24-qwen-lanes-SHIP-brief.md`, executed exactly as scripted (§4 grant used, nothing beyond).
+
+### Review verdicts (§1 — fresh eyes, gates re-run, nothing inherited trusted)
+- **Fix 1 / F3-1 (api.ts): PASS.** Serializer fix correct. The real latent path it closes: *edited* fallbacks on a
+  locked hermes row were silently dropped (omit = backend preserves old values). claude-cli control upheld — the
+  backend rejects fallbacks for claude-cli rows, so not attaching them is required, not just tradition.
+- **Fix 2 / F-REASONING-K3: PASS.** Provider set grounded in the live config (`kimi-coding` ×3, `kimi-coding-cn` ×1 —
+  the `-cn` id is real, not speculative). k3 reachability proven in Matrix C. No `--reasoning-effort` CLI flag exists,
+  so no cheap behavioral probe of whether the kimi-coding transport honors the value; that residual applies equally
+  to every kimi-coding sibling, so the fix removes an inconsistency rather than introducing new dishonesty.
+- **Fix 3 / F-PROBE-CUSTOM: PASS, fix-needed found & fixed.** The early `ok` ignored `observed_provider` entirely.
+  Lane fallback entries are `provider:model` pairs, so a real fallback serving the SAME model id on a different
+  named provider (e.g. `kimi-coding:k3 → kimi:k3`) would have masqueraded as `ok` — a silent fallback faking the
+  primary green. Latent (0 same-model fallback chains live today) but structurally real.
+
+### Improvement (§2 — bounded)
+- `lanes-verify: sharpen auth-smoke ok rule for same-model fallbacks` (worktree tip `94a3f794e` after rebase): the
+  exact-same-model `ok` is now granted only when the observed provider is the requested one or a custom-endpoint
+  self-label (`custom` / `custom:<name>`); a different named provider answering stays `fallback`. Also removed the
+  now-unreachable second `ok` branch. +2 regression tests (same-model named-provider fallback → `fallback`, with and
+  without the log marker; `custom:<name>` self-label → `ok`). Residual documented in code: a fallback onto another
+  custom endpoint is indistinguishable from a self-label.
+- §4 found-but-not-fixed items are all operator/catalog/design decisions — left documented, none closed (scope held).
+
+### Gate evidence (§3 — final worktree state, incl. full re-run after the rebase)
+- `bash scripts/gate-frontend.sh` → `=== FRONTEND-GATE GRÜN (exit 0) ===` (run 3×: on session-1 state, on my commit,
+  post-rebase; all exit 0).
+- Per-file pytest (live venv, `PYTHONPATH=$(pwd)`): 17 + 20 + 30 + 306 = **373 passed** (test_lane_model_platform /
+  test_kanban_lanes_persist / test_kanban_lanes / test_kanban_dashboard_plugin).
+- `ruff check .` → `All checks passed!`
+
+### Landing live (§4)
+- Preflight (live checkout): clean tree, branch `main` ✓. main had moved (`4772bcccb`, kanban scorecard increment —
+  **zero file overlap**) → rebased the branch in the worktree (clean), re-ran ALL gates there (above), then
+  `git merge --ff-only` → `4772bcccb..94a3f794e` Fast-forward ✓.
+- Gates on the merged live state: `gate-frontend.sh` exit 0 · `run-affected.sh` exit 0 (no affected files against its
+  baseline; touched tests covered by the per-file runs) · `pytest --co -q tests/` exit 0 (48569 collected, 65
+  deselected) · `ruff check .` clean.
+- `CONFIRMED=1 scripts/deploy_dashboard.sh` → exit 0 · `health: loopback=200 tailnet_guard=200 service=active` ·
+  `payload: version=0.18.2 gateway_running=True config_version=27` · `[deploy] OK — live + mobile reachable`.
+- Smoke: `overall=healthy autoresearch=healthy gateway=healthy kanban_db=healthy kanban_dispatcher=healthy(age_s=23.5)`,
+  exit 0.
+- **Live proof = payload:** authenticated `GET /api/plugins/kanban/lanes` → **3 lanes** (api-standard active,
+  max-abo, Premium) / **10 profiles** (top-level catalog) / **202 models** (198→202 is catalog drift since the
+  matrices — identical count before and after this rollout; not caused by it).
+- **Fixed behavior spot-check live** (one sequential Abo call): `POST /api/plugins/kanban/lanes/model-probe`
+  `alibaba-token-plan/qwen3.8-max-preview` → **`status: ok`** — `observed custom/qwen3.8-max-preview`, exact
+  response. Pre-Fix-3 this exact payload read `fallback`.
+
+### Hashes & fork sync
+- My increment merged at main `94a3f794e`. During the live-gate window a parallel kanban increment (t_e207e287,
+  Langfuse identity; own worker/integrator gates) landed on top → the service restart shipped `09147b28d` = my work
+  + that increment. `94a3f794e` verified ancestor of both `main` and `piet-fork/main`.
+- Fork sync: ff `4c8158a9e..09147b28d` → `git rev-parse main piet-fork/main` =
+  **`09147b28d6f8fbc80304b42399748f10d688e06d`** (equal — the only accepted proof) ✓.
+- This addendum committed on main, fork re-synced afterwards (hashes in the commit after it).
+
