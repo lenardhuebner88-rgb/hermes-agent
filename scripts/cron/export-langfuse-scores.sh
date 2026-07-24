@@ -32,5 +32,20 @@ fi
 
 cd "${repo_root}"
 
+# Resolve the repo venv python (venv/ preferred, .venv/ fallback).
+# Never fall back to ~/.local/bin/hermes — the digest-script lesson (24.07.)
+# showed that a PATH-resolved `hermes` can point at a stale install.
+if [[ -x "${repo_root}/venv/bin/python" ]]; then
+    py="${repo_root}/venv/bin/python"
+elif [[ -x "${repo_root}/.venv/bin/python" ]]; then
+    py="${repo_root}/.venv/bin/python"
+else
+    echo "export-langfuse-scores: error: repo venv python not found (${repo_root}/venv or .venv)" >&2
+    exit 1
+fi
+
+# hermes_cli is a package without __main__.py; the entry guard lives in
+# hermes_cli/main.py.  Invoke -m hermes_cli.main (never bare -m hermes_cli,
+# which exits 1 with "No module named hermes_cli.__main__").
 # Pass stdout/exit-code through; --cron controls the silent contract.
-python -m hermes_cli kanban export-langfuse-scores --cron
+"${py}" -m hermes_cli.main kanban export-langfuse-scores --cron
