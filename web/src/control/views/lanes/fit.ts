@@ -141,8 +141,15 @@ export function scoreModelForRole(
   probes?: Record<string, ModelProbeResult>,
 ): FitScore {
   const req = ROLE_REQUIREMENTS[role];
-  // Hard gate: KNOWN-bad models are never recommended. Absent fields fail soft.
-  if (model.authenticated === false || model.sinnvoll === false) {
+  // Hard gate: a model KNOWN unreachable is never recommended. claude-cli
+  // (MAX-Abo / claude binary) carries no inventory provider-credential, so its
+  // `authenticated` flag is NOT a reachability signal — exempt it from that
+  // clause (sinnvoll still gates it, so a deliberately-excluded claude model is
+  // still zeroed). Absent fields fail soft (older payloads / captured fixture).
+  const knownUnreachable =
+    model.sinnvoll === false ||
+    (model.authenticated === false && model.runtime !== "claude-cli");
+  if (knownUnreachable) {
     return { score: 0, reasons: ["nicht erreichbar"] };
   }
 

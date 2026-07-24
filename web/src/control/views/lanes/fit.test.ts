@@ -122,6 +122,25 @@ describe("scoreModelForRole", () => {
     expect(scoreModelForRole(legacy, "coder").score).toBeGreaterThan(0);
   });
 
+  it("exempts claude-cli from the authenticated gate (MAX-Abo needs no provider cred)", () => {
+    // The backend reports authenticated=false for hardcoded claude-cli entries
+    // (no inventory provider), but the MAX-Abo / claude binary IS reachable —
+    // the compass must still recommend it (regression: real-data QA caught the
+    // compass showing every Claude model as score 0 / "nicht erreichbar").
+    const cli = mkModel({
+      id: "claude-opus-4-8",
+      runtime: "claude-cli",
+      provider: null,
+      authenticated: false,
+      sinnvoll: true,
+      reasoning_support: ["low", "medium", "high"],
+    });
+    expect(scoreModelForRole(cli, "premium").score).toBeGreaterThan(0);
+    // A deliberately un-curated claude model is still zeroed via sinnvoll.
+    const cliExcluded = mkModel({ id: "claude-x", runtime: "claude-cli", authenticated: false, sinnvoll: false });
+    expect(scoreModelForRole(cliExcluded, "premium").score).toBe(0);
+  });
+
   it("carries latency + price reason tokens only when the data is present", () => {
     const withData = scoreModelForRole(FAST_CODER, "coder");
     expect(withData.reasons).toContain("400 ms");

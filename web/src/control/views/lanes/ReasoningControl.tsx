@@ -68,7 +68,7 @@ export function ReasoningControl({
             title={opt.full}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "min-h-9 rounded-[5px] px-2.5 text-micro font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40",
+              "min-h-10 rounded-[5px] px-2.5 text-micro font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40",
               on
                 ? "border border-live bg-live/15 text-bronze-hi"
                 : "border border-transparent text-ink-2 hover:bg-surface-3 hover:text-ink",

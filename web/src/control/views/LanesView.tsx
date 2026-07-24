@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { TriangleAlert } from "lucide-react";
-import { SubtabChips } from "../components/leitstand";
+import { DrawerShell, SubtabChips } from "../components/leitstand";
 import type { Density } from "../hooks/useDensity";
 import {
   activateLane,
@@ -44,6 +44,27 @@ const RIGHT_TABS = [
   { id: "kompass" as const, label: t.kompass },
 ];
 
+/** Compact-tier fork (<600px / `tab`): Rauch & Kompass move into a DrawerShell
+ *  instead of a second pane. Mirrors useTwoPaneExpanded's matchMedia guard so it
+ *  is SSR/test-safe (no matchMedia → not compact → inline panes). */
+function useCompact(): boolean {
+  const [compact, setCompact] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      !window.matchMedia("(min-width: 37.5rem)").matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(min-width: 37.5rem)");
+    const onChange = () => setCompact(!media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+  return compact;
+}
+
 function LanesPlatform({
   data,
   lane,
@@ -76,6 +97,8 @@ function LanesPlatform({
   const [batchRunning, setBatchRunning] = useState(false);
   const [benchRunning, setBenchRunning] = useState(false);
   const [benchResults, setBenchResults] = useState<ModelProbeResult[]>([]);
+  const isCompact = useCompact();
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const updateRow = useCallback((profile: string, patch: Partial<EditorRow>) => {
     setRows((prev) => prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)));
@@ -168,6 +191,28 @@ function LanesPlatform({
     }
   }, []);
 
+  const rightPanel =
+    subtab === "rauch" ? (
+      <SmokePanel
+        models={models}
+        probes={probes}
+        busy={busy}
+        batchRunning={batchRunning}
+        onCatalogProbe={() => void handleCatalogProbe()}
+      />
+    ) : (
+      <Compass
+        models={models}
+        rows={rows}
+        probes={probes}
+        busy={busy}
+        benchRunning={benchRunning}
+        benchResults={benchResults}
+        onAdopt={handleAdopt}
+        onBench={(selected) => void handleBench(selected)}
+      />
+    );
+
   return (
     <div className="space-y-4">
       <LaneBar
@@ -199,30 +244,55 @@ function LanesPlatform({
           saveError={saveError}
         />
 
-        <div className="min-w-0 space-y-3">
-          <SubtabChips items={RIGHT_TABS} active={subtab} onSelect={setSubtab} ariaLabelPrefix="Bereich" />
-          {subtab === "rauch" ? (
-            <SmokePanel
-              models={models}
-              probes={probes}
-              busy={busy}
-              batchRunning={batchRunning}
-              onCatalogProbe={() => void handleCatalogProbe()}
-            />
-          ) : (
-            <Compass
-              models={models}
-              rows={rows}
-              probes={probes}
-              busy={busy}
-              benchRunning={benchRunning}
-              benchResults={benchResults}
-              onAdopt={handleAdopt}
-              onBench={(selected) => void handleBench(selected)}
-            />
-          )}
-        </div>
+        {isCompact ? (
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setSubtab("rauch");
+                setDrawerOpen(true);
+              }}
+              className="min-h-12 rounded-card border border-line bg-surface-1 px-3 text-sec font-medium text-ink-2 transition-colors duration-150 hover:border-live hover:text-live"
+            >
+              {t.rauch}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSubtab("kompass");
+                setDrawerOpen(true);
+              }}
+              className="min-h-12 rounded-card border border-line bg-surface-1 px-3 text-sec font-medium text-ink-2 transition-colors duration-150 hover:border-live hover:text-live"
+            >
+              {t.kompass}
+            </button>
+          </div>
+        ) : (
+          <div className="min-w-0 space-y-3">
+            <SubtabChips items={RIGHT_TABS} active={subtab} onSelect={setSubtab} ariaLabelPrefix="Bereich" />
+            {rightPanel}
+          </div>
+        )}
       </div>
+
+      {isCompact && drawerOpen ? (
+        <DrawerShell
+          eyebrow={t.title}
+          title={subtab === "rauch" ? t.rauch : t.kompass}
+          onClose={() => setDrawerOpen(false)}
+          ariaLabel={subtab === "rauch" ? t.rauch : t.kompass}
+          widthClassName="tab:w-[min(440px,92vw)]"
+        >
+          <SubtabChips
+            items={RIGHT_TABS}
+            active={subtab}
+            onSelect={setSubtab}
+            ariaLabelPrefix="Bereich"
+            className="mb-3"
+          />
+          {rightPanel}
+        </DrawerShell>
+      ) : null}
     </div>
   );
 }

@@ -65,7 +65,7 @@ export function SmokePanel({
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
-        <KpiTile label={t.erreichbar} value={t.of(reachable, sinnvoll.length)} dot="live" />
+        <KpiTile label={t.erreichbar} value={t.of(reachable, sinnvoll.length)} />
         <KpiTile label={t.p50} value={p50 != null ? `${p50}` : t.noProbeData} suffix={p50 != null ? "ms" : undefined} />
         <KpiTile label={t.blockiert} value={String(blocked)} dot={blocked > 0 ? "error" : "idle"} />
       </div>
