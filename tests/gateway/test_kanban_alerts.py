@@ -964,12 +964,12 @@ class ScriptedAdapter:
         return SendResult(success=True, message_id=f"m{self.attempts}")
 
 
-def _watcher_escalation_payload(tid: str) -> dict:
+def _watcher_escalation_payload(tid: str, *, evidence: dict | None = None) -> dict:
     return {
         "task": {"id": tid, "title": "Human needs to decide"},
         "why_now": "retry ladder exhausted",
         "attempts_already_made": 3,
-        "evidence": {},
+        "evidence": evidence or {},
         "recommended_human_action": "inspect",
         "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
     }
@@ -1359,7 +1359,9 @@ def test_escalation_triage_inject_confirmed_send_one_event(kanban_home):
         with kb.write_txn(conn):
             kb._append_event(
                 conn, tid, kb.OPERATOR_ESCALATION_EVENT,
-                _watcher_escalation_payload(tid),
+                _watcher_escalation_payload(
+                    tid, evidence={"last_error": "inject evidence sentinel"},
+                ),
             )
 
     acfg = _acfg(escalation_channel_id="esc-chan", escalation_triage_inject=True)
@@ -1374,6 +1376,7 @@ def test_escalation_triage_inject_confirmed_send_one_event(kanban_home):
     assert event.internal is True
     assert event.source.chat_id == "esc-chan"
     assert "retry ladder exhausted" in event.text  # why_now
+    assert "inject evidence sentinel" in event.text
     assert "Triage-Direktive" in event.text  # runbook directive
     assert "board-operator-playbook.md" in event.text
 

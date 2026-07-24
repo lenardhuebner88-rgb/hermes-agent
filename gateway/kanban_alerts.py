@@ -377,7 +377,10 @@ def _rule_operator_escalation(
         task_id = task.get("id") or r["task_id"]
         why = _snippet(payload.get("why_now")) or "retry ladder exhausted"
         action = _snippet(payload.get("recommended_human_action"))
+        evidence = payload.get("evidence")
         line = f"• **{title}** (`{task_id}`) — {why}"
+        if evidence:
+            line += f"; evidence: {_snippet(json.dumps(evidence, ensure_ascii=False, sort_keys=True))}"
         if action:
             line += f"; action: {action}"
         lines.append(line)
