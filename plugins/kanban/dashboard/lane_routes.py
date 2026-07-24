@@ -770,21 +770,35 @@ def _derive_lanes_auth_smoke_status(
         return error_class
     if returncode == "timeout":
         return "timeout"
-    # The requested model answering exactly proves it is reachable. A REAL
-    # fallback substitutes a DIFFERENT model; a provider-label normalization
-    # (a custom OpenAI-compatible endpoint reporting observed_provider="custom"
-    # instead of the configured provider id) or a "fallback" merely mentioned
-    # in the log while the configured chain was NOT actually used must not read
-    # as a fallback — otherwise every custom-endpoint provider (e.g.
-    # alibaba-token-plan) false-positives as "fallback" despite working
-    # (F-PROBE-CUSTOM; matrix C 2026-07-24: 15/19 alibaba chat models were
-    # misclassified even though the requested model echoed the token exactly).
+    # The requested model answering exactly proves it is reachable — but only
+    # when the observed provider IS the requested one (or the self-label of a
+    # custom OpenAI-compatible endpoint, "custom"/"custom:<name>", which never
+    # equals the configured provider id) and the "fallback" merely mentioned in
+    # the log is the configured chain being logged, not used. Otherwise every
+    # custom-endpoint provider (e.g. alibaba-token-plan) false-positives as
+    # "fallback" despite working (F-PROBE-CUSTOM; matrix C 2026-07-24: 15/19
+    # alibaba chat models misclassified even though the requested model echoed
+    # the token exactly).
+    #
+    # Guarded by the observed provider because a REAL fallback can serve the
+    # SAME model id — lane fallback entries are provider:model pairs (e.g.
+    # kimi-coding:k3 → kimi:k3). A different NAMED provider answering is a
+    # primary failure caught by the chain and must stay "fallback", never a
+    # silent "ok" that fakes the primary green. (Only fallbacks onto another
+    # custom endpoint remain indistinguishable from a self-label — residual.)
+    observed_provider_is_self = (
+        not observed_provider
+        or observed_provider == requested_provider
+        or observed_provider == "custom"
+        or observed_provider.startswith("custom:")
+    )
     if (
         returncode == 0
         and response_exact
         and requested_model
         and observed_model
         and observed_model == requested_model
+        and observed_provider_is_self
     ):
         return "ok"
     if fallback_activated:
@@ -793,8 +807,6 @@ def _derive_lanes_auth_smoke_status(
         return "fallback"
     if observed_model and observed_model != requested_model:
         return "fallback"
-    if returncode == 0 and response_exact and observed_provider == requested_provider and observed_model == requested_model:
-        return "ok"
     return "error"
 
 

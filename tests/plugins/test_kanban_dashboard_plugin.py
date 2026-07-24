@@ -614,6 +614,52 @@ def test_lanes_auth_smoke_status_custom_endpoint_exact_model_is_ok_not_fallback(
     )
     assert real == "fallback"
 
+    # The "custom:<name>" self-label variant also reads as the endpoint itself.
+    named_custom = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="alibaba-token-plan",
+        requested_model="qwen3.8-max-preview",
+        observed_provider="custom:alibaba-token-plan",
+        observed_model="qwen3.8-max-preview",
+        fallback_activated=True,
+        error_class=None,
+    )
+    assert named_custom == "ok"
+
+
+def test_lanes_auth_smoke_same_model_other_named_provider_is_fallback_not_ok():
+    # A real fallback can serve the SAME model id — lane fallback entries are
+    # provider:model pairs (e.g. kimi-coding:k3 → kimi:k3). When a DIFFERENT
+    # named provider answers, the primary failed and the chain caught it; that
+    # must stay "fallback", not a silent "ok" that fakes the primary green.
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    status = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="kimi-coding",
+        requested_model="k3",
+        observed_provider="kimi",
+        observed_model="k3",
+        fallback_activated=True,
+        error_class=None,
+    )
+    assert status == "fallback"
+
+    # Same without the "fallback" log marker: a different named provider
+    # answering for the requested one is a substitution either way.
+    silent = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="kimi-coding",
+        requested_model="k3",
+        observed_provider="kimi",
+        observed_model="k3",
+        fallback_activated=False,
+        error_class=None,
+    )
+    assert silent == "fallback"
+
 
 def test_lanes_auth_smoke_selects_effective_catalog_roles_and_skips_claude_runtime():
     plugin_api = _load_plugin_module_for_lanes_auth_smoke()
