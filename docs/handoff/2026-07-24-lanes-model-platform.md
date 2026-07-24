@@ -3,6 +3,8 @@
 **Datum:** 2026-07-24 · **Branch:** `claude/lanes-model-platform` · **Worktree:** `~/.hermes/hermes-agent/.claude/worktrees/claude-lanes-platform` (forked von main `578a8b363`)
 **Status:** ✅ gebaut · gates grün · E2E grün · Design belegt · 3× GPT-5.6 closed-loop reviewed · dokumentiert. **Mergeback = Operator-Entscheidung** (nicht automatisch; kein Push/Deploy erfolgt).
 
+> **SHIPPED 2026-07-24 ~08:00** (Operator-Go 07:25): Design-Elevation-Pass `b220cd25a` obendrauf (pd-N-Dot-Fix — Tailwind-`p-N`-Padding-Kollision blähte die 8px-Identity-Dots auf, joined Reasoning-Segmente, dichte Kompass-Ranking-Rows, LaneBar-Count-Fix + Meta, ModelSelect-Pin-Follow-up geschlossen), Codex read-only Review PASS, ff-merged nach main, deployed (auth-smoke healthy, `/api/plugins/kanban/lanes` live: 3 Lanes/10 Profile/198 Modelle mit S1-Feldern), gepusht piet-fork (rev-parse-Beweis beidseitig `b220cd25a`).
+
 ## TL;DR
 `/lanes` greenfield vom Preset-Cockpit zur **Modell-Plattform** in der binding Design-Sprache „Bronze auf Graphit". Vier Features gebaut + belegt:
 1. **Reasoning pro Profil** — Segment-Control pro Editor-Row, nur wo Provider/Modell es transportiert (Qwen/Grok/claude-cli ehrlich deaktiviert mit Begründung); schreibt atomar via `persist` in `config.yaml` (`agent.reasoning_effort`, dotted-roundtrip → `model:`-Block bleibt).
