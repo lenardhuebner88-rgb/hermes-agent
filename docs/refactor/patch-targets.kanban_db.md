@@ -1,94 +1,95 @@
 # Test patch sites against `hermes_cli.kanban_db`
 
-Plan Task 6. Re-derived on `1254ce618`, not taken from the plan's earlier list.
+Plan Task 6. **Rewritten 2026-07-25 after the first version was proven wrong by execution.**
 
-## Result: **no site needs re-pointing**
+## The first answer was wrong: it said zero, the real number is 470
 
-The concern Task 6 exists for is real in general —
-`monkeypatch.setattr("hermes_cli.kanban_db.connect", fake)` rebinds the attribute on
-`kanban_db` only, while a `kanban_ext` submodule holding
-`from hermes_cli.kanban_db import connect` keeps its own binding and never sees the patch.
-Most such tests would fail loudly; `task_age` could pass **silently** against the real
-implementation, which is the unacceptable outcome.
+The original version of this file concluded *"no site needs re-pointing — all 9 patched
+symbols are upstream-owned and stay."* Task 7 then ran the extraction and **64 tests failed,
+reproduced identically on a rerun** (890 passed / 64 failed, twice), against a `main` baseline
+of 116 passed on the same files.
 
-Measured against `docs/refactor/boundary-map.kanban_ext.yaml`, that hazard does not
-materialise here: **every symbol any test patches is upstream-owned, so all of them stay
-in `kanban_db.py`.** Task 7 Step 6 is therefore a no-op — no test edits are required by
-the extraction.
-
-| patched symbol | ownership | destination |
-|---|---|---|
-| `connect` | UPSTREAM | stays |
-| `init_db` | UPSTREAM | stays |
-| `_record_task_failure` | UPSTREAM | stays |
-| `_record_worker_exit` | UPSTREAM | stays |
-| `task_age` | UPSTREAM | stays |
-| `kanban_db_path` | UPSTREAM | stays |
-| `dispatch_once` | UPSTREAM | stays |
-| `_pid_alive` | UPSTREAM | stays |
-| `_check_file_length_invariant` | UPSTREAM | stays |
-
-**Control probe.** An all-stays table is exactly what a broken lookup also produces, so the
-classifier was proven live: fed symbols that *do* move it reports
-`_stamp_strategist_lever_outcome_shipped`, `TERMINAL_TASK_STATUSES`,
-`KANBAN_ARTIFACT_TREE_MAX_ENTRIES` → `kanban_ext.task_core`, and would flag **730** symbols
-as moving. The zero above is a real zero.
-
-## Sites, by shape
-
-### String-patched — `patch("hermes_cli.kanban_db.<symbol>")` (33 sites)
-
-Symbols that are kanban_db's own (all stay):
-
-| file:line | symbol |
-|---|---|
-| `tests/gateway/test_kanban_notifier_watcher_dispatch_gate.py:34,47` | `connect` |
-| `tests/plugins/test_kanban_dashboard_plugin.py:4815,4847` | `task_age` |
-| `tests/run_agent/test_run_agent.py:5812,5862` | `_record_task_failure` |
-| `tests/run_agent/test_run_agent.py:5814` | `connect` |
-| `tests/agent/test_turn_finalizer_iteration_limit_exit.py:275` | `connect` |
-| `tests/agent/test_turn_finalizer_iteration_limit_exit.py:283` | `_record_task_failure` |
-| `tests/hermes_cli/test_voice_live_tools.py:724,753,779,818,852,867` | `connect` |
-| `tests/hermes_cli/test_kanban_db_runtime.py:591,661,698,718` | `_record_worker_exit` |
-| `tests/hermes_cli/test_kanban_notify.py:282` | `init_db` |
-
-### Module-attribute patches — `patch("hermes_cli.kanban_db.<module>.<attr>")`
-
-| file:line | target |
-|---|---|
-| `tests/hermes_cli/test_kanban_db_spawn_workdir.py:167` | `sqlite3.connect` |
-| `tests/hermes_cli/test_disposition_ledger.py:150` | `time.time` |
-| `tests/hermes_cli/test_kanban_db_runtime.py:470,493` | `os.path.getsize` |
-| `tests/hermes_cli/test_kanban_db_runtime.py:590,601,611,629,643,660,717` | `os.waitpid` |
-| `tests/hermes_cli/test_kanban_db_runtime.py:600,719` | `os.name` |
-
-**Unaffected by construction.** These patch attributes on the `os` / `time` / `sqlite3`
-*module objects*, not on `kanban_db`. Emission rule 1 copies the origin header verbatim
-into every submodule, so each submodule binds the **same** module object. The patch is
-visible in `kanban_ext` without any change.
-
-### Attribute-patched — `setattr(kanban_db, "<symbol>", …)` (5 sites)
-
-| file:line | symbol |
-|---|---|
-| `tests/test_planspec_disposition.py:11,72` | `connect` |
-| `tests/hermes_cli/test_operator_inventory.py:199` | `kanban_db_path` |
-| `tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py:92` | `dispatch_once` |
-| `tests/hermes_cli/test_kanban_workflow_routing.py:60` | `_pid_alive` |
-
-### `patch.object` — one site the plan's two greps miss
-
-`tests/hermes_cli/test_kanban_db_runtime.py:518` —
-`unittest.mock.patch.object(kanban_db_module, "_check_file_length_invariant", …)`.
-Upstream-owned, stays. **The plan's Step 1 greps do not find this shape**
-(`patch.object(<alias>, …)` with a module alias); a third pattern is needed:
+**Why the first answer was wrong.** It used the plan's two greps, which match the literal
+token `kanban_db`:
 
 ```bash
-rg -n 'patch\.object\(\s*kanban_db' tests/ hermes_cli/ gateway/ scripts/
+rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"hermes_cli\.kanban_db\.' …
+rg -n 'setattr\(\s*kanban_db\s*,\s*"' …
 ```
 
-## Standing hazard for Task 8 and beyond
+But the test suite almost never uses that name. It aliases the module:
 
-The zero above holds **only for this boundary map**. Any future change that moves a symbol
-a test patches re-opens the hazard, and `task_age`-shaped failures are silent. Re-run the
-three greps plus the classification whenever the map changes.
+| alias | occurrences |
+|---|---:|
+| `kb` | 352 |
+| `_kb` | 78 |
+| `kdb` | 3 |
+| `kanban_db_module` | 1 |
+| `kanban_db` | 1 |
+
+Every `monkeypatch.setattr(kb, "…")` was invisible to the greps.
+
+**A control probe was run and still missed it.** The probe proved the *classifier* was live —
+fed symbols that move, it reported them. It did not test whether the *input list* was
+complete. Proving the lookup works says nothing about the sweep that produced its input. That
+is the lesson: control-probe the collection step, not only the decision step.
+
+## Correct method: resolve aliases with the AST, never grep
+
+```python
+# per test file: find local names bound to hermes_cli.kanban_db, then find every
+# setattr / patch / patch.object against those names, plus string targets.
+```
+
+Full script: this task's commit. Grep cannot do this — the alias is established by an
+`import … as …` elsewhere in the file.
+
+## Measured result on `59191ccec`
+
+| | count |
+|---|---:|
+| patch sites | **470** |
+| distinct symbols patched | **104** |
+| of those, symbols the boundary map **moves** | **58** |
+| symbols that stay | 46 |
+
+## Why carving the moved symbols out does not fix it
+
+The obvious repair — add the 58 patched-and-moved symbols to the carve-out so they stay in
+`kanban_db.py` — was built and measured. Carve-out grows to **67** after transitive closure
+(4,199 lines kept behind), `kanban_db.py` lands at 782,209 B, `API IDENTICAL`, imports fine.
+
+**It does not fix the tests.** A probe over the three worst files still failed 13 tests.
+
+The reason is a namespace fact, not a mapping fact: `kanban_ext/impl.py` reaches back with
+
+```python
+from hermes_cli.kanban_db import connect, _append_event, …
+```
+
+which **binds at import time**. `monkeypatch.setattr(kb, "connect", fake)` rebinds the
+attribute on `kanban_db`; `impl`'s own global still points at the original function. So any
+call made *from extracted code* ignores the patch — no matter which side of the boundary the
+symbol lives on.
+
+The 470 patch sites depend on `kanban_db` being **one namespace**. Splitting it changes
+monkeypatch semantics by construction. No boundary map avoids this.
+
+## The options that remain
+
+1. **Re-point the patch sites.** Patch where the callee looks the symbol up:
+   `hermes_cli.kanban_ext.impl.X` for extracted code. ~470 sites across ~66 files, plus an
+   import per file. Mechanical but large, and a mis-aimed patch fails **silently** — the exact
+   `task_age` hazard this task exists to prevent, now at scale. Needs a verification pass that
+   each re-pointed patch still actually intercepts.
+2. **Emit cross-boundary references as module-attribute access** (`kanban_db.X` at call time)
+   instead of `from … import X`. Restores patch visibility for stayed symbols without touching
+   tests, but requires body rewrites — so Task 7 stops being a pure move, and the byte-identity
+   equivalence proof is lost.
+3. **Do not extract; go straight to Task 8 (hooks).** The hooks are what move the merge
+   metric; the extraction moves file size and CodeGraph visibility. This decouples the two.
+
+## Standing rule
+
+Re-run the AST sweep, not a grep, whenever the boundary map changes. Aliased monkeypatching is
+the dominant shape in this suite.
