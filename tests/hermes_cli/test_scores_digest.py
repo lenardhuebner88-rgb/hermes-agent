@@ -501,3 +501,89 @@ def test_approval_counts_only_review_verdict(tmp_path, monkeypatch):
     # by_name still reports all score names (informational, not approval)
     assert "run_cost_usd" in report["by_name"]
     assert "run_tokens_total" in report["by_name"]
+
+
+def test_metric_scores_only_on_non_approved_runs(tmp_path, monkeypatch):
+    """Critic C-2/C-3 (round 2): when cost/duration metric scores exist
+    ONLY on rejected/unreviewed runs, the digest must:
+    - report has_metric_scores=True (metrics exist globally)
+    - report approved_run_metric_coverage=False (no approved-run data)
+    - render an explicit coverage-gap line in Markdown, NOT silently omit
+    - JSON must distinguish the two states machine-readably
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        # Approved run WITHOUT metrics
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+
+        # Rejected run WITH metrics (cost + duration)
+        t2 = kb.create_task(conn, title="t2", assignee="tester")
+        r2 = _create_run(conn, task_id=t2, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_cost_usd",
+                       value=0.15, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_duration_seconds",
+                       value=120.0, created_at=ts)
+
+        # Unreviewed run WITH metrics (no verdict at all)
+        t3 = kb.create_task(conn, title="t3", assignee="tester")
+        r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_usd",
+                       value=0.20, created_at=ts)
+
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    # JSON state: metrics exist globally, but no approved-run coverage
+    assert digest["has_metric_scores"] is True
+    assert digest["approved_run_metric_coverage"] is False
+    assert digest["cost_duration_per_approved_run"] == []
+
+    # Approval counters still correct (2 verdict rows, 1 approved)
+    assert digest["rows_total"] == 2
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 0.5
+
+    # Markdown must show explicit coverage-gap line, not omit silently
+    md = run_slash("scores --digest --weeks 4")
+    assert "Metriken vorhanden" in md
+    assert "keine approved Runs mit Kosten-/Dauer-Scores" in md
+    # Must NOT show the generic "keine vorhanden" fallback
+    assert "Metrik-Scores: keine vorhanden" not in md
+
+
+def test_metric_scores_on_approved_runs_positive(tmp_path, monkeypatch):
+    """Positive case: approved runs carry cost/duration metrics.
+    Digest must show approved_run_metric_coverage=True and render the
+    cost/duration line normally.
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_usd",
+                       value=0.05, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_duration_seconds",
+                       value=90.0, created_at=ts)
+
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    assert digest["has_metric_scores"] is True
+    assert digest["approved_run_metric_coverage"] is True
+    assert len(digest["cost_duration_per_approved_run"]) == 1
+    assert digest["cost_duration_per_approved_run"][0]["cost_usd"] == 0.05
+
+    md = run_slash("scores --digest --weeks 4")
+    assert "Cost/approved run" in md
+    assert "Duration/approved run" in md
+    # Must NOT show the coverage-gap or no-metrics fallback
+    assert "keine approved Runs mit Kosten-/Dauer-Scores" not in md
+    assert "Metrik-Scores: keine vorhanden" not in md

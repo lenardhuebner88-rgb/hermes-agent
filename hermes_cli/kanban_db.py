@@ -32941,13 +32941,21 @@ def scores_digest(
             }
         )
 
-    # Whether any metric scores exist at all (for fallback message)
+    # Whether any metric scores exist at all (informational)
     has_metrics = (
         conn.execute(
             "SELECT 1 FROM scores "
             "WHERE name IN ('run_cost_usd', 'run_duration_seconds') LIMIT 1"
         ).fetchone()
         is not None
+    )
+    # Whether approved runs in the window actually carry cost/duration
+    # scores.  Distinguishes "metrics exist only on rejected/unreviewed
+    # runs" from "no metrics at all" so the renderer can show an explicit
+    # coverage gap instead of silently omitting the line (C-2/C-3).
+    approved_run_metric_coverage = any(
+        r.get("cost_usd") is not None or r.get("duration_seconds") is not None
+        for r in cost_duration
     )
 
     # Top-3 retry hotspots: tasks with the most REQUEST_CHANGES verdicts inside
@@ -32980,6 +32988,7 @@ def scores_digest(
         "by_model": by_model,
         "cost_duration_per_approved_run": cost_duration,
         "has_metric_scores": has_metrics,
+        "approved_run_metric_coverage": approved_run_metric_coverage,
         "retry_hotspots": retry_hotspots,
     }
 

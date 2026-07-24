@@ -4190,7 +4190,7 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
             trend = base + " → ".join(kept)
 
     cost_lines: list[str] = []
-    if digest["has_metric_scores"] and digest["cost_duration_per_approved_run"]:
+    if digest.get("approved_run_metric_coverage") and digest["cost_duration_per_approved_run"]:
         cd = digest["cost_duration_per_approved_run"]
         costs = [r["cost_usd"] for r in cd if r["cost_usd"] is not None]
         durations = [r["duration_seconds"] for r in cd if r["duration_seconds"] is not None]
@@ -4202,6 +4202,11 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         if durations:
             avg_dur = sum(durations) / len(durations)
             cost_lines.append(f"Duration/approved run: avg {avg_dur:.0f}s (n={len(durations)})")
+    elif digest["has_metric_scores"] and not digest.get("approved_run_metric_coverage"):
+        cost_lines.append(
+            "Kosten/Dauer je approved Run: Metriken vorhanden, "
+            "aber keine approved Runs mit Kosten-/Dauer-Scores im Zeitraum"
+        )
     elif not digest["has_metric_scores"]:
         cost_lines.append("Metrik-Scores: keine vorhanden")
 
