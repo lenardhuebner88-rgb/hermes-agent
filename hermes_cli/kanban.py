@@ -1105,6 +1105,13 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         help="Apply audited equivalent stamps; only use after explicit operator approval",
     )
 
+    # --- backfill-metrics ---
+    p_bfmetrics = sub.add_parser(
+        "backfill-metrics",
+        help="Idempotent backfill of run-metric scores (duration, tokens, "
+             "cost, attempt index) from historical task_runs into scores",
+    )
+
     # --- notify subscribe / list / remove ---
     p_nsub = sub.add_parser(
         "notify-subscribe",
@@ -4143,6 +4150,14 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
             print(f"Repaired cost_usd_equivalent for {n_repair} frozen closed run(s).")
     return 0
 
+
+def _cmd_backfill_metrics(args: argparse.Namespace) -> int:
+    with kb.connect_closing() as conn:
+        n = kb.backfill_run_metric_scores(conn)
+        print(f"Backfilled run-metric scores for {n} row(s).")
+    return 0
+
+
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
@@ -4538,6 +4553,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "stats":    _cmd_stats,
     "scores":   _cmd_scores,
     "backfill-costs": _cmd_backfill_costs,
+    "backfill-metrics": _cmd_backfill_metrics,
     "log":      _cmd_log,
     "runs":     _cmd_runs,
     "heartbeat": _cmd_heartbeat,

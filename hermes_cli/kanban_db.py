@@ -9492,6 +9492,7 @@ def _end_run(
         (task_id,),
     )
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
+    _record_run_metric_scores(conn, run_id, task_id, created_at=now)
     return run_id
 
 
@@ -10124,6 +10125,7 @@ def _synthesize_ended_run(
     )
     run_id = int(cur.lastrowid or 0)
     _record_run_outcome_score(conn, task_id, run_id, outcome, created_at=now)
+    _record_run_metric_scores(conn, run_id, task_id, created_at=now)
     return run_id
 
 
@@ -13969,6 +13971,81 @@ def _record_verdict_score(
         return False
 
 
+def _record_run_metric_scores(
+    conn: sqlite3.Connection,
+    run_id: int,
+    task_id: str,
+    *,
+    created_at: Optional[int] = None,
+) -> int:
+    """Record run-level metric scores (duration, tokens, cost, attempt index).
+
+    Best-effort: errors are logged, never raised.  Only writes scores for
+    fields actually present in the run row (NULL → skip, never guess).
+    Dedupe: no double-insert per ``(run_id, name)`` — same pattern as
+    ``_record_verdict_score``.  ``value_type='numeric'``, ``source='board-metrics'``.
+    """
+    try:
+        row = conn.execute(
+            "SELECT started_at, ended_at, input_tokens, output_tokens, cost_usd "
+            "FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+
+        ts = int(created_at) if created_at is not None else int(time.time())
+
+        # Attempt index: 1-based count of runs for this task up to this run.
+        attempt_row = conn.execute(
+            "SELECT COUNT(*) FROM task_runs WHERE task_id = ? AND id <= ?",
+            (task_id, run_id),
+        ).fetchone()
+        attempt_index = int(attempt_row[0]) if attempt_row else None
+
+        metrics: list[tuple[str, float]] = []
+
+        started = row["started_at"]
+        ended = row["ended_at"]
+        if started is not None and ended is not None:
+            duration = int(ended) - int(started)
+            if duration >= 0:
+                metrics.append(("run_duration_seconds", float(duration)))
+
+        in_tok = row["input_tokens"]
+        out_tok = row["output_tokens"]
+        if in_tok is not None or out_tok is not None:
+            total = int(in_tok or 0) + int(out_tok or 0)
+            metrics.append(("run_tokens_total", float(total)))
+
+        cost = row["cost_usd"]
+        if cost is not None:
+            metrics.append(("run_cost_usd", float(cost)))
+
+        if attempt_index is not None:
+            metrics.append(("run_attempt_index", float(attempt_index)))
+
+        inserted = 0
+        for name, value in metrics:
+            existing = conn.execute(
+                "SELECT 1 FROM scores WHERE run_id = ? AND name = ? LIMIT 1",
+                (run_id, name),
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(
+                "INSERT INTO scores "
+                "(run_id, task_id, name, value, value_type, source, created_at) "
+                "VALUES (?, ?, ?, ?, 'numeric', 'board-metrics', ?)",
+                (run_id, task_id, name, value, ts),
+            )
+            inserted += 1
+        return inserted
+    except Exception:
+        _log.debug("run-metric scores: failed for run %s", run_id, exc_info=True)
+        return 0
+
+
 def backfill_verdict_scores(conn: sqlite3.Connection) -> int:
     """F5 one-time (idempotent): mirror pre-existing ``task_runs.verdict``
     rows into ``scores`` so the eval baseline starts with history. Score
@@ -13982,6 +14059,23 @@ def backfill_verdict_scores(conn: sqlite3.Connection) -> int:
         for r in rows:
             if _record_verdict_score(conn, r["id"], r["verdict"], created_at=r["at"]):
                 inserted += 1
+    return inserted
+
+
+def backfill_run_metric_scores(conn: sqlite3.Connection) -> int:
+    """Idempotent backfill: mirror run metrics (duration, tokens, cost,
+    attempt index) from historical ``task_runs`` rows with ``ended_at``
+    into ``scores``.  Second run inserts 0 rows (dedupe by run_id+name)."""
+    rows = conn.execute(
+        "SELECT id, task_id, COALESCE(ended_at, started_at) AS at "
+        "FROM task_runs WHERE ended_at IS NOT NULL",
+    ).fetchall()
+    inserted = 0
+    with write_txn(conn):
+        for r in rows:
+            inserted += _record_run_metric_scores(
+                conn, r["id"], r["task_id"], created_at=r["at"]
+            )
     return inserted
 
 
