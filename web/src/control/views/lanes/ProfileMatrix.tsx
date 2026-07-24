@@ -21,7 +21,7 @@ import { PROBE_STATUS_LABEL, probeTone, t } from "./strings";
 // operator the change takes effect at the next spawn (hot-read, no restart).
 
 const COLS =
-  "tab:grid-cols-[minmax(0,1.1fr)_minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,3.25rem)_minmax(0,9rem)_minmax(0,5.5rem)]";
+  "min-[52rem]:grid-cols-[minmax(0,1.1fr)_minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,4.25rem)_minmax(0,9rem)_minmax(0,5.5rem)]";
 
 function rowHasOverride(row: EditorRow): boolean {
   return row.choice !== "" || row.provider != null || row.model != null;
@@ -56,6 +56,7 @@ function ProbeCell({
   onProbeRow: (row: EditorRow) => void;
 }) {
   const probe = rowProbe(row, models, probes);
+  const cliOnly = row.worker_runtime === "claude-cli";
   return (
     <div className="flex items-center gap-2">
       <div className="min-w-0 flex-1">
@@ -74,9 +75,9 @@ function ProbeCell({
       </div>
       <button
         type="button"
-        title={t.probeMessen}
+        title={cliOnly ? "nicht probe-bar (claude-cli)" : t.probeMessen}
         aria-label={`${t.probeMessen}: ${row.profile}`}
-        disabled={busy || probing}
+        disabled={busy || probing || cliOnly || row.locked}
         onClick={() => onProbeRow(row)}
         className="inline-flex size-11 shrink-0 items-center justify-center rounded-card border border-line text-ink-3 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
       >
@@ -208,7 +209,7 @@ export function ProfileMatrix({
       </div>
 
       {/* column headers (desktop) */}
-      <div className={cn("hidden gap-3 border-b border-line-soft px-3 py-2 tab:grid", COLS)}>
+      <div className={cn("hidden gap-3 border-b border-line-soft px-3 py-2 min-[52rem]:grid", COLS)}>
         {[t.colRole, t.colModel, t.colReasoning, t.colFallback, t.colProbe, t.colOverride].map((label) => (
           <span key={label} className="font-display text-micro font-semibold uppercase tracking-[0.1em] text-ink-3">
             {label}
@@ -222,7 +223,7 @@ export function ProfileMatrix({
           return (
             <li
               key={row.profile}
-              className={cn("grid grid-cols-1 gap-3 border-b border-line-soft px-3 py-3 last:border-b-0 tab:items-center", COLS)}
+              className={cn("grid grid-cols-1 gap-3 border-b border-line-soft px-3 py-3 last:border-b-0 min-[52rem]:items-center", COLS)}
             >
               {/* Rolle */}
               <div className="flex min-w-0 items-start gap-2">
@@ -241,14 +242,14 @@ export function ProfileMatrix({
               </div>
 
               {/* Modell */}
-              <ModelSelect row={row} models={models} disabled={busy} onChange={(choice) => onModelChange(row.profile, choice)} />
+              <ModelSelect row={row} models={models} disabled={busy || row.locked} onChange={(choice) => onModelChange(row.profile, choice)} />
 
               {/* Reasoning */}
               <div className="min-w-0">
                 <ReasoningControl
                   value={row.reasoning ?? null}
                   support={row.reasoningSupport ?? []}
-                  disabled={busy}
+                  disabled={busy || row.locked}
                   ariaLabel={`Reasoning für ${row.profile}`}
                   onChange={(value) => onReasoningChange(row.profile, value)}
                 />
@@ -262,8 +263,9 @@ export function ProfileMatrix({
                 type="button"
                 title={t.fallbackEdit}
                 aria-label={`${t.fallbackEdit}: ${row.profile}`}
+                disabled={busy || row.locked}
                 onClick={() => setFallbackRow(row.profile)}
-                className="inline-flex min-h-11 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live"
+                className="inline-flex min-h-11 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
               >
                 {t.fallbacks(row.fallbackProviders.length)}
               </button>

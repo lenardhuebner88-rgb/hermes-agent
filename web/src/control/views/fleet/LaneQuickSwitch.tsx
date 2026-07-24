@@ -161,7 +161,7 @@ export function LaneQuickSwitch() {
       const freshRows = editorRows(freshLane, fresh.profiles, freshModels);
       const targetRow = rowForProfile(freshRows, selectedRow.profile);
       if (!targetRow) throw new Error(`Profil ${selectedRow.profile} ist in der aktiven Lane nicht verfügbar.`);
-      const updatedRow = applyChoice(targetRow, choice, freshModels);
+      const updatedRow = { ...applyChoice(targetRow, choice, freshModels), touched: true };
       const check = await smokeCheckLaneConfig(updatedRow.profile, guardEntry(updatedRow));
       if (check.status !== "healthy") {
         setMessage(check.reason ?? "Spawn-Guard meldet Konflikt; Lane wurde nicht gespeichert.");

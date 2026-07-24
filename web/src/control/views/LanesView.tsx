@@ -101,7 +101,7 @@ function LanesPlatform({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const updateRow = useCallback((profile: string, patch: Partial<EditorRow>) => {
-    setRows((prev) => prev.map((row) => (row.profile === profile ? { ...row, ...patch } : row)));
+    setRows((prev) => prev.map((row) => (row.profile === profile ? { ...row, ...patch, touched: true } : row)));
     setDirty(true);
     setSaveError(null);
   }, []);
@@ -110,7 +110,6 @@ function LanesPlatform({
     setSaveError(null);
     try {
       await onSave(rows);
-      setDirty(false);
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     }
@@ -125,7 +124,8 @@ function LanesPlatform({
   const handleProbeRow = useCallback(async (row: EditorRow) => {
     const modelId = row.model ?? row.defaultModel ?? null;
     if (!modelId) return;
-    const provider = row.worker_runtime === "claude-cli" ? "" : row.provider ?? row.defaultProvider ?? "";
+    if (row.worker_runtime === "claude-cli") return;
+    const provider = row.provider ?? row.defaultProvider ?? "";
     setProbing((prev) => ({ ...prev, [row.profile]: true }));
     try {
       const result = await runModelProbe({ provider, model: modelId, profile: row.profile, timeoutSeconds: 45 });
@@ -138,7 +138,9 @@ function LanesPlatform({
   }, []);
 
   const handleCatalogProbe = useCallback(async () => {
-    const targets = filterSinnvoll(models).map((m) => ({ provider: m.provider ?? "", model: m.id }));
+    const targets = filterSinnvoll(models)
+      .filter((m) => m.runtime === "hermes")
+      .map((m) => ({ provider: m.provider ?? "", model: m.id }));
     if (targets.length === 0) return;
     setBatchRunning(true);
     try {
@@ -351,6 +353,7 @@ export function LanesView(_props: { density?: Density }) {
       const target = lane;
       if (!target) return;
       await run(async () => {
+        if (!target.active) await activateLane(target.id);
         const payload = persistPayloadFromEditorRows(rows);
         if (Object.keys(payload).length > 0) {
           const result = await persistLaneModels(payload);
@@ -360,7 +363,6 @@ export function LanesView(_props: { density?: Density }) {
             );
           }
         }
-        if (!target.active) await activateLane(target.id);
       });
     },
     [lane, run],

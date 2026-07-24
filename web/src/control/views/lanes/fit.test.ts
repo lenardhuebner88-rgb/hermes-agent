@@ -115,6 +115,18 @@ describe("scoreModelForRole", () => {
     expect(scoreModelForRole(uncurated, "coder").score).toBe(0);
   });
 
+  it("scores authenticated curated models at 0 when probe evidence says auth_error or timeout", () => {
+    for (const status of ["auth_error", "timeout"] as const) {
+      const model = mkModel({
+        id: `probe-${status}`,
+        authenticated: true,
+        sinnvoll: true,
+        probe: { provider: "openai-codex", model: `probe-${status}`, status, duration_ms: 50 },
+      });
+      expect(scoreModelForRole(model, "coder").score).toBe(0);
+    }
+  });
+
   it("fails soft when authenticated/sinnvoll are absent (older payload)", () => {
     const legacy = mkModel({ id: "gpt-5.5", reasoning_support: ["low", "medium", "high"] });
     expect(legacy.authenticated).toBeUndefined();

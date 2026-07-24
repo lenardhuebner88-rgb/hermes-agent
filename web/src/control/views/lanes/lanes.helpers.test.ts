@@ -122,6 +122,7 @@ function coderRow(): EditorRow {
 describe("reasoning stage roundtrip", () => {
   it("editorRows seeds the stage from the profile's current reasoning_effort", () => {
     const row = coderRow();
+    expect(row.touched).toBe(false);
     expect(row.defaultReasoning).toBe("medium");
     expect(row.reasoning).toBe("medium"); // valid for the effective model's support
     expect(row.reasoningSupport).toContain("medium");
@@ -129,18 +130,23 @@ describe("reasoning stage roundtrip", () => {
   });
 
   it("profilesFromEditorRows sends reasoning_effort only for a non-default value", () => {
-    const high = { ...coderRow(), reasoning: "high" };
+    const high = { ...coderRow(), touched: true, reasoning: "high" };
     expect(profilesFromEditorRows([high]).coder?.reasoning_effort).toBe("high");
+  });
 
-    // null / "" / "Standard" are omitted → config stays untouched
-    for (const value of [null, "", "Standard"]) {
-      const row = { ...coderRow(), reasoning: value };
-      expect(profilesFromEditorRows([row]).coder?.reasoning_effort).toBeUndefined();
-    }
+  it("omits an untouched row even when reasoning is seeded", () => {
+    const row = { ...coderRow(), touched: false, reasoning: "medium" };
+    expect(profilesFromEditorRows([row]).coder).toBeUndefined();
+  });
+
+  it("sends and persists an empty reasoning_effort when a touched row clears to Standard", () => {
+    const row = { ...coderRow(), touched: true, reasoning: null };
+    expect(profilesFromEditorRows([row]).coder?.reasoning_effort).toBe("");
+    expect(persistPayloadFromEditorRows([row]).coder?.reasoning_effort).toBe("");
   });
 
   it("a reasoning-only change is persisted, falling back to the profile-default model", () => {
-    const row = { ...coderRow(), reasoning: "high" }; // no model/provider/choice override
+    const row = { ...coderRow(), touched: true, reasoning: "high" }; // no model/provider/choice override
     const payload = persistPayloadFromEditorRows([row]);
     expect(payload.coder).toBeDefined();
     expect(payload.coder.model).toBe("gpt-5.6-sol"); // defaultModel, not ""
@@ -149,7 +155,7 @@ describe("reasoning stage roundtrip", () => {
   });
 
   it("drops a row with neither a model nor a reasoning override", () => {
-    const row = { ...coderRow(), reasoning: null };
+    const row = { ...coderRow(), touched: true, reasoning: "medium" };
     expect(persistPayloadFromEditorRows([row]).coder).toBeUndefined();
   });
 
@@ -167,5 +173,17 @@ describe("reasoning stage roundtrip", () => {
     const same = applyChoice(row, "hermes|openai-codex|gpt-5.6-sol", REASONING_MODELS);
     expect(same.reasoning).toBe("high");
     expect(same.reasoningSupport).toContain("high");
+  });
+
+  it("seeds config fallbacks when the lane has no profile entry", () => {
+    const fallbackProviders = [
+      { provider: "openrouter", model: "backup/model" },
+      { provider: "neuralwatt", model: "backup-fast" },
+    ];
+    const catalog = [{ ...REASONING_CATALOG[0], fallback_providers: fallbackProviders }];
+    const row = editorRows(EMPTY_LANE, catalog, REASONING_MODELS).find(
+      (candidate) => candidate.profile === "coder",
+    );
+    expect(row?.fallbackProviders).toEqual(fallbackProviders);
   });
 });

@@ -12,7 +12,7 @@
 // models are still scored (fail-soft) — just without the auth/sinnvoll bonus.
 
 import type { LaneModelOption, ModelProbeResult } from "./api";
-import { probeKey } from "./api";
+import { probeKey, UNREACHABLE_PROBE_STATUSES } from "./api";
 
 // Re-exported so fit consumers (and tests) can key probes through one surface.
 export { probeKey };
@@ -154,6 +154,9 @@ export function scoreModelForRole(
   }
 
   const probe = resolveProbe(model, probes);
+  if (probe && UNREACHABLE_PROBE_STATUSES.has(probe.status)) {
+    return { score: 0, reasons: ["nicht erreichbar"] };
+  }
   const reasons: string[] = [];
 
   const coding = codingAffinity(model);

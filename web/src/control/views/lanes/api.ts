@@ -686,6 +686,7 @@ function cloneFallbacks(value: LaneFallbackProvider[] | undefined): LaneFallback
 }
 
 export interface EditorRow {
+  touched?: boolean;
   profile: string;
   description: string;
   /** Label of the profile's config default, for the "Standard (…)" option. */
@@ -742,6 +743,7 @@ export function editorRows(
     const reasoning =
       profileReasoning != null && support.includes(profileReasoning) ? profileReasoning : null;
     return {
+      touched: false,
       profile: p.name,
       description: p.description,
       defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
@@ -752,7 +754,7 @@ export function editorRows(
       worker_runtime: runtime,
       provider: runtime === "claude-cli" ? null : entry?.provider ?? null,
       model: entry?.model ?? null,
-      fallbackProviders: runtime === "claude-cli" ? [] : cloneFallbacks(entry?.fallback_providers),
+      fallbackProviders: runtime === "claude-cli" ? [] : cloneFallbacks(entry?.fallback_providers ?? p.fallback_providers),
       locked: p.locked === true,
       lockedReason: p.locked_reason ?? null,
       choice: choiceFromEntry(entry),
@@ -769,6 +771,7 @@ export function editorRows(
     const entry = lane.profiles[name];
     const runtime = entry.worker_runtime ?? (entry.model?.startsWith("claude") ? "claude-cli" : "hermes");
     rows.push({
+      touched: false,
       profile: name,
       description: "",
       defaultLabel: "automatisch",
@@ -852,22 +855,20 @@ export function profilesFromEditorRows(
 ): Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> {
   const out: Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> = {};
   for (const row of rows) {
+    if (!row.touched) continue;
     const fallbackProviders = cloneFallbacks(row.fallbackProviders).filter(
       (fallback) => fallback.provider && fallback.model,
     );
-    // "Standard" (null / empty) is omitted so an unchanged profile keeps its
-    // config; only a concrete, transport-valid value is sent (S1 persist 400s
-    // on a value outside the target model's reasoning_support).
-    const reasoningEffort =
-      row.reasoning != null && row.reasoning !== "" && row.reasoning !== "Standard"
-        ? row.reasoning
-        : undefined;
+    const reasoningChanged = (row.reasoning ?? null) !== (row.defaultReasoning ?? null);
+    const reasoningEffort = reasoningChanged
+      ? (row.reasoning == null || row.reasoning === "" || row.reasoning === "Standard" ? "" : row.reasoning)
+      : undefined;
     const hasStructuredOverride =
       row.provider !== null ||
       row.model !== null ||
       fallbackProviders.length > 0 ||
       row.choice !== "" ||
-      reasoningEffort !== undefined;
+      reasoningChanged;
     if (!hasStructuredOverride) continue;
     if (row.locked || row.worker_runtime === "claude-cli") {
       const entry = entryFromProviderAwareChoice(row.choice);
@@ -875,7 +876,7 @@ export function profilesFromEditorRows(
         worker_runtime: "claude-cli" as const,
         model: row.model,
       };
-      out[row.profile] = reasoningEffort !== undefined ? { ...base, reasoning_effort: reasoningEffort } : base;
+      out[row.profile] = reasoningChanged ? { ...base, reasoning_effort: reasoningEffort } : base;
       continue;
     }
     out[row.profile] = {
@@ -883,7 +884,7 @@ export function profilesFromEditorRows(
       provider: row.provider,
       model: row.model,
       fallback_providers: fallbackProviders,
-      ...(reasoningEffort !== undefined ? { reasoning_effort: reasoningEffort } : {}),
+      ...(reasoningChanged ? { reasoning_effort: reasoningEffort } : {}),
     };
   }
   return out;
@@ -915,7 +916,7 @@ export function persistPayloadFromEditorRows(
       model,
       fallback_providers: fallbackProviders,
     };
-    if (entry.reasoning_effort != null && entry.reasoning_effort !== "") {
+    if (entry.reasoning_effort != null) {
       payload.reasoning_effort = entry.reasoning_effort;
     }
     out[profile] = payload;

@@ -106,6 +106,30 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     expect(hints.length).toBeGreaterThanOrEqual(10);
   });
 
+  it("disables model and reasoning controls for a locked profile", async () => {
+    const lockedFixture: LanesResponse = {
+      ...fixture,
+      profiles: fixture.profiles.map((profile) =>
+        profile.name === "coder"
+          ? {
+              ...profile,
+              locked: true,
+              reasoning_effort: "medium",
+              reasoning_support: ["low", "medium", "high"],
+            }
+          : profile,
+      ),
+    };
+    loadLanesMock.mockImplementationOnce(async () => lockedFixture);
+
+    render(<LanesView density="airy" />);
+
+    const modelSelect = await screen.findByLabelText<HTMLButtonElement>("Modell für coder");
+    expect(modelSelect.disabled).toBe(true);
+    const reasoning = screen.getByRole("group", { name: "Reasoning für coder" });
+    expect(Array.from(reasoning.querySelectorAll("button")).every((button) => button.disabled)).toBe(true);
+  });
+
   it("shows the Rauch and Kompass subtabs", async () => {
     render(<LanesView density="airy" />);
     await screen.findAllByText("Rauch");

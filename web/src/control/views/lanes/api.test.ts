@@ -352,7 +352,7 @@ describe("editor rows", () => {
   });
 
   it("profilesFromEditorRows drops default rows and keeps explicit ones", () => {
-    const rows = editorRows(lane, catalog, MODELS);
+    const rows = editorRows(lane, catalog, MODELS).map((row) => ({ ...row, touched: true }));
     expect(profilesFromEditorRows(rows)).toEqual({
       premium: { worker_runtime: "claude-cli", model: "claude-fable-5" },
       altprofil: {
@@ -373,7 +373,7 @@ describe("editor rows", () => {
       },
     };
 
-    const rows = editorRows(cloudMaxLane, catalog, MODELS);
+    const rows = editorRows(cloudMaxLane, catalog, MODELS).map((row) => ({ ...row, touched: true }));
     const coder = rows.find((row) => row.profile === "coder");
 
     expect(coder).toMatchObject({
@@ -395,6 +395,7 @@ describe("editor rows", () => {
   // model: "|claude-haiku-4-5" (leading pipe) into the lane config.
   function claudeCliRow(choice: string, model: string | null): EditorRow {
     return {
+      touched: true,
       profile: "admin",
       description: "",
       defaultLabel: "automatisch",
