@@ -77,6 +77,7 @@ observability_routes = route_contract.namespace("observability")
 delivery_routes = route_contract.namespace("delivery")
 planspec_routes = route_contract.namespace("planspec")
 flow_release_routes = route_contract.namespace("flow_release")
+scorecard_routes = route_contract.namespace("scorecard")
 
 _SHORT_TEXT_MAX_LENGTH = 512
 _FREE_TEXT_MAX_LENGTH = 20_000
@@ -3057,6 +3058,49 @@ def dispatch(
 
 
 # ---------------------------------------------------------------------------
+# Model options (the board's per-task model-override dropdown)
+# ---------------------------------------------------------------------------
+
+@core_routes.get("/model-options")
+def model_options():
+    """Authenticated providers + curated model lists for the task drawer's
+    model-override dropdown.
+
+    Thin wrapper around ``hermes_cli.inventory.build_models_payload`` — the
+    same substrate the dashboard Models page and the TUI picker use, so the
+    dropdown can never offer a model/provider pair the rest of Hermes
+    wouldn't accept. Deliberately skips pricing/capability enrichment and
+    custom-provider probes: the dropdown needs names fast, not $/Mtok
+    columns (a slow/offline local endpoint must not hang the drawer).
+    """
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
+        payload = build_models_payload(
+            load_picker_context(),
+            explicit_only=True,
+            canonical_order=True,
+            probe_custom_providers=False,
+        )
+        return {
+            "providers": [
+                {
+                    "slug": row.get("slug", ""),
+                    "label": row.get("label") or row.get("slug", ""),
+                    "models": list(row.get("models") or []),
+                }
+                for row in payload.get("providers", [])
+                if row.get("models")
+            ],
+        }
+    except Exception:
+        log.exception("kanban model-options failed")
+        # Degrade to an empty catalog — the UI falls back to a free-text
+        # input so the feature still works without the inventory module.
+        return {"providers": []}
+
+
+# ---------------------------------------------------------------------------
 # Boards CRUD (multi-project support)
 # ---------------------------------------------------------------------------
 
@@ -3075,6 +3119,9 @@ class RenameBoardBody(BaseModel):
     description: Optional[FreeText] = None
     icon: Optional[ShortText] = None
     color: Optional[ShortText] = None
+    # Board-level default project directory for new tasks. ``None`` =
+    # leave unchanged; empty string = clear; a path = validate + set.
+    default_workdir: Optional[str] = None
 
 
 def _board_counts(slug: str) -> dict[str, int]:
@@ -3143,23 +3190,32 @@ def list_boards(include_archived: bool = Query(False)):
     return {"boards": boards, "current": current}
 
 
+def _validate_workdir(raw: str) -> str:
+    """Validate a board default_workdir value; return the resolved path.
+
+    Raises :class:`HTTPException` (400) for relative or non-directory
+    paths — mirroring the create-board contract.
+    """
+    requested = Path(raw).expanduser()
+    if not requested.is_absolute():
+        raise HTTPException(
+            status_code=400,
+            detail="Project directory must be an absolute path.",
+        )
+    if not requested.is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail="Project directory must be an existing directory.",
+        )
+    return str(requested.resolve())
+
+
 @core_routes.post("/boards")
 def create_board_endpoint(payload: CreateBoardBody):
     """Create a new board. Idempotent — ``slug`` collision returns existing."""
     default_workdir = None
     if payload.default_workdir:
-        requested = Path(payload.default_workdir).expanduser()
-        if not requested.is_absolute():
-            raise HTTPException(
-                status_code=400,
-                detail="Project directory must be an absolute path.",
-            )
-        if not requested.is_dir():
-            raise HTTPException(
-                status_code=400,
-                detail="Project directory must be an existing directory.",
-            )
-        default_workdir = str(requested.resolve())
+        default_workdir = _validate_workdir(payload.default_workdir)
     try:
         meta = kanban_db.create_board(
             payload.slug,
@@ -3182,20 +3238,28 @@ def create_board_endpoint(payload: CreateBoardBody):
 
 @core_routes.patch("/boards/{slug}")
 def rename_board(slug: str, payload: RenameBoardBody):
-    """Update a board's display metadata (slug is immutable — create a new one to rename the directory)."""
+    """Update a board's display metadata + default project directory (slug is immutable — create a new one to rename the directory)."""
     try:
         normed = kanban_db._normalize_board_slug(slug)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     if not normed or not kanban_db.board_exists(normed):
         raise HTTPException(status_code=404, detail=f"board {slug!r} does not exist")
+    # default_workdir: None = leave unchanged; "" = clear; path = validate + set.
+    # write_board_metadata treats a falsy value as "clear", so pass "" through.
+    default_workdir: Optional[str] = None
+    if payload.default_workdir is not None:
+        raw = payload.default_workdir.strip()
+        default_workdir = _validate_workdir(raw) if raw else ""
     meta = kanban_db.write_board_metadata(
         normed,
         name=payload.name,
         description=payload.description,
         icon=payload.icon,
         color=payload.color,
+        default_workdir=default_workdir,
     )
+    meta["default_workspace_kind"] = _default_workspace_kind(meta)
     return {"board": meta}
 
 

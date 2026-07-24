@@ -65,6 +65,11 @@ _JUDGE_RESPONSE_SNIPPET_CHARS = 4000
 # exhausted with every reply shaped like `judge returned empty response` or
 # `judge reply was not JSON`.
 DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES = 3
+# Transport failures (API auth errors 401, timeouts, DNS, etc.) are also
+# tracked and auto-pause the loop after this many consecutive failures.
+# A broken/invalid API key returns 401 every call — the loop must not
+# run until the turn budget, wasting every turn on an unreachable judge.
+DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES = 5
 
 
 CONTINUATION_PROMPT_TEMPLATE = (
@@ -398,6 +403,10 @@ class GoalState:
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
+    # Transport failures are API/auth/network errors.  Broken API keys return
+    # 401 every call — track them separately so the loop auto-pauses instead
+    # of burning every turn budget slot on an unreachable judge.
+    consecutive_transport_failures: int = 0   # judge API/transport errors in a row
     # User-added criteria appended mid-loop via the /subgoal command.
     # When non-empty the judge prompt and continuation prompt both
     # include them so the agent works toward them and the judge factors
@@ -456,6 +465,7 @@ class GoalState:
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
             consecutive_parse_failures=int(data.get("consecutive_parse_failures", 0) or 0),
+            consecutive_transport_failures=int(data.get("consecutive_transport_failures", 0) or 0),
             subgoals=subgoals,
             waiting_on_pid=(int(data["waiting_on_pid"]) if data.get("waiting_on_pid") else None),
             waiting_on_session=(str(data["waiting_on_session"]) if data.get("waiting_on_session") else None),
@@ -857,17 +867,23 @@ def judge_goal(
     subgoals: Optional[List[str]] = None,
     background_processes: Optional[List[Dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
-) -> Tuple[str, str, bool, Optional[Dict[str, Any]]]:
+) -> Tuple[str, str, bool, Optional[Dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
-    Returns ``(verdict, reason, parse_failed, wait_directive)`` where verdict
+    Returns ``(verdict, reason, parse_failed, wait_directive, transport_failed)`` where verdict
     is ``"done"``, ``"continue"``, ``"wait"``, or ``"skipped"`` (when the
     judge couldn't be reached). ``wait_directive`` is set only for ``"wait"``
     (``{"pid": int}`` or ``{"seconds": int}``); ``None`` otherwise.
 
     ``parse_failed`` is True only when the judge call succeeded but its output
     was unusable (empty or non-JSON). API/transport errors return False — they
-    are transient and should fail-open silently. Callers use this flag to
+    are transient and should fail-open silently.
+
+    ``transport_failed`` is True only when the judge couldn't reach the API at
+    all (auth 401, timeout, DNS, connection error).  Repeated transport
+    failures signal a permanent config problem (e.g. invalid API key).  Callers
+    use this flag to auto-pause after N consecutive transport failures (see
+    ``DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES``). Callers use this flag to
     auto-pause after N consecutive parse failures (see
     ``DEFAULT_MAX_CONSECUTIVE_PARSE_FAILURES``).
 
@@ -883,21 +899,23 @@ def judge_goal(
     judge prompt; when none are set, behavior is identical to the original
     free-form judge.
 
-    This is deliberately fail-open: any error returns ``("continue", ..., False, None)``
-    so a broken judge doesn't wedge progress — the turn budget and the
-    consecutive-parse-failures auto-pause are the backstops.
+    This is deliberately fail-open: transport errors return ``("continue", ..., ..., None, True)``
+    — the ``transport_failed=True`` flag lets callers track and auto-pause after
+    N consecutive transport failures (see
+    ``DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES``) so a permanently broken
+    judge doesn't burn the entire turn budget.
     """
     if not goal.strip():
-        return "skipped", "empty goal", False, None
+        return "skipped", "empty goal", False, None, False
     if not last_response.strip():
         # No substantive reply this turn — almost certainly not done yet.
-        return "continue", "empty response (nothing to evaluate)", False, None
+        return "continue", "empty response (nothing to evaluate)", False, None, False
 
     try:
         from agent.auxiliary_client import call_llm
     except Exception as exc:
         logger.debug("goal judge: auxiliary client import failed: %s", exc)
-        return "continue", "auxiliary client unavailable", False, None
+        return "continue", "auxiliary client unavailable", False, None, False
 
     # Build the prompt. Priority: contract > subgoals > plain. When both a
     # contract and subgoals exist, the subgoals are appended into the
@@ -957,7 +975,7 @@ def judge_goal(
         )
     except Exception as exc:
         logger.info("goal judge: API call failed (%s) — falling through to continue", exc)
-        return "continue", f"judge error: {type(exc).__name__}", False, None
+        return "continue", f"judge error: {type(exc).__name__}", False, None, True
 
     try:
         raw = resp.choices[0].message.content or ""
@@ -970,7 +988,7 @@ def judge_goal(
         verdict, _truncate(reason, 120),
         f" wait={wait_directive}" if wait_directive else "",
     )
-    return verdict, reason, parse_failed, wait_directive
+    return verdict, reason, parse_failed, wait_directive, False
 
 
 def goal_judge_available() -> bool:
@@ -1026,14 +1044,14 @@ def check_goal_mode_completion(
             goal=f"{task_title}\n\n{task_body or ''}".strip(),
             last_response=(handoff_text or "").strip(),
         )
-        # judge_goal's return arity grew from 3 to 4 fields (added
-        # wait_directive); accept both so a future arity change doesn't
-        # silently break the gate — mirrors the same compat shim in
-        # run_kanban_goal_loop (below in this module).
+        # judge_goal's return arity grew from 3 to 4 fields (wait_directive)
+        # and then 5 (transport_failed); accept every live shape.
         if len(judge_result) == 3:
             verdict, reason, _parse_failed = judge_result
-        else:
+        elif len(judge_result) == 4:
             verdict, reason, _parse_failed, _wait = judge_result
+        else:
+            verdict, reason, _parse_failed, _wait, _transport_failed = judge_result
     except Exception as judge_exc:
         # Defensive: judge_goal swallows its own errors, but if it ever
         # raises, fail open rather than wedge the worker.
@@ -1516,7 +1534,7 @@ class GoalManager:
         state.turns_used += 1
         state.last_turn_at = time.time()
 
-        verdict, reason, parse_failed, wait_directive = judge_goal(
+        verdict, reason, parse_failed, wait_directive, transport_failed = judge_goal(
             state.goal,
             last_response,
             subgoals=state.subgoals or None,
@@ -1533,6 +1551,16 @@ class GoalManager:
             state.consecutive_parse_failures += 1
         else:
             state.consecutive_parse_failures = 0
+
+        # Track consecutive transport failures separately — persistent API
+        # errors (401 auth, DNS, timeout) signal a broken config, not
+        # transient network flakiness.  Auto-pause after N consecutive
+        # transport failures so a permanently broken judge doesn't burn
+        # every turn budget slot on an unreachable API.
+        if transport_failed:
+            state.consecutive_transport_failures += 1
+        else:
+            state.consecutive_transport_failures = 0
 
         # WAIT verdict: the judge decided the agent is blocked on async work
         # and re-poking now would be busy-work. Set the barrier and park —
@@ -1569,6 +1597,36 @@ class GoalManager:
                 "verdict": "done",
                 "reason": reason,
                 "message": f"✓ Goal achieved: {reason}",
+            }
+
+        # Auto-pause when the judge cannot reach the API at all N turns in a
+        # row (401 auth, DNS failure, timeout).  Persistent transport failures
+        # signal a broken configuration (e.g. invalid API key), not transient
+        # flakiness.  Without this guard, a permanently broken judge burns
+        # every turn budget slot on an unreachable API.
+        if state.consecutive_transport_failures >= DEFAULT_MAX_CONSECUTIVE_TRANSPORT_FAILURES:
+            state.status = "paused"
+            state.paused_reason = (
+                f"judge API unreachable {state.consecutive_transport_failures} turns in a row "
+                f"(check auxiliary.goal_judge provider/key in config.yaml)"
+            )
+            save_goal(self.session_id, state)
+            return {
+                "status": "paused",
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "continue",
+                "reason": reason,
+                "message": (
+                    f"⏸ Goal paused — judge API returned errors "
+                    f"({state.consecutive_transport_failures} turns). "
+                    "Check the goal_judge provider/key in ~/.hermes/config.yaml:\n"
+                    "  auxiliary:\n"
+                    "    goal_judge:\n"
+                    "      provider: deepseek\n"
+                    "      model: deepseek-v4-flash\n"
+                    "Then /goal resume to continue."
+                ),
             }
 
         # Auto-pause when the judge model can't produce the expected JSON
@@ -1799,8 +1857,12 @@ def run_kanban_goal_loop(
         if len(judge_result) == 3:
             verdict, reason, _parse_failed = judge_result
             _wait = None
-        else:
+            _transport_failed = False
+        elif len(judge_result) == 4:
             verdict, reason, _parse_failed, _wait = judge_result
+            _transport_failed = False
+        else:
+            verdict, reason, _parse_failed, _wait, _transport_failed = judge_result
         if verdict == "wait":
             verdict = "continue"
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")

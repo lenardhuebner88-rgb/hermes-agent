@@ -146,6 +146,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
         "continuation_count": t.continuation_count,
         "max_continuations": t.max_continuations,
         "last_continuation_reason": t.last_continuation_reason,
+        "model_override": t.model_override,
         "session_id": t.session_id,
         "workflow_template_id": t.workflow_template_id,
         "current_step_key": t.current_step_key,
@@ -422,6 +423,10 @@ def _register_create_parser(sub: argparse._SubParsersAction) -> None:
                                "worker explicitly reports iteration-budget "
                                "exhaustion. 0 disables auto-continuation for "
                                "this task; omit to use the code default.")
+    p_create.add_argument("--model", default=None, dest="model_override",
+                          help="Pin the worker to this model (passed as "
+                               "-m <model>) without changing the profile's "
+                               "configured model.")
     p_create.add_argument("--goal", action="store_true", dest="goal_mode",
                           help="Run the worker in a goal loop: after each "
                                "turn a judge checks the response against the "
@@ -559,6 +564,23 @@ def _register_task_query_parsers(sub: argparse._SubParsersAction) -> None:
     p_assign = sub.add_parser("assign", help="Assign or reassign a task")
     p_assign.add_argument("task_id")
     p_assign.add_argument("profile", help="Profile name (or 'none' to unassign)")
+
+    # --- set-model (per-task model/provider override) ---
+    p_set_model = sub.add_parser(
+        "set-model",
+        help="Set or clear a task's model/provider override "
+             "(takes effect on the next dispatch)",
+    )
+    p_set_model.add_argument("task_id")
+    p_set_model.add_argument(
+        "model", nargs="?", default=None,
+        help="Model to pin the worker to (or 'none' to clear the override)",
+    )
+    p_set_model.add_argument(
+        "--provider", default=None,
+        help="Provider the model belongs to (worker is spawned with "
+             "--provider <name>). Cleared together with the model.",
+    )
 
     # --- reclaim / reassign (recovery) ---
     p_reclaim = sub.add_parser(
@@ -782,7 +804,10 @@ def _register_edit_status_parsers(sub: argparse._SubParsersAction) -> None:
         help="Wake at ISO-8601 offset time, Unix epoch seconds, or +2h/+45m/+90s",
     )
 
-    p_unblock = sub.add_parser("unblock", help="Return one or more blocked/scheduled tasks to ready")
+    p_unblock = sub.add_parser(
+        "unblock",
+        help="Return blocked/scheduled tasks to ready, or todo while parents remain open",
+    )
     p_unblock.add_argument(
         "--reason",
         default=None,
@@ -1541,6 +1566,15 @@ def kanban_command(args: argparse.Namespace) -> int:
             )
         return 0
 
+    # Fast-fail for clearer CLI UX only. The durable trust boundary is lower in
+    # hermes_cli.kanban_db, because children can import DB mutators directly.
+    if _is_delegated_child_cli_mutation(args):
+        print(
+            "kanban: delegate_task child contexts cannot mutate Kanban tasks via the CLI",
+            file=sys.stderr,
+        )
+        return 1
+
     # Board-management commands operate on board metadata and the persisted
     # current-board pointer itself. They must ignore the shared `--board`
     # task-routing override; otherwise `/kanban --board beta boards show`
@@ -1615,6 +1649,66 @@ def _profile_author() -> str:
         return get_active_profile_name() or "user"
     except Exception:
         return "user"
+
+_DELEGATED_CHILD_DENIED_ACTIONS: frozenset[str] = frozenset({
+    "init",
+    "create",
+    "swarm",
+    "assign",
+    "reclaim",
+    "reassign",
+    "link",
+    "unlink",
+    "claim",
+    "comment",
+    "attach",
+    "attach-rm",
+    "complete",
+    "edit",
+    "block",
+    "schedule",
+    "unblock",
+    "promote",
+    "archive",
+    "dispatch",
+    "daemon",
+    "repair",
+    "heartbeat",
+    "notify-subscribe",
+    "notify-unsubscribe",
+    "specify",
+    "decompose",
+    "gc",
+})
+
+_DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
+    "create",
+    "new",
+    "rm",
+    "remove",
+    "delete",
+    "switch",
+    "use",
+    "rename",
+    "set-default-workdir",
+})
+
+
+def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
+    action = getattr(args, "kanban_action", None)
+    if action == "boards":
+        boards_action = getattr(args, "boards_action", None) or "list"
+        if boards_action not in _DELEGATED_CHILD_DENIED_BOARD_ACTIONS:
+            return False
+    elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
+        return False
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+
+        return is_delegated_child_process_context()
+    except Exception:
+        return bool(os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"))
+
 
 # ---------------------------------------------------------------------------
 # Boards management (hermes kanban boards …)
@@ -2250,6 +2344,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             max_retries=max_retries,
             max_iterations=max_iterations,
             max_continuations=max_continuations,
+            model_override=getattr(args, "model_override", None),
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
@@ -2667,6 +2762,28 @@ def _cmd_assign(args: argparse.Namespace) -> int:
         return 1
     print(f"Assigned {args.task_id} to {profile or '(unassigned)'}")
     return 0
+
+def _cmd_set_model(args: argparse.Namespace) -> int:
+    model = args.model
+    if model is not None and model.lower() in {"none", "-", "null", ""}:
+        model = None
+    try:
+        with kb.connect_closing() as conn:
+            ok = kb.set_task_model_override(conn, args.task_id, model)
+    except (ValueError, RuntimeError) as exc:
+        print(f"kanban: {exc}", file=sys.stderr)
+        return 2
+    if not ok:
+        print(f"no such task: {args.task_id}", file=sys.stderr)
+        return 1
+    if model:
+        print(f"Set model override on {args.task_id}: {model} "
+              "(applies on next dispatch)")
+    else:
+        print(f"Cleared model override on {args.task_id} "
+              "(worker uses its profile default)")
+    return 0
+
 
 def _cmd_reclaim(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
@@ -4693,6 +4810,7 @@ _KANBAN_ACTION_HANDLERS: dict[str, Any] = {
     "ls":       _cmd_list,
     "show":     _cmd_show,
     "assign":   _cmd_assign,
+    "set-model": _cmd_set_model,
     "reclaim":  _cmd_reclaim,
     "reassign": _cmd_reassign,
     "diagnostics": _cmd_diagnostics,

@@ -3,7 +3,7 @@ import type { Locale, Translations } from "./types";
 import { en } from "./en";
 
 // `en` is the only eager dictionary (fallback + default). Every other locale is
-// loaded on demand so the entry chunk does not ship all ~16 locale files.
+// loaded on demand so the entry chunk does not ship all locale files.
 const LOCALE_LOADERS = {
   en: () => Promise.resolve(en),
   zh: () => import("./zh").then((m) => m.zh),
@@ -21,6 +21,7 @@ const LOCALE_LOADERS = {
   pt: () => import("./pt").then((m) => m.pt),
   ru: () => import("./ru").then((m) => m.ru),
   hu: () => import("./hu").then((m) => m.hu),
+  ar: () => import("./ar").then((m) => m.ar),
 } satisfies Record<Locale, () => Promise<Translations>>;
 
 /** Session-level cache: each locale is fetched at most once. */
@@ -42,6 +43,10 @@ async function loadLocale(locale: Locale): Promise<Translations> {
     return en;
   }
 }
+
+// Locales whose script flows right-to-left. Consumed by the provider to set the
+// document direction so Tailwind's logical utilities (ms-/me-, ps-/pe-) flip.
+const RTL_LOCALES = new Set<Locale>(["ar"]);
 
 // Display metadata for the language picker — endonym (native name) so users
 // recognize their language even if they don't speak the current UI language.
@@ -69,6 +74,7 @@ export const LOCALE_META: Record<Locale, { name: string }> = {
   pt: { name: "Português" },
   ru: { name: "Русский" },
   hu: { name: "Magyar" },
+  ar: { name: "العربية" },
 };
 
 const SUPPORTED_LOCALES = Object.keys(LOCALE_LOADERS) as Locale[];
@@ -133,6 +139,12 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       // ignore
     }
   }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.lang = locale;
+    document.documentElement.dir = RTL_LOCALES.has(locale) ? "rtl" : "ltr";
+  }, [locale]);
 
   const value: I18nContextValue = {
     locale,
