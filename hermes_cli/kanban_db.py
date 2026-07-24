@@ -145,6 +145,7 @@ VALID_BLOCK_KINDS = frozenset(
         "capability",
         "dependency",
         "review_revision",
+        "rebase_conflict",
         "transient",
         # System parks (dispatcher/heiler/integrator) — never leave block_kind NULL.
         "capacity",  # token/iteration budget, stall resource parks
@@ -6784,6 +6785,45 @@ def _append_event(
     return int(cur.lastrowid)
 
 
+def _emit_operator_escalation(
+    conn: sqlite3.Connection,
+    task_id: str,
+    run_id: Optional[int],
+    rule: str,
+    reason: str,
+) -> int:
+    """Emit the payload shape consumed by the Discord escalation rule."""
+    row = conn.execute(
+        "SELECT id, title, status, assignee FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    task = {
+        "id": task_id,
+        "title": row["title"] if row is not None else None,
+        "status": row["status"] if row is not None else None,
+        "assignee": row["assignee"] if row is not None else None,
+    }
+    return _append_event(
+        conn,
+        task_id,
+        OPERATOR_ESCALATION_EVENT,
+        {
+            "rule": rule,
+            "reason": reason,
+            "task": task,
+            "why_now": reason,
+            "attempts_already_made": 0,
+            "evidence": {"rule": rule, "reason": reason, "run_id": run_id},
+            "recommended_human_action": (
+                "inspect the task and resolve the persistent blocker before "
+                "manually unblocking it"
+            ),
+            "blocked_action_boundary": list(OPERATOR_ONLY_ACTIONS),
+        },
+        run_id=run_id,
+    )
+
+
 def _enqueue_closeout_in_txn(
     conn: sqlite3.Connection,
     task_id: str,
@@ -9446,8 +9486,9 @@ def _end_run(
             if isinstance(cost_block, dict):
                 cost_block.setdefault("cost_status", "unknown")
     # Stamp schema-free failure metadata for crash/timeout/gave_up/etc. runs.
-    # This lives in metadata only; no DB-schema assumption on worker_exit_kind
-    # or worker_failure_fingerprint columns.
+    # Some deployed boards also retain the legacy dedicated fingerprint column;
+    # stamp it below when present without requiring a schema migration.
+    failure_meta: dict[str, str] = {}
     if isinstance(metadata_for_store, dict) and error:
         failure_meta = _run_failure_metadata(outcome, error)
         if failure_meta:
@@ -9487,6 +9528,15 @@ def _end_run(
             run_id,
         ),
     )
+    fingerprint = failure_meta.get("worker_failure_fingerprint")
+    if fingerprint and any(
+        col["name"] == "worker_failure_fingerprint"
+        for col in conn.execute("PRAGMA table_info(task_runs)")
+    ):
+        conn.execute(
+            "UPDATE task_runs SET worker_failure_fingerprint = ? WHERE id = ?",
+            (fingerprint, run_id),
+        )
     conn.execute(
         "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
         (task_id,),
@@ -12606,6 +12656,7 @@ _DEFAULT_VERIFIER_PROFILE = "verifier"
 # for the ``review`` and ``critical`` tiers respectively.
 _DEFAULT_REVIEW_PROFILE = "reviewer"
 _DEFAULT_CRITIC_PROFILE = "critic"
+_DEFAULT_MAX_REVIEW_ROUNDS = 2
 
 
 def _review_gate_config() -> dict:
@@ -12691,6 +12742,12 @@ def _review_gate_config() -> dict:
     critical_reviews_each_slice = _coerce_config_bool(
         rg.get("critical_reviews_each_slice", True), default=True
     )
+    try:
+        max_review_rounds = max(
+            1, int(rg.get("max_review_rounds", _DEFAULT_MAX_REVIEW_ROUNDS))
+        )
+    except (TypeError, ValueError):
+        max_review_rounds = _DEFAULT_MAX_REVIEW_ROUNDS
     return {
         "enabled": _coerce_config_bool(rg.get("enabled", False), default=False),
         "code_roles": code_roles,
@@ -12704,6 +12761,7 @@ def _review_gate_config() -> dict:
         "standard_uses_llm_verifier": standard_uses_llm_verifier,
         "judge_at_chain_tip": judge_at_chain_tip,
         "critical_reviews_each_slice": critical_reviews_each_slice,
+        "max_review_rounds": max_review_rounds,
     }
 
 
@@ -16684,43 +16742,34 @@ def _route_rebase_conflict_to_coder(
         f"rebase conflict integrating {branch} onto {target} "
         "(aborted cleanly, returned to coder)"
     )
+    row = conn.execute(
+        "SELECT integration_retry_count, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    retry_count = int(row["integration_retry_count"] or 0) + 1
+    run_id = (
+        int(expected_run_id)
+        if expected_run_id is not None
+        else int(row["current_run_id"])
+        if row["current_run_id"] is not None
+        else None
+    )
+    terminal = retry_count > INTEGRATION_RETRY_LIMIT
+    if not block_task(
+        conn,
+        task_id,
+        reason=reason,
+        kind="integration" if terminal else "rebase_conflict",
+        expected_run_id=expected_run_id,
+        reviewer_metadata=outcome,
+    ):
+        return False
     with write_txn(conn):
-        if expected_run_id is None:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                """,
-                (task_id,),
-            )
-        else:
-            cur = conn.execute(
-                """
-                UPDATE tasks
-                   SET status       = 'blocked',
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
-                 WHERE id = ?
-                   AND status IN ('running', 'ready', 'blocked')
-                   AND current_run_id = ?
-                """,
-                (task_id, int(expected_run_id)),
-            )
-        if cur.rowcount != 1:
-            return False
-        run_id = _end_run(
-            conn,
-            task_id,
-            outcome="completed",
-            status="blocked",
-            summary=reason,
-            metadata=outcome,
+        conn.execute(
+            "UPDATE tasks SET integration_retry_count = ? WHERE id = ?",
+            (retry_count, task_id),
         )
         _set_run_verdict(conn, run_id, "REQUEST_CHANGES")
         _append_event(
@@ -16730,6 +16779,18 @@ def _route_rebase_conflict_to_coder(
             {"reason": reason, "branch": outcome.get("branch")},
             run_id=run_id,
         )
+        if terminal:
+            _emit_operator_escalation(
+                conn,
+                task_id,
+                run_id,
+                "rebase_conflict_cap",
+                (
+                    "integration rebase-conflict breaker: "
+                    f"{retry_count} returns exceeded limit "
+                    f"{INTEGRATION_RETRY_LIMIT}"
+                ),
+            )
     # add_comment opens its own BEGIN IMMEDIATE -> must be OUTSIDE the txn.
     try:
         add_comment(
@@ -16980,6 +17041,17 @@ def _latest_unblocked_block_recurrence(
     return None
 
 
+def _review_revision_rounds(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count prior REQUEST_CHANGES blocks across coder revision runs."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "AND json_extract(payload, '$.kind') = 'review_revision'",
+        (task_id,),
+    ).fetchone()
+    return int(row[0]) if row is not None else 0
+
+
 def _normalize_block_kind(kind: Optional[str]) -> Optional[str]:
     """Return a validated block kind, or ``None`` for an untyped block."""
     if kind is None:
@@ -17056,6 +17128,7 @@ def block_task(
     wait_for: Optional[dict[str, object]] = None,
     expected_run_id: Optional[int] = None,
     reviewer_metadata: Optional[dict] = None,
+    terminal_dependency: bool = False,
 ) -> bool:
     """Transition ``running -> blocked``.
 
@@ -17111,7 +17184,7 @@ def block_task(
         wait_due_at: Optional[int] = None
         wait_state: Optional[str] = None
         wait_rejection: Optional[str] = None
-        if requested_block_kind == "dependency":
+        if requested_block_kind == "dependency" and not terminal_dependency:
             try:
                 normalized_wait, wait_due_at, wait_state = _normalize_wait_for_in_txn(
                     conn,
@@ -17132,6 +17205,9 @@ def block_task(
             if "block_recurrences" in existing.keys()
             else 0
         )
+        if block_kind == "review_revision":
+            previous_recurrences = _review_revision_rounds(conn, task_id)
+            previous_kind = block_kind if previous_recurrences else previous_kind
         if previous_recurrences <= 0:
             previous_recurrences = (
                 _latest_unblocked_block_recurrence(conn, task_id, block_kind) or 0
@@ -17151,13 +17227,29 @@ def block_task(
             )
             if (
                 recurrences >= BLOCK_RECURRENCE_LIMIT
-                and block_kind != "review_revision"
+                and block_kind not in {"review_revision", "rebase_conflict"}
             ):
                 next_status = "triage"
             else:
                 # Review revisions have their own bounded retry/operator path.
                 # They must never leak into the generic repeated-failure triage
                 # lane merely because the same reviewer verdict recurred.
+                next_status = "blocked"
+        review_breaker_reason: Optional[str] = None
+        if block_kind == "review_revision":
+            max_review_rounds = int(
+                _review_gate_config().get(
+                    "max_review_rounds", _DEFAULT_MAX_REVIEW_ROUNDS
+                )
+            )
+            if recurrences >= max_review_rounds:
+                review_breaker_reason = (
+                    "review ping-pong breaker: "
+                    f"{recurrences} REQUEST_CHANGES rounds "
+                    f"({max_review_rounds}-bounce rule)"
+                )
+                reason = review_breaker_reason
+                block_kind = "needs_input"
                 next_status = "blocked"
         next_wait_json = existing["wait_for"]
         next_due_at = existing["due_at"]
@@ -17310,6 +17402,14 @@ def block_task(
                 ),
             }
         _append_event(conn, task_id, "blocked", blocked_payload, run_id=run_id)
+        if review_breaker_reason is not None:
+            _emit_operator_escalation(
+                conn,
+                task_id,
+                run_id,
+                "review_pingpong",
+                review_breaker_reason,
+            )
         if next_status == "triage":
             _append_event(
                 conn,
@@ -21559,9 +21659,7 @@ _NON_FAILURE_RUN_OUTCOMES = frozenset({
     "blocked",
     "reclaimed",
     "stale",
-    "rate_limited",
     "spawn_retry",
-    "transient_retry",
 })
 
 
@@ -21573,6 +21671,49 @@ def _run_failure_metadata(outcome: str, error: Optional[str]) -> dict[str, str]:
         "worker_exit_kind": outcome,
         "worker_failure_fingerprint": _error_fingerprint(error),
     }
+
+
+def _persistent_failure_fingerprint_streak(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> Optional[tuple[str, int]]:
+    """Return a >=3 trailing identical-fingerprint streak, if present."""
+    has_column = any(
+        col["name"] == "worker_failure_fingerprint"
+        for col in conn.execute("PRAGMA table_info(task_runs)")
+    )
+    fingerprint_sql = (
+        "worker_failure_fingerprint, metadata"
+        if has_column
+        else "NULL AS worker_failure_fingerprint, metadata"
+    )
+    rows = conn.execute(
+        f"SELECT {fingerprint_sql} FROM task_runs "
+        "WHERE task_id = ? AND ended_at IS NOT NULL "
+        "ORDER BY ended_at DESC, id DESC LIMIT 6",
+        (task_id,),
+    ).fetchall()
+    fingerprints: list[Optional[str]] = []
+    for row in rows:
+        fingerprint = row["worker_failure_fingerprint"]
+        if not fingerprint and row["metadata"]:
+            try:
+                metadata = json.loads(row["metadata"])
+            except (TypeError, ValueError):
+                metadata = {}
+            if isinstance(metadata, dict):
+                fingerprint = metadata.get("worker_failure_fingerprint")
+        fingerprints.append(str(fingerprint) if fingerprint else None)
+    if len(fingerprints) < 3 or fingerprints[0] is None:
+        return None
+    streak = 1
+    for fingerprint in fingerprints[1:]:
+        if fingerprint != fingerprints[0]:
+            break
+        streak += 1
+    if streak < 3:
+        return None
+    return fingerprints[0], streak
 
 
 _PROTOCOL_VIOLATION_FAILURE_LIMIT = 3
@@ -21674,6 +21815,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     crashed: list[str] = []
     rate_limited: list[str] = []
     transient_recovered: list[str] = []
+    persistent_blocks: list[tuple[str, str, int, Optional[int]]] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -21897,6 +22039,27 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
+                # Quota walls are exempt from the streak breaker: the respawn
+                # guard already defers them on a cooldown and they self-heal
+                # when the quota window resets — terminal-blocking them would
+                # turn every budget wall into manual operator work.
+                persistent_streak = (
+                    None
+                    if rate_limited_exit
+                    else _persistent_failure_fingerprint_streak(conn, row["id"])
+                )
+                if persistent_streak is not None:
+                    fingerprint, streak = persistent_streak
+                    if _reclaim_target == "review":
+                        conn.execute(
+                            "UPDATE tasks SET status = 'ready' "
+                            "WHERE id = ? AND status = 'review'",
+                            (row["id"],),
+                        )
+                    persistent_blocks.append(
+                        (row["id"], fingerprint, streak, run_id)
+                    )
+                    continue
                 if rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
@@ -21977,6 +22140,27 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # top precedence it has for every other failure kind. Systemic same-error
     # crashes still trip immediately.
     auto_blocked: list[str] = []
+    for task_id, fingerprint, streak, run_id in persistent_blocks:
+        reason = (
+            "persistent identical failure across "
+            f"{streak} respawns: {fingerprint}"
+        )
+        if block_task(
+            conn,
+            task_id,
+            reason=reason,
+            kind="dependency",
+            terminal_dependency=True,
+        ):
+            with write_txn(conn):
+                _emit_operator_escalation(
+                    conn,
+                    task_id,
+                    run_id,
+                    "respawn_streak",
+                    reason,
+                )
+            auto_blocked.append(task_id)
     if crash_details:
         # Fingerprint errors to detect systemic failures.
         _fp_counts: dict[str, int] = {}
@@ -27780,6 +27964,8 @@ def _blocked_kind_for_auto_retry(
         # review_revision has its own bounded body-hash retry path below.
         if explicit_block_kind in OPERATOR_ONLY_BLOCK_KINDS:
             return explicit_block_kind
+        if explicit_block_kind == "rebase_conflict":
+            return "retryable"
         if explicit_block_kind not in {"review_revision", "transient"}:
             return explicit_block_kind
     text = (reason or "").strip()
