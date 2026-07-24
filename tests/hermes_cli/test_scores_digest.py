@@ -208,3 +208,62 @@ def test_digest_retry_hotspots(tmp_path, monkeypatch):
     assert len(digest["retry_hotspots"]) == 2
     assert digest["retry_hotspots"][0]["task_id"] == t1
     assert digest["retry_hotspots"][0]["rejections"] == 2
+    assert digest["retry_hotspots"][0]["max_attempt"] == 5
+
+
+# ── Regression: copied-script layout resolves HERMES_HOME venv ────────
+
+
+def test_copied_script_resolves_hermes_home_venv(tmp_path):
+    """Regression (t_57aaa085): when the script is copied to
+    ``~/.hermes/scripts/`` (the cron deployment path), it must resolve
+    ``HERMES_HOME/hermes-agent/.venv/bin/hermes`` instead of falling
+    back to a stale PATH ``hermes`` that lacks ``--digest``."""
+    import os
+    import shutil
+    import subprocess
+
+    repo_script = (
+        Path(__file__).resolve().parents[2]
+        / "scripts"
+        / "cron"
+        / "scores-weekly-digest.sh"
+    )
+
+    # Simulate copied-script layout: <HERMES_HOME>/scripts/scores-weekly-digest.sh
+    hermes_home = tmp_path / ".hermes"
+    scripts_dir = hermes_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    shutil.copy2(repo_script, scripts_dir / "scores-weekly-digest.sh")
+
+    # Create the canonical venv hermes stub (the one we WANT selected)
+    venv_bin = hermes_home / "hermes-agent" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    stub = venv_bin / "hermes"
+    stub.write_text('#!/bin/sh\necho "SELECTED:$0"\n')
+    stub.chmod(0o755)
+
+    # Create a stale PATH hermes that must NOT be selected
+    stale_bin = tmp_path / "stale-bin"
+    stale_bin.mkdir()
+    stale_hermes = stale_bin / "hermes"
+    stale_hermes.write_text('#!/bin/sh\necho "STALE:$0"\n')
+    stale_hermes.chmod(0o755)
+
+    # Run under scheduler-like PATH (stale hermes first, system dirs for bash)
+    env = {
+        **os.environ,
+        "HERMES_HOME": str(hermes_home),
+        "HOME": str(tmp_path),
+        "PATH": f"{stale_bin}:/usr/bin:/bin",
+    }
+    result = subprocess.run(
+        ["/bin/bash", str(scripts_dir / "scores-weekly-digest.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert f"SELECTED:{venv_bin / 'hermes'}" in result.stdout
+    assert "STALE" not in result.stdout
