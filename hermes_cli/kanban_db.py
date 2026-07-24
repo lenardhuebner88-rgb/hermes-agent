@@ -20075,6 +20075,37 @@ def _apply_materialized_dispatch_workspace(
         set_branch_name(conn, task.id, effective_branch)
         task.branch_name = effective_branch
 
+    # Claim emits the first contract before dispatch resolves a ``dir`` task
+    # onto its chain worktree. Publish one newer contract only when its
+    # workspace rails no longer match the worker's materialized location.
+    prior_contract = _latest_code_contract_event(conn, task.id)
+    if prior_contract is None:
+        return
+    row = conn.execute(
+        "SELECT id, body, assignee, workspace_kind, workspace_path, tenant, "
+        "created_by, kind FROM tasks WHERE id = ?",
+        (task.id,),
+    ).fetchone()
+    if row is None or not _is_code_task_row(row):
+        return
+    payload, missing = _code_task_contract_payload(
+        assignee=row["assignee"],
+        workspace_kind=row["workspace_kind"] or "scratch",
+        workspace_path=row["workspace_path"],
+        tenant=row["tenant"],
+        body=row["body"],
+        created_by=row["created_by"],
+        protected_funnel_root=_is_funnel_root_task(conn, row),
+        source="materialized_dispatch",
+    )
+    workspace_fields = ("repo_workspace", "allowed_paths")
+    if missing or all(
+        prior_contract.get(field) == payload.get(field) for field in workspace_fields
+    ):
+        return
+    payload["supersedes"] = True
+    _append_event(conn, task.id, _CODE_TASK_CONTRACT_EVENT, payload)
+
 
 # ``schedule_task`` predates timed holds.  Existing non-CLI callers must leave
 # an already persisted due time alone, while the CLI needs to be able to pass
