@@ -723,6 +723,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                 session_id=session_id or task_key,
                 trace_name="Hermes turn",
                 tags=["hermes", "langfuse"] + (["kanban-worker"] if kanban_metadata else []),
+                metadata=kanban_metadata or None,
             ):
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,

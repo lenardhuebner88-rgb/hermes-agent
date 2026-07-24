@@ -401,6 +401,16 @@ class TestKanbanWorkerTraceMetadata:
             "kanban_run_id": "123", "kanban_board": "planspec", "kanban_profile": "coder",
         }
         assert propagated["tags"] == ["hermes", "langfuse", "kanban-worker"]
+        # Regression: kanban identity must be propagated to TRACE level,
+        # not just stamped on the root span.  Without metadata= in
+        # propagate_attributes(), Langfuse v4 creates the trace with
+        # empty metadata and the exporter can never match it.
+        assert propagated["metadata"] == {
+            "kanban_task_id": "t-kanban",
+            "kanban_run_id": "123",
+            "kanban_board": "planspec",
+            "kanban_profile": "coder",
+        }
 
     def test_root_trace_payload_is_unchanged_outside_kanban_worker(self, monkeypatch):
         mod = importlib.import_module("plugins.observability.langfuse")
@@ -415,6 +425,30 @@ class TestKanbanWorkerTraceMetadata:
             "api_request_id": "", "platform": "cli", "provider": "provider",
             "model": "model", "api_mode": "chat",
         }
+
+    def test_propagated_metadata_is_none_outside_kanban_worker(self, monkeypatch):
+        """Non-worker traces must not carry kanban metadata in propagate_attributes."""
+        mod = importlib.import_module("plugins.observability.langfuse")
+        for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_BOARD", "HERMES_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        propagated = {}
+
+        class _Attributes:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_propagate_attributes(**kwargs):
+            propagated.update(kwargs)
+            return _Attributes()
+
+        monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
+        self._start_root_trace(mod)
+
+        assert propagated.get("metadata") is None
+        assert "kanban-worker" not in propagated.get("tags", [])
 
     def test_kanban_metadata_env_failure_is_fail_soft(self, monkeypatch):
         mod = importlib.import_module("plugins.observability.langfuse")
