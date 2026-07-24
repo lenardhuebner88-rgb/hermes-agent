@@ -29,7 +29,7 @@
 
 ## Acceptance criteria
 
-1. **Mergeability (the point of the work).** Conflict hunks in `hermes_cli/kanban_db.py` when upstream's delta is replayed onto the fork, measured before and after. **Baseline: 14 conflict regions, 568 conflicted lines.** Two corrections apply — the metric must be pinned (below), and the criterion must be re-scoped (further below).
+1. **Mergeability (the point of the work).** Conflict hunks in `hermes_cli/kanban_db.py` when upstream's delta is replayed onto the fork, measured before and after. **Baseline: 14 conflict regions, 568 conflicted lines, file 1,589,570 B.** The bar is **strictly fewer than 14** — operator-set and not softened. It is reached by Task 8 (hooks), not by Task 7 (extraction); see the measurement below for why. The metric must be pinned, as follows.
 
    **Pin the merge base.** Use the explicit-base form, not the automatic one:
 
@@ -44,7 +44,15 @@
 3. **CodeGraph payoff.** `stat -c%s hermes_cli/kanban_db.py` < 1,048,576, and `codegraph query dispatch_once` returns the real definition.
 4. **API equivalence.** `api_snapshot.py --compare` reports `API IDENTICAL`, and affected tests are green.
 
-### Correction to criterion 1 — measured, needs an operator call
+### Operator decision 2026-07-24 23:20 — criterion 1 stays hard, scope extends to hooks
+
+The two-step grading proposed below was **put to the operator and rejected**. The full variant is binding: the restructure extends to the hooks immediately, and criterion 1 keeps its strict form — *strictly fewer* conflict hunks, or it does not land. Brief: `/home/piet/vault/03-Agents/Claude/handoffs/2026-07-24-hook-scope-brief-work5.md`.
+
+The reasoning is the measurement below, which the operator accepted: extraction alone cannot move the number, so the work that *does* move it is now in scope. Session `work:1` additionally objected that `create_task` is the kanban lifecycle spine (create → claim → complete) and that an error there hits every worker. That objection was also overruled. It is **not reopened here**; it is answered instead by the characterization-test requirement in Task 8, which is mandatory and gates every hook.
+
+Everything in the section immediately below remains accurate as *measurement*. Only its recommendation is superseded.
+
+### Why extraction alone cannot move criterion 1 — measured
 
 The delta requires *strictly fewer* conflict hunks after the split, and states that if the count does not drop, "the ownership map was wrong and the split must not land." Measured on `1ef243502`, that criterion **cannot be met by this change**, and the ownership map is not the reason.
 
@@ -62,7 +70,21 @@ Extracting the 733 fork-only symbols removes zero of them, because every conflic
 
 Reducing those conflicts requires the *second* piece of work the delta names as a later candidate: reducing fork divergence inside the 129 shared symbols to hooks. That touches behaviour and cannot ride along with a pure move.
 
-**Recommendation (assumed for the rest of this plan, pending operator confirmation):** re-scope criterion 1 for this pass to *"conflict hunks in `kanban_db.py` must not increase"* — a real regression guard the extraction can actually fail — and promote *"fork-only lines in `kanban_db.py` drop from 23,745 to ~0"* (criterion 2) to the primary success measure. Keep the delta's strict-decrease criterion as the acceptance gate for the follow-on hook-reduction pass, where it is the right test. The extraction remains worth doing on its own: it is the precondition that makes hook-reduction tractable at all, it delivers the CodeGraph payoff, and it is what the standing rule needs in order to have somewhere to put new fork code.
+~~Recommendation: re-scope criterion 1 to "must not increase" and defer strict decrease to a follow-on pass.~~ **Superseded by the operator decision above.** Strict decrease stays, and the hook work that achieves it is now Task 8 of this plan rather than a sequel. The extraction (Task 7) keeps its own value — it is the precondition that makes the hook work tractable, it delivers the CodeGraph payoff, and the standing rule needs somewhere to put new fork code — but it is no longer the end of the job.
+
+### A note on hunk attribution: three measurements, one work list
+
+Attributing each conflict hunk to an enclosing symbol turns out to be heuristic-sensitive. Three independent attempts on the same 14 hunks disagreed on 2 of them:
+
+| source | upstream / fork | notable difference |
+|---|---|---|
+| this plan, regex walk upward | 13 / 1 | placed one hunk in `DEFAULT_BUSY_TIMEOUT_MS` |
+| `work:1` brief | 13 / 1 | placed one hunk in `resolve_vault_memory_link_path`; lists `list_comments` and `_backup_corrupt_db` |
+| this plan, anchor-mapped to `HEAD` lines | 12 / 2 | placed hunks in `HANDOFF_RAW_ARTIFACT_KIND` and at module level; `list_comments`/`_backup_corrupt_db` absent |
+
+All three agree on what matters: **`create_task` carries 6 hunks**, the great majority sit in upstream symbols, and only 1–2 sit in fork symbols. The disagreement is confined to the tail.
+
+**So the work list is not driven by hunk attribution.** It is driven by *how many fork lines sit inside each upstream symbol*, measured by `difflib` of symbol bodies against `origin/main` — a robust signal that does not depend on merge-region alignment. That measurement is reproduced independently below and matches the `work:1` brief to within ±1 line on two rows.
 
 ---
 
@@ -109,7 +131,28 @@ A top-level symbol is `UPSTREAM` if a symbol of that name exists in `git show or
 | `SCHEMA_SQL` | 407 | 187 |
 | `_record_task_failure` | 404 | 162 |
 
-These 129 symbols are the entire remaining conflict surface, and the input list for the follow-on hook-reduction pass.
+These 129 symbols are the entire remaining conflict surface. Seven of them carry the conflicts and are the work list for Task 8.
+
+### Hook work list — fork lines inside upstream symbols
+
+Measured by `difflib.unified_diff` of each symbol's body, `origin/main` versus `HEAD`. `+` = present only in the fork (fork-added lines living inside upstream's function); `−` = present only upstream (incoming upstream work the fork has diverged from). Reproduced independently; matches the `work:1` brief to ±1 on `create_task` and `_default_spawn`.
+
+| symbol | hunks | fork lines inside | upstream-only lines | measure |
+|---|---:|---:|---:|---|
+| `create_task` | 6 | 276 | 163 | **hook — highest risk, lifecycle spine** |
+| `_default_spawn` | 1 | 179 | 62 | hook |
+| `Task` (class, incl. method `from_row`) | 1–2 | 149 | 35 | hook / field separation |
+| `_guard_existing_db_is_healthy` | 1–2 | 45 | 56 | hook |
+| `_cleanup_worker_tmux` | 1 | 5 | 2 | trivial realignment |
+| `list_comments` | 0–1 | 3 | 0 | trivial realignment — the `kind` fallback is the only fork part |
+| `_backup_corrupt_db` | 0–1 | **0** | 3 | **no fork code — resolve as *theirs*, do not hook** |
+
+Net **657 distinct fork lines** inside upstream symbols (the raw sum across the seven; `from_row`'s 89 lines are already inside `Task`'s 149 and are not counted twice).
+
+**Two traps in this list, both verified:**
+
+1. **`from_row` is a method of `Task`**, not a top-level symbol — confirmed: it appears at body line 131 inside `Task`, and `from_row` is absent from the top-level symbol table. Treating it as its own symbol would double-count it and move it twice.
+2. **Not every conflict is the fork's fault.** `_backup_corrupt_db` contains **0** fork lines — confirmed independently. Its conflict is pure upstream evolution (the `_prune_corrupt_backups` retention cap) against an older fork state. The correct resolution is *theirs*; building a hook there would add complexity for no benefit.
 
 ### Cross-file references created by the ownership cut
 
@@ -117,8 +160,10 @@ Classified with `layering.py`'s import-time/runtime distinction:
 
 | direction | import-time | runtime |
 |---|---:|---:|
-| FORK → UPSTREAM | 10 | 354 |
-| UPSTREAM → FORK | **3** | 233 |
+| FORK → UPSTREAM | 32 | 354 |
+| UPSTREAM → FORK | **4** | 233 |
+
+> **Corrected 2026-07-24 (annotations).** These import-time counts were first measured as 10 and 3. That undercounted, because `hermes_cli/kanban_db.py` has **no** `from __future__ import annotations`, so annotations are evaluated when the module body runs and are therefore import-time references like any other. Adding argument annotations, return annotations, `AnnAssign` annotations and class keywords finds **59** further import-time references — raising FORK → UPSTREAM from 10 to 32 (harmless) and UPSTREAM → FORK from 3 to 4 (**not** harmless: it adds a symbol to the carve-out). See Task 5 Step 3.
 
 - The **354 + 233 runtime** references are fine. `kanban_ext` reaches `kanban_db` through a module-object import (`from hermes_cli import kanban_db` + `kanban_db.foo(...)`), resolved at call time, and `kanban_db`'s re-export block sits at the very end of the file. The resulting import cycle is benign, exactly as the empirical test in Task 4 shows.
 - The **10 FORK → UPSTREAM import-time** references are fine too: `kanban_ext` loads after `kanban_db`'s body has run, so those names already exist.
@@ -1706,7 +1751,7 @@ EOF
 head -20 docs/refactor/ownership.kanban_db.md
 ```
 
-Expected header numbers: 733 / 111 / 129 as in the ground-truth section. This file is also the deliverable that seeds the follow-on hook-reduction pass.
+Expected header numbers: 733 / 111 / 129 as in the ground-truth section. This file is also the deliverable that seeds Task 8's hook work, and the backlog of diverged symbols beyond the seven in scope.
 
 - [ ] **Step 2: Record the "before" mergeability baseline**
 
@@ -2000,7 +2045,9 @@ echo "conflict hunks AFTER : $(rg -c '^<<<<<<<' /tmp/kdb_merged_after.txt)"
 echo "conflict hunks BEFORE: 14   (pinned-base baseline)"
 ```
 
-Per the re-scoping recorded under "Acceptance criteria": the count **must not increase**. It is not expected to fall, because all 14 conflicts sit inside upstream-owned bodies that stay. If it *rises*, the extraction has torn text apart that git was previously matching — treat that as a blocking defect and re-examine the map.
+For **this task** the count **must not increase**. It is not expected to fall much — at most the 1–2 hunks that sit in fork symbols — because the rest sit inside upstream bodies that Task 7 leaves alone. If it *rises*, the extraction has torn apart text git was previously matching: that is a blocking defect, re-examine the map.
+
+The strict-decrease bar itself is gated at **Task 8 Step 8**, after the hooks have moved the fork lines that cause the remaining hunks. Task 7 does not attempt it and is not judged against it.
 
 Also record the primary success measure for this pass:
 
@@ -2115,7 +2162,7 @@ block runs), and kanban_db reaches forward through the names that block binds.
 
 Remaining conflict surface is the 129 upstream symbols the fork edited
 in place; they are listed in docs/refactor/ownership.kanban_db.md and are
-the input to the follow-on hook-reduction pass.
+the input to Task 8's hook work (seven of them) and to the residual backlog (the rest).
 
 CodeGraph now resolves the real definitions:
 <paste the `codegraph query dispatch_once` output here>
@@ -2142,7 +2189,208 @@ git checkout main && git merge --ff-only refactor/extract-kanban-ext
 
 ---
 
-## Task 8: Close out
+## Task 8: Hooks — move fork logic out of upstream function bodies
+
+**This is the task that satisfies acceptance criterion 1.** Task 7 removes fork *symbols* from an upstream file; this task removes fork *lines* from inside upstream *functions*. Only the second moves the conflict count.
+
+**Prerequisite:** Task 7 merged. The file is ~565 KB and the seven target symbols are readable.
+
+**Files:**
+- Modify: `hermes_cli/kanban_db.py` (the seven symbols in the work list)
+- Modify/create: `hermes_cli/kanban_ext/hooks.py` and siblings — the fork behaviour being lifted
+- Create: `tests/hermes_cli/test_kanban_db_hooks_characterization.py`
+
+### Discipline change — read this before starting
+
+Tasks 1–7 were **pure moves**, proven equivalent mechanically by `api_snapshot.py`. Task 8 is **not** a pure move: it restructures the inside of functions the fork and upstream both edited. `api_snapshot.py` still applies — signatures must not change — but it can no longer prove behaviour, because behaviour now flows through a hook instead of inline code.
+
+The replacement proof is **characterization tests written before the refactor**: capture what the function does today, then require the identical result after. Nothing else in this plan carries the same risk profile, and `create_task` is the kanban lifecycle spine — an error there hits every worker on every board.
+
+**Rules for this task, all mandatory:**
+
+1. **One symbol per commit.** Seven symbols, seven commits, each independently revertible.
+2. **Characterization tests land in their own commit *before* the refactor commit for that symbol**, and must pass against the *unmodified* function first. A test written after the change proves nothing.
+3. **No behaviour change.** Not a bug fix, not a docstring correction, not a rename. The five known defects under Follow-ups stay unfixed here too. If a hook reveals a bug, record it and move on.
+4. **The upstream body must end up textually closer to `origin/main`'s version**, measured — that is the entire point. Verify per symbol (see the per-symbol gate below).
+5. **Hooks live in `hermes_cli/kanban_ext/`**, reached through the existing re-export. Do not add new fork names to `kanban_db.py` beyond the single hook call.
+
+### Order of work — easiest first, riskiest last
+
+Deliberately inverted from size, so the mechanism is proven on trivial cases before it touches the lifecycle spine.
+
+- [ ] **Step 1: `_backup_corrupt_db` — resolve as *theirs*, no hook**
+
+It contains 0 fork lines; the conflict is upstream's `_prune_corrupt_backups` retention cap against a stale fork copy. Take upstream's version wholesale.
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+git checkout -b refactor/kanban-db-hooks main
+python - <<'EOF'
+import ast, subprocess
+# print upstream's version of the symbol for review before replacing
+up = subprocess.run(['git','show','origin/main:hermes_cli/kanban_db.py'],
+                    capture_output=True, text=True, check=True).stdout
+t = ast.parse(up); ls = up.splitlines()
+for n in t.body:
+    if getattr(n, 'name', None) == '_backup_corrupt_db':
+        print("\n".join(ls[n.lineno-1:n.end_lineno]))
+EOF
+```
+
+Read both versions. Confirm the fork's copy really adds nothing, then replace the fork body with upstream's. Run `scripts/run-affected.sh`. Commit as `refactor(hooks): take upstream _backup_corrupt_db (fork adds nothing)`.
+
+- [ ] **Step 2: `list_comments` — trivial realignment (3 fork lines)**
+
+The only fork part is a `kind` fallback. Write the characterization test first:
+
+```python
+def test_list_comments_kind_fallback_is_preserved(tmp_path):
+    """Characterization: comments without an explicit kind still report the
+    fork's default, and comments with one are untouched."""
+    from hermes_cli import kanban_db
+    db = tmp_path / "k.db"
+    conn = kanban_db.connect(str(db))
+    kanban_db.init_db(conn)
+    tid = kanban_db.create_task(conn, title="t", body="b")
+    kanban_db.add_comment(conn, tid, "no kind given")
+    rows = kanban_db.list_comments(conn, tid)
+    assert rows, "characterization needs at least one comment"
+    assert rows[0].kind is not None, "fork's kind fallback must survive"
+```
+
+Adjust the call signatures to whatever the real API is — read them, do not guess. Run it against the **unmodified** function and confirm it passes. Commit the test. Then lift the fallback into `kanban_ext`, re-run, commit.
+
+- [ ] **Step 3: `_cleanup_worker_tmux` — trivial realignment (5 fork lines)**
+
+Same shape as Step 2: characterization test first, covering whatever the 5 fork lines do (inspect them with the diff command in the per-symbol gate below), then lift, then re-run.
+
+- [ ] **Step 4: `_guard_existing_db_is_healthy` — hook (45 fork lines)**
+
+Note this symbol has **more upstream-only lines (56) than fork lines (45)** — upstream has moved on here more than the fork has. Read upstream's version first and prefer adopting its structure, lifting only the genuinely fork-specific guard into a hook.
+
+Characterization tests must cover: a healthy DB passes; a corrupt DB is caught; whatever fork-specific condition the 45 lines add.
+
+- [ ] **Step 5: `Task` — field separation (149 fork lines, incl. `from_row`)**
+
+`Task` is a dataclass. The fork added fields and extended `from_row`. **`from_row` is a method inside `Task`** — do not treat it as a top-level symbol.
+
+Preferred shape: keep upstream's field set on `Task`; move fork-added fields to a `kanban_ext` companion (a mixin or a dataclass composed alongside), and have `from_row` call one hook that populates them. Characterization tests must pin: every field name currently on `Task` still exists with the same type, and `from_row` on a real DB row produces an identical object.
+
+```python
+def test_task_field_surface_is_unchanged():
+    """Characterization: the full field set of Task, pinned by name."""
+    import dataclasses
+    from hermes_cli import kanban_db
+    got = {f.name for f in dataclasses.fields(kanban_db.Task)}
+    # paste the ACTUAL current set here, generated once before refactoring:
+    #   python -c "import dataclasses;from hermes_cli import kanban_db;\
+    #     print(sorted(f.name for f in dataclasses.fields(kanban_db.Task)))"
+    expected = {...}
+    assert got == expected
+```
+
+- [ ] **Step 6: `_default_spawn` — hook (179 fork lines)**
+
+This is the worker launch path. Characterization tests must cover the environment the child process receives, because that is what the fork extends: assert on the constructed env/argv rather than on side effects, so the test does not spawn anything. Read `docs/kanban/LIFECYCLE.md` §"What the spawned worker sees" for the contract this must preserve.
+
+- [ ] **Step 7: `create_task` — hook (276 fork lines, 6 of the 14 hunks)**
+
+**The highest-risk change in this entire plan.** `create_task` is the entry point of the kanban lifecycle (create → claim → complete); every worker on every board goes through it. The operator was warned and chose to proceed, so it proceeds — with the heaviest test protection in the plan.
+
+Before touching it, enumerate what it currently does:
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+python - <<'EOF'
+import ast
+t = ast.parse(open('hermes_cli/kanban_db.py').read())
+for n in t.body:
+    if getattr(n, 'name', None) == 'create_task':
+        print(f"lines {n.lineno}-{n.end_lineno}, args:")
+        for a in n.args.args + n.args.kwonlyargs:
+            print(f"   {a.arg}")
+EOF
+rg -n 'create_task\(' --type py -g '!tests/**' | wc -l   # production call sites
+rg -n 'create_task\(' tests/ | wc -l                     # existing test coverage
+```
+
+Characterization tests must cover, at minimum, one case per initial status the function accepts (`triage`, `todo`, `ready`, `blocked` — see `VALID_INITIAL_STATUSES`), plus parent-linking, plus the role/workspace contract validation, plus at least one rejection path. Existing tests in `tests/hermes_cli/test_kanban_db_lifecycle.py` are a starting point, not a substitute — they were written for behaviour, not for pinning it against a refactor.
+
+Only once those pass against the unmodified function may the hook extraction begin.
+
+### Per-symbol gate (run for every one of Steps 1–7)
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+SYM=create_task   # the symbol just refactored
+python - <<'EOF'
+import ast, difflib, os, subprocess
+sym = os.environ['SYM']
+def body(src):
+    t = ast.parse(src); ls = src.splitlines()
+    for n in t.body:
+        names = ([n.name] if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                 else [x.id for x in getattr(n, 'targets', []) if isinstance(x, ast.Name)])
+        if sym in names:
+            s = n.lineno
+            d = getattr(n, 'decorator_list', None)
+            if d: s = min(s, min(x.lineno for x in d))
+            return ls[s-1:n.end_lineno]
+    return []
+up = body(subprocess.run(['git','show','origin/main:hermes_cli/kanban_db.py'],
+                         capture_output=True, text=True, check=True).stdout)
+new = body(open('hermes_cli/kanban_db.py').read())
+old = body(subprocess.run(['git','show','main:hermes_cli/kanban_db.py'],
+                          capture_output=True, text=True, check=True).stdout)
+def forklines(a, b):
+    d = list(difflib.unified_diff(a, b, lineterm='', n=0))
+    return sum(1 for l in d if l.startswith('+') and not l.startswith('+++'))
+print(f"{sym}: fork lines inside, before={forklines(up, old)}  after={forklines(up, new)}")
+EOF
+```
+
+**The `after` number must be strictly lower than `before`.** If it is not, the hook did not actually move fork code out of upstream's body — it only relocated it within the same function. Also required per symbol:
+
+```bash
+python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --compare docs/refactor/api-snapshot.kanban_db.json
+python -m pytest tests/hermes_cli/test_kanban_db_hooks_characterization.py -v
+scripts/run-affected.sh
+```
+
+- [ ] **Step 8: Acceptance criterion 1 — the hard gate**
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+git merge-tree --write-tree --merge-base=3bfa6001f HEAD 306c9f766 > /tmp/mt_hooks.txt
+TREE=$(head -1 /tmp/mt_hooks.txt)
+git cat-file -p "$TREE:hermes_cli/kanban_db.py" | rg -c '^<<<<<<<'
+echo "baseline: 14"
+```
+
+**Must be strictly below 14.** This is the criterion the operator declined to soften; it is now reachable because the fork lines causing those hunks have moved.
+
+Re-measure the baseline once more first if the Codex upstream sync landed in the meantime — same command, same file. The sync keeps `kanban_db.py` on *ours*, so the baseline is expected to be unchanged at 14, but confirm rather than assume.
+
+- [ ] **Step 9: Full gates, then review and merge**
+
+```bash
+python -m pytest --co -q tests/ 2>&1 | tail -5
+scripts/run-affected.sh
+ruff check .
+python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --compare docs/refactor/api-snapshot.kanban_db.json
+```
+
+Review brief for the independent reviewer (family ≠ builder), which differs from Task 7's because this is **not** a pure move:
+
+1. For each of the seven symbols: does the upstream body now match `origin/main` more closely, and is every remaining difference justified?
+2. Did any behaviour change? Specifically: are the characterization tests genuine pins, or were any weakened/deleted to make the refactor pass?
+3. Was each characterization test committed *before* its refactor, and did it pass against the unmodified function?
+4. `create_task` gets its own pass: every initial status, parent-linking, contract validation, rejection paths.
+5. None of the five Follow-up defects fixed in passing.
+
+---
+
+## Task 9: Close out
 
 - [ ] **Step 1: Verify every acceptance criterion**
 
@@ -2171,7 +2419,7 @@ Add to `AGENTS.md` and `CLAUDE.md`, in the section that governs where new code g
 
 Two backlogs come out of this work:
 
-1. **Hook-reduction (the sequel that earns the delta's strict-decrease criterion).** `docs/refactor/ownership.kanban_db.md` lists the 129 diverged symbols, largest first: `_dispatch_once_locked` (1,297 fork lines vs 400 upstream), `complete_task` (612 vs 208), `_migrate_add_optional_columns` (569 vs 256), `create_task` (491 vs 378). `create_task` alone causes 6 of the 14 conflict hunks and is the highest-value first target.
+1. **Residual divergence beyond the seven hooked symbols.** Task 8 hooks the symbols that actually cause today's 14 conflict hunks. It does **not** exhaust the 129 diverged symbols — `docs/refactor/ownership.kanban_db.md` lists them all, largest first: `_dispatch_once_locked` (1,297 fork lines vs 400 upstream), `complete_task` (612 vs 208), `_migrate_add_optional_columns` (569 vs 256). These carry no conflict *today* only because upstream has not touched them recently; they are the next conflict surface as soon as it does. Hook them opportunistically, worst-ratio first, under the same characterization-test discipline as Task 8.
 2. **Upstream's skipped `kanban_db.py` delta.** The Codex sync resolved the file as *ours*, so upstream's `3bfa6001f → 306c9f766` changes to it (+693 lines) are recorded as merged but never applied, and git will not re-offer them. Now that the file is ~13k lines instead of 38.8k, replaying them by hand is tractable for the first time:
 
    ```bash
