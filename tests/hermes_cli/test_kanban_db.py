@@ -62,8 +62,11 @@ def test_scores_report_aggregates_and_fills_last_eight_iso_weeks(tmp_path, monke
     assert report["rows_total"] == 4
     assert report["by_name"] == {"old": 1, "quality": 1, "review_verdict": 2}
     assert report["by_source"] == {"legacy": 1, "manual": 1, "review_gate": 2}
-    assert report["approved_rows"] == 3
-    assert report["approval_rate"] == 0.75
+    # Approval is defined over review_verdict rows only — the quality/old
+    # rows count toward rows_total but never toward the approval rate.
+    assert report["verdict_rows"] == 2
+    assert report["approved_rows"] == 1
+    assert report["approval_rate"] == 0.5
     assert [(week["year"], week["week"]) for week in report["weeks"]] == [
         (2026, week) for week in range(23, 31)
     ]

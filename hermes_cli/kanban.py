@@ -4084,7 +4084,7 @@ def _cmd_scores(args: argparse.Namespace) -> int:
         print(f"  {source:20s}  {count}")
     rate = report["approval_rate"]
     rate_text = f"{rate:.1%}" if rate is not None else "n/a"
-    print(f"Approval rate: {rate_text} ({report['approved_rows']}/{report['rows_total']})")
+    print(f"Approval rate: {rate_text} ({report['approved_rows']}/{report['verdict_rows']})")
     print("Weekly approval rate:")
     for week in report["weeks"]:
         weekly_rate = week["approval_rate"]
@@ -4186,7 +4186,7 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     # Top-3 retry hotspots
     if digest["retry_hotspots"]:
         hs_parts = [
-            f"{h['task_id']} (×{h['max_attempt']})"
+            f"{h['task_id']} (×{h['rejections']})"
             for h in digest["retry_hotspots"]
         ]
         lines.append("Retry-Hotspots: " + ", ".join(hs_parts))

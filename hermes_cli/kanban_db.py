@@ -32739,9 +32739,15 @@ def scores_report(
     )
 
     overall = conn.execute(
-        "SELECT COUNT(*) AS rows_total, "
+        "SELECT COUNT(*) AS rows_total FROM scores"
+    ).fetchone()
+    # Approval semantics are defined over review verdicts only. Metric score
+    # rows (run_duration_seconds, run_cost_usd, ...) share the table but carry
+    # raw values, so an unfiltered value==1.0 aggregate is meaningless.
+    verdicts = conn.execute(
+        "SELECT COUNT(*) AS verdict_rows, "
         "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
-        "FROM scores"
+        "FROM scores WHERE name = 'review_verdict'"
     ).fetchone()
     by_name = {
         str(row["name"]): int(row["count"])
@@ -32758,7 +32764,8 @@ def scores_report(
 
     weekly_counts: dict[_dt.date, tuple[int, int]] = {}
     for row in conn.execute(
-        "SELECT created_at, value FROM scores WHERE created_at >= ? ORDER BY created_at",
+        "SELECT created_at, value FROM scores "
+        "WHERE name = 'review_verdict' AND created_at >= ? ORDER BY created_at",
         (start_epoch,),
     ):
         day = _dt.datetime.fromtimestamp(int(row["created_at"]), tz=_dt.timezone.utc).date()
@@ -32785,13 +32792,15 @@ def scores_report(
         )
 
     rows_total = int(overall["rows_total"])
-    approved_rows = int(overall["approved_rows"])
+    verdict_rows = int(verdicts["verdict_rows"])
+    approved_rows = int(verdicts["approved_rows"])
     return {
         "rows_total": rows_total,
         "by_name": by_name,
         "by_source": by_source,
+        "verdict_rows": verdict_rows,
         "approved_rows": approved_rows,
-        "approval_rate": approved_rows / rows_total if rows_total else None,
+        "approval_rate": approved_rows / verdict_rows if verdict_rows else None,
         "weeks": weeks,
     }
 
@@ -32818,11 +32827,12 @@ def scores_digest(
         ).timestamp()
     )
 
-    # Overall approval rate — same query as scores_report for consistency
+    # Overall approval rate — verdict rows only, same semantics as
+    # scores_report (metric score rows share the table but carry raw values).
     overall = conn.execute(
         "SELECT COUNT(*) AS rows_total, "
         "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
-        "FROM scores"
+        "FROM scores WHERE name = 'review_verdict'"
     ).fetchone()
     rows_total = int(overall["rows_total"])
     approved_rows = int(overall["approved_rows"])
@@ -32831,7 +32841,8 @@ def scores_digest(
     # Weekly approval rates (last N weeks, same logic as scores_report)
     weekly_counts: dict[_dt.date, tuple[int, int]] = {}
     for row in conn.execute(
-        "SELECT created_at, value FROM scores WHERE created_at >= ? ORDER BY created_at",
+        "SELECT created_at, value FROM scores "
+        "WHERE name = 'review_verdict' AND created_at >= ? ORDER BY created_at",
         (start_epoch,),
     ):
         day = _dt.datetime.fromtimestamp(
@@ -32939,18 +32950,22 @@ def scores_digest(
         is not None
     )
 
-    # Top-3 retry hotspots (tasks with highest run_attempt_index)
+    # Top-3 retry hotspots: tasks with the most REQUEST_CHANGES verdicts inside
+    # the digest window. Review bounces are the actionable retry signal —
+    # all-time run_attempt_index would let long-lived heartbeat/loop tasks
+    # (1000+ routine runs) dominate the list forever.
     retry_hotspots: list[dict[str, Any]] = []
     for row in conn.execute(
-        "SELECT task_id, MAX(value) AS max_attempt "
+        "SELECT task_id, COUNT(*) AS rejections "
         "FROM scores "
-        "WHERE name = 'run_attempt_index' "
+        "WHERE name = 'review_verdict' AND value = 0.0 AND created_at >= ? "
         "GROUP BY task_id "
-        "ORDER BY max_attempt DESC "
-        "LIMIT 3"
+        "ORDER BY rejections DESC "
+        "LIMIT 3",
+        (start_epoch,),
     ):
         retry_hotspots.append(
-            {"task_id": str(row["task_id"]), "max_attempt": int(row["max_attempt"])}
+            {"task_id": str(row["task_id"]), "rejections": int(row["rejections"])}
         )
 
     return {

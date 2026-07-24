@@ -71,7 +71,9 @@ def test_digest_approval_rate_matches_scores_report(tmp_path, monkeypatch):
 
     assert digest["approval_rate"] == report["approval_rate"]
     assert digest["approved_rows"] == report["approved_rows"]
-    assert digest["rows_total"] == report["rows_total"]
+    # Digest rows_total counts verdict rows only; scores_report exposes the
+    # same figure as verdict_rows (rows_total there is the raw table size).
+    assert digest["rows_total"] == report["verdict_rows"]
     # Weekly values for the weeks that overlap must match
     for dw, rw in zip(digest["weekly"], report["weeks"][-len(digest["weekly"]):]):
         assert dw["rows_total"] == rw["rows_total"]
@@ -187,16 +189,22 @@ def test_digest_retry_hotspots(tmp_path, monkeypatch):
     with kb.connect_closing() as conn:
         t1 = kb.create_task(conn, title="t1", assignee="tester")
         r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
-        _insert_metric(conn, run_id=r1, task_id=t1, name="run_attempt_index",
-                       value=5.0, created_at=int(monday.timestamp()))
+        for _ in range(2):
+            _insert_verdict(conn, task_id=t1, run_id=r1, value=0.0,
+                            created_at=int(monday.timestamp()))
 
         t2 = kb.create_task(conn, title="t2", assignee="tester")
         r2 = _create_run(conn, task_id=t2, profile="coder", model="qwen3")
-        _insert_metric(conn, run_id=r2, task_id=t2, name="run_attempt_index",
-                       value=2.0, created_at=int(monday.timestamp()))
+        _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0,
+                        created_at=int(monday.timestamp()))
+        # Old rejection outside the window must not count
+        t3 = kb.create_task(conn, title="t3", assignee="tester")
+        r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t3, run_id=r3, value=0.0,
+                        created_at=int((monday - timedelta(weeks=10)).timestamp()))
 
         digest = kb.scores_digest(conn, weeks=2, now=now)
 
     assert len(digest["retry_hotspots"]) == 2
     assert digest["retry_hotspots"][0]["task_id"] == t1
-    assert digest["retry_hotspots"][0]["max_attempt"] == 5
+    assert digest["retry_hotspots"][0]["rejections"] == 2
