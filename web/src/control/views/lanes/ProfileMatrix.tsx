@@ -266,6 +266,7 @@ export function ProfileMatrix({
                   support={row.reasoningSupport ?? []}
                   disabled={busy || row.locked}
                   ariaLabel={`Reasoning für ${row.profile}`}
+                  hint={row.reasoningHint ?? undefined}
                   onChange={(value) => onReasoningChange(row.profile, value)}
                 />
                 {row.defaultReasoning ? (
@@ -308,18 +309,24 @@ export function ProfileMatrix({
         })}
       </ul>
 
-      {/* SaveBar */}
-      <div className="sticky bottom-0 flex flex-col gap-2 border-t border-line bg-surface-1/95 px-3 py-3 tab:flex-row tab:items-center tab:justify-end">
+      {/* SaveBar — mobile (<tab/600px): the hint takes its own line (basis-full)
+          and the two actions share the next row side-by-side (flex-1), so they
+          never stack into two full-width blocks (W5 phone bug: „Speichern und
+          Verwerfen komisch dargestellt"). Desktop (tab+): one row, hint pushed
+          left (mr-auto), actions right — unchanged. The pb inset reserves the iOS
+          home-indicator safe area so the buttons are never clipped (env()=0
+          elsewhere → identical to the old py-3). */}
+      <div className="sticky bottom-0 flex flex-wrap items-center gap-2 border-t border-line bg-surface-1/95 px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] tab:flex-nowrap tab:justify-end">
         {saveError ? (
-          <p className="text-micro text-status-alert tab:mr-auto">{saveError}</p>
+          <p className="text-micro text-status-alert basis-full tab:basis-auto tab:mr-auto">{saveError}</p>
         ) : (
-          <span className="text-micro text-ink-3 tab:mr-auto">{t.saveHint}</span>
+          <span className="text-micro text-ink-3 basis-full tab:basis-auto tab:mr-auto">{t.saveHint}</span>
         )}
         <button
           type="button"
           disabled={busy || !dirty}
           onClick={onDiscard}
-          className="min-h-12 rounded-card border border-line px-3 text-sec text-ink-2 transition-colors duration-150 hover:text-ink disabled:opacity-40"
+          className="min-h-12 flex-1 rounded-card border border-line px-3 text-sec text-ink-2 transition-colors duration-150 hover:text-ink disabled:opacity-40 tab:flex-none"
         >
           {t.discard}
         </button>
@@ -327,7 +334,7 @@ export function ProfileMatrix({
           type="button"
           disabled={busy || !dirty}
           onClick={onSave}
-          className="min-h-12 rounded-card border border-live bg-live px-3 text-sec font-semibold text-surface-0 transition-colors duration-150 hover:bg-bronze-hi disabled:cursor-not-allowed disabled:opacity-40"
+          className="min-h-12 flex-1 rounded-card border border-live bg-live px-3 text-sec font-semibold text-surface-0 transition-colors duration-150 hover:bg-bronze-hi disabled:cursor-not-allowed disabled:opacity-40 tab:flex-none"
         >
           {busy ? t.saving : t.save}
         </button>

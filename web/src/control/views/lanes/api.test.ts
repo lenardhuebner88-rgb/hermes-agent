@@ -355,6 +355,41 @@ describe("editor rows", () => {
     expect(rows[2].choice).toBe("hermes|gpt-5.5");
   });
 
+  it("W3: claude-cli rows carry the honest no-Knopf hint; hermes rows do not", () => {
+    // The backend now sends reasoning_support=[] + a claude_effort pointer hint
+    // for claude-cli rows (the control's agent.reasoning_effort is a no-op there).
+    // editorRows must surface that hint on the row so ReasoningControl renders
+    // the honest state instead of greyed segments.
+    const modelsWithHints: LaneModelOption[] = [
+      {
+        id: "claude-fable-5",
+        label: "Claude Fable 5",
+        runtime: "claude-cli",
+        group: "Claude (Max-Abo)",
+        provider: null,
+        reasoning_support: [],
+        reasoning_hint:
+          "claude -p: Reasoning via Profil-Config „claude_effort“ (--effort) — hier nicht schaltbar",
+      },
+      {
+        id: "gpt-5.5",
+        label: "GPT-5.5",
+        runtime: "hermes",
+        group: "OpenAI Codex",
+        provider: "openai-codex",
+        reasoning_support: ["minimal", "low", "medium", "high"],
+      },
+    ];
+    const rows = editorRows(lane, catalog, modelsWithHints);
+    const premium = rows.find((r) => r.profile === "premium")!;
+    expect(premium.worker_runtime).toBe("claude-cli");
+    expect(premium.reasoningSupport).toEqual([]);
+    expect(premium.reasoningHint).toContain("claude_effort");
+    const coder = rows.find((r) => r.profile === "coder")!;
+    expect(coder.reasoningSupport).toEqual(["minimal", "low", "medium", "high"]);
+    expect(coder.reasoningHint ?? null).toBeNull();
+  });
+
   it("profilesFromEditorRows drops default rows and keeps explicit ones", () => {
     const rows = editorRows(lane, catalog, MODELS).map((row) => ({ ...row, touched: true }));
     expect(profilesFromEditorRows(rows)).toEqual({

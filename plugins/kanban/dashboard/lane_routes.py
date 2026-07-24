@@ -38,6 +38,80 @@ def reasoning_support_for(provider: str | None, model_id: str) -> list[str]:
     return []
 
 
+# claude-cli rows are LOCKED in the Lanes UI and their reasoning is NOT steered
+# by this control: the Reasoning segment persists `agent.reasoning_effort`, which
+# the `claude -p` transport ignores. claude-cli reasoning IS configurable — via
+# the profile config field `claude_effort`, which the worker spawn maps to
+# `claude --effort <low|medium|high|xhigh|max>` (kanban_worker_runtime.
+# CLAUDE_CLI_EFFORT_LEVELS / kanban_db `_build_claude_worker_launch_spec`). So the
+# honest UI state is "no Reasoning-Knopf HERE" with a pointer to claude_effort,
+# NOT greyed segments that imply a disabled hermes-style control (W3, 2026-07-24).
+_LANE_CLAUDE_CLI_REASONING_HINT = (
+    "claude -p: Reasoning via Profil-Config „claude_effort“ (--effort) — hier nicht schaltbar"
+)
+
+
+def _lane_image_model(provider: str | None, model_id: str) -> bool:
+    """True for image/video-generation models that cannot echo a chat token (W2).
+
+    Detection is capability-first: models.dev exposes a model's output modalities,
+    and a model whose OUTPUT is image with no text output is a generator, not a
+    chat model. Custom-endpoint providers (e.g. ``alibaba-token-plan``) are NOT in
+    models.dev, so for those we fall back to an explicit, documented id-pattern
+    list of Alibaba's image/video lines — deliberate patterns, not blind substring
+    guessing:
+      - ``qwen-image-*``  → Qwen image generation
+      - ``wan*-image*``   → Alibaba „Wan“ image/video generation
+    Both lines are confirmed chat-probe fallback noise (verify REPORT 2026-07-24
+    §4.2: qwen-image-2.0/-pro, wan2.7-image/-pro all fall back to kimi/k3 because
+    an image generator cannot echo the probe token).
+    """
+    model_id = (model_id or "").strip().lower()
+    if not model_id:
+        return False
+    try:
+        from agent.models_dev import get_model_info
+
+        info = get_model_info((provider or "").strip().lower(), model_id)
+        if info is not None and info.output_modalities:
+            outs = {str(m).lower() for m in info.output_modalities}
+            # Image-only output → generator. models.dev knows this model and it is
+            # NOT image-only (text output present / no image out) → trust that.
+            return "image" in outs and "text" not in outs
+    except Exception:
+        pass
+    if model_id.startswith("qwen-image"):
+        return True
+    if model_id.startswith("wan") and "-image" in model_id:
+        return True
+    return False
+
+
+def _lane_offer_exclusion(provider: str | None, model_id: str) -> str | None:
+    """Return a reason if ``(provider, model_id)`` must NOT be offered on a chat
+    lane (selectable / sinnvoll / probe-able), else ``None`` (W1 + W2).
+
+    Two operator-curated exclusions (2026-07-24):
+      - openai-codex ``-pro`` ids (gpt-5.6-sol/terra/luna-pro): the Codex endpoint
+        does not serve them directly — a probe falls back to kimi/k3, they only
+        resolve via a profile fallback chain, so offering them as a primary model
+        is misleading (verify REPORT §4.1).
+      - image/video generators (see ``_lane_image_model``): a chat probe asks the
+        model to echo a token, which they cannot → permanent fallback noise.
+
+    An already-persisted override referencing one of these still RENDERS (the
+    catalog keeps lane-pinned/profile-default rows and the frontend pins the
+    current selection into the open dropdown); only the fresh OFFER disappears.
+    """
+    provider_norm = (provider or "").strip().lower()
+    model_norm = (model_id or "").strip().lower()
+    if provider_norm == "openai-codex" and model_norm.endswith("-pro"):
+        return "Codex -pro wird nicht direkt serviert (nur via Fallback erreichbar)"
+    if _lane_image_model(provider, model_id):
+        return "Bild-/Video-Modell — kein Chat-Probe möglich"
+    return None
+
+
 def _lane_model_metadata(provider: str | None, model: str) -> dict[str, float | int | None]:
     metadata: dict[str, float | int | None] = {
         "price_in_per_mtok_usd": None,
@@ -113,6 +187,14 @@ def _append_lane_model_option(
     if key in seen:
         return
     seen.add(key)
+    reasoning_support = reasoning_support_for(provider, model)
+    reasoning_hint: str | None = None
+    if runtime == "claude-cli":
+        # The Lanes reasoning segment persists `agent.reasoning_effort`, which the
+        # `claude -p` transport ignores — show the honest no-Knopf state with a
+        # pointer to `claude_effort` instead of greyed segments (W3).
+        reasoning_support = []
+        reasoning_hint = _LANE_CLAUDE_CLI_REASONING_HINT
     row = {
         "id": model,
         "label": label or _lane_model_label(model),
@@ -123,9 +205,11 @@ def _append_lane_model_option(
         "authenticated": authenticated,
         "configured": configured,
         **_lane_model_metadata(provider, model),
-        "reasoning_support": reasoning_support_for(provider, model),
+        "reasoning_support": reasoning_support,
         "probe": _lane_model_probe_for(provider, model),
     }
+    if reasoning_hint is not None:
+        row["reasoning_hint"] = reasoning_hint
     if source:
         row["source"] = source
     out.append(row)
@@ -154,6 +238,45 @@ def _append_openrouter_extra_model_options(
             label=model_id,
             source="config",
         )
+
+
+def _append_other_provider_extra_model_options(
+    out: list[dict[str, Any]],
+    seen: set[tuple[str, str | None, str]],
+) -> None:
+    """Add locally admitted ``extra_models`` for every NON-openrouter provider (W4).
+
+    OpenRouter is handled byte-identical by ``_append_openrouter_extra_model_options``
+    (called immediately before this); this generalizes the same mechanism to all
+    other providers so their admitted models land in the dropdown catalog instead
+    of merely setting the ``admitted`` flag. Custom-endpoint providers
+    (``alibaba-token-plan``, ``neuralwatt``) otherwise only surface via the
+    authenticated catalog fetch — this makes their extra models visible regardless.
+    Models already present (e.g. from the inventory fetch) are deduped by ``seen``
+    (key = model/provider/runtime), so this is purely additive.
+    """
+    try:
+        from hermes_cli.model_catalog import get_all_configured_provider_extra_models
+
+        extra = get_all_configured_provider_extra_models()
+    except Exception:
+        log.exception("lanes: failed to load configured extra models")
+        return
+    for provider, model_ids in extra.items():
+        if provider == "openrouter":
+            continue  # handled byte-identical by _append_openrouter_extra_model_options
+        group = _lane_provider_label(provider)
+        for model_id in model_ids:
+            _append_lane_model_option(
+                out,
+                seen,
+                model=model_id,
+                runtime="hermes",
+                group=group,
+                provider=provider,
+                label=model_id,
+                source="config",
+            )
 
 
 # Last good inventory-sourced model rows. The live inventory occasionally
@@ -252,6 +375,7 @@ def _lane_model_catalog(profiles: list[dict], active_lane: Optional[dict] = None
             )
 
     _append_openrouter_extra_model_options(out, seen)
+    _append_other_provider_extra_model_options(out, seen)
 
     # Profile defaults are live config and must stay visible even if the
     # curated catalog does not know them yet.
@@ -390,9 +514,15 @@ def _scan_lane_profiles() -> list[dict]:
             ),
             "fallback_providers": [] if runtime == "claude-cli" else fallback_providers,
             "reasoning_effort": reasoning_effort,
-            "reasoning_support": reasoning_support_for(
-                None if runtime == "claude-cli" else provider,
-                claude_model if runtime == "claude-cli" else (model or ""),
+            "reasoning_support": (
+                []
+                if runtime == "claude-cli"
+                else reasoning_support_for(provider, model or "")
+            ),
+            # claude-cli reasoning is steered via `claude_effort`/`--effort`, not
+            # this control — honest no-Knopf state with a pointer (W3).
+            "reasoning_hint": (
+                _LANE_CLAUDE_CLI_REASONING_HINT if runtime == "claude-cli" else None
             ),
             "description": read_profile_meta(entry).get("description", ""),
             "locked": runtime == "claude-cli",
@@ -478,12 +608,23 @@ def _annotate_lane_model_relevance(
         )
         row["used_in_profiles"] = used_in_profiles
         row["admitted"] = admitted
+        # Operator-curated offer exclusions (W1 codex -pro, W2 image/video models)
+        # drop a model out of the selectable / sinnvoll / probe-able OFFER even when
+        # a generic relevance rule would mark it relevant. A persisted override
+        # still renders (lane-pinned/profile-default rows stay in the catalog and
+        # the frontend pins the current selection into the open dropdown); only the
+        # fresh offer disappears.
+        exclusion = _lane_offer_exclusion(provider, model)
+        row["offer_excluded"] = exclusion is not None
         row["sinnvoll"] = bool(
-            row.get("runtime") == "claude-cli"
-            or used_in_profiles
-            or admitted
-            or (provider and provider in lane_providers)
-            or (model and model in lane_models)
+            exclusion is None
+            and (
+                row.get("runtime") == "claude-cli"
+                or used_in_profiles
+                or admitted
+                or (provider and provider in lane_providers)
+                or (model and model in lane_models)
+            )
         )
 
 
@@ -1394,6 +1535,23 @@ def _run_lanes_model_probe(
     profile: str,
     timeout_seconds: int,
 ) -> ModelProbeResult:
+    # Image/video generators cannot echo a chat token — a chat probe would only
+    # burn an Abo call to fall back. Skip them honestly (W2 chat-probe scope; the
+    # frontend batch scope already drops them via sinnvoll, this guards the
+    # backend against an explicit catalog-probe/model-probe request too).
+    if _lane_image_model(provider, model):
+        return ModelProbeResult(
+            provider=provider,
+            model=model,
+            profile=profile,
+            status="skipped",
+            duration_ms=0,
+            observed_provider=None,
+            observed_model=None,
+            error_class=None,
+            reason="image/video model — chat-probe not applicable",
+            at=int(time.time()),
+        )
     smoke = _run_single_lanes_auth_smoke(
         {
             "role": profile,

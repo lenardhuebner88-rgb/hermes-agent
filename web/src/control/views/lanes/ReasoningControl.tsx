@@ -21,6 +21,7 @@ export function ReasoningControl({
   support,
   disabled,
   ariaLabel,
+  hint,
   onChange,
 }: {
   /** Staged value; null = "Std" (leave config untouched). */
@@ -29,19 +30,25 @@ export function ReasoningControl({
   support: string[];
   disabled?: boolean;
   ariaLabel: string;
+  /** Honest explanation for an empty support set; defaults to the generic
+   *  "no Reasoning-Knopf" text. claude-cli rows pass a pointer to the
+   *  `claude_effort` profile config that DOES steer `claude -p` reasoning (W3) —
+   *  the control itself maps to `agent.reasoning_effort`, which claude-cli ignores. */
+  hint?: string | null;
   onChange: (value: string | null) => void;
 }) {
   if (support.length === 0) {
+    const noKnopf = hint ?? "Modell hat keinen Reasoning-Knopf";
     return (
       <div className="min-w-0">
         <div
           className="inline-flex min-h-8 cursor-not-allowed items-center rounded-card border border-line bg-surface-1 px-2 font-data text-micro uppercase tracking-wide text-ink-3 opacity-60"
           aria-disabled="true"
-          title="Modell hat keinen Reasoning-Knopf"
+          title={noKnopf}
         >
           {STD}
         </div>
-        <p className="mt-1 text-micro text-ink-3">Modell hat keinen Reasoning-Knopf</p>
+        <p className="mt-1 text-micro text-ink-3">{noKnopf}</p>
       </div>
     );
   }

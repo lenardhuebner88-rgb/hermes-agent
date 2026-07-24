@@ -359,6 +359,22 @@ def get_configured_provider_extra_models(provider: str) -> list[str]:
     return out
 
 
+def get_all_configured_provider_extra_models() -> dict[str, list[str]]:
+    """Return ``{provider: [model_ids]}`` for EVERY provider with ``extra_models``.
+
+    Generalizes ``get_configured_provider_extra_models`` (per-provider) so a caller
+    can list admitted models for all providers at once — the Lanes catalog uses it
+    to feed the dropdown for every provider the way it already did for openrouter
+    (W4). Providers with no (or empty) ``extra_models`` are omitted.
+    """
+    out: dict[str, list[str]] = {}
+    for provider in _load_catalog_config()["providers"]:
+        model_ids = get_configured_provider_extra_models(provider)
+        if model_ids:
+            out[provider] = model_ids
+    return out
+
+
 def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
     """Return OpenRouter's curated ``[(id, description), ...]`` from the manifest.
 

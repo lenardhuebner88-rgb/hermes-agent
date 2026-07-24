@@ -139,6 +139,8 @@ export interface LaneCatalogProfile {
   reasoning_effort?: string | null;
   /** Reasoning-effort values the profile-default model can transport (S1); [] = no control. */
   reasoning_support?: string[];
+  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  reasoning_hint?: string | null;
 }
 
 /** Result of a single model reachability/latency probe (S1). The backend always
@@ -180,12 +182,16 @@ export interface LaneModelOption {
   context_window?: number | null;
   /** Reasoning-effort values this model can transport; [] = no Reasoning control. */
   reasoning_support?: string[];
+  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  reasoning_hint?: string | null;
   /** Last cached probe result, echoed back by GET /lanes. */
   probe?: ModelProbeResult | null;
   /** Backend-curated working-model flag; absent on older payloads. */
   sinnvoll?: boolean;
   used_in_profiles?: boolean;
   admitted?: boolean;
+  /** Operator-curated offer exclusion (W1 codex -pro / W2 image models); absent on older payloads. */
+  offer_excluded?: boolean;
 }
 
 export interface LanesResponse {
@@ -715,6 +721,8 @@ export interface EditorRow {
   // --- S1 reasoning stage (all optional: older payloads/catalogs omit them) ---
   /** Reasoning values the row's EFFECTIVE model can transport; [] = no control. */
   reasoningSupport?: string[];
+  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  reasoningHint?: string | null;
   /** Reasoning values of the profile-DEFAULT model — the "Standard" revert target. */
   defaultReasoningSupport?: string[];
   /** Staged reasoning effort; null = "Standard" = leave config untouched on persist. */
@@ -745,6 +753,7 @@ export function editorRows(
       : null;
     const profileReasoning = p.reasoning_effort ?? null;
     const support = effectiveModel?.reasoning_support ?? p.reasoning_support ?? [];
+    const reasoningHint = effectiveModel?.reasoning_hint ?? p.reasoning_hint ?? null;
     const reasoning =
       profileReasoning != null && support.includes(profileReasoning) ? profileReasoning : null;
     return {
@@ -765,6 +774,7 @@ export function editorRows(
       lockedReason: p.locked_reason ?? null,
       choice: choiceFromEntry(entry),
       reasoningSupport: support,
+      reasoningHint,
       defaultReasoningSupport: p.reasoning_support ?? [],
       reasoning,
       defaultReasoning: profileReasoning,
@@ -794,6 +804,9 @@ export function editorRows(
       lockedReason: runtime === "claude-cli" ? "Claude-CLI / claude -p excluded from this slice" : null,
       choice: choiceFromEntry(entry),
       reasoningSupport: [],
+      // Lane-only extras carry no backend model row, so no hint payload — the
+      // ReasoningControl falls back to its generic no-Knopf text (W3).
+      reasoningHint: null,
       defaultReasoningSupport: [],
       reasoning: null,
       defaultReasoning: null,
