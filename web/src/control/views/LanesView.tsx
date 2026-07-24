@@ -223,14 +223,20 @@ function LanesPlatform({
 
   return (
     <div className="space-y-4">
-      <LaneBar
-        lanes={data.lanes}
-        activeId={data.active_id}
-        profileCount={data.profiles.length}
-        busy={busy}
-        onActivate={onActivate}
-        onCreate={onCreate}
-      />
+      {/* Mobile: the lane bar pins to the top (`.lp-lanebar`, lanes.css) so lane
+          switching stays reachable while the long matrix scrolls — paired with the
+          already-sticky save bar (W5) both operator actions are always in reach.
+          Static from the 2-pane cut up; desktop layout unchanged (S2 priority 3). */}
+      <div className="lp-lanebar">
+        <LaneBar
+          lanes={data.lanes}
+          activeId={data.active_id}
+          profileCount={data.profiles.length}
+          busy={busy}
+          onActivate={onActivate}
+          onCreate={onCreate}
+        />
+      </div>
 
       <div className="lp-main">
         <ProfileMatrix

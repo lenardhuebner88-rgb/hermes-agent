@@ -44,3 +44,31 @@ describe("ReasoningControl honest empty-support state", () => {
     expect(screen.getByTitle("high")).toBeTruthy();
   });
 });
+
+describe("ReasoningControl 5-level claude-cli claude_effort strip (S1)", () => {
+  it("renders STD·LOW·MED·HIGH·XHI·MAX for the full claude --effort set", () => {
+    render(
+      <ReasoningControl
+        value="xhigh"
+        support={["low", "medium", "high", "xhigh", "max"]}
+        ariaLabel="Reasoning für premium"
+        onChange={() => {}}
+      />,
+    );
+    // The two beyond-trio segments render with their short labels (xhigh→xhi, max→max).
+    expect(screen.getByText("xhi")).toBeTruthy();
+    expect(screen.getByText("max")).toBeTruthy();
+    // …and carry the full level as the title tooltip.
+    expect(screen.getByTitle("xhigh")).toBeTruthy();
+    expect(screen.getByTitle("max")).toBeTruthy();
+    // The hermes trio labels are still present (one joined strip, no break).
+    expect(screen.getByTitle("low")).toBeTruthy();
+    expect(screen.getByTitle("medium")).toBeTruthy();
+    expect(screen.getByTitle("high")).toBeTruthy();
+    // The staged value is marked pressed.
+    expect(screen.getByTitle("xhigh").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTitle("max").getAttribute("aria-pressed")).toBe("false");
+    // No empty-state hint leaks into the active control.
+    expect(screen.queryByText(/keinen Reasoning-Knopf/)).toBeNull();
+  });
+});

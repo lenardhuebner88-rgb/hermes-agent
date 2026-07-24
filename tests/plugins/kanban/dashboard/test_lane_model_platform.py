@@ -796,20 +796,46 @@ def test_offer_excludes_image_models_and_probe_skips_them(
     assert called == ["qwen3.8-max-preview"]
 
 
-def test_claude_cli_rows_show_honest_no_reasoning_control(
+def test_lane_reasoning_support_claude_cli_is_full_effort_set(plugin_module):
+    """S1 (support set): claude-cli rows expose the FULL `claude --effort`
+    transport truth — read from the spawn constant CLAUDE_CLI_EFFORT_LEVELS, so
+    the UI offer and the `--effort` transport can never drift — NOT the hermes
+    trio. hermes rows delegate to reasoning_support_for byte-identically."""
+    from hermes_cli.kanban_worker_runtime import CLAUDE_CLI_EFFORT_LEVELS
+
+    full = list(CLAUDE_CLI_EFFORT_LEVELS)
+    assert full == ["low", "medium", "high", "xhigh", "max"]
+    # claude-cli: provider/model are irrelevant — always the full transport set.
+    assert plugin_module._lane_reasoning_support("claude-cli", None, "claude-fable-5") == full
+    assert plugin_module._lane_reasoning_support("claude-cli", None, "") == full
+    # hermes: unchanged delegation to reasoning_support_for.
+    assert plugin_module._lane_reasoning_support("hermes", "openai-codex", "gpt-5.6-sol") == [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+    ]
+    assert plugin_module._lane_reasoning_support("hermes", "xai", "grok-4") == []
+
+
+def test_claude_cli_rows_expose_full_effort_control_and_read_back_claude_effort(
     plugin_module,
     kanban_home,
     client,
     monkeypatch,
 ):
-    """W3: claude-cli rows expose reasoning_support=[] (honest no-Knopf state)
-    plus a pointer hint to `claude_effort`/`--effort` — NOT greyed segments that
-    imply the hermes reasoning control (which claude-cli ignores) applies."""
-    # A claude-cli profile so the profile-catalog path is exercised too.
+    """S1 (GET /lanes): claude-cli rows expose the full `claude --effort` set
+    (low/medium/high/xhigh/max) with an ACTIVE control — the relay-3 empty
+    support + "hier nicht schaltbar" hint is gone (it was false). The claude-cli
+    profile row reads its current level back from top-level `claude_effort`
+    (the field the spawn maps to --effort), NOT agent.reasoning_effort; unset →
+    STD (None)."""
+    # A claude-cli profile with a persisted claude_effort so the read-back path
+    # (config `claude_effort` → profile `reasoning_effort`) is exercised too.
     profile_dir = kanban_home / "profiles" / "maxprofile"
     profile_dir.mkdir(parents=True)
     (profile_dir / "config.yaml").write_text(
-        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\n",
+        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\nclaude_effort: high\n",
         encoding="utf-8",
     )
 
@@ -830,18 +856,122 @@ def test_claude_cli_rows_show_honest_no_reasoning_control(
     assert response.status_code == 200, response.text
     data = response.json()
 
-    # Every claude-cli MODEL row: empty support + an honest hint.
+    full_effort = ["low", "medium", "high", "xhigh", "max"]
+
+    # Every claude-cli MODEL row: the full transport set, and NO hint (the
+    # control is genuinely active now — no honest-empty-state pointer needed).
     claude_models = [row for row in data["models"] if row["runtime"] == "claude-cli"]
     assert claude_models, "expected the built-in claude-cli model rows"
     for row in claude_models:
-        assert row["reasoning_support"] == []
-        assert "claude_effort" in (row.get("reasoning_hint") or "")
+        assert row["reasoning_support"] == full_effort
+        assert row.get("reasoning_hint") in (None, "")
 
-    # The claude-cli PROFILE row carries the same honest state.
+    # The claude-cli PROFILE row: full set, no hint, and the current level read
+    # back from top-level `claude_effort` (NOT agent.reasoning_effort).
     profile = next(p for p in data["profiles"] if p["name"] == "maxprofile")
     assert profile["worker_runtime"] == "claude-cli"
-    assert profile["reasoning_support"] == []
-    assert "claude_effort" in (profile.get("reasoning_hint") or "")
+    assert profile["reasoning_support"] == full_effort
+    assert profile.get("reasoning_hint") in (None, "")
+    assert profile["reasoning_effort"] == "high"
+
+
+def test_persist_claude_cli_reasoning_writes_claude_effort_not_agent(
+    plugin_module,
+    kanban_home,
+    client,
+    monkeypatch,
+):
+    """S1 (persist): a claude-cli persist writes top-level `claude_effort` (the
+    field the worker spawn maps to `--effort`) and NEVER `agent.reasoning_effort`
+    (a no-op for `claude -p`). The full effort set — incl. `xhigh`, beyond the
+    hermes trio — is accepted. Read-back round-trip: the profile scan then reports
+    that claude_effort as the row's current reasoning level. (hermes rows keep
+    writing agent.reasoning_effort byte-identically — covered by
+    test_persist_reasoning_effort_writes_yaml_and_rejects_unsupported.)"""
+    profile_dir = kanban_home / "profiles" / "premium"
+    profile_dir.mkdir(parents=True)
+    config_path = profile_dir / "config.yaml"
+    config_path.write_text(
+        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\n",
+        encoding="utf-8",
+    )
+
+    from hermes_cli import profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "get_profile_dir", lambda _name: profile_dir)
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_profile_catalog",
+        lambda: [
+            {
+                "name": "premium",
+                "worker_runtime": "claude-cli",
+                "default_provider": None,
+                "default_model": "claude-fable-5",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_model_catalog",
+        lambda _profiles, _active=None: [
+            {"id": "claude-fable-5", "runtime": "claude-cli", "provider": None},
+        ],
+    )
+
+    # `xhigh` is beyond the hermes trio — only the full claude-cli set accepts it.
+    ok = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "premium": {
+                    "worker_runtime": "claude-cli",
+                    "provider": None,
+                    "model": "claude-fable-5",
+                    "reasoning_effort": "xhigh",
+                },
+            },
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["claude_effort"] == "xhigh"
+    # The no-op field must NOT be written for claude-cli.
+    assert "reasoning_effort" not in (config.get("agent") or {})
+    # The roundtrip merge keeps the model/runtime intact (no clobber).
+    assert config["claude_model"] == "claude-fable-5"
+    assert config["worker_runtime"] == "claude-cli"
+
+    # Read-back round-trip: the real profile scan reports the persisted
+    # claude_effort as the row's current reasoning level + the full support set
+    # (the same fields the GET /lanes payload carries to the selected segment).
+    plugin_module._lane_profile_cache = None
+    scanned = {p["name"]: p for p in plugin_module._scan_lane_profiles()}
+    assert scanned["premium"]["reasoning_effort"] == "xhigh"
+    assert scanned["premium"]["reasoning_support"] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+
+    # A value outside even the full claude-cli set is still rejected (400).
+    rejected = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "premium": {
+                    "worker_runtime": "claude-cli",
+                    "provider": None,
+                    "model": "claude-fable-5",
+                    "reasoning_effort": "turbo",
+                },
+            },
+        },
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"]["profiles"] == ["premium"]
 
 
 def test_extra_models_for_all_providers_land_in_catalog(

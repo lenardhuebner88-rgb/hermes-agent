@@ -596,6 +596,68 @@ def test_dispatch_auto_retry_second_attempt_escalates_to_spawnable_claude_model(
         assert run["requested_model"] == kb.AUTO_RETRY_ESCALATION_MODEL
 
 
+def test_claude_worker_launch_spec_maps_persisted_claude_effort_to_effort_flag(
+    kanban_home, tmp_path
+):
+    """S1 evidence (b): a `claude_effort` persisted into the profile-home
+    config.yaml — exactly what the Lanes control writes for a claude-cli row —
+    flows through the REAL spawn-mapping code path
+    (_build_claude_worker_launch_spec → _claude_profile_effort → cmd.extend)
+    into the constructed ``--effort <level>`` argv. Covers the two levels beyond
+    the hermes trio (xhigh/max). With no claude_effort, or an INVALID one, no
+    --effort flag is emitted (fail-soft — the spawn is never blocked)."""
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="effort probe", assignee="premium")
+        task = kb.get_task(conn, t)
+    assert task is not None
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config_path = Path(kanban_home) / "config.yaml"
+
+    def build_argv() -> tuple[str, ...]:
+        spec = kb._build_claude_worker_launch_spec(
+            task,
+            str(workspace),
+            env={"HERMES_HOME": str(kanban_home), "PATH": ""},
+            resolved_model="claude-fable-5",
+        )
+        return spec.argv
+
+    # Persisted claude_effort=xhigh (beyond the hermes trio) lands as --effort.
+    config_path.write_text(
+        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\nclaude_effort: xhigh\n",
+        encoding="utf-8",
+    )
+    argv = build_argv()
+    assert "--effort" in argv
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+    # `max` (the other beyond-trio level) round-trips too.
+    config_path.write_text(
+        "worker_runtime: claude-cli\nclaude_effort: max\n",
+        encoding="utf-8",
+    )
+    argv = build_argv()
+    assert "--effort" in argv
+    assert argv[argv.index("--effort") + 1] == "max"
+
+    # No claude_effort → no --effort flag (profile default; spawn omits it).
+    config_path.write_text(
+        "worker_runtime: claude-cli\nclaude_model: claude-fable-5\n",
+        encoding="utf-8",
+    )
+    assert "--effort" not in build_argv()
+
+    # An INVALID claude_effort is filtered out by claude_profile_effort
+    # (fail-soft): no --effort flag leaks the bad value, spawn never blocked.
+    config_path.write_text(
+        "worker_runtime: claude-cli\nclaude_effort: turbo\n",
+        encoding="utf-8",
+    )
+    assert "--effort" not in build_argv()
+
+
 def test_dispatch_auto_retry_stops_after_limit(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):

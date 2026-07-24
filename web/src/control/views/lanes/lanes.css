@@ -67,6 +67,25 @@
   display: none;
 }
 
+/* --- Mobile: pin the lane switcher to the top while the long matrix scrolls
+ *     (S2 priority 3). The save bar is already sticky-bottom (W5), so this keeps
+ *     BOTH operator actions — lane switching + Speichern & aktivieren — in reach
+ *     without a new nav paradigm. Only below the 2-pane cut (840px): from there up
+ *     the side-by-side panes keep everything visible, so the desktop layout stays
+ *     untouched (priority 5). bg = page canvas so matrix rows scroll cleanly
+ *     beneath; a soft hairline marks the pinned edge. --- */
+@media (max-width: 839px) {
+  .lp .lp-lanebar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--color-surface-0);
+    padding-top: 0.25rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--color-line-soft);
+  }
+}
+
 /* --- main 2-pane split: 62/38 from 840px, stacked below.
  *     840px is the Brief's expanded-tier cut; it is drawn here (not via a new
  *     theme.css breakpoint) so the shared token sheet stays untouched. --- */

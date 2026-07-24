@@ -100,7 +100,7 @@ export function Compass({
                     disabled={fit.model.runtime !== "hermes"}
                     onClick={() => toggleSelect(fit.model.id)}
                     className={cn(
-                      "inline-flex size-8 shrink-0 items-center justify-center rounded-card border transition-colors duration-150 disabled:opacity-40",
+                      "inline-flex size-11 shrink-0 items-center justify-center rounded-card border transition-colors duration-150 disabled:opacity-40 min-[52rem]:size-8",
                       selected ? "border-live bg-live/15 text-bronze-hi" : "border-line text-ink-3 hover:border-live hover:text-live",
                     )}
                   >
@@ -115,7 +115,7 @@ export function Compass({
                       type="button"
                       disabled={busy}
                       onClick={() => onAdopt(role, fit.model)}
-                      className="min-h-8 shrink-0 rounded-card border border-live/50 px-2 text-micro font-medium text-live transition-colors duration-150 hover:border-live hover:bg-live/10 hover:text-bronze-hi disabled:opacity-40"
+                      className="min-h-11 shrink-0 rounded-card border border-live/50 px-2 text-micro font-medium text-live transition-colors duration-150 hover:border-live hover:bg-live/10 hover:text-bronze-hi disabled:opacity-40 min-[52rem]:min-h-8"
                     >
                       {t.übernehmen}
                     </button>

@@ -355,21 +355,20 @@ describe("editor rows", () => {
     expect(rows[2].choice).toBe("hermes|gpt-5.5");
   });
 
-  it("W3: claude-cli rows carry the honest no-Knopf hint; hermes rows do not", () => {
-    // The backend now sends reasoning_support=[] + a claude_effort pointer hint
-    // for claude-cli rows (the control's agent.reasoning_effort is a no-op there).
-    // editorRows must surface that hint on the row so ReasoningControl renders
-    // the honest state instead of greyed segments.
-    const modelsWithHints: LaneModelOption[] = [
+  it("S1: claude-cli rows surface the full claude_effort support set (no hint); hermes rows their trio", () => {
+    // The backend now sends reasoning_support=[low,medium,high,xhigh,max] and NO
+    // hint for claude-cli rows — the Reasoning control is genuinely active there
+    // (it persists claude_effort → --effort at spawn). editorRows must surface
+    // that full set on the row so ReasoningControl renders the 5-level strip, and
+    // carry no honest-empty-state hint. hermes rows keep their trio, byte-identical.
+    const modelsWithSupport: LaneModelOption[] = [
       {
         id: "claude-fable-5",
         label: "Claude Fable 5",
         runtime: "claude-cli",
         group: "Claude (Max-Abo)",
         provider: null,
-        reasoning_support: [],
-        reasoning_hint:
-          "claude -p: Reasoning via Profil-Config „claude_effort“ (--effort) — hier nicht schaltbar",
+        reasoning_support: ["low", "medium", "high", "xhigh", "max"],
       },
       {
         id: "gpt-5.5",
@@ -380,11 +379,11 @@ describe("editor rows", () => {
         reasoning_support: ["minimal", "low", "medium", "high"],
       },
     ];
-    const rows = editorRows(lane, catalog, modelsWithHints);
+    const rows = editorRows(lane, catalog, modelsWithSupport);
     const premium = rows.find((r) => r.profile === "premium")!;
     expect(premium.worker_runtime).toBe("claude-cli");
-    expect(premium.reasoningSupport).toEqual([]);
-    expect(premium.reasoningHint).toContain("claude_effort");
+    expect(premium.reasoningSupport).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(premium.reasoningHint ?? null).toBeNull();
     const coder = rows.find((r) => r.profile === "coder")!;
     expect(coder.reasoningSupport).toEqual(["minimal", "low", "medium", "high"]);
     expect(coder.reasoningHint ?? null).toBeNull();

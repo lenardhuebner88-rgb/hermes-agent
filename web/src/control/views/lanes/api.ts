@@ -135,11 +135,14 @@ export interface LaneCatalogProfile {
   locked_reason?: string | null;
   /** Optional backend evidence: can this profile actually spawn Kanban workers? */
   kanban_spawn_health?: LaneSpawnHealth | LaneSpawnHealthStatus | null;
-  /** Current `agent.reasoning_effort` for this profile (S1); null = config default. */
+  /** Current reasoning level for this profile: `agent.reasoning_effort` (hermes)
+   *  or `claude_effort` (claude-cli, S1). null = STD (config default). */
   reasoning_effort?: string | null;
   /** Reasoning-effort values the profile-default model can transport (S1); [] = no control. */
   reasoning_support?: string[];
-  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  /** Honest hint shown instead of a Reasoning control when support is [] (no
+   *  transport, e.g. grok/qwen/alibaba). claude-cli rows have an ACTIVE 5-level
+   *  control since S1 (persists `claude_effort`) and carry no hint. */
   reasoning_hint?: string | null;
 }
 
@@ -182,7 +185,9 @@ export interface LaneModelOption {
   context_window?: number | null;
   /** Reasoning-effort values this model can transport; [] = no Reasoning control. */
   reasoning_support?: string[];
-  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  /** Honest hint shown instead of a Reasoning control when support is [] (no
+   *  transport, e.g. grok/qwen/alibaba). claude-cli rows have an ACTIVE 5-level
+   *  control since S1 (persists `claude_effort`) and carry no hint. */
   reasoning_hint?: string | null;
   /** Last cached probe result, echoed back by GET /lanes. */
   probe?: ModelProbeResult | null;
@@ -208,8 +213,10 @@ export interface LanePersistProfileEntry {
   provider?: string | null;
   model: string;
   fallback_providers: Array<{ provider: string; model: string; base_url?: string }>;
-  /** S1: omit = leave `agent.reasoning_effort` untouched; a value must be in the
-   *  target model's reasoning_support (the backend 400s otherwise). */
+  /** S1: omit = leave the profile's reasoning field untouched; a value must be in
+   *  the row's reasoning_support (the backend 400s otherwise). For claude-cli rows
+   *  it lands in top-level `claude_effort` (→ `--effort`), for hermes in
+   *  `agent.reasoning_effort`. */
   reasoning_effort?: string | null;
 }
 
@@ -721,13 +728,16 @@ export interface EditorRow {
   // --- S1 reasoning stage (all optional: older payloads/catalogs omit them) ---
   /** Reasoning values the row's EFFECTIVE model can transport; [] = no control. */
   reasoningSupport?: string[];
-  /** Honest hint shown instead of a Reasoning control when support is [] (W3 claude-cli). */
+  /** Honest hint shown instead of a Reasoning control when support is [] (no
+   *  transport, e.g. grok/qwen/alibaba). claude-cli rows have an ACTIVE 5-level
+   *  control since S1 (persists `claude_effort`) and carry no hint. */
   reasoningHint?: string | null;
   /** Reasoning values of the profile-DEFAULT model — the "Standard" revert target. */
   defaultReasoningSupport?: string[];
   /** Staged reasoning effort; null = "Standard" = leave config untouched on persist. */
   reasoning?: string | null;
-  /** The profile's current agent.reasoning_effort, for "aktuell: X" display. */
+  /** The profile's current reasoning level (agent.reasoning_effort or, for
+   *  claude-cli, claude_effort), for the "aktuell: X" display. */
   defaultReasoning?: string | null;
 }
 

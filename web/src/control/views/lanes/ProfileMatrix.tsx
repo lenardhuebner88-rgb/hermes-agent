@@ -81,7 +81,7 @@ function ProbeCell({
         aria-label={`${t.probeMessen}: ${row.profile}`}
         disabled={busy || probing || cliOnly || row.locked}
         onClick={() => onProbeRow(row)}
-        className="inline-flex size-9 shrink-0 items-center justify-center rounded-card border border-line text-ink-3 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
+        className="inline-flex size-11 shrink-0 items-center justify-center rounded-card border border-line text-ink-3 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40 min-[52rem]:size-9"
       >
         <Zap className="h-3.5 w-3.5" />
       </button>
@@ -259,50 +259,65 @@ export function ProfileMatrix({
               {/* Modell */}
               <ModelSelect row={row} models={models} disabled={busy || row.locked} onChange={(choice) => onModelChange(row.profile, choice)} />
 
-              {/* Reasoning */}
-              <div className="min-w-0">
-                <ReasoningControl
-                  value={row.reasoning ?? null}
-                  support={row.reasoningSupport ?? []}
+              {/* Mobile (<52rem): Reasoning + Fallback + Probe + Override share one
+                  compact WRAPPING action row beneath the full-width name + model
+                  select — a clean stacked card with no horizontal scroll and far
+                  less height than the old every-control-on-its-own-line stack.
+                  Desktop (≥52rem): the wrapper is `display:contents`, so these four
+                  rejoin the parent 6-column grid as columns 3–6 — the desktop
+                  layout stays byte-identical (S2 priority 5). */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 min-[52rem]:contents">
+                {/* Reasoning — S1 selective unlock: claude-cli rows stay LOCKED for
+                    model/fallback/probe, but their Reasoning segment is genuinely
+                    active (it persists `claude_effort` → `--effort` at spawn). The
+                    unlock is keyed EXPLICITLY on worker_runtime === "claude-cli" —
+                    it does NOT generalize to any other locked-row type: a locked
+                    hermes row keeps its Reasoning disabled (operator-approved scope). */}
+                <div className="min-w-0">
+                  <ReasoningControl
+                    value={row.reasoning ?? null}
+                    support={row.reasoningSupport ?? []}
+                    disabled={busy || (row.locked && row.worker_runtime !== "claude-cli")}
+                    ariaLabel={`Reasoning für ${row.profile}`}
+                    hint={row.reasoningHint ?? undefined}
+                    onChange={(value) => onReasoningChange(row.profile, value)}
+                  />
+                  {row.defaultReasoning ? (
+                    <div className="mt-1 font-data text-micro text-ink-3">{t.currently(row.defaultReasoning)}</div>
+                  ) : null}
+                </div>
+
+                {/* Fallback — 44px touch target on mobile (min-h-11), the denser
+                    36px (min-h-9) on desktop. */}
+                <button
+                  type="button"
+                  title={t.fallbackEdit}
+                  aria-label={`${t.fallbackEdit}: ${row.profile}`}
                   disabled={busy || row.locked}
-                  ariaLabel={`Reasoning für ${row.profile}`}
-                  hint={row.reasoningHint ?? undefined}
-                  onChange={(value) => onReasoningChange(row.profile, value)}
+                  onClick={() => setFallbackRow(row.profile)}
+                  className="inline-flex min-h-11 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40 min-[52rem]:min-h-9"
+                >
+                  {t.fallbacks(row.fallbackProviders.length)}
+                </button>
+
+                {/* Probe */}
+                <ProbeCell
+                  row={row}
+                  models={models}
+                  probes={probes}
+                  probing={Boolean(probing[row.profile])}
+                  busy={busy}
+                  onProbeRow={onProbeRow}
                 />
-                {row.defaultReasoning ? (
-                  <div className="mt-1 font-data text-micro text-ink-3">{t.currently(row.defaultReasoning)}</div>
-                ) : null}
-              </div>
 
-              {/* Fallback */}
-              <button
-                type="button"
-                title={t.fallbackEdit}
-                aria-label={`${t.fallbackEdit}: ${row.profile}`}
-                disabled={busy || row.locked}
-                onClick={() => setFallbackRow(row.profile)}
-                className="inline-flex min-h-9 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
-              >
-                {t.fallbacks(row.fallbackProviders.length)}
-              </button>
-
-              {/* Probe */}
-              <ProbeCell
-                row={row}
-                models={models}
-                probes={probes}
-                probing={Boolean(probing[row.profile])}
-                busy={busy}
-                onProbeRow={onProbeRow}
-              />
-
-              {/* Override */}
-              <div>
-                {override ? (
-                  <SignalChip tone="neutral" label={t.override} />
-                ) : (
-                  <span className="text-micro text-ink-3">{t.standard}</span>
-                )}
+                {/* Override */}
+                <div>
+                  {override ? (
+                    <SignalChip tone="neutral" label={t.override} />
+                  ) : (
+                    <span className="text-micro text-ink-3">{t.standard}</span>
+                  )}
+                </div>
               </div>
             </li>
           );

@@ -38,17 +38,23 @@ def reasoning_support_for(provider: str | None, model_id: str) -> list[str]:
     return []
 
 
-# claude-cli rows are LOCKED in the Lanes UI and their reasoning is NOT steered
-# by this control: the Reasoning segment persists `agent.reasoning_effort`, which
-# the `claude -p` transport ignores. claude-cli reasoning IS configurable — via
-# the profile config field `claude_effort`, which the worker spawn maps to
-# `claude --effort <low|medium|high|xhigh|max>` (kanban_worker_runtime.
-# CLAUDE_CLI_EFFORT_LEVELS / kanban_db `_build_claude_worker_launch_spec`). So the
-# honest UI state is "no Reasoning-Knopf HERE" with a pointer to claude_effort,
-# NOT greyed segments that imply a disabled hermes-style control (W3, 2026-07-24).
-_LANE_CLAUDE_CLI_REASONING_HINT = (
-    "claude -p: Reasoning via Profil-Config „claude_effort“ (--effort) — hier nicht schaltbar"
-)
+def _lane_reasoning_support(runtime: str, provider: str | None, model: str) -> list[str]:
+    """Reasoning-effort values a Lanes row can transport (S1, 2026-07-24).
+
+    claude-cli rows expose the FULL ``claude --effort`` transport truth
+    (``CLAUDE_CLI_EFFORT_LEVELS`` = low/medium/high/xhigh/max): the Lanes control
+    persists ``claude_effort`` for them — the top-level profile field the worker
+    spawn maps to ``claude --effort <level>`` (kanban_worker_runtime.
+    CLAUDE_CLI_EFFORT_LEVELS / kanban_db ``_build_claude_worker_launch_spec``) —
+    NOT the hermes ``agent.reasoning_effort`` (a no-op for ``claude -p``). hermes
+    rows keep ``reasoning_support_for`` byte-identically. The level set is read
+    from the spawn constant itself, so the UI offer and the transport never drift.
+    """
+    if runtime == "claude-cli":
+        from hermes_cli.kanban_worker_runtime import CLAUDE_CLI_EFFORT_LEVELS
+
+        return list(CLAUDE_CLI_EFFORT_LEVELS)
+    return reasoning_support_for(provider, model)
 
 
 def _lane_image_model(provider: str | None, model_id: str) -> bool:
@@ -187,14 +193,10 @@ def _append_lane_model_option(
     if key in seen:
         return
     seen.add(key)
-    reasoning_support = reasoning_support_for(provider, model)
-    reasoning_hint: str | None = None
-    if runtime == "claude-cli":
-        # The Lanes reasoning segment persists `agent.reasoning_effort`, which the
-        # `claude -p` transport ignores — show the honest no-Knopf state with a
-        # pointer to `claude_effort` instead of greyed segments (W3).
-        reasoning_support = []
-        reasoning_hint = _LANE_CLAUDE_CLI_REASONING_HINT
+    # S1: claude-cli rows expose the full `claude --effort` set and persist
+    # `claude_effort` (the field the spawn maps to --effort), so the Reasoning
+    # segment is genuinely active for them — no hint, no greyed segments. hermes
+    # rows keep reasoning_support_for byte-identically.
     row = {
         "id": model,
         "label": label or _lane_model_label(model),
@@ -205,11 +207,9 @@ def _append_lane_model_option(
         "authenticated": authenticated,
         "configured": configured,
         **_lane_model_metadata(provider, model),
-        "reasoning_support": reasoning_support,
+        "reasoning_support": _lane_reasoning_support(runtime, provider, model),
         "probe": _lane_model_probe_for(provider, model),
     }
-    if reasoning_hint is not None:
-        row["reasoning_hint"] = reasoning_hint
     if source:
         row["source"] = source
     out.append(row)
@@ -480,11 +480,17 @@ def _scan_lane_profiles() -> list[dict]:
                         model = model_cfg.get("default") or model_cfg.get("model")
                         provider = model_cfg.get("provider")
                     agent_cfg = cfg.get("agent")
-                    raw_reasoning_effort = (
-                        agent_cfg.get("reasoning_effort")
-                        if isinstance(agent_cfg, dict)
-                        else None
-                    )
+                    if runtime == "claude-cli":
+                        # S1 read-back: claude-cli reasoning lives in top-level
+                        # `claude_effort` (→ `--effort` at spawn), NOT
+                        # agent.reasoning_effort. Unset → STD (None).
+                        raw_reasoning_effort = cfg.get("claude_effort")
+                    else:
+                        raw_reasoning_effort = (
+                            agent_cfg.get("reasoning_effort")
+                            if isinstance(agent_cfg, dict)
+                            else None
+                        )
                     reasoning_effort = (
                         raw_reasoning_effort.strip()
                         if isinstance(raw_reasoning_effort, str) and raw_reasoning_effort.strip()
@@ -514,16 +520,12 @@ def _scan_lane_profiles() -> list[dict]:
             ),
             "fallback_providers": [] if runtime == "claude-cli" else fallback_providers,
             "reasoning_effort": reasoning_effort,
-            "reasoning_support": (
-                []
-                if runtime == "claude-cli"
-                else reasoning_support_for(provider, model or "")
-            ),
-            # claude-cli reasoning is steered via `claude_effort`/`--effort`, not
-            # this control — honest no-Knopf state with a pointer (W3).
-            "reasoning_hint": (
-                _LANE_CLAUDE_CLI_REASONING_HINT if runtime == "claude-cli" else None
-            ),
+            # S1: claude-cli → full `claude --effort` set (control persists
+            # claude_effort, the field the spawn maps to --effort); hermes →
+            # reasoning_support_for, byte-identical. No hint: the control IS
+            # active for claude-cli now (the relay-3 "nicht schaltbar" hint was
+            # false and is removed).
+            "reasoning_support": _lane_reasoning_support(runtime, provider, model or ""),
             "description": read_profile_meta(entry).get("description", ""),
             "locked": runtime == "claude-cli",
             "locked_reason": "Claude-CLI / claude -p excluded from this slice" if runtime == "claude-cli" else None,
@@ -1863,7 +1865,8 @@ def persist_lane_models_endpoint(
                     or profile.get("default_provider")
                 )
                 target_model = entry.model or profile.get("default_model") or ""
-                if entry.reasoning_effort not in reasoning_support_for(
+                if entry.reasoning_effort not in _lane_reasoning_support(
+                    entry.worker_runtime,
                     target_provider,
                     target_model,
                 ):
@@ -1985,11 +1988,20 @@ def persist_lane_models_endpoint(
                         [row.model_dump() for row in entry.fallback_providers],
                     )
                 if entry.reasoning_effort is not None:
-                    atomic_roundtrip_yaml_update(
-                        config_path,
-                        "agent.reasoning_effort",
-                        entry.reasoning_effort,
-                    )
+                    if entry.worker_runtime == "claude-cli":
+                        # S1: claude-cli reasoning is `claude_effort` (top-level →
+                        # `--effort` at spawn), NEVER the no-op agent.reasoning_effort.
+                        atomic_roundtrip_yaml_update(
+                            config_path,
+                            "claude_effort",
+                            entry.reasoning_effort,
+                        )
+                    else:
+                        atomic_roundtrip_yaml_update(
+                            config_path,
+                            "agent.reasoning_effort",
+                            entry.reasoning_effort,
+                        )
 
             failed_profile = "__active_lane__"
             if (lane_profiles or removed) and active_id is not None and active_lane is not None:

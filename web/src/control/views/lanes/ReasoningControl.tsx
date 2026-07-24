@@ -12,6 +12,10 @@ const SHORT: Record<string, string> = {
   low: "low",
   medium: "med",
   high: "high",
+  // claude-cli `claude --effort` carries two levels beyond the hermes trio (S1):
+  // xhigh + max. The joined strip renders STD·LOW·MED·HIGH·XHI·MAX for those rows.
+  xhigh: "xhi",
+  max: "max",
 };
 
 const STD = "Std";
@@ -31,9 +35,9 @@ export function ReasoningControl({
   disabled?: boolean;
   ariaLabel: string;
   /** Honest explanation for an empty support set; defaults to the generic
-   *  "no Reasoning-Knopf" text. claude-cli rows pass a pointer to the
-   *  `claude_effort` profile config that DOES steer `claude -p` reasoning (W3) —
-   *  the control itself maps to `agent.reasoning_effort`, which claude-cli ignores. */
+   *  "no Reasoning-Knopf" text (grok/qwen/alibaba — no transport branch).
+   *  claude-cli rows are NOT empty anymore (S1 wired `claude_effort`), so they
+   *  render the active 5-level strip and never use this hint. */
   hint?: string | null;
   onChange: (value: string | null) => void;
 }) {
@@ -59,8 +63,10 @@ export function ReasoningControl({
   ];
 
   // Joined segments (mockup AB1/AB4): one bordered strip, hairline dividers, no
-  // wrap — dense mono STD·MIN·LOW·MED·HIGH. WCAG floor stays met (min-h-8 =
-  // 32px ≥ 24px; the segment is a secondary in-row control, not a primary CTA).
+  // wrap — dense mono STD·MIN·LOW·MED·HIGH (hermes) or STD·LOW·MED·HIGH·XHI·MAX
+  // (claude-cli's 5-level claude_effort set, S1). Touch target: 44px on
+  // phone/tablet (<52rem, min-h-11) per the ≥44px mobile rule, the dense 32px
+  // (min-h-8) on desktop — both clear the WCAG 2.5.8 ≥24px floor.
   return (
     <div
       role="group"
@@ -78,7 +84,7 @@ export function ReasoningControl({
             title={opt.full}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "min-h-8 px-2 font-data text-micro uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40",
+              "min-h-11 px-2 font-data text-micro uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 min-[52rem]:min-h-8",
               index > 0 && "border-l border-line-soft",
               on
                 ? "bg-live/15 font-semibold text-bronze-hi"

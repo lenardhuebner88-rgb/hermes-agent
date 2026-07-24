@@ -107,6 +107,8 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
   });
 
   it("disables model and reasoning controls for a locked profile", async () => {
+    // Locked HERMES row (S1 no-generalization guard): model AND reasoning stay
+    // disabled — the selective unlock applies ONLY to claude-cli rows (next test).
     const lockedFixture: LanesResponse = {
       ...fixture,
       profiles: fixture.profiles.map((profile) =>
@@ -128,6 +130,63 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     expect(modelSelect.disabled).toBe(true);
     const reasoning = screen.getByRole("group", { name: "Reasoning für coder" });
     expect(Array.from(reasoning.querySelectorAll("button")).every((button) => button.disabled)).toBe(true);
+  });
+
+  it("S1: selectively unlocks Reasoning on a locked claude-cli profile (model stays locked)", async () => {
+    // The S1 selective unlock: a claude-cli row stays LOCKED for model/fallback/
+    // probe, but its Reasoning segment is active (it persists claude_effort →
+    // --effort at spawn) — without generalizing to other locked rows (the locked
+    // hermes case above stays disabled). The captured fixture predates claude-cli
+    // reasoning_support, so wire premium as the live backend now reports it: a
+    // locked claude-cli profile carrying the full claude --effort set.
+    const full = ["low", "medium", "high", "xhigh", "max"];
+    const claudeFixture: LanesResponse = {
+      ...fixture,
+      profiles: fixture.profiles.map((profile) =>
+        profile.name === "premium"
+          ? {
+              ...profile,
+              worker_runtime: "claude-cli",
+              default_provider: null,
+              default_model: "claude-fable-5",
+              locked: true,
+              reasoning_support: full,
+            }
+          : profile,
+      ),
+      lanes: fixture.lanes.map((lane) =>
+        lane.id === fixture.active_id && lane.profiles.premium
+          ? {
+              ...lane,
+              profiles: {
+                ...lane.profiles,
+                premium: {
+                  worker_runtime: "claude-cli",
+                  provider: null,
+                  model: "claude-fable-5",
+                  fallback_providers: [],
+                },
+              },
+            }
+          : lane,
+      ),
+    };
+    loadLanesMock.mockImplementationOnce(async () => claudeFixture);
+
+    render(<LanesView density="airy" />);
+
+    // Model stays locked…
+    const modelSelect = await screen.findByLabelText<HTMLButtonElement>("Modell für premium");
+    expect(modelSelect.disabled).toBe(true);
+    // …but the Reasoning segment is selectively active: none of its buttons are
+    // disabled, and the full 5-level claude_effort strip renders (xhi + max beyond
+    // the hermes trio).
+    const reasoning = screen.getByRole("group", { name: "Reasoning für premium" });
+    const buttons = Array.from(reasoning.querySelectorAll("button"));
+    expect(buttons.length).toBeGreaterThan(0);
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+    expect(reasoning.textContent).toContain("xhi");
+    expect(reasoning.textContent).toContain("max");
   });
 
   it("shows the Rauch and Kompass subtabs", async () => {
