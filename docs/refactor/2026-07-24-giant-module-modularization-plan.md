@@ -2,43 +2,124 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Convert the five giant modules (112,912 lines) into packages so every source file is under 1 MiB and CodeGraph-visible, with the public API of each module provably byte-identical before and after and zero production call-site edits.
+> **Re-aimed 2026-07-24** by `docs/refactor/2026-07-24-modularization-delta-merge-capability.md` (operator decision, grill session `work:5`). The overriding goal is now **staying merge-capable against upstream**; CodeGraph visibility is kept only where it costs nothing. Scope reduced from five files to one. The tooling (Tasks 1–4) is unchanged and still correct.
 
-**Architecture:** Each giant module becomes a package whose `__init__.py` explicitly re-exports every top-level symbol, so the 275 importing files never change. A deterministic AST-based tool (`split_module.py`) performs the move; a second tool (`api_snapshot.py`) proves the public surface is unchanged. Submodules are emitted in the source file's own top-level order, which measurement shows is already a valid import-time layering for all five files — cross-module references to *earlier* submodules become plain symbol imports (line stays byte-identical), references to *later* submodules become module-object imports (`from . import x` + `x.name(...)`), which makes the import graph acyclic by construction.
+**Goal:** Extract the fork-owned portion of `hermes_cli/kanban_db.py` into a fork-owned package so the file stops being a 1.59 MB battleground against upstream — leaving a module file that is close to upstream's own copy, mergeable, and (as a side effect) back under CodeGraph's 1 MiB limit.
 
-**Tech Stack:** Python 3 `ast` + `tokenize` (stdlib only, no new dependencies), PyYAML (already vendored in the repo's env) for boundary maps, pytest, `scripts/run-affected.sh`, `codegraph`.
+**Architecture:** `hermes_cli/kanban_db.py` **stays a plain module file**, not a package — upstream's future diffs are addressed to that literal path and would fail to apply against a directory. It keeps only symbols upstream also carries. The 733 fork-only symbols move to a new fork-owned package `hermes_cli/kanban_ext/`, split into submodules by the same deterministic AST tooling. `kanban_db.py` ends with one explicit re-export block from that package, so all ~275 importers and the tests that monkeypatch private symbols are untouched. That trailing block is the only fork-owned hunk left in an upstream-owned file.
+
+**Tech Stack:** Python 3 `ast` (stdlib only, no new dependencies), PyYAML for boundary maps, pytest, `scripts/run-affected.sh`, `git merge-tree`, `codegraph`.
 
 ## Global Constraints
 
-- **Pure-move discipline.** Split commits contain moves only. No renames, no reformatting, no bug fixes, no docstring corrections — explicitly including the five defects in the spec's Follow-ups section. Mixing fixes in invalidates the equivalence gate.
-- **Zero production call-site edits.** No file outside the module being split may change its imports or calls. (Test-internal `monkeypatch` string targets are the single, enumerated exception — see Task 7 Step 6.)
+- **Scope is `hermes_cli/kanban_db.py` alone.** `gateway/run.py`, `hermes_cli/web_server.py`, `cli.py` and `hermes_cli/main.py` are explicitly out — see "Why the other four are out" below.
+- **`hermes_cli/kanban_db.py` must remain a file, never a directory.** This is the load-bearing constraint of the re-aim. A package at that path makes every future upstream diff unapplyable.
+- **Pure-move discipline.** The extraction commit contains moves only. No renames, no reformatting, no bug fixes, no docstring corrections — explicitly including the five defects under Follow-ups. Mixing fixes in invalidates the equivalence gate.
+- **Zero production call-site edits.** No file outside `hermes_cli/` changes its imports or calls. (Test-internal `monkeypatch` string targets are the single, enumerated exception — Task 6.)
 - **No model retypes code.** Every moved line is moved by `split_module.py`. Models author boundary maps (YAML) and tool code only.
-- **Per-file isolation.** One branch and one commit per giant module, so a bad split of one file never forces unwinding another.
-- **Model routing (fixed by the approved spec):** `split_module.py` / `api_snapshot.py` + their tests → **Codex (gpt-5.6-sol)**. The five boundary maps → **qwen 3.8 via `claude-qwen -p` one-shot only**. Boundary-map approval, gate verification, merge judgment → **Claude Opus 5**.
+- **Standing rule that outlives this plan.** New fork code never goes into an upstream-owned file. It goes into a fork-owned module reached by a minimal hook. Without this rule `kanban_db.py` re-accumulates and the work is undone within months — it went 9,135 → 38,834 lines while the rule was absent.
+- **Model routing (fixed by the approved spec):** `split_module.py` / `api_snapshot.py` + their tests → **Codex (gpt-5.6-sol)**. The boundary map → **qwen 3.8 via `claude-qwen -p` one-shot only**. Boundary-map approval, gate verification, merge judgment → **Claude Opus 5**.
 - **ToS constraint (binding):** `/usr/local/bin/claude-qwen` line 12 — Token Plan is interactive coding/agent use only. qwen may be used for session-driven one-shots supervised by an interactive session. It must **never** be wired as a kanban lane or cron worker.
 - **Repo git rules:** `origin` is NousResearch upstream — never push there. Push only to `piet-fork`, fast-forward, never `--force`. `git status --short` before any git action; this checkout is edited by parallel sessions.
-- **Test scope:** `scripts/run-affected.sh` while building. Before any merge to main: one collection sweep (`pytest --co -q tests/`) plus affected tests. Never run the full suite in both worker and verifier.
-- **Base commit:** `1ef243502` on `main`.
+- **Test scope:** `scripts/run-affected.sh` while building. Before merge to main: one collection sweep (`pytest --co -q tests/`) plus affected tests. Never run the full suite in both worker and verifier.
+- **Base commit:** `1ef243502` on `main`. Upstream reference: `origin/main`. Merge-base: `3bfa6001f` (2026-07-15).
+
+## Acceptance criteria
+
+1. **Mergeability (the point of the work).** `git merge-tree --write-tree HEAD origin/main`, conflict hunks in `hermes_cli/kanban_db.py`, measured before and after. **Baseline measured on `1ef243502`: 14 conflict regions, 568 conflicted lines.** See the correction below — this criterion needs re-scoping before it can gate anything.
+2. **Fork-owned lines in the upstream-owned file drop to ~zero.** `hermes_cli/kanban_db.py` currently carries 23,736 lines of fork-only symbols. After extraction it must carry none except the re-export block and the small import-time carve-out (Task 5 Step 3).
+3. **CodeGraph payoff.** `stat -c%s hermes_cli/kanban_db.py` < 1,048,576, and `codegraph query dispatch_once` returns the real definition.
+4. **API equivalence.** `api_snapshot.py --compare` reports `API IDENTICAL`, and affected tests are green.
+
+### Correction to criterion 1 — measured, needs an operator call
+
+The delta requires *strictly fewer* conflict hunks after the split, and states that if the count does not drop, "the ownership map was wrong and the split must not land." Measured on `1ef243502`, that criterion **cannot be met by this change**, and the ownership map is not the reason.
+
+All 14 conflict regions sit **inside upstream-owned symbols that stay in `kanban_db.py`**:
+
+| enclosing symbol | ownership | hunks |
+|---|---|---:|
+| `create_task` | upstream, diverged | 6 |
+| `Task` | upstream, diverged | 2 |
+| `_backup_corrupt_db`, `_guard_existing_db_is_healthy`, `list_comments`, `_cleanup_worker_tmux`, `_default_spawn` | upstream, diverged | 1 each |
+| `DEFAULT_BUSY_TIMEOUT_MS` | upstream, identical | 1 |
+| **any fork-only symbol** | — | **0** |
+
+Extracting the 733 fork-only symbols removes zero of them, because every conflict is caused by the fork having edited *inside* a function upstream also edited. Those bodies stay verbatim by design. The delta itself identifies this bucket as "the one that decides whether this exercise actually succeeds" — the measurement confirms it decides it, and it decides against criterion 1 as currently sequenced.
+
+Reducing those conflicts requires the *second* piece of work the delta names as a later candidate: reducing fork divergence inside the 129 shared symbols to hooks. That touches behaviour and cannot ride along with a pure move.
+
+**Recommendation (assumed for the rest of this plan, pending operator confirmation):** re-scope criterion 1 for this pass to *"conflict hunks in `kanban_db.py` must not increase"* — a real regression guard the extraction can actually fail — and promote *"fork-only lines in `kanban_db.py` drop from 23,736 to ~0"* (criterion 2) to the primary success measure. Keep the delta's strict-decrease criterion as the acceptance gate for the follow-on hook-reduction pass, where it is the right test. The extraction remains worth doing on its own: it is the precondition that makes hook-reduction tractable at all, it delivers the CodeGraph payoff, and it is what the standing rule needs in order to have somewhere to put new fork code.
 
 ---
 
-## Measured ground truth (do not re-derive)
+## Measured ground truth (verified on `1ef243502`, do not re-derive)
 
-Measured on `1ef243502` with `scripts/refactor/split_module.py --analyze` (prototype output archived in the Task 3 acceptance criteria):
+### Why the other four files are out of scope
 
-| file | lines | top-level symbols | banner sections | import-time back-edges | runtime back-edges | sections >4000 lines |
-|---|---:|---:|---:|---:|---:|---:|
-| `hermes_cli/kanban_db.py` | 38,834 | 973 | 37 | **0** | 140 | 0 |
-| `gateway/run.py` | 21,875 | 134 | 2 | **0** | 1 | 1 (20,122) |
-| `hermes_cli/web_server.py` | 20,314 | 836 | 39 | **0** | 66 | 0 |
-| `cli.py` | 16,797 | 153 | 1 | **0** | 1 | 1 (13,874) |
-| `hermes_cli/main.py` | 15,092 | 260 | 3 | **0** | 1 | 2 (9,734 / 4,274) |
+Byte sizes against CodeGraph's `MAX_FILE_SIZE` (1,048,576 B), verified with `stat -c%s` and `git show origin/main:<file> | wc -c`:
 
-Three consequences that shape this plan:
+| file | fork today | CodeGraph | upstream's own copy |
+|---|---:|---|---:|
+| `hermes_cli/kanban_db.py` | 1,589,066 | **blind** | 406,482 |
+| `gateway/run.py` | 1,062,191 | **blind** | **1,178,861** |
+| `hermes_cli/web_server.py` | 803,509 | visible | — |
+| `cli.py` | 772,748 | visible | — |
+| `hermes_cli/main.py` | 618,546 | visible | — |
 
-1. **Zero import-time back-edges in all five files.** The source order is already a valid layering, so the spec's `_core.py` cycle fallback is never triggered. The splitter still implements the refusal path as a safety net, but it must not fire.
-2. **`kanban_db.py` (37 banners) and `web_server.py` (39 banners) have real banner structure**; their boundary maps are banner-derived. **`gateway/run.py`, `cli.py`, and `main.py` do not** (2, 1 and 3 banners, with a single section holding 92%, 83% and 64% of the file). Their maps must come from call-clustering, and need proportionally more scrutiny at the approval gate.
-3. `hermes_cli/kanban_db.py`'s top level is unusually clean — 1,004 nodes: 1 docstring, 30 imports, 284 assignments, 671 functions, 18 classes, and **zero** conditional/executable top-level statements. AST-based moving is safe here.
+- **Three of the five are already CodeGraph-visible.** The original spec's premise that five modules are invisible does not survive measurement. Splitting them buys nothing toward either goal.
+- **`gateway/run.py` must not be split.** It is 97.6% upstream's file (+519 fork lines vs +3,887 upstream lines since the merge-base), and upstream's own copy is *already* 1.18 MB — blind at upstream too, and growing. Visibility there is purchasable only with permanent divergence against the largest incoming change stream in the repo. `rg` + `docs/kanban/LIFECYCLE.md` remain the documented navigation route for it.
+- **`hermes_cli/web_server.py`** is genuinely contested (+3,667 fork vs +3,681 upstream) and already visible. It needs its own ownership analysis in a later pass.
+
+That leaves exactly one file where both goals are reachable at once: `kanban_db.py`, which the fork grew 9,135 → 38,834 lines while upstream contributed 693.
+
+### Ownership map of `kanban_db.py` (fork vs `origin/main`)
+
+A top-level symbol is `UPSTREAM` if a symbol of that name exists in `git show origin/main:hermes_cli/kanban_db.py`; otherwise `FORK`. Measured: fork has 973 top-level symbols, upstream has 259.
+
+| bucket | symbols | fork lines | disposition |
+|---|---:|---:|---|
+| **FORK-only** | 733 | 23,736 | move out to `hermes_cli/kanban_ext/` |
+| **UPSTREAM, body byte-identical** | 111 | 1,293 | stay, untouched |
+| **UPSTREAM, body diverged** | 129 | 11,419 | stay; each is a standing conflict site (see below) |
+| upstream-only, absent from fork | 19 | — | nothing to do |
+
+**Projected residual size of `kanban_db.py`: ≈ 565 KB** of symbol bodies plus header and re-export block. That is comfortably under the 1 MiB limit, so criterion 3 is met — but it is *not* the ≈406 KB the delta estimated, because the 129 shared symbols are themselves heavily fork-grown (11,419 fork lines against far fewer upstream lines). The largest divergences:
+
+| symbol | fork lines | upstream lines |
+|---|---:|---:|
+| `_dispatch_once_locked` | 1,297 | 400 |
+| `complete_task` | 612 | 208 |
+| `_migrate_add_optional_columns` | 569 | 256 |
+| `create_task` | 491 | 378 |
+| `detect_crashed_workers` | 456 | 268 |
+| `SCHEMA_SQL` | 407 | 187 |
+| `_record_task_failure` | 404 | 162 |
+
+These 129 symbols are the entire remaining conflict surface, and the input list for the follow-on hook-reduction pass.
+
+### Cross-file references created by the ownership cut
+
+Classified with `layering.py`'s import-time/runtime distinction:
+
+| direction | import-time | runtime |
+|---|---:|---:|
+| FORK → UPSTREAM | 10 | 354 |
+| UPSTREAM → FORK | **3** | 233 |
+
+- The **354 + 233 runtime** references are fine. `kanban_ext` reaches `kanban_db` through a module-object import (`from hermes_cli import kanban_db` + `kanban_db.foo(...)`), resolved at call time, and `kanban_db`'s re-export block sits at the very end of the file. The resulting import cycle is benign, exactly as the empirical test in Task 4 shows.
+- The **10 FORK → UPSTREAM import-time** references are fine too: `kanban_ext` loads after `kanban_db`'s body has run, so those names already exist.
+- The **3 UPSTREAM → FORK import-time** references are **fatal to a naive cut** and drive a carve-out rule in Task 5 Step 3:
+
+  | upstream symbol | needs fork symbol | why it is import-time |
+  |---|---|---|
+  | `_dispatch_once_locked` | `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` | default argument |
+  | `dispatch_once` | `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` | default argument |
+  | `schedule_task` | `_SCHEDULE_DUE_UNSPECIFIED` | default argument |
+
+### Structural facts
+
+`kanban_db.py`'s top level is unusually clean — 1,004 nodes: 1 docstring, 30 imports, 284 assignments, 671 functions, 18 classes, and **zero** conditional or executable top-level statements. AST-based moving is safe here.
 
 ---
 
@@ -55,24 +136,36 @@ Three consequences that shape this plan:
 - `tests/refactor/test_split_module.py`
 - `tests/refactor/fixtures/` — synthetic modules exercising forward edges, back-edges, decorators, class bases, default args
 
-**Created (per split, ×5):**
+**Created (the extraction):**
 
-- `docs/refactor/boundary-map.<module>.yaml` — the approved boundary map, kept in the repo as the record of the split
-- `hermes_cli/kanban_db/` (etc.) — the package replacing the module
+- `docs/refactor/boundary-map.kanban_ext.yaml` — the approved ownership-derived boundary map, kept in the repo as the record
+- `docs/refactor/ownership.kanban_db.md` — the three-bucket ownership report, including the 129 diverged symbols that become the hook-reduction backlog
+- `hermes_cli/kanban_ext/` — the fork-owned package: `__init__.py` plus ~8–12 submodules of 2,000–3,000 lines
 
 **Modified:**
 
-- `docs/kanban/LIFECYCLE.md` — 95 anchors re-pointed at new module paths (Task 7)
-- `scripts/check_kanban_lifecycle_anchors.py` — must resolve anchors across the package (Task 7)
-- ~33 test lines with `monkeypatch`/`patch` string targets into `hermes_cli.kanban_db.<symbol>` (Task 7)
+- `hermes_cli/kanban_db.py` — **stays a file**; loses 733 fork-only symbols, gains one trailing re-export block
+- `docs/kanban/LIFECYCLE.md` — anchors re-pointed; symbols that moved now live in `hermes_cli/kanban_ext/<module>.py`
+- `scripts/check_kanban_lifecycle_anchors.py` — must resolve anchors across both files
+- the enumerated test lines with `monkeypatch`/`patch` string targets into `hermes_cli.kanban_db.<symbol>` (Task 6)
 
 ---
 
-## Task 0: Branch triage (operator gate — blocks every split)
+## Task 0: Branch triage (operator gate — still open, still blocking)
 
-Eleven branches carry `kanban_db.py` deltas. After the split their diffs cannot auto-merge, because the file no longer exists at that path.
+Eleven branches carry `kanban_db.py` deltas. After the extraction their fork-owned hunks address text that has moved to `hermes_cli/kanban_ext/`, so they can no longer auto-merge.
 
-**Files:** no source changes. Produces `docs/refactor/branch-triage-2026-07-24.md`.
+The re-aim narrows this gate to `kanban_db.py` branches only. In practice the set is unchanged: all eleven were selected *because* they carry `kanban_db.py` deltas. Branches touching only `gateway/run.py`, `web_server.py`, `cli.py` or `main.py` are now irrelevant, since those files are out of scope.
+
+**Status: the analysis is done and committed (`b20d0c8f3`); the operator decision is NOT made.** `docs/refactor/branch-triage-2026-07-24.md` holds the full evidence. Summary of what was found:
+
+- **All three branches the spec flagged for land-or-drop review are superseded by `main`**, verified at symbol level rather than by patch-id. `git cherry` misreported `kanban/t_610a9f84` as 8-of-11 unlanded; every deliverable is in fact on `main`, and `main` is *ahead* in two of its test files.
+- `kanban/t_c254b029`: 0 top-level symbols exist on the branch but not on `main`.
+- `codex/board-model-truth-20260713` and `kanban/t_610a9f84`: differ from `main` only by the same 28 OpenClaw / Mission-Control / FO-backlog symbols, which `main` deleted deliberately in `fd95ada4b codex: retire OpenClaw kanban writers`. OpenClaw was decommissioned 2026-06-01. Landing either would resurrect retired code.
+- **Recommendation: drop all three** (archive as tag, then delete), alongside the eight already bucketed for deletion.
+- **Open flag:** `kanban/t_57aaa085` is in the delete bucket but is dated **today** with 10 commits ahead. Its `kanban_db.py` delta is trivial (10+/1−), so the extraction does not care, but it may hold live non-`kanban_db` work. Do not delete it without an explicit call.
+
+**Files:** no source changes. Maintains `docs/refactor/branch-triage-2026-07-24.md`.
 
 **Verified state on `1ef243502`:**
 
@@ -94,7 +187,7 @@ Eleven branches carry `kanban_db.py` deltas. After the split their diffs cannot 
 
 `backup/grok-kanban-block-kind-20260715-pre-rebase` carries the second-largest delta in the whole set (627+/113−) yet sits in the archive bucket. That is consistent with its name (a pre-rebase backup, i.e. superseded), but confirm before deleting.
 
-- [ ] **Step 1: Write the triage summary for the three "decide" branches**
+- [x] **Step 1: Write the triage summary for the three "decide" branches** — done, committed as `b20d0c8f3`. The commands below are the reproduction recipe.
 
 For each of `kanban/t_c254b029`, `codex/board-model-truth-20260713`, `kanban/t_610a9f84`, capture what the branch actually does:
 
@@ -161,7 +254,7 @@ git commit -m "docs: branch triage before giant-module modularization"
 
 **Interfaces:**
 - Produces: `snapshot(module_name: str) -> dict` returning `{"module": str, "symbols": {name: descriptor}}` where `descriptor` is a dict with keys `kind` (`"function"` | `"class"` | `"value"`), `signature` (str or `None`), and for classes `methods` (dict of method name → signature). `diff(before: dict, after: dict) -> list[str]` returns human-readable difference lines; empty list means identical.
-- Consumed by: Task 4 (`split_module.py` calls neither — the gate is run separately), Tasks 7–11 (the per-file sequence).
+- Consumed by: Task 4's round-trip test, and Task 7 Steps 1 and 4 (the equivalence gate around the extraction).
 
 The snapshot must be taken by **importing** the module and introspecting it, not by parsing source. That is the whole point: it proves what importers actually see, including the re-exported package surface.
 
@@ -704,7 +797,7 @@ git commit -m "refactor tooling: symbol layering analysis"
 - Consumes: `layering.top_level_symbols`, `layering.banner_sections`, `layering.classify_references`
 - Produces: `analyze(path: str, boundary_map: dict | None) -> dict` returning `{"symbols": int, "sections": [...], "import_time_backward": [...], "runtime_backward": [...], "oversized": [...]}`. When `boundary_map` is `None`, sections come from banners; otherwise from the map. CLI: `python -m scripts.refactor.split_module --analyze <path> [--map <yaml>]`.
 
-**Acceptance criterion (this is the reproduction gate for the ground-truth table):** running `--analyze` with no map on the five giant modules must reproduce the measured table above exactly — in particular `import_time_backward` must be empty for all five, and `runtime_backward` must be 140 / 1 / 66 / 1 / 1.
+**Acceptance criterion (the reproduction gate for the ground-truth section):** running `--analyze` with no map on `hermes_cli/kanban_db.py` must report `import_time_backward` empty and `runtime_backward` = 140, and `--ownership` must report 733 / 111 / 129. Both are checked in Step 6.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -930,21 +1023,125 @@ if __name__ == "__main__":
 Run: `python -m pytest tests/refactor/test_split_module.py -v`
 Expected: PASS, 3 tests
 
-- [ ] **Step 5: Reproduce the ground-truth table on the real files**
+- [ ] **Step 5: Add `--ownership`, the mode the re-aim needs**
+
+The boundary map is now derived from ownership against upstream, not from banners. Add to `split_module.py`:
+
+```python
+def ownership(path: str, upstream_ref: str = "origin/main") -> dict:
+    """Classify every top-level symbol as FORK / UPSTREAM-identical / UPSTREAM-diverged.
+
+    A symbol is UPSTREAM if a symbol of that name exists in the upstream copy
+    of the same path. Compared against today's upstream (default origin/main),
+    NOT the merge-base: what matters is which symbols upstream still carries,
+    because those are the ones future merges will touch.
+
+    The three buckets are reported separately and never silently folded
+    together — the diverged bucket is the standing conflict surface.
+    """
+    import subprocess
+
+    def bodies(src):
+        tree = ast.parse(src)
+        lines = src.splitlines()
+        out = {}
+        for n in tree.body:
+            names = []
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names = [n.name]
+            elif isinstance(n, ast.Assign):
+                names = [t.id for t in n.targets if isinstance(t, ast.Name)]
+            elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+                names = [n.target.id]
+            if not names:
+                continue
+            start, end = _symbol_span(n)
+            body = "\n".join(lines[start - 1:end])
+            for nm in names:
+                out[nm] = (body, end - start + 1)
+        return out
+
+    fork = bodies(open(path).read())
+    up = bodies(subprocess.run(
+        ["git", "show", f"{upstream_ref}:{path}"],
+        capture_output=True, text=True, check=True).stdout)
+
+    fork_only = {k for k in fork if k not in up}
+    shared = {k for k in fork if k in up}
+    identical = {k for k in shared if fork[k][0] == up[k][0]}
+    diverged = shared - identical
+
+    def total(names):
+        return sum(fork[n][1] for n in names)
+
+    return {
+        "path": path,
+        "upstream_ref": upstream_ref,
+        "fork_only": sorted(fork_only),
+        "upstream_identical": sorted(identical),
+        "upstream_diverged": sorted(
+            diverged, key=lambda n: -fork[n][1]),
+        "lines": {
+            "fork_only": total(fork_only),
+            "upstream_identical": total(identical),
+            "upstream_diverged": total(diverged),
+        },
+        "diverged_detail": [
+            {"symbol": n, "fork_lines": fork[n][1], "upstream_lines": up[n][1]}
+            for n in sorted(diverged, key=lambda n: -fork[n][1])
+        ],
+    }
+```
+
+Wire it to `--ownership [--upstream-ref REF]` in `main()`, printing the three bucket counts and line totals, and `--json` for the raw report.
+
+Add to `tests/refactor/test_split_module.py`:
+
+```python
+def test_ownership_separates_the_three_buckets(tmp_path, monkeypatch):
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
+    subprocess.run(["git", "init", "-q"], check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], check=True)
+    subprocess.run(["git", "config", "user.name", "t"], check=True)
+
+    (repo / "m.py").write_text(
+        "SHARED_SAME = 1\n\n\ndef shared_changed():\n    return 1\n")
+    subprocess.run(["git", "add", "m.py"], check=True)
+    subprocess.run(["git", "commit", "-qm", "up"], check=True)
+    subprocess.run(["git", "branch", "-M", "upstream"], check=True)
+
+    (repo / "m.py").write_text(
+        "SHARED_SAME = 1\n\n\ndef shared_changed():\n    return 2\n\n\n"
+        "def fork_only():\n    return 3\n")
+
+    rep = split_module.ownership("m.py", upstream_ref="upstream")
+    assert rep["fork_only"] == ["fork_only"]
+    assert rep["upstream_identical"] == ["SHARED_SAME"]
+    assert rep["upstream_diverged"] == ["shared_changed"]
+```
+
+Run: `python -m pytest tests/refactor/test_split_module.py -v`
+Expected: PASS.
+
+- [ ] **Step 6: Reproduce the measured ownership map on the real file**
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
-for f in hermes_cli/kanban_db.py gateway/run.py hermes_cli/web_server.py cli.py hermes_cli/main.py; do
-  python -m scripts.refactor.split_module "$f" --analyze
-done
+python -m scripts.refactor.split_module hermes_cli/kanban_db.py --analyze
+python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
 ```
-Expected: `backward=0` on the import-time line for all five; runtime backward counts 140, 1, 66, 1, 1 respectively. **If any file reports a non-zero import-time backward count, stop and escalate** — the plan's central assumption has changed.
+Expected from `--analyze`: import-time `backward=0`, runtime `backward=140`.
+Expected from `--ownership`: **733** fork-only (23,736 lines), **111** upstream-identical (1,293 lines), **129** upstream-diverged (11,419 lines). If these numbers differ, upstream has moved — re-derive before continuing, do not proceed on stale figures.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add scripts/refactor/split_module.py tests/refactor/test_split_module.py
-git commit -m "refactor tooling: split_module --analyze"
+git commit -m "refactor tooling: split_module --analyze and --ownership"
 ```
 
 ---
@@ -1365,7 +1562,139 @@ def test_split_preserves_api_snapshot_exactly(tmp_path, monkeypatch):
 Run: `python -m pytest tests/refactor/test_split_module.py::test_split_preserves_api_snapshot_exactly -v`
 Expected: PASS
 
-- [ ] **Step 6: Run ruff and the affected suite**
+- [ ] **Step 6: Add `--extract`, the mode the re-aim actually uses**
+
+`apply_split` converts a module into a package at the same path. The re-aim needs the opposite shape: pull a *subset* of symbols out into a **sibling** package, leave the rest in the original file, and append one re-export block.
+
+**This shape is strictly simpler than `--apply`, because it needs no body rewrites at all.** Verified empirically:
+
+- The re-export block is the **last** statement in `kanban_db.py`, so when `kanban_ext` is imported every upstream symbol is already defined. `kanban_ext` submodules therefore reach back with plain `from hermes_cli.kanban_db import X` symbol imports, and their bodies stay byte-identical.
+- Conversely, the re-export block binds every fork symbol as a module global of `kanban_db`, so the 233 runtime UPSTREAM → FORK references resolve at call time with bodies byte-identical too.
+- The circular import is benign: `kanban_db` is in `sys.modules` and fully populated by the time `kanban_ext` executes.
+- The **3 import-time** UPSTREAM → FORK references are the sole exception and fail loudly — a direct test reproduces `NameError: name 'FORK_CONST' is not defined`. Hence the carve-out rule below.
+
+Emission rules for `--extract`:
+
+1. Symbols named by the boundary map move to `<package_dir>/<module>.py`; every other symbol **stays in the original file, byte-identical, in its original position**.
+2. The original file's header (docstring + imports) is untouched. Each extracted submodule gets that header copied verbatim, exactly as `--apply` does.
+3. Each extracted submodule gets `from <origin_module> import <names>` for the symbols it references that stayed behind. **No body rewriting.**
+4. References *between* extracted submodules follow the existing `--apply` rules: forward → symbol import, backward → module-object import plus rewrite, with the emission rules 8 and 9 shadowing and split-binding guards.
+5. The original file gains, as its **final** statement, `from <package> import (...)` naming every extracted symbol explicitly. No `import *`.
+6. **Refuse** if any symbol that stays references an extracted symbol at import time — that reference cannot be satisfied by a trailing block. Print each offending pair; the fix is to keep that symbol behind (Task 5 Step 3), never to reorder the block.
+
+```python
+def extract_to_package(path: str, boundary_map: dict, package_dir: str) -> int:
+    """Move the boundary map's symbols out to a sibling package.
+
+    Unlike apply_split, `path` remains a module FILE — required, because
+    upstream's future diffs are addressed to that literal path.
+    """
+    src = open(path).read()
+    tree = ast.parse(src)
+    lines = src.split("\n")
+    top = layering.top_level_symbols(tree)
+
+    order = [e["name"] for e in boundary_map["modules"]]
+    moved: dict[str, str] = {}
+    for entry in boundary_map["modules"]:
+        for sym in entry["symbols"]:
+            if sym not in top:
+                raise SystemExit(f"boundary map names unknown symbol: {sym}")
+            moved[sym] = entry["name"]
+    stays = {n for n in top if n not in moved}
+
+    # rule 6: a symbol that stays may not need an extracted symbol at import time
+    offenders = []
+    for name in sorted(stays):
+        for target in sorted(layering.import_time_names(top[name], top) - {name}):
+            if target in moved:
+                offenders.append((name, target))
+    if offenders:
+        print("REFUSING: symbols that stay reference extracted symbols at import "
+              "time; a trailing re-export block runs too late for these:")
+        for referrer, target in offenders:
+            print(f"  {referrer} needs {target} (mapped to {moved[target]})")
+        raise SystemExit(2)
+
+    # ... emit submodules exactly as apply_split does, but with the origin
+    #     module added as an import source for every reference to `stays`;
+    #     then rewrite `path` keeping only `stays`, and append the block.
+    return 0
+```
+
+Add to `tests/refactor/test_split_module.py`:
+
+```python
+EXTRACT_SOURCE = '''\
+"""Origin module docstring."""
+import os
+
+DEFAULT_TTL = 300
+
+
+def connect():
+    return "conn:" + os.sep
+
+
+def upstream_uses_fork():
+    return fork_helper() + "|" + str(DEFAULT_TTL)
+
+
+def fork_helper():
+    return "fork(" + connect() + "," + str(DEFAULT_TTL) + ")"
+'''
+
+
+def test_extract_leaves_origin_a_file_and_moves_only_mapped_symbols(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(tmp_path))
+    src = tmp_path / "origin.py"
+    src.write_text(EXTRACT_SOURCE)
+    split_module.extract_to_package(
+        str(src), {"modules": [{"name": "helpers", "symbols": ["fork_helper"]}]},
+        str(tmp_path / "origin_ext"))
+
+    assert src.is_file()                       # NOT a directory — the whole point
+    assert (tmp_path / "origin_ext" / "helpers.py").exists()
+    text = src.read_text()
+    assert "def connect()" in text             # stayed, byte-identical
+    assert "def fork_helper()" not in text     # moved out
+    assert text.rstrip().endswith(")")         # re-export block is last
+    assert "from origin_ext import (" in text
+
+
+def test_extract_preserves_behaviour_and_api(tmp_path, monkeypatch):
+    from scripts.refactor import api_snapshot
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    src = tmp_path / "origin2.py"
+    src.write_text(EXTRACT_SOURCE)
+    before = api_snapshot.snapshot("origin2", fresh=True)
+
+    split_module.extract_to_package(
+        str(src), {"modules": [{"name": "helpers", "symbols": ["fork_helper"]}]},
+        str(tmp_path / "origin2_ext"))
+
+    after = api_snapshot.snapshot("origin2", fresh=True)
+    assert api_snapshot.diff(before, after) == []
+
+    import origin2
+    assert origin2.upstream_uses_fork() == "fork(conn:/,300)|300"
+
+
+def test_extract_refuses_import_time_reference_into_the_extracted_set(tmp_path):
+    src = tmp_path / "origin3.py"
+    src.write_text(
+        "FORK_CONST = 'fc'\n\n\ndef stays(_x=FORK_CONST):\n    return _x\n")
+    with pytest.raises(SystemExit):
+        split_module.extract_to_package(
+            str(src), {"modules": [{"name": "c", "symbols": ["FORK_CONST"]}]},
+            str(tmp_path / "origin3_ext"))
+```
+
+Run: `python -m pytest tests/refactor/test_split_module.py -v`
+Expected: PASS.
+
+- [ ] **Step 7: Run ruff and the affected suite**
 
 ```bash
 ruff check scripts/refactor tests/refactor
@@ -1373,161 +1702,243 @@ scripts/run-affected.sh
 ```
 Expected: both clean.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add scripts/refactor/split_module.py tests/refactor/test_split_module.py
-git commit -m "refactor tooling: split_module --apply, deterministic AST move"
+git commit -m "refactor tooling: split_module --apply and --extract, deterministic AST moves"
 ```
 
 ---
 
-## Task 5: `kanban_db.py` boundary map
+## Task 5: The ownership boundary map for `kanban_ext`
 
 **Files:**
-- Create: `docs/refactor/boundary-map.kanban_db.yaml`
+- Create: `docs/refactor/ownership.kanban_db.md`, `docs/refactor/boundary-map.kanban_ext.yaml`
 
 **Interfaces:**
-- Produces: the YAML consumed by `split_module.py --map`. Schema:
+- Produces the YAML consumed by `split_module.py --extract`. Schema:
 
 ```yaml
 module: hermes_cli/kanban_db.py
+package: hermes_cli/kanban_ext
+upstream_ref: origin/main
 modules:
-  - name: constants
-    banners: ["Constants", "Paths"]
-    symbols: [VALID_STATUSES, TERMINAL_TASK_STATUSES, ...]
-  - name: schema
-    banners: ["Schema"]
-    symbols: [...]
+  - name: waits
+    symbols: [_wait_is_satisfied, _register_wait, ...]
+  - name: worker_ctx
+    symbols: [build_worker_context, render_worker_brief_for_task, ...]
 ```
 
-Order in the list **is** the emission order and must be the source file's banner order. `symbols` must cover every one of the 973 top-level names exactly once — the splitter refuses otherwise.
+Only fork-only symbols appear. Everything absent from the map stays in `kanban_db.py`. Target: **8–12 submodules of 2,000–3,000 lines**, covering all 733 fork-only symbols minus the carve-out from Step 3.
 
-**Target:** 12–16 modules of 2,000–4,000 lines, merging adjacent banner sections. The 37 sections and their line counts are in the analysis output; the largest single section is 3,729 lines, so no section needs sub-splitting.
-
-- [ ] **Step 1: Produce the section inventory qwen will work from**
+- [ ] **Step 1: Generate the ownership report**
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
-python -m scripts.refactor.split_module hermes_cli/kanban_db.py --analyze --json \
-  > /tmp/kanban_sections.json
-python - <<'EOF' > /tmp/kanban_brief.txt
+python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership --json \
+  > /tmp/kdb_ownership.json
+python - <<'EOF' > docs/refactor/ownership.kanban_db.md
 import json
-r = json.load(open('/tmp/kanban_sections.json'))
-for m in r['modules']:
-    print(f"{r['module_lines'].get(m,0):6d}  {m}")
+r = json.load(open('/tmp/kdb_ownership.json'))
+L = r['lines']
+print("# Ownership of hermes_cli/kanban_db.py\n")
+print(f"- Upstream reference: `{r['upstream_ref']}`")
+print(f"- FORK-only: {len(r['fork_only'])} symbols, {L['fork_only']} lines -> move to hermes_cli/kanban_ext/")
+print(f"- UPSTREAM identical: {len(r['upstream_identical'])} symbols, {L['upstream_identical']} lines -> stay")
+print(f"- UPSTREAM diverged: {len(r['upstream_diverged'])} symbols, {L['upstream_diverged']} lines -> stay\n")
+print("## Standing conflict surface (the hook-reduction backlog)\n")
+print("Each row is a symbol the fork edited inside a body upstream also owns. These are")
+print("the only remaining merge-conflict sites once the extraction lands.\n")
+print("| symbol | fork lines | upstream lines |")
+print("|---|---:|---:|")
+for d in r['diverged_detail']:
+    print(f"| `{d['symbol']}` | {d['fork_lines']} | {d['upstream_lines']} |")
 EOF
-cat /tmp/kanban_brief.txt
+head -20 docs/refactor/ownership.kanban_db.md
 ```
 
-- [ ] **Step 2: Dispatch the boundary-map proposal to qwen (one-shot, interactive-supervised)**
+Expected header numbers: 733 / 111 / 129 as in the ground-truth section. This file is also the deliverable that seeds the follow-on hook-reduction pass.
 
-Single `claude-qwen -p` call — never a kanban lane, never a cron worker (ToS).
+- [ ] **Step 2: Record the "before" mergeability baseline**
 
 ```bash
-claude-qwen -p "$(cat <<'PROMPT'
-You are proposing a boundary map for splitting hermes_cli/kanban_db.py (38,834
-lines, 973 top-level symbols) into a Python package.
-
-Constraints:
-- Group the 37 existing banner sections into 12-16 modules of 2,000-4,000 lines.
-- ONLY merge ADJACENT sections. The output order must be the source order —
-  it is a valid import-time layering and reordering would break it.
-- Give each module a short snake_case name describing its responsibility.
-- Do not invent, rename, split or drop any section.
-
-Section line counts, in source order, are in /tmp/kanban_brief.txt.
-Read hermes_cli/kanban_db.py section banners for context on what each contains.
-
-Output ONLY YAML in this shape, no prose:
-
-module: hermes_cli/kanban_db.py
-modules:
-  - name: constants
-    banners: ["Constants", "Paths"]
-  - name: schema
-    banners: ["Schema"]
-PROMPT
-)" > /tmp/kanban_map_draft.yaml
-cat /tmp/kanban_map_draft.yaml
+cd /home/piet/.hermes/hermes-agent
+git merge-tree --write-tree HEAD origin/main > /tmp/mt_before.txt; TREE=$(head -1 /tmp/mt_before.txt)
+git show "$TREE:hermes_cli/kanban_db.py" > /tmp/kdb_merged_before.txt
+echo "conflict hunks BEFORE: $(rg -c '^<<<<<<<' /tmp/kdb_merged_before.txt)"
+stat -c%s hermes_cli/kanban_db.py
 ```
+Expected on `1ef243502`: **14** conflict hunks, **1,589,066** bytes. Write both into the commit message later; they are the denominators for acceptance criteria 1 and 3.
 
-- [ ] **Step 3: Review and approve the map (Claude Opus 5 — the human/architectural gate)**
+- [ ] **Step 3: Compute the import-time carve-out — the symbols that must NOT move**
 
-Check, in this order, and reject back to Step 2 on any failure:
-1. Every one of the 37 banner titles appears exactly once.
-2. Sections are merged only with their neighbours; source order is preserved.
-3. Every module's line total is between 2,000 and 4,000 (allow the first and last to be smaller).
-4. Module count is 12–16.
-5. Names describe responsibility, not position (`review_gate`, not `part_7`).
-
-Then present the map to the operator for approval before it is used. This is the human gate the spec calls for.
-
-- [ ] **Step 4: Expand banner names to explicit symbol lists**
-
-The splitter validates against symbols, not banners, so expand mechanically:
+Three fork symbols are referenced at import time by symbols that stay, so a trailing re-export block runs too late for them. They stay in `kanban_db.py`:
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
 python - <<'EOF'
-import ast, yaml
+import ast
 from scripts.refactor import layering
+import subprocess
+src = open('hermes_cli/kanban_db.py').read()
+tree = ast.parse(src)
+top = layering.top_level_symbols(tree)
+up = subprocess.run(['git','show','origin/main:hermes_cli/kanban_db.py'],
+                    capture_output=True, text=True, check=True).stdout
+up_names = set(layering.top_level_symbols(ast.parse(up)))
+fork_only = {n for n in top if n not in up_names}
+carve = set()
+for name, node in top.items():
+    if name in fork_only:
+        continue
+    for target in layering.import_time_names(node, top) - {name}:
+        if target in fork_only:
+            carve.add(target)
+            print(f"CARVE-OUT: {name} (stays) needs {target} at import time")
+print(f"\ncarve-out set ({len(carve)}): {sorted(carve)}")
+EOF
+```
+Expected: exactly 3 references naming 2 distinct symbols — `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` (used as a default argument by both `_dispatch_once_locked` and `dispatch_once`) and `_SCHEDULE_DUE_UNSPECIFIED` (default argument of `schedule_task`).
+
+These stay in `kanban_db.py`. They are small constants, and they become a second small fork-owned hunk alongside the re-export block — accepted, and far cheaper than the alternatives (reordering the block would break it; converting the default arguments to sentinels would be a behaviour change and violates pure-move discipline).
+
+**If this set is larger than 3, stop and reconsider before mapping** — a large carve-out means the ownership boundary is not clean and the extraction buys less than projected.
+
+- [ ] **Step 4: Produce the grouping brief for qwen**
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+python - <<'EOF' > /tmp/kext_brief.txt
+import ast, json
+from scripts.refactor import layering
+r = json.load(open('/tmp/kdb_ownership.json'))
+fork_only = set(r['fork_only']) - {'DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS',
+                                   '_SCHEDULE_DUE_UNSPECIFIED'}
 src = open('hermes_cli/kanban_db.py').read()
 tree, lines = ast.parse(src), src.splitlines()
-banners = layering.banner_sections(lines)
 top = layering.top_level_symbols(tree)
-def section_of(ln):
-    name = '__head__'
+banners = layering.banner_sections(lines)
+def sect(ln):
+    s = '(head)'
     for bl, bt in banners:
         if bl <= ln:
-            name = bt
-    return name
-by_section = {}
-for n, node in sorted(top.items(), key=lambda kv: kv[1].lineno):
-    by_section.setdefault(section_of(node.lineno), []).append(n)
-draft = yaml.safe_load(open('/tmp/kanban_map_draft.yaml'))
-for entry in draft['modules']:
-    syms = []
-    for b in entry['banners']:
-        syms.extend(by_section.pop(b))
-    entry['symbols'] = syms
-leftover = {k: len(v) for k, v in by_section.items()}
-assert not leftover, f"sections not placed by the map: {leftover}"
-with open('docs/refactor/boundary-map.kanban_db.yaml', 'w') as fh:
-    yaml.safe_dump(draft, fh, sort_keys=False, width=100)
-print("wrote docs/refactor/boundary-map.kanban_db.yaml")
+            s = bt
+    return s
+for name in sorted(fork_only, key=lambda n: top[n].lineno):
+    node = top[name]
+    end = getattr(node, 'end_lineno', node.lineno)
+    uses = sorted((layering.all_names(node, top) - {name}) & fork_only)
+    print(f"{node.lineno:6d} {end-node.lineno+1:5d}  {name}   [{sect(node.lineno)}]")
+    if uses:
+        print(f"            uses: {', '.join(uses[:10])}")
+EOF
+wc -l /tmp/kext_brief.txt; head -30 /tmp/kext_brief.txt
+```
+
+The brief carries each fork symbol's source position, size, originating banner section, and which other fork symbols it uses. The banner section is a *hint* about responsibility, not the boundary — the boundary is ownership.
+
+- [ ] **Step 5: Dispatch the grouping to qwen (one-shot, interactive-supervised)**
+
+A single `claude-qwen -p` call. Never a kanban lane, never a cron worker (ToS).
+
+```bash
+claude-qwen -p "$(cat <<'PROMPT'
+Group 731 fork-owned Python symbols into 8-12 submodules of 2,000-3,000 lines
+each. They are being extracted out of hermes_cli/kanban_db.py into a new
+fork-owned package hermes_cli/kanban_ext/.
+
+The inventory is in /tmp/kext_brief.txt: source line, size in lines, symbol
+name, the banner section it came from in square brackets, and which other
+fork symbols it uses.
+
+Rules:
+- Group by RESPONSIBILITY. The bracketed banner section is a strong hint;
+  symbols from the same section usually belong together.
+- Output order must preserve source order: a symbol may only be grouped with
+  neighbours in the listing, never reordered.
+- Every symbol in the brief appears exactly once. Do not invent or drop any.
+- Name each module snake_case after what it does (waits, respawn_guard,
+  worker_ctx, disposition, lanes...), never after position.
+
+Output ONLY YAML, no prose:
+
+module: hermes_cli/kanban_db.py
+package: hermes_cli/kanban_ext
+upstream_ref: origin/main
+modules:
+  - name: <snake_case responsibility>
+    symbols: [<names in source order>]
+PROMPT
+)" > /tmp/kext_map_draft.yaml
+head -30 /tmp/kext_map_draft.yaml
+```
+
+- [ ] **Step 6: Review and approve the map (Claude Opus 5 — the architectural gate)**
+
+Check in this order; reject back to Step 5 on any failure:
+
+1. Every symbol in `/tmp/kext_brief.txt` appears exactly once, and **no symbol outside it appears at all** — an upstream symbol sneaking into the map would move upstream code out of the upstream file, which is the exact failure this whole re-aim exists to prevent.
+2. Neither carve-out symbol (`DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS`, `_SCHEDULE_DUE_UNSPECIFIED`) is in the map.
+3. Source order is preserved; only neighbours are grouped.
+4. Each module is 2,000–3,000 lines; module count is 8–12.
+5. Names describe responsibility, not position.
+
+Verify 1 and 2 mechanically rather than by eye:
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+python - <<'EOF'
+import json, yaml
+r = json.load(open('/tmp/kdb_ownership.json'))
+carve = {'DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS', '_SCHEDULE_DUE_UNSPECIFIED'}
+expected = set(r['fork_only']) - carve
+m = yaml.safe_load(open('/tmp/kext_map_draft.yaml'))
+mapped = [s for e in m['modules'] for s in e['symbols']]
+assert len(mapped) == len(set(mapped)), "duplicate symbol in the map"
+mapped = set(mapped)
+upstream = set(r['upstream_identical']) | set(r['upstream_diverged'])
+assert not (mapped & upstream), f"map moves UPSTREAM symbols: {sorted(mapped & upstream)[:10]}"
+assert not (mapped & carve), f"map moves a carve-out symbol: {sorted(mapped & carve)}"
+missing, extra = expected - mapped, mapped - expected
+assert not missing, f"{len(missing)} fork symbols unplaced: {sorted(missing)[:10]}"
+assert not extra, f"map names unknown symbols: {sorted(extra)[:10]}"
+print(f"OK: {len(mapped)} fork symbols placed across {len(m['modules'])} modules")
 EOF
 ```
 
-Note the `__head__` pseudo-section holds symbols defined before the first banner; it must be assigned to the first module in the map. If the assertion fires naming `__head__`, add it to the first entry's `banners` list and re-run.
+Then present the map to the operator for approval, and save it:
 
-- [ ] **Step 5: Validate the map against the splitter without applying it**
+```bash
+cp /tmp/kext_map_draft.yaml docs/refactor/boundary-map.kanban_ext.yaml
+```
+
+- [ ] **Step 7: Validate the map against the tooling without applying it**
 
 ```bash
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py \
-  --analyze --map docs/refactor/boundary-map.kanban_db.yaml
+  --analyze --map docs/refactor/boundary-map.kanban_ext.yaml
 ```
-Expected: `backward=0` on the import-time line, no `OVERSIZED` lines, exit 0. A non-zero exit means the map is not a valid layering — go back to Step 2.
+Expected: exit 0, import-time `backward=0`, no `OVERSIZED` module. A non-zero exit means the grouping is not a valid layering — back to Step 5.
 
-- [ ] **Step 6: Commit the approved map**
+- [ ] **Step 8: Commit the map and the ownership report**
 
 ```bash
-git add docs/refactor/boundary-map.kanban_db.yaml
-git commit -m "refactor: approved boundary map for kanban_db"
+git add docs/refactor/boundary-map.kanban_ext.yaml docs/refactor/ownership.kanban_db.md
+git commit -m "refactor: ownership map and approved kanban_ext boundary map"
 ```
 
 ---
 
-## Task 6: Re-target the test patch sites
+## Task 6: Enumerate the test patch sites
 
-**Files:**
-- Modify: the ~33 lines across `tests/` that patch `hermes_cli.kanban_db.<symbol>` by string path
+**Files:** produces `docs/refactor/patch-targets.kanban_db.md`. No source edits yet.
 
-**Why this is necessary and why it is not a violation of "zero call-site edits":** the spec's guarantee covers production importers — the 275 files that call `kanban_db.foo()`. Those do not change. But `monkeypatch.setattr("hermes_cli.kanban_db.connect", fake)` sets the attribute on the *package*, while a submodule that did `from .connection import connect` holds its own binding and never sees the patch. Most such tests will fail loudly; at least one (`task_age`) could pass silently with the real implementation. Silent is the unacceptable outcome, so these are re-targeted deliberately, in the same commit as the split, and enumerated here.
+**Why this is necessary and why it is not a violation of "zero call-site edits":** the guarantee covers production importers — the ~275 files that call `kanban_db.foo()`. Those do not change, because the re-export block keeps every name bound on `kanban_db`. But `monkeypatch.setattr("hermes_cli.kanban_db.connect", fake)` rebinds the attribute on `kanban_db` only, while a `kanban_ext` submodule that did `from hermes_cli.kanban_db import connect` holds its own binding and never sees the patch. Most such tests fail loudly; at least one (`task_age`) could pass silently against the real implementation. Silent is the unacceptable outcome, so these are re-targeted deliberately and enumerated.
 
-**Known targets (verified on `1ef243502`):** string-patched — `connect`, `init_db`, `_record_task_failure`, `_record_worker_exit`, `task_age`. Attribute-patched via `setattr(kanban_db, "...")` — in `tests/test_planspec_disposition.py` (2), `tests/hermes_cli/test_operator_inventory.py`, `tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py`, `tests/hermes_cli/test_kanban_workflow_routing.py`.
+**Known targets (verified on `1ef243502`, re-derive rather than trusting):** string-patched — `connect`, `init_db`, `_record_task_failure`, `_record_worker_exit`, `task_age` (33 lines). Attribute-patched via `setattr(kanban_db, "...")` — `tests/test_planspec_disposition.py` (2), `tests/hermes_cli/test_operator_inventory.py`, `tests/hermes_cli/test_kanban_cli_dispatch_passthrough.py`, `tests/hermes_cli/test_kanban_workflow_routing.py`.
 
-- [ ] **Step 1: Enumerate every patch site freshly (do not trust this list — re-derive it)**
+- [ ] **Step 1: Re-derive every patch site**
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
@@ -1535,171 +1946,211 @@ rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"hermes_cli\.kanban_db\.' te
 rg -n 'setattr\(\s*kanban_db\s*,\s*"' tests/ hermes_cli/ gateway/ scripts/
 ```
 
-- [ ] **Step 2: Add a splitter check that fails on unenumerated targets**
+- [ ] **Step 2: Classify each target by where it lands**
 
-Append to `scripts/refactor/split_module.py` a `--check-patch-targets` mode that greps the repo for string literals of the form `<module.dotted.path>.<symbol>` where `<symbol>` is a top-level name, and prints each with the submodule it will land in. Run it and reconcile against Step 1:
+A patch target only needs re-pointing if the symbol **moves**. Symbols that stay in `kanban_db.py` are unaffected. Cross-check each against the boundary map:
 
 ```bash
-python -m scripts.refactor.split_module hermes_cli/kanban_db.py \
-  --map docs/refactor/boundary-map.kanban_db.yaml --check-patch-targets
+cd /home/piet/.hermes/hermes-agent
+python - <<'EOF'
+import yaml
+m = yaml.safe_load(open('docs/refactor/boundary-map.kanban_ext.yaml'))
+where = {s: e['name'] for e in m['modules'] for s in e['symbols']}
+for sym in ['connect', 'init_db', '_record_task_failure', '_record_worker_exit', 'task_age']:
+    dest = where.get(sym)
+    print(f"{sym:28s} -> {'hermes_cli.kanban_ext.' + dest if dest else 'STAYS in kanban_db.py (no change needed)'}")
+EOF
 ```
 
-- [ ] **Step 3: Do not edit yet**
+Write the result, with file:line for every site, to `docs/refactor/patch-targets.kanban_db.md`. The edits themselves land in Task 7 Step 6, once the new paths exist.
 
-The re-targeting edits land in Task 7 Step 6, after the split, because the new submodule paths do not exist until then. This task's deliverable is the verified list, written to `docs/refactor/patch-targets.kanban_db.md`.
-
-- [ ] **Step 4: Commit the list**
+- [ ] **Step 3: Commit the list**
 
 ```bash
 git add docs/refactor/patch-targets.kanban_db.md
-git commit -m "refactor: enumerate kanban_db test patch targets before split"
+git commit -m "refactor: enumerate kanban_db test patch targets before extraction"
 ```
 
 ---
 
-## Task 7: Split `kanban_db.py` (the pilot)
+## Task 7: Extract `kanban_ext` (the whole point)
+
+**Prerequisite:** Task 0's operator decision is executed.
 
 **Files:**
-- Delete: `hermes_cli/kanban_db.py`
-- Create: `hermes_cli/kanban_db/` (12–16 modules + `__init__.py`)
-- Modify: `docs/kanban/LIFECYCLE.md`, `scripts/check_kanban_lifecycle_anchors.py`, the patch sites from Task 6
+- Modify: `hermes_cli/kanban_db.py` (stays a file), `docs/kanban/LIFECYCLE.md`, `scripts/check_kanban_lifecycle_anchors.py`, the patch sites from Task 6
+- Create: `hermes_cli/kanban_ext/`
 
-**Prerequisite:** Task 0 is complete and the operator's land-or-drop decisions are executed.
-
-- [ ] **Step 1: Branch and record the "before" snapshot**
+- [ ] **Step 1: Branch and snapshot the API**
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
 git status --short                       # must be clean of foreign work
-git checkout -b refactor/split-kanban-db main
+git checkout -b refactor/extract-kanban-ext main
 python -m scripts.refactor.api_snapshot hermes_cli.kanban_db \
   --out docs/refactor/api-snapshot.kanban_db.json
-wc -l docs/refactor/api-snapshot.kanban_db.json
 ```
 
-- [ ] **Step 2: Apply the split**
+- [ ] **Step 2: Extract**
 
 ```bash
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py \
-  --apply --map docs/refactor/boundary-map.kanban_db.yaml
-ls -la hermes_cli/kanban_db/
-wc -l hermes_cli/kanban_db/*.py | sort -n
+  --extract --map docs/refactor/boundary-map.kanban_ext.yaml \
+  --package hermes_cli/kanban_ext
+test -f hermes_cli/kanban_db.py && echo "origin is still a FILE — correct"
+test -d hermes_cli/kanban_db && echo "FATAL: origin became a directory" && exit 1
+ls -la hermes_cli/kanban_ext/
+wc -l hermes_cli/kanban_ext/*.py hermes_cli/kanban_db.py | sort -n
 ```
-Expected: 13–17 files, none over ~4,000 lines, and the largest well under 1 MiB.
+Expected: 9–13 files in `kanban_ext/`, none over ~3,000 lines; `kanban_db.py` down to roughly 13,000 lines. Resolve any `REVIEW REQUIRED` shadowing report exactly as in the `--apply` path: confirm each is genuinely local, and fix via the boundary map, never by hand-editing emitted code.
 
-If the splitter prints a `REVIEW REQUIRED` block, resolve it before going further: for each listed pair, read the referring function and confirm the shadowed name really is a local. If any is a genuine module-level reference, the fix is in the boundary map (put referrer and target in the same submodule), never a hand-edit of the emitted package.
+- [ ] **Step 3: Acceptance criterion 3 — the CodeGraph payoff**
 
-- [ ] **Step 3: The equivalence gate — API snapshot diff MUST be empty**
+```bash
+stat -c%s hermes_cli/kanban_db.py
+```
+Expected: **under 1,048,576**, projected ≈ 565,000. If it is still over the limit, the ownership map moved too little — stop.
+
+- [ ] **Step 4: Acceptance criterion 4 — API equivalence and import smoke**
 
 ```bash
 python -m scripts.refactor.api_snapshot hermes_cli.kanban_db \
   --compare docs/refactor/api-snapshot.kanban_db.json
-```
-Expected: `API IDENTICAL — <N> symbols match`, exit 0. **Any diff means stop and fix the boundary map — do not hand-edit the emitted package.**
-
-- [ ] **Step 4: Import-time smoke**
-
-```bash
 python -c "import hermes_cli.kanban_db as k; print(len(dir(k)), 'attributes')"
 python -c "from hermes_cli import kanban_db; print(kanban_db.VALID_STATUSES)"
 python -c "from hermes_cli.kanban_db import create_task, claim_task, complete_task; print('symbol-level import OK')"
+python -c "import hermes_cli.kanban_ext; print('ext imports standalone OK')"
 ```
-Expected: all three succeed. The third proves the 14 symbol-level importers still work.
+Expected: `API IDENTICAL`, then all four imports succeed. **Any API diff means fix the boundary map — never hand-edit the emitted package.**
 
-- [ ] **Step 5: Run the affected suite**
+The fourth check matters on its own: importing `kanban_ext` first, before `kanban_db`, must also work. It exercises the circular import from the other side.
+
+- [ ] **Step 5: Acceptance criterion 1 — mergeability, measured**
 
 ```bash
-scripts/run-affected.sh
-ruff check hermes_cli/kanban_db
+cd /home/piet/.hermes/hermes-agent
+git merge-tree --write-tree HEAD origin/main > /tmp/mt_after.txt; TREE=$(head -1 /tmp/mt_after.txt)
+git show "$TREE:hermes_cli/kanban_db.py" > /tmp/kdb_merged_after.txt
+echo "conflict hunks AFTER : $(rg -c '^<<<<<<<' /tmp/kdb_merged_after.txt)"
+echo "conflict hunks BEFORE: 14   (baseline, measured on 1ef243502)"
 ```
-Expected: green. Failures here are almost certainly patch-target failures — go to Step 6, then re-run.
+
+Per the re-scoping recorded under "Acceptance criteria": the count **must not increase**. It is not expected to fall, because all 14 conflicts sit inside upstream-owned bodies that stay. If it *rises*, the extraction has torn text apart that git was previously matching — treat that as a blocking defect and re-examine the map.
+
+Also record the primary success measure for this pass:
+
+```bash
+python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
+```
+Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 2** (the carve-out), and fork-only lines from 23,736 to single digits.
 
 - [ ] **Step 6: Re-target the patch sites from Task 6**
 
-For each site in `docs/refactor/patch-targets.kanban_db.md`, change the string target from `hermes_cli.kanban_db.<symbol>` to `hermes_cli.kanban_db.<submodule>.<symbol>`, and each `setattr(kanban_db, "<symbol>", ...)` to `setattr(kanban_db.<submodule>, "<symbol>", ...)`. Then re-run:
+For each site whose symbol moved, change `hermes_cli.kanban_db.<symbol>` to `hermes_cli.kanban_ext.<submodule>.<symbol>`, and `setattr(kanban_db, "<symbol>", ...)` to `setattr(kanban_ext.<submodule>, "<symbol>", ...)`. Sites whose symbol stayed in `kanban_db.py` are left alone.
 
 ```bash
 scripts/run-affected.sh
+ruff check hermes_cli/kanban_ext hermes_cli/kanban_db.py
 ```
-Expected: green.
+Expected: green and clean.
 
 - [ ] **Step 7: Re-anchor `docs/kanban/LIFECYCLE.md`**
 
-Its 95 anchors point at `../../hermes_cli/kanban_db.py#L<n>`. Re-point each at the new file and line. Generate the mapping mechanically:
+Anchors point at `../../hermes_cli/kanban_db.py#L<n>`. Symbols that stayed need only a line-number refresh; symbols that moved need a new path. Generate both mechanically:
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
 python - <<'EOF'
 import ast, os, re
-new = {}
-for fn in sorted(os.listdir('hermes_cli/kanban_db')):
-    if not fn.endswith('.py') or fn == '__init__.py':
-        continue
-    tree = ast.parse(open(f'hermes_cli/kanban_db/{fn}').read())
+loc = {}
+def index(path, rel):
+    tree = ast.parse(open(path).read())
     for n in tree.body:
+        names = []
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            new[n.name] = (fn, n.lineno)
+            names = [n.name]
         elif isinstance(n, ast.Assign):
-            for tg in n.targets:
-                if isinstance(tg, ast.Name):
-                    new[tg.id] = (fn, n.lineno)
+            names = [t.id for t in n.targets if isinstance(t, ast.Name)]
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            names = [n.target.id]
+        for nm in names:
+            loc[nm] = (rel, n.lineno)
+index('hermes_cli/kanban_db.py', 'hermes_cli/kanban_db.py')
+for fn in sorted(os.listdir('hermes_cli/kanban_ext')):
+    if fn.endswith('.py') and fn != '__init__.py':
+        index(f'hermes_cli/kanban_ext/{fn}', f'hermes_cli/kanban_ext/{fn}')
 doc = open('docs/kanban/LIFECYCLE.md').read()
-# anchors look like [`symbol`](../../hermes_cli/kanban_db.py#L1234)
 def fix(m):
     sym = m.group(1)
-    if sym not in new:
+    if sym not in loc:
         raise SystemExit(f"LIFECYCLE.md anchors unknown symbol {sym!r}")
-    fn, ln = new[sym]
-    return f"[`{sym}`](../../hermes_cli/kanban_db/{fn}#L{ln})"
-out, n = re.subn(r"\[`([A-Za-z_][A-Za-z_0-9]*)`\]\(\.\./\.\./hermes_cli/kanban_db\.py#L\d+\)",
-                 fix, doc)
+    rel, ln = loc[sym]
+    return f"[`{sym}`](../../{rel}#L{ln})"
+out, n = re.subn(
+    r"\[`([A-Za-z_][A-Za-z_0-9]*)`\]\(\.\./\.\./hermes_cli/kanban_db\.py#L\d+\)",
+    fix, doc)
 open('docs/kanban/LIFECYCLE.md', 'w').write(out)
 print(f"re-anchored {n} symbol links")
 EOF
 ```
 
-Then fix by hand the anchors that are **not** symbol-shaped — the "Section index" table at the bottom of `LIFECYCLE.md` lists banner line numbers, which no longer exist as such. Replace that table with a module index: one row per new submodule, giving its path, line count, and the banner titles it absorbed (that information is in the boundary map). Also update the opening paragraph, which currently says the file is over 1 MiB and CodeGraph does not index it — after this task the opposite is true.
+Then fix by hand what is not symbol-shaped:
+
+- The **"Section index"** table lists banner line numbers in the monolith. Replace it with a two-part index: the banner sections still in `kanban_db.py`, and one row per `kanban_ext` submodule with its path, line count and responsibility.
+- The **opening paragraph** says the file is larger than 1 MiB and CodeGraph does not index it. After this task the opposite is true — say so, and point at `docs/refactor/ownership.kanban_db.md` for the fork/upstream split.
 
 - [ ] **Step 8: Update the anchor checker**
 
-`scripts/check_kanban_lifecycle_anchors.py` verifies anchors against `kanban_db.py`. Point it at the package directory so it resolves `hermes_cli/kanban_db/<file>#L<n>` anchors. Then:
+`scripts/check_kanban_lifecycle_anchors.py` verifies anchors against `kanban_db.py` alone. Teach it to resolve `hermes_cli/kanban_ext/<file>#L<n>` as well.
 
 ```bash
 python scripts/check_kanban_lifecycle_anchors.py
 ```
-Expected: exit 0, all anchors resolve.
+Expected: exit 0.
 
-- [ ] **Step 9: The success proof — CodeGraph visibility**
+- [ ] **Step 9: CodeGraph proof**
 
 ```bash
 codegraph reindex 2>&1 | tail -5
 codegraph query dispatch_once
 ```
-Expected: the real `dispatch_once` in `hermes_cli/kanban_db/<dispatch module>.py` is returned — **not** only `fake_dispatch_once` from test files. This is the measurable success criterion from the spec. Record the output verbatim in the commit message.
+Expected: the real `dispatch_once` in `hermes_cli/kanban_db.py` — not only `fake_dispatch_once` from test files. Record the output verbatim in the commit message.
 
 - [ ] **Step 10: Pre-merge gates**
 
 ```bash
-python -m pytest --co -q tests/ 2>&1 | tail -5      # collection sweep
+python -m pytest --co -q tests/ 2>&1 | tail -5
 scripts/run-affected.sh
 ruff check .
 ```
-Expected: collection reports no errors; affected tests green; ruff clean.
 
-- [ ] **Step 11: Commit as a single pure-move commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add -A
 git commit -m "$(cat <<'MSG'
-refactor: split hermes_cli/kanban_db.py into a package (pure move)
+refactor: extract fork-owned kanban code to hermes_cli/kanban_ext (pure move)
 
-38,834 lines -> N modules of 2-4k lines. Public API proven identical by
-scripts/refactor/api_snapshot.py; no production call site changed.
+kanban_db.py stays a MODULE FILE, deliberately: upstream's future diffs are
+addressed to that literal path and would not apply to a directory.
 
-Backward runtime references use the module-object import form so the
-package import graph is acyclic by construction. Test monkeypatch string
-targets re-pointed at the new submodule paths (enumerated in
-docs/refactor/patch-targets.kanban_db.md).
+733 fork-only symbols (23,736 lines) move to hermes_cli/kanban_ext/. Upstream
+symbols stay in place, byte-identical. One trailing re-export block keeps all
+~275 importers and the private-symbol monkeypatches working. Two fork
+constants stay behind because upstream-owned symbols use them as default
+arguments, which a trailing block cannot satisfy.
+
+Bodies are byte-identical in both directions: kanban_ext reaches back with
+plain symbol imports (kanban_db is fully populated by the time the trailing
+block runs), and kanban_db reaches forward through the names that block binds.
+
+  kanban_db.py size:      1,589,066 -> <after> bytes  (CodeGraph limit 1,048,576)
+  fork-only lines in it:     23,736 -> <after>
+  merge conflict hunks:          14 -> <after>
+
+Remaining conflict surface is the 129 upstream symbols the fork edited
+in place; they are listed in docs/refactor/ownership.kanban_db.md and are
+the input to the follow-on hook-reduction pass.
 
 CodeGraph now resolves the real definitions:
 <paste the `codegraph query dispatch_once` output here>
@@ -1711,525 +2162,78 @@ MSG
 
 - [ ] **Step 12: Review and merge**
 
-Request an independent review of the diff (review family must differ from the builder family — Codex built the tooling, so this review goes to a Grok or Claude reviewer). The reviewer's job is narrow and mechanical: confirm the commit contains **only** moves, that no line inside a moved body differs except the enumerated module-object rewrites, and that none of the five Follow-up defects were "fixed" in passing.
+Independent review, builder family ≠ reviewer family (Codex built the tooling, so this review goes to a Grok or Claude reviewer). The brief is narrow and mechanical:
+
+1. Confirm `hermes_cli/kanban_db.py` is still a file.
+2. Confirm no upstream-owned symbol moved: `--ownership` on the post-extraction file must show the same 111 identical + 129 diverged symbols still present.
+3. Confirm every moved body is byte-identical to its pre-extraction text.
+4. Confirm none of the five Follow-up defects was "fixed" in passing.
+5. Confirm the re-export block is the last statement in the file.
 
 ```bash
-git diff main...refactor/split-kanban-db --stat
-git checkout main && git merge --ff-only refactor/split-kanban-db
+git diff main...refactor/extract-kanban-ext --stat
+git checkout main && git merge --ff-only refactor/extract-kanban-ext
 ```
 
 ---
 
-## Task 8: Split `gateway/run.py`
+## Task 8: Close out
 
-**Files:**
-- Delete: `gateway/run.py`; Create: `gateway/run/`
-- Create: `docs/refactor/boundary-map.gateway_run.yaml`
-
-**Key difference from Task 7:** this file has only **2 banner sections**, one of which holds 20,122 of its 21,875 lines. Banners are useless here. The boundary map must be derived from call clustering over its 134 top-level symbols, and needs proportionally harder scrutiny at the approval gate. With only 134 symbols and 1 runtime back-edge, the graph is simple — the risk is a map that is *semantically* arbitrary, not one that is technically invalid.
-
-- [ ] **Step 1: Produce the clustering brief**
+- [ ] **Step 1: Verify every acceptance criterion**
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
-python -m scripts.refactor.split_module gateway/run.py --analyze --json > /tmp/gwrun.json
-python - <<'EOF' > /tmp/gwrun_brief.txt
-import ast
-from scripts.refactor import layering
-src = open('gateway/run.py').read()
-tree = ast.parse(src)
-top = layering.top_level_symbols(tree)
-for name, node in sorted(top.items(), key=lambda kv: kv[1].lineno):
-    end = getattr(node, 'end_lineno', node.lineno)
-    calls = sorted(layering.all_names(node, top) - {name})
-    print(f"{node.lineno:6d} {end-node.lineno+1:5d}  {name}")
-    if calls:
-        print(f"            uses: {', '.join(calls[:12])}")
-EOF
-head -60 /tmp/gwrun_brief.txt
-```
-
-- [ ] **Step 2: Dispatch the boundary-map proposal to qwen (one-shot)**
-
-```bash
-claude-qwen -p "$(cat <<'PROMPT'
-Propose a boundary map splitting gateway/run.py (21,875 lines, 134 top-level
-symbols) into 6-10 Python submodules of 2,000-4,000 lines each.
-
-This file has almost no section banners, so group by RESPONSIBILITY inferred
-from names and call clustering. The inventory (source order, line span, and
-what each symbol references) is in /tmp/gwrun_brief.txt.
-
-Hard constraint: the output order must preserve source order — a symbol may
-only be grouped with neighbours, never reordered.
-
-Output ONLY YAML:
-
-module: gateway/run.py
-modules:
-  - name: <snake_case responsibility>
-    symbols: [<names in source order>]
-PROMPT
-)" > /tmp/gwrun_map_draft.yaml
-```
-
-- [ ] **Step 3: Approve the map**
-
-Same five checks as Task 5 Step 3, plus: every symbol appears exactly once, source order preserved. Present to the operator. Save to `docs/refactor/boundary-map.gateway_run.yaml`.
-
-- [ ] **Step 4: Validate without applying**
-
-```bash
-python -m scripts.refactor.split_module gateway/run.py \
-  --analyze --map docs/refactor/boundary-map.gateway_run.yaml
-```
-Expected: import-time `backward=0`, no `OVERSIZED`, exit 0.
-
-- [ ] **Step 5: Branch, snapshot, split, gate**
-
-```bash
-git checkout -b refactor/split-gateway-run main
-python -m scripts.refactor.api_snapshot gateway.run \
-  --out docs/refactor/api-snapshot.gateway_run.json
-python -m scripts.refactor.split_module gateway/run.py \
-  --apply --map docs/refactor/boundary-map.gateway_run.yaml
-python -m scripts.refactor.api_snapshot gateway.run \
-  --compare docs/refactor/api-snapshot.gateway_run.json
-python -c "import gateway.run; print('import OK')"
-scripts/run-affected.sh
-ruff check gateway/run
-```
-Expected: `API IDENTICAL`, import OK, tests green, ruff clean.
-
-- [ ] **Step 6: Re-target patch sites**
-
-```bash
-rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"gateway\.run\.' tests/ gateway/ scripts/
-rg -n 'setattr\(\s*run\s*,\s*"' tests/ gateway/
-```
-Re-point each at the new submodule path, then re-run `scripts/run-affected.sh`.
-
-- [ ] **Step 7: CodeGraph proof**
-
-```bash
-codegraph reindex 2>&1 | tail -3
-codegraph query <a symbol you know lives in gateway/run.py>
-```
-Expected: the real definition is returned. `gateway/run.py` was the second CodeGraph blind spot; this closes it.
-
-- [ ] **Step 8: Gate, commit, review, merge**
-
-```bash
-python -m pytest --co -q tests/ 2>&1 | tail -5
-git add -A
-git commit -m "refactor: split gateway/run.py into a package (pure move)
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-git checkout main && git merge --ff-only refactor/split-gateway-run
-```
-
-Independent review before merge, same narrow mechanical brief as Task 7 Step 12.
-
----
-
-## Task 9: Split `hermes_cli/web_server.py`
-
-**Files:**
-- Delete: `hermes_cli/web_server.py`; Create: `hermes_cli/web_server/`
-- Create: `docs/refactor/boundary-map.web_server.yaml`
-
-**Key difference:** 39 banner sections, none over 4,000 lines, 836 symbols, 66 runtime back-edges. This is the same shape as `kanban_db.py` — banner-derived map, merge adjacent sections into 6–10 modules of 2,000–4,000 lines.
-
-- [ ] **Step 1: Produce the section inventory**
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-python -m scripts.refactor.split_module hermes_cli/web_server.py --analyze --json \
-  > /tmp/ws.json
-python - <<'EOF' > /tmp/ws_brief.txt
-import json
-r = json.load(open('/tmp/ws.json'))
-for m in r['modules']:
-    print(f"{r['module_lines'].get(m,0):6d}  {m}")
-EOF
-cat /tmp/ws_brief.txt
-```
-
-- [ ] **Step 2: Dispatch to qwen (one-shot)**
-
-```bash
-claude-qwen -p "$(cat <<'PROMPT'
-Propose a boundary map grouping the 39 banner sections of
-hermes_cli/web_server.py (20,314 lines) into 6-10 Python submodules of
-2,000-4,000 lines each.
-
-Only merge ADJACENT sections; output order must be source order.
-Section line counts in source order are in /tmp/ws_brief.txt.
-
-Output ONLY YAML:
-
-module: hermes_cli/web_server.py
-modules:
-  - name: <snake_case responsibility>
-    banners: ["<exact banner title>", ...]
-PROMPT
-)" > /tmp/ws_map_draft.yaml
-```
-
-- [ ] **Step 3: Approve, expand banners to symbols, validate**
-
-Apply the same five approval checks as Task 5 Step 3. Expand banner names to explicit symbol lists with the Task 5 Step 4 script (change the source path and output path), then:
-
-```bash
-python -m scripts.refactor.split_module hermes_cli/web_server.py \
-  --analyze --map docs/refactor/boundary-map.web_server.yaml
-```
-Expected: import-time `backward=0`, no `OVERSIZED`, exit 0.
-
-- [ ] **Step 4: Branch, snapshot, split, gate**
-
-```bash
-git checkout -b refactor/split-web-server main
-python -m scripts.refactor.api_snapshot hermes_cli.web_server \
-  --out docs/refactor/api-snapshot.web_server.json
-python -m scripts.refactor.split_module hermes_cli/web_server.py \
-  --apply --map docs/refactor/boundary-map.web_server.yaml
-python -m scripts.refactor.api_snapshot hermes_cli.web_server \
-  --compare docs/refactor/api-snapshot.web_server.json
-python -c "import hermes_cli.web_server; print('import OK')"
-scripts/run-affected.sh
-ruff check hermes_cli/web_server
-```
-Expected: `API IDENTICAL`, import OK, tests green, ruff clean.
-
-- [ ] **Step 5: Re-target patch sites and re-run**
-
-```bash
-rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"hermes_cli\.web_server\.' tests/ hermes_cli/ gateway/ scripts/
-rg -n 'setattr\(\s*web_server\s*,\s*"' tests/ hermes_cli/ gateway/
-scripts/run-affected.sh
-```
-
-- [ ] **Step 6: Dashboard live check**
-
-`web_server.py` serves `/control`. A green unit suite is not sufficient evidence here.
-
-```bash
-systemctl --user restart hermes-dashboard.service
-sleep 3
-systemctl --user is-active hermes-dashboard.service
-HERMES_DASHBOARD_URL=https://<host>:9443 \
-HERMES_DASHBOARD_USERNAME=<user> HERMES_DASHBOARD_PASSWORD=<pass> \
-  scripts/smoke_health_status_auth.py --no-prompt
-```
-Expected: service active; the auth smoke reaches `/api/health-status` and reports healthy. A bare loopback curl returns 401 and proves nothing — the SPA injects its token.
-
-- [ ] **Step 7: Gate, commit, review, merge**
-
-```bash
-python -m pytest --co -q tests/ 2>&1 | tail -5
-git add -A
-git commit -m "refactor: split hermes_cli/web_server.py into a package (pure move)
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-git checkout main && git merge --ff-only refactor/split-web-server
-```
-
----
-
-## Task 10: Split `cli.py`
-
-**Files:**
-- Delete: `cli.py`; Create: `cli/`
-- Create: `docs/refactor/boundary-map.cli.yaml`
-
-**Key difference:** 1 banner section holding 13,874 of 16,797 lines, 153 symbols, 1 runtime back-edge. Call-clustering map, like Task 8. Target 4–8 modules of 2,000–4,000 lines.
-
-**Extra risk specific to this file:** `cli.py` sits at the repo root, so `cli/` becomes a root-level package. Confirm nothing on `sys.path` shadows it and that no packaging manifest lists `cli` as a `py_modules` entry rather than a package.
-
-- [ ] **Step 1: Check the packaging declaration before anything else**
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-rg -n 'py_modules|packages\s*=|\bcli\b' pyproject.toml setup.py setup.cfg 2>/dev/null
-```
-If `cli` is declared as a module rather than a package, update that declaration as part of this task's commit. If it is discovered automatically, nothing to do.
-
-- [ ] **Step 2: Produce the clustering brief**
-
-```bash
-python - <<'EOF' > /tmp/cli_brief.txt
-import ast
-from scripts.refactor import layering
-src = open('cli.py').read()
-tree = ast.parse(src)
-top = layering.top_level_symbols(tree)
-for name, node in sorted(top.items(), key=lambda kv: kv[1].lineno):
-    end = getattr(node, 'end_lineno', node.lineno)
-    calls = sorted(layering.all_names(node, top) - {name})
-    print(f"{node.lineno:6d} {end-node.lineno+1:5d}  {name}")
-    if calls:
-        print(f"            uses: {', '.join(calls[:12])}")
-EOF
-head -40 /tmp/cli_brief.txt
-```
-
-- [ ] **Step 3: Dispatch to qwen (one-shot)**
-
-```bash
-claude-qwen -p "$(cat <<'PROMPT'
-Propose a boundary map splitting cli.py (16,797 lines, 153 top-level symbols)
-into 4-8 Python submodules of 2,000-4,000 lines each.
-
-This file has no usable section banners, so group by RESPONSIBILITY inferred
-from names and call clustering. The inventory (source order, line span, and
-what each symbol references) is in /tmp/cli_brief.txt.
-
-Hard constraint: output order must preserve source order — a symbol may only
-be grouped with neighbours, never reordered.
-
-Output ONLY YAML:
-
-module: cli.py
-modules:
-  - name: <snake_case responsibility>
-    symbols: [<names in source order>]
-PROMPT
-)" > /tmp/cli_map_draft.yaml
-```
-
-- [ ] **Step 4: Approve and validate**
-
-Same approval checks as Task 5 Step 3. Save to `docs/refactor/boundary-map.cli.yaml`, then:
-
-```bash
-python -m scripts.refactor.split_module cli.py --analyze --map docs/refactor/boundary-map.cli.yaml
-```
-Expected: import-time `backward=0`, no `OVERSIZED`, exit 0.
-
-- [ ] **Step 5: Branch, snapshot, split, gate**
-
-```bash
-git checkout -b refactor/split-cli main
-python -m scripts.refactor.api_snapshot cli --out docs/refactor/api-snapshot.cli.json
-python -m scripts.refactor.split_module cli.py --apply --map docs/refactor/boundary-map.cli.yaml
-python -m scripts.refactor.api_snapshot cli --compare docs/refactor/api-snapshot.cli.json
-python -c "import cli; print('import OK')"
-scripts/run-affected.sh
-ruff check cli
-```
-Expected: `API IDENTICAL`, import OK, tests green, ruff clean.
-
-- [ ] **Step 6: Entry-point smoke**
-
-`cli.py` is an entry point, so an import test is not enough:
-
-```bash
-python -m cli --help 2>&1 | head -20
-hermes --help 2>&1 | head -20
-```
-Expected: both print usage without traceback.
-
-- [ ] **Step 7: Re-target patch sites, gate, commit, review, merge**
-
-```bash
-rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"cli\.' tests/ hermes_cli/ gateway/ scripts/
-scripts/run-affected.sh
-python -m pytest --co -q tests/ 2>&1 | tail -5
-git add -A
-git commit -m "refactor: split cli.py into a package (pure move)
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-git checkout main && git merge --ff-only refactor/split-cli
-```
-
----
-
-## Task 11: Split `hermes_cli/main.py`
-
-**Files:**
-- Delete: `hermes_cli/main.py`; Create: `hermes_cli/main/`
-- Create: `docs/refactor/boundary-map.main.yaml`
-
-**Key difference and the sharpest risk in the whole plan:** this file's banner analysis reports a section titled *"Profile override — MUST happen before any hermes module impo[rt]"* (4,274 lines). That is an explicit ordering contract in the source. A split that changes when profile-override code runs relative to other imports would break it silently — the API snapshot would still be identical, because the surface is unchanged while the *timing* is not.
-
-**Mitigation, mandatory:** the first module in this boundary map must contain the entire profile-override section and everything the source places before it, and `__init__.py` must import that module first. Verify by reading the section's code before approving the map, and add an explicit runtime assertion to the smoke step below.
-
-- [ ] **Step 1: Read the ordering contract before proposing anything**
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-rg -n 'MUST happen before any hermes module impo' hermes_cli/main.py
-```
-Read ±80 lines around the hit. Write down, in `docs/refactor/boundary-map.main.yaml` as a leading comment, exactly what must run before what. If the contract cannot be preserved by a source-order-preserving split, **stop and escalate to the operator** rather than proceeding.
-
-- [ ] **Step 2: Produce the clustering brief**
-
-```bash
-python - <<'EOF' > /tmp/main_brief.txt
-import ast
-from scripts.refactor import layering
-src = open('hermes_cli/main.py').read()
-tree = ast.parse(src)
-top = layering.top_level_symbols(tree)
-for name, node in sorted(top.items(), key=lambda kv: kv[1].lineno):
-    end = getattr(node, 'end_lineno', node.lineno)
-    calls = sorted(layering.all_names(node, top) - {name})
-    print(f"{node.lineno:6d} {end-node.lineno+1:5d}  {name}")
-    if calls:
-        print(f"            uses: {', '.join(calls[:12])}")
-EOF
-head -40 /tmp/main_brief.txt
-```
-
-- [ ] **Step 3: Dispatch to qwen (one-shot)**
-
-```bash
-claude-qwen -p "$(cat <<'PROMPT'
-Propose a boundary map splitting hermes_cli/main.py (15,092 lines, 260
-top-level symbols) into 4-8 Python submodules of 2,000-4,000 lines each.
-
-Group by RESPONSIBILITY inferred from names and call clustering. The
-inventory (source order, line span, references) is in /tmp/main_brief.txt.
-
-TWO hard constraints:
-1. Output order must preserve source order — group neighbours only.
-2. The FIRST module must contain everything up to and including the
-   "Profile override" section. That section documents an ordering contract
-   ("MUST happen before any hermes module import") and must load first.
-
-Output ONLY YAML:
-
-module: hermes_cli/main.py
-modules:
-  - name: <snake_case responsibility>
-    symbols: [<names in source order>]
-PROMPT
-)" > /tmp/main_map_draft.yaml
-```
-
-- [ ] **Step 4: Approve and validate**
-
-Same checks as Task 5 Step 3, **plus** an explicit confirmation that the profile-override symbols are all in the first module. Save to `docs/refactor/boundary-map.main.yaml`, then:
-
-```bash
-python -m scripts.refactor.split_module hermes_cli/main.py \
-  --analyze --map docs/refactor/boundary-map.main.yaml
-```
-Expected: import-time `backward=0`, no `OVERSIZED`, exit 0.
-
-- [ ] **Step 5: Branch, snapshot, split, gate**
-
-```bash
-git checkout -b refactor/split-main main
-python -m scripts.refactor.api_snapshot hermes_cli.main \
-  --out docs/refactor/api-snapshot.main.json
-python -m scripts.refactor.split_module hermes_cli/main.py \
-  --apply --map docs/refactor/boundary-map.main.yaml
-python -m scripts.refactor.api_snapshot hermes_cli.main \
-  --compare docs/refactor/api-snapshot.main.json
-python -c "import hermes_cli.main; print('import OK')"
-scripts/run-affected.sh
-ruff check hermes_cli/main
-```
-Expected: `API IDENTICAL`, import OK, tests green, ruff clean.
-
-- [ ] **Step 6: Prove the profile-override ordering contract still holds**
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-HERMES_PROFILE=<a non-default profile that exists on disk> \
-  python -c "import hermes_cli.main; import hermes_cli; print(hermes_cli.__file__)"
-hermes --help 2>&1 | head -20
-HERMES_PROFILE=<same profile> hermes profile show 2>&1 | head -20
-```
-Expected: the profile override takes effect exactly as it did before the split. Compare against the same three commands run on `main` before merging — capture both outputs and diff them. If they differ, the ordering contract broke; revert and re-map.
-
-- [ ] **Step 7: Re-target patch sites, gate, commit, review, merge**
-
-```bash
-rg -n '(monkeypatch\.setattr|mock\.patch|patch)\(\s*"hermes_cli\.main\.' tests/ hermes_cli/ gateway/ scripts/
-scripts/run-affected.sh
-python -m pytest --co -q tests/ 2>&1 | tail -5
-git add -A
-git commit -m "refactor: split hermes_cli/main.py into a package (pure move)
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-git checkout main && git merge --ff-only refactor/split-main
-```
-
----
-
-## Task 12: Close out
-
-- [ ] **Step 1: Verify every success criterion from the spec**
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-find . -name '*.py' -size +1M -not -path './.claude/*' -not -path './node_modules/*'
-```
-Expected: no output. Criterion 1 (every file under 1 MiB) met.
-
-```bash
-codegraph reindex 2>&1 | tail -3
+stat -c%s hermes_cli/kanban_db.py                       # < 1048576
+python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
+python -m scripts.refactor.api_snapshot hermes_cli.kanban_db \
+  --compare docs/refactor/api-snapshot.kanban_db.json
+git merge-tree --write-tree HEAD origin/main > /tmp/mt_final.txt
+git show "$(head -1 /tmp/mt_final.txt):hermes_cli/kanban_db.py" | rg -c '^<<<<<<<'
 codegraph query dispatch_once
 ```
-Expected: the real definition. Criterion 1 (CodeGraph visibility) met.
+
+- [ ] **Step 2: Record the standing rule where it will actually be read**
+
+Add to `AGENTS.md` and `CLAUDE.md`, in the section that governs where new code goes:
+
+> **New fork code never goes into an upstream-owned file.** `hermes_cli/kanban_db.py` is upstream's file; the fork's extension lives in `hermes_cli/kanban_ext/`. Add fork behaviour there and reach it through the existing re-export, not by editing `kanban_db.py`. The file went 9,135 → 38,834 lines while this rule was absent; without it the extraction is undone within months. The same reasoning applies to `gateway/run.py`, which is 97.6% upstream's and deliberately not split.
+
+- [ ] **Step 3: Correct the code-map guidance**
+
+`CLAUDE.md`'s "Code map" section says CodeGraph skips `hermes_cli/kanban_db.py` and `gateway/run.py`. After this work only the second is true. Update it to: `kanban_db.py` is indexed again; `gateway/run.py` remains blind **by decision, not accident** — upstream's own copy is 1.18 MB, so `rg` plus `docs/kanban/LIFECYCLE.md` stays the documented route there. Check `AGENTS.md` and `docs/agent-dev-guide.md` for the same claim.
+
+- [ ] **Step 4: File the follow-ups**
+
+Two backlogs come out of this work:
+
+1. **Hook-reduction (the sequel that earns the delta's strict-decrease criterion).** `docs/refactor/ownership.kanban_db.md` lists the 129 diverged symbols, largest first: `_dispatch_once_locked` (1,297 fork lines vs 400 upstream), `complete_task` (612 vs 208), `_migrate_add_optional_columns` (569 vs 256), `create_task` (491 vs 378). `create_task` alone causes 6 of the 14 conflict hunks and is the highest-value first target.
+2. **The five defects deliberately left unfixed**, each needing its own change and its own test: the unguarded `_dispatch_once_locked` DB-path-resolution path; the `failed`/`canceled`/`cancelled` status vocabulary; `block_task`'s docstring; the review-dispatch "back to running" comment; the orphan banner divider.
+
+- [ ] **Step 5: Push the fork**
 
 ```bash
-for m in hermes_cli.kanban_db gateway.run hermes_cli.web_server cli hermes_cli.main; do
-  python -m scripts.refactor.api_snapshot "$m" \
-    --compare "docs/refactor/api-snapshot.$(echo $m | tr '.' '_' | sed 's/hermes_cli_//').json"
-done
-```
-Expected: `API IDENTICAL` five times. Criterion 2 met.
-
-```bash
-git log --oneline main --since=2026-07-24 -- hermes_cli/ gateway/ cli.py
-git diff --stat <first-split-commit>~1..main -- ':!hermes_cli/kanban_db*' ':!gateway/run*' \
-  ':!hermes_cli/web_server*' ':!cli*' ':!hermes_cli/main*' ':!docs/' ':!scripts/refactor/' ':!tests/refactor/'
-```
-Expected: the second command shows only the enumerated test patch-target lines. Criterion 3 (zero production call-site edits) met.
-
-- [ ] **Step 2: Update the repo's own navigation docs**
-
-`CLAUDE.md` contains a "Code map" section stating that CodeGraph skips `hermes_cli/kanban_db.py` and `gateway/run.py` and that `rg` plus `LIFECYCLE.md` must be used instead. That is now false. Update it: CodeGraph indexes everything; the `rg`-only workaround for those two files is retired. Keep the `rg` over `grep -r` guidance (worktrees), which is unrelated and still true.
-
-`AGENTS.md` and `docs/agent-dev-guide.md` may carry the same claim — check and update both.
-
-- [ ] **Step 3: Record the follow-ups as their own tasks**
-
-The five defects deliberately left unfixed (spec, Follow-ups) still exist. File each as its own kanban task with its own test requirement, referencing the new module path rather than the old line number:
-
-1. `_dispatch_once_locked` unguarded DB-path-resolution path weakens the single-writer invariant
-2. Status vocabulary: `failed` / `canceled` / `cancelled` referenced by filters but absent from `VALID_STATUSES`
-3. `block_task` docstring understates real behaviour
-4. Review-dispatch comment says rejection goes "back to running"; it lands in `blocked`
-5. Inconsistent banner layout around scheduling/dispatch
-
-- [ ] **Step 4: Push the fork**
-
-```bash
-git status --short          # clean
+git status --short
 git log --oneline -8
 git push piet-fork main     # fast-forward only, never --force, never origin
 ```
 
-- [ ] **Step 5: Commit the closeout doc changes**
-
-```bash
-git add CLAUDE.md AGENTS.md docs/agent-dev-guide.md
-git commit -m "docs: retire the CodeGraph blind-spot workaround after modularization"
-```
-
 ---
 
-## Amendment to the approved spec (recorded for the operator)
+## Superseded by the re-aim
 
-The spec's stated cycle mitigation — *"anything that would cycle stays in `_core.py` for that round"* — was measured against the real file before planning and does not work as written. Partitioning `kanban_db.py` by its 34 (actually 37) banner sections and converting intra-module references into symbol-level imports puts **28 of 37 sections, 34,764 of 38,834 lines (89.5%), into a single module-level import cycle**. Under the `_core.py` fallback that produces a 34.7k-line `_core.py`: still over 1 MiB, still CodeGraph-invisible, no goal met.
+The following are **not** part of this plan any more. They are recorded so nobody re-derives them from the original spec:
 
-The cause is that symbol-level imports (`from .b import fn`) are resolved at import time and therefore fail on cycles, while the file's genuine dependency structure is fine — its symbol graph is a near-perfect DAG (973 symbols, exactly one 3-symbol cycle).
+- Splitting `gateway/run.py` — actively harmful. 97.6% upstream's file; upstream's own copy is already 1.18 MB, so a split buys blindness-relief that upstream will not sustain, at the price of permanent divergence against the repo's largest incoming change stream.
+- Splitting `hermes_cli/web_server.py` — deferred. Genuinely contested ownership (+3,667 fork vs +3,681 upstream) and already CodeGraph-visible at 803 KB. Needs its own ownership analysis first.
+- Splitting `cli.py` and `hermes_cli/main.py` — dropped. Both already visible (772 KB, 618 KB) and under no merge pressure. The `hermes_cli/main.py` profile-override ordering risk is moot as a result.
+- Converting `hermes_cli/kanban_db.py` into a package at the same path — inverted. It preserves Python compatibility but destroys merge compatibility, which is now the overriding goal.
 
-The fix, verified empirically and adopted throughout this plan: distinguish **import-time** references (assignment values, decorators, default arguments, class bases) from **runtime** references (names used inside function bodies). Only import-time references constrain module order. Runtime references to a later submodule are emitted as module-object imports (`from . import b` + `b.fn(...)`), which resolve at call time and tolerate cycles — confirmed by direct test. Measured across all five files, **import-time backward references number zero**, so the source order is already a valid layering and `_core.py` is never needed. The cost is 140 mechanically-rewritten reference sites in `kanban_db.py` (66 in `web_server.py`, 1 each in the others) — still tool-generated, never model-authored, so the spec's core safety property is preserved. What changes is the "byte-exact" claim: ~99.6% of moved lines are byte-identical rather than 100%.
+## Amendment to the original approved spec (still applicable)
 
-The spec's claim that "the other four files scale proportionally" is also not accurate: `gateway/run.py`, `cli.py` and `hermes_cli/main.py` have 2, 1 and 3 banner sections respectively, with one section holding 92%, 83% and 64% of each file. Their boundary maps must be derived from call clustering, not banners, and `hermes_cli/main.py` carries an explicit source-documented ordering contract ("Profile override — MUST happen before any hermes module import") that the split must preserve and prove. Tasks 8, 10 and 11 handle this.
+The spec's cycle mitigation — *"anything that would cycle stays in `_core.py` for that round"* — does not work as written, and the measurement that showed it is what produced the import-time/runtime distinction the current design still rests on.
+
+Partitioning `kanban_db.py` by its banner sections and converting intra-module references into symbol-level imports puts **28 of 37 sections, 34,764 of 38,834 lines (89.5%), into a single module-level import cycle**. Under the `_core.py` fallback that yields a 34.7k-line `_core.py`: still over 1 MiB, no goal met. The cause is that symbol-level imports resolve at import time and therefore fail on cycles, while the file's real dependency structure is fine — its symbol graph is a near-perfect DAG (973 symbols, exactly one 3-symbol cycle).
+
+The fix, verified empirically and carried into the re-aimed design: only **import-time** references (assignment values, decorators, default arguments, class bases) constrain module order; **runtime** references (names used inside function bodies) do not, and resolve fine across a cycle. Measured across the five original files, import-time backward references number **zero**.
+
+In the re-aimed extraction this pays off twice over. Because the re-export block is the *last* statement in `kanban_db.py`, every cross-file reference in both directions is a runtime reference resolved after both modules are fully populated — so unlike the abandoned package split, which needed 140 mechanical rewrites, the extraction moves **every body byte-identically**. The only exceptions are the 3 import-time references that drive the Task 5 Step 3 carve-out, and they fail loudly rather than silently.
