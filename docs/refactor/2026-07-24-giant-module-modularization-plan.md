@@ -1143,7 +1143,19 @@ git commit -m "refactor tooling: split_module --analyze and --ownership"
 
 ---
 
-## Task 4: `split_module.py --apply` — the mover
+## Task 4: `split_module.py --extract` — the mover
+
+> **Amended 2026-07-24: `--apply` is dropped; build `--extract` only.**
+>
+> `apply_split` converts a module into a package *at the same path*. The re-aim forbids exactly that shape — it is what makes future upstream diffs unapplyable — so `--apply` can never legitimately run on any file in this repo. Building it would be dead code carrying real review cost.
+>
+> Nothing is lost by dropping it. Emission rules 1–9 below are shared, and every one of them is exercised by `--extract` through references *between* the extracted submodules: forward edges become symbol imports, backward edges get the module-object rewrite, and the shadowing (rule 8) and split-binding (rule 9) guards apply identically.
+>
+> **What to build:** `extract_to_package` and its tests (Steps 1, 5, 6 below, plus the `--extract` block in Step 6). **Skip:** `apply_split` and the four `test_apply_*` cases. Re-point the two rule tests at `--extract`:
+> - `test_local_binding_shadowing_a_backward_target_is_not_rewritten` → drive it through `extract_to_package`, with the shadowed symbol and its referrer in *different extracted submodules* so the back-edge is intra-package.
+> - `test_apply_refuses_split_binding_across_modules` → rename to `test_extract_refuses_split_binding_across_modules`; same assertion, `extract_to_package` instead.
+>
+> The `apply_split` implementation below is retained as the reference for the shared machinery — read it for the emission mechanics, do not ship it.
 
 **Files:**
 - Modify: `scripts/refactor/split_module.py`
