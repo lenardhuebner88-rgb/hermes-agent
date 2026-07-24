@@ -15,6 +15,7 @@ from hermes_cli.fallback_config import (
     _iter_fallback_entries,
     _normalized_base_url,
     get_fallback_chain,
+    resolve_entry_api_key,
 )
 
 # ─── _normalized_base_url ────────────────────────────────────────────────────
@@ -177,3 +178,40 @@ def test_returned_entries_are_fresh_copies():
     chain[0]["provider"] = "MUTATED"
     # Re-deriving must not see the mutation → copies, not references.
     assert get_fallback_chain(config)[0]["provider"] == "a"
+
+
+class TestResolveEntryApiKey:
+    def test_inline_api_key_wins(self, monkeypatch):
+        monkeypatch.setenv("FB_KEY", "env-key")
+        entry = {"provider": "custom", "api_key": "inline-key", "key_env": "FB_KEY"}
+        assert resolve_entry_api_key(entry) == "inline-key"
+
+    def test_key_env_resolves_from_environment(self, monkeypatch):
+        monkeypatch.setenv("FB_KEY", "env-key")
+        assert resolve_entry_api_key({"key_env": "FB_KEY"}) == "env-key"
+
+    def test_api_key_env_alias(self, monkeypatch):
+        monkeypatch.setenv("FB_ALIAS_KEY", "alias-key")
+        assert resolve_entry_api_key({"api_key_env": "FB_ALIAS_KEY"}) == "alias-key"
+
+    def test_unset_env_var_returns_none(self, monkeypatch):
+        monkeypatch.delenv("FB_MISSING", raising=False)
+        # None (not "") lets resolve_runtime_provider fall through to the
+        # provider's standard credential resolution.
+        assert resolve_entry_api_key({"key_env": "FB_MISSING"}) is None
+
+    def test_empty_env_var_returns_none(self, monkeypatch):
+        monkeypatch.setenv("FB_EMPTY", "   ")
+        assert resolve_entry_api_key({"key_env": "FB_EMPTY"}) is None
+
+    def test_no_key_fields_returns_none(self):
+        assert resolve_entry_api_key({"provider": "openrouter", "model": "glm"}) is None
+
+    def test_non_dict_returns_none(self):
+        assert resolve_entry_api_key(None) is None
+        assert resolve_entry_api_key("nope") is None  # type: ignore[arg-type]
+
+    def test_whitespace_inline_key_falls_through_to_env(self, monkeypatch):
+        monkeypatch.setenv("FB_KEY", "env-key")
+        entry = {"api_key": "   ", "key_env": "FB_KEY"}
+        assert resolve_entry_api_key(entry) == "env-key"

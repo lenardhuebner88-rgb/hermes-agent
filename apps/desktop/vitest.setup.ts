@@ -5,10 +5,8 @@ import { configure } from '@testing-library/react'
 // spurious "not wrapped in act(...)" warnings.
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
-// Load-flake hardening for the UI project: under full-suite parallel load
-// (maxWorkers contention) heavy jsdom render tests miss findBy*'s default 1s
-// waitFor poll — surfacing as random "Unable to find role …" failures on
-// unrelated files (2026-07-16/17: skills, messaging, toolset-config-panel).
-// Raise the async-utility poll ceiling suite-wide; the per-project testTimeout
-// (vitest.config.ts) covers the raw-timeout variant of the same contention.
+// findBy*/waitFor default to a 1000ms deadline — too tight for async-heavy
+// panels (radix menus, refetch chains) when the full suite runs under xdist
+// CPU contention in CI. Success still resolves the instant the node appears;
+// the wider deadline only absorbs a starved runner, killing timing flakes.
 configure({ asyncUtilTimeout: 5000 })

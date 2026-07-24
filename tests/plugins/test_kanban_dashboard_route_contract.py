@@ -43,6 +43,7 @@ UPSTREAM_CORE_ROUTES = {
     ("DELETE", "/boards/{slug}"),
     ("POST", "/boards/{slug}/switch"),
     ("GET", "/profiles"),
+    ("GET", "/model-options"),
     ("PATCH", "/profiles/{profile_name}"),
     ("POST", "/profiles/{profile_name}/describe-auto"),
     ("POST", "/tasks/{task_id}/decompose"),

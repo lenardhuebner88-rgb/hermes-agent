@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -81,7 +82,8 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_comment", "kanban_create", "kanban_link",
+        "kanban_comment", "kanban_attach", "kanban_attach_url",
+        "kanban_attachments", "kanban_create", "kanban_link",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
@@ -179,9 +181,10 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     names = {s["function"].get("name") for s in schema if "function" in s}
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
-        "kanban_list",
-        "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_comment", "kanban_create", "kanban_link",
+            "kanban_list",
+            "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
+            "kanban_comment", "kanban_attach", "kanban_attach_url",
+            "kanban_attachments", "kanban_create", "kanban_link",
         "kanban_unblock",
         "kanban_rewire_superseding_review", "kanban_ensure_needs_revision_fix",
     }
@@ -917,11 +920,10 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
 
     # Mock the judge to reject the completion. The gate only runs when a
     # judge is reachable, so force the availability probe True as well.
-    # The fork's judge_goal returns a 4-tuple (verdict, reason, parse_failed,
-    # wait_directive); exercise that shape here. Patched at hermes_cli.goals
-    # — the shared gate module both kanban_tools and the CLI verb call into.
-    def mock_judge_goal(goal, last_response, **kwargs):
-        return "continue", "missing verification evidence", False, None
+    def mock_judge_goal(goal, last_response, *, timeout=30.0, subgoals=None):
+        # Match the real judge_goal contract:
+        # (verdict, reason, parse_failed, wait_directive, transport_failed)
+        return "continue", "missing verification evidence", False, None, False
 
     monkeypatch.setattr("hermes_cli.goals.judge_goal", mock_judge_goal)
     monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
@@ -1760,10 +1762,53 @@ def test_create_project_passthrough(worker_env):
         conn.close()
 
 
-def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
-    """A worker scoped to a dir: task that spawns a child without a
-    workspace arg inherits the dir, not scratch (so follow-up code-gen
-    lands in the same project)."""
+def test_create_default_child_isolates_materialized_scratch_workspace(
+    monkeypatch, worker_env,
+):
+    """A worker-created default-scratch child must not reuse its parent's path."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        parent = kb.get_task(conn, worker_env)
+        assert parent is not None
+        parent_workspace = kb.resolve_workspace(parent)
+        kb.set_workspace_path(conn, worker_env, parent_workspace)
+    finally:
+        conn.close()
+
+    # This file represents immutable evidence produced by the parent review.
+    evidence = parent_workspace / "review-evidence.txt"
+    evidence.write_text("parent-only", encoding="utf-8")
+
+    d = json.loads(kt._handle_create({
+        "title": "remediation", "assignee": "peer", "parents": [worker_env],
+    }))
+    assert d["ok"] is True
+    assert d["workspace_kind"] == "scratch"
+    assert d["workspace_path"] is None
+    assert d["project_id"] is None
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child is not None
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
+        child_workspace = kb.resolve_workspace(child)
+    finally:
+        conn.close()
+
+    assert child_workspace != parent_workspace
+    (child_workspace / "child-write.txt").write_text("child", encoding="utf-8")
+    assert not (parent_workspace / "child-write.txt").exists()
+    assert evidence.read_text(encoding="utf-8") == "parent-only"
+
+
+def test_create_default_child_does_not_implicitly_share_worker_dir(
+    monkeypatch, worker_env,
+):
+    """Persistent directory sharing requires explicit child workspace args."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
 
@@ -1784,14 +1829,57 @@ def test_create_inherits_worker_dir_workspace(monkeypatch, worker_env):
     conn = kb.connect()
     try:
         child = kb.get_task(conn, d["task_id"])
-        assert child.workspace_kind == "dir"
-        assert child.workspace_path == proj
+        assert child is not None
+        assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
     finally:
         conn.close()
 
 
-def test_create_explicit_workspace_beats_inheritance(monkeypatch, worker_env):
-    """An explicit workspace arg overrides worker-task inheritance."""
+def test_create_explicit_dir_workspace_shares_parent_path(monkeypatch, worker_env):
+    """An explicit dir workspace remains the intentional sharing escape hatch."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    proj = "/home/teknium/proj"
+    conn = kb.connect()
+    try:
+        self_tid = kb.create_task(
+            conn, title="dir worker", assignee="test-worker",
+            workspace_kind="dir", workspace_path=proj,
+        )
+        kb.claim_task(conn, self_tid)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", self_tid)
+
+    d = json.loads(kt._handle_create({
+        "title": "shared child", "assignee": "peer",
+        "workspace_kind": "dir", "workspace_path": proj,
+    }))
+    assert d["ok"] is True
+    assert d["workspace_kind"] == "dir"
+    assert d["workspace_path"] == proj
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, d["task_id"])
+        assert child is not None
+        assert child.workspace_kind == "dir"
+        assert child.workspace_path == proj
+        created = next(
+            event for event in kb.list_events(conn, child.id)
+            if event.kind == "created"
+        )
+        assert created.payload is not None
+        assert created.payload["workspace_kind"] == "dir"
+        assert created.payload["workspace_path"] == proj
+        assert created.payload["project_id"] is None
+    finally:
+        conn.close()
+
+
+def test_create_explicit_scratch_beats_parent_workspace(monkeypatch, worker_env):
+    """Explicit scratch remains isolated even when the parent uses a directory."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
 
@@ -1814,14 +1902,206 @@ def test_create_explicit_workspace_beats_inheritance(monkeypatch, worker_env):
     conn = kb.connect()
     try:
         child = kb.get_task(conn, d["task_id"])
+        assert child is not None
         assert child.workspace_kind == "scratch"
+        assert child.workspace_path is None
     finally:
         conn.close()
 
 
+def test_create_nested_default_scratch_children_each_get_own_workspace(
+    monkeypatch, worker_env,
+):
+    """Isolation remains stable throughout a worker-created task graph."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    conn = kb.connect()
+    try:
+        parent = kb.get_task(conn, worker_env)
+        assert parent is not None
+        parent_workspace = kb.resolve_workspace(parent)
+        kb.set_workspace_path(conn, worker_env, parent_workspace)
+    finally:
+        conn.close()
+
+    child_result = json.loads(kt._handle_create({
+        "title": "child", "assignee": "peer", "parents": [worker_env],
+    }))
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child_result["task_id"])
+    grandchild_result = json.loads(kt._handle_create({
+        "title": "grandchild", "assignee": "reviewer",
+        "parents": [child_result["task_id"]],
+    }))
+
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, child_result["task_id"])
+        grandchild = kb.get_task(conn, grandchild_result["task_id"])
+        assert child is not None
+        assert grandchild is not None
+        assert child.workspace_path is None
+        assert grandchild.workspace_path is None
+        workspaces = {
+            kb.resolve_workspace(parent),
+            kb.resolve_workspace(child),
+            kb.resolve_workspace(grandchild),
+        }
+    finally:
+        conn.close()
+    assert len(workspaces) == 3
+
+
+def test_create_default_child_inherits_project_without_reusing_worktree(
+    monkeypatch, worker_env, tmp_path,
+):
+    """Project context propagates while each task keeps its own worktree path."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn, name="Isolated Project", folders=[str(repo)],
+        )
+
+    conn = kb.connect()
+    try:
+        parent_id = kb.create_task(
+            conn, title="implementation", assignee="test-worker",
+            project_id=project_id,
+        )
+        kb.claim_task(conn, parent_id)
+        parent = kb.get_task(conn, parent_id)
+        assert parent is not None
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent_id)
+
+    result = json.loads(kt._handle_create({
+        "title": "independent review", "assignee": "reviewer",
+        "parents": [parent_id],
+    }))
+    assert result["ok"] is True
+    assert result["workspace_kind"] == "worktree"
+    assert result["workspace_path"] == str(
+        repo / ".worktrees" / result["task_id"]
+    )
+    assert result["project_id"] == parent.project_id
+
+    conn = kb.connect()
+    try:
+        child = kb.get_task(conn, result["task_id"])
+        assert child is not None
+        assert child.project_id == parent.project_id
+        assert child.workspace_kind == "worktree"
+        assert child.workspace_path != parent.workspace_path
+        assert child.workspace_path == str(repo / ".worktrees" / child.id)
+        assert child.branch_name != parent.branch_name
+    finally:
+        conn.close()
+
+
+def test_create_cross_profile_project_children_keep_isolated_worktree_routing(
+    monkeypatch, tmp_path,
+):
+    """A shared-board worker need not duplicate the creator's projects.db."""
+    from pathlib import Path as _Path
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import projects_db as pdb
+    from tools import kanban_tools as kt
+
+    profile_a = tmp_path / "profiles" / "creator"
+    profile_b = tmp_path / "profiles" / "worker"
+    profile_a.mkdir(parents=True)
+    profile_b.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    shared_db = tmp_path / "shared-kanban.db"
+
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(shared_db))
+    monkeypatch.setenv("HERMES_HOME", str(profile_a))
+    monkeypatch.setenv("HERMES_PROFILE", "creator")
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn, name="Cross Profile Project", folders=[str(repo)],
+        )
+    with kb.connect() as conn:
+        parent_id = kb.create_task(
+            conn,
+            title="parent implementation",
+            assignee="worker",
+            project_id=project_id,
+        )
+        kb.claim_task(conn, parent_id)
+        parent = kb.get_task(conn, parent_id)
+        assert parent is not None
+
+    # Dispatcher switches to profile B but pins the shared board DB. Profile B
+    # intentionally has no copy of profile A's first-class Project row.
+    monkeypatch.setenv("HERMES_HOME", str(profile_b))
+    monkeypatch.setenv("HERMES_PROFILE", "worker")
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent_id)
+    assert not (profile_b / "projects.db").exists()
+
+    def create_child(index: int) -> dict:
+        return json.loads(kt._handle_create({
+            "title": f"parallel child {index}",
+            "assignee": "peer",
+            "parents": [parent_id],
+        }))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        children = list(pool.map(create_child, range(2)))
+
+    assert all(result["ok"] is True for result in children)
+    child_ids = [result["task_id"] for result in children]
+    with kb.connect() as conn:
+        child_tasks = [kb.get_task(conn, task_id) for task_id in child_ids]
+    for task in child_tasks:
+        assert task is not None
+        assert task.project_id == project_id
+        assert task.workspace_kind == "worktree"
+        assert task.workspace_path == str(repo / ".worktrees" / task.id)
+        assert task.workspace_path != parent.workspace_path
+        assert task.branch_name is not None
+        assert task.branch_name.startswith(f"cross-profile-project/{task.id}")
+    assert len({task.workspace_path for task in child_tasks}) == 2
+    assert len({task.branch_name for task in child_tasks}) == 2
+
+    # Nested fan-out must route from the persisted child context too, without
+    # requiring the worker profile to learn or duplicate the Project record.
+    monkeypatch.setenv("HERMES_KANBAN_TASK", child_ids[0])
+    grandchild_result = json.loads(kt._handle_create({
+        "title": "nested review",
+        "assignee": "reviewer",
+        "parents": [child_ids[0]],
+    }))
+    assert grandchild_result["ok"] is True
+    with kb.connect() as conn:
+        grandchild = kb.get_task(conn, grandchild_result["task_id"])
+    assert grandchild is not None
+    assert grandchild.project_id == project_id
+    assert grandchild.workspace_kind == "worktree"
+    assert grandchild.workspace_path == str(repo / ".worktrees" / grandchild.id)
+    assert grandchild.workspace_path not in {
+        parent.workspace_path,
+        *(task.workspace_path for task in child_tasks),
+    }
+    assert grandchild.branch_name is not None
+    assert grandchild.branch_name.startswith(
+        f"cross-profile-project/{grandchild.id}"
+    )
+
+
 def test_create_no_worker_task_stays_scratch(monkeypatch, worker_env):
-    """Orchestrator/CLI callers (no HERMES_KANBAN_TASK) still default to
-    scratch — inheritance only applies to task-scoped workers."""
+    """Orchestrator/CLI callers keep the same isolated scratch default."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
 
@@ -2238,6 +2518,40 @@ def test_unblock_happy_path(monkeypatch, worker_env):
         conn.close()
 
 
+def test_unblock_with_pending_parents_returns_todo(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "orchestrator")
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(conn, title="child", assignee="worker", parents=[parent])
+        conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (child,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_unblock({"task_id": child})
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["status"] == "todo"
+
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, child).status == "todo"
+    finally:
+        conn.close()
+
+
 def test_unblock_rejects_non_blocked_task(monkeypatch, worker_env):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     from tools import kanban_tools as kt
@@ -2372,6 +2686,136 @@ def test_kanban_guidance_in_worker_prompt(monkeypatch, tmp_path):
     assert "Do not shell out" in prompt or "tools — they work" in prompt
 
 
+# ---------------------------------------------------------------------------
+# Attachments — kanban_attach / kanban_attach_url / kanban_attachments
+# ---------------------------------------------------------------------------
+
+
+def test_attach_roundtrips_bytes_to_row_and_disk(worker_env):
+    """kanban_attach decodes base64, writes the blob, and records the row."""
+    import base64
+    from pathlib import Path
+
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    content = b"hello attachment from a tool"
+    out = kt._handle_attach({
+        "filename": "notes.txt",
+        "content_base64": base64.b64encode(content).decode(),
+        "content_type": "text/plain",
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, out
+    assert d["size"] == len(content)
+    att_id = d["attachment_id"]
+
+    conn = kb.connect()
+    try:
+        atts = kb.list_attachments(conn, worker_env)
+        assert [a.filename for a in atts] == ["notes.txt"]
+        a = atts[0]
+        assert a.id == att_id
+        assert a.content_type == "text/plain"
+        assert a.uploaded_by == "agent"
+        assert Path(a.stored_path).read_bytes() == content
+        assert Path(a.stored_path).resolve().is_relative_to(
+            kb.task_attachments_dir(worker_env).resolve()
+        )
+    finally:
+        conn.close()
+
+
+def test_attach_rejects_oversize(worker_env, monkeypatch):
+    """A decoded payload over the cap returns a clean tool error, no row."""
+    import base64
+
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    monkeypatch.setattr(kb, "KANBAN_ATTACHMENT_MAX_BYTES", 8)
+    out = kt._handle_attach({
+        "filename": "big.bin",
+        "content_base64": base64.b64encode(b"0123456789").decode(),
+    })
+    d = json.loads(out)
+    assert "error" in d
+    assert "MB limit" in d["error"]
+
+    conn = kb.connect()
+    try:
+        assert kb.list_attachments(conn, worker_env) == []
+    finally:
+        conn.close()
+
+
+def test_attach_rejects_bad_base64(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_attach({"filename": "x.txt", "content_base64": "not base64!!!"})
+    d = json.loads(out)
+    assert "error" in d and "base64" in d["error"]
+
+
+def test_attach_requires_filename_and_content(worker_env):
+    from tools import kanban_tools as kt
+
+    assert "error" in json.loads(kt._handle_attach({"content_base64": "QQ=="}))
+    assert "error" in json.loads(kt._handle_attach({"filename": "x.txt"}))
+
+
+def test_attach_enforces_worker_task_ownership(worker_env):
+    """A worker scoped to its own task can't attach to a foreign task."""
+    import base64
+
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    conn = kb.connect()
+    try:
+        other = kb.create_task(conn, title="someone else's task", assignee="peer")
+    finally:
+        conn.close()
+
+    out = kt._handle_attach({
+        "task_id": other,
+        "filename": "x.txt",
+        "content_base64": base64.b64encode(b"x").decode(),
+    })
+    d = json.loads(out)
+    assert "error" in d
+    assert "scoped to task" in d["error"]
+
+
+def test_attachments_lists_uploaded_files(worker_env):
+    import base64
+
+    from tools import kanban_tools as kt
+
+    kt._handle_attach({
+        "filename": "a.txt",
+        "content_base64": base64.b64encode(b"aaa").decode(),
+    })
+    kt._handle_attach({
+        "filename": "b.txt",
+        "content_base64": base64.b64encode(b"bbbb").decode(),
+    })
+    out = kt._handle_attachments({})
+    d = json.loads(out)
+    assert d.get("ok") is True
+    names = sorted(a["filename"] for a in d["attachments"])
+    assert names == ["a.txt", "b.txt"]
+    sizes = {a["filename"]: a["size"] for a in d["attachments"]}
+    assert sizes == {"a.txt": 3, "b.txt": 4}
+
+
+def test_attachments_unknown_task_errors(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_attachments({"task_id": "t_nope"})
+    assert "error" in json.loads(out)
+
+
 def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     """Sanity: the guidance block stays lean so it doesn't blow up the
     cached prompt.
@@ -2405,7 +2849,12 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
     # our fork's worker-contract clauses with upstream's own KANBAN_GUIDANCE
     # additions (base 4_056 + fork 2_087 + upstream 938 = 7_081 chars, verified
     # no duplication). Still guards against runaway bloat.
-    assert 1_500 < len(KANBAN_GUIDANCE) < 8_192, (
+    # Bumped 8_192 -> 9_216 at the 2026-07-24 upstream sync (1962 commits): the
+    # merge again combined both sides' additions to this block — merge-base
+    # 5_218 + fork 2_762 + upstream 263 = 8_243 chars. The sum is exactly the
+    # merged length, which is the proof that nothing was duplicated. Still
+    # guards against runaway bloat.
+    assert 1_500 < len(KANBAN_GUIDANCE) < 9_216, (
         f"KANBAN_GUIDANCE is {len(KANBAN_GUIDANCE)} chars — too short (missing?) or too long"
     )
 
@@ -2964,7 +3413,7 @@ def test_board_param_rejects_invalid_slug(multi_board_env):
 
 
 def test_board_param_in_all_schemas():
-    """All nine kanban_* tool schemas must expose an optional ``board``
+    """Every kanban_* tool schema must expose an optional ``board``
     parameter. This pins the contract surfaced to the LLM — adding a
     new kanban tool without ``board`` will fail CI immediately."""
     from tools import kanban_tools as kt
@@ -2979,6 +3428,9 @@ def test_board_param_in_all_schemas():
         kt.KANBAN_CREATE_SCHEMA,
         kt.KANBAN_UNBLOCK_SCHEMA,
         kt.KANBAN_LINK_SCHEMA,
+        kt.KANBAN_ATTACH_SCHEMA,
+        kt.KANBAN_ATTACH_URL_SCHEMA,
+        kt.KANBAN_ATTACHMENTS_SCHEMA,
     ]
     for schema in schemas:
         props = schema["parameters"]["properties"]

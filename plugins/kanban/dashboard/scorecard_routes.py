@@ -19,7 +19,7 @@ def _rate(rows: list[sqlite3.Row]) -> dict[str, object]:
     return {"runs": total, "approved": approved, "approval_rate": approved / total if total else None}
 
 
-@core_routes.get("/scorecard")
+@scorecard_routes.get("/scorecard")
 def get_scorecard(board: Optional[str] = Query(None, description="Kanban board slug (omit for current)")):
     """Aggregate review verdict scores by profile/model and ISO week."""
     conn = _connect(board)
