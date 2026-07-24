@@ -22,11 +22,22 @@
 - **ToS constraint (binding):** `/usr/local/bin/claude-qwen` line 12 — Token Plan is interactive coding/agent use only. qwen may be used for session-driven one-shots supervised by an interactive session. It must **never** be wired as a kanban lane or cron worker.
 - **Repo git rules:** `origin` is NousResearch upstream — never push there. Push only to `piet-fork`, fast-forward, never `--force`. `git status --short` before any git action; this checkout is edited by parallel sessions.
 - **Test scope:** `scripts/run-affected.sh` while building. Before merge to main: one collection sweep (`pytest --co -q tests/`) plus affected tests. Never run the full suite in both worker and verifier.
-- **Base commit:** `1ef243502` on `main`. Upstream reference: `origin/main`. Merge-base: `3bfa6001f` (2026-07-15).
+- **Sequencing (operator-set):** the Codex upstream sync in `.claude/worktrees/codex-upstream-sync-20260724` (branch `codex/upstream-sync-20260724`, merging `origin/main` = `306c9f766`) **lands before this restructure starts**. Two operations must not restructure the same file at once. Task 7 Step 0 verifies it landed.
+- **Base commit:** `f3e6afdd6` on `main` (measurements in this plan were taken on `1ef243502`; nothing they measure changed between the two — Task 3 Step 6 re-verifies). Upstream reference: `origin/main` = `306c9f766`. Merge-base: `3bfa6001f` (2026-07-15).
 
 ## Acceptance criteria
 
-1. **Mergeability (the point of the work).** `git merge-tree --write-tree HEAD origin/main`, conflict hunks in `hermes_cli/kanban_db.py`, measured before and after. **Baseline measured on `1ef243502`: 14 conflict regions, 568 conflicted lines.** See the correction below — this criterion needs re-scoping before it can gate anything.
+1. **Mergeability (the point of the work).** Conflict hunks in `hermes_cli/kanban_db.py` when upstream's delta is replayed onto the fork, measured before and after. **Baseline: 14 conflict regions, 568 conflicted lines.** Two corrections apply — the metric must be pinned (below), and the criterion must be re-scoped (further below).
+
+   **Pin the merge base.** Use the explicit-base form, not the automatic one:
+
+   ```bash
+   git merge-tree --write-tree --merge-base=3bfa6001f HEAD 306c9f766
+   ```
+
+   The automatic form (`git merge-tree --write-tree HEAD origin/main`) reports the same 14 today, but becomes **structurally meaningless the moment the Codex upstream sync lands**: that merge makes `origin/main` an ancestor of `main`, so the computed base collapses to `origin/main` itself and the conflict count drops to 0 — measuring nothing, because there is nothing left to merge. The pinned form replays the *same* known upstream delta (`3bfa6001f → 306c9f766`) against whatever `HEAD` is, so before/after stay comparable across the sync. Verified: both forms report 14 on `1ef243502`.
+
+   **Note on what the sync does to `kanban_db.py`.** In that merge the file is resolved **as ours** — the staged blob is byte-identical to the fork's version. Upstream's `+693` lines of `kanban_db.py` work between `3bfa6001f` and `306c9f766` are therefore recorded as merged without being applied, and git will not offer them again. That is a deliberate call and a reasonable one — applying them into a 38.8k-line divergent file is precisely what this restructure exists to make possible *later* — but it should be a known cost, not a surprise: this restructure does not recover them. Recovering them is a separate, explicit act (`git diff 3bfa6001f 306c9f766 -- hermes_cli/kanban_db.py` replayed by hand), best done after the extraction, when the file is small enough to reason about.
 2. **Fork-owned lines in the upstream-owned file drop to ~zero.** `hermes_cli/kanban_db.py` currently carries 23,736 lines of fork-only symbols. After extraction it must carry none except the re-export block and the small import-time carve-out (Task 5 Step 3).
 3. **CodeGraph payoff.** `stat -c%s hermes_cli/kanban_db.py` < 1,048,576, and `codegraph query dispatch_once` returns the real definition.
 4. **API equivalence.** `api_snapshot.py --compare` reports `API IDENTICAL`, and affected tests are green.
@@ -151,98 +162,33 @@ Classified with `layering.py`'s import-time/runtime distinction:
 
 ---
 
-## Task 0: Branch triage (operator gate — still open, still blocking)
+## Task 0: Branch triage — CLOSED 2026-07-24
 
-Eleven branches carry `kanban_db.py` deltas. After the extraction their fork-owned hunks address text that has moved to `hermes_cli/kanban_ext/`, so they can no longer auto-merge.
+**The split is no longer gated on branch triage.** Operator decision taken and executed; `main` is at `f3e6afdd6`. Full record with evidence: `docs/refactor/branch-triage-2026-07-24.md`, sections *Decision* and *Execution record*.
 
-The re-aim narrows this gate to `kanban_db.py` branches only. In practice the set is unchanged: all eleven were selected *because* they carry `kanban_db.py` deltas. Branches touching only `gateway/run.py`, `web_server.py`, `cli.py` or `main.py` are now irrelevant, since those files are out of scope.
-
-**Status: the analysis is done and committed (`b20d0c8f3`); the operator decision is NOT made.** `docs/refactor/branch-triage-2026-07-24.md` holds the full evidence. Summary of what was found:
-
-- **All three branches the spec flagged for land-or-drop review are superseded by `main`**, verified at symbol level rather than by patch-id. `git cherry` misreported `kanban/t_610a9f84` as 8-of-11 unlanded; every deliverable is in fact on `main`, and `main` is *ahead* in two of its test files.
-- `kanban/t_c254b029`: 0 top-level symbols exist on the branch but not on `main`.
-- `codex/board-model-truth-20260713` and `kanban/t_610a9f84`: differ from `main` only by the same 28 OpenClaw / Mission-Control / FO-backlog symbols, which `main` deleted deliberately in `fd95ada4b codex: retire OpenClaw kanban writers`. OpenClaw was decommissioned 2026-06-01. Landing either would resurrect retired code.
-- **Recommendation: drop all three** (archive as tag, then delete), alongside the eight already bucketed for deletion.
-- **Open flag:** `kanban/t_57aaa085` is in the delete bucket but is dated **today** with 10 commits ahead. Its `kanban_db.py` delta is trivial (10+/1−), so the extraction does not care, but it may hold live non-`kanban_db` work. Do not delete it without an explicit call.
-
-**Files:** no source changes. Maintains `docs/refactor/branch-triage-2026-07-24.md`.
-
-**Verified state on `1ef243502`:**
-
-| branch | commits ahead | last commit | `kanban_db.py` delta | bucket |
-|---|---:|---|---|---|
-| `kanban/t_c254b029` | 5 | 2026-07-22 | 626+/284− | decide |
-| `codex/board-model-truth-20260713` | 1 | 2026-07-14 | 713+/47− | decide |
-| `kanban/t_610a9f84` | 11 | 2026-07-14 | 187+/34− | decide |
-| `backup/grok-kanban-block-kind-20260715-pre-rebase` | 4 | 2026-07-15 | 627+/113− | archive+delete |
-| `kanban/t_80809063` | 1 | 2026-07-12 | 40+/11− | archive+delete |
-| `kanban/t_d2d25240` | 1 | 2026-07-18 | 30+/0− | archive+delete |
-| `kanban/t_49c1e99b` | 1 | 2026-07-17 | 19+/1− | archive+delete |
-| `worktree-bridge-cse_01HZiECqoEjuEdJuA5DWYFys` | 1 | 2026-07-17 | 19+/2− | archive+delete |
-| `kanban/t_57aaa085` | 10 | **2026-07-24** | 10+/1− | archive+delete — **flag to operator** |
-| `salvage/dirty-main-20260712T014834` | 2 | 2026-07-12 | 9+/7− | archive+delete |
-| `kanban/t_69536fff` | 1 | 2026-07-12 | 7+/16− | archive+delete |
-
-**Discrepancy to raise with the operator:** the spec buckets `kanban/t_57aaa085` as "trivial or ≥1 week stale", but it is dated **today** with 10 commits ahead. Its `kanban_db.py` delta is trivial (10+/1−), so the bucketing is defensible, but the branch may hold live non-`kanban_db` work. Do not delete it without an explicit call.
-
-`backup/grok-kanban-block-kind-20260715-pre-rebase` carries the second-largest delta in the whole set (627+/113−) yet sits in the archive bucket. That is consistent with its name (a pre-rebase backup, i.e. superseded), but confirm before deleting.
-
-- [x] **Step 1: Write the triage summary for the three "decide" branches** — done, committed as `b20d0c8f3`. The commands below are the reproduction recipe.
-
-For each of `kanban/t_c254b029`, `codex/board-model-truth-20260713`, `kanban/t_610a9f84`, capture what the branch actually does:
+Outcome: ten of the eleven branches were archived as `archive/pre-modularization/<name>` and deleted; one was **landed first**. Branch forest 105 → 94. Any branch is recoverable with:
 
 ```bash
-cd /home/piet/.hermes/hermes-agent
-for b in kanban/t_c254b029 codex/board-model-truth-20260713 kanban/t_610a9f84; do
-  echo "##### $b"
-  git log --oneline main..$b
-  git diff --stat main...$b
-  git diff main...$b -- hermes_cli/kanban_db.py | head -200
-done
+git branch <name> archive/pre-modularization/<name>
 ```
 
-Write `docs/refactor/branch-triage-2026-07-24.md` containing, per branch: the commit subjects, the full `--stat`, a two-to-four sentence description of the change in behavioural terms, whether it is already superseded by something on `main`, and a land-or-drop recommendation with reasoning.
+- [x] **Step 1: Triage analysis** — committed `b20d0c8f3`.
+- [x] **Step 2: Operator decision** — taken 2026-07-24, recorded in the triage document.
+- [x] **Step 3: Land `kanban/t_57aaa085`** — merged as `8f29783e0`. Real conflict resolution in two files in favour of `main`'s newer venv precedence; all of the branch's new tests preserved. Gates green: 13 passed, ruff clean, 48,666 collected, `run-affected` 50 files / 1,572 tests / 0 failures.
+- [x] **Step 4: Archive + delete the other ten** — done, all tagged.
+- [x] **Step 5: Verify and record** — done.
 
-- [ ] **Step 2: Get the operator's land-or-drop call**
+### Correction to this plan's earlier finding
 
-Present the summary. Do not proceed past this step without an explicit decision per branch. Record the decision inline in the triage document.
+The recommendation to drop all eleven was **right for ten and wrong for one**.
 
-- [ ] **Step 3: Execute "land" decisions (only those the operator approved)**
+`kanban/t_57aaa085` carried genuinely unlanded work: `tests/hermes_cli/test_scores_digest.py` at **592 lines against 288 on `main`**, plus +188 lines in `hermes_cli/kanban.py` and the `HERMES_HOME` venv fix in `scripts/cron/scores-weekly-digest.sh`. The triage raised the right caveat — "dated today, 10 commits, do not delete without an explicit call" — and then filed it in the archive bucket anyway. **The caveat should have overridden the bucket.** The lesson is narrow and worth carrying into the rest of this plan: a branch's `kanban_db.py` delta being trivial says nothing about the rest of its diff, and this triage measured only the `kanban_db.py` delta before bucketing.
 
-For each branch marked *land*, merge it to `main` **before** any split, resolve conflicts normally, run gates, and commit. This is ordinary merge work and is deliberately not scripted here — the point is that it happens while `kanban_db.py` still exists at its original path.
+`backup/grok-kanban-block-kind-20260715-pre-rebase` was independently re-verified as genuinely superseded: `block_kind`/`system park` markers 5:5 on both sides, and `tests/hermes_cli/test_kanban_block_kinds.py` is 696 lines on `main`. That classification held.
 
-```bash
-git checkout main
-git merge --no-ff <branch>
-scripts/run-affected.sh
-```
+### What this leaves for the restructure
 
-- [ ] **Step 4: Archive-then-delete the eight (or nine) drop branches**
-
-Tag first so nothing is unrecoverable, then delete the branch ref:
-
-```bash
-cd /home/piet/.hermes/hermes-agent
-for b in kanban/t_49c1e99b kanban/t_57aaa085 kanban/t_69536fff kanban/t_80809063 \
-         kanban/t_d2d25240 salvage/dirty-main-20260712T014834 \
-         backup/grok-kanban-block-kind-20260715-pre-rebase \
-         worktree-bridge-cse_01HZiECqoEjuEdJuA5DWYFys; do
-  git tag "archive/pre-modularization/$(echo $b | tr '/' '_')" "$b"
-  git branch -D "$b"
-done
-git tag -l 'archive/pre-modularization/*'
-```
-
-Note: `kanban/t_57aaa085` is in this list only if the operator confirmed it in Step 2. Remove it from the loop otherwise.
-
-- [ ] **Step 5: Verify no branch was lost and commit the triage record**
-
-```bash
-git tag -l 'archive/pre-modularization/*' | wc -l   # expect 8 (or 7)
-git branch --list 'kanban/t_49c1e99b'               # expect empty
-git add docs/refactor/branch-triage-2026-07-24.md
-git commit -m "docs: branch triage before giant-module modularization"
-```
+No open branch work touches `hermes_cli/kanban_db.py`. The remaining sequencing constraint is not branches but the **Codex upstream sync** — see Global Constraints and Task 7 Step 0.
 
 ---
 
@@ -1764,12 +1710,13 @@ Expected header numbers: 733 / 111 / 129 as in the ground-truth section. This fi
 
 ```bash
 cd /home/piet/.hermes/hermes-agent
-git merge-tree --write-tree HEAD origin/main > /tmp/mt_before.txt; TREE=$(head -1 /tmp/mt_before.txt)
+git merge-tree --write-tree --merge-base=3bfa6001f HEAD 306c9f766 > /tmp/mt_before.txt
+TREE=$(head -1 /tmp/mt_before.txt)
 git show "$TREE:hermes_cli/kanban_db.py" > /tmp/kdb_merged_before.txt
 echo "conflict hunks BEFORE: $(rg -c '^<<<<<<<' /tmp/kdb_merged_before.txt)"
 stat -c%s hermes_cli/kanban_db.py
 ```
-Expected on `1ef243502`: **14** conflict hunks, **1,589,066** bytes. Write both into the commit message later; they are the denominators for acceptance criteria 1 and 3.
+Expected: **14** conflict hunks, **1,589,066** bytes. Write both into the commit message later; they are the denominators for acceptance criteria 1 and 3. Use the pinned `--merge-base` form for the reason given under Acceptance criteria — the automatic form reads 0 once the upstream sync has landed.
 
 - [ ] **Step 3: Compute the import-time carve-out — the symbols that must NOT move**
 
@@ -1975,11 +1922,24 @@ git commit -m "refactor: enumerate kanban_db test patch targets before extractio
 
 ## Task 7: Extract `kanban_ext` (the whole point)
 
-**Prerequisite:** Task 0's operator decision is executed.
+**Prerequisites:** Task 0 is closed (done). The Codex upstream sync has landed — verified in Step 0.
 
 **Files:**
 - Modify: `hermes_cli/kanban_db.py` (stays a file), `docs/kanban/LIFECYCLE.md`, `scripts/check_kanban_lifecycle_anchors.py`, the patch sites from Task 6
 - Create: `hermes_cli/kanban_ext/`
+
+- [ ] **Step 0: Confirm the upstream sync landed first (operator-set sequencing)**
+
+Two operations must not restructure `kanban_db.py` at the same time. The Codex sync merges `origin/main` (`306c9f766`) and resolves `kanban_db.py` as *ours*; it must be on `main` before anything here starts.
+
+```bash
+cd /home/piet/.hermes/hermes-agent
+git merge-base --is-ancestor 306c9f766 HEAD && echo "sync LANDED — proceed" || echo "sync NOT landed — STOP"
+git worktree list | rg upstream-sync || echo "(sync worktree already cleaned up)"
+git status --short          # this checkout must be clean of foreign work
+```
+
+If the sync has not landed, stop here — do not start the extraction and do not touch that worktree. When it has landed, re-run Task 3 Step 6 and Task 5 Step 1 before continuing: the sync brings ~2,500 files, and while `kanban_db.py` itself is resolved as *ours* and so is byte-unchanged, the ownership numbers must be re-confirmed rather than assumed.
 
 - [ ] **Step 1: Branch and snapshot the API**
 
@@ -2027,12 +1987,15 @@ The fourth check matters on its own: importing `kanban_ext` first, before `kanba
 
 - [ ] **Step 5: Acceptance criterion 1 — mergeability, measured**
 
+Use the **pinned-base** form. After the Codex sync, the automatic form collapses to zero and measures nothing:
+
 ```bash
 cd /home/piet/.hermes/hermes-agent
-git merge-tree --write-tree HEAD origin/main > /tmp/mt_after.txt; TREE=$(head -1 /tmp/mt_after.txt)
+git merge-tree --write-tree --merge-base=3bfa6001f HEAD 306c9f766 > /tmp/mt_after.txt
+TREE=$(head -1 /tmp/mt_after.txt)
 git show "$TREE:hermes_cli/kanban_db.py" > /tmp/kdb_merged_after.txt
 echo "conflict hunks AFTER : $(rg -c '^<<<<<<<' /tmp/kdb_merged_after.txt)"
-echo "conflict hunks BEFORE: 14   (baseline, measured on 1ef243502)"
+echo "conflict hunks BEFORE: 14   (pinned-base baseline)"
 ```
 
 Per the re-scoping recorded under "Acceptance criteria": the count **must not increase**. It is not expected to fall, because all 14 conflicts sit inside upstream-owned bodies that stay. If it *rises*, the extraction has torn text apart that git was previously matching — treat that as a blocking defect and re-examine the map.
@@ -2187,7 +2150,7 @@ stat -c%s hermes_cli/kanban_db.py                       # < 1048576
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
 python -m scripts.refactor.api_snapshot hermes_cli.kanban_db \
   --compare docs/refactor/api-snapshot.kanban_db.json
-git merge-tree --write-tree HEAD origin/main > /tmp/mt_final.txt
+git merge-tree --write-tree --merge-base=3bfa6001f HEAD 306c9f766 > /tmp/mt_final.txt
 git show "$(head -1 /tmp/mt_final.txt):hermes_cli/kanban_db.py" | rg -c '^<<<<<<<'
 codegraph query dispatch_once
 ```
@@ -2207,7 +2170,15 @@ Add to `AGENTS.md` and `CLAUDE.md`, in the section that governs where new code g
 Two backlogs come out of this work:
 
 1. **Hook-reduction (the sequel that earns the delta's strict-decrease criterion).** `docs/refactor/ownership.kanban_db.md` lists the 129 diverged symbols, largest first: `_dispatch_once_locked` (1,297 fork lines vs 400 upstream), `complete_task` (612 vs 208), `_migrate_add_optional_columns` (569 vs 256), `create_task` (491 vs 378). `create_task` alone causes 6 of the 14 conflict hunks and is the highest-value first target.
-2. **The five defects deliberately left unfixed**, each needing its own change and its own test: the unguarded `_dispatch_once_locked` DB-path-resolution path; the `failed`/`canceled`/`cancelled` status vocabulary; `block_task`'s docstring; the review-dispatch "back to running" comment; the orphan banner divider.
+2. **Upstream's skipped `kanban_db.py` delta.** The Codex sync resolved the file as *ours*, so upstream's `3bfa6001f → 306c9f766` changes to it (+693 lines) are recorded as merged but never applied, and git will not re-offer them. Now that the file is ~13k lines instead of 38.8k, replaying them by hand is tractable for the first time:
+
+   ```bash
+   git diff 3bfa6001f 306c9f766 -- hermes_cli/kanban_db.py
+   ```
+
+   Decide per hunk: apply, or record as deliberately-declined in `docs/refactor/ownership.kanban_db.md`. This is the first real test of whether the restructure achieved its stated goal — "Updates leicht reinholen".
+
+3. **The five defects deliberately left unfixed**, each needing its own change and its own test: the unguarded `_dispatch_once_locked` DB-path-resolution path; the `failed`/`canceled`/`cancelled` status vocabulary; `block_task`'s docstring; the review-dispatch "back to running" comment; the orphan banner divider.
 
 - [ ] **Step 5: Push the fork**
 
