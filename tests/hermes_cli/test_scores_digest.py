@@ -211,6 +211,60 @@ def test_digest_retry_hotspots(tmp_path, monkeypatch):
     assert digest["retry_hotspots"][0]["max_attempt"] == 5
 
 
+# ── Regression: high-cardinality profile/model breakdown ──────────────
+
+
+def test_digest_high_cardinality_budgeted_output(tmp_path, monkeypatch):
+    """Regression (reviewer finding 3): with many long distinct profile
+    and model names, the digest must stay <=1800 chars while retaining
+    model, cost/duration, retry, Scorecard, and Langfuse sections on
+    clean entry boundaries (no mid-token truncation)."""
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    with kb.connect_closing() as conn:
+        # 40 distinct profiles with ~50-char names
+        for i in range(40):
+            tid = kb.create_task(conn, title=f"t{i}", assignee="tester")
+            profile = f"very-long-profile-name-{i:03d}-extra-padding-abcdefghij"
+            model = f"very-long-model-name-{i:03d}-extra-padding-klmnopqrstuv"
+            rid = _create_run(conn, task_id=tid, profile=profile, model=model)
+            _insert_verdict(conn, task_id=tid, run_id=rid, value=1.0,
+                            created_at=int(monday.timestamp()))
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_usd",
+                           value=0.05, created_at=int(monday.timestamp()))
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_duration_seconds",
+                           value=90.0, created_at=int(monday.timestamp()))
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_attempt_index",
+                           value=float(i % 5 + 1),
+                           created_at=int(monday.timestamp()))
+
+    out = run_slash("scores --digest --weeks 2")
+
+    # Must stay within Discord limit
+    assert len(out) <= 1800, f"digest is {len(out)} chars, exceeds 1800"
+
+    # Mandatory sections must survive
+    assert "Model:" in out
+    assert "Cost/approved run:" in out
+    assert "Duration/approved run:" in out
+    assert "Retry-Hotspots:" in out
+    assert "Scorecard:" in out
+    assert "Langfuse:" in out
+
+    # Clean entry boundaries: no mid-token truncation
+    # (no line should end with a partial entry like "very-long-pro")
+    for line in out.split("\n"):
+        if line.startswith(("Profile:", "Model:")):
+            # Each entry must be complete: "name: rate (a/t)"
+            # Check that we don't have a dangling partial entry
+            assert not line.rstrip().endswith(("|", ":")), \
+                f"line ends with dangling separator: {line!r}"
+
+    # "+N weitere" marker must appear when entries are omitted
+    assert "weitere" in out
+
+
 # ── Regression: copied-script layout resolves HERMES_HOME venv ────────
 
 
