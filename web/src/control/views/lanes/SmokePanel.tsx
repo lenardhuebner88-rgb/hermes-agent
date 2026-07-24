@@ -88,6 +88,13 @@ export function SmokePanel({
         </div>
       ) : (
         <div className="space-y-1.5">
+          {feed[0]?.at ? (
+            <p className="font-data text-micro tabular-nums text-ink-3">
+              {t.zuletztGemessen(
+                new Date(feed[0].at * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
+              )}
+            </p>
+          ) : null}
           {feed.map((probe) => {
             const model =
               models.find((m) => m.id === probe.model && (m.provider ?? "") === (probe.provider ?? "")) ??

@@ -20,8 +20,10 @@ import { PROBE_STATUS_LABEL, probeTone, t } from "./strings";
 // (Lane ≠ Profil-Default). SaveBar persists + activates; the hint reminds the
 // operator the change takes effect at the next spawn (hot-read, no restart).
 
+// Reasoning column gets a fixed floor so the joined segment strip never wraps;
+// role/model split the remaining flex. Fallback/probe/override stay narrow.
 const COLS =
-  "min-[52rem]:grid-cols-[minmax(0,1.1fr)_minmax(0,1.35fr)_minmax(0,1fr)_minmax(0,4.25rem)_minmax(0,9rem)_minmax(0,5.5rem)]";
+  "min-[52rem]:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_minmax(11.5rem,auto)_minmax(0,4.75rem)_minmax(0,8.5rem)_minmax(0,5rem)]";
 
 function rowHasOverride(row: EditorRow): boolean {
   return row.choice !== "" || row.provider != null || row.model != null;
@@ -79,9 +81,9 @@ function ProbeCell({
         aria-label={`${t.probeMessen}: ${row.profile}`}
         disabled={busy || probing || cliOnly || row.locked}
         onClick={() => onProbeRow(row)}
-        className="inline-flex size-11 shrink-0 items-center justify-center rounded-card border border-line text-ink-3 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
+        className="inline-flex size-9 shrink-0 items-center justify-center rounded-card border border-line text-ink-3 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
       >
-        <Zap className="h-4 w-4" />
+        <Zap className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -236,7 +238,7 @@ export function ProfileMatrix({
           return (
             <li
               key={row.profile}
-              className={cn("grid grid-cols-1 gap-3 border-b border-line-soft px-3 py-3 last:border-b-0 min-[52rem]:items-center", COLS)}
+              className={cn("grid grid-cols-1 gap-3 border-b border-line-soft px-3 py-2.5 last:border-b-0 min-[52rem]:items-center", COLS)}
             >
               {/* Rolle */}
               <div className="flex min-w-0 items-start gap-2">
@@ -278,7 +280,7 @@ export function ProfileMatrix({
                 aria-label={`${t.fallbackEdit}: ${row.profile}`}
                 disabled={busy || row.locked}
                 onClick={() => setFallbackRow(row.profile)}
-                className="inline-flex min-h-11 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
+                className="inline-flex min-h-9 items-center justify-center rounded-card border border-line px-2 font-data text-micro tabular-nums text-ink-2 transition-colors duration-150 hover:border-live hover:text-live disabled:opacity-40"
               >
                 {t.fallbacks(row.fallbackProviders.length)}
               </button>

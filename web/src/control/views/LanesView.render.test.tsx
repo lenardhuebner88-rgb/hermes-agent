@@ -156,6 +156,43 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     expect(screen.getAllByText("Reviewer").length).toBeGreaterThan(0);
   });
 
+  it("lane cards separate override count from catalog profile count", async () => {
+    render(<LanesView density="airy" />);
+    await screen.findAllByText("api-standard");
+    // api-standard: 7 overrides, but the catalog has 10 profiles — the old
+    // meta line printed the override count twice ("7 Overrides · 7 Profile").
+    expect(screen.getAllByText("builtin · 7 Overrides · 10 Profile").length).toBeGreaterThan(0);
+    // the non-builtin lane is labelled as such
+    expect(screen.getAllByText("eigene Lane · 7 Overrides · 10 Profile").length).toBeGreaterThan(0);
+  });
+
+  it("pins the selected non-curated model into the dropdown options", async () => {
+    render(<LanesView density="airy" />);
+    // coder's active override (gpt-5.6-terra) is NOT in the fixture's curated
+    // set (claude-cli only) — the open dropdown must still contain it.
+    const trigger = await screen.findByLabelText<HTMLButtonElement>("Modell für coder");
+    expect(trigger.textContent).toMatch(/terra/i);
+    fireEvent.click(trigger);
+    const listbox = await screen.findByRole("listbox", { name: "Modell für coder" });
+    const options = Array.from(listbox.querySelectorAll('[role="option"]'));
+    expect(options.length).toBeGreaterThan(1);
+    expect(options.some((option) => /terra/i.test(option.textContent ?? ""))).toBe(true);
+  });
+
+  it("provider dots use the pd-N modifier, never a Tailwind p-N padding class", async () => {
+    const { container } = render(<LanesView density="airy" />);
+    await screen.findAllByText("coder");
+    const dots = Array.from(container.querySelectorAll(".pdot"));
+    expect(dots.length).toBeGreaterThan(0);
+    for (const dot of dots) {
+      const classes = Array.from(dot.classList);
+      expect(classes.some((cls) => /^pd-[1-7]$/.test(cls))).toBe(true);
+      // regression: `p-N` collides with Tailwind padding utilities and inflated
+      // the 8px identity dot into a provider-sized circle
+      expect(classes.some((cls) => /^p-[0-9]/.test(cls))).toBe(false);
+    }
+  });
+
   it("logs no console errors while loading and rendering", async () => {
     render(<LanesView density="airy" />);
     await screen.findAllByText("api-standard");

@@ -226,6 +226,7 @@ function LanesPlatform({
       <LaneBar
         lanes={data.lanes}
         activeId={data.active_id}
+        profileCount={data.profiles.length}
         busy={busy}
         onActivate={onActivate}
         onCreate={onCreate}

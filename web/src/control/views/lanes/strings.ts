@@ -19,6 +19,9 @@ export const t = {
   create: "Anlegen",
   overrides: (n: number) => (n === 1 ? "1 Override" : `${n} Overrides`),
   profileCount: (n: number) => (n === 1 ? "1 Profil" : `${n} Profile`),
+  builtin: "builtin",
+  eigeneLane: "eigene Lane",
+  zuletzt: (time: string) => `zuletzt ${time}`,
 
   // ProfileMatrix
   colRole: "Rolle",
@@ -62,6 +65,7 @@ export const t = {
   smokeEmptyTitle: "Noch keine Messungen",
   smokeEmptyEval: "Erreichbarkeit und Latenz der Modelle sind ungesehen.",
   smokeEmptyAction: "Katalog messen startet sequenzielle Probes (moderate Kosten).",
+  zuletztGemessen: (time: string) => `zuletzt gemessen ${time}`,
   truncated: (n: number) => `auf ${n} begrenzt`,
   probeFeed: "Ergebnis-Feed",
 

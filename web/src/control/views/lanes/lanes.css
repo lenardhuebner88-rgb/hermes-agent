@@ -11,22 +11,25 @@
  *  - the central reduced-motion kill switch for every transition in the view.
  */
 
-/* --- provider identity dots (data palette, never status/affordance) --- */
+/* --- provider identity dots (data palette, never status/affordance) ---
+ * Modifier is `pd-N`, NOT `p-N`: Tailwind's `p-N` padding utilities matched the
+ * old modifier names and inflated the dot into a provider-sized circle. */
 .lp .pdot {
   display: inline-block;
   width: 0.5rem;
   height: 0.5rem;
+  padding: 0;
   flex: none;
   border-radius: 9999px;
   background: var(--color-data-6); /* default = neutral */
 }
-.lp .pdot.p-1 { background: var(--color-data-1); } /* alibaba-token-plan (olive) */
-.lp .pdot.p-2 { background: var(--color-data-2); } /* neuralwatt (sage) */
-.lp .pdot.p-3 { background: var(--color-data-3); } /* openai-codex (slate) */
-.lp .pdot.p-4 { background: var(--color-data-4); } /* moonshotai / kimi (violett) */
-.lp .pdot.p-5 { background: var(--color-data-5); } /* claude-cli / anthropic (rose) */
-.lp .pdot.p-6 { background: var(--color-data-6); } /* nous / default (neutral) */
-.lp .pdot.p-7 { background: var(--color-data-7); } /* openrouter (amber) */
+.lp .pdot.pd-1 { background: var(--color-data-1); } /* alibaba-token-plan (olive) */
+.lp .pdot.pd-2 { background: var(--color-data-2); } /* neuralwatt (sage) */
+.lp .pdot.pd-3 { background: var(--color-data-3); } /* openai-codex (slate) */
+.lp .pdot.pd-4 { background: var(--color-data-4); } /* moonshotai / kimi (violett) */
+.lp .pdot.pd-5 { background: var(--color-data-5); } /* claude-cli / anthropic (rose) */
+.lp .pdot.pd-6 { background: var(--color-data-6); } /* nous / default (neutral) */
+.lp .pdot.pd-7 { background: var(--color-data-7); } /* openrouter (amber) */
 
 /* --- lane cards: active = surface-2 + inset bronze edge + bronze LED --- */
 .lp .lane-card {

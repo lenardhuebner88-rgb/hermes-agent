@@ -35,7 +35,7 @@ export function ReasoningControl({
     return (
       <div className="min-w-0">
         <div
-          className="inline-flex min-h-10 cursor-not-allowed items-center rounded-card border border-line bg-surface-1 px-2.5 text-micro text-ink-3 opacity-60"
+          className="inline-flex min-h-8 cursor-not-allowed items-center rounded-card border border-line bg-surface-1 px-2 font-data text-micro uppercase tracking-wide text-ink-3 opacity-60"
           aria-disabled="true"
           title="Modell hat keinen Reasoning-Knopf"
         >
@@ -51,13 +51,16 @@ export function ReasoningControl({
     ...support.map((s) => ({ value: s, label: SHORT[s] ?? s, full: s })),
   ];
 
+  // Joined segments (mockup AB1/AB4): one bordered strip, hairline dividers, no
+  // wrap — dense mono STD·MIN·LOW·MED·HIGH. WCAG floor stays met (min-h-8 =
+  // 32px ≥ 24px; the segment is a secondary in-row control, not a primary CTA).
   return (
     <div
       role="group"
       aria-label={ariaLabel}
-      className="inline-flex flex-wrap items-center gap-1 rounded-card border border-line bg-surface-1 p-1"
+      className="inline-flex items-stretch overflow-hidden rounded-card border border-line bg-surface-1"
     >
-      {options.map((opt) => {
+      {options.map((opt, index) => {
         const on = value === opt.value;
         return (
           <button
@@ -68,10 +71,11 @@ export function ReasoningControl({
             title={opt.full}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "min-h-10 rounded-[5px] px-2.5 text-micro font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40",
+              "min-h-8 px-2 font-data text-micro uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40",
+              index > 0 && "border-l border-line-soft",
               on
-                ? "border border-live bg-live/15 text-bronze-hi"
-                : "border border-transparent text-ink-2 hover:bg-surface-3 hover:text-ink",
+                ? "bg-live/15 font-semibold text-bronze-hi"
+                : "text-ink-3 hover:bg-surface-3 hover:text-ink",
             )}
           >
             {opt.label}

@@ -78,17 +78,20 @@ export function Compass({
 
       <div>
         <SectionHeader label={t.fitTop} rule={false} />
-        <ul className="mt-2 space-y-2">
+        {/* Dense ranking rows (mockup AB2): rank · dot · name · aktuell-marker ·
+            bench-toggle · inline Übernehmen; meter + evidence chips beneath.
+            The adopt button collapses to a passive „✓" marker on the current
+            model — the ranking reads as a list, not a stack of card-CTAs. */}
+        <ul className="mt-2 space-y-1.5">
           {ranked.map((fit, index) => {
             const isCurrent = fit.model.id === currentId;
             const selected = selection.includes(fit.model.id);
             return (
-              <li key={fit.model.id} className="rounded-card border border-line bg-surface-2 p-2.5">
+              <li key={fit.model.id} className="rounded-card border border-line bg-surface-2 px-2.5 py-2">
                 <div className="flex items-center gap-2">
                   <span className="w-4 shrink-0 text-right font-data text-micro tabular-nums text-ink-3">{index + 1}</span>
                   <span className={cn("pdot", providerDot(fit.model.provider, fit.model.id))} aria-hidden />
                   <span className="min-w-0 flex-1 truncate font-data text-micro text-ink">{fit.model.label}</span>
-                  {isCurrent ? <span className="shrink-0 text-micro text-live">{t.aktuellMarker}</span> : null}
                   <button
                     type="button"
                     aria-pressed={selected}
@@ -97,16 +100,30 @@ export function Compass({
                     disabled={fit.model.runtime !== "hermes"}
                     onClick={() => toggleSelect(fit.model.id)}
                     className={cn(
-                      "inline-flex size-9 shrink-0 items-center justify-center rounded-card border transition-colors duration-150",
+                      "inline-flex size-8 shrink-0 items-center justify-center rounded-card border transition-colors duration-150 disabled:opacity-40",
                       selected ? "border-live bg-live/15 text-bronze-hi" : "border-line text-ink-3 hover:border-live hover:text-live",
                     )}
                   >
                     <Check className="h-3.5 w-3.5" />
                   </button>
+                  {isCurrent ? (
+                    <span className="shrink-0 px-1 text-micro text-live" title={t.aktuellMarker}>
+                      {t.aktuellMarker}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onAdopt(role, fit.model)}
+                      className="min-h-8 shrink-0 rounded-card border border-live/50 px-2 text-micro font-medium text-live transition-colors duration-150 hover:border-live hover:bg-live/10 hover:text-bronze-hi disabled:opacity-40"
+                    >
+                      {t.übernehmen}
+                    </button>
+                  )}
                 </div>
-                <ScoreMeter score={fit.score} className="mt-2" />
+                <ScoreMeter score={fit.score} className="mt-1.5" />
                 {fit.reasons.length > 0 ? (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
+                  <div className="mt-1 flex flex-wrap gap-1">
                     {fit.reasons.map((reason) => (
                       <span
                         key={reason}
@@ -117,19 +134,6 @@ export function Compass({
                     ))}
                   </div>
                 ) : null}
-                <button
-                  type="button"
-                  disabled={isCurrent || busy}
-                  onClick={() => onAdopt(role, fit.model)}
-                  className={cn(
-                    "mt-2 min-h-11 w-full rounded-card border px-2.5 text-micro font-medium transition-colors duration-150",
-                    isCurrent
-                      ? "border-line text-ink-3"
-                      : "border-live/50 text-live hover:border-live hover:bg-live/10 hover:text-bronze-hi disabled:opacity-40",
-                  )}
-                >
-                  {isCurrent ? t.übernommen : t.übernehmen}
-                </button>
               </li>
             );
           })}

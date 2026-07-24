@@ -48,7 +48,14 @@ export function ModelSelect({
 
   const curated = models.filter(isModelReachable);
   const rest = models.filter((m) => !isModelReachable(m));
-  const groups = groupModels(showAll ? models : curated);
+  // Pin the currently selected model into the curated view: in credential-less
+  // environments an active row can point at a non-"sinnvoll" model — the open
+  // dropdown must always contain the selection (documented S2 follow-up).
+  const selectedPinned =
+    selected && !showAll && !curated.some((m) => m.id === selected.id && m.runtime === selected.runtime)
+      ? [...curated, selected]
+      : curated;
+  const groups = groupModels(showAll ? models : selectedPinned);
   const restIds = new Set(rest.map((m) => `${m.runtime}|${m.id}`));
 
   const close = () => setOpen(false);
@@ -63,17 +70,19 @@ export function ModelSelect({
         aria-label={`Modell für ${row.profile}`}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          "flex min-h-12 w-full items-center gap-2 rounded-card border border-line bg-surface-2 px-2.5 py-1.5 text-left text-sec text-ink transition-colors duration-150",
+          "flex min-h-11 w-full items-center gap-2 rounded-card border border-line bg-surface-2 px-2.5 py-1.5 text-left text-sec text-ink transition-colors duration-150 min-[52rem]:min-h-9",
           "hover:border-live/60 focus-visible:border-live focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50",
         )}
       >
         {selected ? (
           <>
             <span className={cn("pdot", providerDot(selected.provider, selected.id))} aria-hidden />
-            <span className="min-w-0 flex-1 truncate">{selected.label}</span>
+            <span className="min-w-0 flex-1 truncate font-data text-micro">{selected.label}</span>
           </>
         ) : (
-          <span className="min-w-0 flex-1 truncate text-ink-2">Standard ({row.defaultLabel})</span>
+          <span className="min-w-0 flex-1 truncate font-data text-micro text-ink-2">
+            Standard ({row.defaultLabel})
+          </span>
         )}
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-3 transition-transform duration-150", open && "rotate-180")} />
       </button>

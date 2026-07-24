@@ -11,15 +11,47 @@ import { t } from "./strings";
 // window.confirm). Trailing ghost card creates a new lane from the current
 // matrix staging. Horizontal-scroll on every width (pills on mobile, Phase D).
 
+/** Short display name of an override model id ("openai/gpt-5.6-sol" → "gpt-5.6-sol"). */
+function shortModel(id: string): string {
+  const tail = id.split("/").pop() ?? id;
+  return tail.length > 24 ? `${tail.slice(0, 23)}…` : tail;
+}
+
+/** "gpt-5.6-sol · qwen3.8 · +2" — distinct override models wired in this lane. */
+function laneModelSummary(lane: Lane): string | null {
+  const models = Array.from(
+    new Set(
+      Object.values(lane.profiles)
+        .map((entry) => entry.model)
+        .filter((m): m is string => Boolean(m)),
+    ),
+  );
+  if (models.length === 0) return null;
+  const shown = models.slice(0, 2).map(shortModel);
+  const rest = models.length - shown.length;
+  return rest > 0 ? `${shown.join(" · ")} · +${rest}` : shown.join(" · ");
+}
+
+function savedTime(lane: Lane): string | null {
+  if (!lane.updated_at) return null;
+  return new Date(lane.updated_at * 1000).toLocaleTimeString("de-DE", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export function LaneBar({
   lanes,
   activeId,
+  profileCount,
   busy,
   onActivate,
   onCreate,
 }: {
   lanes: Lane[];
   activeId: string | null;
+  /** Catalog profile count (the matrix rows) — NOT the lane's override count. */
+  profileCount: number;
   busy: boolean;
   onActivate: (laneId: string) => void;
   onCreate: (name: string) => void;
@@ -34,6 +66,8 @@ export function LaneBar({
         const active = lane.active || lane.id === activeId;
         const overrideCount = Object.keys(lane.profiles).length;
         const confirming = pendingActivate === lane.id;
+        const summary = laneModelSummary(lane);
+        const saved = savedTime(lane);
         return (
           <div
             key={lane.id}
@@ -81,9 +115,18 @@ export function LaneBar({
               </div>
             ) : (
               <>
+                {summary ? (
+                  <div className="mt-1 truncate font-data text-micro text-ink-2" title={summary}>
+                    {summary}
+                  </div>
+                ) : null}
                 <div className="mt-1 font-data text-micro tabular-nums text-ink-3">
-                  {t.overrides(overrideCount)} · {t.profileCount(Object.keys(lane.profiles).length)}
+                  {lane.builtin ? t.builtin : t.eigeneLane} · {t.overrides(overrideCount)} ·{" "}
+                  {t.profileCount(profileCount)}
                 </div>
+                {saved ? (
+                  <div className="mt-0.5 font-data text-micro tabular-nums text-ink-3">{t.zuletzt(saved)}</div>
+                ) : null}
                 {!active ? (
                   <button
                     type="button"
