@@ -30,5 +30,9 @@
 ## Dependency source (opensrc)
 Read a dependency's internals instead of guessing: `rg "x" $(opensrc path <pkg>)` / `cat $(opensrc path pypi:<pkg>)/…` — real repo source at the version tag, cached globally in `~/.opensrc/` (works without `web/node_modules` in worktrees). Full block: `AGENTS.md`.
 
-## Code map (graphify)
-Prefer `graphify query|path` for architecture/callers when `graphify-out/` exists. Canon: `vault/00-Canon/graphify-playbook.md`. No worker rebuilds.
+## Code map — which navigator actually works here
+Overrides the global "CodeGraph first" rule **for this repo**. Measured 2026-07-24.
+- **`graphify query|path` = first choice** for "how does X flow / what connects X→Y". It surfaced the real kanban lifecycle spine (`create_task`:4931 → `claim_task`:11305 → `complete_task`:15485). Wide queries truncate — narrow with `--budget` or `context_filter=['call']`. Canon: `vault/00-Canon/graphify-playbook.md`. No worker rebuilds.
+- **`codegraph query|node|explore`** is good for blast radius / callers / "no covering tests" — but it **skips every file >1 MiB** (`MAX_FILE_SIZE`, `~/.codegraph/versions/v1.5.0/lib/dist/extraction/index.js:113`), and exactly two source files exceed that: `hermes_cli/kanban_db.py` (1.51 MiB) and `gateway/run.py` (1.01 MiB). So on kanban/gateway core work it silently answers with test doubles and lexical near-misses — `codegraph query dispatch_once` returns only `fake_dispatch_once`, never the real `kanban_db.py:28760`. There, use `rg` + `docs/kanban/LIFECYCLE.md`, and do **not** trust its "no covering tests found" for those two files.
+- **Use `rg`, not `grep -r`/`find`.** Worktrees are git-excluded, so `rg` sees 1 hit where `grep -r` sees 33 copies.
+- Tools live in `/usr/local/bin` (symlinks): `codegraph`, `graphify`, `qmd`, `hermes`. Bare names resolve; the harness shell does **not** read `~/.bashrc`/`~/.profile`, so never rely on those for PATH.

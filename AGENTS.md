@@ -145,3 +145,5 @@ More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 ## Code map (graphify)
 
 If `graphify-out/graph.json` exists: architecture / callers / "what connects X→Y" → prefer `graphify query|path` before wide rg/read. Full rules: `/home/piet/vault/00-Canon/graphify-playbook.md`. Builders never rebuild; Maintainer/timer only.
+
+CodeGraph blind spot (measured 2026-07-24): it skips files >1 MiB, which silently excludes `hermes_cli/kanban_db.py` and `gateway/run.py` — the kanban and gateway cores. On those two, `codegraph query` returns test doubles instead of the real symbol; use `rg` + `docs/kanban/LIFECYCLE.md` and ignore its "no covering tests found".
