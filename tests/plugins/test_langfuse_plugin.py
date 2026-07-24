@@ -426,8 +426,8 @@ class TestKanbanWorkerTraceMetadata:
             "model": "model", "api_mode": "chat",
         }
 
-    def test_propagated_metadata_is_none_outside_kanban_worker(self, monkeypatch):
-        """Non-worker traces must not carry kanban metadata in propagate_attributes."""
+    def test_propagated_metadata_absent_outside_kanban_worker(self, monkeypatch):
+        """Non-worker traces must not receive a metadata kwarg at all."""
         mod = importlib.import_module("plugins.observability.langfuse")
         for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_BOARD", "HERMES_PROFILE"):
             monkeypatch.delenv(name, raising=False)
@@ -447,8 +447,11 @@ class TestKanbanWorkerTraceMetadata:
         monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
         self._start_root_trace(mod)
 
-        assert propagated.get("metadata") is None
+        # metadata key must be completely absent, not merely None
+        assert "metadata" not in propagated
         assert "kanban-worker" not in propagated.get("tags", [])
+        # Exact kwargs for non-worker: session_id, trace_name, tags only
+        assert set(propagated.keys()) == {"session_id", "trace_name", "tags"}
 
     def test_kanban_metadata_env_failure_is_fail_soft(self, monkeypatch):
         mod = importlib.import_module("plugins.observability.langfuse")
@@ -458,6 +461,69 @@ class TestKanbanWorkerTraceMetadata:
 
         monkeypatch.setattr(mod.os.environ, "get", raise_on_get)
         assert mod._kanban_worker_metadata() == {}
+
+
+class TestPropagateAttributesSDKContract:
+    """Verify the real Langfuse SDK contract for propagate_attributes(metadata=...).
+
+    The regression tests above use a **kwargs fake that accepts any keyword.
+    This class pins the actual SDK signature so an incompatible SDK upgrade
+    is caught at test time rather than silently failing in production.
+    """
+
+    @pytest.fixture()
+    def real_propagate_attributes(self):
+        try:
+            from langfuse import propagate_attributes as real_pa
+        except ImportError:
+            pytest.skip("langfuse SDK not installed")
+        return real_pa
+
+    def test_metadata_is_keyword_only_param(self, real_propagate_attributes):
+        """propagate_attributes must accept metadata as a keyword-only arg."""
+        import inspect
+
+        sig = inspect.signature(real_propagate_attributes)
+        params = sig.parameters
+        assert "metadata" in params, (
+            f"propagate_attributes signature lacks 'metadata': {sig}"
+        )
+        meta_param = params["metadata"]
+        assert meta_param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"'metadata' must be KEYWORD_ONLY, got {meta_param.kind.name}"
+        )
+        assert meta_param.default is None, (
+            f"'metadata' default must be None, got {meta_param.default!r}"
+        )
+
+    def test_metadata_kwarg_accepted_at_runtime(self, real_propagate_attributes):
+        """Calling propagate_attributes(metadata={...}) must not raise TypeError."""
+        # This exercises the real SDK entry point (context manager creation,
+        # not the network export) to prove the kwarg is wired through.
+        try:
+            ctx = real_propagate_attributes(
+                session_id="contract-test",
+                trace_name="contract",
+                tags=["contract"],
+                metadata={"kanban_task_id": "t_test", "kanban_run_id": "1"},
+            )
+            # Enter and exit the context manager to prove it is well-formed.
+            with ctx:
+                pass
+        except TypeError as exc:
+            pytest.fail(f"propagate_attributes rejected metadata kwarg: {exc}")
+
+    def test_non_worker_call_omits_metadata(self, real_propagate_attributes):
+        """Non-worker call (no metadata kwarg) must also succeed."""
+        try:
+            with real_propagate_attributes(
+                session_id="contract-test",
+                trace_name="contract",
+                tags=["contract"],
+            ):
+                pass
+        except TypeError as exc:
+            pytest.fail(f"propagate_attributes failed without metadata: {exc}")
 
 
 class TestTraceScopeKey:

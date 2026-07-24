@@ -719,12 +719,14 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 
     if propagate_attributes is not None:
         try:
-            with propagate_attributes(
-                session_id=session_id or task_key,
-                trace_name="Hermes turn",
-                tags=["hermes", "langfuse"] + (["kanban-worker"] if kanban_metadata else []),
-                metadata=kanban_metadata or None,
-            ):
+            pa_kwargs: Dict[str, Any] = {
+                "session_id": session_id or task_key,
+                "trace_name": "Hermes turn",
+                "tags": ["hermes", "langfuse"] + (["kanban-worker"] if kanban_metadata else []),
+            }
+            if kanban_metadata:
+                pa_kwargs["metadata"] = kanban_metadata
+            with propagate_attributes(**pa_kwargs):
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,
                     name="Hermes turn",
