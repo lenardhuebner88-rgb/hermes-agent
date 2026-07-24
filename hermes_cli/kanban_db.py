@@ -6794,7 +6794,7 @@ def _emit_operator_escalation(
 ) -> int:
     """Emit the payload shape consumed by the Discord escalation rule."""
     row = conn.execute(
-        "SELECT id, title, status, assignee FROM tasks WHERE id = ?",
+        "SELECT id, title, status, assignee, last_failure_error FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     task = {
@@ -6813,7 +6813,19 @@ def _emit_operator_escalation(
             "task": task,
             "why_now": reason,
             "attempts_already_made": 0,
-            "evidence": {"rule": rule, "reason": reason, "run_id": run_id},
+            "evidence": {
+                "rule": rule,
+                "reason": reason,
+                "run_id": run_id,
+                # Keep the escalation evidence contract aligned with the
+                # normal failure-breaker payload. In particular, a protocol
+                # violation's fixed error is more actionable than the generic
+                # respawn-streak wrapper reason.
+                "last_error": (
+                    row["last_failure_error"] if row is not None else reason
+                )
+                or reason,
+            },
             "recommended_human_action": (
                 "inspect the task and resolve the persistent blocker before "
                 "manually unblocking it"
@@ -22042,10 +22054,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # Quota walls are exempt from the streak breaker: the respawn
                 # guard already defers them on a cooldown and they self-heal
                 # when the quota window resets — terminal-blocking them would
-                # turn every budget wall into manual operator work.
+                # turn every budget wall into manual operator work. Protocol
+                # violations are likewise handled by their dedicated streak
+                # below, which preserves the per-task max_retries override and
+                # emits the gave_up contract on the terminal attempt.
                 persistent_streak = (
                     None
-                    if rate_limited_exit
+                    if rate_limited_exit or protocol_violation
                     else _persistent_failure_fingerprint_streak(conn, row["id"])
                 )
                 if persistent_streak is not None:
