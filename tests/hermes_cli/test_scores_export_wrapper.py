@@ -79,11 +79,21 @@ def test_hermes_cli_main_is_executable_entry_point() -> None:
 def test_wrapper_stderr_on_missing_venv(tmp_path: Path) -> None:
     """When no repo venv python exists, the wrapper exits non-zero with a
     diagnostics line on stderr (never silently falls back to PATH python)."""
+    import shutil
+
+    # Run a COPY of the wrapper placed so script_dir/../.. is tmp_path (no
+    # .git): the HERMES_AGENT_REPO fallback (also empty) kicks in and no venv
+    # python can be resolved. Running the in-repo wrapper here would resolve
+    # the REAL checkout (script_dir wins when .git exists) and fire a real
+    # Langfuse export from a unit test — never do that.
+    script_copy = tmp_path / "scripts" / "cron" / "export-langfuse-scores.sh"
+    script_copy.parent.mkdir(parents=True)
+    shutil.copy(WRAPPER, script_copy)
     env = dict(os.environ)
     # Point repo root to an empty dir so no venv is found.
     env["HERMES_AGENT_REPO"] = str(tmp_path)
     rc = subprocess.run(
-        ["bash", str(WRAPPER)],
+        ["bash", str(script_copy)],
         capture_output=True,
         text=True,
         env=env,
