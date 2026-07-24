@@ -797,6 +797,119 @@ def test_code_task_safe_contract_is_auto_enriched_before_pickup(
     assert payload["allowed_paths"] == [str(repo)]
 
 
+def test_worktree_dispatch_supersedes_stale_code_contract_once(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Real worktree dispatch replaces its claim-time checkout contract once."""
+    from hermes_cli import profiles
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    monkeypatch.setattr(profiles, "profile_exists", lambda _name: True)
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (
+        ("init", "-b", "main"),
+        ("config", "user.email", "test@example.invalid"),
+        ("config", "user.name", "Test User"),
+        ("add", "."),
+        ("commit", "-m", "initial"),
+    ):
+        if args == ("add", "."):
+            (repo / "README.md").write_text("fixture\n")
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+    spawned: dict[str, str] = {}
+
+    def fake_spawn(task, workspace):
+        spawned[task.id] = workspace
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="materialize code workspace",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        workspace_path = task.workspace_path
+        assert workspace_path is not None
+        contract_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+        latest = contract_events[-1].payload
+        assert latest is not None
+
+        # The real dispatch path has persisted a matching contract, so both
+        # an already-identical materialization and a repeated one are no-ops.
+        kb._apply_materialized_dispatch_workspace(
+            conn, task, Path(workspace_path), task.branch_name
+        )
+        identical_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+        kb._apply_materialized_dispatch_workspace(
+            conn, task, Path(workspace_path), task.branch_name
+        )
+        repeated_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+
+    assert len(contract_events) == 2
+    assert spawned[tid] == workspace_path
+    assert latest["repo_workspace"] == f"dir:{workspace_path}"
+    assert latest["allowed_paths"] == [workspace_path]
+    assert latest["source"] == "materialized_dispatch"
+    assert latest["supersedes"] is True
+    assert len(identical_events) == len(contract_events)
+    assert len(repeated_events) == len(contract_events)
+
+
+def test_materialized_workspace_without_prior_contract_is_noop(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """Materialization without a claim-time contract must not invent one."""
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="no prior contract",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        task = kb.claim_task(conn, tid)
+        assert task is not None
+        conn.execute("DELETE FROM task_events WHERE task_id = ? AND kind = ?", (
+            tid, "code_task_contract_inferred",
+        ))
+
+        workspace = repo / ".worktrees" / "kanban" / tid
+        workspace.mkdir(parents=True)
+        kb._apply_materialized_dispatch_workspace(
+            conn, task, workspace, f"kanban/{tid}"
+        )
+        contract_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+
+    assert contract_events == []
+
+
 def test_absolute_paths_from_text_rejects_single_segment_prose_token():
     """B2.1: the allowed-paths parser must not scoop a single-segment slash token
     out of prose. The observed defect: a body mentioning the dispatcher action
