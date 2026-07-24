@@ -341,6 +341,91 @@ class TestPayloadSanitization:
         assert payload not in repr(serialized)
 
 
+class TestKanbanWorkerTraceMetadata:
+    @staticmethod
+    def _start_root_trace(mod):
+        recorded = {}
+
+        class _RootSpan:
+            def set_trace_io(self, **_kwargs):
+                pass
+
+        class _RootContext:
+            def __enter__(self):
+                return _RootSpan()
+
+            def __exit__(self, *_args):
+                return False
+
+        class _Client:
+            def create_trace_id(self, **_kwargs):
+                return "trace-id"
+
+            def start_as_current_observation(self, **kwargs):
+                recorded.update(kwargs)
+                return _RootContext()
+
+        mod._start_root_trace(
+            "task-key", task_id="turn-task", session_id="session", platform="cli",
+            provider="provider", model="model", api_mode="chat", messages=[],
+            client=_Client(),
+        )
+        return recorded
+
+    def test_root_trace_stamps_kanban_worker_identity_and_tag(self, monkeypatch):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t-kanban")
+        monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "123")
+        monkeypatch.setenv("HERMES_KANBAN_BOARD", "planspec")
+        monkeypatch.setenv("HERMES_PROFILE", "coder")
+        propagated = {}
+
+        class _Attributes:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_propagate_attributes(**kwargs):
+            propagated.update(kwargs)
+            return _Attributes()
+
+        monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
+        recorded = self._start_root_trace(mod)
+
+        assert recorded["metadata"] == {
+            "source": "hermes", "task_id": "turn-task", "turn_id": "",
+            "api_request_id": "", "platform": "cli", "provider": "provider",
+            "model": "model", "api_mode": "chat", "kanban_task_id": "t-kanban",
+            "kanban_run_id": "123", "kanban_board": "planspec", "kanban_profile": "coder",
+        }
+        assert propagated["tags"] == ["hermes", "langfuse", "kanban-worker"]
+
+    def test_root_trace_payload_is_unchanged_outside_kanban_worker(self, monkeypatch):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_BOARD", "HERMES_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setattr(mod, "propagate_attributes", None)
+
+        recorded = self._start_root_trace(mod)
+
+        assert recorded["metadata"] == {
+            "source": "hermes", "task_id": "turn-task", "turn_id": "",
+            "api_request_id": "", "platform": "cli", "provider": "provider",
+            "model": "model", "api_mode": "chat",
+        }
+
+    def test_kanban_metadata_env_failure_is_fail_soft(self, monkeypatch):
+        mod = importlib.import_module("plugins.observability.langfuse")
+
+        def raise_on_get(*_args, **_kwargs):
+            raise RuntimeError("synthetic environment failure")
+
+        monkeypatch.setattr(mod.os.environ, "get", raise_on_get)
+        assert mod._kanban_worker_metadata() == {}
+
+
 class TestTraceScopeKey:
     def _fresh_plugin(self):
         mod_name = "plugins.observability.langfuse"

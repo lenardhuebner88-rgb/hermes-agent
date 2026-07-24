@@ -669,6 +669,26 @@ def _correlation_metadata(*, task_run_id: str = "", task_id: str = "", chain_id:
     return result
 
 
+def _kanban_worker_metadata() -> dict[str, str]:
+    """Return dispatcher identity for worker traces without affecting other runs."""
+    try:
+        task_id = _env("HERMES_KANBAN_TASK")
+        if not task_id:
+            return {}
+        return {
+            key: value
+            for key, value in {
+                "kanban_task_id": task_id,
+                "kanban_run_id": _env("HERMES_KANBAN_RUN_ID"),
+                "kanban_board": _env("HERMES_KANBAN_BOARD"),
+                "kanban_profile": _env("HERMES_PROFILE"),
+            }.items()
+            if value
+        }
+    except Exception:  # pragma: no cover - defensive fail-open for trace hooks
+        return {}
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "", task_run_id: str = "",
@@ -689,6 +709,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         task_run_id=task_run_id, task_id=task_id, chain_id=chain_id, lane=lane,
         provider=provider, model=model, billing_snapshot=billing_snapshot,
     ))
+    kanban_metadata = _kanban_worker_metadata()
+    metadata.update(kanban_metadata)
 
     # session_id must be passed in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
@@ -700,7 +722,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             with propagate_attributes(
                 session_id=session_id or task_key,
                 trace_name="Hermes turn",
-                tags=["hermes", "langfuse"],
+                tags=["hermes", "langfuse"] + (["kanban-worker"] if kanban_metadata else []),
             ):
                 root_ctx = client.start_as_current_observation(
                     trace_context=trace_ctx,
