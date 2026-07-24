@@ -32796,6 +32796,179 @@ def scores_report(
     }
 
 
+def scores_digest(
+    conn: sqlite3.Connection, *, weeks: int = 4, now: Optional[int] = None
+) -> dict[str, Any]:
+    """Compact weekly digest: approval rates, per-profile/model breakdown,
+    cost/duration per approved run, and retry hotspots.
+
+    Overall approval rate and weekly values use the same query logic as
+    :func:`scores_report` so the two stay consistent (AC-4).
+    """
+    weeks = max(1, int(weeks))
+    now_dt = _dt.datetime.fromtimestamp(now or time.time(), tz=_dt.timezone.utc)
+    current_monday = now_dt.date() - _dt.timedelta(days=now_dt.weekday())
+    week_starts = [
+        current_monday - _dt.timedelta(weeks=offset)
+        for offset in range(weeks - 1, -1, -1)
+    ]
+    start_epoch = int(
+        _dt.datetime.combine(
+            week_starts[0], _dt.time.min, tzinfo=_dt.timezone.utc
+        ).timestamp()
+    )
+
+    # Overall approval rate — same query as scores_report for consistency
+    overall = conn.execute(
+        "SELECT COUNT(*) AS rows_total, "
+        "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
+        "FROM scores"
+    ).fetchone()
+    rows_total = int(overall["rows_total"])
+    approved_rows = int(overall["approved_rows"])
+    approval_rate = approved_rows / rows_total if rows_total else None
+
+    # Weekly approval rates (last N weeks, same logic as scores_report)
+    weekly_counts: dict[_dt.date, tuple[int, int]] = {}
+    for row in conn.execute(
+        "SELECT created_at, value FROM scores WHERE created_at >= ? ORDER BY created_at",
+        (start_epoch,),
+    ):
+        day = _dt.datetime.fromtimestamp(
+            int(row["created_at"]), tz=_dt.timezone.utc
+        ).date()
+        monday = day - _dt.timedelta(days=day.weekday())
+        if monday in week_starts:
+            rt, ar = weekly_counts.get(monday, (0, 0))
+            weekly_counts[monday] = (rt + 1, ar + int(row["value"] == 1.0))
+
+    weekly: list[dict[str, Any]] = []
+    for monday in week_starts:
+        rt, ar = weekly_counts.get(monday, (0, 0))
+        iso_year, iso_week, _ = monday.isocalendar()
+        weekly.append(
+            {
+                "year": iso_year,
+                "week": iso_week,
+                "rows_total": rt,
+                "approved_rows": ar,
+                "approval_rate": ar / rt if rt else None,
+            }
+        )
+
+    # Week-over-week delta (last two weeks with data)
+    wow_delta: Optional[float] = None
+    rates_with_data = [w for w in weekly if w["approval_rate"] is not None]
+    if len(rates_with_data) >= 2:
+        wow_delta = rates_with_data[-1]["approval_rate"] - rates_with_data[-2]["approval_rate"]
+
+    # Per-profile approval rate (review_verdict joined with task_runs)
+    by_profile: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(tr.profile, '?') AS profile, "
+        "COUNT(*) AS total, "
+        "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
+        "FROM scores s "
+        "JOIN task_runs tr ON s.run_id = tr.id "
+        "WHERE s.name = 'review_verdict' "
+        "GROUP BY tr.profile "
+        "ORDER BY total DESC"
+    ):
+        total = int(row["total"])
+        approved = int(row["approved"])
+        by_profile[str(row["profile"])] = {
+            "total": total,
+            "approved": approved,
+            "approval_rate": approved / total if total else None,
+        }
+
+    # Per-model approval rate
+    by_model: dict[str, dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT COALESCE(tr.active_model, '?') AS model, "
+        "COUNT(*) AS total, "
+        "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
+        "FROM scores s "
+        "JOIN task_runs tr ON s.run_id = tr.id "
+        "WHERE s.name = 'review_verdict' "
+        "GROUP BY tr.active_model "
+        "ORDER BY total DESC"
+    ):
+        total = int(row["total"])
+        approved = int(row["approved"])
+        by_model[str(row["model"])] = {
+            "total": total,
+            "approved": approved,
+            "approval_rate": approved / total if total else None,
+        }
+
+    # Cost and duration per approved run (from F1 metric scores)
+    cost_duration: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT s.run_id, tr.task_id, "
+        "MAX(CASE WHEN s.name = 'run_cost_usd' THEN s.value END) AS cost, "
+        "MAX(CASE WHEN s.name = 'run_duration_seconds' THEN s.value END) AS duration "
+        "FROM scores s "
+        "JOIN task_runs tr ON tr.id = s.run_id "
+        "WHERE s.run_id IN ("
+        "  SELECT run_id FROM scores "
+        "  WHERE name = 'review_verdict' AND value = 1.0"
+        ") "
+        "AND s.name IN ('run_cost_usd', 'run_duration_seconds') "
+        "GROUP BY s.run_id "
+        "ORDER BY s.run_id DESC "
+        "LIMIT 20"
+    ):
+        cost_duration.append(
+            {
+                "run_id": int(row["run_id"]) if row["run_id"] is not None else None,
+                "task_id": str(row["task_id"]) if row["task_id"] is not None else None,
+                "cost_usd": float(row["cost"]) if row["cost"] is not None else None,
+                "duration_seconds": (
+                    float(row["duration"]) if row["duration"] is not None else None
+                ),
+            }
+        )
+
+    # Whether any metric scores exist at all (for fallback message)
+    has_metrics = (
+        conn.execute(
+            "SELECT 1 FROM scores "
+            "WHERE name IN ('run_cost_usd', 'run_duration_seconds') LIMIT 1"
+        ).fetchone()
+        is not None
+    )
+
+    # Top-3 retry hotspots (tasks with highest run_attempt_index)
+    retry_hotspots: list[dict[str, Any]] = []
+    for row in conn.execute(
+        "SELECT task_id, MAX(value) AS max_attempt "
+        "FROM scores "
+        "WHERE name = 'run_attempt_index' "
+        "GROUP BY task_id "
+        "ORDER BY max_attempt DESC "
+        "LIMIT 3"
+    ):
+        retry_hotspots.append(
+            {"task_id": str(row["task_id"]), "max_attempt": int(row["max_attempt"])}
+        )
+
+    return {
+        "generated_at": int(now or time.time()),
+        "weeks_requested": weeks,
+        "approval_rate": approval_rate,
+        "approved_rows": approved_rows,
+        "rows_total": rows_total,
+        "wow_delta": wow_delta,
+        "weekly": weekly,
+        "by_profile": by_profile,
+        "by_model": by_model,
+        "cost_duration_per_approved_run": cost_duration,
+        "has_metric_scores": has_metrics,
+        "retry_hotspots": retry_hotspots,
+    }
+
+
 def autonomy_stats(conn: sqlite3.Connection) -> dict:
     """Operator-free task acceptance rate from task event history."""
     accepted = int(

@@ -1065,6 +1065,14 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         "scores", help="Score aggregates and weekly approval rates",
     )
     p_scores.add_argument("--json", action="store_true")
+    p_scores.add_argument(
+        "--digest", action="store_true",
+        help="Compact weekly digest for Discord (Markdown or --json)",
+    )
+    p_scores.add_argument(
+        "--weeks", type=int, default=4,
+        help="Number of weeks for --digest (default: 4)",
+    )
 
     p_bfcost = sub.add_parser(
         "backfill-costs",
@@ -4059,6 +4067,8 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_scores(args: argparse.Namespace) -> int:
+    if getattr(args, "digest", False):
+        return _cmd_scores_digest(args)
     with kb.connect_closing() as conn:
         report = kb.scores_report(conn)
     if getattr(args, "json", False):
@@ -4083,6 +4093,113 @@ def _cmd_scores(args: argparse.Namespace) -> int:
             f"  {week['year']}-W{week['week']:02d}  {weekly_text:6s} "
             f"({week['approved_rows']}/{week['rows_total']})"
         )
+    return 0
+
+
+def _fmt_pct(value: Optional[float]) -> str:
+    """Format a 0..1 float as percentage string, or 'n/a'."""
+    return f"{value:.1%}" if value is not None else "n/a"
+
+
+def _cmd_scores_digest(args: argparse.Namespace) -> int:
+    """Handle ``hermes kanban scores --digest [--weeks N] [--json]``."""
+    weeks = max(1, int(getattr(args, "weeks", 4) or 4))
+    with kb.connect_closing() as conn:
+        digest = kb.scores_digest(conn, weeks=weeks)
+
+    # Always write JSON sidecar for agent grounding (AC-2)
+    try:
+        from hermes_constants import get_hermes_home
+
+        reports_dir = get_hermes_home() / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        sidecar = reports_dir / "scores-digest-latest.json"
+        sidecar.write_text(
+            json.dumps(digest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001 — best-effort sidecar, never fail the digest
+        pass
+
+    if getattr(args, "json", False):
+        _emit_json(digest)
+        return 0
+
+    # Build compact Markdown for Discord (max ~1800 chars)
+    lines: list[str] = []
+    lines.append("**Kanban Score Digest**")
+
+    # Overall approval rate + WoW delta
+    rate = digest["approval_rate"]
+    wow = digest["wow_delta"]
+    wow_text = ""
+    if wow is not None:
+        sign = "+" if wow >= 0 else ""
+        wow_text = f" ({sign}{wow:.1%} WoW)"
+    lines.append(
+        f"Approval: **{_fmt_pct(rate)}** "
+        f"({digest['approved_rows']}/{digest['rows_total']}){wow_text}"
+    )
+
+    # Weekly trend (compact)
+    weekly_parts: list[str] = []
+    for w in digest["weekly"]:
+        wr = w["approval_rate"]
+        weekly_parts.append(
+            f"W{w['week']:02d} {_fmt_pct(wr)}"
+        )
+    if weekly_parts:
+        lines.append("Trend: " + " → ".join(weekly_parts))
+
+    # Per-profile breakdown
+    if digest["by_profile"]:
+        prof_parts = [
+            f"{name}: {_fmt_pct(v['approval_rate'])} ({v['approved']}/{v['total']})"
+            for name, v in digest["by_profile"].items()
+        ]
+        lines.append("Profile: " + " | ".join(prof_parts))
+
+    # Per-model breakdown
+    if digest["by_model"]:
+        model_parts = [
+            f"{name}: {_fmt_pct(v['approval_rate'])} ({v['approved']}/{v['total']})"
+            for name, v in digest["by_model"].items()
+        ]
+        lines.append("Model: " + " | ".join(model_parts))
+
+    # Cost/duration per approved run
+    if digest["has_metric_scores"] and digest["cost_duration_per_approved_run"]:
+        cd = digest["cost_duration_per_approved_run"]
+        costs = [r["cost_usd"] for r in cd if r["cost_usd"] is not None]
+        durations = [r["duration_seconds"] for r in cd if r["duration_seconds"] is not None]
+        if costs:
+            lines.append(
+                f"Cost/approved run: avg ${sum(costs)/len(costs):.3f} "
+                f"(n={len(costs)})"
+            )
+        if durations:
+            avg_dur = sum(durations) / len(durations)
+            lines.append(f"Duration/approved run: avg {avg_dur:.0f}s (n={len(durations)})")
+    elif not digest["has_metric_scores"]:
+        lines.append("Metrik-Scores: keine vorhanden")
+
+    # Top-3 retry hotspots
+    if digest["retry_hotspots"]:
+        hs_parts = [
+            f"{h['task_id']} (×{h['max_attempt']})"
+            for h in digest["retry_hotspots"]
+        ]
+        lines.append("Retry-Hotspots: " + ", ".join(hs_parts))
+
+    # Reference lines
+    lines.append("Scorecard: /control → Scorecard")
+    lines.append("Langfuse: loopback-Langfuse → Scores")
+
+    text = "\n".join(lines)
+    # Truncate to ~1800 chars for Discord safety
+    if len(text) > 1800:
+        text = text[:1797] + "..."
+    print(text)
     return 0
 
 
