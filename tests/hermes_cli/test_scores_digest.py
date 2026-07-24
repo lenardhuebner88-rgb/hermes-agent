@@ -333,3 +333,58 @@ def test_copied_script_resolves_hermes_home_venv(tmp_path):
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert f"SELECTED:{venv_bin / 'hermes'}" in result.stdout
     assert "STALE" not in result.stdout
+
+
+# ── Regression: sidecar write failure must be non-zero ──────────────────
+
+
+def test_digest_sidecar_write_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """When the reports dir is unwritable, the digest must fail non-zero
+    instead of silently succeeding without the required sidecar artifact."""
+    _seed_db(tmp_path, monkeypatch)
+
+    # Make reports path a regular file so mkdir raises FileExistsError (OSError)
+    home = tmp_path / ".hermes"
+    reports = home / "reports"
+    reports.write_text("blocker")
+
+    out = run_slash("scores --digest")
+    assert "cannot write digest sidecar" in out, (
+        "digest must report sidecar write failure, not silently succeed"
+    )
+    # The digest markdown must NOT be present when sidecar fails
+    assert "**Kanban Score Digest**" not in out
+
+
+# ── Regression: large --weeks must stay within budget ───────────────────
+
+
+def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
+    """--weeks 200 must produce output <= 1800 chars with clean boundaries
+    and all mandatory sections retained (reviewer finding: unbounded trend)."""
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t1", assignee="tester")
+        rid = _create_run(conn, task_id=tid, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=tid, run_id=rid, value=1.0,
+                        created_at=int(monday.timestamp()))
+        _insert_verdict(conn, task_id=tid, run_id=rid, value=0.0,
+                        created_at=int((monday - timedelta(weeks=1)).timestamp()))
+
+    out = run_slash("scores --digest --weeks 200")
+
+    # Hard budget contract
+    assert len(out) <= 1800, f"output is {len(out)} chars, exceeds 1800"
+
+    # All mandatory sections must survive
+    assert "Scorecard" in out
+    assert "Langfuse" in out
+    assert "Approval:" in out
+    assert "Trend:" in out
+
+    # Clean boundaries: no mid-entry truncation artifacts
+    assert "..." not in out or "weitere" in out
+    # Trend must show omission marker for the 200-week span
+    assert "weitere" in out

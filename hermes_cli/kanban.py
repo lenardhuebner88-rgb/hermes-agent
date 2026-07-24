@@ -4107,19 +4107,31 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         digest = kb.scores_digest(conn, weeks=weeks)
 
-    # Always write JSON sidecar for agent grounding (AC-2)
-    try:
-        from hermes_constants import get_hermes_home
+    # Write JSON sidecar atomically — required artifact (AC-2).
+    # Real I/O errors propagate as non-zero exit; never swallowed.
+    import tempfile
 
-        reports_dir = get_hermes_home() / "reports"
+    from hermes_constants import get_hermes_home
+
+    reports_dir = get_hermes_home() / "reports"
+    sidecar = reports_dir / "scores-digest-latest.json"
+    sidecar_content = json.dumps(digest, indent=2, ensure_ascii=False) + "\n"
+    try:
         reports_dir.mkdir(parents=True, exist_ok=True)
-        sidecar = reports_dir / "scores-digest-latest.json"
-        sidecar.write_text(
-            json.dumps(digest, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            dir=str(reports_dir), prefix=".scores-digest-", suffix=".tmp",
         )
-    except Exception:  # noqa: BLE001 — best-effort sidecar, never fail the digest
-        pass
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(sidecar_content)
+            os.replace(tmp_path_str, str(sidecar))
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path_str)
+            raise
+    except OSError as exc:
+        print(f"error: cannot write digest sidecar: {exc}", file=sys.stderr)
+        return 1
 
     if getattr(args, "json", False):
         _emit_json(digest)
@@ -4145,11 +4157,30 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         f"({digest['approved_rows']}/{digest['rows_total']}){wow_text}"
     )
 
+    # Budget the trend line: with large --weeks the unbounded list would
+    # alone exceed MAX_LEN.  Keep the most recent weeks that fit and mark
+    # omitted older weeks with "+N weitere" (clean entry boundaries).
+    _TREND_BUDGET = 340
     weekly_parts = [
         f"W{w['week']:02d} {_fmt_pct(w['approval_rate'])}"
         for w in digest["weekly"]
     ]
-    trend = ("Trend: " + " → ".join(weekly_parts)) if weekly_parts else ""
+    trend = ""
+    if weekly_parts:
+        base = "Trend: "
+        kept: list[str] = []
+        cur = base
+        for part in weekly_parts:
+            sep = " → " if kept else ""
+            candidate = cur + sep + part
+            if kept and len(candidate) > _TREND_BUDGET:
+                break
+            kept.append(part)
+            cur = candidate
+        trend = cur
+        omitted_weeks = len(weekly_parts) - len(kept)
+        if omitted_weeks > 0:
+            trend += f" | +{omitted_weeks} weitere"
 
     cost_lines: list[str] = []
     if digest["has_metric_scores"] and digest["cost_duration_per_approved_run"]:
@@ -4191,7 +4222,8 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     # Split remaining budget equally between sections so neither starves.
     # Greedily fill entries until the section budget is exhausted,
     # then mark omitted entries as "+N weitere" (clean boundaries).
-    remaining = MAX_LEN - len(mandatory_text)
+    # The construction itself guarantees <= MAX_LEN — no blind end-slice.
+    remaining = max(0, MAX_LEN - len(mandatory_text))
     breakdown_data = [
         (label, data)
         for label, data in [("Profile", digest["by_profile"]), ("Model", digest["by_model"])]
@@ -4233,9 +4265,6 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     out_lines.extend(refs)
 
     text = "\n".join(out_lines)
-    # Safety net — the budget logic above should guarantee this.
-    if len(text) > MAX_LEN:
-        text = text[:MAX_LEN - 3] + "..."
     print(text)
     return 0
 
