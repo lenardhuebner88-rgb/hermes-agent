@@ -964,12 +964,12 @@ class ScriptedAdapter:
         return SendResult(success=True, message_id=f"m{self.attempts}")
 
 
-def _watcher_escalation_payload(tid: str) -> dict:
+def _watcher_escalation_payload(tid: str, *, evidence: dict | None = None) -> dict:
     return {
         "task": {"id": tid, "title": "Human needs to decide"},
         "why_now": "retry ladder exhausted",
         "attempts_already_made": 3,
-        "evidence": {},
+        "evidence": evidence or {},
         "recommended_human_action": "inspect",
         "blocked_action_boundary": list(kb.OPERATOR_ONLY_ACTIONS),
     }
@@ -1284,3 +1284,125 @@ def test_new_event_mid_retry_resets_attempt_budget(kanban_home):
         evaluate_alerts(conn, _acfg(), state, now=NOW + 5, **kw)
         assert len(backstopped) == 1
         assert backstopped[0]["attempts"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Escalation-Triage-Inject (AC-5): after a confirmed operator_escalation
+# send, the tick feeds a synthetic MessageEvent(internal=True) into the
+# escalation channel via adapter.handle_message — but only when the
+# kanban.alerts.escalation_triage_inject flag is on.
+# ---------------------------------------------------------------------------
+
+
+class InjectRecordingAdapter:
+    """RecordingAdapter extended with handle_message recording for
+    escalation-triage-inject assertions (AC-5)."""
+
+    def __init__(self, *, always_fail: bool = False):
+        self.sent: list[dict] = []
+        self.handled: list = []
+        self.always_fail = always_fail
+
+    async def send(self, chat_id, text, reply_to=None, metadata=None):
+        from gateway.platforms.base import SendResult
+
+        if self.always_fail:
+            return SendResult(success=False, error="discord 503")
+        self.sent.append({"chat_id": chat_id, "text": text, "metadata": metadata})
+        return SendResult(success=True)
+
+    async def handle_message(self, event):
+        self.handled.append(event)
+
+
+def test_escalation_triage_inject_flag_off_no_inject(kanban_home):
+    """AC-5: Flag off -> no inject even after confirmed send."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+
+    adapter = InjectRecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                _watcher_escalation_payload(tid),
+            )
+
+    acfg = _acfg(escalation_channel_id="esc-chan")
+    assert not acfg["escalation_triage_inject"]  # default False
+
+    asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
+
+    assert len(adapter.sent) == 1  # alert was sent
+    assert adapter.handled == []  # but no inject
+
+
+def test_escalation_triage_inject_confirmed_send_one_event(kanban_home):
+    """AC-5: Flag on + confirmed send -> exactly one MessageEvent with
+    internal=True, escalation_channel_id as target, why_now + runbook
+    directive in text."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+
+    adapter = InjectRecordingAdapter()
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                _watcher_escalation_payload(
+                    tid, evidence={"last_error": "inject evidence sentinel"},
+                ),
+            )
+
+    acfg = _acfg(escalation_channel_id="esc-chan", escalation_triage_inject=True)
+    assert acfg["escalation_triage_inject"]
+
+    asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
+
+    assert len(adapter.sent) == 1  # alert was sent
+    assert len(adapter.handled) == 1  # exactly one inject
+
+    event = adapter.handled[0]
+    assert event.internal is True
+    assert event.source.chat_id == "esc-chan"
+    assert "retry ladder exhausted" in event.text  # why_now
+    assert "inject evidence sentinel" in event.text
+    assert "Triage-Direktive" in event.text  # runbook directive
+    assert "board-operator-playbook.md" in event.text
+
+
+def test_escalation_triage_inject_deferred_send_no_inject(kanban_home):
+    """AC-5: Deferred send -> no inject (alert not confirmed)."""
+    from gateway.config import Platform
+    from gateway.run import GatewayRunner
+
+    adapter = InjectRecordingAdapter(always_fail=True)
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.adapters = {Platform.DISCORD: adapter}
+
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
+        with kb.write_txn(conn):
+            kb._append_event(
+                conn, tid, kb.OPERATOR_ESCALATION_EVENT,
+                _watcher_escalation_payload(tid),
+            )
+
+    acfg = _acfg(escalation_channel_id="esc-chan", escalation_triage_inject=True)
+    assert acfg["escalation_triage_inject"]
+
+    asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
+
+    assert len(adapter.sent) == 0  # send failed (no successful delivery)
+    assert adapter.handled == []  # no inject (alert not confirmed)

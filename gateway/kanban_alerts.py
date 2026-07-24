@@ -146,6 +146,9 @@ def load_alerts_config(cfg: Any) -> dict:
         "enabled": bool(raw.get("enabled", False)),
         "channel_id": channel_id or None,
         "escalation_channel_id": escalation_channel_id or None,
+        "escalation_triage_inject": bool(
+            raw.get("escalation_triage_inject", False)
+        ),
         "thread_id": str(raw.get("thread_id") or "").strip() or None,
         "interval_seconds": max(30.0, _num("interval_seconds", DEFAULT_INTERVAL_SECONDS)),
         "cooldown_seconds": max(0.0, _num("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)),
@@ -374,7 +377,10 @@ def _rule_operator_escalation(
         task_id = task.get("id") or r["task_id"]
         why = _snippet(payload.get("why_now")) or "retry ladder exhausted"
         action = _snippet(payload.get("recommended_human_action"))
+        evidence = payload.get("evidence")
         line = f"• **{title}** (`{task_id}`) — {why}"
+        if evidence:
+            line += f"; evidence: {_snippet(json.dumps(evidence, ensure_ascii=False, sort_keys=True))}"
         if action:
             line += f"; action: {action}"
         lines.append(line)
