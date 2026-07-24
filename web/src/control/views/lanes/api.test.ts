@@ -377,7 +377,9 @@ describe("editor rows", () => {
     };
     const profiles = profilesFromEditorRows(
       freshRows.map((row) =>
-        row.profile === updatedCoder.profile ? updatedCoder : { ...row, touched: true },
+        row.profile === updatedCoder.profile
+          ? updatedCoder
+          : { ...row, touched: (row.initialChoice ?? "") !== "" },
       ),
     );
     expect(profiles.coder).toMatchObject({
@@ -392,6 +394,42 @@ describe("editor rows", () => {
       worker_runtime: "hermes",
       model: "gpt-5.5",
     });
+  });
+
+  it("quick-switch keep-set excludes a Standard row that only inherits config fallbacks", () => {
+    // F3-3 regression guard: the first round-2 rule (mark every sibling touched)
+    // serialized Standard rows that only inherit config fallbacks into a
+    // spurious model-null lane override that froze the config chain. The keep-set
+    // must include only rows that actually carry a lane override (initialChoice).
+    const inherited: EditorRow = {
+      touched: false,
+      initialChoice: "",
+      profile: "research",
+      description: "",
+      defaultLabel: "automatisch",
+      defaultRuntime: "hermes",
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.5",
+      defaultFallbackProviders: [{ provider: "openrouter", model: "fb-model" }],
+      worker_runtime: "hermes",
+      provider: null,
+      model: null,
+      fallbackProviders: [{ provider: "openrouter", model: "fb-model" }],
+      locked: false,
+      lockedReason: null,
+      choice: "",
+      reasoningSupport: [],
+      defaultReasoningSupport: [],
+      reasoning: null,
+      defaultReasoning: null,
+    };
+    const keepSet = profilesFromEditorRows([
+      { ...inherited, touched: (inherited.initialChoice ?? "") !== "" },
+    ]);
+    expect(keepSet.research).toBeUndefined();
+    // The old over-inclusive rule would have created the spurious override:
+    const overInclusive = profilesFromEditorRows([{ ...inherited, touched: true }]);
+    expect(overInclusive.research).toBeDefined();
   });
 
   it("keeps ordinary profiles on claude-cli when a Claude Max model is selected", () => {

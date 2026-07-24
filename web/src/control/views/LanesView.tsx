@@ -343,8 +343,12 @@ export function LanesView(_props: { density?: Density }) {
         await op();
         await reload();
       } catch (e) {
+        // Do NOT reload here: a reload would discard the operator's staged rows
+        // (the rows-reset effect fires on the fresh data). Keep the edits + the
+        // top-banner error so the save is retryable. The rare activate-succeeded
+        // + persist-rejected case leaves the active-indicator stale until the
+        // next reload/action — documented limitation, preferable to data loss.
         setError(e instanceof Error ? e.message : String(e));
-        await reload();
       } finally {
         setBusy(false);
       }

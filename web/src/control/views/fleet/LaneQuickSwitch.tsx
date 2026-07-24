@@ -169,9 +169,16 @@ export function LaneQuickSwitch() {
         return;
       }
       setState("saving");
+      // Replace-semantics writer: the keep-set must be exactly the rows that
+      // carry a lane override (initialChoice !== "") plus the row being edited.
+      // Marking every sibling touched (the first round-2 attempt) pulled in
+      // Standard rows that only inherit config fallbacks and serialized them
+      // into a spurious model-null lane override that froze the config chain.
       const nextProfiles = profilesFromEditorRows(
         freshRows.map((row) =>
-          row.profile === updatedRow.profile ? updatedRow : { ...row, touched: true },
+          row.profile === updatedRow.profile
+            ? updatedRow
+            : { ...row, touched: (row.initialChoice ?? "") !== "" },
         ),
       );
       await updateLane(freshLane.id, { profiles: nextProfiles });
