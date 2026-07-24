@@ -1082,6 +1082,11 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         "--dry-run", action="store_true",
         help="Report trace matches and score names without writing",
     )
+    p_export_scores.add_argument(
+        "--cron", action="store_true",
+        help="Cron-friendly mode: empty stdout at 0 posted scores (silent), "
+             "one summary line at N>0, error line + non-zero exit on failure",
+    )
 
     p_bfcost = sub.add_parser(
         "backfill-costs",
@@ -4112,21 +4117,32 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
     """Export the active board's scores without changing its SQLite database."""
     from hermes_cli.langfuse_scores_export import export_scores
 
+    cron = bool(getattr(args, "cron", False))
     try:
         result = export_scores(dry_run=bool(args.dry_run))
     except RuntimeError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        # --cron: errors go to stdout (single line) + non-zero exit so the
+        # cron watchdog delivers. Default mode keeps errors on stderr.
+        if cron:
+            print(f"langfuse-scores-export: error: {exc}")
+        else:
+            print(f"error: {exc}", file=sys.stderr)
         return 1
-    # AC-2: matched=0/posted=0 with exit 0 is a valid no-op (forward-only:
-    # historical board scores without a trace are expected to be unmatched).
     matched = result.get("matched", 0)
     unmatched = result.get("unmatched", 0)
     posted = result.get("posted", 0)
     dry = " (dry-run)" if args.dry_run else ""
-    print(
-        f"Langfuse export{dry}: matched={matched} unmatched={unmatched} posted={posted}",
-        file=sys.stderr,
-    )
+    summary = f"Langfuse export{dry}: matched={matched} unmatched={unmatched} posted={posted}"
+    if cron:
+        # Silent contract (hermes cron --no-agent): empty stdout when nothing
+        # was newly posted -> no Discord delivery; exactly one line on N>0.
+        # Diagnostics always go to stderr so they never trigger delivery.
+        print(summary, file=sys.stderr)
+        if posted > 0:
+            print(f"langfuse-scores-export: posted {posted} score(s) to Langfuse")
+        return 0
+    # Default mode: summary on stderr, full JSON result on stdout.
+    print(summary, file=sys.stderr)
     print(json.dumps(result, sort_keys=True))
     return 0
 

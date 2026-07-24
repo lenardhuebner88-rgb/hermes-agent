@@ -70,14 +70,21 @@ def _start_server() -> tuple[ThreadingHTTPServer, threading.Thread]:
     return server, thread
 
 
+def _env(server: ThreadingHTTPServer) -> dict[str, str]:
+    return {
+        "HERMES_LANGFUSE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+        "HERMES_LANGFUSE_PUBLIC_KEY": "pk-test",
+        "HERMES_LANGFUSE_SECRET_KEY": "sk-test",
+    }
+
+
 def test_export_posts_shaped_scores_idempotently_and_skips_unmatched(tmp_path: Path) -> None:
     db_path = tmp_path / "kanban.db"
     _make_db(db_path)
     _FakeLangfuseHandler.scores = []
     server, thread = _start_server()
     try:
-        env = {"HERMES_LANGFUSE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-               "HERMES_LANGFUSE_PUBLIC_KEY": "pk-test", "HERMES_LANGFUSE_SECRET_KEY": "sk-test"}
+        env = _env(server)
         result = export_scores(db_path=db_path, env=env)
         again = export_scores(db_path=db_path, env=env)
     finally:
@@ -106,8 +113,7 @@ def test_export_dry_run_does_not_write(tmp_path: Path) -> None:
     _FakeLangfuseHandler.scores = []
     server, thread = _start_server()
     try:
-        env = {"HERMES_LANGFUSE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-               "HERMES_LANGFUSE_PUBLIC_KEY": "pk-test", "HERMES_LANGFUSE_SECRET_KEY": "sk-test"}
+        env = _env(server)
         result = export_scores(db_path=db_path, env=env, dry_run=True)
     finally:
         server.shutdown()
@@ -143,8 +149,7 @@ def test_export_no_op_when_nothing_matches(tmp_path: Path) -> None:
     _FakeLangfuseHandler.scores = []
     server, thread = _start_server()
     try:
-        env = {"HERMES_LANGFUSE_BASE_URL": f"http://127.0.0.1:{server.server_port}",
-               "HERMES_LANGFUSE_PUBLIC_KEY": "pk-test", "HERMES_LANGFUSE_SECRET_KEY": "sk-test"}
+        env = _env(server)
         result = export_scores(db_path=db_path, env=env, dry_run=True)
     finally:
         server.shutdown()
@@ -153,3 +158,89 @@ def test_export_no_op_when_nothing_matches(tmp_path: Path) -> None:
     assert result["unmatched"] == 2
     assert result["posted"] == 0
     assert _FakeLangfuseHandler.scores == []
+
+
+def test_cron_mode_silent_when_zero_posted(tmp_path: Path, capsys, monkeypatch) -> None:
+    """AC-1 --cron: empty stdout when 0 scores posted (silent contract)."""
+    from hermes_cli.kanban import _cmd_export_langfuse_scores
+    import argparse
+    import os
+
+    db_path = tmp_path / "kanban.db"
+    _make_empty_db(db_path)
+    _FakeLangfuseHandler.scores = []
+    server, thread = _start_server()
+    # Pin HERMES_HOME so kanban_db_path() honours HERMES_KANBAN_DB.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-test")
+    try:
+        args = argparse.Namespace(dry_run=True, cron=True)
+        rc = _cmd_export_langfuse_scores(args)
+    finally:
+        server.shutdown()
+        thread.join()
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.out == "", f"stdout must be empty (silent), got: {captured.out!r}"
+
+
+def test_cron_mode_one_line_when_n_posted(tmp_path: Path, capsys, monkeypatch) -> None:
+    """AC-1 --cron: exactly one stdout line when N>0 scores posted."""
+    from hermes_cli.kanban import _cmd_export_langfuse_scores
+    import argparse
+    import os
+
+    db_path = tmp_path / "kanban.db"
+    _make_db(db_path)
+    _FakeLangfuseHandler.scores = []
+    server, thread = _start_server()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-test")
+    try:
+        args = argparse.Namespace(dry_run=False, cron=True)
+        rc = _cmd_export_langfuse_scores(args)
+    finally:
+        server.shutdown()
+        thread.join()
+    captured = capsys.readouterr()
+    assert rc == 0
+    lines = [l for l in captured.out.splitlines() if l.strip()]
+    assert len(lines) == 1, f"expected exactly 1 stdout line, got {len(lines)}: {captured.out!r}"
+    assert "posted 3" in lines[0]
+
+
+def test_cron_mode_error_exit_nonzero(tmp_path: Path, capsys, monkeypatch) -> None:
+    """AC-1 --cron: error on stdout + non-zero exit when export fails."""
+    from hermes_cli.kanban import _cmd_export_langfuse_scores
+    import argparse
+    import os
+
+    db_path = tmp_path / "kanban.db"
+    _make_db(db_path)
+    _FakeLangfuseHandler.scores = []
+    server, thread = _start_server()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    # Missing base URL and host — export_scores will raise RuntimeError.
+    monkeypatch.delenv("HERMES_LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.delenv("HERMES_LANGFUSE_HOST", raising=False)
+    monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-test")
+    monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-test")
+    try:
+        args = argparse.Namespace(dry_run=False, cron=True)
+        rc = _cmd_export_langfuse_scores(args)
+    finally:
+        server.shutdown()
+        thread.join()
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert "error" in captured.out.lower()
+    # No key/token values must appear.
+    assert "sk-test" not in captured.out
+    assert "pk-test" not in captured.out
