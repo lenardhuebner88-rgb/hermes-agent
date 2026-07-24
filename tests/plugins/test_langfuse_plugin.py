@@ -529,55 +529,58 @@ class TestPropagateAttributesSDKContract:
 
 class TestPropagateAttributesExportContract:
     """Prove the full SDK export chain: propagate_attributes(metadata=...) →
-    LangfuseSpanProcessor.on_start → span attributes langfuse.trace.metadata.*.
+    LangfuseSpanProcessor.on_start → span attributes langfuse.trace.metadata.*
+    → LangfuseSpanProcessor.on_end → injected InMemorySpanExporter.
 
     This uses the REAL LangfuseSpanProcessor (with dummy credentials, no
-    network) and an InMemorySpanExporter to capture the actual OTel span
-    attributes that the Langfuse backend would receive.  This reproduces the
-    live failure mode: without propagate_attributes(metadata=...), the
-    exporter sees zero kanban metadata on the trace.
+    network) and an InMemorySpanExporter injected directly into it.  The
+    separate SimpleSpanProcessor is intentionally absent: assertions read
+    ONLY from the exporter the LangfuseSpanProcessor actually writes to.
+    ``should_export_span=lambda span: True`` ensures the test span passes the
+    default filter (which would otherwise drop non-Langfuse/non-GenAI spans).
+    This reproduces the live failure mode: without propagate_attributes(
+    metadata=...), the exporter sees zero kanban metadata on the trace.
     """
 
     @pytest.fixture()
     def span_capture(self):
-        """Set up a TracerProvider with the real LangfuseSpanProcessor and an
-        InMemorySpanExporter.  Returns (tracer, exporter) and tears down."""
+        """Set up a TracerProvider with ONLY the real LangfuseSpanProcessor
+        and an InMemorySpanExporter injected into it.  Returns
+        (tracer, exporter, provider) and tears down."""
         try:
             from langfuse._client.span_processor import LangfuseSpanProcessor
         except ImportError:
             pytest.skip("langfuse SDK not installed")
         from opentelemetry.sdk.trace import TracerProvider
-        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
         from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
             InMemorySpanExporter,
         )
 
         exporter = InMemorySpanExporter()
         provider = TracerProvider()
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
         # Real LangfuseSpanProcessor with an injected InMemorySpanExporter —
         # no OTLP-HTTP exporter is constructed, no network calls are made.
-        # The on_start propagation logic (span_processor.py:147-165) runs
-        # identically regardless of the downstream exporter.
+        # should_export_span allows all spans so the test span reaches the
+        # injected exporter (default filter drops non-Langfuse/non-GenAI).
         provider.add_span_processor(
             LangfuseSpanProcessor(
                 public_key="pk-contract-test",
                 secret_key="sk-contract-test-dummy",
                 base_url="http://localhost:1",
-                span_exporter=InMemorySpanExporter(),
+                span_exporter=exporter,
+                should_export_span=lambda span: True,
             )
         )
         tracer = provider.get_tracer("contract-test")
-        yield tracer, exporter
+        yield tracer, exporter, provider
         provider.shutdown()
 
     def test_metadata_exported_as_trace_metadata_span_attributes(
         self, span_capture, real_propagate_attributes
     ):
         """Worker case: metadata dict lands as langfuse.trace.metadata.* on
-        the exported span — the exact attributes the Langfuse backend reads
-        to populate trace-level metadata."""
-        tracer, exporter = span_capture
+        the span exported through the LangfuseSpanProcessor's own exporter."""
+        tracer, exporter, provider = span_capture
 
         with real_propagate_attributes(
             session_id="s1",
@@ -588,6 +591,7 @@ class TestPropagateAttributesExportContract:
             with tracer.start_as_current_span("root-observation"):
                 pass
 
+        provider.force_flush()
         spans = exporter.get_finished_spans()
         assert len(spans) == 1, f"Expected 1 span, got {len(spans)}"
         attrs = dict(spans[0].attributes)
@@ -603,8 +607,8 @@ class TestPropagateAttributesExportContract:
         self, span_capture, real_propagate_attributes
     ):
         """Non-worker case: no metadata kwarg → no langfuse.trace.metadata.*
-        attributes on the exported span."""
-        tracer, exporter = span_capture
+        attributes on the span exported through the LangfuseSpanProcessor."""
+        tracer, exporter, provider = span_capture
 
         with real_propagate_attributes(
             session_id="s1",
@@ -614,6 +618,7 @@ class TestPropagateAttributesExportContract:
             with tracer.start_as_current_span("root-observation"):
                 pass
 
+        provider.force_flush()
         spans = exporter.get_finished_spans()
         assert len(spans) == 1
         attrs = dict(spans[0].attributes)
