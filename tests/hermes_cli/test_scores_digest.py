@@ -385,9 +385,9 @@ def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
     assert "Trend:" in out
 
     # Clean boundaries: no mid-entry truncation artifacts
-    assert "..." not in out or "weitere" in out
+    assert "..." not in out or "ältere" in out
     # Trend must show omission marker for the 200-week span
-    assert "weitere" in out
+    assert "ältere" in out
 
     # Retained-newest invariant: the current/newest week must be present
     # in the trend while early old weeks are omitted.
@@ -405,8 +405,16 @@ def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
     )
     # The omission marker must account for the vast majority of the
     # 200 requested weeks (budget keeps ~30 → >150 omitted).
-    m = re.search(r"\+(\d+) weitere", trend_line)
+    m = re.search(r"\+(\d+) ältere", trend_line)
     assert m, f"omission marker missing in trend: {trend_line!r}"
     assert int(m.group(1)) > 150, (
         f"expected >150 omitted old weeks, got {m.group(1)}"
+    )
+    # Marker position: "+N ältere" must appear BEFORE the first retained
+    # week entry (unambiguous older-prefix marker, not trailing suffix).
+    marker_pos = trend_line.index("ältere")
+    first_week_pos = trend_line.index(f"W{current_iso_week:02d}")
+    assert marker_pos < first_week_pos, (
+        f"omission marker must precede retained weeks, "
+        f"got: {trend_line!r}"
     )

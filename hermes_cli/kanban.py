@@ -4159,10 +4159,12 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
 
     # Budget the trend line: with large --weeks the unbounded list would
     # alone exceed MAX_LEN.  Keep the most recent weeks that fit and mark
-    # omitted older weeks with "+N weitere" (clean entry boundaries).
+    # omitted older weeks with "+N ältere" BEFORE the retained entries
+    # (clean entry boundaries, unambiguous older-prefix marker).
     # weekly is chronological oldest→newest; budget from the end so the
     # newest weeks are retained, then output chronologically.
     _TREND_BUDGET = 340
+    _OMIT_MARKER_RESERVE = 20  # "+NNNNNN ältere | " worst case
     weekly_parts = [
         f"W{w['week']:02d} {_fmt_pct(w['approval_rate'])}"
         for w in digest["weekly"]
@@ -4175,16 +4177,17 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         for part in reversed(weekly_parts):
             sep = " → " if kept_rev else ""
             candidate = cur + sep + part
-            if kept_rev and len(candidate) > _TREND_BUDGET:
+            if kept_rev and len(candidate) > _TREND_BUDGET - _OMIT_MARKER_RESERVE:
                 break
             kept_rev.append(part)
             cur = candidate
         # Reverse back to chronological order for display
         kept = list(reversed(kept_rev))
-        trend = base + " → ".join(kept)
         omitted_weeks = len(weekly_parts) - len(kept)
         if omitted_weeks > 0:
-            trend += f" | +{omitted_weeks} weitere"
+            trend = base + f"+{omitted_weeks} ältere | " + " → ".join(kept)
+        else:
+            trend = base + " → ".join(kept)
 
     cost_lines: list[str] = []
     if digest["has_metric_scores"] and digest["cost_duration_per_approved_run"]:
