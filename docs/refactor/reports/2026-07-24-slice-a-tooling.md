@@ -10,10 +10,12 @@ measurements for base `e86c8a66b`. No Slice B behavior was implemented.
 - Task 1: `1fa990bae` — `refactor tooling: api_snapshot equivalence gate`
 - Task 2: `25e5de727` — `refactor tooling: symbol layering analysis`
 - Task 3: `64e2cb1a0` — `refactor tooling: split_module --analyze and --ownership`
-- Report: committed separately after this report was finalized
+- Annotation correction: `6390c9ccc` — `codex: make layering annotation-aware`
+- Initial report: `86094d994` — `codex: document Slice A tooling gates`
+- Corrected report: committed separately after this report was finalized
 
-The branch is intentionally one docs-only commit behind current `main`; it was
-not rebased because the brief pins `e86c8a66b` as the implementation base.
+The branch is intentionally behind current `main`; it was not rebased because
+the brief pins `e86c8a66b` as the implementation base.
 
 ## Files created
 
@@ -22,11 +24,11 @@ not rebased because the brief pins `e86c8a66b` as the implementation base.
 | `scripts/refactor/__init__.py` | 1 | Task 1 |
 | `scripts/refactor/api_snapshot.py` | 116 | Task 1 |
 | `tests/refactor/test_api_snapshot.py` | 87 | Task 1 |
-| `scripts/refactor/layering.py` | 132 | Task 2 |
-| `tests/refactor/test_layering.py` | 106 | Task 2 |
+| `scripts/refactor/layering.py` | 175 | Task 2 + annotation correction |
+| `tests/refactor/test_layering.py` | 209 | Task 2 + annotation correction |
 | `scripts/refactor/split_module.py` | 243 | Task 3 |
 | `tests/refactor/test_split_module.py` | 83 | Task 3 |
-| `docs/refactor/reports/2026-07-24-slice-a-tooling.md` | 148 | report commit |
+| `docs/refactor/reports/2026-07-24-slice-a-tooling.md` | 198 | report commits |
 
 Both `apply_split` and `extract_to_package` remain `NotImplementedError` stubs.
 
@@ -36,7 +38,7 @@ Commands ran from the isolated worktree on the requested base. The live
 checkout's `venv` was activated because worktrees do not carry a virtualenv.
 The command output below is verbatim.
 
-### `python -m scripts.refactor.split_module hermes_cli/kanban_db.py --analyze`
+### `/home/piet/.hermes/hermes-agent/venv/bin/python -m scripts.refactor.split_module hermes_cli/kanban_db.py --analyze`
 
 ```text
 hermes_cli/kanban_db.py: 38843 lines, 973 symbols, 37 modules
@@ -46,7 +48,7 @@ hermes_cli/kanban_db.py: 38843 lines, 973 symbols, 37 modules
 
 Exit code: 0.
 
-### `python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership`
+### `/home/piet/.hermes/hermes-agent/venv/bin/python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership`
 
 ```text
 hermes_cli/kanban_db.py against origin/main:
@@ -57,7 +59,7 @@ hermes_cli/kanban_db.py against origin/main:
 
 Exit code: 0.
 
-### `python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --out /tmp/kdb_api.json`
+### `/home/piet/.hermes/hermes-agent/venv/bin/python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --out /tmp/kdb_api.json`
 
 ```text
 wrote 992 symbols to /tmp/kdb_api.json
@@ -65,7 +67,7 @@ wrote 992 symbols to /tmp/kdb_api.json
 
 Exit code: 0.
 
-### `python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --compare /tmp/kdb_api.json`
+### `/home/piet/.hermes/hermes-agent/venv/bin/python -m scripts.refactor.api_snapshot hermes_cli.kanban_db --compare /tmp/kdb_api.json`
 
 ```text
 API IDENTICAL — 992 symbols match
@@ -81,14 +83,14 @@ buckets 733/111/129 with line totals 23,745/1,293/11,419.
 
 | Command | Exit | Result |
 |---|---:|---|
-| `ruff check scripts/refactor tests/refactor` | 0 | `All checks passed!` |
-| `python -m pytest tests/refactor/ -v` | 0 | 12 passed |
-| `scripts/run-affected.sh` | 0 | 3 files, 12 tests passed |
+| `/home/piet/.hermes/hermes-agent/venv/bin/ruff check scripts/refactor tests/refactor` | 0 | `All checks passed!` |
+| `PYTHONPATH=$(pwd) /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest tests/refactor/ -v` | 0 | 15 passed |
+| `scripts/run-affected.sh` | 0 | 3 files, 15 tests passed |
 
 `scripts/run-affected.sh` emitted the expected advisory that this pinned branch
-is one commit behind `main`; it selected only the three `tests/refactor/` files
-and completed with 12/12 passing. No frontend or generated served assets were
-in scope.
+is four commits behind `main`; it selected only the three `tests/refactor/`
+files and completed with 15/15 passing. No frontend or generated served assets
+were in scope.
 
 ## Plan issues and implementation notes
 
@@ -109,40 +111,88 @@ in scope.
    `1ef243502` and requested base `e86c8a66b`, all inside fork-only
    `scores_digest`. Commit `aa36b6869`, landed through `8f29783e0`, accounts
    exactly for the corrected +9 file and fork-only line totals.
+5. **Annotation evaluation must be module-aware.** Function/method argument and
+   return annotations, plus `AnnAssign` annotations, are now import-time only
+   when the module does not enable postponed annotations. Class keywords such
+   as `metaclass=...` are always import-time. `classify_references` receives the
+   module AST so this decision is made once from the actual source.
 
-## Import-time classification judgment
+## Future annotations and banner versus ownership cuts
 
-The current `import_time_names` set is **incomplete as a general Python
-classifier**, although I found no evidence that it misses an import-time edge
-in this specific `kanban_db.py`.
+`hermes_cli/kanban_db.py` has a 69-line module docstring followed by
+`from __future__ import annotations` at line 71. Runtime inspection confirms
+that `schedule_task.__annotations__["due_at"]` is the string
+`"int | None | _ScheduleDueUnspecified"`.
 
-Expression positions evaluated during module execution but not modeled include:
+The regression test therefore pins both sides:
 
-- function and method parameter/return annotations when annotations are not
-  postponed;
-- module/class annotated-assignment annotation expressions under the same
-  condition;
-- class keyword expressions such as `metaclass=...` and `**keywords`;
-- Python 3.12+ type-parameter bounds/defaults;
-- unsupported top-level defining/executable shapes such as tuple-unpack
-  assignments, augmented assignments, and compound statements.
+- `_SCHEDULE_DUE_UNSPECIFIED`, used as a default value, is import-time;
+- `_ScheduleDueUnspecified`, used only in the postponed annotation, is not.
 
-There is also conservative over-classification: walking an assigned lambda or
-generator expression, or a nested scope inside a non-method class-body
-statement, can mark deferred names as import-time. That creates false
-constraints or false fatal reports, not a silently broken extraction.
+This distinction applies independently of the boundary scheme. `--analyze`
+currently groups symbols by banner sections; Task 7's eventual boundary map
+groups by fork/upstream ownership. The same module-level future flag is threaded
+into either classification. The banner graph remains import-time 58/0. The
+ownership cut remains FORK→UPSTREAM 10 and UPSTREAM→FORK 3; its carve-out stays
+the original two default-value symbols. `_ScheduleDueUnspecified` is not a
+carve-out.
 
-Live AST checks on the target found:
+Postponed annotation names remain conservatively visible to the existing
+runtime bucket through `all_names`; that preserves the measured 878/140 totals.
+They are not claimed to be runtime evaluation edges.
 
-- `from __future__ import annotations` is active;
-- zero top-level classes with keyword/metaclass expressions;
-- zero top-level lambda or generator-expression assignments;
-- zero non-simple assignment targets;
-- zero unsupported top-level executable/compound statements.
+## Remaining import-execution audit
 
-Therefore the omitted annotation positions are postponed in this module and
-the other identified gaps do not occur. The measured import-time graph is
-credible for this target. Before Slice B promotes this into a reusable mover,
-the safe choice is to either implement these positions with awareness of
-postponed annotations or make analysis fail closed when unsupported constructs
-are present.
+The requested constructs were checked as follows:
+
+- **Walrus in a module-level comprehension.** `add()` walks the complete
+  assignment value, so loads inside eager list/set/dict comprehensions are
+  seen, including a walrus value. A generator expression is deferred and is
+  currently over-classified. A standalone top-level comprehension is not owned
+  by `top_level_symbols` and remains unsupported. The target contains no
+  comprehension with a walrus.
+- **`__init_subclass__`.** Python calls the immediate parent's hook during
+  class creation. The analyzer records the base expression but does not
+  propagate globals read inside the hook; that interprocedural behavior cannot
+  be ruled out generally. The target defines no `__init_subclass__`, has no
+  internal top-level base edges, and its bases are built-in exception classes.
+- **Decorators on nested classes.** A class nested directly in a class-body
+  statement is covered conservatively by that statement's AST walk; a class
+  nested inside a function is correctly deferred with the function body.
+  Calls and transitive globals inside decorator implementations are not
+  modeled. The target has no decorated nested classes and no internal
+  decorator edge.
+- **Legacy `TypeVar` bounds.** `TypeVar(..., bound=Foo)` evaluates `Foo` as an
+  ordinary call argument and is covered when the call occurs in an analyzed
+  assignment/class-body statement. The target has no `TypeVar` calls.
+- **PEP 695 type parameters.** Bounds, constraints, and type-alias values are
+  lazy, while other generic-definition expressions have more nuanced eager
+  behavior. This worktree runs Python 3.11, where PEP 695 syntax fails parsing,
+  and the target has none. Behavior when the tool itself runs on Python 3.12+
+  is not validated; explicit AST-version support or a fail-closed check is
+  required before claiming general support.
+- **`dataclasses.field(default_factory=...)`.** The factory object expression is
+  loaded when `field()` runs in the class body and is covered by the class-body
+  AST walk; the factory is invoked later during instance initialization. The
+  target has 21 occurrences, all `default_factory=list`, so there is no
+  internal symbol edge. A lambda factory body is deferred but would currently
+  be over-classified.
+
+Other unresolved interprocedural class-creation effects include metaclass
+`__prepare__`/`__new__`, descriptor `__set_name__`, decorator bodies, and helper
+functions called from assignments/defaults/class bodies. The analyzer sees the
+direct callable expression but does not promote globals used inside the called
+body to import-time. It also does not own arbitrary top-level compound
+statements, tuple-unpack assignments, or augmented assignments.
+
+For this target, live AST checks found none of the unsupported shapes above,
+no custom class-creation hooks, no class keywords, no PEP 695 nodes, and no
+internal base/decorator edges. The graph is credible for `kanban_db.py`.
+Before Slice B treats the analyzer as a general mover, unsupported syntax and
+interprocedural hooks should fail closed rather than silently pass.
+
+Language-semantics references used for this audit:
+
+- [Python data model — customizing class creation](https://docs.python.org/3/reference/datamodel.html#customizing-class-creation)
+- [Python dataclasses — default factories](https://docs.python.org/3/library/dataclasses.html#default-factory-functions)
+- [PEP 695 — lazy evaluation](https://peps.python.org/pep-0695/#lazy-evaluation)
