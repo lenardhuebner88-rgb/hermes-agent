@@ -1326,6 +1326,7 @@ def test_escalation_triage_inject_flag_off_no_inject(kanban_home):
 
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
         with kb.write_txn(conn):
             kb._append_event(
                 conn, tid, kb.OPERATOR_ESCALATION_EVENT,
@@ -1335,7 +1336,6 @@ def test_escalation_triage_inject_flag_off_no_inject(kanban_home):
     acfg = _acfg(escalation_channel_id="esc-chan")
     assert not acfg["escalation_triage_inject"]  # default False
 
-    state = new_alert_state()
     asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
 
     assert len(adapter.sent) == 1  # alert was sent
@@ -1355,6 +1355,7 @@ def test_escalation_triage_inject_confirmed_send_one_event(kanban_home):
 
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
         with kb.write_txn(conn):
             kb._append_event(
                 conn, tid, kb.OPERATOR_ESCALATION_EVENT,
@@ -1364,7 +1365,6 @@ def test_escalation_triage_inject_confirmed_send_one_event(kanban_home):
     acfg = _acfg(escalation_channel_id="esc-chan", escalation_triage_inject=True)
     assert acfg["escalation_triage_inject"]
 
-    state = new_alert_state()
     asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
 
     assert len(adapter.sent) == 1  # alert was sent
@@ -1389,6 +1389,7 @@ def test_escalation_triage_inject_deferred_send_no_inject(kanban_home):
 
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="Human needs to decide")
+        state = _primed_state(conn)
         with kb.write_txn(conn):
             kb._append_event(
                 conn, tid, kb.OPERATOR_ESCALATION_EVENT,
@@ -1398,7 +1399,6 @@ def test_escalation_triage_inject_deferred_send_no_inject(kanban_home):
     acfg = _acfg(escalation_channel_id="esc-chan", escalation_triage_inject=True)
     assert acfg["escalation_triage_inject"]
 
-    state = new_alert_state()
     asyncio.run(runner._kanban_alert_rules_tick(acfg, state))
 
     assert len(adapter.sent) == 0  # send failed (no successful delivery)
