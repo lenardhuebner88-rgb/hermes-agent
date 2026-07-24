@@ -17,13 +17,15 @@
 - **Pure-move discipline.** The extraction commit contains moves only. No renames, no reformatting, no bug fixes, no docstring corrections — explicitly including the five defects under Follow-ups. Mixing fixes in invalidates the equivalence gate.
 - **Zero production call-site edits.** No file outside `hermes_cli/` changes its imports or calls. (Test-internal `monkeypatch` string targets are the single, enumerated exception — Task 6.)
 - **No model retypes code.** Every moved line is moved by `split_module.py`. Models author boundary maps (YAML) and tool code only.
-- **Standing rule that outlives this plan.** New fork code never goes into an upstream-owned file. It goes into a fork-owned module reached by a minimal hook. Without this rule `kanban_db.py` re-accumulates and the work is undone within months — it went 9,135 → 38,834 lines while the rule was absent.
+- **Standing rule that outlives this plan.** New fork code never goes into an upstream-owned file. It goes into a fork-owned module reached by a minimal hook. Without this rule `kanban_db.py` re-accumulates and the work is undone within months — it went 9,135 → 38,843 lines while the rule was absent.
 - **Model routing (fixed by the approved spec):** `split_module.py` / `api_snapshot.py` + their tests → **Codex (gpt-5.6-sol)**. The boundary map → **qwen 3.8 via `claude-qwen -p` one-shot only**. Boundary-map approval, gate verification, merge judgment → **Claude Opus 5**.
 - **ToS constraint (binding):** `/usr/local/bin/claude-qwen` line 12 — Token Plan is interactive coding/agent use only. qwen may be used for session-driven one-shots supervised by an interactive session. It must **never** be wired as a kanban lane or cron worker.
 - **Repo git rules:** `origin` is NousResearch upstream — never push there. Push only to `piet-fork`, fast-forward, never `--force`. `git status --short` before any git action; this checkout is edited by parallel sessions.
 - **Test scope:** `scripts/run-affected.sh` while building. Before merge to main: one collection sweep (`pytest --co -q tests/`) plus affected tests. Never run the full suite in both worker and verifier.
 - **Sequencing (operator-set):** the Codex upstream sync in `.claude/worktrees/codex-upstream-sync-20260724` (branch `codex/upstream-sync-20260724`, merging `origin/main` = `306c9f766`) **lands before this restructure starts**. Two operations must not restructure the same file at once. Task 7 Step 0 verifies it landed.
-- **Base commit:** `f3e6afdd6` on `main` (measurements in this plan were taken on `1ef243502`; nothing they measure changed between the two — Task 3 Step 6 re-verifies). Upstream reference: `origin/main` = `306c9f766`. Merge-base: `3bfa6001f` (2026-07-15).
+- **Base commit:** `e86c8a66b` on `main`. Upstream reference: `origin/main` = `306c9f766`. Merge-base: `3bfa6001f` (2026-07-15).
+
+  **Baseline refreshed 2026-07-24.** The figures below were first measured on `1ef243502`; they are now stated for `e86c8a66b`. The only change is `+10/−1` inside `scores_digest`, landed by the `kanban/t_57aaa085` merge (`8f29783e0`, via `aa36b6869`). `scores_digest` is a fork-only symbol, so the effect is confined to two numbers — file lines `38,834 → 38,843` and fork-only lines `23,736 → 23,745`. **All symbol counts are unchanged** (973 total; 733 / 111 / 129), so the ownership map and every structural conclusion stand. Confirmed independently by the tooling and by hand. Historical figures inside the Amendment section at the end deliberately keep the `1ef243502` numbers, because they record what was measured there.
 
 ## Acceptance criteria
 
@@ -38,7 +40,7 @@
    The automatic form (`git merge-tree --write-tree HEAD origin/main`) reports the same 14 today, but becomes **structurally meaningless the moment the Codex upstream sync lands**: that merge makes `origin/main` an ancestor of `main`, so the computed base collapses to `origin/main` itself and the conflict count drops to 0 — measuring nothing, because there is nothing left to merge. The pinned form replays the *same* known upstream delta (`3bfa6001f → 306c9f766`) against whatever `HEAD` is, so before/after stay comparable across the sync. Verified: both forms report 14 on `1ef243502`.
 
    **Note on what the sync does to `kanban_db.py`.** In that merge the file is resolved **as ours** — the staged blob is byte-identical to the fork's version. Upstream's `+693` lines of `kanban_db.py` work between `3bfa6001f` and `306c9f766` are therefore recorded as merged without being applied, and git will not offer them again. That is a deliberate call and a reasonable one — applying them into a 38.8k-line divergent file is precisely what this restructure exists to make possible *later* — but it should be a known cost, not a surprise: this restructure does not recover them. Recovering them is a separate, explicit act (`git diff 3bfa6001f 306c9f766 -- hermes_cli/kanban_db.py` replayed by hand), best done after the extraction, when the file is small enough to reason about.
-2. **Fork-owned lines in the upstream-owned file drop to ~zero.** `hermes_cli/kanban_db.py` currently carries 23,736 lines of fork-only symbols. After extraction it must carry none except the re-export block and the small import-time carve-out (Task 5 Step 3).
+2. **Fork-owned lines in the upstream-owned file drop to ~zero.** `hermes_cli/kanban_db.py` currently carries 23,745 lines of fork-only symbols. After extraction it must carry none except the re-export block and the small import-time carve-out (Task 5 Step 3).
 3. **CodeGraph payoff.** `stat -c%s hermes_cli/kanban_db.py` < 1,048,576, and `codegraph query dispatch_once` returns the real definition.
 4. **API equivalence.** `api_snapshot.py --compare` reports `API IDENTICAL`, and affected tests are green.
 
@@ -60,7 +62,7 @@ Extracting the 733 fork-only symbols removes zero of them, because every conflic
 
 Reducing those conflicts requires the *second* piece of work the delta names as a later candidate: reducing fork divergence inside the 129 shared symbols to hooks. That touches behaviour and cannot ride along with a pure move.
 
-**Recommendation (assumed for the rest of this plan, pending operator confirmation):** re-scope criterion 1 for this pass to *"conflict hunks in `kanban_db.py` must not increase"* — a real regression guard the extraction can actually fail — and promote *"fork-only lines in `kanban_db.py` drop from 23,736 to ~0"* (criterion 2) to the primary success measure. Keep the delta's strict-decrease criterion as the acceptance gate for the follow-on hook-reduction pass, where it is the right test. The extraction remains worth doing on its own: it is the precondition that makes hook-reduction tractable at all, it delivers the CodeGraph payoff, and it is what the standing rule needs in order to have somewhere to put new fork code.
+**Recommendation (assumed for the rest of this plan, pending operator confirmation):** re-scope criterion 1 for this pass to *"conflict hunks in `kanban_db.py` must not increase"* — a real regression guard the extraction can actually fail — and promote *"fork-only lines in `kanban_db.py` drop from 23,745 to ~0"* (criterion 2) to the primary success measure. Keep the delta's strict-decrease criterion as the acceptance gate for the follow-on hook-reduction pass, where it is the right test. The extraction remains worth doing on its own: it is the precondition that makes hook-reduction tractable at all, it delivers the CodeGraph payoff, and it is what the standing rule needs in order to have somewhere to put new fork code.
 
 ---
 
@@ -72,7 +74,7 @@ Byte sizes against CodeGraph's `MAX_FILE_SIZE` (1,048,576 B), verified with `sta
 
 | file | fork today | CodeGraph | upstream's own copy |
 |---|---:|---|---:|
-| `hermes_cli/kanban_db.py` | 1,589,066 | **blind** | 406,482 |
+| `hermes_cli/kanban_db.py` | 1,589,570 | **blind** | 406,482 |
 | `gateway/run.py` | 1,062,191 | **blind** | **1,178,861** |
 | `hermes_cli/web_server.py` | 803,509 | visible | — |
 | `cli.py` | 772,748 | visible | — |
@@ -82,7 +84,7 @@ Byte sizes against CodeGraph's `MAX_FILE_SIZE` (1,048,576 B), verified with `sta
 - **`gateway/run.py` must not be split.** It is 97.6% upstream's file (+519 fork lines vs +3,887 upstream lines since the merge-base), and upstream's own copy is *already* 1.18 MB — blind at upstream too, and growing. Visibility there is purchasable only with permanent divergence against the largest incoming change stream in the repo. `rg` + `docs/kanban/LIFECYCLE.md` remain the documented navigation route for it.
 - **`hermes_cli/web_server.py`** is genuinely contested (+3,667 fork vs +3,681 upstream) and already visible. It needs its own ownership analysis in a later pass.
 
-That leaves exactly one file where both goals are reachable at once: `kanban_db.py`, which the fork grew 9,135 → 38,834 lines while upstream contributed 693.
+That leaves exactly one file where both goals are reachable at once: `kanban_db.py`, which the fork grew 9,135 → 38,843 lines while upstream contributed 693.
 
 ### Ownership map of `kanban_db.py` (fork vs `origin/main`)
 
@@ -90,7 +92,7 @@ A top-level symbol is `UPSTREAM` if a symbol of that name exists in `git show or
 
 | bucket | symbols | fork lines | disposition |
 |---|---:|---:|---|
-| **FORK-only** | 733 | 23,736 | move out to `hermes_cli/kanban_ext/` |
+| **FORK-only** | 733 | 23,745 | move out to `hermes_cli/kanban_ext/` |
 | **UPSTREAM, body byte-identical** | 111 | 1,293 | stay, untouched |
 | **UPSTREAM, body diverged** | 129 | 11,419 | stay; each is a standing conflict site (see below) |
 | upstream-only, absent from fork | 19 | — | nothing to do |
@@ -1081,7 +1083,7 @@ python -m scripts.refactor.split_module hermes_cli/kanban_db.py --analyze
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
 ```
 Expected from `--analyze`: import-time `backward=0`, runtime `backward=140`.
-Expected from `--ownership`: **733** fork-only (23,736 lines), **111** upstream-identical (1,293 lines), **129** upstream-diverged (11,419 lines). If these numbers differ, upstream has moved — re-derive before continuing, do not proceed on stale figures.
+Expected from `--ownership`: **733** fork-only (23,745 lines), **111** upstream-identical (1,293 lines), **129** upstream-diverged (11,419 lines). If these numbers differ, upstream has moved — re-derive before continuing, do not proceed on stale figures.
 
 - [ ] **Step 7: Commit**
 
@@ -1716,7 +1718,7 @@ git show "$TREE:hermes_cli/kanban_db.py" > /tmp/kdb_merged_before.txt
 echo "conflict hunks BEFORE: $(rg -c '^<<<<<<<' /tmp/kdb_merged_before.txt)"
 stat -c%s hermes_cli/kanban_db.py
 ```
-Expected: **14** conflict hunks, **1,589,066** bytes. Write both into the commit message later; they are the denominators for acceptance criteria 1 and 3. Use the pinned `--merge-base` form for the reason given under Acceptance criteria — the automatic form reads 0 once the upstream sync has landed.
+Expected: **14** conflict hunks, **1,589,570** bytes. Write both into the commit message later; they are the denominators for acceptance criteria 1 and 3. Use the pinned `--merge-base` form for the reason given under Acceptance criteria — the automatic form reads 0 once the upstream sync has landed.
 
 - [ ] **Step 3: Compute the import-time carve-out — the symbols that must NOT move**
 
@@ -2005,7 +2007,7 @@ Also record the primary success measure for this pass:
 ```bash
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
 ```
-Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 2** (the carve-out), and fork-only lines from 23,736 to single digits.
+Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 2** (the carve-out), and fork-only lines from 23,745 to single digits.
 
 - [ ] **Step 6: Re-target the patch sites from Task 6**
 
@@ -2097,7 +2099,7 @@ refactor: extract fork-owned kanban code to hermes_cli/kanban_ext (pure move)
 kanban_db.py stays a MODULE FILE, deliberately: upstream's future diffs are
 addressed to that literal path and would not apply to a directory.
 
-733 fork-only symbols (23,736 lines) move to hermes_cli/kanban_ext/. Upstream
+733 fork-only symbols (23,745 lines) move to hermes_cli/kanban_ext/. Upstream
 symbols stay in place, byte-identical. One trailing re-export block keeps all
 ~275 importers and the private-symbol monkeypatches working. Two fork
 constants stay behind because upstream-owned symbols use them as default
@@ -2107,8 +2109,8 @@ Bodies are byte-identical in both directions: kanban_ext reaches back with
 plain symbol imports (kanban_db is fully populated by the time the trailing
 block runs), and kanban_db reaches forward through the names that block binds.
 
-  kanban_db.py size:      1,589,066 -> <after> bytes  (CodeGraph limit 1,048,576)
-  fork-only lines in it:     23,736 -> <after>
+  kanban_db.py size:      1,589,570 -> <after> bytes  (CodeGraph limit 1,048,576)
+  fork-only lines in it:     23,745 -> <after>
   merge conflict hunks:          14 -> <after>
 
 Remaining conflict surface is the 129 upstream symbols the fork edited
@@ -2159,7 +2161,7 @@ codegraph query dispatch_once
 
 Add to `AGENTS.md` and `CLAUDE.md`, in the section that governs where new code goes:
 
-> **New fork code never goes into an upstream-owned file.** `hermes_cli/kanban_db.py` is upstream's file; the fork's extension lives in `hermes_cli/kanban_ext/`. Add fork behaviour there and reach it through the existing re-export, not by editing `kanban_db.py`. The file went 9,135 → 38,834 lines while this rule was absent; without it the extraction is undone within months. The same reasoning applies to `gateway/run.py`, which is 97.6% upstream's and deliberately not split.
+> **New fork code never goes into an upstream-owned file.** `hermes_cli/kanban_db.py` is upstream's file; the fork's extension lives in `hermes_cli/kanban_ext/`. Add fork behaviour there and reach it through the existing re-export, not by editing `kanban_db.py`. The file went 9,135 → 38,843 lines while this rule was absent; without it the extraction is undone within months. The same reasoning applies to `gateway/run.py`, which is 97.6% upstream's and deliberately not split.
 
 - [ ] **Step 3: Correct the code-map guidance**
 
