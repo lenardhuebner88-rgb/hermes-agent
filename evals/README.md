@@ -3,11 +3,20 @@
 Evaluation harness for Hermes Agent — golden-set builders, inspect-ai
 tasks, and Langfuse score pushers.
 
-## Install
+## Install (isolated venv)
+
+The eval harness requires `inspect-ai`, which is NOT in the repo's
+runtime `.venv`.  Create a separate venv outside the repo so the
+runtime environment stays clean:
 
 ```bash
-pip install -e ".[evals]"
+python3 -m venv ~/.hermes/evals/venv
+~/.hermes/evals/venv/bin/pip install -e ".[evals]"
+~/.hermes/evals/venv/bin/inspect --version
 ```
+
+After install, the repo's own `.venv` still lacks `inspect_ai` — the
+eval dependency is fully isolated.
 
 Without the `evals` extra the runtime path is unchanged — nothing in
 `hermes_cli/` or `agent/` imports from `evals/`.
@@ -33,20 +42,21 @@ Labels are balanced to at most 70/30 skew (majority is downsampled).
 ## 2. Run the review-agreement eval
 
 ```bash
-inspect eval evals/review_agreement.py \
-  --model openai/gpt-4o-mini \
-  -T golden_path=~/.hermes/evals/golden/review_agreement.jsonl
+~/.hermes/evals/venv/bin/inspect eval evals/review_agreement.py \
+  --model openai-api/kimi/kimi-for-coding \
+  --limit 20
 ```
 
-Model selection uses inspect-native provider env vars — no hard-coded
-provider.  For an OpenAI-compatible subscription endpoint from
-`~/.hermes/.env`:
+Model selection uses inspect-native `openai-api/<service>/<model>`
+syntax.  The provider reads `<SERVICE>_API_KEY` and
+`<SERVICE>_BASE_URL` from the environment — no hard-coded provider.
+For a subscription endpoint from `~/.hermes/.env`:
 
 ```bash
 source ~/.hermes/.env
-export OPENAI_API_KEY="$HERMES_OPENAI_API_KEY"   # or the matching key
-export OPENAI_BASE_URL="$HERMES_OPENAI_BASE_URL"  # if non-default
-inspect eval evals/review_agreement.py --model openai/gpt-4o-mini
+# Service prefix "kimi" → reads KIMI_API_KEY + KIMI_BASE_URL
+~/.hermes/evals/venv/bin/inspect eval evals/review_agreement.py \
+  --model openai-api/kimi/kimi-for-coding --limit 20
 ```
 
 The solver sends AC text + worker summary and asks for exactly one
@@ -57,7 +67,8 @@ APPROVED as positive class).
 ## 3. Push scores to Langfuse
 
 ```bash
-python -m evals.langfuse_push <path-to-.eval-log>
+source ~/.hermes/.env
+~/.hermes/evals/venv/bin/python -m evals.langfuse_push <path-to-.eval-log>
 ```
 
 Posts scores via `POST /api/public/scores` to loopback Langfuse.

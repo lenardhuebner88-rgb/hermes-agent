@@ -12,6 +12,7 @@ import json
 import os
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -62,6 +63,7 @@ def push_scores(
 
     trace_id = f"inspect-{result.eval_run_id}"
     meta = {"model": result.model, "golden_set_size": result.golden_set_size}
+    ts = datetime.now(timezone.utc).isoformat()
 
     # 1. Create trace via ingestion API
     _post(
@@ -72,9 +74,11 @@ def push_scores(
                 {
                     "type": "trace-create",
                     "id": trace_id,
+                    "timestamp": ts,
                     "body": {
                         "id": trace_id,
                         "name": "eval-review-agreement",
+                        "timestamp": ts,
                         "metadata": meta,
                     },
                 }
