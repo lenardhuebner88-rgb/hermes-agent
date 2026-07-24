@@ -1872,7 +1872,7 @@ def test_review_revision_first_block_auto_retries_once(kanban_home):
     assert task.block_kind is None
 
 
-def test_review_revision_same_body_after_retry_needs_operator(kanban_home):
+def test_review_revision_same_body_after_retry_hits_review_loop_breaker(kanban_home):
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1901,20 +1901,15 @@ def test_review_revision_same_body_after_retry_needs_operator(kanban_home):
             failure_limit=5,
         )
         task = kb.get_task(conn, task_id)
-        skipped = [
-            event.payload
-            for event in kb.list_events(conn, task_id)
-            if event.kind == "auto_retry_skipped"
-        ]
 
     assert retried == []
     assert task is not None
     assert task.status == "blocked"
     assert task.auto_retry_count == 1
-    assert any(payload.get("blocked_kind") == "needs_operator" for payload in skipped)
+    assert task.block_kind == "needs_input"
 
 
-def test_review_revision_changed_body_honors_global_retry_limit(kanban_home):
+def test_review_revision_changed_body_hits_review_loop_breaker(kanban_home):
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1941,35 +1936,16 @@ def test_review_revision_changed_body_honors_global_retry_limit(kanban_home):
             backoff_seconds=0,
             retry_limit=2,
             failure_limit=5,
-        ) == [(task_id, 2)]
-
-        with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET body = ? WHERE id = ?",
-                ("acceptance contract v3", task_id),
-            )
-        _block_as_review_revision(conn, task_id, reason="revision three")
-        retried = kb.auto_retry_blocked_tasks(
-            conn,
-            backoff_seconds=0,
-            retry_limit=2,
-            failure_limit=5,
-        )
+        ) == []
         task = kb.get_task(conn, task_id)
-        exhausted = [
-            event.payload
-            for event in kb.list_events(conn, task_id)
-            if event.kind == "auto_retry_exhausted"
-        ]
 
-    assert retried == []
     assert task is not None
     assert task.status == "blocked"
-    assert task.auto_retry_count == 2
-    assert exhausted[-1] == {"attempts": 2, "limit": 2}
+    assert task.auto_retry_count == 1
+    assert task.block_kind == "needs_input"
 
 
-def test_review_revision_recurrence_does_not_enter_generic_triage(kanban_home):
+def test_review_revision_recurrence_hits_review_loop_breaker(kanban_home):
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
@@ -1984,7 +1960,7 @@ def test_review_revision_recurrence_does_not_enter_generic_triage(kanban_home):
 
     assert task is not None
     assert task.status == "blocked"
-    assert task.block_kind == "review_revision"
+    assert task.block_kind == "needs_input"
     assert task.block_recurrences == kb.BLOCK_RECURRENCE_LIMIT
 
 
