@@ -572,15 +572,18 @@ def test_silent_block_autonomy_review_second_episode_escalates(
             reason="Urteil: NEEDS_REVISION\nWarum: still broken after autonomy reready",
             expected_run_id=run_id,
         )
-        # Episode-local count is 0, but task-lifetime total is 1 → escalate.
+        # The review-loop breaker settles the second REQUEST_CHANGES before
+        # autonomy can spend a second re-ready token.
         assert kb._autonomy_reready_count(conn, t) == 0
         assert kb._autonomy_reready_total(conn, t) == 1
-        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)  # default bounds
-        assert any(e["task_id"] == t for e in res2["escalated"])
-        assert res2["autonomy_reready"] == []
+        # The breaker emits the operator escalation immediately, so the silent
+        # sweep has no new escalation to add.
         assert len(_operator_escalations(conn, t)) == 1
+        res2 = kb.escalate_silent_blocks_sweep(conn, now=base)  # default bounds
+        assert res2["escalated"] == []
+        assert res2["autonomy_reready"] == []
         esc = _operator_escalations(conn, t)[0]
-        assert esc.payload.get("autonomy_reready_exhausted") is True
+        assert "review ping-pong breaker" in (esc.payload.get("reason") or "")
         assert kb.get_task(conn, t).status == "blocked"
 
 
@@ -949,11 +952,10 @@ def test_create_task_inventory_reroutes_to_coder(kanban_home):
         assert "inventory_lane_contract" in data
 
 
-def test_review_prose_bait_uses_second_auto_retry_not_operator(
+def test_review_prose_bait_hits_review_loop_breaker(
     kanban_home, all_assignees_spawnable, monkeypatch
 ):
-    """End-to-end: REQUEST_CHANGES with regex bait after one auto_retry still
-    gets attempt 2 — does not settle as operator_question."""
+    """The review-loop breaker wins over regex-bait auto-retry classification."""
     base = 1_800_000_000
     monkeypatch.setattr(kb.time, "time", lambda: base)
     bait = "NEEDS_REVISION: fix token path; which delete/migration is safe?"
@@ -991,7 +993,7 @@ def test_review_prose_bait_uses_second_auto_retry_not_operator(
         assert kb.block_task(
             conn, t, reason=bait + " still", expected_run_id=run_id2,
         )
-        # Must still be retryable — not operator_question
+        # The second review revision is the configured review-loop cap.
         kind = kb._blocked_kind_for_auto_retry(
             bait + " still",
             explicit_block_kind=kb.get_task(conn, t).block_kind,
@@ -1000,13 +1002,15 @@ def test_review_prose_bait_uses_second_auto_retry_not_operator(
             body_hash=kb._task_body_hash("v2-fix"),
             last_auto_retry_body_hash=kb._latest_auto_retry_body_hash(conn, t),
         )
-        assert kind == "retryable"
+        assert kind == "needs_input"
         retried2 = kb.auto_retry_blocked_tasks(
             conn, backoff_seconds=0, retry_limit=2
         )
-        assert retried2 == [(t, 2)]
-        assert kb.get_task(conn, t).status == "ready"
-        assert _operator_escalations(conn, t) == []
+        assert retried2 == []
+        assert kb.get_task(conn, t).status == "blocked"
+        escalations = _operator_escalations(conn, t)
+        assert len(escalations) == 1
+        assert "review ping-pong breaker" in (escalations[0].payload.get("reason") or "")
 
 
 def test_resolve_settled_block_autonomy_route_unit():
