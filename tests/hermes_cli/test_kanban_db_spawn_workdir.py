@@ -797,6 +797,57 @@ def test_code_task_safe_contract_is_auto_enriched_before_pickup(
     assert payload["allowed_paths"] == [str(repo)]
 
 
+def test_materialized_workspace_supersedes_stale_code_contract_once(
+    kanban_home, tmp_path, monkeypatch,
+):
+    """A dir task claimed before chain-worktree materialization must publish
+    one replacement contract for workers, not retain the live-checkout rails.
+    """
+    monkeypatch.setattr(
+        kb, "_review_gate_config", lambda: {"code_roles": ["coder"]}
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="materialize code workspace",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        task = kb.claim_task(conn, tid)
+        assert task is not None
+
+        chain_worktree = repo / ".worktrees" / "kanban" / tid
+        chain_worktree.mkdir(parents=True)
+        kb._apply_materialized_dispatch_workspace(
+            conn, task, chain_worktree, f"kanban/{tid}"
+        )
+        contract_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+        latest = contract_events[-1].payload
+        assert latest is not None
+
+        kb._apply_materialized_dispatch_workspace(
+            conn, task, chain_worktree, f"kanban/{tid}"
+        )
+        repeated_contract_events = [
+            event for event in kb.list_events(conn, tid)
+            if event.kind == "code_task_contract_inferred"
+        ]
+
+    assert len(contract_events) == 2
+    assert latest["repo_workspace"] == f"dir:{chain_worktree}"
+    assert latest["allowed_paths"] == [str(chain_worktree)]
+    assert latest["source"] == "materialized_dispatch"
+    assert latest["supersedes"] is True
+    assert len(repeated_contract_events) == len(contract_events)
+
+
 def test_absolute_paths_from_text_rejects_single_segment_prose_token():
     """B2.1: the allowed-paths parser must not scoop a single-segment slash token
     out of prose. The observed defect: a body mentioning the dispatcher action
