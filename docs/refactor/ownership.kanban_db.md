@@ -1,0 +1,143 @@
+# Ownership of hermes_cli/kanban_db.py
+
+- Upstream reference: `origin/main`
+- FORK-only: 733 symbols, 23745 lines -> move to hermes_cli/kanban_ext/
+- UPSTREAM identical: 111 symbols, 1293 lines -> stay
+- UPSTREAM diverged: 129 symbols, 11419 lines -> stay
+
+## Standing conflict surface (the hook-reduction backlog)
+
+Each row is a symbol the fork edited inside a body upstream also owns. These are
+the only remaining merge-conflict sites once the extraction lands.
+
+| symbol | fork lines | upstream lines |
+|---|---:|---:|
+| `_dispatch_once_locked` | 1297 | 400 |
+| `complete_task` | 612 | 208 |
+| `_migrate_add_optional_columns` | 569 | 256 |
+| `create_task` | 491 | 378 |
+| `detect_crashed_workers` | 456 | 268 |
+| `decompose_triage_task` | 429 | 230 |
+| `SCHEMA_SQL` | 407 | 187 |
+| `_record_task_failure` | 404 | 162 |
+| `block_task` | 339 | 213 |
+| `_default_spawn` | 310 | 193 |
+| `Task` | 290 | 176 |
+| `claim_task` | 237 | 120 |
+| `check_respawn_guard` | 223 | 133 |
+| `archive_task` | 190 | 24 |
+| `release_stale_claims` | 181 | 144 |
+| `_end_run` | 160 | 55 |
+| `detect_stale_running` | 149 | 127 |
+| `_persist_scratch_completion_artifacts` | 145 | 107 |
+| `unblock_task` | 137 | 64 |
+| `claim_unseen_events_for_sub` | 134 | 49 |
+| `recompute_ready` | 133 | 85 |
+| `claim_review_task` | 131 | 73 |
+| `enforce_max_runtime` | 127 | 112 |
+| `DispatchResult` | 126 | 58 |
+| `_terminate_reclaimed_worker` | 118 | 60 |
+| `board_stats` | 104 | 34 |
+| `_resolve_worker_cli_toolsets` | 97 | 32 |
+| `Run` | 97 | 52 |
+| `reclaim_task` | 93 | 67 |
+| `promote_task` | 93 | 68 |
+| `connect` | 89 | 104 |
+| `specify_triage_task` | 88 | 89 |
+| `dispatch_once` | 85 | 68 |
+| `_cross_process_init_lock` | 83 | 82 |
+| `_dispatch_tick_lock` | 82 | 83 |
+| `_guard_existing_db_is_healthy` | 82 | 93 |
+| `_cleanup_workspace` | 74 | 67 |
+| `_verify_created_cards` | 74 | 73 |
+| `_resolve_worktree_workspace` | 71 | 87 |
+| `edit_completed_task_result` | 68 | 65 |
+| `_REBUILD_SPECS` | 68 | 42 |
+| `run_daemon` | 67 | 53 |
+| `heartbeat_worker` | 67 | 49 |
+| `schedule_task` | 65 | 43 |
+| `_pid_alive` | 63 | 62 |
+| `_synthesize_ended_run` | 57 | 49 |
+| `unseen_events_for_sub` | 56 | 47 |
+| `list_tasks` | 56 | 50 |
+| `_set_worker_pid` | 52 | 19 |
+| `_backup_corrupt_db` | 52 | 55 |
+| `rewind_notify_cursor` | 51 | 27 |
+| `known_assignees` | 49 | 33 |
+| `add_attachment` | 48 | 47 |
+| `_try_cleanup_parent_workspaces` | 47 | 38 |
+| `remove_board` | 46 | 46 |
+| `_has_sticky_block` | 44 | 36 |
+| `write_board_metadata` | 42 | 43 |
+| `_check_file_length_invariant` | 42 | 37 |
+| `add_notify_sub` | 42 | 34 |
+| `write_txn` | 38 | 39 |
+| `delete_archived_task` | 38 | 24 |
+| `add_comment` | 37 | 20 |
+| `_merge_completion_prose_artifacts` | 36 | 45 |
+| `delete_task` | 35 | 21 |
+| `_ensure_git_worktree` | 35 | 28 |
+| `list_profiles_on_disk` | 34 | 33 |
+| `connect_closing` | 34 | 33 |
+| `assign_task` | 33 | 31 |
+| `unlink_tasks` | 33 | 19 |
+| `kanban_db_path` | 32 | 23 |
+| `read_worker_log` | 31 | 29 |
+| `init_db` | 29 | 28 |
+| `delete_attachment` | 29 | 22 |
+| `_maybe_emit_scratch_tip` | 29 | 27 |
+| `attachments_root` | 28 | 28 |
+| `_cleanup_worker_tmux` | 27 | 24 |
+| `_to_epoch` | 27 | 26 |
+| `_protocol_violation_streak` | 27 | 48 |
+| `_append_event` | 27 | 22 |
+| `workspaces_root` | 26 | 20 |
+| `list_events` | 26 | 22 |
+| `worker_log_rotation_config` | 25 | 25 |
+| `_fire_kanban_lifecycle_hook` | 25 | 23 |
+| `_git_common_dir` | 24 | 17 |
+| `_managed_scratch_path_info` | 24 | 50 |
+| `_git_dir` | 24 | 17 |
+| `_sqlite_connect` | 23 | 13 |
+| `gc_worker_logs` | 23 | 22 |
+| `has_spawnable_review` | 22 | 23 |
+| `kanban_home` | 22 | 21 |
+| `_git_toplevel` | 21 | 21 |
+| `_insert_completion_attachment` | 21 | 22 |
+| `_record_spawn_failure` | 21 | 14 |
+| `_git_branch_exists` | 19 | 12 |
+| `_resolve_rate_limit_cooldown_seconds` | 18 | 20 |
+| `list_comments` | 18 | 15 |
+| `_clear_failure_counter` | 17 | 16 |
+| `gc_events` | 17 | 15 |
+| `_canonical_assignee` | 16 | 7 |
+| `parent_results` | 15 | 13 |
+| `_git_current_branch` | 15 | 15 |
+| `Attachment` | 15 | 12 |
+| `set_current_board` | 15 | 16 |
+| `_looks_like_tls_record_at` | 14 | 14 |
+| `task_age` | 14 | 16 |
+| `_default_board_display_name` | 13 | 8 |
+| `VALID_BLOCK_KINDS` | 13 | 1 |
+| `_find_missing_parents` | 13 | 11 |
+| `list_notify_subs` | 12 | 10 |
+| `_unique_attachment_path` | 12 | 15 |
+| `VALID_STATUSES` | 11 | 1 |
+| `build_worker_context` | 11 | 246 |
+| `Comment` | 11 | 7 |
+| `_error_fingerprint` | 10 | 9 |
+| `_claimer_id` | 9 | 8 |
+| `get_attachment` | 9 | 16 |
+| `list_attachments` | 6 | 18 |
+| `_current_run_id` | 6 | 5 |
+| `clear_current_board` | 6 | 7 |
+| `set_branch_name` | 6 | 8 |
+| `_worker_survived_termination` | 6 | 14 |
+| `get_run` | 6 | 5 |
+| `link_tasks` | 5 | 28 |
+| `DEFAULT_LOG_ROTATE_BYTES` | 1 | 1 |
+| `_CTX_MAX_PRIOR_ATTEMPTS` | 1 | 1 |
+| `_CTX_MAX_COMMENTS` | 1 | 1 |
+| `_CTX_MAX_COMMENT_BYTES` | 1 | 1 |
+| `_CTX_MAX_FIELD_BYTES` | 1 | 1 |
+| `_CTX_MAX_BODY_BYTES` | 1 | 1 |

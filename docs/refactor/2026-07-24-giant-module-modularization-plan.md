@@ -68,6 +68,21 @@ All 14 conflict regions sit **inside upstream-owned symbols that stay in `kanban
 
 Extracting the 733 fork-only symbols removes zero of them, because every conflict is caused by the fork having edited *inside* a function upstream also edited. Those bodies stay verbatim by design. The delta itself identifies this bucket as "the one that decides whether this exercise actually succeeds" — the measurement confirms it decides it, and it decides against criterion 1 as currently sequenced.
 
+> **Confirmed end-to-end on 2026-07-25 (Task 5), no longer a prediction.** The approved
+> boundary map was run through `extract_to_package` against a *copy* of `kanban_db.py`, the
+> resulting origin file and `kanban_ext/` package were written into a temporary git index, and
+> the pinned merge was replayed against that synthetic tree (no ref was moved):
+>
+> ```
+> conflict hunks BEFORE (pinned base): 14
+> conflict hunks AFTER  (pinned base): 14
+> ```
+>
+> Extraction moves the number by exactly **zero**. Task 7 will satisfy criteria 2, 3 and 4 and
+> leave criterion 1 untouched; only Task 8 can move it. The same dry run measured the post-
+> extraction origin file at **604,371 B / 14,187 lines** (from 1,589,570 B / 38,843) — criterion 3
+> met with room to spare, against a plan projection of ≈565,000 B.
+
 Reducing those conflicts requires the *second* piece of work the delta names as a later candidate: reducing fork divergence inside the 129 shared symbols to hooks. That touches behaviour and cannot ride along with a pure move.
 
 ~~Recommendation: re-scope criterion 1 to "must not increase" and defer strict decrease to a follow-on pass.~~ **Superseded by the operator decision above.** Strict decrease stays, and the hook work that achieves it is now Task 8 of this plan rather than a sequel. The extraction (Task 7) keeps its own value — it is the precondition that makes the hook work tractable, it delivers the CodeGraph payoff, and the standing rule needs somewhere to put new fork code — but it is no longer the end of the job.
@@ -1811,7 +1826,49 @@ EOF
 ```
 Expected: exactly 3 references naming 2 distinct symbols — `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` (default argument of both `_dispatch_once_locked` and `dispatch_once`) and `_SCHEDULE_DUE_UNSPECIFIED` (default argument of `schedule_task`).
 
-Annotations are **not** a source of carve-out here: the module carries `from __future__ import annotations`, so they are strings. Do not add `_ScheduleDueUnspecified` to this set — an earlier revision of this plan did, wrongly. If this step ever reports annotation-driven references for this file, the classifier has become future-*unaware* and is over-reporting.
+> **CORRECTION 2026-07-25 — the snippet above is wrong, and the carve-out is 3, not 2.**
+> Two defects, both found by running the mover on a copy rather than by reading:
+>
+> 1. **It omits `annotations_postponed=`.** Since the Slice A annotation fix,
+>    `layering.import_time_names` takes that keyword and **defaults to `False`**. Called as
+>    written it treats annotations as import-time and over-reports — it returns 4 references /
+>    3 symbols, the extra being `_ScheduleDueUnspecified` *via the annotation*. That is the
+>    over-report the paragraph below correctly warns about. Pass
+>    `annotations_postponed=layering.annotations_are_postponed(tree)`.
+>
+> 2. **It is not transitive.** It only inspects symbols that are *upstream-owned*, but a
+>    carved-out fork symbol also stays, and its own import-time references must therefore be
+>    carved out too. The set must be closed to a fixpoint:
+>
+>    ```
+>    round 1: dispatch_once         (stays) needs DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
+>    round 1: _dispatch_once_locked (stays) needs DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS
+>    round 1: schedule_task         (stays) needs _SCHEDULE_DUE_UNSPECIFIED
+>    round 2: _SCHEDULE_DUE_UNSPECIFIED (stays) needs _ScheduleDueUnspecified
+>    ```
+>
+>    `_SCHEDULE_DUE_UNSPECIFIED = _ScheduleDueUnspecified()` (line 20117) **constructs** its
+>    value at import time from a fork-only class at line 20113. With the constant carved out
+>    and the class moved, the origin raises `NameError` on import.
+>
+> **The carve-out is therefore `{DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS,
+> _SCHEDULE_DUE_UNSPECIFIED, _ScheduleDueUnspecified}` — 3 symbols.** `extract_to_package`
+> refuses the 2-symbol map with exactly this diagnosis, which is how it was found:
+>
+> ```
+> REFUSING: symbols that stay reference extracted symbols at import time; ...
+>   _SCHEDULE_DUE_UNSPECIFIED needs _ScheduleDueUnspecified (mapped to workspace)
+> ```
+>
+> **This does not resurrect the reverted annotation claim** (`71a8fa29b`, reverted by
+> `a46089034`). That claim said `_ScheduleDueUnspecified` is carved out *because of the
+> annotation on `schedule_task`*, and it was wrong — annotations are postponed in this module.
+> `_ScheduleDueUnspecified` is carved out for an unrelated reason: the **initializer of the
+> other carve-out constant**. Right answer, wrong reason, now with the right reason.
+
+Annotations are **not** a source of carve-out here: the module carries `from __future__ import annotations`, so they are strings. ~~Do not add `_ScheduleDueUnspecified` to this set — an earlier revision of this plan did, wrongly.~~ If this step ever reports annotation-driven references for this file, the classifier has become future-*unaware* and is over-reporting.
+
+**Read the struck sentence carefully against the correction above.** `_ScheduleDueUnspecified` *is* in the carve-out set, but never for an annotation reason. If it appears because of `schedule_task`'s annotation, the classifier is broken. It belongs there because `_SCHEDULE_DUE_UNSPECIFIED` calls it at import time.
 
 These stay in `kanban_db.py`. They are small constants, and they become a second small fork-owned hunk alongside the re-export block — accepted, and far cheaper than the alternatives (reordering the block would break it; converting the default arguments to sentinels would be a behaviour change and violates pure-move discipline).
 
@@ -1891,10 +1948,35 @@ head -30 /tmp/kext_map_draft.yaml
 Check in this order; reject back to Step 5 on any failure:
 
 1. Every symbol in `/tmp/kext_brief.txt` appears exactly once, and **no symbol outside it appears at all** — an upstream symbol sneaking into the map would move upstream code out of the upstream file, which is the exact failure this whole re-aim exists to prevent.
-2. Neither carve-out symbol (`DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS`, `_SCHEDULE_DUE_UNSPECIFIED`) is in the map.
+2. No carve-out symbol is in the map — all **three**: `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS`, `_SCHEDULE_DUE_UNSPECIFIED`, `_ScheduleDueUnspecified` (see the Step 3 correction).
 3. Source order is preserved; only neighbours are grouped.
 4. Each module is 2,000–3,000 lines; module count is 8–12.
 5. Names describe responsibility, not position.
+
+> **CORRECTION 2026-07-25 — check 4's size band is unreachable and was relaxed at the gate.**
+>
+> The 731 fork symbols fall into **31 banner sections that form perfectly contiguous runs** in
+> source order — zero sections are split by an interleaved upstream symbol. Grouping is
+> therefore a partition of 31 ordered sections, which makes checks 1–3 true *by construction*.
+>
+> But section 10 (`Attachments`) is **3,248 lines on its own**, so any group containing it
+> exceeds 3,000. A dynamic-programming search over all contiguous partitions confirms the
+> band is not merely awkward but **infeasible**:
+>
+> | band | achievable group counts |
+> |---|---|
+> | [2000, 3000] | **INFEASIBLE** |
+> | [2000, 3300] | **INFEASIBLE** |
+> | [1500, 3300] | **INFEASIBLE** |
+> | [1300, 3300] | 10, 11 |
+>
+> ([2000, 3300] also fails because sections 14–16 total 1,648 and are hemmed in by 13 (2,672)
+> and 17 (1,944) — neither merge fits.)
+>
+> The approved map lives exactly in the tightest feasible envelope: **10 modules, 1,336–3,248
+> lines**. Splitting a responsibility to satisfy a readability target is the wrong trade, so
+> `Attachments` stays whole. Read check 4 as *"8–12 modules, sized as evenly as whole
+> responsibilities allow"*.
 
 Verify 1 and 2 mechanically rather than by eye:
 
@@ -1932,6 +2014,40 @@ python -m scripts.refactor.split_module hermes_cli/kanban_db.py \
   --analyze --map docs/refactor/boundary-map.kanban_ext.yaml
 ```
 Expected: exit 0, import-time `backward=0`, no `OVERSIZED` module. A non-zero exit means the grouping is not a valid layering — back to Step 5.
+
+> **CORRECTION 2026-07-25 — this step cannot pass as written; use the dry extraction instead.**
+>
+> `--analyze --map` routes through `_section_owner_from_map`, which requires the map to place
+> **every** top-level symbol. The boundary map is deliberately partial — only fork symbols —
+> so it always exits 1:
+>
+> ```
+> boundary map does not place 242 symbol(s): ['ArtifactPreservationError', 'Attachment', ...]
+> exit=1
+> ```
+>
+> (242 = 973 − 731, i.e. exactly the upstream symbols that stay. The failure is the map being
+> correct, not wrong.)
+>
+> The validation that does the intended job is a **full dry extraction on a copy**, which
+> exercises the same refusal rules, emission and ordering logic Task 7 will use, and touches
+> nothing:
+>
+> ```bash
+> D=$(mktemp -d); mkdir -p $D/hermes_cli
+> cp hermes_cli/kanban_db.py $D/hermes_cli/
+> cp docs/refactor/boundary-map.kanban_ext.yaml $D/map.yaml
+> cd $D && PYTHONPATH=/home/piet/.hermes/hermes-agent \
+>   /home/piet/.hermes/hermes-agent/venv/bin/python -c "
+> import sys, yaml; sys.path.insert(0,'/home/piet/.hermes/hermes-agent')
+> from scripts.refactor import split_module
+> print(split_module.extract_to_package('hermes_cli/kanban_db.py',
+>       yaml.safe_load(open('map.yaml')), 'hermes_cli/kanban_ext'))"
+> ```
+>
+> Expected on the approved map: `extracted 730 symbols ... (10 modules, 52 module-object
+> rewrites)`, `rc = 0`, origin still a file at **604,371 B / 14,187 lines**. This is the run
+> that found the transitive carve-out defect in Step 3.
 
 - [ ] **Step 8: Commit the map and the ownership report**
 
@@ -2072,11 +2188,19 @@ Also record the primary success measure for this pass:
 ```bash
 python -m scripts.refactor.split_module hermes_cli/kanban_db.py --ownership
 ```
-Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 2** (the carve-out), and fork-only lines from 23,745 to single digits.
+Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 3** (the carve-out — see the Step 3 correction), and fork-only lines from 23,745 to single digits. Measured on the dry run: origin **604,371 B / 14,187 lines**, package 10 modules, 730 symbols moved, 52 module-object rewrites.
 
 - [ ] **Step 6: Re-target the patch sites from Task 6**
 
 For each site whose symbol moved, change `hermes_cli.kanban_db.<symbol>` to `hermes_cli.kanban_ext.<submodule>.<symbol>`, and `setattr(kanban_db, "<symbol>", ...)` to `setattr(kanban_ext.<submodule>, "<symbol>", ...)`. Sites whose symbol stayed in `kanban_db.py` are left alone.
+
+> **Measured 2026-07-25 (Task 6): this step is a NO-OP for the approved map.** All 9 patched
+> symbols (`connect`, `init_db`, `_record_task_failure`, `_record_worker_exit`, `task_age`,
+> `kanban_db_path`, `dispatch_once`, `_pid_alive`, `_check_file_length_invariant`) are
+> **upstream-owned and stay**; the `os` / `time` / `sqlite3` module-attribute patches are
+> unaffected because submodules copy the header verbatim and share the same module objects.
+> No test file changes. Details and the control probe: `docs/refactor/patch-targets.kanban_db.md`.
+> Re-run that classification if the boundary map ever changes.
 
 ```bash
 scripts/run-affected.sh
