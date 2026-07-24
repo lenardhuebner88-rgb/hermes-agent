@@ -388,3 +388,25 @@ def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
     assert "..." not in out or "weitere" in out
     # Trend must show omission marker for the 200-week span
     assert "weitere" in out
+
+    # Retained-newest invariant: the current/newest week must be present
+    # in the trend while early old weeks are omitted.
+    import re
+
+    now_dt = datetime.now(tz=timezone.utc)
+    current_monday = now_dt.date() - timedelta(days=now_dt.weekday())
+    _, current_iso_week, _ = current_monday.isocalendar()
+    trend_line = next(
+        (ln for ln in out.splitlines() if ln.startswith("Trend:")), ""
+    )
+    assert f"W{current_iso_week:02d}" in trend_line, (
+        f"newest week W{current_iso_week:02d} must be retained in trend, "
+        f"got: {trend_line!r}"
+    )
+    # The omission marker must account for the vast majority of the
+    # 200 requested weeks (budget keeps ~30 → >150 omitted).
+    m = re.search(r"\+(\d+) weitere", trend_line)
+    assert m, f"omission marker missing in trend: {trend_line!r}"
+    assert int(m.group(1)) > 150, (
+        f"expected >150 omitted old weeks, got {m.group(1)}"
+    )
