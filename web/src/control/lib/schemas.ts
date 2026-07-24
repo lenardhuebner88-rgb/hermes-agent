@@ -20,3 +20,4 @@ export * from "./schemas/flowTriageDisposition";
 export * from "./schemas/loops";
 export * from "./schemas/projekte";
 export * from "./schemas/operatorDigest";
+export * from "./schemas/scorecard";

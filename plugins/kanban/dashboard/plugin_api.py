@@ -2390,6 +2390,14 @@ _control_routes_module = load_api_extension(
 for _extension_name in _control_routes_module.__all__:
     globals()[_extension_name] = getattr(_control_routes_module, _extension_name)
 
+_scorecard_routes_module = load_api_extension(
+    Path(__file__).with_name("scorecard_routes.py"),
+    globals(),
+    extension_name="scorecard_routes",
+)
+for _extension_name in _scorecard_routes_module.__all__:
+    globals()[_extension_name] = getattr(_scorecard_routes_module, _extension_name)
+
 _lane_routes_module = load_api_extension(
     Path(__file__).with_name("lane_routes.py"),
     globals(),
