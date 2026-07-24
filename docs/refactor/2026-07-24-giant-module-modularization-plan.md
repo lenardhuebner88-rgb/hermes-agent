@@ -174,6 +174,7 @@ Classified with `layering.py`'s import-time/runtime distinction:
   | `_dispatch_once_locked` | `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` | default argument |
   | `dispatch_once` | `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` | default argument |
   | `schedule_task` | `_SCHEDULE_DUE_UNSPECIFIED` | default argument |
+  | `schedule_task` | `_ScheduleDueUnspecified` | **parameter annotation** |
 
 ### Structural facts
 
@@ -1793,7 +1794,9 @@ for name, node in top.items():
 print(f"\ncarve-out set ({len(carve)}): {sorted(carve)}")
 EOF
 ```
-Expected: exactly 3 references naming 2 distinct symbols — `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` (used as a default argument by both `_dispatch_once_locked` and `dispatch_once`) and `_SCHEDULE_DUE_UNSPECIFIED` (default argument of `schedule_task`).
+Expected: exactly **4** references naming **3** distinct symbols — `DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS` (default argument of both `_dispatch_once_locked` and `dispatch_once`), `_SCHEDULE_DUE_UNSPECIFIED` (default argument of `schedule_task`), and `_ScheduleDueUnspecified` (**parameter annotation** of `schedule_task`).
+
+The third is only visible once `import_time_names` covers annotations. `hermes_cli/kanban_db.py` has no `from __future__ import annotations`, so annotations are evaluated when the module body runs. If this step reports only 3 references / 2 symbols, the classifier is still missing annotations — fix it before mapping, or `--extract` will emit a file that raises `NameError` on import instead of refusing.
 
 These stay in `kanban_db.py`. They are small constants, and they become a second small fork-owned hunk alongside the re-export block — accepted, and far cheaper than the alternatives (reordering the block would break it; converting the default arguments to sentinels would be a behaviour change and violates pure-move discipline).
 
@@ -1808,7 +1811,8 @@ import ast, json
 from scripts.refactor import layering
 r = json.load(open('/tmp/kdb_ownership.json'))
 fork_only = set(r['fork_only']) - {'DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS',
-                                   '_SCHEDULE_DUE_UNSPECIFIED'}
+                                   '_SCHEDULE_DUE_UNSPECIFIED',
+                                   '_ScheduleDueUnspecified'}
 src = open('hermes_cli/kanban_db.py').read()
 tree, lines = ast.parse(src), src.splitlines()
 top = layering.top_level_symbols(tree)
@@ -1873,7 +1877,7 @@ head -30 /tmp/kext_map_draft.yaml
 Check in this order; reject back to Step 5 on any failure:
 
 1. Every symbol in `/tmp/kext_brief.txt` appears exactly once, and **no symbol outside it appears at all** — an upstream symbol sneaking into the map would move upstream code out of the upstream file, which is the exact failure this whole re-aim exists to prevent.
-2. Neither carve-out symbol (`DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS`, `_SCHEDULE_DUE_UNSPECIFIED`) is in the map.
+2. No carve-out symbol (`DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS`, `_SCHEDULE_DUE_UNSPECIFIED`, `_ScheduleDueUnspecified`) is in the map.
 3. Source order is preserved; only neighbours are grouped.
 4. Each module is 2,000–3,000 lines; module count is 8–12.
 5. Names describe responsibility, not position.
@@ -1885,7 +1889,8 @@ cd /home/piet/.hermes/hermes-agent
 python - <<'EOF'
 import json, yaml
 r = json.load(open('/tmp/kdb_ownership.json'))
-carve = {'DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS', '_SCHEDULE_DUE_UNSPECIFIED'}
+carve = {'DEFAULT_AUTO_RETRY_BLOCKED_BACKOFF_SECONDS', '_SCHEDULE_DUE_UNSPECIFIED',
+         '_ScheduleDueUnspecified'}
 expected = set(r['fork_only']) - carve
 m = yaml.safe_load(open('/tmp/kext_map_draft.yaml'))
 mapped = [s for e in m['modules'] for s in e['symbols']]
