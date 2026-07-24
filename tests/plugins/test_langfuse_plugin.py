@@ -555,13 +555,16 @@ class TestPropagateAttributesExportContract:
         exporter = InMemorySpanExporter()
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(exporter))
-        # Real LangfuseSpanProcessor with dummy creds — no network calls,
-        # but exercises the real on_start propagation logic (lines 98-116).
+        # Real LangfuseSpanProcessor with an injected InMemorySpanExporter —
+        # no OTLP-HTTP exporter is constructed, no network calls are made.
+        # The on_start propagation logic (span_processor.py:147-165) runs
+        # identically regardless of the downstream exporter.
         provider.add_span_processor(
             LangfuseSpanProcessor(
                 public_key="pk-contract-test",
-                secret_key="sk-contract-test",
+                secret_key="sk-contract-test-dummy",
                 base_url="http://localhost:1",
+                span_exporter=InMemorySpanExporter(),
             )
         )
         tracer = provider.get_tracer("contract-test")
