@@ -401,6 +401,16 @@ class TestKanbanWorkerTraceMetadata:
             "kanban_run_id": "123", "kanban_board": "planspec", "kanban_profile": "coder",
         }
         assert propagated["tags"] == ["hermes", "langfuse", "kanban-worker"]
+        # Regression: kanban identity must be propagated to TRACE level,
+        # not just stamped on the root span.  Without metadata= in
+        # propagate_attributes(), Langfuse v4 creates the trace with
+        # empty metadata and the exporter can never match it.
+        assert propagated["metadata"] == {
+            "kanban_task_id": "t-kanban",
+            "kanban_run_id": "123",
+            "kanban_board": "planspec",
+            "kanban_profile": "coder",
+        }
 
     def test_root_trace_payload_is_unchanged_outside_kanban_worker(self, monkeypatch):
         mod = importlib.import_module("plugins.observability.langfuse")
@@ -416,6 +426,33 @@ class TestKanbanWorkerTraceMetadata:
             "model": "model", "api_mode": "chat",
         }
 
+    def test_propagated_metadata_absent_outside_kanban_worker(self, monkeypatch):
+        """Non-worker traces must not receive a metadata kwarg at all."""
+        mod = importlib.import_module("plugins.observability.langfuse")
+        for name in ("HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_BOARD", "HERMES_PROFILE"):
+            monkeypatch.delenv(name, raising=False)
+        propagated = {}
+
+        class _Attributes:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_propagate_attributes(**kwargs):
+            propagated.update(kwargs)
+            return _Attributes()
+
+        monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
+        self._start_root_trace(mod)
+
+        # metadata key must be completely absent, not merely None
+        assert "metadata" not in propagated
+        assert "kanban-worker" not in propagated.get("tags", [])
+        # Exact kwargs for non-worker: session_id, trace_name, tags only
+        assert set(propagated.keys()) == {"session_id", "trace_name", "tags"}
+
     def test_kanban_metadata_env_failure_is_fail_soft(self, monkeypatch):
         mod = importlib.import_module("plugins.observability.langfuse")
 
@@ -424,6 +461,172 @@ class TestKanbanWorkerTraceMetadata:
 
         monkeypatch.setattr(mod.os.environ, "get", raise_on_get)
         assert mod._kanban_worker_metadata() == {}
+
+
+@pytest.fixture()
+def real_propagate_attributes():
+    try:
+        from langfuse import propagate_attributes as real_pa
+    except ImportError:
+        pytest.skip("langfuse SDK not installed")
+    return real_pa
+
+
+class TestPropagateAttributesSDKContract:
+    """Verify the real Langfuse SDK contract for propagate_attributes(metadata=...).
+
+    The regression tests above use a **kwargs fake that accepts any keyword.
+    This class pins the actual SDK signature so an incompatible SDK upgrade
+    is caught at test time rather than silently failing in production.
+    """
+
+    def test_metadata_is_keyword_only_param(self, real_propagate_attributes):
+        """propagate_attributes must accept metadata as a keyword-only arg."""
+        import inspect
+
+        sig = inspect.signature(real_propagate_attributes)
+        params = sig.parameters
+        assert "metadata" in params, (
+            f"propagate_attributes signature lacks 'metadata': {sig}"
+        )
+        meta_param = params["metadata"]
+        assert meta_param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"'metadata' must be KEYWORD_ONLY, got {meta_param.kind.name}"
+        )
+        assert meta_param.default is None, (
+            f"'metadata' default must be None, got {meta_param.default!r}"
+        )
+
+    def test_metadata_kwarg_accepted_at_runtime(self, real_propagate_attributes):
+        """Calling propagate_attributes(metadata={...}) must not raise TypeError."""
+        # This exercises the real SDK entry point (context manager creation,
+        # not the network export) to prove the kwarg is wired through.
+        try:
+            ctx = real_propagate_attributes(
+                session_id="contract-test",
+                trace_name="contract",
+                tags=["contract"],
+                metadata={"kanban_task_id": "t_test", "kanban_run_id": "1"},
+            )
+            # Enter and exit the context manager to prove it is well-formed.
+            with ctx:
+                pass
+        except TypeError as exc:
+            pytest.fail(f"propagate_attributes rejected metadata kwarg: {exc}")
+
+    def test_non_worker_call_omits_metadata(self, real_propagate_attributes):
+        """Non-worker call (no metadata kwarg) must also succeed."""
+        try:
+            with real_propagate_attributes(
+                session_id="contract-test",
+                trace_name="contract",
+                tags=["contract"],
+            ):
+                pass
+        except TypeError as exc:
+            pytest.fail(f"propagate_attributes failed without metadata: {exc}")
+
+
+class TestPropagateAttributesExportContract:
+    """Prove the full SDK export chain: propagate_attributes(metadata=...) →
+    LangfuseSpanProcessor.on_start → span attributes langfuse.trace.metadata.*
+    → LangfuseSpanProcessor.on_end → injected InMemorySpanExporter.
+
+    This uses the REAL LangfuseSpanProcessor (with dummy credentials, no
+    network) and an InMemorySpanExporter injected directly into it.  The
+    separate SimpleSpanProcessor is intentionally absent: assertions read
+    ONLY from the exporter the LangfuseSpanProcessor actually writes to.
+    ``should_export_span=lambda span: True`` ensures the test span passes the
+    default filter (which would otherwise drop non-Langfuse/non-GenAI spans).
+    This reproduces the live failure mode: without propagate_attributes(
+    metadata=...), the exporter sees zero kanban metadata on the trace.
+    """
+
+    @pytest.fixture()
+    def span_capture(self):
+        """Set up a TracerProvider with ONLY the real LangfuseSpanProcessor
+        and an InMemorySpanExporter injected into it.  Returns
+        (tracer, exporter, provider) and tears down."""
+        try:
+            from langfuse._client.span_processor import LangfuseSpanProcessor
+        except ImportError:
+            pytest.skip("langfuse SDK not installed")
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        # Real LangfuseSpanProcessor with an injected InMemorySpanExporter —
+        # no OTLP-HTTP exporter is constructed, no network calls are made.
+        # should_export_span allows all spans so the test span reaches the
+        # injected exporter (default filter drops non-Langfuse/non-GenAI).
+        provider.add_span_processor(
+            LangfuseSpanProcessor(
+                public_key="pk-contract-test",
+                secret_key="sk-contract-test-dummy",
+                base_url="http://localhost:1",
+                span_exporter=exporter,
+                should_export_span=lambda span: True,
+            )
+        )
+        tracer = provider.get_tracer("contract-test")
+        yield tracer, exporter, provider
+        provider.shutdown()
+
+    def test_metadata_exported_as_trace_metadata_span_attributes(
+        self, span_capture, real_propagate_attributes
+    ):
+        """Worker case: metadata dict lands as langfuse.trace.metadata.* on
+        the span exported through the LangfuseSpanProcessor's own exporter."""
+        tracer, exporter, provider = span_capture
+
+        with real_propagate_attributes(
+            session_id="s1",
+            trace_name="worker-trace",
+            tags=["kanban-worker"],
+            metadata={"kanban_task_id": "t_test123", "kanban_run_id": "42"},
+        ):
+            with tracer.start_as_current_span("root-observation"):
+                pass
+
+        provider.force_flush()
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1, f"Expected 1 span, got {len(spans)}"
+        attrs = dict(spans[0].attributes)
+
+        assert attrs.get("langfuse.trace.metadata.kanban_task_id") == "t_test123", (
+            f"kanban_task_id missing from exported span attributes: {sorted(attrs)}"
+        )
+        assert attrs.get("langfuse.trace.metadata.kanban_run_id") == "42", (
+            f"kanban_run_id missing from exported span attributes: {sorted(attrs)}"
+        )
+
+    def test_non_worker_export_has_no_metadata_attributes(
+        self, span_capture, real_propagate_attributes
+    ):
+        """Non-worker case: no metadata kwarg → no langfuse.trace.metadata.*
+        attributes on the span exported through the LangfuseSpanProcessor."""
+        tracer, exporter, provider = span_capture
+
+        with real_propagate_attributes(
+            session_id="s1",
+            trace_name="non-worker-trace",
+            tags=["regular"],
+        ):
+            with tracer.start_as_current_span("root-observation"):
+                pass
+
+        provider.force_flush()
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        attrs = dict(spans[0].attributes)
+
+        metadata_keys = [k for k in attrs if k.startswith("langfuse.trace.metadata")]
+        assert not metadata_keys, (
+            f"Unexpected metadata attributes in non-worker span: {metadata_keys}"
+        )
 
 
 class TestTraceScopeKey:
