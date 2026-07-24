@@ -25,7 +25,11 @@ def reasoning_support_for(provider: str | None, model_id: str) -> list[str]:
         return ["minimal", "low", "medium", "high"]
     if model_id.startswith("claude") or provider == "anthropic":
         return ["low", "medium", "high"]
-    if provider == "moonshotai" or "kimi" in model_id:
+    # Kimi family: detect by PROVIDER, not just a "kimi" substring in the model
+    # id — otherwise short ids on the kimi/kimi-coding transport (e.g. "k3")
+    # fell through to [] while their siblings (kimi-k2.5, kimi-for-coding, …)
+    # on the very same transport advertised [low, medium, high] (F-REASONING-K3).
+    if provider in {"moonshotai", "kimi", "kimi-coding", "kimi-coding-cn"} or "kimi" in model_id:
         return ["low", "medium", "high"]
     if provider == "google" or "gemini" in model_id:
         return ["low", "medium", "high"]
@@ -766,6 +770,23 @@ def _derive_lanes_auth_smoke_status(
         return error_class
     if returncode == "timeout":
         return "timeout"
+    # The requested model answering exactly proves it is reachable. A REAL
+    # fallback substitutes a DIFFERENT model; a provider-label normalization
+    # (a custom OpenAI-compatible endpoint reporting observed_provider="custom"
+    # instead of the configured provider id) or a "fallback" merely mentioned
+    # in the log while the configured chain was NOT actually used must not read
+    # as a fallback — otherwise every custom-endpoint provider (e.g.
+    # alibaba-token-plan) false-positives as "fallback" despite working
+    # (F-PROBE-CUSTOM; matrix C 2026-07-24: 15/19 alibaba chat models were
+    # misclassified even though the requested model echoed the token exactly).
+    if (
+        returncode == 0
+        and response_exact
+        and requested_model
+        and observed_model
+        and observed_model == requested_model
+    ):
+        return "ok"
     if fallback_activated:
         return "fallback"
     if observed_provider and observed_provider != requested_provider:

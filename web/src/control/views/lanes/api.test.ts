@@ -432,6 +432,73 @@ describe("editor rows", () => {
     expect(overInclusive.research).toBeDefined();
   });
 
+  // F3-1: the locked branch of profilesFromEditorRows conflated "locked" with
+  // "claude-cli" and dropped fallback_providers for BOTH. A locked HERMES row
+  // (catalog-locked custom-lane entry) carries a fallback chain that must
+  // survive the serializer; only claude-cli legitimately drops it.
+  function lockedHermesRow(): EditorRow {
+    return {
+      touched: true,
+      initialChoice: "hermes|openai-codex|gpt-5.5",
+      profile: "research",
+      description: "",
+      defaultLabel: "GPT-5.5",
+      defaultRuntime: "hermes",
+      defaultProvider: "openai-codex",
+      defaultModel: "gpt-5.5",
+      defaultFallbackProviders: [{ provider: "openrouter", model: "fb-model" }],
+      worker_runtime: "hermes",
+      provider: "openai-codex",
+      model: "gpt-5.5",
+      fallbackProviders: [{ provider: "openrouter", model: "fb-model" }],
+      locked: true,
+      lockedReason: "catalog-locked",
+      choice: "hermes|openai-codex|gpt-5.5",
+      reasoningSupport: ["minimal", "low", "medium", "high"],
+      defaultReasoningSupport: ["minimal", "low", "medium", "high"],
+      reasoning: null,
+      defaultReasoning: null,
+    };
+  }
+
+  it("F3-1: a locked HERMES row keeps its fallback chain through the serializer", () => {
+    const profiles = profilesFromEditorRows([lockedHermesRow()]);
+    expect(profiles.research).toEqual({
+      worker_runtime: "hermes",
+      provider: "openai-codex",
+      model: "gpt-5.5",
+      fallback_providers: [{ provider: "openrouter", model: "fb-model" }],
+    });
+  });
+
+  it("F3-1: a locked HERMES row still serializes a reasoning change alongside fallbacks", () => {
+    const row = { ...lockedHermesRow(), reasoning: "high" };
+    const profiles = profilesFromEditorRows([row]);
+    expect(profiles.research).toEqual({
+      worker_runtime: "hermes",
+      provider: "openai-codex",
+      model: "gpt-5.5",
+      fallback_providers: [{ provider: "openrouter", model: "fb-model" }],
+      reasoning_effort: "high",
+    });
+  });
+
+  it("F3-1 control: a claude-cli row still drops fallbacks (no fallback transport)", () => {
+    const cliRow: EditorRow = {
+      ...lockedHermesRow(),
+      profile: "premium",
+      worker_runtime: "claude-cli",
+      provider: null,
+      model: "claude-fable-5",
+      choice: "claude-cli|claude-fable-5",
+      fallbackProviders: [{ provider: "openrouter", model: "fb-model" }],
+    };
+    expect(profilesFromEditorRows([cliRow]).premium).toEqual({
+      worker_runtime: "claude-cli",
+      model: "claude-fable-5",
+    });
+  });
+
   it("keeps ordinary profiles on claude-cli when a Claude Max model is selected", () => {
     const cloudMaxLane: Lane = {
       ...lane,

@@ -883,7 +883,17 @@ export function profilesFromEditorRows(
         worker_runtime: "claude-cli" as const,
         model: row.model,
       };
-      out[row.profile] = reasoningChanged ? { ...base, reasoning_effort: reasoningEffort } : base;
+      // F3-1: the locked branch conflated "locked" with "claude-cli" and dropped
+      // fallback_providers for BOTH. Only claude-cli legitimately has no fallback
+      // transport — a locked HERMES row (e.g. a catalog-locked custom-lane entry)
+      // carries a fallback chain that must survive the quick-switch serializer.
+      const withFallbacks =
+        base.worker_runtime === "hermes"
+          ? { ...base, fallback_providers: fallbackProviders }
+          : base;
+      out[row.profile] = reasoningChanged
+        ? { ...withFallbacks, reasoning_effort: reasoningEffort }
+        : withFallbacks;
       continue;
     }
     out[row.profile] = {

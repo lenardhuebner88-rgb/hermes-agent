@@ -581,6 +581,40 @@ def test_lanes_auth_smoke_status_and_reasoning_are_honest():
     assert "fallback activated" in reason
 
 
+def test_lanes_auth_smoke_status_custom_endpoint_exact_model_is_ok_not_fallback():
+    # F-PROBE-CUSTOM: a custom OpenAI-compatible provider (alibaba-token-plan)
+    # resolves to observed_provider="custom" and its fallback chain is merely
+    # logged (fallback_activated=True) — but the requested model echoed the
+    # token exactly. That is reachability, NOT a fallback; classifying it
+    # "fallback" made every alibaba chat model look unreachable (matrix C).
+    plugin_api = _load_plugin_module_for_lanes_auth_smoke()
+    status = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="alibaba-token-plan",
+        requested_model="qwen3.8-max-preview",
+        observed_provider="custom",
+        observed_model="qwen3.8-max-preview",
+        fallback_activated=True,
+        error_class=None,
+    )
+    assert status == "ok"
+
+    # Control: a REAL fallback substitutes a different model (openai-codex
+    # -pro ids are not served and fall back to kimi/k3) and stays "fallback".
+    real = plugin_api._derive_lanes_auth_smoke_status(
+        returncode=0,
+        response_exact=True,
+        requested_provider="openai-codex",
+        requested_model="gpt-5.6-sol-pro",
+        observed_provider="kimi",
+        observed_model="k3",
+        fallback_activated=True,
+        error_class=None,
+    )
+    assert real == "fallback"
+
+
 def test_lanes_auth_smoke_selects_effective_catalog_roles_and_skips_claude_runtime():
     plugin_api = _load_plugin_module_for_lanes_auth_smoke()
     lane = {

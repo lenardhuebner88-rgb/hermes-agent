@@ -66,6 +66,12 @@ def client(plugin_module, kanban_home):
         ("openai-codex", "gpt-5.6-sol", ["minimal", "low", "medium", "high"]),
         (None, "claude-fable-5", ["low", "medium", "high"]),
         ("moonshotai", "kimi-k2.6", ["low", "medium", "high"]),
+        # F-REASONING-K3: short kimi-family ids on the kimi/kimi-coding transport
+        # must match their siblings, not fall through to [] via the "kimi"
+        # substring check (k3 probed ok on kimi-coding — a real working model).
+        ("kimi-coding", "k3", ["low", "medium", "high"]),
+        ("kimi", "k3", ["low", "medium", "high"]),
+        ("kimi-coding", "kimi-for-coding", ["low", "medium", "high"]),
         ("google", "gemini-3.1-pro", ["low", "medium", "high"]),
         ("openrouter", "qwen/qwen3.7-max", ["low", "medium", "high"]),
         ("xai", "grok-4", []),
