@@ -30,6 +30,17 @@ logger = logging.getLogger("gateway.run")
 
 _COMPLETED_HANDOFF_LIMIT = 1600
 
+# Triage-Direktive fuer den synthetischen Orchestrator-Turn nach einem
+# bestaetigten operator_escalation-Alert (kanban.alerts.escalation_triage_inject).
+_ESCALATION_TRIAGE_DIRECTIVE = (
+    "\n\n**Triage-Direktive:** Eskalation nach Runbook abarbeiten — "
+    "/home/piet/vault/00-Canon/board-operator-playbook.md, Abschnitt "
+    "'Runbook: operator_escalation triagieren'. Verdikte/Fingerprints/"
+    "Konflikt-Dateien lesen, genau einen Paved-Road-Handgriff ausfuehren, "
+    "Board-Kommentar mit Evidenz. Nur bei Urteil/Geld/Irreversiblem an Piet "
+    "rueckfragen."
+)
+
 _REPORTING_ROUTE_KINDS = {
     "received", "completed", "blocked", "gave_up", "tree_stalled_flush",
 }
@@ -2128,6 +2139,48 @@ class GatewayKanbanWatchersMixin:
         alerts = await self._kanban_off_loop(_evaluate)
         for alert in alerts:
             if alert["rule"] in _SEND_GATED_RULES:
+                # Already delivered via _send_gated_alert inside
+                # evaluate_alerts. When the escalation-triage-inject flag
+                # is on, additionally feed a synthetic orchestrator turn
+                # for confirmed operator_escalation alerts (AC-2).
+                if (
+                    acfg.get("escalation_triage_inject")
+                    and alert["rule"] == "operator_escalation"
+                    and adapter is not None
+                ):
+                    try:
+                        from gateway.platforms.base import MessageEvent
+                        from gateway.session import SessionSource
+
+                        escalation_channel = (
+                            alert.get("channel_id")
+                            or acfg.get("escalation_channel_id")
+                            or acfg["channel_id"]
+                        )
+                        source = SessionSource(
+                            platform=_Platform.DISCORD,
+                            chat_id=escalation_channel,
+                            chat_type="channel",
+                            thread_id=acfg["thread_id"],
+                        )
+                        synth_event = MessageEvent(
+                            text=alert["text"] + _ESCALATION_TRIAGE_DIRECTIVE,
+                            source=source,
+                            internal=True,
+                        )
+                        await adapter.handle_message(synth_event)
+                        logger.info(
+                            "kanban alerts: injected escalation triage turn "
+                            "for %s",
+                            escalation_channel,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "kanban alerts: escalation triage inject failed "
+                            "for %s: %s",
+                            alert["rule"],
+                            exc,
+                        )
                 continue
             target_channel_id = alert.get("channel_id") or acfg["channel_id"]
             if adapter is None or not target_channel_id:

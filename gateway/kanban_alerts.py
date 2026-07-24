@@ -146,6 +146,9 @@ def load_alerts_config(cfg: Any) -> dict:
         "enabled": bool(raw.get("enabled", False)),
         "channel_id": channel_id or None,
         "escalation_channel_id": escalation_channel_id or None,
+        "escalation_triage_inject": bool(
+            raw.get("escalation_triage_inject", False)
+        ),
         "thread_id": str(raw.get("thread_id") or "").strip() or None,
         "interval_seconds": max(30.0, _num("interval_seconds", DEFAULT_INTERVAL_SECONDS)),
         "cooldown_seconds": max(0.0, _num("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)),
