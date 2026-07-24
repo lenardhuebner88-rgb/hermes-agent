@@ -3099,7 +3099,10 @@ def _complete_one_task(
         _kanban_err(exc)
         return False
     if not completed:
-        print(f"cannot complete {tid} (unknown id or terminal state)", file=sys.stderr)
+        print(
+            f"NOT completed {tid} (state or run mismatch)",
+            file=sys.stderr,
+        )
         return False
     print(f"Completed {tid}")
     return True
