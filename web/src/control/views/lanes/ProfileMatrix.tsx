@@ -112,10 +112,23 @@ function FallbackDrawer({
         <button
           type="button"
           onClick={() => {
-            onCommit(
-              row.profile,
-              draft.filter((fb) => fb.provider && fb.model),
-            );
+            const normalizedDraft = draft
+              .filter((fb) => fb.provider && fb.model)
+              .map((fb) => ({
+                provider: fb.provider,
+                model: fb.model,
+                base_url: fb.base_url ?? null,
+              }));
+            const normalizedCurrent = row.fallbackProviders
+              .filter((fb) => fb.provider && fb.model)
+              .map((fb) => ({
+                provider: fb.provider,
+                model: fb.model,
+                base_url: fb.base_url ?? null,
+              }));
+            if (JSON.stringify(normalizedDraft) !== JSON.stringify(normalizedCurrent)) {
+              onCommit(row.profile, draft.filter((fb) => fb.provider && fb.model));
+            }
             onClose();
           }}
           className="min-h-12 w-full rounded-card border border-live bg-live/15 text-sec font-medium text-bronze-hi"

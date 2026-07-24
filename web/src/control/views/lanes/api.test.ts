@@ -166,14 +166,17 @@ describe("lanes api client", () => {
       active_id: "lane_1",
     }));
 
-    const result = await persistLaneModels({
-      coder: {
-        worker_runtime: "hermes",
-        provider: "openai-codex",
-        model: "gpt-5.5",
-        fallback_providers: [],
+    const result = await persistLaneModels(
+      {
+        coder: {
+          worker_runtime: "hermes",
+          provider: "openai-codex",
+          model: "gpt-5.5",
+          fallback_providers: [],
+        },
       },
-    });
+      ["research"],
+    );
 
     expect(result.written).toEqual(["coder"]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -188,6 +191,7 @@ describe("lanes api client", () => {
           fallback_providers: [],
         },
       },
+      removed_profiles: ["research"],
     });
   });
 });
@@ -361,6 +365,32 @@ describe("editor rows", () => {
         model: "gpt-5.5",
         fallback_providers: [],
       },
+    });
+  });
+
+  it("the quick-switch full-map keep-set preserves a sibling override", () => {
+    const freshRows = editorRows(lane, catalog, MODELS);
+    const coder = freshRows.find((row) => row.profile === "coder")!;
+    const updatedCoder = {
+      ...applyChoice(coder, "hermes|neuralwatt|glm-5.2-fast", MODELS),
+      touched: true,
+    };
+    const profiles = profilesFromEditorRows(
+      freshRows.map((row) =>
+        row.profile === updatedCoder.profile ? updatedCoder : { ...row, touched: true },
+      ),
+    );
+    expect(profiles.coder).toMatchObject({
+      provider: "neuralwatt",
+      model: "glm-5.2-fast",
+    });
+    expect(profiles.premium).toEqual({
+      worker_runtime: "claude-cli",
+      model: "claude-fable-5",
+    });
+    expect(profiles.altprofil).toMatchObject({
+      worker_runtime: "hermes",
+      model: "gpt-5.5",
     });
   });
 

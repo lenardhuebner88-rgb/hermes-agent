@@ -166,6 +166,188 @@ def test_persist_reasoning_effort_writes_yaml_and_rejects_unsupported(
     assert rejected.json()["detail"]["profiles"] == ["coder"]
 
 
+def test_persist_updates_one_lane_profile_and_removes_another(
+    plugin_module,
+    kanban_home,
+    client,
+    monkeypatch,
+):
+    from hermes_cli import profiles as profiles_mod
+
+    profile_dirs = {}
+    for name in ("coder", "research"):
+        profile_dir = kanban_home / "profiles" / name
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text(
+            "model:\n  provider: openai-codex\n  default: gpt-5.6-sol\n",
+            encoding="utf-8",
+        )
+        profile_dirs[name] = profile_dir
+    monkeypatch.setattr(
+        profiles_mod,
+        "get_profile_dir",
+        lambda name: profile_dirs[name],
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_profile_catalog",
+        lambda: [
+            {
+                "name": name,
+                "worker_runtime": "hermes",
+                "default_provider": "openai-codex",
+                "default_model": "gpt-5.6-sol",
+            }
+            for name in ("coder", "research")
+        ],
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_model_catalog",
+        lambda _profiles, _active=None: [
+            {
+                "id": "gpt-5.6-sol",
+                "runtime": "hermes",
+                "provider": "openai-codex",
+            },
+        ],
+    )
+
+    conn = kb.connect()
+    try:
+        lane = kb.create_lane(
+            conn,
+            name="remove-one",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "old-coder",
+                },
+                "research": {
+                    "worker_runtime": "hermes",
+                    "provider": "openrouter",
+                    "model": "old-research",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+    finally:
+        conn.close()
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-sol",
+                },
+            },
+            "removed_profiles": ["research"],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    conn = kb.connect()
+    try:
+        active = kb.get_active_lane(conn)
+        assert active is not None
+        assert active["profiles"]["coder"]["model"] == "gpt-5.6-sol"
+        assert "research" not in active["profiles"]
+    finally:
+        conn.close()
+
+
+def test_persist_overlap_clears_reasoning_and_removes_lane_profile(
+    plugin_module,
+    kanban_home,
+    client,
+    monkeypatch,
+):
+    from hermes_cli import profiles as profiles_mod
+
+    profile_dir = kanban_home / "profiles" / "coder"
+    profile_dir.mkdir(parents=True)
+    config_path = profile_dir / "config.yaml"
+    config_path.write_text(
+        "model:\n"
+        "  provider: openai-codex\n"
+        "  default: gpt-5.6-sol\n"
+        "agent:\n"
+        "  reasoning_effort: high\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles_mod, "get_profile_dir", lambda _name: profile_dir)
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_profile_catalog",
+        lambda: [
+            {
+                "name": "coder",
+                "worker_runtime": "hermes",
+                "default_provider": "openai-codex",
+                "default_model": "gpt-5.6-sol",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_model_catalog",
+        lambda _profiles, _active=None: [
+            {
+                "id": "gpt-5.6-sol",
+                "runtime": "hermes",
+                "provider": "openai-codex",
+            },
+        ],
+    )
+
+    conn = kb.connect()
+    try:
+        lane = kb.create_lane(
+            conn,
+            name="clear-overlap",
+            profiles={
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-sol",
+                },
+            },
+        )
+        kb.activate_lane(conn, lane["id"])
+    finally:
+        conn.close()
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "",
+                },
+            },
+            "removed_profiles": ["coder"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["agent"]["reasoning_effort"] == ""
+
+    conn = kb.connect()
+    try:
+        active = kb.get_active_lane(conn)
+        assert active is not None
+        assert "coder" not in active["profiles"]
+    finally:
+        conn.close()
+
+
 def test_model_probe_status_cache_and_get_lanes_join(
     plugin_module,
     kanban_home,

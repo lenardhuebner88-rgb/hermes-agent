@@ -7,6 +7,7 @@ import {
   isModelReachable,
   persistPayloadFromEditorRows,
   profilesFromEditorRows,
+  removedProfilesFromEditorRows,
   UNREACHABLE_PROBE_STATUSES,
   type EditorRow,
   type Lane,
@@ -157,6 +158,73 @@ describe("reasoning stage roundtrip", () => {
   it("drops a row with neither a model nor a reasoning override", () => {
     const row = { ...coderRow(), touched: true, reasoning: "medium" };
     expect(persistPayloadFromEditorRows([row]).coder).toBeUndefined();
+  });
+
+  it("marks a cleared override for removal without persisting an unchanged config", () => {
+    const row = {
+      ...coderRow(),
+      touched: true,
+      initialChoice: "hermes|gpt-5.6-sol",
+      choice: "",
+      provider: null,
+      model: null,
+    };
+    expect(removedProfilesFromEditorRows([row])).toEqual(["coder"]);
+    expect(profilesFromEditorRows([row]).coder).toBeUndefined();
+  });
+
+  it("persists a reasoning clear and removes the cleared lane override", () => {
+    const row = {
+      ...coderRow(),
+      touched: true,
+      initialChoice: "hermes|gpt-5.6-sol",
+      choice: "",
+      provider: null,
+      model: null,
+      reasoning: null,
+    };
+    expect(removedProfilesFromEditorRows([row])).toEqual(["coder"]);
+    expect(profilesFromEditorRows([row]).coder?.reasoning_effort).toBe("");
+  });
+
+  it("restores the config fallback chain when an override is cleared", () => {
+    const defaultFallbackProviders = [
+      { provider: "openrouter", model: "backup/model" },
+    ];
+    const row = {
+      ...coderRow(),
+      choice: "hermes|openai-codex|gpt-5.6-sol",
+      model: "gpt-5.6-sol",
+      fallbackProviders: [{ provider: "neuralwatt", model: "glm-5.2-fast" }],
+      defaultFallbackProviders,
+    };
+    expect(applyChoice(row, "", REASONING_MODELS).fallbackProviders).toEqual(
+      defaultFallbackProviders,
+    );
+  });
+
+  it("retains fallback base_url in the persist payload", () => {
+    const row = {
+      ...coderRow(),
+      touched: true,
+      choice: "hermes|openai-codex|gpt-5.6-sol",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      fallbackProviders: [
+        {
+          provider: "openai-compatible",
+          model: "backup",
+          base_url: "https://models.example.test/v1",
+        },
+      ],
+    };
+    expect(persistPayloadFromEditorRows([row]).coder?.fallback_providers).toEqual([
+      {
+        provider: "openai-compatible",
+        model: "backup",
+        base_url: "https://models.example.test/v1",
+      },
+    ]);
   });
 
   it("switching to a model without Reasoning drops the staged value (persist stays valid)", () => {

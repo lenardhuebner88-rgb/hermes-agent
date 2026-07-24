@@ -1582,6 +1582,7 @@ def activate_lane_endpoint(
 class LanePersistFallbackEntry(BaseModel):
     provider: ShortText
     model: ShortText
+    base_url: Optional[str] = None
 
 
 class LanePersistProfileEntry(BaseModel):
@@ -1597,6 +1598,7 @@ class LanePersistProfileEntry(BaseModel):
 
 class LanePersistBody(BaseModel):
     profiles: dict[str, LanePersistProfileEntry]
+    removed_profiles: list[str] = Field(default_factory=list)
 
 
 @lane_routes.post("/lanes/persist")
@@ -1620,6 +1622,7 @@ def persist_lane_models_endpoint(
 
         catalog_profiles = _lane_profile_catalog()
         known_profiles = {p["name"] for p in catalog_profiles}
+        removed = list(payload.removed_profiles)
         active_lane_for_catalog = kanban_db.get_active_lane(conn)
         models = _lane_model_catalog(catalog_profiles, active_lane_for_catalog)
         known_models = {m["id"] for m in models}
@@ -1702,6 +1705,16 @@ def persist_lane_models_endpoint(
         active_id = next((lane["id"] for lane in lanes if lane["active"]), None)
         active_lane = next((lane for lane in lanes if lane["id"] == active_id), None)
         active_profiles = (active_lane or {}).get("profiles") or {}
+        unknown_removed = [
+            name
+            for name in removed
+            if name not in known_profiles and name not in active_profiles
+        ]
+        if unknown_removed:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "unknown removed profiles", "profiles": unknown_removed},
+            )
 
         config_snapshots: dict[str, tuple[Path, bool, bytes, int | None]] = {}
         lane_profiles: dict[str, dict[str, Any]] = {}
@@ -1788,9 +1801,11 @@ def persist_lane_models_endpoint(
                     )
 
             failed_profile = "__active_lane__"
-            if lane_profiles and active_id is not None and active_lane is not None:
+            if (lane_profiles or removed) and active_id is not None and active_lane is not None:
                 merged_profiles = dict(active_profiles)
                 merged_profiles.update(lane_profiles)
+                for name in removed:
+                    merged_profiles.pop(name, None)
                 kanban_db.update_lane(conn, active_id, profiles=merged_profiles)
             _invalidate_lane_profile_caches()
         except Exception as exc:

@@ -201,7 +201,7 @@ export interface LanePersistProfileEntry {
   worker_runtime: LaneRuntime;
   provider?: string | null;
   model: string;
-  fallback_providers: Array<{ provider: string; model: string }>;
+  fallback_providers: Array<{ provider: string; model: string; base_url?: string }>;
   /** S1: omit = leave `agent.reasoning_effort` untouched; a value must be in the
    *  target model's reasoning_support (the backend 400s otherwise). */
   reasoning_effort?: string | null;
@@ -519,11 +519,15 @@ export function importOpenRouterModels(rawText: string): Promise<OpenRouterModel
 
 export function persistLaneModels(
   profiles: Record<string, LanePersistProfileEntry>,
+  removed_profiles?: string[],
 ): Promise<LanePersistResult> {
   return fetchJSON<LanePersistResult>(`${BASE}/persist`, {
     method: "POST",
     headers: JSON_HEADERS,
-    body: JSON.stringify({ profiles }),
+    body: JSON.stringify({
+      profiles,
+      ...(removed_profiles ? { removed_profiles } : {}),
+    }),
   });
 }
 
@@ -687,6 +691,7 @@ function cloneFallbacks(value: LaneFallbackProvider[] | undefined): LaneFallback
 
 export interface EditorRow {
   touched?: boolean;
+  initialChoice?: string;
   profile: string;
   description: string;
   /** Label of the profile's config default, for the "Standard (…)" option. */
@@ -744,6 +749,7 @@ export function editorRows(
       profileReasoning != null && support.includes(profileReasoning) ? profileReasoning : null;
     return {
       touched: false,
+      initialChoice: choiceFromEntry(entry),
       profile: p.name,
       description: p.description,
       defaultLabel: p.default_model ? modelLabel(p.default_model, models) : "automatisch",
@@ -772,6 +778,7 @@ export function editorRows(
     const runtime = entry.worker_runtime ?? (entry.model?.startsWith("claude") ? "claude-cli" : "hermes");
     rows.push({
       touched: false,
+      initialChoice: choiceFromEntry(entry),
       profile: name,
       description: "",
       defaultLabel: "automatisch",
@@ -820,7 +827,7 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
       worker_runtime: row.defaultRuntime ?? row.worker_runtime,
       provider: null,
       model: null,
-      fallbackProviders: [],
+      fallbackProviders: row.defaultFallbackProviders,
       reasoningSupport: support,
       reasoning: row.reasoning != null && support.includes(row.reasoning) ? row.reasoning : null,
     };
@@ -890,6 +897,17 @@ export function profilesFromEditorRows(
   return out;
 }
 
+export function removedProfilesFromEditorRows(rows: EditorRow[]): string[] {
+  return rows
+    .filter(
+      (row) =>
+        row.touched &&
+        row.choice === "" &&
+        (row.initialChoice ?? "") !== "",
+    )
+    .map((row) => row.profile);
+}
+
 /** Normalizes `profilesFromEditorRows` output into full persist entries.
  *  Reasoning-only rows (model still "Standard") fall back to the profile-default
  *  model so the payload is always a valid `{worker_runtime, model}` the backend
@@ -907,7 +925,11 @@ export function persistPayloadFromEditorRows(
       .filter((fallback): fallback is LaneFallbackProvider & { provider: string; model: string } =>
         Boolean(fallback.provider && fallback.model),
       )
-      .map((fallback) => ({ provider: fallback.provider, model: fallback.model }));
+      .map((fallback) => ({
+        provider: fallback.provider,
+        model: fallback.model,
+        ...(fallback.base_url ? { base_url: fallback.base_url } : {}),
+      }));
     const model = entry.model ?? row?.defaultModel ?? "";
     if (!model && (entry.reasoning_effort == null || entry.reasoning_effort === "")) continue;
     const payload: LanePersistProfileEntry = {

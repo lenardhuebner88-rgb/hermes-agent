@@ -138,8 +138,10 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
 
   it("renders the Rauch panel with the catalog-probe CTA for the sinnvoll set", async () => {
     render(<LanesView density="airy" />);
-    // fixture has no sinnvoll field → curated heuristic = the 5 claude-cli models
-    await screen.findAllByText("Katalog messen · 5 sinnvolle Modelle");
+    // fixture has no sinnvoll/authenticated fields, so its curated heuristic is
+    // five claude-cli models; none are probe-able through the Hermes endpoint.
+    const ctas = await screen.findAllByText("Katalog messen · 0 sinnvolle Modelle");
+    expect(ctas.every((cta) => (cta.closest("button") as HTMLButtonElement).disabled)).toBe(true);
     // empty-state doctrine: situation → bewertung → aktion (no ok-green)
     expect(screen.getAllByText("Noch keine Messungen").length).toBeGreaterThan(0);
   });

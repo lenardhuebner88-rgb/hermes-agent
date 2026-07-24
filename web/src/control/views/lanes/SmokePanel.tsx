@@ -49,8 +49,8 @@ export function SmokePanel({
   batchRunning: boolean;
   onCatalogProbe: () => void;
 }) {
-  const sinnvoll = filterSinnvoll(models);
-  const probesFor = sinnvoll.map((m) => effectiveProbe(m, probes));
+  const probeable = filterSinnvoll(models).filter((model) => model.runtime === "hermes");
+  const probesFor = probeable.map((m) => effectiveProbe(m, probes));
 
   const reachable = probesFor.filter((p) => p && (p.status === "ok" || p.status === "fallback")).length;
   const blocked = probesFor.filter((p) => p && UNREACHABLE_PROBE_STATUSES.has(p.status)).length;
@@ -65,19 +65,19 @@ export function SmokePanel({
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
-        <KpiTile label={t.erreichbar} value={t.of(reachable, sinnvoll.length)} />
+        <KpiTile label={t.erreichbar} value={t.of(reachable, probeable.length)} />
         <KpiTile label={t.p50} value={p50 != null ? `${p50}` : t.noProbeData} suffix={p50 != null ? "ms" : undefined} />
         <KpiTile label={t.blockiert} value={String(blocked)} dot={blocked > 0 ? "error" : "idle"} />
       </div>
 
       <button
         type="button"
-        disabled={busy || batchRunning || sinnvoll.length === 0}
+        disabled={busy || batchRunning || probeable.length === 0}
         onClick={onCatalogProbe}
         className="flex min-h-12 w-full items-center justify-center gap-2 rounded-card border border-live bg-live px-3 text-sec font-semibold text-surface-0 transition-colors duration-150 hover:bg-bronze-hi disabled:cursor-not-allowed disabled:opacity-40"
       >
         <Activity className="h-4 w-4" />
-        {batchRunning ? t.measuring : t.katalogMessen(sinnvoll.length)}
+        {batchRunning ? t.measuring : t.katalogMessen(probeable.length)}
       </button>
 
       {feed.length === 0 ? (

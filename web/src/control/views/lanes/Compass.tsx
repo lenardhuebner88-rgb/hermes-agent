@@ -92,8 +92,9 @@ export function Compass({
                   <button
                     type="button"
                     aria-pressed={selected}
-                    title={t.bench}
+                    title={fit.model.runtime === "hermes" ? t.bench : "nicht bench-bar (claude-cli)"}
                     aria-label={`${t.bench}: ${fit.model.label}`}
+                    disabled={fit.model.runtime !== "hermes"}
                     onClick={() => toggleSelect(fit.model.id)}
                     className={cn(
                       "inline-flex size-9 shrink-0 items-center justify-center rounded-card border transition-colors duration-150",

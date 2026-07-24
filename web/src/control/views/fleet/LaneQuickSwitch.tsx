@@ -170,7 +170,9 @@ export function LaneQuickSwitch() {
       }
       setState("saving");
       const nextProfiles = profilesFromEditorRows(
-        freshRows.map((row) => (row.profile === updatedRow.profile ? updatedRow : row)),
+        freshRows.map((row) =>
+          row.profile === updatedRow.profile ? updatedRow : { ...row, touched: true },
+        ),
       );
       await updateLane(freshLane.id, { profiles: nextProfiles });
       await refresh("Lane gespeichert; gilt ab dem nächsten Worker-Spawn.");

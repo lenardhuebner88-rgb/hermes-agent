@@ -14,6 +14,7 @@ import {
   persistLaneModels,
   persistPayloadFromEditorRows,
   probeKey,
+  removedProfilesFromEditorRows,
   runCatalogProbe,
   runModelProbe,
   type EditorRow,
@@ -164,6 +165,7 @@ function LanesPlatform({
   const handleAdopt = useCallback(
     (role: CompassRole, model: LaneModelOption) => {
       const row = rows.find((r) => r.profile === role);
+      if (row?.locked) return;
       if (!row) return;
       updateRow(role, applyChoice(row, choiceForModel(model), models));
     },
@@ -171,14 +173,18 @@ function LanesPlatform({
   );
 
   const handleBench = useCallback(async (selected: LaneModelOption[]) => {
-    if (selected.length < 2) return;
+    const probeable = selected.filter((model) => model.runtime === "hermes");
+    if (probeable.length < 2) {
+      setSaveError("Bench benötigt mindestens zwei Hermes-Modelle.");
+      return;
+    }
     setBenchRunning(true);
     try {
       const { results } = await runCatalogProbe({
-        models: selected.map((m) => ({ provider: m.provider ?? "", model: m.id })),
+        models: probeable.map((m) => ({ provider: m.provider ?? "", model: m.id })),
         profile: null,
         timeoutSeconds: 45,
-        limit: selected.length,
+        limit: probeable.length,
       });
       setBenchResults(results);
       setProbes((prev) => {
@@ -338,6 +344,7 @@ export function LanesView(_props: { density?: Density }) {
         await reload();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
+        await reload();
       } finally {
         setBusy(false);
       }
@@ -355,8 +362,9 @@ export function LanesView(_props: { density?: Density }) {
       await run(async () => {
         if (!target.active) await activateLane(target.id);
         const payload = persistPayloadFromEditorRows(rows);
-        if (Object.keys(payload).length > 0) {
-          const result = await persistLaneModels(payload);
+        const removed_profiles = removedProfilesFromEditorRows(rows);
+        if (Object.keys(payload).length > 0 || removed_profiles.length > 0) {
+          const result = await persistLaneModels(payload, removed_profiles);
           if (result.failed.length > 0) {
             throw new Error(
               `Speichern fehlgeschlagen: ${result.failed.map((f) => `${f.profile} (${f.error})`).join(", ")}`,
