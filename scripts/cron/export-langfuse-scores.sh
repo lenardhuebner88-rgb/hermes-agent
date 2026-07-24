@@ -22,12 +22,24 @@ if [[ -f "${HERMES_HOME:-$HOME/.hermes}/.env" ]]; then
     set +a
 fi
 
-# Resolve the Hermes Agent repo root from the script location, falling
-# back to the canonical checkout path.
+# Resolve the Hermes Agent repo root by CONTENT (hermes_cli/main.py must
+# exist), not by .git presence: from the installed location
+# (~/.hermes/scripts/) script_dir/../.. is the home directory, which may
+# legitimately have its own .git (dotfiles) — a bare .git check would then
+# resolve the home dir as repo root (live failure 24.07., cron 23717e2f32ff).
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/../.." 2>/dev/null && pwd)"
-if [[ ! -d "${repo_root}/.git" ]]; then
-    repo_root="${HERMES_AGENT_REPO:-$HOME/.hermes/hermes-agent}"
+repo_root=""
+for cand in "$(cd "${script_dir}/../.." 2>/dev/null && pwd || true)" \
+            "${HERMES_AGENT_REPO:-}" \
+            "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"; do
+    if [[ -n "${cand}" && -f "${cand}/hermes_cli/main.py" ]]; then
+        repo_root="${cand}"
+        break
+    fi
+done
+if [[ -z "${repo_root}" ]]; then
+    echo "export-langfuse-scores: error: hermes repo root not found (checked script location, HERMES_AGENT_REPO, hermes home)" >&2
+    exit 1
 fi
 
 cd "${repo_root}"
