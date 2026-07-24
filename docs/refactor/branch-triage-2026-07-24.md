@@ -77,16 +77,70 @@ Two notes for the operator:
 
 ## Decision
 
-_To be filled in at Step 2._
+Operator decision taken 2026-07-24 in a grill session, after two of the flagged branches were
+re-verified independently. **The "drop all eleven" recommendation was correct for ten of them and
+wrong for one.**
 
 | branch | operator decision | date |
 |---|---|---|
-| `kanban/t_c254b029` | | |
-| `codex/board-model-truth-20260713` | | |
-| `kanban/t_610a9f84` | | |
-| `kanban/t_57aaa085` | | |
-| the remaining 7 | | |
+| `kanban/t_c254b029` | drop (archive + delete) | 2026-07-24 |
+| `codex/board-model-truth-20260713` | drop (archive + delete) | 2026-07-24 |
+| `kanban/t_610a9f84` | drop (archive + delete) | 2026-07-24 |
+| `kanban/t_57aaa085` | **land first**, then archive + delete | 2026-07-24 |
+| the remaining 7 | drop (archive + delete) | 2026-07-24 |
+
+### Correction to the finding
+
+- **`backup/grok-kanban-block-kind-20260715-pre-rebase` — superseded, confirmed.** `git cherry`
+  marks `38f94f9a6` ("stamp block_kind on system parks") as unlanded, but that is another rebase
+  artifact: `hermes_cli/kanban_diagnostics.py` carries the same 5 `block_kind`/`system park`
+  markers on both sides, and `tests/hermes_cli/test_kanban_block_kinds.py` is 696 lines on `main`
+  against the branch's +104. Nothing is lost.
+- **`kanban/t_57aaa085` — NOT superseded.** `tests/hermes_cli/test_scores_digest.py` is **592
+  lines on the branch against 288 on `main`**, plus +188 lines in `hermes_cli/kanban.py` and the
+  `HERMES_HOME` venv fix in `scripts/cron/scores-weekly-digest.sh`. The triage's own caveat was
+  right; its bucketing into archive-and-delete was not. It was landed rather than dropped.
 
 ## Execution record
 
-_To be filled in at Steps 3–5. Every dropped branch is tagged `archive/pre-modularization/<name>` before its ref is deleted, so nothing is unrecoverable._
+**Step 2–5 executed 2026-07-24.**
+
+`kanban/t_57aaa085` was landed first. `main` was 33 commits ahead of the branch's rebase base and
+had evolved the same two files, so this was a real conflict resolution, not a fast-forward:
+
+- `scripts/cron/scores-weekly-digest.sh` → resolved in favour of `main`. Its venv precedence
+  (canonical `venv` before stale sibling `.venv`) is the deliberate later decision and carries a
+  written rationale; both venvs were verified to exist and resolve `hermes_cli` to the live repo,
+  so preferring `venv` costs nothing.
+- `tests/hermes_cli/test_scores_digest.py` → union. `main`'s stricter
+  `test_copied_script_resolves_hermes_home_venv` (asserts `venv` beats a stale `.venv` sibling)
+  plus every test the branch added: high-cardinality budgeting, sidecar write failure, large
+  `--weeks` budget, verdict-filtered approval aggregates.
+
+Gates before landing, all exit 0: `pytest tests/hermes_cli/test_scores_digest.py` → 13 passed ·
+`ruff check` → clean · `pytest --co -q tests/` → 48,666 collected · `scripts/run-affected.sh` →
+50 files, 1,572 tests, 0 failed. No `web/` change, so frontend gates did not apply.
+
+`main` fast-forwarded to `8f29783e0`. The worktree `.worktrees/kanban/t_57aaa085` was removed
+(its work is in `main`).
+
+All eleven branches were then tagged and deleted — **11 tagged, 11 deleted, 0 failures**; each
+delete was gated on its tag resolving to the same SHA as the branch tip. Branch count 105 → 94.
+
+| archived tag | tip |
+|---|---|
+| `archive/pre-modularization/kanban/t_c254b029` | `e978d4bfd` |
+| `archive/pre-modularization/codex/board-model-truth-20260713` | `7b9713ed5` |
+| `archive/pre-modularization/kanban/t_610a9f84` | `0c3ff00e6` |
+| `archive/pre-modularization/backup/grok-kanban-block-kind-20260715-pre-rebase` | `46760f82e` |
+| `archive/pre-modularization/kanban/t_80809063` | `8a46eb264` |
+| `archive/pre-modularization/kanban/t_d2d25240` | `2655a7969` |
+| `archive/pre-modularization/kanban/t_49c1e99b` | `506f094c9` |
+| `archive/pre-modularization/worktree-bridge-cse_01HZiECqoEjuEdJuA5DWYFys` | `65fbcc2fb` |
+| `archive/pre-modularization/kanban/t_57aaa085` | `9a1b79798` |
+| `archive/pre-modularization/salvage/dirty-main-20260712T014834` | `24d785ea1` |
+| `archive/pre-modularization/kanban/t_69536fff` | `d1393da21` |
+
+Restore any of them with `git branch <name> archive/pre-modularization/<name>`.
+
+**Task 0 is closed. The split is no longer gated on branch triage.**
