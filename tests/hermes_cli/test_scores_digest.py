@@ -210,7 +210,67 @@ def test_digest_retry_hotspots(tmp_path, monkeypatch):
     assert digest["retry_hotspots"][0]["rejections"] == 2
 
 
+# ── Regression: high-cardinality profile/model breakdown ──────────────
+
+
+def test_digest_high_cardinality_budgeted_output(tmp_path, monkeypatch):
+    """Regression (reviewer finding 3): with many long distinct profile
+    and model names, the digest must stay <=1800 chars while retaining
+    model, cost/duration, retry, Scorecard, and Langfuse sections on
+    clean entry boundaries (no mid-token truncation)."""
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    with kb.connect_closing() as conn:
+        # 40 distinct profiles with ~50-char names
+        for i in range(40):
+            tid = kb.create_task(conn, title=f"t{i}", assignee="tester")
+            profile = f"very-long-profile-name-{i:03d}-extra-padding-abcdefghij"
+            model = f"very-long-model-name-{i:03d}-extra-padding-klmnopqrstuv"
+            rid = _create_run(conn, task_id=tid, profile=profile, model=model)
+            _insert_verdict(
+                conn,
+                task_id=tid,
+                run_id=rid,
+                value=0.0 if i < 3 else 1.0,
+                created_at=int(monday.timestamp()),
+            )
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_usd",
+                           value=0.05, created_at=int(monday.timestamp()))
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_duration_seconds",
+                           value=90.0, created_at=int(monday.timestamp()))
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_attempt_index",
+                           value=float(i % 5 + 1),
+                           created_at=int(monday.timestamp()))
+
+    out = run_slash("scores --digest --weeks 2")
+
+    # Must stay within Discord limit
+    assert len(out) <= 1800, f"digest is {len(out)} chars, exceeds 1800"
+
+    # Mandatory sections must survive
+    assert "Model:" in out
+    assert "Cost/approved run:" in out
+    assert "Duration/approved run:" in out
+    assert "Retry-Hotspots:" in out
+    assert "Scorecard:" in out
+    assert "Langfuse:" in out
+
+    # Clean entry boundaries: no mid-token truncation
+    # (no line should end with a partial entry like "very-long-pro")
+    for line in out.split("\n"):
+        if line.startswith(("Profile:", "Model:")):
+            # Each entry must be complete: "name: rate (a/t)"
+            # Check that we don't have a dangling partial entry
+            assert not line.rstrip().endswith(("|", ":")), \
+                f"line ends with dangling separator: {line!r}"
+
+    # "+N weitere" marker must appear when entries are omitted
+    assert "weitere" in out
+
+
 # ── Cron-script binary resolution regression (salvage t_a8a941c6 + t_d0bc5e77) ──
+
 
 def test_copied_script_resolves_hermes_home_venv(tmp_path: Path) -> None:
     """Regression (t_57aaa085 + t_d0bc5e77): when the script is copied to
@@ -286,3 +346,256 @@ def test_copied_script_resolves_hermes_home_venv(tmp_path: Path) -> None:
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert f"SELECTED:{venv_bin / 'hermes'}" in result.stdout
     assert "STALE" not in result.stdout
+
+
+# ── Regression: sidecar write failure must be non-zero ──────────────────
+
+
+def test_digest_sidecar_write_failure_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """When the reports dir is unwritable, the digest must fail non-zero
+    instead of silently succeeding without the required sidecar artifact."""
+    _seed_db(tmp_path, monkeypatch)
+
+    # Make reports path a regular file so mkdir raises FileExistsError (OSError)
+    home = tmp_path / ".hermes"
+    reports = home / "reports"
+    reports.write_text("blocker")
+
+    out = run_slash("scores --digest")
+    assert "cannot write digest sidecar" in out, (
+        "digest must report sidecar write failure, not silently succeed"
+    )
+    # The digest markdown must NOT be present when sidecar fails
+    assert "**Kanban Score Digest**" not in out
+
+
+# ── Regression: large --weeks must stay within budget ───────────────────
+
+
+def test_digest_large_weeks_stays_within_budget(tmp_path, monkeypatch, capsys):
+    """--weeks 200 must produce output <= 1800 chars with clean boundaries
+    and all mandatory sections retained (reviewer finding: unbounded trend)."""
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(conn, title="t1", assignee="tester")
+        rid = _create_run(conn, task_id=tid, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=tid, run_id=rid, value=1.0,
+                        created_at=int(monday.timestamp()))
+        _insert_verdict(conn, task_id=tid, run_id=rid, value=0.0,
+                        created_at=int((monday - timedelta(weeks=1)).timestamp()))
+
+    out = run_slash("scores --digest --weeks 200")
+
+    # Hard budget contract
+    assert len(out) <= 1800, f"output is {len(out)} chars, exceeds 1800"
+
+    # All mandatory sections must survive
+    assert "Scorecard" in out
+    assert "Langfuse" in out
+    assert "Approval:" in out
+    assert "Trend:" in out
+
+    # Clean boundaries: no mid-entry truncation artifacts
+    assert "..." not in out or "ältere" in out
+    # Trend must show omission marker for the 200-week span
+    assert "ältere" in out
+
+    # Retained-newest invariant: the current/newest week must be present
+    # in the trend while early old weeks are omitted.
+    import re
+
+    now_dt = datetime.now(tz=timezone.utc)
+    current_monday = now_dt.date() - timedelta(days=now_dt.weekday())
+    _, current_iso_week, _ = current_monday.isocalendar()
+    trend_line = next(
+        (ln for ln in out.splitlines() if ln.startswith("Trend:")), ""
+    )
+    assert f"W{current_iso_week:02d}" in trend_line, (
+        f"newest week W{current_iso_week:02d} must be retained in trend, "
+        f"got: {trend_line!r}"
+    )
+    # The omission marker must account for the vast majority of the
+    # 200 requested weeks (budget keeps ~30 → >150 omitted).
+    m = re.search(r"\+(\d+) ältere", trend_line)
+    assert m, f"omission marker missing in trend: {trend_line!r}"
+    assert int(m.group(1)) > 150, (
+        f"expected >150 omitted old weeks, got {m.group(1)}"
+    )
+    # Marker position: "+N ältere" must appear BEFORE the first retained
+    # week entry (unambiguous older-prefix marker, not trailing suffix).
+    marker_pos = trend_line.index("ältere")
+    first_week_pos = trend_line.index(f"W{current_iso_week:02d}")
+    assert marker_pos < first_week_pos, (
+        f"omission marker must precede retained weeks, "
+        f"got: {trend_line!r}"
+    )
+
+
+# ── Regression: approval counters must count only review_verdict ────────
+
+
+def test_approval_counts_only_review_verdict(tmp_path, monkeypatch):
+    """Critic C-2/C-3: overall and weekly approval counters in both
+    scores_report and scores_digest must count ONLY rows with
+    name='review_verdict'.  Metric scores (run_cost_usd,
+    run_duration_seconds, run_tokens_total, run_attempt_index, F1)
+    must not inflate the denominator.
+
+    Deterministic setup:
+    - Run A: review_verdict=1.0 + run_cost_usd + run_duration_seconds
+    - Run B: review_verdict=0.0 + run_attempt_index
+    - Run C: F1 metric only, NO review_verdict  → must NOT add to denominator
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_usd",
+                       value=0.05, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_duration_seconds",
+                       value=90.0, created_at=ts)
+
+        t2 = kb.create_task(conn, title="t2", assignee="tester")
+        r2 = _create_run(conn, task_id=t2, profile="reviewer", model="gpt5")
+        _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_attempt_index",
+                       value=3.0, created_at=ts)
+
+        # Run C: metric-only, no review_verdict — must NOT affect approval
+        t3 = kb.create_task(conn, title="t3", assignee="tester")
+        r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_usd",
+                       value=0.10, created_at=ts)
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_tokens_total",
+                       value=5000.0, created_at=ts)
+
+        report = kb.scores_report(conn, now=now)
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    # The report retains the raw table size for informational purposes, while
+    # verdict_rows is the denominator for approval: 1 approved out of 2.
+    assert report["rows_total"] == 7
+    assert report["verdict_rows"] == 2
+    assert report["approved_rows"] == 1
+    assert report["approval_rate"] == 0.5
+
+    assert digest["rows_total"] == 2, (
+        f"scores_digest rows_total must count only review_verdict rows, "
+        f"got {digest['rows_total']}"
+    )
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 0.5
+
+    # Weekly approval aggregates must contain only the 2 verdict rows, not
+    # the 7 total score rows.
+    iso_year, iso_week, _ = monday.date().isocalendar()
+    for w in report["weeks"]:
+        if w["year"] == iso_year and w["week"] == iso_week:
+            assert w["rows_total"] == 2, (
+                f"weekly rows_total must count only review_verdict, got {w}"
+            )
+            assert w["approved_rows"] == 1
+            break
+    for w in digest["weekly"]:
+        if w["year"] == iso_year and w["week"] == iso_week:
+            assert w["rows_total"] == 2, (
+                f"digest weekly rows_total must count only review_verdict, got {w}"
+            )
+            assert w["approved_rows"] == 1
+            break
+
+    # by_name still reports all score names (informational, not approval)
+    assert "run_cost_usd" in report["by_name"]
+    assert "run_tokens_total" in report["by_name"]
+
+
+def test_metric_scores_only_on_non_approved_runs(tmp_path, monkeypatch):
+    """Critic C-2/C-3 (round 2): when cost/duration metric scores exist
+    ONLY on rejected/unreviewed runs, the digest must:
+    - report has_metric_scores=True (metrics exist globally)
+    - report approved_run_metric_coverage=False (no approved-run data)
+    - render an explicit coverage-gap line in Markdown, NOT silently omit
+    - JSON must distinguish the two states machine-readably
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        # Approved run WITHOUT metrics
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+
+        # Rejected run WITH metrics (cost + duration)
+        t2 = kb.create_task(conn, title="t2", assignee="tester")
+        r2 = _create_run(conn, task_id=t2, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_cost_usd",
+                       value=0.15, created_at=ts)
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_duration_seconds",
+                       value=120.0, created_at=ts)
+
+        # Unreviewed run WITH metrics (no verdict at all)
+        t3 = kb.create_task(conn, title="t3", assignee="tester")
+        r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_usd",
+                       value=0.20, created_at=ts)
+
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    # JSON state: metrics exist globally, but no approved-run coverage
+    assert digest["has_metric_scores"] is True
+    assert digest["approved_run_metric_coverage"] is False
+    assert digest["cost_duration_per_approved_run"] == []
+
+    # Approval counters still correct (2 verdict rows, 1 approved)
+    assert digest["rows_total"] == 2
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 0.5
+
+    # Markdown must show explicit coverage-gap line, not omit silently
+    md = run_slash("scores --digest --weeks 4")
+    assert "Metriken vorhanden" in md
+    assert "keine approved Runs mit Kosten-/Dauer-Scores" in md
+    # Must NOT show the generic "keine vorhanden" fallback
+    assert "Metrik-Scores: keine vorhanden" not in md
+
+
+def test_metric_scores_on_approved_runs_positive(tmp_path, monkeypatch):
+    """Positive case: approved runs carry cost/duration metrics.
+    Digest must show approved_run_metric_coverage=True and render the
+    cost/duration line normally.
+    """
+    now = _seed_db(tmp_path, monkeypatch)
+    monday = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    ts = int(monday.timestamp())
+
+    with kb.connect_closing() as conn:
+        t1 = kb.create_task(conn, title="t1", assignee="tester")
+        r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
+        _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_usd",
+                       value=0.05, created_at=ts)
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_duration_seconds",
+                       value=90.0, created_at=ts)
+
+        digest = kb.scores_digest(conn, weeks=4, now=now)
+
+    assert digest["has_metric_scores"] is True
+    assert digest["approved_run_metric_coverage"] is True
+    assert len(digest["cost_duration_per_approved_run"]) == 1
+    assert digest["cost_duration_per_approved_run"][0]["cost_usd"] == 0.05
+
+    md = run_slash("scores --digest --weeks 4")
+    assert "Cost/approved run" in md
+    assert "Duration/approved run" in md
+    # Must NOT show the coverage-gap or no-metrics fallback
+    assert "keine approved Runs mit Kosten-/Dauer-Scores" not in md
+    assert "Metrik-Scores: keine vorhanden" not in md

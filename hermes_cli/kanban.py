@@ -4158,98 +4158,176 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         digest = kb.scores_digest(conn, weeks=weeks)
 
-    # Always write JSON sidecar for agent grounding (AC-2)
-    try:
-        from hermes_constants import get_hermes_home
+    # Write JSON sidecar atomically — required artifact (AC-2).
+    # Real I/O errors propagate as non-zero exit; never swallowed.
+    import tempfile
 
-        reports_dir = get_hermes_home() / "reports"
+    from hermes_constants import get_hermes_home
+
+    reports_dir = get_hermes_home() / "reports"
+    sidecar = reports_dir / "scores-digest-latest.json"
+    sidecar_content = json.dumps(digest, indent=2, ensure_ascii=False) + "\n"
+    try:
         reports_dir.mkdir(parents=True, exist_ok=True)
-        sidecar = reports_dir / "scores-digest-latest.json"
-        sidecar.write_text(
-            json.dumps(digest, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
+        tmp_fd, tmp_path_str = tempfile.mkstemp(
+            dir=str(reports_dir), prefix=".scores-digest-", suffix=".tmp",
         )
-    except Exception:  # noqa: BLE001 — best-effort sidecar, never fail the digest
-        pass
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as tmp_f:
+                tmp_f.write(sidecar_content)
+            os.replace(tmp_path_str, str(sidecar))
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path_str)
+            raise
+    except OSError as exc:
+        print(f"error: cannot write digest sidecar: {exc}", file=sys.stderr)
+        return 1
 
     if getattr(args, "json", False):
         _emit_json(digest)
         return 0
 
-    # Build compact Markdown for Discord (max ~1800 chars)
-    lines: list[str] = []
-    lines.append("**Kanban Score Digest**")
+    # Build compact Markdown for Discord (max 1800 chars).
+    # Mandatory sections are always included; profile/model breakdowns
+    # are budgeted to fit within the limit with clean entry boundaries.
+    MAX_LEN = 1800
+    _SUFFIX_RESERVE = 20  # chars reserved per section for " | +N weitere"
 
-    # Overall approval rate + WoW delta
+    # ── Mandatory lines (always present) ──
+    header = "**Kanban Score Digest**"
+
     rate = digest["approval_rate"]
     wow = digest["wow_delta"]
     wow_text = ""
     if wow is not None:
         sign = "+" if wow >= 0 else ""
         wow_text = f" ({sign}{wow:.1%} WoW)"
-    lines.append(
+    approval = (
         f"Approval: **{_fmt_pct(rate)}** "
         f"({digest['approved_rows']}/{digest['rows_total']}){wow_text}"
     )
 
-    # Weekly trend (compact)
-    weekly_parts: list[str] = []
-    for w in digest["weekly"]:
-        wr = w["approval_rate"]
-        weekly_parts.append(
-            f"W{w['week']:02d} {_fmt_pct(wr)}"
-        )
+    # Budget the trend line: with large --weeks the unbounded list would
+    # alone exceed MAX_LEN.  Keep the most recent weeks that fit and mark
+    # omitted older weeks with "+N ältere" BEFORE the retained entries
+    # (clean entry boundaries, unambiguous older-prefix marker).
+    # weekly is chronological oldest→newest; budget from the end so the
+    # newest weeks are retained, then output chronologically.
+    _TREND_BUDGET = 340
+    _OMIT_MARKER_RESERVE = 20  # "+NNNNNN ältere | " worst case
+    weekly_parts = [
+        f"W{w['week']:02d} {_fmt_pct(w['approval_rate'])}"
+        for w in digest["weekly"]
+    ]
+    trend = ""
     if weekly_parts:
-        lines.append("Trend: " + " → ".join(weekly_parts))
+        base = "Trend: "
+        kept_rev: list[str] = []
+        cur = base
+        for part in reversed(weekly_parts):
+            sep = " → " if kept_rev else ""
+            candidate = cur + sep + part
+            if kept_rev and len(candidate) > _TREND_BUDGET - _OMIT_MARKER_RESERVE:
+                break
+            kept_rev.append(part)
+            cur = candidate
+        # Reverse back to chronological order for display
+        kept = list(reversed(kept_rev))
+        omitted_weeks = len(weekly_parts) - len(kept)
+        if omitted_weeks > 0:
+            trend = base + f"+{omitted_weeks} ältere | " + " → ".join(kept)
+        else:
+            trend = base + " → ".join(kept)
 
-    # Per-profile breakdown
-    if digest["by_profile"]:
-        prof_parts = [
-            f"{name}: {_fmt_pct(v['approval_rate'])} ({v['approved']}/{v['total']})"
-            for name, v in digest["by_profile"].items()
-        ]
-        lines.append("Profile: " + " | ".join(prof_parts))
-
-    # Per-model breakdown
-    if digest["by_model"]:
-        model_parts = [
-            f"{name}: {_fmt_pct(v['approval_rate'])} ({v['approved']}/{v['total']})"
-            for name, v in digest["by_model"].items()
-        ]
-        lines.append("Model: " + " | ".join(model_parts))
-
-    # Cost/duration per approved run
-    if digest["has_metric_scores"] and digest["cost_duration_per_approved_run"]:
+    cost_lines: list[str] = []
+    if digest.get("approved_run_metric_coverage") and digest["cost_duration_per_approved_run"]:
         cd = digest["cost_duration_per_approved_run"]
         costs = [r["cost_usd"] for r in cd if r["cost_usd"] is not None]
         durations = [r["duration_seconds"] for r in cd if r["duration_seconds"] is not None]
         if costs:
-            lines.append(
+            cost_lines.append(
                 f"Cost/approved run: avg ${sum(costs)/len(costs):.3f} "
                 f"(n={len(costs)})"
             )
         if durations:
             avg_dur = sum(durations) / len(durations)
-            lines.append(f"Duration/approved run: avg {avg_dur:.0f}s (n={len(durations)})")
+            cost_lines.append(f"Duration/approved run: avg {avg_dur:.0f}s (n={len(durations)})")
+    elif digest["has_metric_scores"] and not digest.get("approved_run_metric_coverage"):
+        cost_lines.append(
+            "Kosten/Dauer je approved Run: Metriken vorhanden, "
+            "aber keine approved Runs mit Kosten-/Dauer-Scores im Zeitraum"
+        )
     elif not digest["has_metric_scores"]:
-        lines.append("Metrik-Scores: keine vorhanden")
+        cost_lines.append("Metrik-Scores: keine vorhanden")
 
-    # Top-3 retry hotspots
+    retry_line = ""
     if digest["retry_hotspots"]:
         hs_parts = [
             f"{h['task_id']} (×{h['rejections']})"
             for h in digest["retry_hotspots"]
         ]
-        lines.append("Retry-Hotspots: " + ", ".join(hs_parts))
+        retry_line = "Retry-Hotspots: " + ", ".join(hs_parts)
 
-    # Reference lines
-    lines.append("Scorecard: /control → Scorecard")
-    lines.append("Langfuse: loopback-Langfuse → Scores")
+    refs = ["Scorecard: /control → Scorecard", "Langfuse: loopback-Langfuse → Scores"]
 
-    text = "\n".join(lines)
-    # Truncate to ~1800 chars for Discord safety
-    if len(text) > 1800:
-        text = text[:1797] + "..."
+    # Assemble mandatory text (everything except profile/model breakdowns)
+    mandatory_parts: list[str] = [header, approval]
+    if trend:
+        mandatory_parts.append(trend)
+    mandatory_parts.extend(cost_lines)
+    if retry_line:
+        mandatory_parts.append(retry_line)
+    mandatory_parts.extend(refs)
+    mandatory_text = "\n".join(mandatory_parts)
+
+    # ── Budgeted profile/model breakdowns ──
+    # Split remaining budget equally between sections so neither starves.
+    # Greedily fill entries until the section budget is exhausted,
+    # then mark omitted entries as "+N weitere" (clean boundaries).
+    # The construction itself guarantees <= MAX_LEN — no blind end-slice.
+    remaining = max(0, MAX_LEN - len(mandatory_text))
+    breakdown_data = [
+        (label, data)
+        for label, data in [("Profile", digest["by_profile"]), ("Model", digest["by_model"])]
+        if data
+    ]
+    breakdown_lines: list[str] = []
+    if breakdown_data:
+        per_section = remaining // len(breakdown_data)
+        for label, data in breakdown_data:
+            entries = list(data.items())
+            prefix = f"{label}: "
+            parts: list[str] = []
+            line_len = len(prefix)
+            section_budget = per_section - _SUFFIX_RESERVE
+            for name, v in entries:
+                part = f"{name}: {_fmt_pct(v['approval_rate'])} ({v['approved']}/{v['total']})"
+                sep = 3 if parts else 0  # " | "
+                new_len = line_len + sep + len(part)
+                if new_len + 1 <= section_budget:  # +1 for newline
+                    parts.append(part)
+                    line_len = new_len
+                else:
+                    break
+            if parts:
+                line = prefix + " | ".join(parts)
+                omitted = len(entries) - len(parts)
+                if omitted > 0:
+                    line += f" | +{omitted} weitere"
+                breakdown_lines.append(line)
+
+    # ── Assemble final output in display order ──
+    out_lines: list[str] = [header, approval]
+    if trend:
+        out_lines.append(trend)
+    out_lines.extend(breakdown_lines)
+    out_lines.extend(cost_lines)
+    if retry_line:
+        out_lines.append(retry_line)
+    out_lines.extend(refs)
+
+    text = "\n".join(out_lines)
     print(text)
     return 0
 
