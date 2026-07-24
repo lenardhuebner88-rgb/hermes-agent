@@ -251,6 +251,10 @@ def test_copied_script_resolves_hermes_home_venv(tmp_path):
     stale_home_hermes.write_text('#!/bin/sh\necho "STALE_HOME:$0"\n')
     stale_home_hermes.chmod(0o755)
 
+    # Also place a $HOME/pyproject.toml to prove that the marker alone
+    # does NOT make the copied layout look like a repo (reviewer finding 2).
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'stale'\n")
+
     # Create a stale PATH hermes that must NOT be selected
     stale_bin = tmp_path / "stale-bin"
     stale_bin.mkdir()

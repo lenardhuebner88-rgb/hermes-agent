@@ -11,14 +11,15 @@ set -euo pipefail
 # In the repo layout (<repo>/scripts/cron/), prefer the venv next to the repo.
 # In the copied layout (${HERMES_HOME}/scripts/), REPO_ROOT resolves to $HOME;
 # a stale $HOME/.venv must NOT win over the canonical HERMES_HOME venv.
-# Detect repo layout via the pyproject.toml marker at REPO_ROOT.
+# Require BOTH the pyproject.toml marker AND the actual path layout
+# <REPO_ROOT>/scripts/cron/<script> to accept repo-relative venvs.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 
 HERMES=""
-if [[ -f "${REPO_ROOT}/pyproject.toml" ]]; then
+if [[ "${SCRIPT_DIR}" == "${REPO_ROOT}/scripts/cron" && -f "${REPO_ROOT}/pyproject.toml" ]]; then
     if [[ -x "${REPO_ROOT}/.venv/bin/hermes" ]]; then
         HERMES="${REPO_ROOT}/.venv/bin/hermes"
     elif [[ -x "${REPO_ROOT}/venv/bin/hermes" ]]; then
