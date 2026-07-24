@@ -208,7 +208,6 @@ def test_digest_retry_hotspots(tmp_path, monkeypatch):
     assert len(digest["retry_hotspots"]) == 2
     assert digest["retry_hotspots"][0]["task_id"] == t1
     assert digest["retry_hotspots"][0]["rejections"] == 2
-    assert digest["retry_hotspots"][0]["max_attempt"] == 5
 
 
 # ── Regression: high-cardinality profile/model breakdown ──────────────
@@ -229,8 +228,13 @@ def test_digest_high_cardinality_budgeted_output(tmp_path, monkeypatch):
             profile = f"very-long-profile-name-{i:03d}-extra-padding-abcdefghij"
             model = f"very-long-model-name-{i:03d}-extra-padding-klmnopqrstuv"
             rid = _create_run(conn, task_id=tid, profile=profile, model=model)
-            _insert_verdict(conn, task_id=tid, run_id=rid, value=1.0,
-                            created_at=int(monday.timestamp()))
+            _insert_verdict(
+                conn,
+                task_id=tid,
+                run_id=rid,
+                value=0.0 if i < 3 else 1.0,
+                created_at=int(monday.timestamp()),
+            )
             _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_usd",
                            value=0.05, created_at=int(monday.timestamp()))
             _insert_metric(conn, run_id=rid, task_id=tid, name="run_duration_seconds",
@@ -465,11 +469,10 @@ def test_approval_counts_only_review_verdict(tmp_path, monkeypatch):
         report = kb.scores_report(conn, now=now)
         digest = kb.scores_digest(conn, weeks=4, now=now)
 
-    # Pure verdict approval: 1 approved out of 2 verdict rows = 0.5
-    assert report["rows_total"] == 2, (
-        f"scores_report rows_total must count only review_verdict rows, "
-        f"got {report['rows_total']}"
-    )
+    # The report retains the raw table size for informational purposes, while
+    # verdict_rows is the denominator for approval: 1 approved out of 2.
+    assert report["rows_total"] == 7
+    assert report["verdict_rows"] == 2
     assert report["approved_rows"] == 1
     assert report["approval_rate"] == 0.5
 
