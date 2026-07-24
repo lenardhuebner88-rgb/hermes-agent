@@ -42,7 +42,13 @@ dependencies = [
   # extra and gets lazy-installed via `tools/lazy_deps.py` when the
   # user picks that backend. Smaller `dependencies` = smaller blast
   # radius for the next supply-chain attack.
-  "openai==2.24.0",
+  # Exact pin per repo policy (lines 29-37).  2.48.0 is the version
+  # verified by the verifier's isolated integration run (inspect-ai
+  # 0.3.249 + openai 2.48.0, 6/6 tests) and focused OpenAI caller tests
+  # (37/37).  The evals extra (inspect-ai) requires >=2.26.0 for
+  # validate_openai_client(); pinning exactly avoids the two-SDK-contract
+  # divergence between locked and freshly-resolved installs.
+  "openai==2.48.0",
   "certifi==2026.5.20",
   "python-dotenv==1.2.2",
   "fire==0.7.1",
@@ -161,6 +167,7 @@ modal = ["modal==1.3.4"]
 daytona = ["daytona==0.155.0"]
 hindsight = ["hindsight-client==0.6.1"]
 push = ["pywebpush==2.3.0"]
+evals = ["inspect-ai>=0.3.200,<1.0"]  # openai>=2.26.0,<3.0 is a core dep; inspect-ai's validate_openai_client() floor is 2.26.0
 dev = ["debugpy==1.8.20", "pytest==9.0.2", "pytest-asyncio==1.3.0", "mcp==1.26.0", "starlette==1.0.1", "ty==0.0.21", "ruff==0.15.10", "setuptools==81.0.0"]  # starlette: CVE-2026-48710; setuptools: latest <82 (torch >=2.11 caps setuptools<82)
 messaging = ["python-telegram-bot[webhooks]==22.6", "discord.py[voice]==2.7.1", "aiohttp==3.14.1", "brotlicffi==1.2.0.1", "slack-bolt==1.29.0", "slack-sdk==3.43.0", "qrcode==7.4.2"]  # aiohttp 3.14.1: CVE-2026-34513/34518/34519/34520/34525 + 34993(RCE)/47265
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
@@ -228,7 +235,7 @@ acp = ["agent-client-protocol==0.9.0"]
 # NOT re-added to [all] so a future quarantined release can't break fresh
 # installs (see [all] policy comment below).
 mistral = ["mistralai==2.4.8"]
-bedrock = ["boto3==1.42.89"]
+bedrock = ["boto3==1.40.61"]  # downgraded from 1.42.89: aiobotocore[boto3]==2.25.1 (via inspect-ai→aioboto3) caps boto3<1.40.62; 1.40.61 is the highest compatible release
 vertex = ["google-auth==2.55.1"]
 azure-identity = ["azure-identity==1.25.3"]
 termux = [

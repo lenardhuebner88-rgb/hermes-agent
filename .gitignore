@@ -68,6 +68,7 @@ skills/.hub/
 ignored/
 .worktrees/
 environments/benchmarks/evals/
+evals/golden/
 
 # Python setuptools build output (e.g. `python setup.py build` → build/lib/...).
 # Untracked artifacts here otherwise park the kanban integrator (dirty worktree).

@@ -98,7 +98,7 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # OpenRouter / aggregators which use the openai SDK).
     "provider.anthropic": ("anthropic==0.87.0",),  # CVE-2026-34450, CVE-2026-34452
     # AWS Bedrock provider
-    "provider.bedrock": ("boto3==1.42.89",),
+    "provider.bedrock": ("boto3==1.40.61",),
     # Google Vertex AI provider — OAuth2 token minting for the Gemini
     # OpenAI-compatible endpoint. Only loaded when provider=vertex is selected;
     # google-auth is NOT in [all] so plain installs don't carry it.
