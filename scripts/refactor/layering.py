@@ -2,9 +2,10 @@
 
 The load-bearing distinction here is IMPORT-TIME vs RUNTIME references.
 
-An import-time reference (an assignment's value, a decorator, a default
-argument, a class base) is evaluated while the module body executes, so it
-constrains submodule order absolutely: the target must already exist.
+An import-time reference (an assignment's value or evaluated annotation, a
+decorator, a default argument, a class base or keyword) is evaluated while the
+module body executes, so it constrains submodule order absolutely: the target
+must already exist.
 
 A runtime reference (a name used inside a function body) is evaluated when
 the function is called, long after every submodule has finished importing.
@@ -47,7 +48,22 @@ def banner_sections(lines: list[str]) -> list[tuple[int, str]]:
     return out
 
 
-def import_time_names(node: ast.AST, top: dict[str, ast.AST]) -> set[str]:
+def annotations_are_postponed(tree: ast.Module) -> bool:
+    """Whether `tree` enables `from __future__ import annotations`."""
+    return any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+
+
+def import_time_names(
+    node: ast.AST,
+    top: dict[str, ast.AST],
+    *,
+    annotations_postponed: bool = False,
+) -> set[str]:
     """Names of `top` that `node` evaluates while the module body runs."""
     found: set[str] = set()
 
@@ -56,33 +72,49 @@ def import_time_names(node: ast.AST, top: dict[str, ast.AST]) -> set[str]:
             if isinstance(sub, ast.Name) and sub.id in top:
                 found.add(sub.id)
 
-    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+    def add_function_header(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        for decorator in fn.decorator_list:
+            add(decorator)
+        for default in fn.args.defaults:
+            add(default)
+        for default in fn.args.kw_defaults:
+            if default is not None:
+                add(default)
+        if annotations_postponed:
+            return
+        args = [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]
+        if fn.args.vararg is not None:
+            args.append(fn.args.vararg)
+        if fn.args.kwarg is not None:
+            args.append(fn.args.kwarg)
+        for arg in args:
+            if arg.annotation is not None:
+                add(arg.annotation)
+        if fn.returns is not None:
+            add(fn.returns)
+
+    if isinstance(node, ast.Assign):
         if node.value is not None:
             add(node.value)
+    elif isinstance(node, ast.AnnAssign):
+        if node.value is not None:
+            add(node.value)
+        if not annotations_postponed:
+            add(node.annotation)
     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for d in node.decorator_list:
-            add(d)
-        for d in node.args.defaults:
-            add(d)
-        for d in node.args.kw_defaults:
-            if d is not None:
-                add(d)
+        add_function_header(node)
     elif isinstance(node, ast.ClassDef):
-        for d in node.decorator_list:
-            add(d)
-        for b in node.bases:
-            add(b)
-        for st in node.body:
-            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for d in st.decorator_list:
-                    add(d)
-                for d in st.args.defaults:
-                    add(d)
-                for d in st.args.kw_defaults:
-                    if d is not None:
-                        add(d)
+        for decorator in node.decorator_list:
+            add(decorator)
+        for base in node.bases:
+            add(base)
+        for keyword in node.keywords:
+            add(keyword.value)
+        for statement in node.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                add_function_header(statement)
             else:
-                add(st)
+                add(statement)
     return found
 
 
@@ -107,13 +139,24 @@ def classify_references(
     top: dict[str, ast.AST],
     owner: dict[str, str],
     module_order: list[str],
+    *,
+    module_tree: ast.Module | None = None,
 ) -> References:
     """Split cross-module references into import-time/runtime × forward/backward."""
     rank = {m: i for i, m in enumerate(module_order)}
     refs = References()
+    postponed = (
+        annotations_are_postponed(module_tree)
+        if module_tree is not None
+        else False
+    )
     for name, node in top.items():
         home = owner[name]
-        it = import_time_names(node, top) - {name}
+        it = import_time_names(
+            node,
+            top,
+            annotations_postponed=postponed,
+        ) - {name}
         rt = all_names(node, top) - it - {name}
         for target in sorted(it):
             if owner[target] == home:

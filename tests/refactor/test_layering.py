@@ -1,5 +1,6 @@
 import ast
 import textwrap
+from pathlib import Path
 
 from scripts.refactor import layering
 
@@ -104,3 +105,105 @@ def test_import_time_backward_reference_is_detected():
     owner = {"FIRST": "a", "SECOND": "b"}
     refs = layering.classify_references(top, owner, module_order=["a", "b"])
     assert ("FIRST", "SECOND") in refs.import_time_backward
+
+
+def annotation_fixture(*, postponed):
+    future = "from __future__ import annotations\n" if postponed else ""
+    return f"""{future}
+POSONLY = object()
+POSITIONAL = object()
+VARARG = object()
+KWONLY = object()
+KWARG = object()
+RETURN = object()
+ANNASSIGN = object()
+META = object()
+METHOD_POSONLY = object()
+METHOD_POSITIONAL = object()
+METHOD_VARARG = object()
+METHOD_KWONLY = object()
+METHOD_KWARG = object()
+METHOD_RETURN = object()
+
+def annotated(
+    posonly: POSONLY,
+    /,
+    positional: POSITIONAL,
+    *vararg: VARARG,
+    kwonly: KWONLY,
+    **kwarg: KWARG,
+) -> RETURN:
+    pass
+
+typed: ANNASSIGN = 1
+
+class WithMeta(metaclass=META):
+    def method(
+        self,
+        posonly: METHOD_POSONLY,
+        /,
+        positional: METHOD_POSITIONAL,
+        *vararg: METHOD_VARARG,
+        kwonly: METHOD_KWONLY,
+        **kwarg: METHOD_KWARG,
+    ) -> METHOD_RETURN:
+        pass
+"""
+
+
+def test_evaluated_annotations_and_class_keywords_are_import_time():
+    tree, _ = parse(annotation_fixture(postponed=False))
+    top = layering.top_level_symbols(tree)
+
+    assert layering.annotations_are_postponed(tree) is False
+    assert layering.import_time_names(top["annotated"], top) == {
+        "POSONLY",
+        "POSITIONAL",
+        "VARARG",
+        "KWONLY",
+        "KWARG",
+        "RETURN",
+    }
+    assert layering.import_time_names(top["typed"], top) == {"ANNASSIGN"}
+    assert layering.import_time_names(top["WithMeta"], top) == {
+        "META",
+        "METHOD_POSONLY",
+        "METHOD_POSITIONAL",
+        "METHOD_VARARG",
+        "METHOD_KWONLY",
+        "METHOD_KWARG",
+        "METHOD_RETURN",
+    }
+
+
+def test_postponed_annotations_are_excluded_but_class_keywords_are_not():
+    tree, _ = parse(annotation_fixture(postponed=True))
+    top = layering.top_level_symbols(tree)
+    postponed = layering.annotations_are_postponed(tree)
+
+    assert postponed is True
+    assert layering.import_time_names(
+        top["annotated"], top, annotations_postponed=postponed
+    ) == set()
+    assert layering.import_time_names(
+        top["typed"], top, annotations_postponed=postponed
+    ) == set()
+    assert layering.import_time_names(
+        top["WithMeta"], top, annotations_postponed=postponed
+    ) == {"META"}
+
+
+def test_kanban_schedule_task_uses_default_but_postpones_annotation():
+    path = Path(__file__).resolve().parents[2] / "hermes_cli" / "kanban_db.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    top = layering.top_level_symbols(tree)
+    postponed = layering.annotations_are_postponed(tree)
+
+    assert postponed is True
+    names = layering.import_time_names(
+        top["schedule_task"],
+        top,
+        annotations_postponed=postponed,
+    )
+    assert "_SCHEDULE_DUE_UNSPECIFIED" in names
+    assert "_ScheduleDueUnspecified" not in names

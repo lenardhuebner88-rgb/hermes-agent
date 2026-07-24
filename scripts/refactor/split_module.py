@@ -69,7 +69,7 @@ def analyze(path: str, boundary_map: dict | None = None) -> dict:
     else:
         top, owner, order = _section_owner_from_map(tree, boundary_map)
 
-    refs = layering.classify_references(top, owner, order)
+    refs = layering.classify_references(top, owner, order, module_tree=tree)
 
     span = {}
     for name, node in top.items():
