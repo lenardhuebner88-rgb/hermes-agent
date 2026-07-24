@@ -243,6 +243,14 @@ def test_copied_script_resolves_hermes_home_venv(tmp_path):
     stub.write_text('#!/bin/sh\necho "SELECTED:$0"\n')
     stub.chmod(0o755)
 
+    # Create a stale $HOME/.venv/bin/hermes that must NOT be selected
+    # (in copied layout, REPO_ROOT == $HOME; the old code picked this up).
+    stale_home_venv = tmp_path / ".venv" / "bin"
+    stale_home_venv.mkdir(parents=True)
+    stale_home_hermes = stale_home_venv / "hermes"
+    stale_home_hermes.write_text('#!/bin/sh\necho "STALE_HOME:$0"\n')
+    stale_home_hermes.chmod(0o755)
+
     # Create a stale PATH hermes that must NOT be selected
     stale_bin = tmp_path / "stale-bin"
     stale_bin.mkdir()
