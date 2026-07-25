@@ -5036,9 +5036,12 @@ def _default_quick_gate_pytest(
     """Affected-pytest modules via isolated parallel runner; error or None."""
     modules = _affected_pytest_modules(repo_root, changed_files)
     if modules:
-        # Run the affected modules through the canonical per-file isolation
-        # runner (one freshly-spawned ``python -m pytest <file>`` subprocess
-        # per file) rather than a single ``pytest <all modules>`` process.
+        # Run the affected modules through the canonical repository wrapper.
+        # It selects the dev/test Python (explicitly rejecting the managed
+        # release venv, which intentionally has no pytest) and then invokes the
+        # per-file isolation runner: one freshly-spawned
+        # ``python -m pytest <file>`` subprocess per file rather than a single
+        # ``pytest <all modules>`` process.
         #
         # Why: ``tests/conftest.py`` documents per-file subprocess isolation as
         # THE cross-file isolation boundary and deliberately does NOT reset
@@ -5054,16 +5057,16 @@ def _default_quick_gate_pytest(
         # The fallback's own walltime calibration (~26s for 437 files) assumes
         # the parallel isolated runner, not a single process.
         #
-        # No extra pytest flags: invoke exactly like the canonical runner
+        # No extra pytest flags: invoke exactly like the canonical wrapper
         # (``python -m pytest <file>``). The previous ``-p no:cacheprovider``
         # was inherited into ``sys.argv`` by ``relaunch.build_relaunch_argv``
         # (it copies ambient process flags), failing test_relaunch.py — the
         # other half of the t_c4ff7329 park. ``.pytest_cache`` is gitignored,
         # so dropping the flag does not dirty the post-merge tree.
-        runner = str(repo_root / "scripts" / "run_tests_parallel.py")
+        runner = str(repo_root / "scripts" / "run_tests.sh")
         return _quick_gate_run_cmd(
             f"pytest[{len(modules)}]",
-            [sys.executable, runner, *modules],
+            [runner, *modules],
             repo_root, 1200, notes,
         )
     notes.append("pytest skipped (no affected test modules)")
