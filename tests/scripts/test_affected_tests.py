@@ -63,34 +63,40 @@ def test_monolith_source_falls_back_to_package_dir():
 
 
 def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
-    """Known monoliths select their maintained feature tests, not the package."""
-    mod = _load_module()
-    cases = {
-        "hermes_cli/strategist.py": ("test_strategist*.py",),
-        "hermes_cli/kanban_db.py": (
-            "test_kanban_db*.py",
-            "test_kanban_lanes.py",
-            "test_kanban_block_kind*.py",
-        ),
-        "hermes_cli/kanban_worktrees.py": (
-            "test_kanban_worktrees*.py",
-            "test_visual_gate.py",
-        ),
-    }
+    """Known monoliths select their maintained feature tests, not the package.
 
-    for source, patterns in cases.items():
+    Reads the mapping from the module instead of restating it. A duplicated
+    fixture list means every legitimate addition to the table fails this test for
+    no reason, which is how the two copies drift apart. The assertions that
+    actually catch bugs are kept: every configured pattern must still match a
+    real test file (so a rename or typo is caught rather than silently selecting
+    nothing), and the selection must not degrade to the whole package directory.
+    """
+    mod = _load_module()
+
+    assert mod._MONOLITH_TEST_PATTERNS, "the monolith table is empty"
+
+    for source, patterns in mod._MONOLITH_TEST_PATTERNS.items():
+        assert (REPO_ROOT / source).is_file(), f"mapped source no longer exists: {source}"
+        for pattern in patterns:
+            assert list(REPO_ROOT.glob(pattern)), (
+                f"pattern for {source} matches no test file: {pattern}"
+            )
+
         expected = sorted(
             {
                 str(path.relative_to(REPO_ROOT))
                 for pattern in patterns
-                for path in (REPO_ROOT / "tests/hermes_cli").glob(pattern)
+                for path in REPO_ROOT.glob(pattern)
+                if path.is_file()
             }
         )
         selected = mod.affected_pytest_modules(REPO_ROOT, [source])
 
-        assert expected, f"fixture patterns for {source} must match real tests"
         assert selected == expected
-        assert "tests/hermes_cli/" not in selected
+        # No package-wide fallback: that would turn the targeted gate into a
+        # de-facto full-suite run (AC-2 counter-metric).
+        assert not any(s.endswith("/") for s in selected), selected
 
 
 def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):

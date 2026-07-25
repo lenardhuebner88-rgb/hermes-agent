@@ -62,6 +62,17 @@ _MONOLITH_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
         "tests/hermes_cli/test_kanban_db*.py",
         "tests/hermes_cli/test_kanban_lanes.py",
         "tests/hermes_cli/test_kanban_block_kind*.py",
+        # Per-task model/provider override: asserts the spawn-identity stamp and
+        # the resulting worker argv. Named outside the test_kanban_db* family, so
+        # without this line an edit to the spawn path skips its own coverage.
+        "tests/hermes_cli/test_kanban_provider_override*.py",
+        "tests/plugins/test_kanban_model_override*.py",
+        # docs/kanban/LIFECYCLE.md anchors every transition to a line number in
+        # this file, so any edit here can silently invalidate the map. The check
+        # existed and was already red — but it lives in tests/scripts/, which no
+        # pattern reached, and the full suite that would have caught it runs only
+        # nightly (green-gate-heartbeat). 92 anchors had drifted by 2026-07-25.
+        "tests/scripts/test_check_kanban_lifecycle_anchors.py",
     ),
     "hermes_cli/kanban_worktrees.py": (
         "tests/hermes_cli/test_kanban_worktrees*.py",

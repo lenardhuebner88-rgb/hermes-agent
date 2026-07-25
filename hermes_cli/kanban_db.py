@@ -7916,6 +7916,7 @@ def _resolve_model_override(
     *,
     task_id: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
+    explicit_provider: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Validate a model override against the effective provider.
 
@@ -7929,8 +7930,58 @@ def _resolve_model_override(
     * ``None`` — the override is incompatible with the current provider and
       cannot be resolved.  When ``task_id`` and ``conn`` are supplied, a
       ``model_override_incompatible`` event is appended to the task.
+
+    ``explicit_provider`` is the out-of-band spelling of the same intent: the
+    task's ``provider_override`` column (upstream #69876) names the backend
+    the model belongs to instead of encoding it in the override string. It
+    resolves to the same ``task_override_with_provider_switch`` contract.
     """
     from hermes_cli.models import detect_static_provider_for_model, parse_model_input
+
+    if explicit_provider:
+        # Upstream's dashboard dropdown sends the pair as two separate values
+        # (model_override + provider_override) rather than one "provider/model"
+        # string. Trust the named provider, but keep the family check — an
+        # explicit provider must not buy a bypass of the poison-pill guard.
+        #
+        # Deliberately does NOT split on "/": provider-scoped model ids such as
+        # openrouter's ``anthropic/claude-fable-5`` have to stay intact, and the
+        # provider is already known here, so there is nothing to infer.
+        #
+        # Canonicalize first, exactly as the provider/model branch below does.
+        # Provider aliases are real ("kimi" -> "kimi-coding"), and skipping this
+        # would let the two spellings of the same intent resolve to different
+        # providers — the alias would reach both the worker argv and the
+        # persisted cost stamp, so a run could be billed against a provider name
+        # nothing else in Hermes uses.
+        resolved_explicit_provider, _ = parse_model_input(f"{explicit_provider}:model", "")
+        if not resolved_explicit_provider:
+            # Unlike the slash form, this field is unambiguously a provider, so
+            # an unresolvable value is an operator error rather than part of an
+            # opaque model id. Refuse instead of forwarding a bogus --provider.
+            return _handle_incompatible_model_override(
+                model_override,
+                explicit_provider,
+                task_id,
+                conn,
+                reason="unknown_provider_override",
+            )
+        redirected = detect_static_provider_for_model(
+            model_override, resolved_explicit_provider
+        )
+        if redirected is None or redirected[0] == resolved_explicit_provider:
+            return (
+                model_override,
+                resolved_explicit_provider,
+                "task_override_with_provider_switch",
+            )
+        return _handle_incompatible_model_override(
+            model_override,
+            resolved_explicit_provider,
+            task_id,
+            conn,
+            reason="explicit_provider_mismatch",
+        )
 
     if "/" in model_override:
         explicit_provider, explicit_model = model_override.split("/", 1)
@@ -8000,6 +8051,7 @@ def _spawn_identity_metadata(
     profile: Optional[str],
     *,
     model_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
     board: Optional[str] = None,
     lane_entry: Optional[dict] = None,
     task_id: Optional[str] = None,
@@ -8057,7 +8109,51 @@ def _spawn_identity_metadata(
         model: Optional[str] = None
         model_source: Optional[str] = None
         override_provider: Optional[str] = None
-        current_provider = lane_provider or profile_provider
+        task_provider_override = (
+            provider_override.strip()
+            if isinstance(provider_override, str) and provider_override.strip()
+            else None
+        )
+        if task_provider_override is None and task_id and conn is not None:
+            # Read the column here rather than at the claim sites. Both callers
+            # (claim_task / claim_review_task) are upstream-owned bodies, and
+            # every fork line inside one is merge cost on the next sync — see
+            # docs/refactor/UPSTREAM-STRATEGY.md. They already hand us `task_id`
+            # and `conn`, so the lookup belongs in this fork-only function and
+            # the upstream bodies stay byte-identical. Callers may still pass
+            # provider_override explicitly (tests, and any future non-DB caller).
+            try:
+                _po_row = conn.execute(
+                    "SELECT assignee, provider_override FROM tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                # Pre-migration DB (column absent): a missing provider override
+                # is the documented no-op, so degrade to the old behaviour.
+                _po_row = None
+            if _po_row is not None:
+                _po_raw = _po_row["provider_override"]
+                _po_assignee = (_po_row["assignee"] or "").strip()
+                # Apply the override only to the task's OWN run. `claim_review_task`
+                # resolves a reviewer profile (review-gate `verifier_profile`) that
+                # can differ from the assignee, and a coder task's provider must not
+                # silently retarget the reviewer's run — that would move review work
+                # onto a metered backend the operator never chose for it. Same
+                # profile (the normal claim_task case) => same run => applies.
+                if (
+                    isinstance(_po_raw, str)
+                    and _po_raw.strip()
+                    and _po_assignee == (profile or "").strip()
+                ):
+                    task_provider_override = _po_raw.strip()
+        # A task-level provider_override names the backend its model override
+        # belongs to, so compatibility has to be judged against THAT provider
+        # rather than the profile's. Without this the classic valid pair from
+        # upstream's dropdown (say xai-oauth + grok-build-0.1 on a profile that
+        # runs openai-codex) is read as a poison pill and silently dropped —
+        # the run then lands on the profile model, which is the mis-route the
+        # override existed to prevent.
+        current_provider = task_provider_override or lane_provider or profile_provider
         if isinstance(model_override, str) and model_override.strip():
             if is_claude_cli:
                 # Claude CLI owns this model family, so a task override remains
@@ -8073,6 +8169,7 @@ def _spawn_identity_metadata(
                     current_provider,
                     task_id=task_id,
                     conn=conn,
+                    explicit_provider=task_provider_override,
                 )
             if resolved_model is not None:
                 model = resolved_model

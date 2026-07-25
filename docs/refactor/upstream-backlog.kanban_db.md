@@ -71,8 +71,13 @@ evidence is the AST sweep itself, re-runnable from
 
 ## 3. Documented divergences — reds that must NOT be "fixed"
 
-Nine reds survive adoption. Every one was traced to a cause; none is a defect in
-the adopted code. Do not chase them without reading this section.
+Nine reds survived adoption; **four remain** after 2026-07-25 (§3d was resolved
+without touching upstream's tests — see there). Every one was traced to a cause;
+none is a defect in the adopted code. Do not chase them without reading this
+section.
+
+Current count on this host, measured: **7 red** across the affected set — the
+four below, plus the three in §3c that are not fork divergences at all.
 
 ### 3a. Fork skips the connect-time integrity guard (2 reds)
 
@@ -127,19 +132,30 @@ Hermes on WAL at all.** Fixing that is a toolchain upgrade
 (python-build-standalone's embedded SQLite; `hermes update` alone may not move
 it — see `hermes doctor`), not a code change.
 
-### 3d. Fork validates assignee spawnability (5 reds)
+### 3d. Fork validates assignee spawnability — RESOLVED 2026-07-25 (was 5 reds)
 
 - `test_patch_sets_model_override`, `test_patch_clears_model_override`,
   `test_patch_provider_without_model_is_400`,
   `test_create_task_with_override_via_api`, `test_bulk_model_override`
 
-All five die inside the shared `_create()` helper, which builds tasks with
+All five died inside the shared `_create()` helper, which builds tasks with
 `assignee="worker"`. The fork rejects assignees with no on-disk Hermes profile
-("Assignee 'worker' is not spawnable"). They never reach the override code.
+("Assignee 'worker' is not spawnable"). They never reached the override code.
 
-**Proven, not assumed:** `tests/plugins/test_kanban_model_override_fork.py` runs
-the identical five flows with `assignee="default"` and all five pass. That file
-is the permanent fork-side coverage.
+**These are now green, and legitimately so.** `tests/plugins/conftest.py`
+provisions a real `profiles/worker` directory inside the test's own temporary
+`HERMES_HOME`, so the fork's guard executes and *passes* on a precondition that
+is actually satisfied. Two cheaper routes were rejected: editing upstream's test
+file (adds the merge burden this workstream removes) and monkeypatching
+`profile_exists` to `True` (deletes the guard from the run — a green test that
+skipped a real code path is worse than a red one).
+
+Control probe, not assumption: provisioning the directory under a *wrong* name
+puts exactly these five back to red, which is what proves the guard still runs.
+
+`tests/plugins/test_kanban_model_override_fork.py` is kept. It covers the same
+five flows under the fork's real `default` profile, so the two files now assert
+the contract against a provisioned profile and against a real one.
 
 ## 4. Method notes for the next session
 

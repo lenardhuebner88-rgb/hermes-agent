@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -48,7 +49,20 @@ def test_committed_lifecycle_map_resolves_against_real_source() -> None:
     result = _run()
 
     assert result.returncode == 0, result.stderr
-    assert "OK: 95 anchors resolved" in result.stdout
+    # Derive the expected count from the document instead of hardcoding it. A
+    # literal ("OK: 95 anchors resolved") turns every legitimate addition to the
+    # map into a spurious failure, which is how this assertion came to be edited
+    # rather than trusted. Counting the anchors still catches the case the
+    # literal was there to catch: anchors silently vanishing from the document.
+    expected = len(
+        re.findall(r"\]\(\.\./\.\./hermes_cli/kanban_db\.py#L\d+\)", DOCUMENT.read_text(encoding="utf-8"))
+    )
+    # Equality against the document catches the checker silently skipping
+    # anchors it used to parse; the floor catches the document losing coverage.
+    # 95 is the count when this guard was introduced (2026-07-25) — raise it
+    # deliberately, never lower it to make a deletion pass.
+    assert expected >= 95, f"lifecycle map lost coverage: only {expected} anchors"
+    assert f"OK: {expected} anchors resolved" in result.stdout, result.stdout
 
 
 def test_drifted_anchor_is_detected(tmp_path: Path) -> None:
