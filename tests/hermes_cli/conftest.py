@@ -2,26 +2,69 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
 
 
+@pytest.fixture(scope="module")
+def _kanban_db_template(tmp_path_factory):
+    """Module-scoped template: one fully initialized kanban DB.
+
+    ``kb.init_db()`` runs schema creation + all additive migrations and
+    stamps ``PRAGMA user_version`` — measured at ~1–2 s on a cold cache.
+    Running it once per module and copying the result per test replaces
+    that cost with a ~245 KiB file copy (<5 ms).
+
+    The template is created with an explicit ``db_path`` so it does NOT
+    depend on ``HERMES_HOME`` being set to any particular value.
+    """
+    from hermes_cli import kanban_db as kb
+
+    template_dir = tmp_path_factory.mktemp("kanban_db_template")
+    template_db = template_dir / "kanban.db"
+    kb.init_db(db_path=template_db)
+
+    # Reset the per-process WAL warning dedup so tests that assert on the
+    # fallback warning (e.g. test_connect_falls_back_to_delete_on_locking_protocol)
+    # still observe it for their own fresh DB connection.  The template init
+    # consumed the "kanban.db (kanban.db)" label; clear it.
+    try:
+        from hermes_state import (
+            _wal_fallback_warned_paths,
+            _wal_reset_bug_warned_paths,
+        )
+
+        _wal_fallback_warned_paths.discard("kanban.db (kanban.db)")
+        _wal_reset_bug_warned_paths.discard("kanban.db (kanban.db)")
+    except ImportError:  # pragma: no cover
+        pass
+
+    return template_dir
+
+
 @pytest.fixture
-def kanban_home(tmp_path, monkeypatch):
-    """Isolated HERMES_HOME with an empty kanban DB.
+def kanban_home(tmp_path, monkeypatch, _kanban_db_template):
+    """Isolated HERMES_HOME with a kanban DB copied from the module template.
 
     Moved from test_kanban_db.py for shared use across split DB test modules.
     Modules that need a different setup (crash grace, kanban env clearing)
     continue to define their own module-level ``kanban_home`` override.
-    """
-    from hermes_cli import kanban_db as kb
 
+    Instead of calling ``kb.init_db()`` from scratch (~1–2 s per test),
+    this copies the pre-initialized template DB (~5 ms).  The copy carries
+    the correct ``PRAGMA user_version`` stamp, so ``kb.connect()`` inside
+    the test takes the fast path (no schema re-creation, no migration pass).
+    """
     home = tmp_path / ".hermes"
     home.mkdir()
+    # Fast-copy the pre-initialized template (kanban.db + init.lock).
+    for src in _kanban_db_template.iterdir():
+        if src.is_file():
+            shutil.copy2(src, home / src.name)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
     return home
 
 
