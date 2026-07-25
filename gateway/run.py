@@ -17162,7 +17162,7 @@ class GatewayRunner(
                                     "(completed %ds ago, exit_code=%s), "
                                     "cleaning up",
                                     int(completion_age),
-                                    exit_code_path.read_text().strip(),
+                                    exit_code_path.read_text(encoding="utf-8").strip(),
                                 )
                                 for marker in (
                                     pending_path,

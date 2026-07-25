@@ -98,6 +98,8 @@ from toolsets import get_toolset_names
 from hermes_cli import disposition as _disposition_mod
 from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
+from hermes_cli import kanban_escalation_class as _escalation_class
+from hermes_cli import kanban_review_policy as _review_policy
 from hermes_cli import kanban_templates
 from hermes_cli import kanban_worker_runtime as _worker_runtime
 
@@ -7239,6 +7241,7 @@ def _append_event(
     (e.g. pairing a ``heiler_classification`` to the ``operator_escalation``
     it explains) can record it. Existing callers ignore the return.
     """
+    payload = _escalation_class.materialize_event_payload(kind, payload, classifier=_classify_escalation_payload)
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
     cur = conn.execute(
@@ -13376,7 +13379,11 @@ def _task_plan_spec(task: "Task") -> dict:
 
 
 def _effective_review_tier(
-    conn: sqlite3.Connection, task_id: str, *, cfg: Optional[dict] = None
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    cfg: Optional[dict] = None,
+    review_context: Optional[_review_policy.ReviewDecisionContext] = None,
 ) -> str:
     """Resolve a task's effective staged-review tier with a safety FLOOR.
 
@@ -13413,14 +13420,15 @@ def _effective_review_tier(
                 exc_info=True,
             )
             floor = "standard"
-    explicit = (task.review_tier or "").strip().lower()
-    if explicit not in _TIER_ORDER:
-        return floor  # NULL/unknown column → heuristic self-classification
-    if _TIER_ORDER[explicit] >= _TIER_ORDER.get(floor, 0):
-        return explicit  # operator/PlanSpec may always raise (or match the floor)
-    if _review_tier_downgrade_acked(conn, task_id, explicit):
-        return explicit  # deliberate, audit-logged downgrade below the floor
-    return floor  # snap up — never silently under-gate a hard-risk task
+    return _review_policy.resolve_effective_review_tier(
+        conn,
+        task_id,
+        prose_floor=floor,
+        explicit_tier=task.review_tier,
+        path_floor_enabled=bool(cfg.get("auto_tier")),
+        legacy_ack=_review_tier_downgrade_acked,
+        context=review_context,
+    )
 
 
 def _review_tier_downgrade_acked(
@@ -14713,7 +14721,12 @@ def backfill_run_metric_scores(conn: sqlite3.Connection) -> int:
 
 
 def _review_gate_should_apply(
-    conn: sqlite3.Connection, task_id: str, expected_run_id: Optional[int]
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int],
+    *,
+    cfg: Optional[dict] = None,
+    review_context: Optional[_review_policy.ReviewDecisionContext] = None,
 ) -> bool:
     """Decide whether this completion should be parked in ``review``.
 
@@ -14722,7 +14735,7 @@ def _review_gate_should_apply(
     retryable runtime state handled after policy selection; it can never turn
     an enabled review gate into direct ``done``.
     """
-    cfg = _review_gate_config()
+    cfg = cfg if cfg is not None else _review_gate_config()
     if not cfg["enabled"]:
         return False
     run_id = expected_run_id
@@ -14734,7 +14747,43 @@ def _review_gate_should_apply(
     if not row:
         return False
     assignee = (row["assignee"] or "").strip().lower()
-    return assignee in cfg["code_roles"]
+    return assignee in cfg["code_roles"] or (
+        bool(cfg.get("auto_tier"))
+        and _review_policy.path_risk_requires_gate(
+            conn,
+            task_id,
+            context=review_context,
+            fail_closed=review_context is not None,
+        )
+    )
+
+
+def _completion_review_gate_decision(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int],
+    *,
+    requested: bool,
+) -> tuple[bool, Optional[_review_policy.ReviewDecisionContext], dict]:
+    """Build the completion's diff context once, before any economy decision."""
+    cfg = _review_gate_config()
+    context = (
+        _review_policy.build_review_context(
+            conn,
+            task_id,
+            run_id=expected_run_id,
+        )
+        if cfg["enabled"] and requested
+        else None
+    )
+    applies = _review_gate_should_apply(
+        conn,
+        task_id,
+        expected_run_id,
+        cfg=cfg,
+        review_context=context,
+    )
+    return applies, context, cfg
 
 
 def _git_head_sha_for_workspace(workspace_path: Optional[str]) -> Optional[str]:
@@ -14830,6 +14879,8 @@ def _capture_review_diff_snapshot(
     *,
     baseline_commit: Optional[str] = None,
     baseline_kind: str = "pre_run_commit_sha",
+    changed_files_override: Optional[Iterable[str]] = None,
+    snapshot_extra: Optional[dict] = None,
 ) -> dict:
     """Best-effort diff snapshot for *task_id*'s workspace.
 
@@ -14885,7 +14936,7 @@ def _capture_review_diff_snapshot(
     if inside is None or inside.strip() != "true":
         return {}
 
-    snapshot: dict = {}
+    snapshot: dict = dict(snapshot_extra) if isinstance(snapshot_extra, dict) else {}
     candidate_commit = _git("rev-parse", "--verify", "HEAD")
     if candidate_commit and candidate_commit.strip():
         snapshot["diff_candidate_commit"] = candidate_commit.strip()
@@ -14918,14 +14969,21 @@ def _capture_review_diff_snapshot(
                 effective_baseline_kind = "candidate_parent_same_tree_fallback"
     changed: list = []
     if effective_baseline:
-        committed_and_worktree = _git("diff", "--name-only", effective_baseline)
-        if committed_and_worktree is not None:
-            for entry in committed_and_worktree.splitlines():
-                entry = entry.strip().strip('"')
-                if entry:
-                    changed.append(entry)
-                if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
-                    break
+        if changed_files_override is not None:
+            changed = [
+                str(entry).strip()
+                for entry in changed_files_override
+                if str(entry).strip()
+            ][:_DIFF_SNAPSHOT_FILE_CAP]
+        else:
+            committed_and_worktree = _git("diff", "--name-only", effective_baseline)
+            if committed_and_worktree is not None:
+                for entry in committed_and_worktree.splitlines():
+                    entry = entry.strip().strip('"')
+                    if entry:
+                        changed.append(entry)
+                    if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
+                        break
         stat = _git("diff", "--stat", effective_baseline)
         if stat and stat.strip():
             snapshot["diff_stat"] = stat[:_DIFF_SNAPSHOT_STAT_CAP]
@@ -14945,7 +15003,12 @@ def _capture_review_diff_snapshot(
             if " -> " in entry:
                 entry = entry.split(" -> ", 1)[1]
             entry = entry.strip().strip('"')
-            if entry and entry not in changed:
+            if (
+                changed_files_override is None
+                and entry
+                and entry not in changed
+                and len(changed) < _DIFF_SNAPSHOT_FILE_CAP
+            ):
                 changed.append(entry)
             if line.startswith("?? "):
                 untracked_diff = _git(
@@ -14954,7 +15017,10 @@ def _capture_review_diff_snapshot(
                 )
                 if untracked_diff:
                     raw_diff = (raw_diff or "") + untracked_diff
-            if len(changed) >= _DIFF_SNAPSHOT_FILE_CAP:
+            if (
+                changed_files_override is None
+                and len(changed) >= _DIFF_SNAPSHOT_FILE_CAP
+            ):
                 break
     if changed:
         snapshot["changed_files"] = changed
@@ -15124,7 +15190,11 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
 
 
 def _deterministic_review_skip(
-    conn: sqlite3.Connection, task_id: str
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    cfg: Optional[dict] = None,
+    review_context: Optional[_review_policy.ReviewDecisionContext] = None,
 ) -> Optional[dict]:
     """B1 verification economy: decide whether this completion may skip the LLM
     verifier because its deterministic gates ARE the done signal.
@@ -15137,10 +15207,23 @@ def _deterministic_review_skip(
     :class:`WorkerGateError` from :func:`_run_worker_gate` — identical
     fail-safe to the review submission path.
     """
-    cfg = _review_gate_config()
+    cfg = cfg if cfg is not None else _review_gate_config()
     if cfg.get("standard_uses_llm_verifier", True):
         return None
-    if _effective_review_tier(conn, task_id, cfg=cfg) != "standard":
+    if review_context is not None and (
+        not review_context.evidence_complete
+        or review_context.accumulated_required
+    ):
+        return None
+    if (
+        _effective_review_tier(
+            conn,
+            task_id,
+            cfg=cfg,
+            review_context=review_context,
+        )
+        != "standard"
+    ):
         return None
     stamp = _run_worker_gate(conn, task_id)
     if stamp.get("passed") is True:
@@ -15148,7 +15231,13 @@ def _deterministic_review_skip(
     return None
 
 
-def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+def _tip_defer_review(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    cfg: Optional[dict] = None,
+    review_context: Optional[_review_policy.ReviewDecisionContext] = None,
+) -> Optional[dict]:
     """B2 tip judgment: decide whether this review-tier slice defers its LLM
     review to the chain tip (ONE judgment per feature, on the integrated diff).
 
@@ -15162,56 +15251,46 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
     PlanSpec rows retain their source-based fallback. Returns the green stamp on
     defer, ``None`` otherwise (park in review as before).
     """
-    cfg = _review_gate_config()
+    cfg = cfg if cfg is not None else _review_gate_config()
     if not cfg.get("judge_at_chain_tip", False):
         return None
-    tier = _effective_review_tier(conn, task_id, cfg=cfg)
+    context = review_context or _review_policy.build_review_context(conn, task_id)
+    if not context.can_defer:
+        return None
+    tier = _effective_review_tier(
+        conn,
+        task_id,
+        cfg=cfg,
+        review_context=context,
+    )
     if tier == "standard":
         return None
     if tier == "critical" and cfg.get("critical_reviews_each_slice", True):
         return None
-    row = conn.execute(
-        "SELECT planspec_source FROM tasks WHERE id = ?", (task_id,)
-    ).fetchone()
-    source = (row["planspec_source"] or "").strip() if row else ""
-
-    # Reuse the worktree subsystem's canonical identity rather than defining a
-    # second graph model here. Decompose graphs point every slice at the root in
-    # the inverted direction; these helpers already encode that nuance.
+    # Reuse the decision context's frozen cohort.  Legacy PlanSpec cohorts are
+    # stamped into the defer event, so a later ingestion with the same source
+    # cannot borrow stale evidence.
     from hermes_cli import kanban_worktrees as _kwt
 
-    root_id = _kwt.chain_root_id(conn, task_id)
-    member_ids = _kwt._chain_member_ids(conn, root_id)
-    linked_chain = len(member_ids) > 1
-
-    candidate_rows: list[sqlite3.Row] = []
-    if linked_chain:
-        candidate_ids = sorted(member_ids - {task_id})
+    candidate_ids = sorted(set(context.member_ids) - {task_id})
+    if context.chain_kind == "linked":
         # A decompose root is an orchestration card, not a code-bearing slice,
         # even if a legacy caller assigned it to a code profile.
-        if root_id != task_id and _kwt._is_decompose_root(conn, root_id):
+        root_id = context.chain_root_id
+        if root_id and root_id != task_id and _kwt._is_decompose_root(conn, root_id):
             candidate_ids = [item for item in candidate_ids if item != root_id]
-        if candidate_ids:
-            placeholders = ",".join("?" for _ in candidate_ids)
-            candidate_rows = conn.execute(
-                "SELECT id, assignee, kind, status FROM tasks "
-                f"WHERE id IN ({placeholders})",
-                tuple(candidate_ids),
-            ).fetchall()
-    elif source:
-        # Compatibility for pre-graph PlanSpec imports. New native and PlanSpec
-        # taskgraphs take the canonical linked path above.
-        candidate_rows = conn.execute(
-            "SELECT id, assignee, kind, status FROM tasks "
-            "WHERE planspec_source = ? AND id != ?",
-            (source, task_id),
-        ).fetchall()
-    else:
+    if not candidate_ids:
         return None
+    placeholders = ",".join("?" for _ in candidate_ids)
+    candidate_rows = conn.execute(
+        "SELECT id, assignee, kind, status FROM tasks "
+        f"WHERE id IN ({placeholders})",
+        tuple(candidate_ids),
+    ).fetchall()
 
-    terminal = {"done", "archived", "failed", "canceled", "cancelled"}
     open_code_siblings = any(
-        str(candidate["status"] or "").strip().lower() not in terminal
+        str(candidate["status"] or "").strip().lower()
+        not in {"done", "archived", "failed", "canceled", "cancelled"}
         and _is_code_task_row(candidate)
         for candidate in candidate_rows
     )
@@ -15219,8 +15298,49 @@ def _tip_defer_review(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
         return None  # this IS the tip — the one judgment fires here
     stamp = _run_worker_gate(conn, task_id)
     if stamp.get("passed") is True:
-        return stamp
+        return _review_policy.defer_event_payload(context, stamp)
     return None
+
+
+def _completion_review_economy(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    cfg: dict,
+    review_context: _review_policy.ReviewDecisionContext,
+) -> tuple[Optional[dict], Optional[dict]]:
+    skip = _deterministic_review_skip(
+        conn,
+        task_id,
+        cfg=cfg,
+        review_context=review_context,
+    )
+    defer = (
+        None
+        if skip is not None
+        else _tip_defer_review(
+            conn,
+            task_id,
+            cfg=cfg,
+            review_context=review_context,
+        )
+    )
+    return skip, defer
+
+
+def _capture_completion_review_snapshot(
+    conn: sqlite3.Connection,
+    task_id: str,
+    expected_run_id: Optional[int],
+    review_context: _review_policy.ReviewDecisionContext,
+) -> dict:
+    return _review_policy.capture_review_snapshot(
+        review_context,
+        conn,
+        task_id,
+        expected_run_id,
+        capture=_capture_review_diff_snapshot,
+    )
 
 
 _WORKFLOW_ID_BODY_RE = re.compile(
@@ -15263,6 +15383,7 @@ def _submit_for_review(
     target_profile: Optional[str] = None,
     diff_run_id: Optional[int] = None,
     blocked_only: bool = False,
+    review_context: Optional[_review_policy.ReviewDecisionContext] = None,
 ) -> bool:
     """Park a code-bearing completion in ``review`` instead of ``done``.
 
@@ -15285,10 +15406,18 @@ def _submit_for_review(
     workflow_id, _workflow_identity_source = workflow_identity
     # B1: snapshot the workspace diff BEFORE taking the write lock (subprocess
     # must not run under the txn). Empty dict when no/non-git workspace.
-    diff_snapshot = _capture_review_diff_snapshot(
+    _diff_run_id = diff_run_id if diff_run_id is not None else expected_run_id
+    review_context = review_context or _review_policy.build_review_context(
         conn,
         task_id,
-        expected_run_id=(diff_run_id if diff_run_id is not None else expected_run_id),
+        run_id=_diff_run_id,
+    )
+    diff_snapshot = _review_policy.capture_review_snapshot(
+        review_context,
+        conn,
+        task_id,
+        _diff_run_id,
+        capture=_capture_review_diff_snapshot,
     )
     previous_submission: dict = {}
     if int(stage or 0) > 0:
@@ -15321,6 +15450,14 @@ def _submit_for_review(
                     "diff_stat",
                     "diff_text",
                     "diff_truncated",
+                    "changed_files_total",
+                    "changed_files_truncated",
+                    "review_evidence_complete",
+                    "review_chain_accumulated",
+                    "review_chain_root_id",
+                    "review_repo_identity",
+                    "merge_target",
+                    "merge_target_head",
                 )
                 if key in previous_submission
             }
@@ -15344,6 +15481,14 @@ def _submit_for_review(
                     "diff_base_commit",
                     "diff_baseline",
                     "diff_candidate_commit",
+                    "changed_files_total",
+                    "changed_files_truncated",
+                    "review_evidence_complete",
+                    "review_chain_accumulated",
+                    "review_chain_root_id",
+                    "review_repo_identity",
+                    "merge_target",
+                    "merge_target_head",
                 )
                 if key in previous_submission
             }
@@ -15459,7 +15604,12 @@ def _submit_for_review(
         # frozen at first submit (stage 0) so a mid-chain edit of the column
         # cannot bend a running chain.
         _chain_cfg = _review_gate_config()
-        _tier = effective_tier or _effective_review_tier(conn, task_id, cfg=_chain_cfg)
+        _tier = effective_tier or _effective_review_tier(
+            conn,
+            task_id,
+            cfg=_chain_cfg,
+            review_context=review_context,
+        )
         _explicit_tier_row = conn.execute(
             "SELECT review_tier FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
@@ -15873,6 +16023,14 @@ def _maybe_advance_review_chain(
             "diff_candidate_commit",
             "diff_baseline",
             "diff_truncated",
+            "changed_files_total",
+            "changed_files_truncated",
+            "review_evidence_complete",
+            "review_chain_accumulated",
+            "review_chain_root_id",
+            "review_repo_identity",
+            "merge_target",
+            "merge_target_head",
         ):
             if _snap_key in payload:
                 next_payload[_snap_key] = payload[_snap_key]
@@ -16175,7 +16333,8 @@ def complete_task(
     # code-bearing assignee — otherwise fall through. Profile availability is
     # recorded as a retryable hold by _submit_for_review, never as permission
     # to bypass this policy.
-    if _review_gate_should_apply(conn, task_id, expected_run_id):
+    _review_applies, _review_context, _review_cfg = _completion_review_gate_decision(conn, task_id, expected_run_id, requested=bool(review_gate or expected_run_id is not None))
+    if _review_applies:
         if review_gate or expected_run_id is not None:
             _revision = _pending_review_revision(conn, task_id)
             # B1 verification economy: a green deterministic worker gate IS the
@@ -16184,21 +16343,18 @@ def complete_task(
             # audit-stamp the skip and fall through to the direct done path
             # below. None → park in review as before (safety floor). A RED
             # gate raises WorkerGateError exactly like the submission path.
-            _skip_stamp = _deterministic_review_skip(conn, task_id)
+            _skip_stamp, _defer_stamp = _completion_review_economy(conn, task_id, cfg=_review_cfg, review_context=_review_context)
             # B2 tip judgment: a non-tip review-tier slice of a PlanSpec chain
             # defers its LLM review to the chain tip — green deterministic
             # gate required, audit-stamped, then falls through to done.
-            _defer_stamp = (
-                None if _skip_stamp is not None else _tip_defer_review(conn, task_id)
-            )
             if _skip_stamp is not None:
                 # A deterministic skip does not emit submitted_for_review, but
                 # downstream PlanSpec reviewer children still need the same
                 # machine-readable diff evidence as an ordinary review handoff.
                 # Capture before opening the event transaction: this may invoke
                 # git and must remain best-effort/fail-soft like submit.
-                _skip_diff_snapshot = _capture_review_diff_snapshot(
-                    conn, task_id, expected_run_id
+                _skip_diff_snapshot = _capture_completion_review_snapshot(
+                    conn, task_id, expected_run_id, _review_context
                 )
                 with write_txn(conn):
                     _append_event(
@@ -16219,7 +16375,7 @@ def complete_task(
                         conn,
                         task_id,
                         "review_deferred_to_tip",
-                        {"worker_gate": _defer_stamp},
+                        _defer_stamp,
                     )
             else:
                 submitted = _submit_for_review(
@@ -16234,6 +16390,7 @@ def complete_task(
                     effective_tier=(
                         str(_revision.get("review_tier")) if _revision else None
                     ),
+                    review_context=_review_context,
                 )
                 if submitted:
                     # The WORKER's own run succeeded (work delivered, worker
@@ -26406,6 +26563,11 @@ def _classify_escalation_payload(payload: dict) -> tuple[str, dict]:
     deterministic :func:`_classify_failure`, so a swept classification lands in
     the same vocabulary as an inline one.
     """
+    persisted = _escalation_class.persisted_escalation_classification(
+        payload, classifier=_classify_escalation_payload
+    )
+    if persisted is not None:
+        return persisted
     payload = payload if isinstance(payload, dict) else {}
     evidence = payload.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
@@ -37083,6 +37245,11 @@ def set_task_review_tier(
         raise ValueError(
             f"unknown review_tier {value!r}; expected one of {sorted(_TIER_ORDER)}"
         )
+    downgrade_ack_payload = (
+        _review_policy.downgrade_ack_payload(conn, task_id, value)
+        if value is not None and acknowledge_downgrade
+        else None
+    )
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET review_tier = ? WHERE id = ?",
@@ -37091,9 +37258,9 @@ def set_task_review_tier(
         if cur.rowcount != 1:
             return False
         _append_event(conn, task_id, "review_tier_set", {"review_tier": value})
-        if value is not None and acknowledge_downgrade:
+        if downgrade_ack_payload is not None:
             _append_event(
-                conn, task_id, "review_tier_downgrade_ack", {"to_tier": value}
+                conn, task_id, "review_tier_downgrade_ack", downgrade_ack_payload
             )
     # Phase-C-followup (a): couple scout to critical (flag-gated, default off →
     # byte-identical). Outside the write_txn — the scout's own create_task /

@@ -3,10 +3,29 @@ import { buildDecisionInbox, inboxSummary } from "./decisionInbox";
 import { liveAutoresearchMutationFixture } from "./proposalGroups.live.fixture";
 import type { Proposal } from "./types";
 import type { BacklogItem } from "./schemas";
-import { KanbanDecisionKindSchema } from "./schemas";
+import {
+  KanbanDecisionKindSchema,
+  OperatorEscalationPayloadSchema,
+} from "./schemas";
 import type { AgentOpsIntervention } from "./agentOps";
 
 const NOW = Math.floor(Date.parse("2026-06-05T00:00:00Z") / 1000);
+
+describe("OperatorEscalationPayloadSchema", () => {
+  it("preserves the backend escalation class", () => {
+    const payload = OperatorEscalationPayloadSchema.parse({
+      task: { id: "t_escalated" },
+      escalation_class: "capacity",
+      why_now: "iteration budget exhausted",
+      attempts_already_made: 2,
+      evidence: {},
+      recommended_human_action: "raise the limit",
+      blocked_action_boundary: [],
+    });
+
+    expect(payload?.escalation_class).toBe("capacity");
+  });
+});
 
 function proposal(over: Partial<Proposal> & { id: string }): Proposal {
   return {

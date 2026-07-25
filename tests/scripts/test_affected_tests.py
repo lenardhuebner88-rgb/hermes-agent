@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
+import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_MAX_UNMAPPED_TRACKED_PYTHON_SOURCES = 349
 
 
 def _load_module():
@@ -189,3 +192,105 @@ def test_fallback_cap_covers_hermes_cli_package_dir():
     # test lives at tests/ root), so the directory fallback applies.
     out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
     assert "tests/hermes_cli/" in out
+
+
+def test_unmapped_python_source_count_does_not_regress():
+    """Ratchet the measured false-green surface without requiring it to be zero.
+
+    The 2026-07-25 nested-package fix reduced the repository-wide count from
+    417 to 349.  Include untracked worktree files so this guard also catches a
+    new source file before it is committed.
+    """
+    mod = _load_module()
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "*.py",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sources = sorted(
+        path
+        for path in proc.stdout.splitlines()
+        if path
+        and not path.startswith("tests/")
+        and (REPO_ROOT / path).is_file()
+    )
+    imports_by_test_dir: dict[Path, set[str]] = {}
+    for test_path in (REPO_ROOT / "tests").rglob("test_*.py"):
+        imported: set[str] = set()
+        try:
+            lines = test_path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines:
+            direct = re.match(r"^\s*import\s+(?P<names>.*)$", line)
+            if direct:
+                imported.update(
+                    part.strip().split()[0]
+                    for part in direct.group("names").split(",")
+                    if part.strip()
+                )
+            from_import = re.match(
+                r"^\s*from\s+(?P<module>[A-Za-z_][\w.]*)\s+import\b"
+                r"(?P<names>.*)$",
+                line,
+            )
+            if from_import:
+                package = from_import.group("module")
+                imported.add(package)
+                imported.update(
+                    f"{package}.{name}"
+                    for name in re.findall(
+                        r"\b[A-Za-z_]\w*\b",
+                        from_import.group("names"),
+                    )
+                    if name not in {"as", "import"}
+                )
+        imports_by_test_dir.setdefault(test_path.parent, set()).update(imported)
+
+    def maps_to_test(source_path: str) -> bool:
+        source = Path(source_path)
+        rel_dir = str(source.parent)
+        candidate = Path("tests") / rel_dir / f"test_{source.name}"
+        if (REPO_ROOT / candidate).is_file():
+            return True
+        if mod._mapped_monolith_tests(REPO_ROOT, source_path):
+            return True
+        module_import = str(source.with_suffix("")).replace("/", ".")
+        test_dirs = [REPO_ROOT / "tests"]
+        package_test_dir = Path("tests") / rel_dir
+        while package_test_dir != Path("tests"):
+            absolute = REPO_ROOT / package_test_dir
+            if absolute.is_dir():
+                test_dirs.append(absolute)
+            package_test_dir = package_test_dir.parent
+        if any(
+            module_import in imports_by_test_dir.get(test_dir, set())
+            for test_dir in test_dirs
+        ):
+            return True
+        package_test_dir = REPO_ROOT / "tests" / rel_dir
+        return (
+            package_test_dir != REPO_ROOT / "tests"
+            and package_test_dir.is_dir()
+            and sum(1 for _path in package_test_dir.glob("test_*.py"))
+            <= mod._FALLBACK_MAX_TEST_FILES
+        )
+
+    unmapped = [source for source in sources if not maps_to_test(source)]
+
+    assert len(unmapped) <= _MAX_UNMAPPED_TRACKED_PYTHON_SOURCES, (
+        f"{len(unmapped)} Python source files select no pytest module "
+        f"(ratchet {_MAX_UNMAPPED_TRACKED_PYTHON_SOURCES}); "
+        f"first new blind spots: {unmapped[:20]}"
+    )

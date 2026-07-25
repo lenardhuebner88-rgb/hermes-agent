@@ -1357,7 +1357,9 @@ def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
         "evidence",
         "recommended_human_action",
         "blocked_action_boundary",
+        "escalation_class",
     }
+    assert payload["escalation_class"] == kb.HEILER_CLASS_TRANSIENT
     assert payload["attempts_already_made"] == 2
     assert payload["task"]["id"] == tid
     assert payload["evidence"]["trigger_outcome"] == "spawn_failed"
@@ -1367,4 +1369,3 @@ def test_3b_operator_escalation_emitted_once_when_failure_ladder_exhausts(
     assert "push" not in boundary
     assert "deploy" not in boundary
     assert "restart" not in boundary
-

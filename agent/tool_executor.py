@@ -972,7 +972,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
         agent._current_tool = None
-        _status_suffix = " (error)" if is_error else ""
+        _status_suffix = " (error)" if _detect_tool_failure(name, function_result)[0] else ""
         agent._touch_activity(f"tool completed: {name} ({tool_duration:.1f}s){_status_suffix}")
 
         if not blocked and agent.tool_complete_callback:

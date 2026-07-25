@@ -34,8 +34,22 @@ const OperatorEscalationTaskSchema = z.object({
   assignee: z.string().nullable().catch(null).optional(),
 });
 
+export const EscalationClassSchema = z.enum([
+  "transient",
+  "flaky",
+  "real-bug",
+  "bad-spec",
+  "conflict",
+  "unclassified",
+  "capacity",
+  "protocol-noncompliance",
+  "operator-intent",
+  "operator-gated",
+]);
+
 export const OperatorEscalationPayloadSchema = z.object({
   task: OperatorEscalationTaskSchema.catch({ id: "" }),
+  escalation_class: EscalationClassSchema.catch("unclassified").optional(),
   source: z.string().nullable().catch(null).optional(),
   signal_key: z.string().nullable().catch(null).optional(),
   why_now: z.string().catch(""),

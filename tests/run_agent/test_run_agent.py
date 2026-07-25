@@ -3086,7 +3086,9 @@ class TestConcurrentToolExecution:
             with patch(
                 "agent.tool_executor._emit_terminal_post_tool_call",
                 side_effect=lambda *a, **k: emitted.append(k),
-            ), patch("run_agent.handle_function_call", side_effect=fake_handle):
+            ), patch.object(agent, "_touch_activity") as touch_activity, patch(
+                "run_agent.handle_function_call", side_effect=fake_handle
+            ):
                 agent._execute_tool_calls_concurrent(mock_msg, messages, "task-1")
         finally:
             blocker.set()
@@ -3102,6 +3104,10 @@ class TestConcurrentToolExecution:
             e.get("status") == "timeout" and e.get("error_type") == "tool_timeout"
             for e in emitted
         ), f"no tool_timeout post-hook emitted; got {emitted!r}"
+        assert any(
+            call.args and call.args[0].endswith("(error)")
+            for call in touch_activity.call_args_list
+        )
 
     def test_concurrent_deadline_fans_interrupt_out_to_registered_worker_tids(
         self, agent, monkeypatch

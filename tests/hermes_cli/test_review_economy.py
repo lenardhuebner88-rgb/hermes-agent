@@ -351,6 +351,13 @@ def _linked_two_slice_chain(conn, repo, *, planspec: bool) -> tuple[str, str, st
         author="test",
     )
     assert children is not None
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            root,
+            "worktree_provisioned",
+            {"merge_target": "main"},
+        )
     return children[0], children[1], children[2]
 
 
@@ -385,6 +392,51 @@ def test_linked_chains_share_canonical_code_tip_semantics(
         assert kb.get_task(conn, trailing_doc).status == "todo"
 
 
+def test_standard_tip_cannot_skip_promised_accumulated_review(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A prior review-tier defer outranks standard-tier skip economy at tip."""
+    repo = _green_gate_repo(tmp_path)
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: _gate_cfg(
+            judge_at_chain_tip=True,
+            standard_uses_llm_verifier=False,
+        ),
+    )
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(kb, "_worker_gate_config", lambda: _worker_gate_for(repo))
+    with kb.connect() as conn:
+        first, tip, _trailing_doc = _linked_two_slice_chain(
+            conn, repo, planspec=False
+        )
+        conn.execute(
+            "UPDATE tasks SET review_tier = 'standard' WHERE id = ?",
+            (tip,),
+        )
+        conn.commit()
+
+        assert kb.claim_task(conn, first) is not None
+        assert kb.complete_task(
+            conn, first, summary="review slice", review_gate=True
+        )
+        assert [
+            event.kind for event in kb.list_events(conn, first)
+        ].count("review_deferred_to_tip") == 1
+
+        assert kb.claim_task(conn, tip) is not None
+        assert kb.complete_task(
+            conn, tip, summary="standard tip", review_gate=True
+        )
+        status = kb.get_task(conn, tip).status
+        kinds = [event.kind for event in kb.list_events(conn, tip)]
+
+    assert status == "review"
+    assert "submitted_for_review" in kinds
+    assert "review_skipped_deterministic" not in kinds
+
+
 def test_review_fires_at_tip_not_per_slice(
     kanban_home, tip_judgment_on, tmp_path, monkeypatch
 ):
@@ -394,6 +446,9 @@ def test_review_fires_at_tip_not_per_slice(
         t1, t2, t3 = _planspec_chain(conn, repo)
         for tid in (t1, t2):
             kb.claim_task(conn, tid)
+            context = kb._review_policy.build_review_context(conn, tid)
+            assert context.evidence_complete, context
+            assert context.can_defer, context
             assert kb.complete_task(conn, tid, summary="s", review_gate=True)
             assert kb.get_task(conn, tid).status == "done", tid
             deferred = conn.execute(
