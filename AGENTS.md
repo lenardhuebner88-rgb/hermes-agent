@@ -121,6 +121,27 @@ scripts/gate-frontend.sh
 - `no test Python` means: run the exact `uv sync` command printed by the wrapper.
 - Never use `python3 -m pytest`; system Python creates optional-dependency phantom errors.
 - In the Nix devShell, `HERMES_PYTHON` is the locked fallback when `.venv` is absent.
+- Interpreter selection lives once, in `scripts/lib/select_test_python.sh`. Both
+  `run_tests.sh` and `collect_check.sh` source it. Do not re-inline it — the two inline
+  copies drifted on 2026-07-25 while a comment claimed they matched.
+
+### Test runtime — what actually costs time
+
+Measured against the 2026-07-25 nightly (`~/.hermes/logs/green-gate/*/python.log`, which
+records per-file timings — read it before optimising anything):
+
+- The nightly runs **`-j 12` with a 300 s per-file timeout**. The 12 does not come from
+  `run_tests.sh` (which sets `HERMES_TEST_WORKERS:-8` because gate runs share the box) — it
+  comes from `HERMES_TEST_WORKERS=12` exported in `~/.bashrc` and
+  `~/.config/environment.d/50-hermes-limits.conf`. Under that contention a file runs roughly
+  5× slower than standalone, which is how a 85 s file hits a 300 s limit.
+- **A file over the timeout is SIGKILLed and contributes zero tests** while the summary still
+  reads as one failing file. `tests/plugins/test_kanban_dashboard_plugin.py` loses 307 tests
+  that way. Check for that class before trusting a green-ish nightly.
+- `tests/hermes_cli/conftest.py` builds the kanban DB **once per module** and copies the file
+  per test. Do not reintroduce a per-test `kb.init_db()`; it cost 63 % of the runtime of the
+  35 files that use the shared `kanban_home` fixture. Note the 35: of the 123 files that
+  mention `kanban_home`, 88 define their own override and are untouched by that conftest.
 
 Run targeted/affected checks interactively; the full suite is the nightly path.
 Use repository wrappers rather than bare pytest. In worktrees NEVER bare
