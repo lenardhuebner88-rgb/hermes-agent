@@ -43,7 +43,14 @@ from pathlib import Path
 # gate into a broad suite; importing tests remain selected individually and
 # the nightly full suite remains the backstop. scripts/affected-tests.sh reads
 # this value through the CLI so the shell gate cannot drift from Python.
-_FALLBACK_MAX_TEST_FILES = 200
+#
+# 800, not 200: the two gates previously disagreed (shell 200, post-merge 800)
+# and unifying DOWN was measured to be a coverage regression — tests/agent/,
+# tests/gateway/ and tests/hermes_cli/ all exceed 200, so 45 source files lost
+# their only merge-gate selection. Unifying UP keeps that fallback and lets the
+# worker gate reach it too. Raise deliberately if a package outgrows it; do not
+# lower it to make a gate faster.
+_FALLBACK_MAX_TEST_FILES = 800
 
 # Source paths with feature-split test suites. Keep this small and explicit:
 # these entries prevent a package-wide fallback without relying on test files

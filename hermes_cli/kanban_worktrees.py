@@ -58,8 +58,9 @@ from typing import Any, Callable, Optional, Sequence
 # Cap for the package-directory fallback in _affected_pytest_modules. Larger
 # directories turn a targeted gate into a broad suite; importing tests remain
 # selected individually and the nightly full suite remains the backstop.
-# Must stay in sync with scripts/affected_tests.py.
-_FALLBACK_MAX_TEST_FILES = 200
+# Must stay in sync with scripts/affected_tests.py — see the rationale there
+# for why the two gates unify UP at 800 rather than down at the shell's old 200.
+_FALLBACK_MAX_TEST_FILES = 800
 
 # Source paths with feature-split test suites. Keep this identical to
 # scripts/affected_tests.py so worker and post-merge gates select the same scope.

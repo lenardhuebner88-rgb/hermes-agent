@@ -61,11 +61,21 @@ def test_both_mappers_agree_for_required_real_inputs(changed_files):
     assert standalone == integration
 
 
-def test_fallback_cap_is_200_in_both_python_mappers_and_shell_has_no_literal():
+def test_fallback_cap_agrees_in_both_python_mappers_and_shell_has_no_literal():
+    """The two gates must share ONE cap, and it must be the higher one.
+
+    The gates used to disagree (shell 200, post-merge 800). Unifying DOWN was
+    measured to drop 45 source files to zero merge-gate selection, because
+    tests/agent/, tests/gateway/ and tests/hermes_cli/ all exceed 200 — the
+    'silently downgrading to no selection' failure the cap tests in
+    test_affected_tests.py already guard against. So they unify UP.
+    """
     standalone = _load_standalone_mapper()
     shell = (REPO_ROOT / "scripts" / "affected-tests.sh").read_text(encoding="utf-8")
 
-    assert standalone._FALLBACK_MAX_TEST_FILES == 200
-    assert kanban_worktrees._FALLBACK_MAX_TEST_FILES == 200
+    assert standalone._FALLBACK_MAX_TEST_FILES == 800
+    assert kanban_worktrees._FALLBACK_MAX_TEST_FILES == 800
+    # The shell must READ the Python constant, never carry its own literal.
     assert "--fallback-max-test-files" in shell
     assert "FALLBACK_MAX_TEST_FILES=200" not in shell
+    assert "FALLBACK_MAX_TEST_FILES=800" not in shell
