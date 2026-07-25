@@ -17437,6 +17437,32 @@ def _park_integration(
                 where_params=(int(expected_run_id),),
             )
         if rowcount != 1:
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            actual_status = row["status"] if row is not None else None
+            _append_event(
+                conn,
+                task_id,
+                "integration_park_failed",
+                {
+                    "reason": reason,
+                    "actual_status": actual_status,
+                    "expected_run_id": expected_run_id,
+                },
+                run_id=(
+                    int(expected_run_id) if expected_run_id is not None else None
+                ),
+            )
+            _log.error(
+                "failed to park integration for task %s: actual_status=%r "
+                "expected_run_id=%r reason=%s",
+                task_id,
+                actual_status,
+                expected_run_id,
+                reason,
+            )
             return False
         run_id = _end_run(
             conn,
