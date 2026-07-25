@@ -717,6 +717,13 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if session_id:
         trace_ctx["session_id"] = session_id
 
+    root_kwargs = {
+        "trace_context": trace_ctx,
+        "name": "Hermes turn",
+        "as_type": "chain",
+        "input": trace_input,
+        "metadata": metadata,
+    }
     if propagate_attributes is not None:
         try:
             pa_kwargs: Dict[str, Any] = {
@@ -727,35 +734,11 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
             if kanban_metadata:
                 pa_kwargs["metadata"] = kanban_metadata
             with propagate_attributes(**pa_kwargs):
-                root_ctx = client.start_as_current_observation(
-                    trace_context=trace_ctx,
-                    name="Hermes turn",
-                    as_type="chain",
-                    input=trace_input,
-                    metadata=metadata,
-                    end_on_exit=False,
-                )
-                root_span = root_ctx.__enter__()
+                root_span = client.start_observation(**root_kwargs)
         except Exception:
-            root_ctx = client.start_as_current_observation(
-                trace_context=trace_ctx,
-                name="Hermes turn",
-                as_type="chain",
-                input=trace_input,
-                metadata=metadata,
-                end_on_exit=False,
-            )
-            root_span = root_ctx.__enter__()
+            root_span = client.start_observation(**root_kwargs)
     else:
-        root_ctx = client.start_as_current_observation(
-            trace_context=trace_ctx,
-            name="Hermes turn",
-            as_type="chain",
-            input=trace_input,
-            metadata=metadata,
-            end_on_exit=False,
-        )
-        root_span = root_ctx.__enter__()
+        root_span = client.start_observation(**root_kwargs)
 
     try:
         root_span.set_trace_io(input=trace_input)
@@ -763,7 +746,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         pass
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
+    return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span)
 
 
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,

@@ -119,7 +119,7 @@ class TestRuntimeGate:
             def __init__(self, **kwargs):
                 counters["client_initializations"] += 1
 
-            def start_as_current_observation(self, **kwargs):
+            def start_observation(self, **kwargs):
                 counters["send_calls"] += 1
                 raise AssertionError("disabled plugin attempted egress")
 
@@ -139,7 +139,7 @@ class TestRuntimeGate:
             def __init__(self, **kwargs):
                 counters["client_initializations"] += 1
 
-            def start_as_current_observation(self, **kwargs):
+            def start_observation(self, **kwargs):
                 counters["send_calls"] += 1
 
         monkeypatch.setattr(mod, "Langfuse", GuardClient)
@@ -350,20 +350,13 @@ class TestKanbanWorkerTraceMetadata:
             def set_trace_io(self, **_kwargs):
                 pass
 
-        class _RootContext:
-            def __enter__(self):
-                return _RootSpan()
-
-            def __exit__(self, *_args):
-                return False
-
         class _Client:
             def create_trace_id(self, **_kwargs):
                 return "trace-id"
 
-            def start_as_current_observation(self, **kwargs):
+            def start_observation(self, **kwargs):
                 recorded.update(kwargs)
-                return _RootContext()
+                return _RootSpan()
 
         mod._start_root_trace(
             "task-key", task_id="turn-task", session_id="session", platform="cli",
@@ -660,6 +653,75 @@ class TestTraceScopeKey:
         assert plugin._trace_key("task-1", "session-1") == "task-1"
 
 
+class TestRootObservationContext:
+    def test_root_trace_does_not_keep_current_context_across_turn(self, monkeypatch):
+        """Reproduce the live OpenTelemetry shutdown artifact.
+
+        Langfuse's current-observation context manager stores a ContextVar token
+        when entered.  Finalizing that manager in another async context raises
+        the exact journal error: ``Token ... was created in a different
+        Context``.  A turn-spanning root observation must therefore use the
+        non-current SDK API and retain no context manager for later GC.
+        """
+        import contextvars
+        from contextlib import contextmanager
+
+        sys.modules.pop("plugins.observability.langfuse", None)
+        mod = importlib.import_module("plugins.observability.langfuse")
+        monkeypatch.setattr(mod, "propagate_attributes", None)
+        current_context = contextvars.ContextVar("current_context", default={})
+
+        class RootSpan:
+            def set_trace_io(self, **_kwargs):
+                pass
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            def create_trace_id(self, **_kwargs):
+                return "trace-id"
+
+            def start_observation(self, **_kwargs):
+                self.calls.append("non-current")
+                return RootSpan()
+
+            def start_as_current_observation(self, **_kwargs):
+                self.calls.append("current")
+
+                @contextmanager
+                def root_context():
+                    token = current_context.set({"trace": "trace-id"})
+                    try:
+                        yield RootSpan()
+                    finally:
+                        current_context.reset(token)
+
+                return root_context()
+
+        client = Client()
+        state = mod._start_root_trace(
+            "task-key",
+            task_id="turn-task",
+            session_id="session",
+            platform="gateway",
+            provider="provider",
+            model="model",
+            api_mode="chat",
+            messages=[],
+            client=client,
+        )
+
+        if state.root_ctx is not None:
+            with pytest.raises(ValueError, match="created in a different Context"):
+                contextvars.Context().run(
+                    state.root_ctx.__exit__, None, None, None
+                )
+
+        assert state.root_ctx is None
+        assert client.calls == ["non-current"]
+
+
 # ---------------------------------------------------------------------------
 # End-to-end collision regression: two turns of ONE gateway session must not
 # share trace state.  The helper-level tests above prove _trace_key returns
@@ -689,9 +751,8 @@ class TestTurnTraceIsolation:
         """A minimal Langfuse stand-in that records each root trace opened.
 
         ``_start_root_trace`` calls ``create_trace_id`` then opens a root via
-        ``start_as_current_observation(...)`` (a context manager whose
-        ``__enter__`` returns the root span).  We record one entry per root
-        actually opened so the test can count distinct traces.
+        the non-current ``start_observation(...)`` API. We record one entry per
+        root actually opened so the test can count distinct traces.
         """
 
         class _Span:
@@ -707,20 +768,13 @@ class TestTurnTraceIsolation:
             def start_observation(self, **kw):
                 return _Span()
 
-        class _RootCM:
-            def __enter__(self):
-                return _Span()
-
-            def __exit__(self, *exc):
-                return False
-
         class _Client:
             def create_trace_id(self, seed=None):
                 return f"trace::{seed}"
 
-            def start_as_current_observation(self, **kw):
+            def start_observation(self, **kw):
                 started.append(kw.get("trace_context", {}).get("trace_id"))
-                return _RootCM()
+                return _Span()
 
             def flush(self):
                 pass
