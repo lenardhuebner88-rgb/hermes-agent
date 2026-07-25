@@ -1,9 +1,11 @@
 # dashboard-experience — operator-authorisierte Planner→Builder→Verifier-Pipeline
 # (Operator-Entscheid 2026-07-12: Cross-Family; Modelle floaten via Katalog).
-# Auto-Landung ist im Runner an Repo-Pfad, Live-Repo, Engine-Rollen und die
-# SHA-256 der modellagnostischen Sicherheitsprojektion dieses Manifests sowie
-# aller drei Prompts gebunden. Das konkrete Modell floatet (Katalog-geprueft),
-# Rollen-/Prompt-/Scope-Drift ist fail-closed. Effektive Routen: pack.yaml + Overrides.
+# Auto-Landung ist im Runner an Repo-Pfad, Live-Repo, die Prompt-Zuordnung und die
+# SHA-256 der modell- und engineagnostischen Sicherheitsprojektion dieses Manifests
+# sowie aller drei Prompts gebunden. Modell UND Engine floaten (Katalog-geprueft;
+# Engine seit Operator-Entscheid 2026-07-25), Prompt-/Scope-Drift ist fail-closed.
+# Damit gibt es KEINE Garantie Bauer!=Pruefer mehr — die Landung haengt an
+# Verify-PASS, Visual-Gate und den land_gates. Effektive Routen: pack.yaml + Overrides.
 name: dashboard-experience
 type: pipeline
 description: Planner findet einen belegten Dashboard-UX-Slice, Builder implementiert ihn, Verifier prueft visuell; genau ein PASS-Commit darf automatisch landen; Routen aus pack.yaml/Overrides

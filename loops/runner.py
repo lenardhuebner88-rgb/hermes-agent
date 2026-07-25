@@ -83,27 +83,36 @@ AUTOLAND_PACK_ALLOWLIST = frozenset({"dashboard-experience"})
 AUTOLAND_EXPECTED_REPO = Path("/home/piet/.hermes/hermes-agent").resolve()
 # Die Landungsautorität bindet Engine-ROLLE + Prompt pro Phase — NICHT das
 # konkrete Modell. Modell und Budgets dürfen zur Laufzeit floaten (Operator wählt
-# im Control-Startdialog), solange sie im Katalog liegen; Engine-Rolle, Prompt,
-# Repo, Pack-Quelle, Pfad-/Visual-/exact-one-commit-/clean-/ff-only-Gates bleiben
+# im Control-Startdialog), solange sie im Katalog liegen; Prompt, Repo,
+# Pack-Quelle, Pfad-/Visual-/exact-one-commit-/clean-/ff-only-Gates bleiben
 # fail-closed. Keine konkreten Modellnamen hier oder im Fehlertext (sonst kippt
 # ein Modell-Update die Autorität zurück in die modellgebundene Regression).
+#
+# Operator-Entscheid 2026-07-25: die Engine-ROLLE ist NICHT mehr Teil der
+# Landungsautorität. Sie floatet ab jetzt wie das Modell — ein Engine-Swap
+# (etwa build auf eine Fremd-Engine) erzwingt kein manual-land mehr. Damit
+# entfällt bewusst die Garantie Bauer≠Prüfer; was die Landung objektiv hält,
+# sind Verify-PASS, Visual-Gate und die land_gates (Collection-Sweep +
+# run-affected + Frontend-Gate), plus die unten weiterhin gebundenen Prompts,
+# Pack-Quelle, Live-Repo und Landungsziel.
 AUTOLAND_PHASE_CONTRACT = {
-    "plan": ("claude", "PLANNER-PROMPT.md"),
-    "build": ("codex", "BUILDER-PROMPT.md"),
-    "verify": ("claude", "VERIFIER-PROMPT.md"),
+    "plan": "PLANNER-PROMPT.md",
+    "build": "BUILDER-PROMPT.md",
+    "verify": "VERIFIER-PROMPT.md",
 }
 
 
 def _autoland_safety_hash(raw: dict) -> str:
-    """Hash der Landungsautorität — schließt Laufzeit-Modell und -Budgets bewusst
-    aus, bindet aber Rolle/Engine, Prompt-Zuordnung, Repo, Params, Notify und die
+    """Hash der Landungsautorität — schließt Laufzeit-Modell, -Engine und -Budgets
+    bewusst aus, bindet aber Prompt-Zuordnung, Repo, Params, Notify und die
     Landungsziel-/Gate-Parameter (base_branch, land_remote, land_push, land_gates).
 
-    So bleibt ein Modell-Swap (gpt-5.6-sol → gpt-5.5) OHNE Manifest-Drift, während
-    jede Änderung an Engine-Rolle, Prompt, Repo, Scope-Params ODER am Push-Ziel/den
-    Land-Gates fail-closed auffällt. `stop`/Budgets nur über die Schlüssel gebunden
-    (Werte floaten). Push-Ziel und Gates dürfen NICHT floaten: land_remote=origin
-    oder land_gates=[] müssen den Hash drehen (sonst nicht fail-closed)."""
+    So bleiben Modell-Swap (gpt-5.6-sol → gpt-5.5) UND Engine-Swap (Operator-
+    Entscheid 2026-07-25) OHNE Manifest-Drift, während jede Änderung an Prompt,
+    Repo, Scope-Params ODER am Push-Ziel/den Land-Gates fail-closed auffällt.
+    `stop`/Budgets nur über die Schlüssel gebunden (Werte floaten). Push-Ziel und
+    Gates dürfen NICHT floaten: land_remote=origin oder land_gates=[] müssen den
+    Hash drehen (sonst nicht fail-closed)."""
     phases = raw.get("phases") or {}
     projection = {
         "name": raw.get("name"),
@@ -111,7 +120,7 @@ def _autoland_safety_hash(raw: dict) -> str:
         "repo": raw.get("repo"),
         "stability": raw.get("stability"),
         "phases": {
-            phase: {"engine": cfg.get("engine"), "prompt": cfg.get("prompt")}
+            phase: {"prompt": cfg.get("prompt")}
             for phase, cfg in phases.items()
         },
         "stop_keys": sorted((raw.get("stop") or {}).keys()),
@@ -158,7 +167,7 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
     "dashboard-experience": AutolandContract(
         path_prefixes=("web/src/control/",),
         deny_prefixes=(),
-        safety_sha256="8940bc59f98cfdb9ae45c4fec67f39da364d59a2aa5be2e67f52292adb42585c",
+        safety_sha256="cedbcf5ea93cdb72f7f70f82b258a212fcca0380a76239d3c8f7c7e787e9207f",
         prompt_sha256={
         "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
         "BUILDER-PROMPT.md": "4a6eb2e5e558901a0d3e06a0f5785b30295e56c84c51d3f0321a7eed06ec8d93",
@@ -348,19 +357,19 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
                 f"Pack {name!r}: autoland braucht das gebundene Live-Repo "
                 f"{AUTOLAND_EXPECTED_REPO}, ist {Path(repo).expanduser().resolve()}"
             )
-        # Rollen-/Prompt-Vertrag: Engine-Rolle + Prompt pro Phase, KEIN Modell —
-        # ein Modell-Swap fällt hier bewusst nicht durch (Autorität bindet Rollen).
+        # Prompt-Vertrag: Prompt pro Phase, KEIN Modell und (seit 2026-07-25)
+        # KEINE Engine — beide floaten bewusst und fallen hier nicht durch.
         actual_contract = {
-            phase: (cfg.engine, cfg.prompt)
+            phase: cfg.prompt
             for phase, cfg in phases.items()
         }
         if actual_contract != AUTOLAND_PHASE_CONTRACT:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Phasenvertrag weicht ab; "
-                "erwartet die kuratierten Engine-Rollen und Prompts"
+                "erwartet die kuratierte Prompt-Zuordnung pro Phase"
             )
-        # Modellagnostische Sicherheitsprojektion statt Vollmanifest-Bytes — Modell
-        # und Budget-Werte sind ausgeschlossen, alles Sicherheitsrelevante gebunden.
+        # Modell-/engineagnostische Sicherheitsprojektion statt Vollmanifest-Bytes —
+        # Modell, Engine und Budget-Werte sind ausgeschlossen, alles übrige gebunden.
         if _autoland_safety_hash(raw) != autoland_contract.safety_sha256:
             raise ManifestError(
                 f"Pack {name!r}: autoland-Sicherheitsprojektion weicht vom "
@@ -1143,29 +1152,16 @@ class LoopRunner:
                 )
 
     def _runtime_autoland_authorized(self) -> bool:
-        """Modell UND Budgets floaten frei; nur die Engine-ROLLE pro Phase bleibt
-        Teil der Landungsautorität. Effektive Rolle folgt One-Shot > Night >
-        pack.yaml — reiner Modell-Swap gleicher Rolle erzwingt KEIN manual-land,
-        ein Engine-Rollenwechsel schon.
+        """Modell, Engine UND Budgets floaten frei (Operator-Entscheid 2026-07-25).
 
-        Ohne PHASE_*_ENGINE/MODEL-Overrides (One-Shot oder Night) gilt der beim
-        Laden fail-closed validierte Manifest-Vertrag weiter (Fixtures mutieren
-        pack.phases oft auf Fake-Engines ohne Overrides).
+        Vorher war die Engine-ROLLE pro Phase Teil der Landungsautorität: ein
+        Engine-Swap über PHASE_*_ENGINE (One-Shot oder Night) setzte den
+        manual-land-Marker und der Runner loggte `AUTOLAND übersprungen`. Das ist
+        entfallen — die Landung hängt jetzt nur noch am beim Laden fail-closed
+        validierten Manifest-Vertrag (Prompts, Pack-Quelle, Live-Repo,
+        Landungsziel) sowie an Verify-PASS, Visual-Gate und den land_gates.
         """
-        if not self.pack.autoland:
-            return False
-        phase_keys = {
-            key
-            for key in (*self.overrides, *self.night_overrides)
-            if key.startswith("PHASE_") and key.endswith(("_ENGINE", "_MODEL"))
-        }
-        if not phase_keys:
-            return True
-        return all(
-            self.phase_cfg(phase).engine == AUTOLAND_PHASE_CONTRACT[phase][0]
-            for phase in AUTOLAND_PHASE_CONTRACT
-            if phase in self.pack.phases
-        )
+        return bool(self.pack.autoland)
 
     @property
     def manual_land_marker(self) -> Path:
