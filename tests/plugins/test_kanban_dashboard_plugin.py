@@ -93,35 +93,16 @@ def _configure_dashboard_ws(
 
 
 @pytest.fixture
-def kanban_home(tmp_path, monkeypatch):
+def kanban_home(tmp_path, monkeypatch, _kanban_plugin_home_template):
     """Isolated HERMES_HOME with an empty kanban DB."""
+    import shutil
+
     home = tmp_path / ".hermes"
-    home.mkdir()
-    profiles = home / "profiles"
-    for name in [
-        "default",
-        "coder",
-        "premium",
-        "research",
-        "ops",
-        "x",
-        "a",
-        "b",
-        "old",
-        "new",
-        "worker",
-        "linguist",
-        "alice",
-        "bob",
-    ]:
-        d = profiles / name
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "config.yaml").write_text("model: {}\n")
+    shutil.copytree(_kanban_plugin_home_template, home)
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
     return home
 
 
