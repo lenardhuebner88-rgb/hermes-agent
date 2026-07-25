@@ -7,9 +7,12 @@ Plain pytest, standard library only. Run with:
 
 import ast
 import textwrap
+import time
+from pathlib import Path
 
 import pytest
 
+from hermes_cli import _ast_mutator
 from hermes_cli._ast_mutator import Mutant, generate_mutants
 
 
@@ -510,6 +513,80 @@ def test_max_mutants_cap():
     full_sigs = [(m.operator, m.lineno, m.mutated_source) for m in full]
     capped_sigs = [(m.operator, m.lineno, m.mutated_source) for m in capped]
     assert capped_sigs == full_sigs[:5]
+
+
+def _budget_build_attempts(monkeypatch, budget):
+    """Let the real mutator run, but abort once it has built more than ``budget``
+    mutants. Returns a list that receives one entry per build attempt.
+
+    This is a counting wrapper, not a stub: every call is delegated to the real
+    :class:`_SingleSiteMutator`, so the mutation itself is exercised unchanged.
+    Without the abort a regressed build loop would not fail, it would simply run
+    for hours -- exactly the production symptom we are pinning.
+    """
+    real_cls = _ast_mutator._SingleSiteMutator
+    attempts: list[str] = []
+
+    def counting(operator, target_occurrence, annotation_nodes):
+        attempts.append(operator)
+        if len(attempts) > budget:
+            raise AssertionError(
+                f"generate_mutants built {len(attempts)} mutants for a cap of "
+                f"{budget}; the cap must stop the build loop, not filter its result"
+            )
+        return real_cls(operator, target_occurrence, annotation_nodes)
+
+    monkeypatch.setattr(_ast_mutator, "_SingleSiteMutator", counting)
+    return attempts
+
+
+def test_max_mutants_stops_the_build_loop(monkeypatch):
+    """The cap must bound the *work*, not just the returned list.
+
+    Regression (autoresearch-v2 nightly, 2026-07-24): ``generate_mutants`` built
+    one mutant per discovered site -- each a full re-parse, transform,
+    ``fix_missing_locations`` and ``unparse`` of the whole file -- and applied
+    ``max_mutants`` only afterwards. The nightly asked for 6 mutants of a target
+    with ~11k sites and was killed by the watchdog after 30 CPU minutes.
+    """
+    lines = ["def f():"]
+    for i in range(400):
+        lines.append(f"    x{i} = {i} == {i}")
+    lines.append("    return 0")
+    src = "\n".join(lines)
+
+    attempts = _budget_build_attempts(monkeypatch, budget=12)
+    mutants = generate_mutants(src, max_mutants=4)
+
+    assert len(mutants) == 4
+    assert len(attempts) <= 12
+
+
+def test_curated_foundry_target_stays_bounded(monkeypatch):
+    """The real triggering artefact: the day-rotated Test-Foundry target.
+
+    ``hermes_cli/kanban_db.py`` is entry 0 of ``test_foundry._TARGETS`` and the
+    file the nightly hung on. Mutating it must cost a handful of builds, not one
+    per site.
+    """
+    target = Path(__file__).resolve().parents[1] / "hermes_cli" / "kanban_db.py"
+    assert target.exists(), f"curated Test-Foundry target missing: {target}"
+    source = target.read_text(encoding="utf-8")
+
+    # Sanity: this input really is pathological, otherwise the test is vacuous.
+    sites = _ast_mutator._discover_sites(ast.parse(source))
+    assert len(sites) > 1000, f"expected thousands of sites, found {len(sites)}"
+
+    attempts = _budget_build_attempts(monkeypatch, budget=8)
+    started = time.perf_counter()
+    mutants = generate_mutants(source, max_mutants=2)
+    elapsed = time.perf_counter() - started
+
+    assert len(mutants) == 2
+    assert len(attempts) <= 8
+    assert elapsed < 60.0, f"generate_mutants took {elapsed:.1f}s for 2 mutants"
+    for m in mutants:
+        ast.parse(m.mutated_source)
 
 
 def test_max_mutants_zero_or_negative():
