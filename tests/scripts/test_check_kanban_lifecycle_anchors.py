@@ -54,14 +54,21 @@ def test_committed_lifecycle_map_resolves_against_real_source() -> None:
     # map into a spurious failure, which is how this assertion came to be edited
     # rather than trusted. Counting the anchors still catches the case the
     # literal was there to catch: anchors silently vanishing from the document.
+    # Count anchors into ANY source file, not just kanban_db.py: the checker
+    # resolves every `path#Lnnn` it finds, and since 2026-07-25 the map also
+    # anchors hermes_cli/kanban_worktrees.py (the landing/integration half) and
+    # hermes_cli/control_plane_gate.py. A kanban_db-only regex silently
+    # undercounts and fails the equality assertion below on a legitimate
+    # addition — the exact failure mode this derivation exists to avoid.
     expected = len(
-        re.findall(r"\]\(\.\./\.\./hermes_cli/kanban_db\.py#L\d+\)", DOCUMENT.read_text(encoding="utf-8"))
+        re.findall(r"\]\(\.\./\.\./[\w./]+\.py#L\d+\)", DOCUMENT.read_text(encoding="utf-8"))
     )
     # Equality against the document catches the checker silently skipping
     # anchors it used to parse; the floor catches the document losing coverage.
-    # 95 is the count when this guard was introduced (2026-07-25) — raise it
-    # deliberately, never lower it to make a deletion pass.
-    assert expected >= 95, f"lifecycle map lost coverage: only {expected} anchors"
+    # 95 was the count when this guard was introduced (2026-07-25); raised to
+    # 143 the same day when the map gained the landing/integration half. Raise
+    # it deliberately, never lower it to make a deletion pass.
+    assert expected >= 143, f"lifecycle map lost coverage: only {expected} anchors"
     assert f"OK: {expected} anchors resolved" in result.stdout, result.stdout
 
 

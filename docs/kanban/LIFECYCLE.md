@@ -182,6 +182,143 @@ The daemon publishes board counts and tick health through
 An expired claim with a live local PID is extended only while observable
 heartbeat progress remains fresh.
 
+## Landing path: review verdict to merged branch
+
+The dispatch half above ends at `running`. This half covers everything between a
+worker saying "done" and the code actually being on the live branch. It lives in
+a **different file** — [`hermes_cli/kanban_worktrees.py`](../../hermes_cli/kanban_worktrees.py) —
+which is why it is easy to miss when reading the monolith alone.
+
+### Order of decisions inside `complete_task`
+
+[`complete_task`](../../hermes_cli/kanban_db.py#L16058) is a funnel, not a
+single write. The order matters and is load-bearing:
+
+1. **Workflow step routing** — a non-final workflow step re-queues instead of
+   completing.
+2. **Review gate** — [`_review_gate_should_apply`](../../hermes_cli/kanban_db.py#L14715):
+   gate enabled, this run did *not* originate from review (anti-loop), and the
+   assignee is in `code_roles`. Anything else falls straight through to done.
+3. **Token levers** — [`_deterministic_review_skip`](../../hermes_cli/kanban_db.py#L15126)
+   and [`_tip_defer_review`](../../hermes_cli/kanban_db.py#L15151) may skip the
+   LLM review; otherwise [`_submit_for_review`](../../hermes_cli/kanban_db.py#L15252)
+   parks the task in `review`.
+4. **Review verdict authority** — a review-originated run must carry a
+   machine-readable verdict or `ReviewVerdictRequiredError` is raised;
+   `REQUEST_CHANGES` routes to `block_task`.
+5. **Stage advance** — [`_maybe_advance_review_chain`](../../hermes_cli/kanban_db.py#L15750)
+   re-parks an APPROVED *intermediate* stage for the next reviewer. Placed
+   before integration so a mid-chain stage never triggers a premature merge.
+6. **Integration hook** — `maybe_integrate_on_complete`, guarded so it only runs
+   for a completion the done-UPDATE would actually accept (same status set, same
+   `expected_run_id`). Without that guard a stale worker or a CLI `complete` on a
+   `review` row would merge an unreviewed chain.
+7. **The done UPDATE.**
+
+### The serialized integrator
+
+[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L5517) is *the* single
+merge point and it never pushes. It holds a file lock in the repo's `.git` dir
+(invisible to `git status`), then runs these stages, each of which can park:
+
+| # | stage | anchored | parks when |
+|---|---|---|---|
+| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5185) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
+| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5222) | chain worktree dirty with non-preservable files |
+| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5275) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
+| 3 | dirty overlap | inline in `integrate_chain` | a foreign dirty file in the live checkout overlaps the branch diff |
+| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L5403) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
+| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L5453) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
+
+The post-merge gate runs at the exact merge commit inside a detached validation
+worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L4853)
+— never in the possibly-dirty live checkout. Every exception path there returns
+`(False, …)` — it fails **closed**.
+
+Gate selection is
+[`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L338):
+a per-repo command list from `kanban.integration_gate.repos` if configured, else
+[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5119) for the FO
+repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5092).
+**This repo is not in `integration_gate.repos`, so it uses `default_quick_gate`.**
+
+`default_quick_gate` = ruff over the changed `.py` files, then the *affected*
+pytest modules, then `lint:control` + `tsc -b` + control Vitest when the diff
+touches `web/`. `npm run build` is deliberately excluded (it mutates generated
+dashboard assets and belongs to the release gate).
+
+Outcomes: `merged` / `clean` (nothing to merge) / `parked` / `rebase_conflict`.
+A park becomes [`_park_integration`](../../hermes_cli/kanban_db.py#L17399),
+which blocks the task and stamps the closing run `integration_parked` rather
+than `completed` — a parked integration must not count as a success for the
+respawn guard or per-profile stats.
+
+### Chain semantics: only the last task merges
+
+[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L6135) only
+integrates when this completion closes the **last open task** of a provisioned
+chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L5617)
+ORs two signals conservatively: `task_links` membership from the chain root, and
+any task whose `workspace_path` lives under the same worktree. Consequence: an
+ordinary mid-chain slice goes `done` with **nothing merged**, and the merge
+event lands on a *different* task ID than the one that wrote the code. Do not
+read "task X is done" as "X's code is on main".
+
+## Review tiers and the four token levers
+
+The live `~/.hermes/config.yaml` encodes four deliberate cost decisions. They are
+policy, not accident — flipping one buys quality and costs tokens, in the
+direction stated here.
+
+```yaml
+kanban.review_gate:
+  auto_tier: true                   # tier chosen mechanically, not by hand
+  standard_uses_llm_verifier: false # lever 1
+  judge_at_chain_tip: true          # lever 2
+  critical_reviews_each_slice: false# lever 3
+  code_roles: [coder, premium]      # lever 4 (scope of the whole gate)
+```
+
+**Tier resolution** —
+[`_effective_review_tier`](../../hermes_cli/kanban_db.py#L13378) treats the
+deterministic classifier as a *floor*: an operator may always RAISE the tier,
+but a downgrade below the floor only applies with a logged
+`review_tier_downgrade_ack` event, checked by
+[`_review_tier_downgrade_acked`](../../hermes_cli/kanban_db.py#L13426). The
+classifier itself,
+[`classify_review_tier`](../../hermes_cli/control_plane_gate.py#L337), reads
+**only prose** — `risk_class`, the title, and the body. It never sees the diff.
+
+**Lever 1 — `standard_uses_llm_verifier: false`.** A standard-tier completion
+skips the LLM verifier when the deterministic worker gate ran green. The skip
+requires *positive* evidence: [`_run_worker_gate`](../../hermes_cli/kanban_db.py#L15033)
+returns `{"configured": False}` (no `passed` key) whenever the gate is disabled,
+the assignee is not code-bearing, the workspace is missing, or no commands match
+the repo — and `stamp.get("passed") is True` is then False, so the task parks in
+review. Disabled/misconfigured therefore fails **safe**. What it does *not*
+protect against is a gate that passes **vacuously** — see the trap below.
+
+**Lever 2 — `judge_at_chain_tip: true`.** A non-tip `review`-tier slice defers
+its LLM review to the chain tip, so one judgment covers the feature instead of
+one per slice. Cost: the tip's review diff is captured by
+[`_capture_review_diff_snapshot`](../../hermes_cli/kanban_db.py#L14826) against
+that run's own `pre_run_commit_sha`. In a shared chain worktree the earlier
+slices are already in that baseline, so a mid-chain regression is **outside the
+diff the tip judge sees**. The against-main baseline exists but is only used for
+stage>0 re-submissions. The only thing that sees the accumulated diff is the
+mechanical post-merge gate.
+
+**Lever 3 — `critical_reviews_each_slice: false`.** Lets `critical`-tier slices
+also defer to the tip. Same trade as lever 2, applied to the highest tier.
+
+**Lever 4 — `code_roles: [coder, premium]`.** The review gate is scoped by
+*assignee name*, not by whether the diff contains code. A code-bearing task
+assigned to any other profile is never reviewed and never tier-classified; it
+still merges through the integrator with only the post-merge gate.
+
+Note `_review_gate_config` deliberately reads the **root** config: a worker's
+own profile config must not be able to disable the gate it is subject to.
+
 ## Stall and failure modes
 
 | mode | trigger | enforcing code | confirm live | clear |
@@ -199,6 +336,9 @@ heartbeat progress remains fresh.
 | Worker exits without terminal lifecycle call | subprocess exits zero while task is still running | [`detect_crashed_workers`](../../hermes_cli/kanban_db.py#L22444) | `protocol_violation` or `deliverable_posted_not_completed`; bounded repeats end in `gave_up` | recover posted evidence or rerun with the required complete/block call; operator unblocks after breaker trip |
 | Spawn/config failure breaker | model route, executable, workspace, or repeated spawn fails | [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24025) | failure counter and spawn events accumulate; terminal attempt becomes blocked/auto-blocked | repair deterministic config; allow bounded transient retry, then explicitly unblock after correction |
 | Sticky worker/operator block | latest block or active escalation requires a decision | [`_has_sticky_block`](../../hermes_cli/kanban_db.py#L11541) | card stays `blocked` even when every parent is done | [`unblock_task`](../../hermes_cli/kanban_db.py#L18755) after resolving the stated cause |
+| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L5517) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17399) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
+| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L5403) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
+| Integration retry exhausted | a `transient`-classed park kept failing | [`_integration_park_class`](../../hermes_cli/kanban_worktrees.py#L451) | bounded `integration_retry` events; re-park once reclassified non-transient | resolve the underlying dirt/lock; the retry counter is separate from the failure breaker |
 
 ## Traps
 
@@ -238,6 +378,37 @@ breaker logic lives in
 [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24025) delegates to it.
 Grep finds the old name first, so a change applied only there misses the crash
 and timeout paths that call `_record_task_failure` directly.
+
+**A green gate can be an empty gate.** Both the worker gate and the post-merge
+gate select tests from the diff, and both treat "nothing selected" as pass:
+`scripts/run-affected.sh` prints `skipping pytest` and exits 0, and
+[`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5092) notes
+`pytest skipped (no affected test modules)` and returns green. The mapper,
+[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4430) with
+[`_feature_named_sibling_tests`](../../hermes_cli/kanban_worktrees.py#L89), only
+scans `tests/` root and `tests/<dir-of-the-source-file>` — so a source file in a
+**nested package** whose tests live one level up matches nothing. Measured
+2026-07-25: **417 of 1175 tracked non-test `.py` files select zero pytest
+modules**, including all 13 files of `hermes_cli/dashboard_auth/` — for which 14
+dedicated `tests/hermes_cli/test_dashboard_auth_*.py` files exist and are never
+selected. Combined with `standard_uses_llm_verifier: false`, such a change can
+land on ruff alone. The two gates also disagree on the package fallback cap
+(`affected-tests.sh` drops it above 200 test files,
+`_FALLBACK_MAX_TEST_FILES` allows 800), so the worker gate and the merge gate do
+not run the same set.
+
+**A park cannot demote a task that is already `done`.**
+[`_park_integration`](../../hermes_cli/kanban_db.py#L17399) blocks via an UPDATE
+constrained to `status IN ('running','ready','blocked')` and returns `False`
+when `rowcount != 1` — silently, with the `integration_parked` event already
+written. When the integrator runs after the row reached `done`, the event
+appears but the status does not change. Measured 2026-07-25 on the live board:
+106 `integration_parked` events but only 50 runs stamped with the
+`integration_parked` outcome, and four `done` tasks whose closing run is stamped
+`completed` while carrying a red-gate park reason (`t_81a35a60` pytest exit -15,
+`t_461aee5e` pytest exit 1, `t_77ffe9cc`, `t_daed5e85`). Their work was reverted
+by the gate and never landed, yet they read as successfully done. When auditing,
+trust `task_runs.outcome`, not `tasks.status`.
 
 **This file's anchors rot silently.** Every anchor is a line number into a
 ~39 k-line file, so any edit to the monolith can invalidate the whole map while
