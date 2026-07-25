@@ -53,7 +53,7 @@ function EpicCreateSheet({ onClose, onCreated }: { onClose: () => void; onCreate
         className="mt-2 w-full rounded-lg border border-[var(--hc-border)] bg-[var(--hc-panel)] px-3 py-2 text-base text-white outline-none placeholder:hc-dim focus:border-[var(--hc-accent-border)]"
       />
 
-      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-red-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
+      {error ? <p className="mt-2.5 flex items-start gap-1.5 text-[0.75rem] text-status-alert"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{error}</p> : null}
 
       <div className="mt-4 flex items-center justify-end gap-2">
         <button type="button" onClick={onClose} className="inline-flex min-h-11 items-center rounded-full border border-[var(--hc-border-strong)] px-4 text-sm hc-soft sm:min-h-9">{de.flow.epicCreate.cancel}</button>
@@ -78,7 +78,7 @@ export function EpicCreate({ onCreated }: { onCreated?: () => void }) {
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-full border border-indigo-400/30 bg-indigo-400/10 px-3.5 text-sm font-medium text-indigo-200 transition hover:bg-indigo-400/20 sm:min-h-9 sm:min-w-0"
+        className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center gap-1.5 rounded-full border border-line bg-surface-2 px-3.5 text-sm font-medium text-ink-2 transition hover:bg-surface-3 sm:min-h-9 sm:min-w-0"
       >
         <Layers className="h-4 w-4" />
         <span className="hidden sm:inline">{de.flow.epicCreate.button}</span>

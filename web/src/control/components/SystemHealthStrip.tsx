@@ -19,10 +19,10 @@ interface Props {
 }
 
 const toneClass: Record<HealthTone, string> = {
-  emerald: "border-status-ok/25 bg-status-ok/10 text-emerald-200",
-  amber: "border-status-warn/25 bg-status-warn/10 text-amber-200",
-  red: "border-status-alert/25 bg-status-alert/10 text-red-200",
-  zinc: "border-zinc-600/25 bg-zinc-600/10 text-zinc-200",
+  emerald: "border-status-ok/25 bg-status-ok/10 text-status-ok",
+  amber: "border-status-warn/25 bg-status-warn/10 text-status-warn",
+  red: "border-status-alert/25 bg-status-alert/10 text-status-alert",
+  zinc: "border-line bg-surface-2 text-ink-2",
 };
 
 const statusTone: Record<HealthStatus, HealthTone> = {
@@ -97,11 +97,11 @@ function MetricsTile({ metrics }: { metrics: MetricsLiteResponse | null }) {
     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-white/10 pt-2 text-[11px] hc-soft">
       <span className="font-semibold uppercase tracking-normal hc-dim">{de.systemHealth.metricsTitle}</span>
       <span>{de.systemHealth.requests}: <span className="hc-mono text-white">{totalRequests}</span></span>
-      <span className={cn(hot && "text-red-300")}>
+      <span className={cn(hot && "text-status-alert")}>
         {de.systemHealth.errorRate}: <span className="hc-mono">{(errorRate * 100).toFixed(1)}%</span>
       </span>
       <span>{de.systemHealth.p95}: <span className="hc-mono text-white">{Math.round(worstP95)}ms</span></span>
-      {hot ? <span className="rounded-full border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 text-red-200">{de.systemHealth.metricsErrorBadge}</span> : null}
+      {hot ? <span className="rounded-full border border-status-alert/40 bg-status-alert/10 px-2 py-0.5 text-status-alert">{de.systemHealth.metricsErrorBadge}</span> : null}
     </div>
   );
 }

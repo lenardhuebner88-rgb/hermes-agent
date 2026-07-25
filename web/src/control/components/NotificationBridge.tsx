@@ -277,7 +277,7 @@ export function NotificationBridge({ inbox }: { inbox: DecisionInboxData }) {
         enabled
           ? "border-[var(--hc-accent-border)] bg-[var(--hc-accent-wash)] text-[var(--hc-accent-text)]"
           : pushStatus === "blocked" || pushStatus === "error"
-            ? "border-amber-500/40 bg-amber-500/10 text-amber-100"
+            ? "border-status-warn/40 bg-status-warn/10 text-status-warn"
             : "border-white/10 hc-soft hover:bg-white/5",
       )}
     >
