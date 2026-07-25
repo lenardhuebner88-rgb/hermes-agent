@@ -387,15 +387,29 @@ gate select tests from the diff, and both treat "nothing selected" as pass:
 [`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4459) with
 [`_feature_named_sibling_tests`](../../hermes_cli/kanban_worktrees.py#L116), only
 scans `tests/` root and `tests/<dir-of-the-source-file>` — so a source file in a
-**nested package** whose tests live one level up matches nothing. Measured
-2026-07-25: **417 of 1175 tracked non-test `.py` files select zero pytest
-modules**, including all 13 files of `hermes_cli/dashboard_auth/` — for which 14
-dedicated `tests/hermes_cli/test_dashboard_auth_*.py` files exist and are never
-selected. Combined with `standard_uses_llm_verifier: false`, such a change can
-land on ruff alone. The two gates also disagree on the package fallback cap
-(`affected-tests.sh` drops it above 200 test files,
-`_FALLBACK_MAX_TEST_FILES` allows 800), so the worker gate and the merge gate do
-not run the same set.
+**nested package** whose tests live one level up matched nothing. Measured
+2026-07-25 before the fix: **417 of 1175 tracked non-test `.py` files selected
+zero pytest modules**, including all 13 files of `hermes_cli/dashboard_auth/` —
+for which 14 dedicated `tests/hermes_cli/test_dashboard_auth_*.py` files exist
+and were never selected. Combined with `standard_uses_llm_verifier: false`, such
+a change landed on ruff alone. The mapper now walks the parent chain down to
+`tests/`, which brought that count to **348**; the remainder are genuinely
+untested source files, so the fail-open is still load-bearing. Re-measure before
+claiming a gate covers anything.
+
+**The two fallback caps differ on purpose — do not "de-duplicate" them.**
+The Python mappers cap the package-directory fallback at
+[`_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/kanban_worktrees.py#L63) = 800,
+while `scripts/affected-tests.sh` applies its own lower bound of 200 on top.
+That is two layers with different jobs: the post-merge gate runs once and can
+afford the broad fallback, whereas the shell is the interactive worker gate and
+trades it for tempo — announcing the omission on stderr ("nightly full suite
+remains authoritative") rather than dropping it silently. Both attempts to
+unify them regressed something: coupling the shell to the Python constant erased
+the tempo bound (caught by `tests/hermes_cli/test_run_affected_mapping.py`, which
+pins the 201-file case), and lowering the Python side to 200 dropped 45 source
+files to zero merge-gate selection because `tests/agent/`, `tests/gateway/` and
+`tests/hermes_cli/` all exceed 200.
 
 **A park cannot demote a task that is already `done`.**
 [`_park_integration`](../../hermes_cli/kanban_db.py#L17399) blocks via an UPDATE

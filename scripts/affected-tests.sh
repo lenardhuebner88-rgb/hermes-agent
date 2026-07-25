@@ -12,7 +12,16 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-FALLBACK_MAX_TEST_FILES="$(python3 "$SCRIPT_DIR/affected_tests.py" --fallback-max-test-files)"
+# DELIBERATELY lower than the Python mappers' _FALLBACK_MAX_TEST_FILES (800),
+# and deliberately NOT read from them. Two layers with different jobs:
+#   - the Python mapper emits the raw selection, used by the post-merge
+#     integration gate, which runs once and can afford a broad package fallback;
+#   - this wrapper is the interactive WORKER gate, which trades that fallback
+#     for tempo and says so on stderr ("nightly full suite remains
+#     authoritative") instead of dropping it silently.
+# Coupling the two (2026-07-25) looked like de-duplication but erased the
+# worker-gate tempo bound; test_run_affected_mapping.py pins this behaviour.
+FALLBACK_MAX_TEST_FILES=200
 
 RAW="$(python3 "$SCRIPT_DIR/affected_tests.py" "$@")"
 TOKENS=()

@@ -44,12 +44,12 @@ from pathlib import Path
 # the nightly full suite remains the backstop. scripts/affected-tests.sh reads
 # this value through the CLI so the shell gate cannot drift from Python.
 #
-# 800, not 200: the two gates previously disagreed (shell 200, post-merge 800)
-# and unifying DOWN was measured to be a coverage regression — tests/agent/,
-# tests/gateway/ and tests/hermes_cli/ all exceed 200, so 45 source files lost
-# their only merge-gate selection. Unifying UP keeps that fallback and lets the
-# worker gate reach it too. Raise deliberately if a package outgrows it; do not
-# lower it to make a gate faster.
+# 800 is the RAW selection cap and is intentionally higher than the 200 bound
+# scripts/affected-tests.sh applies on top: the shell is the interactive worker
+# gate and trades the broad fallback for tempo, while the post-merge gate can
+# afford it. Do not "de-duplicate" the two — measured 2026-07-25, lowering this
+# to 200 dropped 45 source files (tests/agent/, tests/gateway/,
+# tests/hermes_cli/ all exceed 200) to zero merge-gate selection.
 _FALLBACK_MAX_TEST_FILES = 800
 
 # Source paths with feature-split test suites. Keep this small and explicit:
@@ -211,9 +211,6 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 2 and argv[1] == "--fallback-max-test-files":
-        print(_FALLBACK_MAX_TEST_FILES)
-        return 0
     ref = argv[1] if len(argv) > 1 else None
     repo_root = _repo_root()
     changed = _changed_files(repo_root, ref)

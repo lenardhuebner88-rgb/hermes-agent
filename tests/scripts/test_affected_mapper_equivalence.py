@@ -61,21 +61,26 @@ def test_both_mappers_agree_for_required_real_inputs(changed_files):
     assert standalone == integration
 
 
-def test_fallback_cap_agrees_in_both_python_mappers_and_shell_has_no_literal():
-    """The two gates must share ONE cap, and it must be the higher one.
+def test_python_mappers_share_a_cap_and_the_shell_keeps_its_lower_bound():
+    """The two PYTHON mappers must agree; the shell wrapper must NOT join them.
 
-    The gates used to disagree (shell 200, post-merge 800). Unifying DOWN was
-    measured to drop 45 source files to zero merge-gate selection, because
-    tests/agent/, tests/gateway/ and tests/hermes_cli/ all exceed 200 — the
-    'silently downgrading to no selection' failure the cap tests in
-    test_affected_tests.py already guard against. So they unify UP.
+    This is a two-layer design, not drift:
+      - both Python mappers (worker-side selection and the post-merge
+        integration gate) share _FALLBACK_MAX_TEST_FILES = 800;
+      - scripts/affected-tests.sh applies its OWN, lower bound (200) because it
+        is the interactive worker gate and trades the broad package fallback
+        for tempo, announcing the omission on stderr.
+
+    Coupling the shell to the Python constant (2026-07-25) erased that tempo
+    bound and broke test_run_affected_mapping.py. Unifying the Python side DOWN
+    to 200 instead was measured to drop 45 source files to zero merge-gate
+    selection. Both directions are regressions; the layers stay separate.
     """
     standalone = _load_standalone_mapper()
     shell = (REPO_ROOT / "scripts" / "affected-tests.sh").read_text(encoding="utf-8")
 
     assert standalone._FALLBACK_MAX_TEST_FILES == 800
     assert kanban_worktrees._FALLBACK_MAX_TEST_FILES == 800
-    # The shell must READ the Python constant, never carry its own literal.
-    assert "--fallback-max-test-files" in shell
-    assert "FALLBACK_MAX_TEST_FILES=200" not in shell
-    assert "FALLBACK_MAX_TEST_FILES=800" not in shell
+    # The shell keeps its own, deliberately lower literal.
+    assert "FALLBACK_MAX_TEST_FILES=200" in shell
+    assert "--fallback-max-test-files" not in shell
