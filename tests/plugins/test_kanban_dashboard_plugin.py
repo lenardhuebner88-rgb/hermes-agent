@@ -8044,6 +8044,12 @@ def test_decision_queue_surfaces_failure_escalation_with_human_payload(client):
         "evidence",
         "recommended_human_action",
         "blocked_action_boundary",
+        # Added when escalation classification landed; this exact-set assertion
+        # was never updated because the whole file was being SIGKILLed in the
+        # nightly, so nobody saw it go red. The field is intended — see
+        # hermes_cli/kanban_escalation_class.py, web/src/control/lib/schemas/
+        # decisionInbox.ts, and the four test files that assert it positively.
+        "escalation_class",
     }
     assert decision["task"]["id"] == t
     assert decision["attempts_already_made"] == 2
