@@ -46,6 +46,9 @@ from agent.context_engine import (
     automatic_compaction_status_message,
     sanitize_memory_context,
 )
+from agent.hygiene_compression_lock_guard import (
+    try_acquire_compression_lock_with_guard,
+)
 from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
@@ -1502,8 +1505,12 @@ def compress_context(
             _lock_acquired = True  # acquired-but-unlocked compatibility path
         else:
             try:
-                _lock_acquired = _try_acquire_lock(
-                    _lock_sid, _lock_holder, ttl_seconds=_lock_ttl
+                _lock_acquired = try_acquire_compression_lock_with_guard(
+                    agent,
+                    _try_acquire_lock,
+                    _lock_sid,
+                    _lock_holder,
+                    ttl_seconds=_lock_ttl,
                 )
             except Exception as _lock_err:
                 # The method exists and entered its implementation but failed.

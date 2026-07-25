@@ -13651,6 +13651,9 @@ class GatewayRunner(
 
                     try:
                         from agent.conversation_compression import CompressionCommitFence
+                        from agent.hygiene_compression_lock_guard import (
+                            install_hygiene_compression_lock_guard,
+                        )
                         from run_agent import AIAgent
 
                         _hyg_model, _hyg_runtime = self._resolve_session_agent_runtime(
@@ -13684,6 +13687,9 @@ class GatewayRunner(
                                     enabled_toolsets=["memory"],
                                     session_id=session_entry.session_id,
                                     session_db=_hyg_session_db,
+                                )
+                                _hyg_lock_guard = install_hygiene_compression_lock_guard(
+                                    _hyg_agent, _hyg_session_db
                                 )
                                 _hyg_cleanup_deferred = False
                                 try:
@@ -13743,6 +13749,7 @@ class GatewayRunner(
                                             # successful compaction as a timeout.
                                             _compressed, _ = await _hyg_future
                                         else:
+                                            await asyncio.to_thread(_hyg_lock_guard.cancel)
                                             self._defer_agent_cleanup_until_future_done(
                                                 _hyg_future,
                                                 _hyg_agent,
