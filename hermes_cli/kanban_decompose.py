@@ -149,8 +149,8 @@ Rules:
     verdict) plus a concrete `done_signal` the worker/reviewer can cite.
     Avoid vague activity-only criteria such as "implement X", "tests run",
     or "documentation updated" without a specific proof signal.
-  - For worker-lane children assigned to admin, coder, research, reviewer,
-    or critic, include a structured YAML scope block in the body with
+  - For worker-lane children assigned to admin, coder, coder-frontend, research,
+    reviewer, or critic, include a structured YAML scope block in the body with
     `scope_contract.version: 2`, `allowed_tools`, and
     `completion_policy.require_scope_attestation: true`. `allowed_tools` is a
     declarative kanban-lifecycle attestation: set it ONLY to a subset of
@@ -280,9 +280,57 @@ def _active_lane_routing_block() -> str:
         return f"      * {name}: {purpose}.{suffix}"
 
     lines = [
-        route("coder", "default code implementation lane for ordinary code tasks"),
-        route("premium", "reasoning-heavy, chain-critical, or hard multi-file lane; auto-retry escalation target"),
+        route(
+            "coder",
+            "DEFAULT + BACKEND code lane. Owns everything OUTSIDE web/: "
+            "hermes_cli/**, plugins/**, tools/**, gateway/**, agent/**, "
+            "scripts/**, tests/**, docs/**, config. "
+            "Gate: scripts/run-affected.sh + ruff",
+        ),
+        route(
+            "coder-frontend",
+            "FRONTEND code lane for the /control operator SPA. Owns ONLY "
+            "web/src/control/** and web/e2e/** "
+            "(TypeScript/React/CSS/Vitest/Playwright). "
+            "Gate: scripts/gate-frontend.sh (NOT pytest, NOT ruff). "
+            "Design canon web/src/control/DESIGN.md + theme.css tokens are binding",
+        ),
+        route(
+            "premium",
+            "reasoning-heavy, chain-critical, or hard multi-file lane; "
+            "auto-retry escalation target",
+        ),
         route("coder-claude", "deprecated alias of premium", source="premium"),
+        "      * PATH RULE for coder vs coder-frontend — DECIDE BY THE FILES "
+        "THE CHILD WILL EDIT, not by the words in the title. This rule is "
+        "deterministic and overrides intuition:",
+        "          - Every edited path starts with `web/src/control/` or "
+        "`web/e2e/` -> assignee=coder-frontend.",
+        "          - No edited path starts with `web/` -> assignee=coder.",
+        "          - Cannot name the edited paths -> assignee=coder (backend "
+        "owns the contract) and say in the body that the paths are unknown.",
+        "        `hermes_cli/web_dist/**` is generated build output and NEVER "
+        "counts as a frontend path.",
+        "        `web/src/App.tsx`, `web/src/main.tsx`, `web/index.html`, and "
+        "`web/vite.config.ts` are upstream-owned and belong to coder, not "
+        "coder-frontend.",
+        "      * BOTH SIDES (a new/changed endpoint AND the view that renders "
+        "it): do NOT split by default. One coherent feature = ONE owner "
+        "end-to-end (single-owner doctrine). Pick the owner by CENTER OF GRAVITY:",
+        "          - The risk/novelty is in the view (layout, states, tokens, "
+        "interaction, responsive) and the backend part is a thin read-only "
+        "route -> ONE child, assignee=coder-frontend.",
+        "          - The risk/novelty is in the data, the contract, a migration, "
+        "or dispatcher/worker behaviour, and the view is a thin readout -> "
+        "ONE child, assignee=coder.",
+        "        Split into a coder child + a dependent coder-frontend child "
+        "ONLY when the overall decomposition already justifies fan-out "
+        "(>=4 subtasks with disjoint file ownership, each independently "
+        "testable). Splitting a 2-file change buys NO parallelism -- both "
+        "children run in the same repo and are serialized by "
+        "kanban.serialize_by_repo -- it only adds a handoff. When you do split, "
+        "the frontend child MUST list the backend child in `parents`, and BOTH "
+        "children must name their exact scope_files.",
         "      * reviewer and critic: verdict-only lanes; never assign them kind=code or implementation tasks.",
         "      * research: research lane; never assign it kind=code; do not invent researcher as an alias.",
         "      * scout: optional read-only code-recon PREP lane for genuinely large or risky work; it edits, commits and deploys nothing.",
@@ -640,6 +688,7 @@ def validate_constraint_preservation(
 _WORKER_SCOPE_LANES: frozenset[str] = frozenset({
     "admin",
     "coder",
+    "coder-frontend",
     "coder-claude",
     "premium",
     "research",

@@ -58,8 +58,14 @@ def repo(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #4 — _WORKER_SCOPE_LANES covers coder-claude, premium, verifier
+# #4 — _WORKER_SCOPE_LANES covers both coder lanes, premium, verifier
 # ---------------------------------------------------------------------------
+
+def test_worker_scope_lanes_includes_coder_frontend():
+    assert "coder-frontend" in decomp._WORKER_SCOPE_LANES
+    assert "coder-frontend" not in decomp._READ_ONLY_WORKER_LANES
+    assert "write_file" in decomp._allowed_tools_for_assignee("coder-frontend")
+
 
 def test_worker_scope_lanes_includes_coder_claude():
     assert "coder-claude" in decomp._WORKER_SCOPE_LANES

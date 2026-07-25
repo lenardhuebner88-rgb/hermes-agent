@@ -418,7 +418,7 @@ def _is_review_like_task(task: Any, text: str) -> bool:
     assignee = _normalise_text(_task_field(task, "assignee", ""))
     if assignee in {"reviewer", "verifier"}:
         return True
-    if assignee not in {"coder", "premium"}:
+    if assignee not in {"coder", "coder-frontend", "premium"}:
         return False
     return bool(_text_contains_any(text, _REVIEW_LIKE_TERMS))
 

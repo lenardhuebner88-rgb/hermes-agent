@@ -334,7 +334,7 @@ def _active_legacy_cohort(
             or (
                 str(row["kind"] or "").strip().lower() != "code"
                 and str(row["assignee"] or "").strip().lower()
-                not in {"coder", "premium", "programmer"}
+                not in {"coder", "coder-frontend", "premium", "programmer"}
             )
             or not member_workspace
             or _workspace_identity(member_workspace) != current_workspace

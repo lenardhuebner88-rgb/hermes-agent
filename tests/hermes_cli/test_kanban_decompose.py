@@ -918,10 +918,15 @@ def test_decompose_prompt_documents_3a_lane_policy():
     assert "null if unsure" in prompt
 
 
-def test_decompose_prompt_separates_coder_and_claude_coder():
-    """Code routes are rendered from the active lane, including aliases."""
+def test_decompose_prompt_routes_backend_frontend_and_claude_coder():
+    """Code routes include the deterministic file-path split and aliases."""
     prompt = decomp._system_prompt()
-    assert "coder: default code implementation lane" in prompt
+    assert "coder: DEFAULT + BACKEND code lane" in prompt
+    assert "coder-frontend: FRONTEND code lane" in prompt
+    assert "PATH RULE for coder vs coder-frontend" in prompt
+    assert "Every edited path starts with `web/src/control/` or `web/e2e/`" in prompt
+    assert "CENTER OF GRAVITY" in prompt
+    assert ">=4 subtasks with disjoint file ownership" in prompt
     assert "premium: reasoning-heavy" in prompt
     assert "coder-claude: deprecated alias of premium" in prompt
     assert "Active route:" in prompt or "resolved from active lane configuration" in prompt

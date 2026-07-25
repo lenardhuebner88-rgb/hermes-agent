@@ -39,6 +39,7 @@ VALID_REVIEW_TIERS = {"standard", "review", "critical"}
 
 VALID_PLANSPEC_LANES = {
     "coder",
+    "coder-frontend",
     "coder-claude",
     "premium",
     "scout",

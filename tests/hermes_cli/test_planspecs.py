@@ -346,7 +346,7 @@ def test_verdict_only_code_lane_warns_on_validate_and_blocks_ingest(
     finding = preview["findings"][0]
     assert "role_misuse" in finding
     assert "lane='research' cannot own kind='code'" in finding
-    assert "coder, coder-claude, premium" in finding
+    assert "coder, coder-claude, coder-frontend, premium" in finding
     assert "scout" in finding
 
     with pytest.raises(planspecs.PlanSpecBlocked) as exc:

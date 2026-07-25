@@ -4908,8 +4908,13 @@ def _conflict_event_fingerprint(payload: dict[str, Any]) -> str:
 
 KANBAN_DISPATCHER_HEARTBEAT_FILENAME = "kanban_dispatcher_heartbeat.json"
 _VERDICT_ONLY_BUILD_ROLES = frozenset({"reviewer", "critic", "research"})
+# Fork-only symbol, 0 upstream hits — additive lane key, no upstream conflict surface.
 _CODE_LANE_REASONS = {
     "coder": "default code implementation lane",
+    "coder-frontend": (
+        "frontend code lane for the /control SPA (web/src/control, web/e2e); "
+        "gate is scripts/gate-frontend.sh"
+    ),
     "coder-claude": "reasoning-heavy code lane (alias of premium); requires cross-family review",
     "premium": "reasoning-heavy, chain-critical, or hard multi-file code lane; requires cross-family review",
 }
@@ -13226,7 +13231,13 @@ class ReviewVerdictRequiredError(ValueError):
 #     so it is always sent terminal — never re-parked in review.
 #   * Children gate on the parent's verified ``done`` (recompute_ready is left
 #     unchanged): they must not build on unverified work.
-_DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = ("coder", "coder-claude", "premium")
+# Fork-only symbol, 0 upstream hits — additive lane key, no upstream conflict surface.
+_DEFAULT_REVIEW_CODE_ROLES: tuple[str, ...] = (
+    "coder",
+    "coder-claude",
+    "coder-frontend",
+    "premium",
+)
 _DEFAULT_VERIFIER_PROFILE = "verifier"
 # B (staged review gate): the reviewer/critic stages layered on top of verifier
 # for the ``review`` and ``critical`` tiers respectively.
@@ -37376,8 +37387,14 @@ LANE_RUNTIMES = ("hermes", "claude-cli")
 # night-sprint plan). ensure_lane_seeds prefers the LIVE profile configs for
 # api-standard so activating it is behavior-neutral; these values are the
 # fallback when a profile config is unreadable (e.g. test fixtures).
+# Fork-only symbol, 0 upstream hits — additive lane key, no upstream conflict surface.
 _LANE_SEED_API_STANDARD = {
     "coder": {"worker_runtime": "hermes", "model": "gpt-5.5"},
+    "coder-frontend": {
+        "worker_runtime": "hermes",
+        "provider": "kimi-coding",
+        "model": "k3",
+    },
     "reviewer": {"worker_runtime": "hermes", "model": "kimi-for-coding"},
     "critic": {"worker_runtime": "hermes", "model": "qwen3.7-max"},
     "research": {"worker_runtime": "hermes", "model": "kimi-k2.6"},
@@ -37385,8 +37402,10 @@ _LANE_SEED_API_STANDARD = {
     "coder-claude": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
     "premium": {"worker_runtime": "claude-cli", "model": "claude-opus-4-8"},
 }
+# Fork-only symbol, 0 upstream hits — additive lane key, no upstream conflict surface.
 _LANE_SEED_MAX_ABO = {
     "coder": {"worker_runtime": "claude-cli", "model": None},
+    "coder-frontend": {"worker_runtime": "claude-cli", "model": None},
     "reviewer": {"worker_runtime": "claude-cli", "model": None},
     "critic": {"worker_runtime": "claude-cli", "model": None},
     "research": {"worker_runtime": "claude-cli", "model": None},

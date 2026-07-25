@@ -215,3 +215,25 @@ def test_phase_a_premium_is_canonical_claude_lane_no_opus_coder():
     assert "opus-coder" not in planspecs.VALID_PLANSPEC_LANES
     assert "opus-coder" not in kd._WORKER_SCOPE_LANES
     assert "opus-coder" not in kb._LANE_ALIASES.values()
+
+
+def test_coder_frontend_is_an_additive_writable_code_lane():
+    """The frontend split adds one lane without changing aliases or defaults."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_decompose as kd
+    from hermes_cli import planspecs
+
+    assert kb._LANE_ALIASES == {"coder-claude": "premium"}
+    assert "coder-frontend" in planspecs.VALID_PLANSPEC_LANES
+    assert "coder-frontend" in kd._WORKER_SCOPE_LANES
+    assert "coder-frontend" not in kd._READ_ONLY_WORKER_LANES
+    assert "coder-frontend" in kb._DEFAULT_REVIEW_CODE_ROLES
+    assert kb._LANE_SEED_API_STANDARD["coder-frontend"] == {
+        "worker_runtime": "hermes",
+        "provider": "kimi-coding",
+        "model": "k3",
+    }
+    assert kb._LANE_SEED_MAX_ABO["coder-frontend"] == {
+        "worker_runtime": "claude-cli",
+        "model": None,
+    }
