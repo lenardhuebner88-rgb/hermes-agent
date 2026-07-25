@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lanes · Eval-Scorecard — Inspect AI auf $0-Abos</title>
+<style>
+  :root{
+    --surface-0:#0e100f; --surface-1:#141715; --surface-2:#1a1e1b; --surface-3:#232824;
+    --line:#2a302b; --line-soft:#1e2420;
+    --bronze:#c9884a; --bronze-hi:#dda05f; --lane-prem:#b18bc4;
+    --ok:#86b97e; --warn:#d9b23a; --alert:#e0604f;
+    --d1:#a8ad6a; --d2:#7ba89d; --d3:#8fa3bd; --d4:#9d8bc4; --d5:#c47d92; --d6:#96938a; --d7:#c4955f;
+    --ink:#ebe7de; --ink-2:#a9a59b; --ink-3:#757166;
+    --r-panel:10px; --r-card:7px;
+    --disp:'Archivo Variable','Archivo','Arial Narrow',Arial,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--surface-0);color:var(--ink);font-family:var(--disp);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px 56px}
+
+  .puls-leiste{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+    padding:22px 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:26px}
+  .masthead{font-weight:600;font-size:1.87rem;text-transform:uppercase;letter-spacing:.14em}
+  .subtitle{font-size:.87rem;color:var(--ink-3);margin-top:4px;letter-spacing:.04em}
+  .instruments{display:flex;gap:26px;align-items:flex-end}
+  .instrument{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .instrument-label{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2)}
+  .instrument-value{font-family:var(--mono);font-size:1.2rem}
+  .led{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--ink-3)}
+  .led.ok{background:var(--ok);box-shadow:0 0 6px color-mix(in srgb,var(--ok) 60%,transparent)}
+  .led.bronze{background:var(--bronze);box-shadow:0 0 6px color-mix(in srgb,var(--bronze) 60%,transparent)}
+  @media (prefers-reduced-motion:no-preference){.led.ok,.led.bronze{animation:pulse 2.4s ease-in-out infinite}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  .panel{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);overflow:hidden;margin-bottom:16px}
+  .section-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+    padding:14px 18px 12px;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-size:.73rem;text-transform:uppercase;letter-spacing:.12em;color:var(--ink-2)}
+  .section-note{font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+
+  /* Scorecard */
+  table.score{width:100%;border-collapse:collapse}
+  .score th{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3);
+    text-align:left;font-weight:500;padding:11px 16px;border-bottom:1px solid var(--line-soft)}
+  .score th.num,.score td.num{text-align:right;font-family:var(--mono)}
+  .score td{padding:13px 16px;border-bottom:1px solid var(--line-soft);font-size:.87rem;vertical-align:middle}
+  .score tbody tr{transition:background .13s ease-out}
+  .score tbody tr:hover{background:var(--surface-2)}
+  .score tbody tr.rec{background:var(--surface-3)}
+  .score tbody tr.rec td:first-child{box-shadow:inset 2px 0 0 var(--bronze)}
+  .lane{display:inline-flex;align-items:center;gap:8px;font-size:.87rem}
+  .lane-dot{width:9px;height:9px;border-radius:50%;background:var(--c,var(--d6))}
+  .lane .prem{border:2px solid var(--lane-prem);box-shadow:0 0 0 2px color-mix(in srgb,var(--lane-prem) 40%,transparent)}
+  .lane .tag{font-size:.73rem;color:var(--lane-prem);letter-spacing:.06em}
+  .cell{font-family:var(--mono);font-size:.87rem;display:inline-flex;align-items:center;gap:7px}
+  .cell .sdot{width:6px;height:6px;border-radius:50%}
+  .s-ok{color:var(--ok)} .s-ok .sdot{background:var(--ok)}
+  .s-warn{color:var(--warn)} .s-warn .sdot{background:var(--warn)}
+  .s-alert{color:var(--alert)} .s-alert .sdot{background:var(--alert)}
+  .overall{font-family:var(--mono);font-size:1.2rem;font-weight:500}
+  .spark{vertical-align:middle}
+  .rec-chip{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;letter-spacing:.06em;
+    color:var(--bronze-hi);border:1px solid color-mix(in srgb,var(--bronze) 55%,transparent);
+    border-radius:var(--r-card);padding:2px 9px;background:color-mix(in srgb,var(--bronze) 10%,var(--surface-2))}
+
+  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--disp);font-size:.73rem;
+    text-transform:uppercase;letter-spacing:.1em;padding:9px 16px;border-radius:var(--r-card);
+    border:1px solid var(--bronze);color:var(--bronze-hi);background:transparent;cursor:pointer;
+    transition:background .14s ease-out,color .14s ease-out}
+  .btn:hover{background:var(--bronze);color:var(--surface-0)}
+  .btn.ghost{border-color:var(--line);color:var(--ink-2)}
+  .btn.ghost:hover{background:var(--surface-3);color:var(--ink);border-color:var(--line)}
+
+  .insight{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    padding:16px 18px}
+  .insight .txt{font-size:.87rem;color:var(--ink-2);max-width:640px;line-height:1.55}
+  .insight .txt b{color:var(--ink)}
+  .foot{margin-top:14px;font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}table.score{display:block;overflow-x:auto;max-width:100%}.wrap{overflow-x:hidden;min-width:0}.puls-leiste{flex-direction:column;align-items:flex-start;gap:14px}
+    .instruments{gap:18px}.score{font-size:.8rem}}
+
+  /* ── Shared 8/10 components (MockPreviewMarker, CoverageRail, ProvenanceChip) ── */
+  .mock-preview-marker{display:inline-flex;align-items:center;gap:6px;font-size:.67rem;line-height:1.3;
+    letter-spacing:.08em;color:var(--bronze-hi);border:1px dashed color-mix(in srgb,var(--bronze) 55%,transparent);
+    border-radius:var(--r-card);padding:2px 8px;background:transparent;
+    text-transform:uppercase;font-family:var(--disp);white-space:nowrap;vertical-align:middle}
+  .mock-preview-marker .mpm-mobile{display:none}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}table.score{display:block;overflow-x:auto;max-width:100%}.wrap{overflow-x:hidden;min-width:0}
+    .mock-preview-marker .mpm-desktop{display:none}
+    .mock-preview-marker .mpm-mobile{display:inline}
+  }
+  .prov-chip{display:inline-flex;align-items:center;font-size:.67rem;line-height:1.3;
+    color:var(--ink-3);font-family:var(--mono);letter-spacing:.04em;white-space:nowrap;
+    padding:0 4px;vertical-align:middle}
+  .coverage-rail{margin-bottom:22px}
+  .cov-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 18px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+  .cov-row:last-child{border-bottom:none}
+  .cov-lane{display:inline-flex;align-items:center;gap:8px;font-size:.87rem;min-width:140px}
+  .cov-leds{display:flex;gap:14px;align-items:center;flex-wrap:wrap;min-width:0}
+  .cov-led{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;letter-spacing:.05em;
+    color:var(--ink-2);text-transform:uppercase}
+  .cov-led .led{width:7px;height:7px}
+  .cov-led.ok{color:var(--ink-2)}
+  .cov-led.warn{color:var(--warn)}
+  .cov-led.warn .led{background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 60%,transparent)}
+  .cov-led.absent{color:var(--ink-3)}
+  .cov-led.absent .led{background:var(--ink-3);box-shadow:none}
+  .cov-led.phase2{color:var(--ink-3)}
+  .cov-led.phase2 .led{background:var(--ink-3);box-shadow:none}
+  .cov-led .cov-sub{font-size:.67rem;color:var(--ink-3);text-transform:none;letter-spacing:.02em;
+    margin-left:2px;font-family:var(--disp)}
+  .route-sub{font-size:.8rem;color:var(--ink-2);margin-top:6px;letter-spacing:.03em;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .route-sub b{color:var(--warn);font-weight:600}
+  .panel-footnote{font-size:.67rem;color:var(--ink-3);font-family:var(--mono);
+    padding:10px 18px 14px;line-height:1.5;border-top:1px solid var(--line-soft)}
+  .gap-tag{display:inline-flex;align-items:center;font-size:.67rem;letter-spacing:.06em;
+    color:var(--ink-3);border:1px dashed var(--line);border-radius:var(--r-card);padding:1px 7px;
+    text-transform:uppercase;margin-left:6px}
+  .link-hint{font-size:.8rem;color:var(--ink-3);font-family:var(--disp);
+    padding:12px 18px 16px;line-height:1.5}
+  .link-hint b{color:var(--ink-2);font-weight:600}
+
+  /* Empty-state block (no ok-green, ink-2/ink-3) */
+  .empty-state{padding:18px;font-size:.87rem;color:var(--ink-2);line-height:1.55;
+    border-bottom:1px solid var(--line-soft)}
+  .empty-state .sit{color:var(--ink)}
+  .empty-state .assess{color:var(--ink-3);font-size:.8rem;margin-top:4px}
+
+  /* Collapsible example block */
+  details.example-block{border-top:1px solid var(--line-soft)}
+  details.example-block > summary{cursor:pointer;padding:12px 18px;font-size:.8rem;
+    color:var(--ink-3);letter-spacing:.04em;list-style:none;display:flex;align-items:center;gap:8px;
+    transition:background .13s ease-out}
+  details.example-block > summary:hover{background:var(--surface-2)}
+  details.example-block > summary::-webkit-details-marker{display:none}
+  details.example-block > summary::before{content:"▸";color:var(--ink-3);
+    transition:transform .13s ease-out;display:inline-block}
+  details.example-block[open] > summary::before{transform:rotate(90deg)}
+
+  /* Outcome-neutral chips (inside PHASE2 marker — no status-ok green) */
+  .chip.neutral{color:var(--ink-2)} .chip.neutral .led{background:var(--ink-3)}
+
+  /* Mock banner wrap */
+  .mock-banner{padding:10px 18px;border-bottom:1px solid var(--line-soft);
+    background:color-mix(in srgb,var(--bronze) 4%,var(--surface-1));
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .mock-banner .lbl{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+
+  /* Coverage gauge (reflect) — 6 pill segments */
+  .cov-gauge{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
+  .cov-gauge .seg{width:34px;height:10px;border-radius:3px;background:var(--c,var(--d6));
+    opacity:.92;flex:none}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="puls-leiste">
+    <div class="masthead-group">
+      <div class="masthead">Lanes</div>
+      <div class="subtitle">Eval-Scorecard · Inspect AI · Modell-Trial auf $0-Abos</div>
+    </div>
+    <div class="instruments">
+      <div class="instrument"><span class="instrument-label"><span class="led ok"></span>Worker</span><span class="instrument-value">4</span></div>
+      <div class="instrument"><span class="instrument-label">Inbox</span><span class="instrument-value">2</span></div>
+      <div class="instrument"><span class="instrument-label">Kosten heute</span><span class="instrument-value">$0.00</span></div>
+      <div class="instrument"><span class="instrument-label"><span class="led bronze"></span>Gateway</span><span class="instrument-value">up</span></div>
+    </div>
+  </header>
+
+  <section class="panel">
+    <div class="section-header">
+      <span class="eyebrow">Vorläufig · Outcome-basiert (kein Eval)</span>
+      <span class="section-note">Quelle: subscription_token_burn (outcome, nicht Verdict)</span>
+    </div>
+    <table class="score">
+      <thead>
+        <tr><th>Lane</th><th class="num">Runs (Oa)</th><th class="num">fertig</th><th class="num">frage</th><th class="num">tot</th><th class="num">Token-Anteil</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max</span></td>
+            <td class="num">42</td><td class="num">38</td><td class="num">3</td><td class="num">1</td>
+            <td class="num">38%</td></tr>
+        <tr><td><span class="lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span></td>
+            <td class="num">31</td><td class="num">27</td><td class="num">2</td><td class="num">2</td>
+            <td class="num">22%</td></tr>
+        <tr><td><span class="lane"><span class="lane-dot" style="--c:var(--d3)"></span>Grok 4.5</span></td>
+            <td class="num">24</td><td class="num">22</td><td class="num">1</td><td class="num">1</td>
+            <td class="num">17%</td></tr>
+        <tr><td><span class="lane"><span class="lane-dot" style="--c:var(--d4)"></span>GPT-5.6 (Codex)</span></td>
+            <td class="num">18</td><td class="num">15</td><td class="num">2</td><td class="num">1</td>
+            <td class="num">14%</td></tr>
+        <tr><td><span class="lane"><span class="lane-dot" style="--c:var(--d5)"></span>Qwen 3.8-Max</span></td>
+            <td class="num">11</td><td class="num">7</td><td class="num">1</td><td class="num">3</td>
+            <td class="num">9%</td></tr>
+      </tbody>
+    </table>
+    <div class="panel-footnote">Outcome (Oa) = task_runs.outcome, LIVE. Kein Eval-Verdict (Oc) — das benötigt Inspect (Pick-2).
+      <span class="prov-chip" title="kanban_db.py subscription_token_burn :30363-30380">· LIVE (Oa)</span></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-header">
+      <span class="eyebrow">Letzte Nacht · 4 Eval-Tasks gegen REAL-Daten · je Lane</span>
+      <span class="section-note">Score ≥8 ok · 5–7 warn · &lt;5 alert · immer mit Zahl</span>
+    </div>
+    <div class="mock-banner"><span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span>
+      <span class="lbl">Eval-Scorecard benötigt Inspect (Pick-2) — untenstehende Scores sind illustrativ.</span>
+    </div>
+    <table class="score">
+      <thead>
+        <tr><th>Lane</th><th class="num">Triage</th><th class="num">Dispatch</th><th class="num">Land-Diff</th><th class="num">Reflect-Metrik</th><th class="num">Gesamt</th><th class="num">Eval-Quota</th><th>Trend</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max <span class="tag">MAX</span></span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>10/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>9/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>10/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>9/10</span></td>
+          <td class="num overall">9.5</td>
+          <td class="num muted">312k</td>
+          <td><svg class="spark" width="52" height="14" viewBox="0 0 52 14"><polyline points="1,9 10,7 19,8 28,5 37,4 51,3" fill="none" stroke="#a8ad6a" stroke-width="1.6"/></svg></td>
+          <td></td>
+        </tr>
+        <tr class="rec">
+          <td><span class="lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>8/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>9/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>6/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>7/10</span></td>
+          <td class="num overall">7.5</td>
+          <td class="num muted">128k</td>
+          <td><svg class="spark" width="52" height="14" viewBox="0 0 52 14"><polyline points="1,11 10,9 19,7 28,8 37,5 51,4" fill="none" stroke="#7ba89d" stroke-width="1.6"/></svg></td>
+          <td><span class="rec-chip">Empfohlen für Dispatch</span></td>
+        </tr>
+        <tr>
+          <td><span class="lane"><span class="lane-dot" style="--c:var(--d3)"></span>Grok 4.5</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>8/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>7/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>8/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>6/10</span></td>
+          <td class="num overall">7.3</td>
+          <td class="num muted">141k</td>
+          <td><svg class="spark" width="52" height="14" viewBox="0 0 52 14"><polyline points="1,8 10,8 19,6 28,7 37,6 51,5" fill="none" stroke="#8fa3bd" stroke-width="1.6"/></svg></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><span class="lane"><span class="lane-dot" style="--c:var(--d4)"></span>GPT-5.6 (Codex)</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>7/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>8/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>9/10</span></td>
+          <td class="num"><span class="cell s-ok"><span class="sdot"></span>8/10</span></td>
+          <td class="num overall">8.0</td>
+          <td class="num muted">176k</td>
+          <td><svg class="spark" width="52" height="14" viewBox="0 0 52 14"><polyline points="1,10 10,8 19,7 28,6 37,6 51,4" fill="none" stroke="#9d8bc4" stroke-width="1.6"/></svg></td>
+          <td></td>
+        </tr>
+        <tr>
+          <td><span class="lane"><span class="lane-dot" style="--c:var(--d5)"></span>Qwen 3.8-Max</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>6/10</span></td>
+          <td class="num"><span class="cell s-alert"><span class="sdot"></span>4/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>5/10</span></td>
+          <td class="num"><span class="cell s-warn"><span class="sdot"></span>6/10</span></td>
+          <td class="num overall">5.3</td>
+          <td class="num muted">98k</td>
+          <td><svg class="spark" width="52" height="14" viewBox="0 0 52 14"><polyline points="1,6 10,7 19,8 28,9 37,8 51,9" fill="none" stroke="#c47d92" stroke-width="1.6"/></svg></td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="insight">
+      <div class="txt"><b>Empfehlung:</b> Dispatch an <b>Kimi K3</b> — 9/10 bei <b>41% der Eval-Quota</b> von Claude Max. Claude behält Land-Diff (höchste Präzision, 10/10). Qwen nur für Low-Stakes; Land-Diff-Score unter Schwellwert.</div>
+      <div class="link-hint">Dispatch-Lane setzen → <b>Lane-Routing</b> (separate Ansicht, operator-gated).</div>
+    </div>
+  </section>
+
+  <div class="foot">Scorer: deterministisch gegen REAL-Datenformat (Inspect AI) · Eval-Quota = Tokens, die der nächtliche Lauf die Abos kostet · Quelle: Langfuse-Traces der Eval-Generations</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reflect · Flywheel-Evidenz — wie der Agent die Erkenntnisse nutzt</title>
+<style>
+  :root{
+    --surface-0:#0e100f; --surface-1:#141715; --surface-2:#1a1e1b; --surface-3:#232824;
+    --line:#2a302b; --line-soft:#1e2420;
+    --bronze:#c9884a; --bronze-hi:#dda05f; --lane-prem:#b18bc4;
+    --ok:#86b97e; --warn:#d9b23a; --alert:#e0604f;
+    --d1:#a8ad6a; --d2:#7ba89d; --d3:#8fa3bd; --d4:#9d8bc4; --d5:#c47d92; --d6:#96938a; --d7:#c4955f;
+    --ink:#ebe7de; --ink-2:#a9a59b; --ink-3:#757166;
+    --r-panel:10px; --r-card:7px;
+    --disp:'Archivo Variable','Archivo','Arial Narrow',Arial,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--surface-0);color:var(--ink);font-family:var(--disp);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px 56px}
+
+  .puls-leiste{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+    padding:22px 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:26px}
+  .masthead{font-weight:600;font-size:1.87rem;text-transform:uppercase;letter-spacing:.14em}
+  .subtitle{font-size:.87rem;color:var(--ink-3);margin-top:4px;letter-spacing:.04em}
+  .instruments{display:flex;gap:26px;align-items:flex-end}
+  .instrument{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .instrument-label{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2)}
+  .instrument-value{font-family:var(--mono);font-size:1.2rem}
+  .led{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--ink-3)}
+  .led.ok{background:var(--ok);box-shadow:0 0 6px color-mix(in srgb,var(--ok) 60%,transparent)}
+  .led.bronze{background:var(--bronze);box-shadow:0 0 6px color-mix(in srgb,var(--bronze) 60%,transparent)}
+  @media (prefers-reduced-motion:no-preference){.led.ok,.led.bronze{animation:pulse 2.4s ease-in-out infinite}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  .kpi-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:24px}
+  .kpi-tile{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);
+    padding:16px 18px 15px;transition:border-color .14s ease-out,transform .14s ease-out}
+  .kpi-tile:hover{border-color:var(--line);transform:translateY(-1px)}
+  .kpi-label{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2)}
+  .kpi-value{font-family:var(--mono);font-size:2.67rem;line-height:1.1;margin:8px 0 4px;font-weight:500}
+  .kpi-sub{font-size:.73rem;color:var(--ink-3)}
+  .kpi-value .of{font-size:1.2rem;color:var(--ink-3)}
+
+  .content{display:grid;grid-template-columns:1.9fr 1fr;gap:14px;align-items:start}
+  .panel{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);overflow:hidden}
+  .section-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+    padding:14px 18px 12px;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-size:.73rem;text-transform:uppercase;letter-spacing:.12em;color:var(--ink-2)}
+  .section-note{font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border:1px solid var(--line);
+    border-radius:var(--r-card);font-size:.73rem;letter-spacing:.05em;background:var(--surface-2);color:var(--ink-2);white-space:nowrap}
+  .chip .led{width:6px;height:6px;box-shadow:none}
+  .chip.ok{color:var(--ok)} .chip.ok .led{background:var(--ok)}
+  .chip.warn{color:var(--warn)} .chip.warn .led{background:var(--warn)}
+  .chip.alert{color:var(--alert)} .chip.alert .led{background:var(--alert)}
+
+  .out-row{padding:14px 18px;border-bottom:1px solid var(--line-soft);transition:background .13s ease-out}
+  .out-row:hover{background:var(--surface-2)}
+  .out-row.divergent{background:color-mix(in srgb,var(--alert) 6%,var(--surface-1))}
+  .out-row.divergent:hover{background:color-mix(in srgb,var(--alert) 9%,var(--surface-1))}
+  .out-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+  .out-head .tid{font-family:var(--mono);font-size:.73rem;color:var(--ink-3);margin-right:8px}
+  .out-head .name{font-size:.87rem}
+  .out-pair{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:.8rem}
+  .out-pair .rep,.out-pair .ev{display:inline-flex;align-items:center;gap:7px}
+  .out-pair .k{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+  .arrow{color:var(--ink-3);font-family:var(--mono)}
+  .lane{display:inline-flex;align-items:center;gap:7px;font-size:.8rem}
+  .lane-dot{width:8px;height:8px;border-radius:50%;background:var(--c,var(--d6))}
+
+  .uses{padding:6px 0}
+  .use{padding:12px 18px;border-bottom:1px solid var(--line-soft)}
+  .use .t{font-size:.87rem;font-weight:600;margin-bottom:3px;display:flex;align-items:center;gap:8px}
+  .use .d{font-size:.8rem;color:var(--ink-2);line-height:1.55}
+  .use .d b{color:var(--ink)}
+  .num-mark{font-family:var(--mono);font-size:.73rem;color:var(--bronze-hi);
+    border:1px solid color-mix(in srgb,var(--bronze) 50%,transparent);border-radius:var(--r-card);
+    width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;flex:none}
+  .reccard{margin:14px 18px 18px;border:1px solid color-mix(in srgb,var(--bronze) 45%,transparent);
+    border-radius:var(--r-panel);padding:14px 16px;background:color-mix(in srgb,var(--bronze) 7%,var(--surface-1))}
+  .reccard .t{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--bronze-hi);margin-bottom:6px}
+  .reccard .d{font-size:.87rem;color:var(--ink-2);margin-bottom:12px}
+  .reccard .d b{color:var(--ink)}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--disp);font-size:.73rem;
+    text-transform:uppercase;letter-spacing:.1em;padding:8px 14px;border-radius:var(--r-card);
+    border:1px solid var(--bronze);color:var(--surface-0);background:var(--bronze);cursor:pointer;
+    transition:background .14s ease-out}
+  .btn:hover{background:var(--bronze-hi)}
+  .foot{margin-top:18px;font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}.wrap{overflow-x:hidden;min-width:0}.content{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,1fr)}
+    .puls-leiste{flex-direction:column;align-items:flex-start;gap:14px}.instruments{gap:18px}}
+
+  /* ── Shared 8/10 components (MockPreviewMarker, CoverageRail, ProvenanceChip) ── */
+  .mock-preview-marker{display:inline-flex;align-items:center;gap:6px;font-size:.67rem;line-height:1.3;
+    letter-spacing:.08em;color:var(--bronze-hi);border:1px dashed color-mix(in srgb,var(--bronze) 55%,transparent);
+    border-radius:var(--r-card);padding:2px 8px;background:transparent;
+    text-transform:uppercase;font-family:var(--disp);white-space:nowrap;vertical-align:middle}
+  .mock-preview-marker .mpm-mobile{display:none}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}.wrap{overflow-x:hidden;min-width:0}
+    .mock-preview-marker .mpm-desktop{display:none}
+    .mock-preview-marker .mpm-mobile{display:inline}
+  }
+  .prov-chip{display:inline-flex;align-items:center;font-size:.67rem;line-height:1.3;
+    color:var(--ink-3);font-family:var(--mono);letter-spacing:.04em;white-space:nowrap;
+    padding:0 4px;vertical-align:middle}
+  .coverage-rail{margin-bottom:22px}
+  .cov-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 18px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+  .cov-row:last-child{border-bottom:none}
+  .cov-lane{display:inline-flex;align-items:center;gap:8px;font-size:.87rem;min-width:140px}
+  .cov-leds{display:flex;gap:14px;align-items:center;flex-wrap:wrap;min-width:0}
+  .cov-led{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;letter-spacing:.05em;
+    color:var(--ink-2);text-transform:uppercase}
+  .cov-led .led{width:7px;height:7px}
+  .cov-led.ok{color:var(--ink-2)}
+  .cov-led.warn{color:var(--warn)}
+  .cov-led.warn .led{background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 60%,transparent)}
+  .cov-led.absent{color:var(--ink-3)}
+  .cov-led.absent .led{background:var(--ink-3);box-shadow:none}
+  .cov-led.phase2{color:var(--ink-3)}
+  .cov-led.phase2 .led{background:var(--ink-3);box-shadow:none}
+  .cov-led .cov-sub{font-size:.67rem;color:var(--ink-3);text-transform:none;letter-spacing:.02em;
+    margin-left:2px;font-family:var(--disp)}
+  .route-sub{font-size:.8rem;color:var(--ink-2);margin-top:6px;letter-spacing:.03em;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .route-sub b{color:var(--warn);font-weight:600}
+  .panel-footnote{font-size:.67rem;color:var(--ink-3);font-family:var(--mono);
+    padding:10px 18px 14px;line-height:1.5;border-top:1px solid var(--line-soft)}
+  .gap-tag{display:inline-flex;align-items:center;font-size:.67rem;letter-spacing:.06em;
+    color:var(--ink-3);border:1px dashed var(--line);border-radius:var(--r-card);padding:1px 7px;
+    text-transform:uppercase;margin-left:6px}
+  .link-hint{font-size:.8rem;color:var(--ink-3);font-family:var(--disp);
+    padding:12px 18px 16px;line-height:1.5}
+  .link-hint b{color:var(--ink-2);font-weight:600}
+
+  /* Empty-state block (no ok-green, ink-2/ink-3) */
+  .empty-state{padding:18px;font-size:.87rem;color:var(--ink-2);line-height:1.55;
+    border-bottom:1px solid var(--line-soft)}
+  .empty-state .sit{color:var(--ink)}
+  .empty-state .assess{color:var(--ink-3);font-size:.8rem;margin-top:4px}
+
+  /* Collapsible example block */
+  details.example-block{border-top:1px solid var(--line-soft)}
+  details.example-block > summary{cursor:pointer;padding:12px 18px;font-size:.8rem;
+    color:var(--ink-3);letter-spacing:.04em;list-style:none;display:flex;align-items:center;gap:8px;
+    transition:background .13s ease-out}
+  details.example-block > summary:hover{background:var(--surface-2)}
+  details.example-block > summary::-webkit-details-marker{display:none}
+  details.example-block > summary::before{content:"▸";color:var(--ink-3);
+    transition:transform .13s ease-out;display:inline-block}
+  details.example-block[open] > summary::before{transform:rotate(90deg)}
+
+  /* Outcome-neutral chips (inside PHASE2 marker — no status-ok green) */
+  .chip.neutral{color:var(--ink-2)} .chip.neutral .led{background:var(--ink-3)}
+
+  /* Mock banner wrap */
+  .mock-banner{padding:10px 18px;border-bottom:1px solid var(--line-soft);
+    background:color-mix(in srgb,var(--bronze) 4%,var(--surface-1));
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .mock-banner .lbl{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+
+  /* Coverage gauge (reflect) — 6 pill segments */
+  .cov-gauge{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
+  .cov-gauge .seg{width:34px;height:10px;border-radius:3px;background:var(--c,var(--d6));
+    opacity:.92;flex:none}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="puls-leiste">
+    <div class="masthead-group">
+      <div class="masthead">Reflect</div>
+      <div class="subtitle">Flywheel-Evidenz · 22. Juli, abends · Strategist-Reflect</div>
+    </div>
+    <div class="instruments">
+      <div class="instrument"><span class="instrument-label"><span class="led ok"></span>Worker</span><span class="instrument-value">4</span></div>
+      <div class="instrument"><span class="instrument-label">Inbox</span><span class="instrument-value">2</span></div>
+      <div class="instrument"><span class="instrument-label">Kosten heute</span><span class="instrument-value">$0.00</span></div>
+      <div class="instrument"><span class="instrument-label"><span class="led bronze"></span>Gateway</span><span class="instrument-value">up</span></div>
+    </div>
+  </header>
+
+  <section class="kpi-grid">
+    <div class="kpi-tile"><div class="kpi-label">Runs mit Outcome (Oa)</div><div class="kpi-value">14</div><div class="kpi-sub">geschlossene Versuche · nicht evaluiert <span class="prov-chip" title="task_runs.outcome IS NOT NULL">· LIVE</span></div></div><div class="kpi-tile"><div class="kpi-label">Tasks evaluiert (Oc)</div><div class="kpi-value">— <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></div><div class="kpi-sub">kommt mit Pick-2 · Inspect AI</div></div>
+    <div class="kpi-tile"><div class="kpi-label">Self-Report ↔ Eval divergent</div><div class="kpi-value">2</div><div class="kpi-sub">davon 1 Placebo-Fix entlarvt</div></div>
+    <div class="kpi-tile"><div class="kpi-label">Budget-Skips geloggt</div><div class="kpi-value">3</div><div class="kpi-sub">vorher: unsichtbar im Cron-Log <span class="prov-chip" title="autoresearch_runs.outcome/skip_reason (Ob) · GAP->M3">· belegt ab S2</span></div></div>
+    <div class="kpi-tile"><div class="kpi-label">Metriken · Coverage</div><div class="cov-gauge"><span class="seg" style="--c:var(--d1)" title="flywheel_velocity · roots_by_class · clean"></span><span class="seg" style="--c:var(--d2)" title="disposition_throughput · roots_by_class · clean"></span><span class="seg" style="--c:var(--d3)" title="approval_latency · by_class fallback · derived"></span><span class="seg" style="--c:var(--d4)" title="veto_rate · by_class fallback · derived"></span><span class="seg" style="--c:var(--d5)" title="budget_skip_count · autoresearch_runs (S2) · unknown"></span><span class="seg" style="--c:var(--d6)" title="outcome_match_oa_oc · (Oc) · PHASE2"></span></div><div class="kpi-sub">Quelle: vision_metrics producers (S4) <span class="prov-chip" title="vision_metrics.py:1810-1847 (M5)">· belegt ab S4</span></div></div>
+  </section>
+
+  <div class="content">
+    <section class="panel">
+      <div class="section-header">
+        <span class="eyebrow">Outcome-Wahrheit vs Self-Report <span class="gap-tag" title="Eval-Verdict (Oc) benötigt Pick-2">PHASE2 · Oc fehlt</span></span>
+        <span class="section-note">Divergenz = Alarm, nicht Deko</span>
+      </div>
+
+      <div class="out-row divergent">
+        <div class="out-head">
+          <div><span class="tid">t_2b77c914</span><span class="name">Vitest waitFor-Flake-Fix</span></div>
+          <span class="lane"><span class="lane-dot" style="--c:var(--d5)"></span>Qwen</span>
+        </div>
+        <div class="out-pair">
+          <span class="rep"><span class="k">Self-Report</span><span class="chip ok"><span class="led"></span>shipped</span></span>
+          <span class="arrow">→</span>
+          <span class="ev"><span class="k">Eval-Verdict</span><span class="chip alert"><span class="led"></span>Regression · Placebo</span></span>
+        </div>
+      </div>
+
+      <div class="out-row">
+        <div class="out-head">
+          <div><span class="tid">t_c35430a7</span><span class="name">Gate-Green-Kanban-Lifecycle-Fix</span></div>
+          <span class="lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max</span>
+        </div>
+        <div class="out-pair">
+          <span class="rep"><span class="k">Self-Report</span><span class="chip ok"><span class="led"></span>shipped</span></span>
+          <span class="arrow">→</span>
+          <span class="ev"><span class="k">Eval-Verdict</span><span class="chip neutral"><span class="led"></span>bestanden 9/10</span></span>
+        </div>
+      </div>
+
+      <div class="out-row">
+        <div class="out-head">
+          <div><span class="tid">t_875c87bf</span><span class="name">Disposition-Ledger Triage</span></div>
+          <span class="lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span>
+        </div>
+        <div class="out-pair">
+          <span class="rep"><span class="k">Self-Report</span><span class="chip ok"><span class="led"></span>shipped</span></span>
+          <span class="arrow">→</span>
+          <span class="ev"><span class="k">Eval-Verdict</span><span class="chip neutral"><span class="led"></span>bestanden 8/10</span></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-header"><span class="eyebrow">Was der Agent jetzt damit macht</span></div>
+      <div class="uses">
+        <div class="use"><div class="t"><span class="num-mark">1</span>Strategist-Reflect</div>
+          <div class="d">liest <b>Eval-Verdicts statt by_class</b> — die 5/6-Metriken-Lücke ist zu, weil die Quelle echte Traces sind.</div></div>
+        <div class="use"><div class="t"><span class="num-mark">2</span>Placebo-Frühwarnung</div>
+          <div class="d">Divergenz (Self-Report „shipped" ↔ Eval „Regression") <b>stoppt die Auto-Land-Leiter</b>, bevor ein Placebo-Fix gemergt wird.</div></div>
+        <div class="use"><div class="t"><span class="num-mark">3</span>Budget-Skip-Log</div>
+          <div class="d">„Nulltag" wird erklärbar: Reflect sieht die <b>3 Skips mit Grund</b> und meldet nicht fälschlich „idle".</div></div>
+        <div class="use"><div class="t"><span class="num-mark">4</span>Disposition-Ledger</div>
+          <div class="d">bekommt <b>Ground-Truth</b> für approved/vetoed statt self-reported Success.</div></div>
+      </div>
+      <div class="reccard">
+        <div class="t">Lane-Router-Empfehlung · aus Scorecard</div>
+        <div class="d">Dispatch → <b>Kimi K3</b> (9/10 bei 41% der Claude-Eval-Quota). Entlastet das volle 5h-Fenster.</div>
+        <div class="link-hint">Lane-Routing-Empfehlung übernehmen → <b>Lane-Routing</b> (gated).</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="foot">Reflect-Evidenz = Langfuse-Traces (Quota/Task) + Inspect-Verdicts (Outcome) · die vier Mockups bilden einen Pfad: Quota → Trace → Scorecard → Reflect</div>
+</div>
+</body>
+</html>

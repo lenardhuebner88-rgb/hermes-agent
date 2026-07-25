@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trace t_c35430a7 · Leitstand — Generationen-Waterfall</title>
+<style>
+  :root{
+    --surface-0:#0e100f; --surface-1:#141715; --surface-2:#1a1e1b; --surface-3:#232824;
+    --line:#2a302b; --line-soft:#1e2420;
+    --bronze:#c9884a; --bronze-hi:#dda05f; --lane-prem:#b18bc4;
+    --ok:#86b97e; --warn:#d9b23a; --alert:#e0604f;
+    --d1:#a8ad6a; --d2:#7ba89d; --d3:#8fa3bd; --d4:#9d8bc4; --d5:#c47d92; --d6:#96938a; --d7:#c4955f;
+    --ink:#ebe7de; --ink-2:#a9a59b; --ink-3:#757166;
+    --r-panel:10px; --r-card:7px;
+    --disp:'Archivo Variable','Archivo','Arial Narrow',Arial,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--surface-0);color:var(--ink);font-family:var(--disp);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px 56px}
+
+  .puls-leiste{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+    padding:22px 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:26px}
+  .crumb{font-size:.73rem;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+  .crumb a{color:var(--bronze-hi);text-decoration:none}
+  .crumb a:hover{text-decoration:underline}
+  .masthead{font-weight:600;font-size:1.87rem;line-height:1.15;text-transform:uppercase;letter-spacing:.14em}
+  .masthead .tid{font-family:var(--mono);text-transform:none;letter-spacing:0;color:var(--bronze-hi)}
+  .subtitle{font-size:.87rem;color:var(--ink-3);margin-top:4px;letter-spacing:.04em}
+  .instruments{display:flex;gap:26px;align-items:flex-end}
+  .instrument{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .instrument-label{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2)}
+  .instrument-value{font-family:var(--mono);font-size:1.2rem;color:var(--ink)}
+  .led{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--ink-3)}
+  .led.ok{background:var(--ok);box-shadow:0 0 6px color-mix(in srgb,var(--ok) 60%,transparent)}
+  .led.bronze{background:var(--bronze);box-shadow:0 0 6px color-mix(in srgb,var(--bronze) 60%,transparent)}
+  @media (prefers-reduced-motion:no-preference){.led.ok,.led.bronze{animation:pulse 2.4s ease-in-out infinite}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  /* Hero-Meta */
+  .hero-card{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);
+    padding:18px 22px;display:flex;gap:34px;flex-wrap:wrap;align-items:flex-end;margin-bottom:22px}
+  .meta .k{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3);margin-bottom:3px}
+  .meta .v{font-family:var(--mono);font-size:1.2rem}
+  .meta .v.big{font-size:1.87rem;font-weight:500}
+  .lane{display:inline-flex;align-items:center;gap:7px;font-size:.87rem}
+  .lane-dot{width:8px;height:8px;border-radius:50%;background:var(--c,var(--d6))}
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border:1px solid var(--line);
+    border-radius:var(--r-card);font-size:.73rem;letter-spacing:.05em;background:var(--surface-2);color:var(--ink-2);white-space:nowrap}
+  .chip .led{width:6px;height:6px;box-shadow:none}
+  .chip.ok{color:var(--ok)} .chip.ok .led{background:var(--ok)}
+  .chip.warn{color:var(--warn)} .chip.warn .led{background:var(--warn)}
+  .chip.alert{color:var(--alert)} .chip.alert .led{background:var(--alert)}
+
+  .content{display:grid;grid-template-columns:1.9fr 1fr;gap:14px;align-items:start}
+  .panel{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);overflow:hidden}
+  .section-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+    padding:14px 18px 12px;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-size:.73rem;text-transform:uppercase;letter-spacing:.12em;color:var(--ink-2)}
+  .section-note{font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+
+  /* Waterfall */
+  .wf{display:grid;grid-template-columns:170px 1fr 120px;gap:0;align-items:stretch}
+  .wf-head{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3);
+    padding:10px 18px;border-bottom:1px solid var(--line-soft)}
+  .wf-row{display:contents}
+  .wf-cell{padding:12px 18px;border-bottom:1px solid var(--line-soft);transition:background .13s ease-out}
+  .wf-row:hover .wf-cell{background:var(--surface-2)}
+  .span-name{font-size:.87rem}
+  .span-name .kind{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);display:block}
+  .track{position:relative;display:flex;align-items:center;min-height:26px}
+  .bar{height:8px;border-radius:3px;background:var(--c,var(--d6));opacity:.92;min-width:3px}
+  .bar.tool{opacity:.55}
+  .tok{font-family:var(--mono);font-size:.73rem;color:var(--ink-2);text-align:right}
+  .tok .ms{color:var(--ink);font-size:.87rem;display:block}
+
+  /* Outcome-Panel */
+  .kv{display:flex;justify-content:space-between;gap:12px;padding:11px 18px;border-bottom:1px solid var(--line-soft);font-size:.87rem}
+  .kv .k{color:var(--ink-3)} .kv .v{font-family:var(--mono)}
+  .verdict{padding:16px 18px}
+  .verdict .row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0}
+  .verdict .lbl{font-size:.87rem;color:var(--ink-2)}
+  .agree{font-size:.73rem;color:var(--ink-3);padding:12px 18px;border-top:1px solid var(--line-soft);line-height:1.5}
+  .agree b{color:var(--ink-2)}
+  .foot{margin-top:18px;font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}.wrap{overflow-x:hidden;min-width:0}.content{grid-template-columns:1fr}.wf{grid-template-columns:130px 1fr 90px}
+    .puls-leiste{flex-direction:column;align-items:flex-start;gap:14px}.instruments{gap:18px}.hero-card{gap:20px}}
+
+  /* ── Shared 8/10 components (MockPreviewMarker, CoverageRail, ProvenanceChip) ── */
+  .mock-preview-marker{display:inline-flex;align-items:center;gap:6px;font-size:.67rem;line-height:1.3;
+    letter-spacing:.08em;color:var(--bronze-hi);border:1px dashed color-mix(in srgb,var(--bronze) 55%,transparent);
+    border-radius:var(--r-card);padding:2px 8px;background:transparent;
+    text-transform:uppercase;font-family:var(--disp);white-space:nowrap;vertical-align:middle}
+  .mock-preview-marker .mpm-mobile{display:none}
+  @media (max-width:900px){.panel{overflow-x:auto;overflow-y:visible}html,body{overflow-x:hidden;width:100vw;max-width:100vw}.wrap{overflow-x:hidden;min-width:0}
+    .mock-preview-marker .mpm-desktop{display:none}
+    .mock-preview-marker .mpm-mobile{display:inline}
+  }
+  .prov-chip{display:inline-flex;align-items:center;font-size:.67rem;line-height:1.3;
+    color:var(--ink-3);font-family:var(--mono);letter-spacing:.04em;white-space:nowrap;
+    padding:0 4px;vertical-align:middle}
+  .coverage-rail{margin-bottom:22px}
+  .cov-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 18px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+  .cov-row:last-child{border-bottom:none}
+  .cov-lane{display:inline-flex;align-items:center;gap:8px;font-size:.87rem;min-width:140px}
+  .cov-leds{display:flex;gap:14px;align-items:center;flex-wrap:wrap;min-width:0}
+  .cov-led{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;letter-spacing:.05em;
+    color:var(--ink-2);text-transform:uppercase}
+  .cov-led .led{width:7px;height:7px}
+  .cov-led.ok{color:var(--ink-2)}
+  .cov-led.warn{color:var(--warn)}
+  .cov-led.warn .led{background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 60%,transparent)}
+  .cov-led.absent{color:var(--ink-3)}
+  .cov-led.absent .led{background:var(--ink-3);box-shadow:none}
+  .cov-led.phase2{color:var(--ink-3)}
+  .cov-led.phase2 .led{background:var(--ink-3);box-shadow:none}
+  .cov-led .cov-sub{font-size:.67rem;color:var(--ink-3);text-transform:none;letter-spacing:.02em;
+    margin-left:2px;font-family:var(--disp)}
+  .route-sub{font-size:.8rem;color:var(--ink-2);margin-top:6px;letter-spacing:.03em;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .route-sub b{color:var(--warn);font-weight:600}
+  .panel-footnote{font-size:.67rem;color:var(--ink-3);font-family:var(--mono);
+    padding:10px 18px 14px;line-height:1.5;border-top:1px solid var(--line-soft)}
+  .gap-tag{display:inline-flex;align-items:center;font-size:.67rem;letter-spacing:.06em;
+    color:var(--ink-3);border:1px dashed var(--line);border-radius:var(--r-card);padding:1px 7px;
+    text-transform:uppercase;margin-left:6px}
+  .link-hint{font-size:.8rem;color:var(--ink-3);font-family:var(--disp);
+    padding:12px 18px 16px;line-height:1.5}
+  .link-hint b{color:var(--ink-2);font-weight:600}
+
+  /* Empty-state block (no ok-green, ink-2/ink-3) */
+  .empty-state{padding:18px;font-size:.87rem;color:var(--ink-2);line-height:1.55;
+    border-bottom:1px solid var(--line-soft)}
+  .empty-state .sit{color:var(--ink)}
+  .empty-state .assess{color:var(--ink-3);font-size:.8rem;margin-top:4px}
+
+  /* Collapsible example block */
+  details.example-block{border-top:1px solid var(--line-soft)}
+  details.example-block > summary{cursor:pointer;padding:12px 18px;font-size:.8rem;
+    color:var(--ink-3);letter-spacing:.04em;list-style:none;display:flex;align-items:center;gap:8px;
+    transition:background .13s ease-out}
+  details.example-block > summary:hover{background:var(--surface-2)}
+  details.example-block > summary::-webkit-details-marker{display:none}
+  details.example-block > summary::before{content:"▸";color:var(--ink-3);
+    transition:transform .13s ease-out;display:inline-block}
+  details.example-block[open] > summary::before{transform:rotate(90deg)}
+
+  /* Outcome-neutral chips (inside PHASE2 marker — no status-ok green) */
+  .chip.neutral{color:var(--ink-2)} .chip.neutral .led{background:var(--ink-3)}
+
+  /* Mock banner wrap */
+  .mock-banner{padding:10px 18px;border-bottom:1px solid var(--line-soft);
+    background:color-mix(in srgb,var(--bronze) 4%,var(--surface-1));
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .mock-banner .lbl{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+
+  /* Coverage gauge (reflect) — 6 pill segments */
+  .cov-gauge{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
+  .cov-gauge .seg{width:34px;height:10px;border-radius:3px;background:var(--c,var(--d6));
+    opacity:.92;flex:none}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="puls-leiste">
+    <div class="masthead-group">
+      <div class="crumb"><a href="01-quota-attribution.html">Quota</a> · Drilldown</div>
+      <div class="masthead">Trace <span class="tid">t_c35430a7</span></div>
+      <div class="subtitle">Gate-Green-Kanban-Lifecycle-Fix · Chain kanban-lifecycle · 22. Juli 09:12</div>
+    </div>
+    <div class="instruments">
+      <div class="instrument"><span class="instrument-label"><span class="led ok"></span>Worker</span><span class="instrument-value">4</span></div>
+      <div class="instrument"><span class="instrument-label">Inbox</span><span class="instrument-value">2</span></div>
+      <div class="instrument"><span class="instrument-label">Kosten heute</span><span class="instrument-value">$0.00</span></div>
+      <div class="instrument"><span class="instrument-label"><span class="led bronze"></span>Gateway</span><span class="instrument-value">up</span></div>
+    </div>
+  </header>
+
+  <!-- Hero-Meta -->
+  <section class="hero-card">
+    <div class="meta"><div class="k">Lane</div><div class="v"><span class="lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max</span></div><span class="prov-chip" title="metadata.subscription (claim-time)">· LIVE</span></div>
+    <div class="meta"><div class="k">Gesamt-Tokens</div><div class="v big">450k</div><span class="prov-chip" title="task_runs.input_tokens+output_tokens (Oa)">· PARTIAL</span></div>
+    <div class="meta"><div class="k">in / out</div><div class="v">412k / 38k</div><span class="prov-chip" title="task_runs :3628-3631 (ohne cache)">· PARTIAL</span></div>
+    <div class="meta"><div class="k">Dauer</div><div class="v">11m 42s</div><span class="prov-chip" title="task_runs.started_at->ended_at">· LIVE</span></div>
+    <div class="meta"><div class="k">Quota-Anteil</div><div class="v">24%</div><span class="prov-chip" title="row_traced_tokens / sum traced (INV-4)">· PARTIAL</span></div>
+    <div class="meta"><div class="k">Generationen</div><div class="v">6</div><span class="prov-chip" title="langfuse read adapter (M2b)">· LIVE ab S1r</span></div>
+    <div class="meta"><div class="k">Outcome</div><div class="v"><span class="chip ok" title="task_runs.outcome (Oa)"><span class="led"></span>fertig · Oa</span><span class="prov-chip" title="task_runs.outcome (Oa) · NICHT evaluiert">· LIVE (Oa)</span></div></div>
+  </section>
+
+  <div class="content">
+    <!-- Generationen-Waterfall -->
+    <section class="panel">
+      <div class="section-header">
+        <span class="eyebrow">Generationen · zeitlicher Verlauf</span>
+        <span class="section-note">Balken = Dauer · Farbe = Lane/Typ</span>
+      </div>
+      <div class="empty-state">
+        <div class="sit">Keine Traces — Lane nicht instrumentiert (Slice S1).</div>
+        <div class="assess">Codex-Runtime feuert heute keine pre/post_api_request-Hooks; M1 schließt diese Lücke. Bis dahin: honest empty, kein Fake-Span.</div>
+      </div>
+      <details class="example-block">
+        <summary>Beispiel-Waterfall (nur wenn Traces vorhanden) <span class="prov-chip" title="langfuse generations · join via task_run_id (M2a/M2b)">· LIVE ab S1r</span></summary>
+      <div class="wf">
+        <div class="wf-head">Span</div><div class="wf-head">Verlauf</div><div class="wf-head" style="text-align:right">Tokens · Dauer</div>
+
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">llm · plan</span>Brief lesen, Plan fassen</div>
+          <div class="wf-cell track"><span class="bar" style="--c:var(--d1);width:34%;margin-left:0%"></span></div>
+          <div class="wf-cell tok"><span class="ms">86k</span>1m 58s</div>
+        </div>
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">tool</span>git status · diff sichten</div>
+          <div class="wf-cell track"><span class="bar tool" style="--c:var(--d6);width:9%;margin-left:34%"></span></div>
+          <div class="wf-cell tok"><span class="ms">—</span>0m 31s</div>
+        </div>
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">llm · build</span>Dispatch-Loop fixen</div>
+          <div class="wf-cell track"><span class="bar" style="--c:var(--d1);width:42%;margin-left:43%"></span></div>
+          <div class="wf-cell tok"><span class="ms">224k</span>5m 02s</div>
+        </div>
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">tool</span>run-affected.sh · pytest</div>
+          <div class="wf-cell track"><span class="bar tool" style="--c:var(--d6);width:12%;margin-left:85%"></span></div>
+          <div class="wf-cell tok"><span class="ms">—</span>1m 24s</div>
+        </div>
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">llm · verify</span>Gates prüfen, Receipt</div>
+          <div class="wf-cell track"><span class="bar" style="--c:var(--d1);width:18%;margin-left:15%"></span></div>
+          <div class="wf-cell tok"><span class="ms">102k</span>2m 11s</div>
+        </div>
+        <div class="wf-row">
+          <div class="wf-cell span-name"><span class="kind">llm · handoff</span>Review-Brief an Grok</div>
+          <div class="wf-cell track"><span class="bar" style="--c:var(--d1);width:8%;margin-left:33%"></span></div>
+          <div class="wf-cell tok"><span class="ms">38k</span>0m 36s</div>
+        </div>
+      </div>
+      </details>
+
+    </section>
+
+    <!-- Outcome / Eval-Verdict -->
+    <section class="panel">
+      <div class="section-header"><span class="eyebrow">Outcome</span><span class="section-note">Inspect-Scorer</span></div>
+    <div class="mock-banner"><span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span>
+      <span class="lbl">Self-Report↔Eval-Verdict benötigt Inspect (Pick-2) — heute nicht gemessen.</span>
+    </div>
+
+      <div class="kv"><span class="k">Self-Report</span><span class="v">shipped</span></div>
+      <div class="kv"><span class="k">Eval-Verdict</span><span class="v">bestanden · 9/10</span></div>
+      <div class="kv"><span class="k">Gate-Fingerprint</span><span class="v">identisch</span></div>
+      <div class="kv"><span class="k">Regressionstest</span><span class="v">1 gegen REAL-Daten</span></div>
+      <div class="verdict">
+        <div class="row"><span class="lbl">Self-Report ↔ Eval</span><span class="chip neutral"><span class="led"></span>stimmen überein</span></div>
+        <div class="row"><span class="lbl">Quota wert</span><span class="chip neutral"><span class="led"></span>24% für echtes Ergebnis</span></div>
+      </div>
+      <div class="agree"><b>Warum das zählt:</b> Ein Trace belegt, dass 450k Tokens in ein <b>evaluiertes</b> Ergebnis flossen — nicht in einen Placebo-Fix. Divergenz zwischen Self-Report und Eval würde hier rot markiert (siehe Mockup 04).</div>
+    </section>
+  </div>
+
+  <div class="foot">Trace = 1 Kanban-Task · Generationen aus canonical_usage · Eval-Verdict aus Inspect AI · keine Secrets im Trace</div>
+</div>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quota · Leitstand — Langfuse-Attribution pro Task</title>
+<style>
+  :root{
+    --surface-0:#0e100f; --surface-1:#141715; --surface-2:#1a1e1b; --surface-3:#232824;
+    --line:#2a302b; --line-soft:#1e2420;
+    --bronze:#c9884a; --bronze-hi:#dda05f; --lane-prem:#b18bc4;
+    --ok:#86b97e; --warn:#d9b23a; --alert:#e0604f;
+    --d1:#a8ad6a; --d2:#7ba89d; --d3:#8fa3bd; --d4:#9d8bc4; --d5:#c47d92; --d6:#96938a; --d7:#c4955f;
+    --ink:#ebe7de; --ink-2:#a9a59b; --ink-3:#757166;
+    --r-panel:10px; --r-card:7px;
+    --disp:'Archivo Variable','Archivo','Arial Narrow',Arial,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,'Courier New',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--surface-0);color:var(--ink);font-family:var(--disp);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 28px 56px}
+
+  /* ── Puls-Leiste (binding contract: masthead + 4 instruments) ─────────── */
+  .puls-leiste{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;
+    padding:22px 0 14px;border-bottom:1px solid var(--line-soft);margin-bottom:26px}
+  .masthead{font-family:var(--disp);font-weight:600;font-size:1.87rem;line-height:1.15;
+    text-transform:uppercase;letter-spacing:.14em}
+  .subtitle{font-size:.87rem;line-height:1.45;color:var(--ink-3);margin-top:4px;letter-spacing:.04em}
+  .instruments{display:flex;gap:26px;align-items:flex-end}
+  .instrument{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .instrument-label{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;line-height:1.3;
+    text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2)}
+  .instrument-value{font-family:var(--mono);font-size:1.2rem;line-height:1.2;color:var(--ink)}
+  .led{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--ink-3)}
+  .led.ok{background:var(--ok);box-shadow:0 0 6px color-mix(in srgb,var(--ok) 60%,transparent)}
+  .led.bronze{background:var(--bronze);box-shadow:0 0 6px color-mix(in srgb,var(--bronze) 60%,transparent)}
+  @media (prefers-reduced-motion:no-preference){
+    .led.ok,.led.bronze{animation:pulse 2.4s ease-in-out infinite}
+  }
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  /* ── KPI-Grid (Quota je Subscription) ─────────────────────────────────── */
+  .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:26px}
+  .kpi-tile{background:var(--surface-1);border:1px solid var(--line-soft);border-radius:var(--r-panel);
+    padding:16px 18px 15px;transition:border-color .14s ease-out,transform .14s ease-out}
+  .kpi-tile:hover{border-color:var(--line);transform:translateY(-1px)}
+  .kpi-label{font-size:.73rem;line-height:1.3;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-2);
+    display:flex;align-items:center;gap:7px}
+  .kpi-value{font-family:var(--mono);font-size:2.67rem;line-height:1.1;margin:8px 0 4px;font-weight:500}
+  .kpi-sub{font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+  .qbar{height:4px;background:var(--surface-3);border-radius:2px;margin-top:12px;overflow:hidden}
+  .qbar i{display:block;height:100%;border-radius:2px}
+  .fill-ok{background:var(--ok)} .fill-warn{background:var(--warn)} .fill-alert{background:var(--alert)}
+
+  /* ── Panels ───────────────────────────────────────────────────────────── */
+  .content{display:grid;grid-template-columns:1.9fr 1fr;gap:14px;align-items:start}
+  .panel{background:var(--surface-1);overflow-x:auto;border:1px solid var(--line-soft);border-radius:var(--r-panel);overflow:hidden}
+  .section-header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;
+    padding:14px 18px 12px;border-bottom:1px solid var(--line-soft)}
+  .eyebrow{font-size:.73rem;line-height:1.3;text-transform:uppercase;letter-spacing:.12em;color:var(--ink-2)}
+  .section-note{font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+
+  /* ── Data table ───────────────────────────────────────────────────────── */
+  table.data-table{width:100%;border-collapse:collapse}
+  .data-table th{font-size:.73rem;text-transform:uppercase;letter-spacing:.1em;color:var(--ink-3);
+    text-align:left;font-weight:500;padding:10px 18px;border-bottom:1px solid var(--line-soft)}
+  .data-table th.num,.data-table td.num{text-align:right;font-family:var(--mono)}
+  .data-table td{padding:11px 18px;border-bottom:1px solid var(--line-soft);font-size:.87rem;vertical-align:middle}
+  .data-table tbody tr{transition:background .13s ease-out}
+  .data-table tbody tr:hover{background:var(--surface-2)}
+  .data-table tbody tr.selected{background:var(--surface-3)}
+  .data-table tbody tr.selected td:first-child{box-shadow:inset 2px 0 0 var(--bronze)}
+  .task{font-size:.87rem}
+  .task .tid{font-family:var(--mono);color:var(--ink-3);font-size:.73rem;display:block}
+  td.mono,.cost{font-family:var(--mono);font-size:.87rem;color:var(--ink)}
+  td.muted{color:var(--ink-2)}
+
+  /* Lane-Identität (data-Palette, nie Farbe allein) */
+  .lane{display:inline-flex;align-items:center;gap:7px;font-size:.87rem;color:var(--ink)}
+  .lane-dot{width:8px;height:8px;border-radius:50%;background:var(--c,var(--d6));flex:none}
+
+  /* Mini-Anteilsbalken in der Tabelle */
+  .share{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+  .share .mini{width:52px;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden}
+  .share .mini i{display:block;height:100%;background:var(--d6);border-radius:2px}
+
+  /* Status-Chips (immer LED + Label) */
+  .chip{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border:1px solid var(--line);
+    border-radius:var(--r-card);font-size:.73rem;line-height:1.3;letter-spacing:.05em;
+    background:var(--surface-2);color:var(--ink-2);white-space:nowrap}
+  .chip .led{width:6px;height:6px;box-shadow:none}
+  .chip.ok{color:var(--ok)} .chip.ok .led{background:var(--ok)}
+  .chip.warn{color:var(--warn)} .chip.warn .led{background:var(--warn)}
+  .chip.alert{color:var(--alert)} .chip.alert .led{background:var(--alert)}
+  .chip.tinted.warn{background:color-mix(in srgb,var(--warn) 10%,var(--surface-2))}
+  .chip.tinted.alert{background:color-mix(in srgb,var(--alert) 10%,var(--surface-2))}
+
+  /* Skip-Liste rechts */
+  .skip-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
+    padding:12px 18px;border-bottom:1px solid var(--line-soft);transition:background .13s ease-out}
+  .skip-row:hover{background:var(--surface-2)}
+  .skip-row .tid{font-family:var(--mono);font-size:.73rem;color:var(--ink-3);display:block}
+  .skip-row .name{font-size:.87rem}
+  .skip-row .why{font-size:.73rem;color:var(--ink-3);margin-top:2px}
+  .hint{padding:14px 18px;font-size:.73rem;line-height:1.5;color:var(--ink-3)}
+  .hint b{color:var(--ink-2);font-weight:600}
+  .foot{margin-top:18px;font-size:.73rem;color:var(--ink-3);font-family:var(--mono)}
+  @media (max-width:900px){html,body{overflow-x:hidden;width:100vw;max-width:100vw}.wrap{overflow-x:hidden;width:100%;max-width:100vw;padding-left:14px;padding-right:14px;box-sizing:border-box}.content{grid-template-columns:1fr;min-width:0;overflow-x:hidden}.kpi-grid{grid-template-columns:repeat(2,1fr)}table.data-table{display:block;overflow-x:auto;white-space:nowrap;max-width:100%}.coverage-rail{overflow-x:auto}.cov-row{min-width:340px}.panel{overflow-x:auto;overflow-y:visible}
+    .puls-leiste{flex-direction:column;align-items:flex-start;gap:14px}.instruments{gap:18px}}
+
+  /* ── Shared 8/10 components (MockPreviewMarker, CoverageRail, ProvenanceChip) ── */
+  .mock-preview-marker{display:inline-flex;align-items:center;gap:6px;font-size:.67rem;line-height:1.3;
+    letter-spacing:.08em;color:var(--bronze-hi);border:1px dashed color-mix(in srgb,var(--bronze) 55%,transparent);
+    border-radius:var(--r-card);padding:2px 8px;background:transparent;
+    text-transform:uppercase;font-family:var(--disp);white-space:nowrap;vertical-align:middle}
+  .mock-preview-marker .mpm-mobile{display:none}
+  @media (max-width:900px){
+    .mock-preview-marker .mpm-desktop{display:none}
+    .mock-preview-marker .mpm-mobile{display:inline}
+  }
+  .prov-chip{display:inline-flex;align-items:center;font-size:.67rem;line-height:1.3;
+    color:var(--ink-3);font-family:var(--mono);letter-spacing:.04em;white-space:nowrap;
+    padding:0 4px;vertical-align:middle}
+  .coverage-rail{margin-bottom:22px}
+  .cov-row{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:10px 18px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+  .cov-row:last-child{border-bottom:none}
+  .cov-lane{display:inline-flex;align-items:center;gap:8px;font-size:.87rem;min-width:140px}
+  .cov-leds{display:flex;gap:14px;align-items:center;flex-wrap:wrap;min-width:0}
+  .cov-led{display:inline-flex;align-items:center;gap:6px;font-size:.73rem;letter-spacing:.05em;
+    color:var(--ink-2);text-transform:uppercase}
+  .cov-led .led{width:7px;height:7px}
+  .cov-led.ok{color:var(--ink-2)}
+  .cov-led.warn{color:var(--warn)}
+  .cov-led.warn .led{background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 60%,transparent)}
+  .cov-led.absent{color:var(--ink-3)}
+  .cov-led.absent .led{background:var(--ink-3);box-shadow:none}
+  .cov-led.phase2{color:var(--ink-3)}
+  .cov-led.phase2 .led{background:var(--ink-3);box-shadow:none}
+  .cov-led .cov-sub{font-size:.67rem;color:var(--ink-3);text-transform:none;letter-spacing:.02em;
+    margin-left:2px;font-family:var(--disp)}
+  .route-sub{font-size:.8rem;color:var(--ink-2);margin-top:6px;letter-spacing:.03em;
+    display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .route-sub b{color:var(--warn);font-weight:600}
+  .panel-footnote{font-size:.67rem;color:var(--ink-3);font-family:var(--mono);
+    padding:10px 18px 14px;line-height:1.5;border-top:1px solid var(--line-soft)}
+  .gap-tag{display:inline-flex;align-items:center;font-size:.67rem;letter-spacing:.06em;
+    color:var(--ink-3);border:1px dashed var(--line);border-radius:var(--r-card);padding:1px 7px;
+    text-transform:uppercase;margin-left:6px}
+  .link-hint{font-size:.8rem;color:var(--ink-3);font-family:var(--disp);
+    padding:12px 18px 16px;line-height:1.5}
+  .link-hint b{color:var(--ink-2);font-weight:600}
+
+  /* Empty-state block (no ok-green, ink-2/ink-3) */
+  .empty-state{padding:18px;font-size:.87rem;color:var(--ink-2);line-height:1.55;
+    border-bottom:1px solid var(--line-soft)}
+  .empty-state .sit{color:var(--ink)}
+  .empty-state .assess{color:var(--ink-3);font-size:.8rem;margin-top:4px}
+
+  /* Collapsible example block */
+  details.example-block{border-top:1px solid var(--line-soft)}
+  details.example-block > summary{cursor:pointer;padding:12px 18px;font-size:.8rem;
+    color:var(--ink-3);letter-spacing:.04em;list-style:none;display:flex;align-items:center;gap:8px;
+    transition:background .13s ease-out}
+  details.example-block > summary:hover{background:var(--surface-2)}
+  details.example-block > summary::-webkit-details-marker{display:none}
+  details.example-block > summary::before{content:"▸";color:var(--ink-3);
+    transition:transform .13s ease-out;display:inline-block}
+  details.example-block[open] > summary::before{transform:rotate(90deg)}
+
+  /* Outcome-neutral chips (inside PHASE2 marker — no status-ok green) */
+  .chip.neutral{color:var(--ink-2)} .chip.neutral .led{background:var(--ink-3)}
+
+  /* Mock banner wrap */
+  .mock-banner{padding:10px 18px;border-bottom:1px solid var(--line-soft);
+    background:color-mix(in srgb,var(--bronze) 4%,var(--surface-1));
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .mock-banner .lbl{font-size:.73rem;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3)}
+
+  /* Coverage gauge (reflect) — 6 pill segments */
+  .cov-gauge{display:flex;gap:5px;margin:10px 0 6px;flex-wrap:wrap}
+  .cov-gauge .seg{width:34px;height:10px;border-radius:3px;background:var(--c,var(--d6));
+    opacity:.92;flex:none}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Puls-Leiste -->
+  <header class="puls-leiste">
+    <div class="masthead-group">
+      <div class="masthead">Quota</div>
+      <div class="subtitle">Leitstand · 22. Juli · Attribution pro Task</div>
+      <div class="route-sub">Engpass: <b>Kimi K3 79%</b> · reset 9 Tage <span class="prov-chip" title="Quelle: pickBottleneck(providers) · account_usage.py">· LIVE</span></div>
+    </div>
+    <div class="instruments">
+      <div class="instrument"><span class="instrument-label"><span class="led ok"></span>Worker</span><span class="instrument-value">4</span></div>
+      <div class="instrument"><span class="instrument-label">Inbox</span><span class="instrument-value">2</span></div>
+      <div class="instrument"><span class="instrument-label">Kosten heute</span><span class="instrument-value">$0.00</span></div>
+      <div class="instrument"><span class="instrument-label"><span class="led bronze"></span>Gateway</span><span class="instrument-value">up</span></div>
+    </div>
+  </header>
+
+  <!-- Quota je Subscription (KPI-Grid) -->
+  <section class="kpi-grid">
+    <div class="kpi-tile">
+      <div class="kpi-label"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max · 5h-Fenster</div>
+      <div class="kpi-value">62%</div>
+      <div class="kpi-sub">ok · reset 14:20</div>
+      <div class="qbar"><i class="fill-ok" style="width:62%"></i></div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3 · Monatsquota</div>
+      <div class="kpi-value">79%</div>
+      <div class="kpi-sub">warn · noch 9 Tage</div>
+      <div class="qbar"><i class="fill-warn" style="width:79%"></i></div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label"><span class="lane-dot" style="--c:var(--d3)"></span>Grok 4.5 · Plan</div>
+      <div class="kpi-value">41%</div>
+      <div class="kpi-sub">ok · täglich</div>
+      <div class="qbar"><i class="fill-ok" style="width:41%"></i></div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-label"><span class="lane-dot" style="--c:var(--d4)"></span>GPT-5.6 · Shared-Pool</div>
+      <div class="kpi-value">23%</div>
+      <div class="kpi-sub">ok · mit Codex/Hermes</div>
+      <div class="qbar"><i class="fill-ok" style="width:23%"></i></div>
+    </div>
+  </section>
+
+
+  <section class="panel coverage-rail">
+    <div class="section-header">
+      <span class="eyebrow">Coverage · je Lane</span>
+      <span class="section-note">Tank · Traces · Eval</span>
+    </div>
+    <div class="cov-row">
+      <span class="cov-lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max</span>
+      <span class="cov-leds">
+        <span class="cov-led ok"><span class="led ok"></span>Tank</span>
+        <span class="cov-led ok"><span class="led ok"></span>Traces</span>
+        <span class="cov-led phase2"><span class="led"></span>Eval <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></span>
+      </span>
+    </div>
+    <div class="cov-row">
+      <span class="cov-lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span>
+      <span class="cov-leds">
+        <span class="cov-led warn"><span class="led" style="background:var(--warn);box-shadow:0 0 6px color-mix(in srgb,var(--warn) 60%,transparent)"></span>Tank</span>
+        <span class="cov-led ok"><span class="led ok"></span>Traces</span>
+        <span class="cov-led phase2"><span class="led"></span>Eval <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></span>
+      </span>
+    </div>
+    <div class="cov-row">
+      <span class="cov-lane"><span class="lane-dot" style="--c:var(--d3)"></span>Grok 4.5</span>
+      <span class="cov-leds">
+        <span class="cov-led ok"><span class="led ok"></span>Tank</span>
+        <span class="cov-led ok"><span class="led ok"></span>Traces</span>
+        <span class="cov-led phase2"><span class="led"></span>Eval <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></span>
+      </span>
+    </div>
+    <div class="cov-row">
+      <span class="cov-lane"><span class="lane-dot" style="--c:var(--d4)"></span>GPT-5.6 (Codex)</span>
+      <span class="cov-leds">
+        <span class="cov-led ok"><span class="led ok"></span>Tank</span>
+        <span class="cov-led absent"><span class="led"></span>Traces <span class="cov-sub">fehlen · Instrumentierung offen (S1)</span></span>
+        <span class="cov-led phase2"><span class="led"></span>Eval <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></span>
+      </span>
+    </div>
+    <div class="cov-row">
+      <span class="cov-lane"><span class="lane-dot" style="--c:var(--d5)"></span>Qwen 3.8-Max</span>
+      <span class="cov-leds">
+        <span class="cov-led ok"><span class="led ok"></span>Tank</span>
+        <span class="cov-led ok"><span class="led ok"></span>Traces</span>
+        <span class="cov-led phase2"><span class="led"></span>Eval <span class="mock-preview-marker" title="PHASE2 · noch nicht live gemessen"><span class="mpm-desktop">VORSCHAU — MOCK-DATEN</span><span class="mpm-mobile">Vorschau (Mock)</span></span></span>
+      </span>
+    </div>
+  </section>
+
+  <div class="content">
+    <!-- Verbrauch pro Task -->
+    <section class="panel">
+      <div class="section-header">
+        <span class="eyebrow">Quota-Verbrauch pro Task · heute</span>
+        <span class="section-note">sortiert nach Anteil · Quelle: Langfuse-Traces</span>
+      </div>
+      <table class="data-table">
+        <thead>
+          <tr><th>Task</th><th>Lane</th><th class="num">Tokens in/out</th><th class="num" title="Anteil am getraceten Tagesverbrauch (ohne Cache-Tokens) — nicht Fenster-Anteil">Anteil*</th><th>Outcome</th><th class="num">Zeit</th></tr>
+        </thead>
+        <tbody>
+          <tr class="selected">
+            <td class="task"><span class="tid">t_c35430a7</span>Gate-Green-Kanban-Lifecycle-Fix</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d1)"></span>Claude Max</span></td>
+            <td class="num muted">412k / 38k</td>
+            <td class="num"><span class="share">24%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:100%"></i></span></span></td>
+            <td><span class="chip ok" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>fertig</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">09:12</td>
+          </tr>
+          <tr>
+            <td class="task"><span class="tid">t_875c87bf</span>Disposition-Ledger Triage 130→59</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span></td>
+            <td class="num muted">188k / 21k</td>
+            <td class="num"><span class="share">14%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:58%"></i></span></span></td>
+            <td><span class="chip ok" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>fertig</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">08:40</td>
+          </tr>
+          <tr>
+            <td class="task"><span class="tid">t_d1f792c0</span>Audit Follow-up P2 (held)</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d4)"></span>GPT-5.6</span></td>
+            <td class="num muted">156k / 17k</td>
+            <td class="num"><span class="share">11%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:46%"></i></span></span></td>
+            <td><span class="chip warn" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>frage</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">10:05</td>
+          </tr>
+          <tr>
+            <td class="task"><span class="tid">t_e4d5ec9f</span>Lane-Routing Variante B (geparkt)</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d3)"></span>Grok 4.5</span></td>
+            <td class="num muted">121k / 12k</td>
+            <td class="num"><span class="share">9%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:38%"></i></span></span></td>
+            <td><span class="chip ok" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>fertig</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">07:58</td>
+          </tr>
+          <tr>
+            <td class="task"><span class="tid">t_9f31aa02</span>Projekte-Tab Receipts-Feed</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d2)"></span>Kimi K3</span></td>
+            <td class="num muted">98k / 9k</td>
+            <td class="num"><span class="share">7%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:29%"></i></span></span></td>
+            <td><span class="chip ok" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>fertig</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">06:22</td>
+          </tr>
+          <tr>
+            <td class="task"><span class="tid">t_2b77c914</span>Vitest waitFor-Flake-Fix</td>
+            <td><span class="lane"><span class="lane-dot" style="--c:var(--d5)"></span>Qwen</span></td>
+            <td class="num muted">64k / 6k</td>
+            <td class="num"><span class="share">5%<span class="prov-chip" title="PARTIAL · ohne Cache-Tokens, ohne ungetracete Codex-Runs">· PARTIAL</span><span class="mini"><i style="width:21%"></i></span></span></td>
+            <td><span class="chip alert" title="Quelle: task_runs.outcome (Oa)"><span class="led"></span>tot</span><span class="prov-chip" title="Quelle: task_runs.outcome (Oa)">· LIVE</span></td>
+            <td class="num muted">05:41</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="panel-footnote">* Anteil am getraceten Tagesverbrauch (ohne Cache-Tokens) — nicht Fenster-Anteil. <span class="prov-chip" title="task_runs · getracete Tokens">· PARTIAL</span></div>
+      <div class="hint">Klick auf eine Zeile öffnet den <b>Trace</b> (Mockup 02). Anteil = Quota-Verbrauch der Lane, den dieser Task verursacht hat — nicht Dollar.</div>
+    </section>
+
+    <!-- Unsichtbare Budget-Skips -->
+    <section class="panel">
+      <div class="section-header">
+        <span class="eyebrow">Budget-Skips · kein Trace</span>
+        <span class="section-note">3 heute <span class="gap-tag" title="run-history outcome (Ob) · GAP->M3">belegt ab S2</span></span>
+      </div>
+      <div class="skip-row">
+        <div><span class="tid">t_a91be233</span><span class="name">Strategist-Reflect (abends)</span>
+          <div class="why">Budget-Skip · 97% Claude-Weekly erreicht</div></div>
+        <span class="chip tinted warn"><span class="led"></span>skip</span>
+      </div>
+      <div class="skip-row">
+        <div><span class="tid">t_f02c8871</span><span class="name">Green-Gate-Heartbeat</span>
+          <div class="why">Budget-Skip · 5h-Fenster voll</div></div>
+        <span class="chip tinted warn"><span class="led"></span>skip</span>
+      </div>
+      <div class="skip-row">
+        <div><span class="tid">t_31dd09c8</span><span class="name">MemSearch-Distillation Wächter</span>
+          <div class="why">Budget-Skip · Claude-Weekly</div></div>
+        <span class="chip tinted warn"><span class="led"></span>skip</span>
+      </div>
+      <div class="panel-footnote">Quelle (Soll): autoresearch_runs.outcome/skip_reason (Ob) <span class="prov-chip" title="GAP -> Slice S2 · M3 (run-history outcome)">· belegt ab S2</span> — heute noch Cron-Log, nicht strukturiert abfragbar.</div>
+      <div class="hint"><b>Vorher:</b> Skips waren im Cron-Log unsichtbar — der Reflect meldete „Nulltag 0/0/0/0". <b>Jetzt:</b> jeder Skip erzeugt einen Eintrag mit Grund; „Kosten heute $0.00" + leere Trace-Spalte werden erklärbar.</div>
+    </section>
+  </div>
+
+  <div class="foot">Datenquellen: canonical_usage (conversation_loop.py · codex_runtime.py) → Langfuse · Quota-Stände: account_usage.py · Beträge in $ (Abos = $0.00)</div>
+</div>
+</body>
+</html>
