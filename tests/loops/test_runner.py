@@ -231,6 +231,12 @@ def write_pack(packs_dir: Path, name: str, ptype: str, repo: Path, **overrides) 
     return pack_dir
 
 
+# Engines der Fixture — bewusst NICHT aus AUTOLAND_PHASE_CONTRACT abgeleitet:
+# der Vertrag bindet seit 2026-07-25 nur noch Prompts, Engines floaten. Die alten
+# Rollen bleiben hier stehen, damit die Fixture dem echten Pack gleicht.
+_FIXTURE_AUTOLAND_ENGINES = {"plan": "claude", "build": "codex", "verify": "claude"}
+
+
 def write_autoland_pack(
     packs_dir: Path,
     repo: Path,
@@ -238,20 +244,20 @@ def write_autoland_pack(
     name: str = "dashboard-experience",
     **overrides,
 ) -> Path:
-    """Schreibt den kuratierten Engine-Rollen-Vertrag (engine+prompt pro Phase)
-    für Loader-Tests. Das konkrete Modell bleibt der write_pack-Default (fake-1) —
-    es ist NICHT Teil der Landungsautorität (Sicherheitsprojektion)."""
+    """Schreibt den kuratierten Prompt-Vertrag (prompt pro Phase) für Loader-Tests.
+    Modell UND Engine bleiben hier frei wählbar — beide sind seit 2026-07-25 NICHT
+    Teil der Landungsautorität (Sicherheitsprojektion)."""
     pack_dir = write_pack(
         packs_dir, name, "pipeline", repo,
         autoland=True, **overrides,
     )
     manifest_path = pack_dir / "pack.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-    for phase, (engine, prompt_name) in runner_module.AUTOLAND_PHASE_CONTRACT.items():
+    for phase, prompt_name in runner_module.AUTOLAND_PHASE_CONTRACT.items():
         source = pack_dir / f"{phase}.md"
         (pack_dir / prompt_name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
         manifest["phases"][phase].update(
-            engine=engine, prompt=prompt_name,
+            engine=_FIXTURE_AUTOLAND_ENGINES[phase], prompt=prompt_name,
         )
     manifest_path.write_text(
         yaml.safe_dump(manifest, allow_unicode=True), encoding="utf-8"
@@ -308,7 +314,7 @@ def authorize_autoland_fixture(
                     prompt: runner_module.hashlib.sha256(
                         (pack_dir / prompt).read_bytes()
                     ).hexdigest()
-                    for _, prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
+                    for prompt in runner_module.AUTOLAND_PHASE_CONTRACT.values()
                 },
                 require_visual=source_contract.require_visual,
             ),
@@ -632,15 +638,34 @@ def test_autoland_rejects_custom_copy_with_authorized_name(
         load_pack(custom, "dashboard-experience")
 
 
-def test_autoland_rejects_engine_role_drift(tmp_path, fake_engine, monkeypatch):
-    # Risiko-Pin (Engine-Rollenprojektion): die Engine-ROLLE pro Phase bleibt Teil
-    # der Autorität — eine geänderte Rolle (verify claude→codex) fällt fail-closed.
+def test_autoland_engine_swap_still_loads(tmp_path, fake_engine, monkeypatch):
+    # Operator-Entscheid 2026-07-25: die Engine-ROLLE ist NICHT mehr Teil der
+    # Autorität. Ein Engine-Swap im Manifest (verify claude→codex) driftet weder
+    # am Phasenvertrag noch an der Sicherheitsprojektion; das Pack lädt weiter
+    # mit autoland=True. Vorher war genau das ein fail-closed-Abbruch.
     repo = init_repo(tmp_path / "repo")
     packs_dir = tmp_path / "packs"
     pack_dir = write_autoland_pack(packs_dir, repo)
     authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
     manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
     manifest["phases"]["verify"]["engine"] = "codex"
+    (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+
+    pack = load_pack(packs_dir, "dashboard-experience")
+    assert pack.autoland is True
+    assert pack.phases["verify"].engine == "codex"
+
+
+def test_autoland_rejects_prompt_assignment_drift(tmp_path, fake_engine, monkeypatch):
+    # Gegenprobe zum obigen Test: was der Vertrag NOCH bindet, ist die
+    # Prompt-Zuordnung pro Phase. Zeigt verify auf den Builder-Prompt, fällt der
+    # Load fail-closed — sonst wäre nach dem Engine-Entkoppeln gar nichts mehr da.
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    pack_dir = write_autoland_pack(packs_dir, repo)
+    authorize_autoland_fixture(monkeypatch, packs_dir, repo, pack_dir)
+    manifest = yaml.safe_load((pack_dir / "pack.yaml").read_text(encoding="utf-8"))
+    manifest["phases"]["verify"]["prompt"] = "BUILDER-PROMPT.md"
     (pack_dir / "pack.yaml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
 
     with pytest.raises(ManifestError, match="Phasenvertrag"):
@@ -1580,7 +1605,12 @@ def test_effective_catalog_rejects_unknown_engine_for_any_pack(tmp_path, fake_en
         runner._validate_effective_phase_catalog()
 
 
-def test_autoland_night_role_change_forces_manual_land(tmp_path, fake_engine, monkeypatch):
+def test_autoland_night_role_change_keeps_autoland(tmp_path, fake_engine, monkeypatch):
+    # Regression auf den Operator-Entscheid 2026-07-25 und zugleich der reale Fall,
+    # der ihn ausgelöst hat: eine night-overrides.env schaltet die plan-Engine auf
+    # eine Fremd-Engine. Bis dahin setzte das den manual-land-Marker und der Runner
+    # loggte jede Nacht "AUTOLAND übersprungen". Jetzt bleibt die Landung autorisiert
+    # und ein ALTER Marker aus einer früheren Nacht wird wieder entfernt.
     _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     # Restore real autoland engines for phase_cfg (fixture mutates to fake).
     pack.phases["plan"].engine = "claude"
@@ -1596,10 +1626,13 @@ def test_autoland_night_role_change_forces_manual_land(tmp_path, fake_engine, mo
         encoding="utf-8",
     )
     runner = LoopRunner(pack, state_root=tmp_path / "state")
+    runner.manual_land_marker.parent.mkdir(parents=True, exist_ok=True)
+    runner.manual_land_marker.write_text("stale marker\n", encoding="utf-8")
     runner._validate_autoland_runtime()
-    assert runner._runtime_autoland_authorized() is False
+    assert runner._runtime_autoland_authorized() is True
     runner._prepare_runtime_land_mode()
-    assert runner.manual_land_marker.is_file()
+    assert not runner.manual_land_marker.exists()
+    assert runner._manual_land_required("resume") is False
     assert (state / "night-overrides.env").is_file()
 
 
@@ -2674,12 +2707,13 @@ def test_autoland_rejects_model_outside_ui_catalog(tmp_path, fake_engine, monkey
         runner._validate_autoland_runtime()
 
 
-def test_autoland_engine_role_override_disables_automatic_landing(
+def test_autoland_engine_role_override_keeps_automatic_landing(
     tmp_path, fake_engine, monkeypatch
 ):
-    # Risiko-Pin (Engine-Rolle bleibt Autorität): eine geänderte Engine-ROLLE zur
-    # Laufzeit (build codex→claude) deaktiviert das automatische Landen — obwohl
-    # das Modell im Katalog liegt. Nur die Rolle, NICHT das Modell, kippt es.
+    # Operator-Entscheid 2026-07-25: eine geänderte Engine-ROLLE zur Laufzeit
+    # (build codex→claude) deaktiviert das automatische Landen NICHT mehr. Damit
+    # entfällt bewusst die Garantie Bauer≠Prüfer — hier baut und prüft claude.
+    # Was die Landung objektiv hält, sind Verify-PASS, Visual-Gate und land_gates.
     _, pack = load_autoland_fixture(tmp_path, monkeypatch)
     state = tmp_path / "state" / "dashboard-experience"
     state.mkdir(parents=True)
@@ -2692,13 +2726,13 @@ def test_autoland_engine_role_override_disables_automatic_landing(
     runner = LoopRunner(pack, state_root=tmp_path / "state")
 
     runner._validate_autoland_runtime()
-    assert runner._runtime_autoland_authorized() is False
+    assert runner._runtime_autoland_authorized() is True
     runner._prepare_runtime_land_mode()
     runner.consume_overrides()
 
     resumed = LoopRunner(pack, state_root=tmp_path / "state")
     assert resumed.overrides == {}
-    assert resumed._manual_land_required("resume") is True
+    assert resumed._manual_land_required("resume") is False
 
 
 def test_autoland_valid_model_swap_keeps_automatic_landing(
