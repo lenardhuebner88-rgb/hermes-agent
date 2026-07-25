@@ -56,7 +56,7 @@ export function runStatusLabel(status?: string | null): string {
 /** Profil-Rollen in Klartext. Unbekannte Profile zeigen ihren Rohnamen
  *  (Lookup-Fallback `?? profile` an den Call-Sites). */
 export const profileLabel: Record<string, string> = {
-  default: 'Standard', admin: 'Admin', coder: 'Coder', devpower: 'DevPower',
+  default: 'Standard', admin: 'Admin', coder: 'Coder', 'coder-frontend': 'Coder (Frontend)', devpower: 'DevPower',
   dispatcher: 'Dispatcher', kanbanops: 'Kanban-Ops', planner: 'Planer',
   research: 'Research', critic: 'Kritiker', verifier: 'Verifier', scout: 'Scout',
   // claude-cli-Lanes (Max-Abo) + Review-Lane

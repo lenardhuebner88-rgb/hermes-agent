@@ -2,7 +2,7 @@ import { profileLabel } from "./tones";
 import { isRosterProfile, workerTokens } from "./statsBroadsheet";
 import type { ReliabilityProfile, WindowedRollupRoot } from "./schemas";
 
-export const WORKER_EFFICIENCY_BENCH_PROFILES = ["premium", "coder", "reviewer", "scout"] as const;
+export const WORKER_EFFICIENCY_BENCH_PROFILES = ["premium", "coder", "coder-frontend", "reviewer", "scout"] as const;
 
 /** Mirror of the backend roster-stats min-n gate (runs_reliability default = 5).
  *  A review-return rate is only asserted once at least this many of the worker's

@@ -116,6 +116,15 @@ RoleChips kombinieren Initiale und Rollenlabel; Pipeline-Stufen kombinieren Eyeb
 und Rail. Unbekannte Identitäten bleiben neutral. Die AA-Tabelle an der Token-Definition
 in `theme.css` belegt alle sieben Farben gegen `surface-1` und `surface-2`.
 
+### Frontend-Coder-Identität
+
+`coder-frontend` ist die Implementierungs-Lane für Änderungen unter `web/`
+und trägt in Statistikserien `--color-data-2` (Sage). Das ist reine
+Lane-Identität: Sie ersetzt weder Bronze als Interaktionsfarbe noch eine Farbe
+des Status-Trios. UI-Arbeit bleibt an dieses Dokument und die gerenderten
+Compact-/Expanded-Prüfungen gebunden; Backend- und gemischte Arbeit bleibt bei
+`coder`, sofern der Schwerpunkt nicht klar in `web/` liegt.
+
 ## Jarvis-Zone (`/control/projekte`) — einzige Token-Ausnahme
 
 **Ausnahme-Entscheidung (Plan of Record, Canon-Entwurf Punkt 4):** die Route

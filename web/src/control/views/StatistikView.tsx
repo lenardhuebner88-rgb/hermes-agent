@@ -92,6 +92,7 @@ const ERROR_LABEL: Record<string, string> = {
 
 const LANE_COLORS: Record<string, string> = {
   coder: "var(--color-brand)",
+  "coder-frontend": "var(--color-data-2)",
   "coder-claude": "var(--color-ink-3)",
   premium: "var(--color-brand)",
   reviewer: "var(--color-status-ok)",

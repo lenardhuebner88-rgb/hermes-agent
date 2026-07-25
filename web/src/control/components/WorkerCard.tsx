@@ -62,7 +62,7 @@ const ACTION_EFFECT: Record<WorkerActionKey, string> = {
 };
 
 // Lane-Optionen für F3 Neu-Starten auf anderer Lane.
-const WORKER_LANE_OPTIONS = ["coder", "coder-claude", "premium", "verifier", "research", "admin"] as const;
+const WORKER_LANE_OPTIONS = ["coder", "coder-frontend", "coder-claude", "premium", "verifier", "research", "admin"] as const;
 
 interface TaskLogResponse {
   task_id: string;

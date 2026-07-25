@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  WORKER_EFFICIENCY_BENCH_PROFILES,
   buildWorkerEfficiencyRows,
   workerEfficiencyLevers,
 } from "./workerEfficiency";
@@ -86,6 +87,16 @@ function root(over: Partial<WindowedRollupRoot> = {}): WindowedRollupRoot {
 }
 
 describe("buildWorkerEfficiencyRows", () => {
+  it("keeps the frontend coder beside the backend coder in the benchmark roster", () => {
+    expect(WORKER_EFFICIENCY_BENCH_PROFILES).toEqual([
+      "premium",
+      "coder",
+      "coder-frontend",
+      "reviewer",
+      "scout",
+    ]);
+  });
+
   it("derives worker efficiency from completed roots and attributed review verdicts", () => {
     // judged >= default min-n (5) so the review rate is asserted, not gated.
     const rows = buildWorkerEfficiencyRows(

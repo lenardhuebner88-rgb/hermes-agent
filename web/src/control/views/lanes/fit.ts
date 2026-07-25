@@ -19,6 +19,7 @@ export { probeKey };
 
 export type CompassRole =
   | "coder"
+  | "coder-frontend"
   | "reviewer"
   | "critic"
   | "verifier"
@@ -38,6 +39,7 @@ export interface RoleRequirement {
 
 export const ROLE_REQUIREMENTS: Record<CompassRole, RoleRequirement> = {
   coder:    { label: "Coder",    weights: { coding: 0.35, reasoning: 0.25, speed: 0.20, cost: 0.12, context: 0.08 }, wantsReasoning: "medium", minContext: 128_000 },
+  "coder-frontend": { label: "Frontend", weights: { coding: 0.40, reasoning: 0.20, speed: 0.20, cost: 0.12, context: 0.08 }, wantsReasoning: "medium", minContext: 128_000 },
   reviewer: { label: "Reviewer", weights: { coding: 0.25, reasoning: 0.35, speed: 0.12, cost: 0.10, context: 0.18 }, wantsReasoning: "high",   minContext: 128_000 },
   critic:   { label: "Critic",   weights: { coding: 0.15, reasoning: 0.40, speed: 0.10, cost: 0.10, context: 0.25 }, wantsReasoning: "high",   minContext: 128_000 },
   verifier: { label: "Verifier", weights: { coding: 0.25, reasoning: 0.20, speed: 0.30, cost: 0.15, context: 0.10 }, wantsReasoning: "medium", minContext: 64_000 },
@@ -48,6 +50,7 @@ export const ROLE_REQUIREMENTS: Record<CompassRole, RoleRequirement> = {
 
 export const COMPASS_ROLES: CompassRole[] = [
   "coder",
+  "coder-frontend",
   "reviewer",
   "critic",
   "verifier",

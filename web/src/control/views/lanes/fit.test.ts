@@ -181,6 +181,13 @@ describe("rankModelsForRole", () => {
   });
 
   it("honors every configured role and keeps weights normalized", () => {
+    expect(COMPASS_ROLES.slice(0, 2)).toEqual(["coder", "coder-frontend"]);
+    expect(ROLE_REQUIREMENTS["coder-frontend"]).toMatchObject({
+      label: "Frontend",
+      weights: { coding: 0.40, reasoning: 0.20, speed: 0.20, cost: 0.12, context: 0.08 },
+      wantsReasoning: "medium",
+      minContext: 128_000,
+    });
     for (const role of COMPASS_ROLES) {
       const w = ROLE_REQUIREMENTS[role].weights;
       const sum = w.coding + w.reasoning + w.speed + w.cost + w.context;

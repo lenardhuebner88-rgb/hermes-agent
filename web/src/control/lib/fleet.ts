@@ -144,6 +144,7 @@ export interface RoleChip {
 const ROLE_BY_PROFILE: Record<string, RoleChip> = {
   verifier: { label: "Verifier", short: "V", tone: "sky" },
   coder: { label: "Coder", short: "C", tone: "amber" },
+  "coder-frontend": { label: "Frontend", short: "F", tone: "amber" },
   premium: { label: "Coder", short: "C", tone: "amber" },
   devpower: { label: "DevPower", short: "D", tone: "amber" },
   research: { label: "Research", short: "R", tone: "emerald" },
