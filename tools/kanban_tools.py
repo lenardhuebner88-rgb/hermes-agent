@@ -1464,6 +1464,7 @@ def _handle_create(args: dict, **kw) -> str:
     workspace_kind = args.get("workspace_kind")
     workspace_path = args.get("workspace_path")
     project_source_task_id = None
+    project_source_task_id = None
     _inherit_project = workspace_kind is None and workspace_path is None
     if workspace_kind is None:
         workspace_kind = "scratch"
@@ -1525,6 +1526,7 @@ def _handle_create(args: dict, **kw) -> str:
                     _self_task = kb.get_task(conn, _self_tid)
                     if _self_task is not None and _self_task.project_id:
                         project_id = _self_task.project_id
+                        project_source_task_id = _self_task.id
             _created_by = os.environ.get("HERMES_PROFILE") or "worker"
             # Cross-family review finding 5 (2026-07-17): re-check as the LAST
             # thing before create_task (not earlier in this handler) and under
@@ -1600,6 +1602,7 @@ def _handle_create(args: dict, **kw) -> str:
                 skills=skills,
                 model_override=model_override,
                 provider_override=provider_override,
+                project_source_task_id=project_source_task_id,
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None

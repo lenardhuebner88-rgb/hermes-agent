@@ -212,6 +212,29 @@ def _ensure_push_hook_consumers_registered() -> None:
         _log.debug("bundled kanban hook consumer bootstrap failed: %s", exc)
 
 
+def _assert_not_delegated_child_mutation() -> None:
+    """Reject Kanban state mutations from ``delegate_task`` child contexts.
+
+    The structured kanban tools and CLI dispatch layer both have fast-fail
+    guards for better UX, but neither is a trust boundary: a delegated child can
+    still shell out to the CLI or import this module directly. The actual
+    invariant belongs at the DB/filesystem mutation layer so every public
+    mutator that uses ``write_txn`` (tasks, runs, comments, attachments,
+    dispatcher claims, repair events, subscriptions, GC, etc.) and every board
+    metadata mutator fails closed before touching durable state.
+    """
+    try:
+        from agent.delegation_context import is_delegated_child_process_context
+
+        delegated = is_delegated_child_process_context()
+    except Exception:
+        delegated = bool(os.environ.get("HERMES_DELEGATED_CHILD_CONTEXT"))
+    if delegated:
+        raise PermissionError(
+            "delegate_task child contexts cannot mutate Kanban tasks or boards"
+        )
+
+
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
     """Fire a kanban lifecycle plugin hook, fully best-effort.
 
@@ -694,6 +717,7 @@ def set_current_board(slug: str) -> Path:
     so that ``hermes kanban boards switch <typo>`` returns an error
     instead of silently pointing at nothing.
     """
+    _assert_not_delegated_child_mutation()
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
@@ -705,6 +729,7 @@ def set_current_board(slug: str) -> Path:
 
 def clear_current_board() -> None:
     """Remove ``<root>/kanban/current`` so the active board reverts to ``default``."""
+    _assert_not_delegated_child_mutation()
     try:
         current_board_path().unlink()
     except FileNotFoundError:
@@ -1060,6 +1085,7 @@ def write_board_metadata(
     Preserves any existing fields not mentioned in the call. Sets
     ``created_at`` on first write. Returns the resulting metadata dict.
     """
+    _assert_not_delegated_child_mutation()
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
     meta = read_board_metadata(slug)
     # Preserve existing DB-derived fields — they get re-computed each
@@ -1175,6 +1201,7 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
     Returns a summary dict describing what happened (``{"slug", "action",
     "new_path"}``).
     """
+    _assert_not_delegated_child_mutation()
     normed = _normalize_board_slug(slug)
     if not normed:
         raise ValueError("board slug is required")
@@ -4470,6 +4497,7 @@ def write_txn(conn: sqlite3.Connection):
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
     """
+    _assert_not_delegated_child_mutation()
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         yield conn
@@ -5273,6 +5301,69 @@ def _default_max_iterations_for_task(
     return value if value >= 1 else DEFAULT_PREMIUM_BUILD_MAX_ITERATIONS
 
 
+def _project_from_source_task(
+    conn: sqlite3.Connection,
+    project_ref: str,
+    source_task_id: str,
+):
+    """Reconstruct a project record from a canonical project-linked task.
+
+    Cross-profile fallback for a worker-created child (upstream
+    b9b5481d6). Worker profiles carry their own ``projects.db`` while the
+    Kanban DB is shared, so ``get_project`` can miss a project the parent
+    task is demonstrably routed into. Rather than open the creator's
+    project store, derive the repo root and branch convention from a
+    source task in this same board.
+
+    Deliberately strict — returns ``None`` unless the source task is a
+    canonical ``<repo>/.worktrees/<task-id>`` worktree carrying the same
+    project id. The source task's literal worktree is never reused; the
+    caller still mints its own task-id-keyed path.
+    """
+    from hermes_cli import projects_db as _projects_db
+
+    source_task = get_task(conn, source_task_id)
+    if (
+        source_task is None
+        or source_task.project_id != project_ref
+        or source_task.workspace_kind != "worktree"
+        or not source_task.workspace_path
+    ):
+        return None
+    source_path = Path(source_task.workspace_path)
+    if not (
+        source_path.is_absolute()
+        and source_path.name == source_task.id
+        and source_path.parent.name == ".worktrees"
+    ):
+        return None
+
+    project_slug = None
+    if source_task.branch_name:
+        prefix, separator, leaf = source_task.branch_name.partition("/")
+        if separator and (
+            leaf == source_task.id or leaf.startswith(f"{source_task.id}-")
+        ):
+            try:
+                project_slug = _projects_db.normalize_slug(prefix)
+            except ValueError:
+                project_slug = None
+    if project_slug is None:
+        try:
+            project_slug = _projects_db.normalize_slug(project_ref)
+        except ValueError:
+            return None
+    if not project_slug:
+        return None
+    return _projects_db.Project(
+        id=project_ref,
+        slug=project_slug,
+        name=project_slug,
+        created_at=0,
+        primary_path=str(source_path.parent.parent),
+    )
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -5310,6 +5401,7 @@ def create_task(
     review_tier: Optional[str] = None,
     ui_impact: Optional[str] = None,
     auto_scout: bool = False,
+    project_source_task_id: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -5373,6 +5465,18 @@ def create_task(
                 project = _projects_db.get_project(project_conn, project_ref)
         except Exception:
             project = None
+        if project is None and project_source_task_id:
+            # Worker profiles have their own projects.db, while the Kanban DB
+            # is intentionally shared. Recover routing only from a canonical
+            # project-linked source task in this same board. This carries the
+            # repo + project branch convention forward without copying or
+            # opening the creator profile's project store, and without reusing
+            # the source task's literal worktree path.
+            project = _project_from_source_task(
+                conn, project_ref, str(project_source_task_id)
+            )
+            if project is not None and workspace_kind == "scratch":
+                workspace_kind = "worktree"
         if project is not None and project.primary_path:
             resolved_project_id = project.id
             if workspace_kind == "scratch" and workspace_path is None:
@@ -5695,6 +5799,12 @@ def create_task(
                     "status": task_status,
                     "parents": list(parents),
                     "tenant": tenant,
+                    # Workspace routing belongs in the created event: a worker
+                    # spawning a child must be auditable as to WHERE that child
+                    # runs (#67567). These are the persisted values, not the
+                    # requested ones, so payload and row can never disagree.
+                    "workspace_kind": task_workspace_kind,
+                    "workspace_path": task_workspace_path,
                     "branch_name": task_branch_name,
                     "project_id": resolved_project_id,
                     "skills": list(skills_list) if skills_list else None,
@@ -14027,6 +14137,8 @@ def _worker_gate_commands_for_workspace(_wg: dict, workspace: str) -> list[str]:
                 cwd=workspace,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=10,
                 check=False,
             )
@@ -14542,6 +14654,8 @@ def _git_head_sha_for_workspace(workspace_path: Optional[str]) -> Optional[str]:
             ["git", "rev-parse", "HEAD"],
             cwd=str(root),
             text=True,
+            encoding='utf-8',
+            errors='replace',
             capture_output=True,
             timeout=5,
             check=False,
@@ -14658,6 +14772,8 @@ def _capture_review_diff_snapshot(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=5,
                 check=False,
             )
@@ -14776,6 +14892,8 @@ def _capture_review_diff_snapshot_against_main(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=5,
                 check=False,
             )
@@ -14849,6 +14967,8 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
             cwd=_wg_ws,
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=10,
             check=False,
         ).stdout.strip()[:40]
@@ -14868,6 +14988,8 @@ def _run_worker_gate(conn: sqlite3.Connection, task_id: str) -> dict:
                 cwd=_wg_ws,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=_wg["timeout"],
                 check=False,
             )
@@ -16916,6 +17038,8 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
             ["tmux", "list-panes", "-t", session, "-F", "#{pane_dead}"],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=5,
         )
         if out.stdout.strip() == "1":
@@ -19425,6 +19549,15 @@ def decompose_triage_task(
             child_ws_kind = child.get("workspace_kind") or root_ws_kind
             if child.get("workspace_path"):
                 child_ws_path = child.get("workspace_path")
+            elif child_ws_kind == "worktree":
+                # Never share one worktree checkout between siblings: the
+                # root's literal path would put every child in the same
+                # directory on the first-dispatched sibling's branch, with
+                # no lock — siblings can be promoted and dispatched
+                # concurrently. Leave the path unset so dispatch
+                # materializes a fresh <repo>/.worktrees/<child-id> per
+                # child from the board anchor.
+                child_ws_path = None
             elif child_ws_kind == root_ws_kind:
                 child_ws_path = root_ws_path
             else:
@@ -20026,6 +20159,8 @@ def _git_toplevel(path: Path) -> Optional[Path]:
             ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30,
             check=False,
         )
@@ -20055,6 +20190,8 @@ def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
             ],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30,
             check=False,
         )
@@ -20076,6 +20213,8 @@ def _git_common_dir(path: Path) -> Optional[Path]:
             ],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30,
             check=False,
         )
@@ -20102,6 +20241,8 @@ def _git_dir(path: Path) -> Optional[Path]:
             ],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30,
             check=False,
         )
@@ -20121,6 +20262,8 @@ def _git_current_branch(path: Path) -> Optional[str]:
             ["git", "-C", str(path), "branch", "--show-current"],
             capture_output=True,
             text=True,
+            encoding='utf-8',
+            errors='replace',
             timeout=30,
             check=False,
         )
@@ -20185,6 +20328,8 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
         cmd,
         capture_output=True,
         text=True,
+        encoding='utf-8',
+        errors='replace',
         timeout=60,
         check=False,
     )
@@ -20250,6 +20395,24 @@ def _resolve_worktree_workspace(
 
     if requested.exists() and _is_linked_worktree_checkout(requested):
         actual_branch = _git_current_branch(requested)
+        if actual_branch == branch_name:
+            return requested_resolved, actual_branch
+        # The requested path is an existing checkout of a DIFFERENT
+        # task's branch. Decompose children inherit the root's
+        # workspace_path verbatim, so siblings all point here; reusing
+        # the checkout as-is would run this task on the other task's
+        # branch — silent cross-task provenance corruption, and unsafe
+        # when siblings run concurrently. Fall back to a fresh worktree
+        # of our own under the same repo.
+        fallback_root = _repo_root_for_worktree_target(requested.parent)
+        if fallback_root is not None:
+            fallback = fallback_root / ".worktrees" / task.id
+            if fallback.resolve(strict=False) != requested_resolved:
+                _ensure_git_worktree(fallback_root, fallback, branch_name)
+                return fallback.resolve(strict=False), branch_name
+        # No repo to anchor a fallback on (or the occupied path IS this
+        # task's own canonical worktree): keep the legacy reuse rather
+        # than failing dispatch.
         return requested_resolved, actual_branch or branch_name
 
     repo_root = _git_toplevel(requested)
@@ -20645,7 +20808,7 @@ def _workspace_release_state(workspace_path: str) -> tuple[Optional[str], bool]:
     try:
         proc = subprocess.run(
             ["git", "-C", str(path), "status", "--porcelain"],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return head, False
@@ -21157,6 +21320,8 @@ def _pid_alive(pid: Optional[int]) -> bool:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=1,
                 check=False,
             )
@@ -30051,7 +30216,9 @@ def _dispatch_once_locked(
                             "git", "-C", str(source_workspace), "rev-parse",
                             "--verify", f"{candidate_sha}^",
                         ],
-                        text=True, capture_output=True, timeout=5, check=False,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace', capture_output=True, timeout=5, check=False,
                     ).stdout.strip()
                     if not base_sha:
                         raise RuntimeError(
@@ -30387,7 +30554,9 @@ def _dispatch_once_locked(
             if not candidate_commit:
                 candidate_commit = subprocess.run(
                     ["git", "-C", str(source_workspace), "rev-parse", "--verify", "HEAD"],
-                    text=True, capture_output=True, timeout=5, check=False,
+                    text=True,
+                    encoding='utf-8',
+                    errors='replace', capture_output=True, timeout=5, check=False,
                 ).stdout.strip()
             if candidate_commit:
                 base_commit = submission.get("diff_base_commit")
@@ -30399,7 +30568,9 @@ def _dispatch_once_locked(
                             "git", "-C", str(source_workspace), "rev-parse",
                             "--verify", f"{candidate_commit}^",
                         ],
-                        text=True, capture_output=True, timeout=5, check=False,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace', capture_output=True, timeout=5, check=False,
                     ).stdout.strip()
                     if not base_commit:
                         raise RuntimeError(
@@ -32862,6 +33033,8 @@ def _complete_review_diff(conn: sqlite3.Connection, task: "Task") -> Optional[st
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                encoding='utf-8',
+                errors='replace',
                 timeout=60,
                 check=False,
             )
