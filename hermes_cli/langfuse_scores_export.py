@@ -4,7 +4,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sqlite3
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,9 +18,12 @@ from typing import Any, Mapping
 from uuid import NAMESPACE_URL, uuid5
 
 from hermes_cli.kanban_db import kanban_db_path
+from hermes_constants import get_hermes_home
 
 _PAGE_SIZE = 100
 _TRACE_BATCH_SIZE = 50
+_SCORE_BATCH_SIZE = 50
+_SCORE_LEDGER_NAME = "langfuse-score-export-ledger.json"
 _OUTCOME_NAMES = {
     1.0: "completed", 2.0: "blocked", 3.0: "iteration_budget_exhausted",
     4.0: "spawn_failed", 5.0: "gave_up", 6.0: "crashed", 7.0: "reclaimed",
@@ -83,6 +89,91 @@ def _request(
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"Langfuse returned invalid JSON from {url}") from exc
     return result if isinstance(result, dict) else {}
+
+
+def _request_with_retry(
+    url: str,
+    authorization: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    retries: int = 4,
+    backoff: float = 0.5,
+) -> dict[str, Any]:
+    """Retry transient Langfuse responses while preserving permanent errors."""
+    for attempt in range(retries + 1):
+        try:
+            return _request(url, authorization, method=method, payload=payload)
+        except RuntimeError as exc:
+            message = str(exc)
+            status_match = re.search(r"\((\d{3})\)", message)
+            status = int(status_match.group(1)) if status_match else None
+            transient = status == 429 or (status is not None and status >= 500)
+            if not transient or attempt >= retries:
+                raise
+            time.sleep(backoff * (2 ** attempt))
+    raise AssertionError("retry loop did not return or raise")
+
+
+def _score_ledger_path(path: Path | None = None) -> Path:
+    return Path(path) if path is not None else get_hermes_home() / _SCORE_LEDGER_NAME
+
+
+def _read_score_ledger(path: Path) -> set[str]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return set()
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, dict):
+        values = raw.get("exported_score_ids", raw.get("scores", []))
+    else:
+        values = []
+    return {str(value) for value in values if value is not None}
+
+
+def _write_score_ledger(path: Path, score_ids: set[str]) -> None:
+    """Atomically persist the resume ledger after each successful batch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps({"exported_score_ids": sorted(score_ids)}, indent=2) + "\n"
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _remote_score_ids(host: str, authorization: str) -> set[str]:
+    """Read all existing score IDs once so old exports seed idempotency."""
+    score_ids: set[str] = set()
+    page = 1
+    while True:
+        query = urllib.parse.urlencode({"page": page, "limit": _PAGE_SIZE})
+        response = _request_with_retry(f"{host}/api/public/scores?{query}", authorization)
+        data: Any = response.get("data", [])
+        if isinstance(data, dict):
+            data = data.get("data", data.get("scores", []))
+        if not isinstance(data, list):
+            raise RuntimeError("Langfuse scores response has no data list")
+        score_ids.update(
+            str(score["id"])
+            for score in data
+            if isinstance(score, dict) and score.get("id") is not None
+        )
+        meta = response.get("meta")
+        total_pages = meta.get("totalPages") if isinstance(meta, dict) else None
+        if not data or (total_pages is not None and page >= int(total_pages)):
+            return score_ids
+        if total_pages is None and len(data) < _PAGE_SIZE:
+            return score_ids
+        page += 1
 
 
 def _trace_records(host: str, authorization: str) -> list[dict[str, Any]]:
@@ -431,7 +522,98 @@ def _score_payload(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
     return payload
 
 
-def export_scores(*, db_path: Path | None = None, env: Mapping[str, str] | None = None, dry_run: bool = False) -> dict[str, Any]:
+def _score_event(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
+    payload = _score_payload(row, trace_id)
+    timestamp = (
+        _utc_timestamp(row["created_at"])
+        if "created_at" in row.keys() and row["created_at"] is not None
+        else datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    return {
+        "id": str(uuid5(NAMESPACE_URL, f"hermes-kanban-score-event:{row['id']}")),
+        "timestamp": timestamp,
+        "type": "score-create",
+        "body": payload,
+    }
+
+
+def _export_score_backfill(
+    rows: list[sqlite3.Row],
+    *,
+    host: str,
+    authorization: str,
+    dry_run: bool,
+    ledger_path: Path | None,
+    batch_size: int,
+) -> dict[str, Any]:
+    """Backfill scores through ingestion with a durable, idempotent ledger."""
+    path = _score_ledger_path(ledger_path)
+    known_ids = _read_score_ledger(path)
+    # This seed is deliberately done before matching: deterministic IDs from
+    # exports performed before the ledger existed must count as seen.
+    known_ids.update(_remote_score_ids(host, authorization))
+    if not dry_run:
+        _write_score_ledger(path, known_ids)
+
+    by_run, by_task = _trace_ids(host, authorization)
+    pending: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+    matchable = unmatched = skipped_seen = 0
+    for row in rows:
+        trace_id = by_run.get(str(row["run_id"])) if row["run_id"] is not None else None
+        trace_id = trace_id or by_task.get(str(row["task_id"]))
+        if not trace_id:
+            unmatched += 1
+            continue
+        matchable += 1
+        event = _score_event(row, trace_id)
+        score_id = str(event["body"]["id"])
+        if score_id in known_ids:
+            skipped_seen += 1
+        else:
+            pending.append((row, event))
+
+    report: dict[str, Any] = {
+        "total_rows": len(rows),
+        "matchable": matchable,
+        "posted_new": 0,
+        "skipped_seen": skipped_seen,
+        "unmatched": unmatched,
+        # Keep the original result vocabulary for callers that only display
+        # the generic export summary.
+        "matched": matchable,
+        "posted": 0,
+    }
+    if dry_run:
+        report["would_post"] = len(pending)
+        return report
+
+    effective_batch_size = max(1, batch_size)
+    for offset in range(0, len(pending), effective_batch_size):
+        batch = pending[offset:offset + effective_batch_size]
+        _request_with_retry(
+            f"{host}/api/public/ingestion",
+            authorization,
+            method="POST",
+            payload={"batch": [event for _row, event in batch]},
+        )
+        known_ids.update(str(event["body"]["id"]) for _row, event in batch)
+        # Persist after every acknowledged batch. If a later batch fails, the
+        # next invocation resumes at exactly this boundary.
+        _write_score_ledger(path, known_ids)
+        report["posted_new"] += len(batch)
+    report["posted"] = report["posted_new"]
+    return report
+
+
+def export_scores(
+    *,
+    db_path: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    dry_run: bool = False,
+    backfill: bool = False,
+    ledger_path: Path | None = None,
+    batch_size: int = _SCORE_BATCH_SIZE,
+) -> dict[str, Any]:
     """Export active-board scores without mutating the Kanban database."""
     selected_db = db_path or kanban_db_path()
     connection = sqlite3.connect(selected_db)
@@ -448,7 +630,17 @@ def export_scores(*, db_path: Path | None = None, env: Mapping[str, str] | None 
 
     names = Counter(str(row["name"]) for row in rows)
     # Dry-run still resolves real traces, but never writes scores.
-    host, authorization = _credentials(env or os.environ)
+    runtime_env = env or os.environ
+    host, authorization = _credentials(runtime_env)
+    if backfill:
+        return _export_score_backfill(
+            rows,
+            host=host,
+            authorization=authorization,
+            dry_run=dry_run,
+            ledger_path=ledger_path,
+            batch_size=batch_size,
+        )
     by_run, by_task = _trace_ids(host, authorization)
     matched = unmatched = posted = 0
     for row in rows:

@@ -1112,6 +1112,10 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         help="Cron-friendly mode: empty stdout at 0 posted scores (silent), "
              "one summary line at N>0, error line + non-zero exit on failure",
     )
+    p_export_scores.add_argument(
+        "--backfill", action="store_true",
+        help="Backfill scores through batched ingestion with a persistent idempotency ledger",
+    )
 
     p_bfcost = sub.add_parser(
         "backfill-costs",
@@ -4261,7 +4265,10 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
 
     cron = bool(getattr(args, "cron", False))
     try:
-        result = export_scores(dry_run=bool(args.dry_run))
+        result = export_scores(
+            dry_run=bool(args.dry_run),
+            backfill=bool(getattr(args, "backfill", False)),
+        )
     except RuntimeError as exc:
         # --cron: errors go to stdout (single line) + non-zero exit so the
         # cron watchdog delivers. Default mode keeps errors on stderr.

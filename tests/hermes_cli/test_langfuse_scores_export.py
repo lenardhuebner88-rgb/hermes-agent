@@ -16,16 +16,29 @@ class _FakeLangfuseHandler(BaseHTTPRequestHandler):
         {"id": "trace-task", "metadata": json.dumps({"kanban_task_id": "t-task"})},
     ]
     scores: list[dict] = []
+    remote_scores: list[dict] = []
+    ingestions: list[dict] = []
+    fail_ingestion = 0
 
     def do_GET(self) -> None:  # noqa: N802
+        data = self.remote_scores if self.path.startswith("/api/public/scores") else self.traces
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"data": self.traces, "meta": {"totalPages": 1}}).encode())
+        self.wfile.write(json.dumps({"data": data, "meta": {"totalPages": 1}}).encode())
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers["Content-Length"])
-        self.scores.append(json.loads(self.rfile.read(length)))
+        payload = json.loads(self.rfile.read(length))
+        if self.path == "/api/public/ingestion":
+            if self.fail_ingestion:
+                type(self).fail_ingestion -= 1
+                self.send_response(503)
+                self.end_headers()
+                return
+            self.ingestions.append(payload)
+        else:
+            self.scores.append(payload)
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"{}")
@@ -123,6 +136,57 @@ def test_export_dry_run_does_not_write(tmp_path: Path) -> None:
     assert result["unmatched"] == 1
     assert result["posted"] == 0
     assert _FakeLangfuseHandler.scores == []
+
+
+def test_backfill_seeds_ledger_batches_ingestion_and_is_idempotent(tmp_path: Path) -> None:
+    db_path = tmp_path / "kanban.db"
+    ledger_path = tmp_path / "ledger.json"
+    _make_db(db_path)
+    _FakeLangfuseHandler.remote_scores = [{"id": "hermes-board-score-123"}]
+    _FakeLangfuseHandler.ingestions = []
+    server, thread = _start_server()
+    try:
+        env = _env(server)
+        result = export_scores(db_path=db_path, env=env, backfill=True,
+                               ledger_path=ledger_path, batch_size=2)
+        again = export_scores(db_path=db_path, env=env, backfill=True,
+                              ledger_path=ledger_path, batch_size=2)
+    finally:
+        server.shutdown()
+        thread.join()
+    assert result == {"total_rows": 4, "matchable": 3, "posted_new": 2,
+                      "skipped_seen": 1, "unmatched": 1, "matched": 3, "posted": 2}
+    assert again["posted_new"] == 0
+    assert again["skipped_seen"] == 3
+    assert len(_FakeLangfuseHandler.ingestions) == 1
+    events = _FakeLangfuseHandler.ingestions[0]["batch"]
+    assert len(events) == 2
+    assert {event["type"] for event in events} == {"score-create"}
+    assert {event["body"]["id"] for event in events} == {
+        "hermes-board-score-124", "hermes-board-score-125",
+    }
+    assert json.loads(ledger_path.read_text())["exported_score_ids"] == [
+        "hermes-board-score-123", "hermes-board-score-124", "hermes-board-score-125",
+    ]
+
+
+def test_backfill_retries_transient_ingestion_failure(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "kanban.db"
+    _make_db(db_path)
+    _FakeLangfuseHandler.remote_scores = []
+    _FakeLangfuseHandler.ingestions = []
+    _FakeLangfuseHandler.fail_ingestion = 1
+    sleeps: list[float] = []
+    monkeypatch.setattr(langfuse_export.time, "sleep", sleeps.append)
+    server, thread = _start_server()
+    try:
+        result = export_scores(db_path=db_path, env=_env(server), backfill=True,
+                               ledger_path=tmp_path / "ledger.json", batch_size=50)
+    finally:
+        server.shutdown()
+        thread.join()
+    assert result["posted_new"] == 3
+    assert sleeps == [0.5]
 
 
 def test_export_accepts_legacy_host_env_name(tmp_path: Path) -> None:
