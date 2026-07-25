@@ -1237,6 +1237,9 @@ class CreateTaskBody(BaseModel):
     # Phase B (Programm 3): per-task model escalation — highest precedence in
     # the spawn resolution (task.model_override > active lane > profile).
     model_override: Optional[ShortText] = None
+    # Provider the model override belongs to (upstream #69876). Requires
+    # model_override; the dispatcher then passes --provider alongside -m.
+    provider_override: Optional[ShortText] = None
     # Phase C lever carried from the Flow capture sheet: a PARKED task carries the
     # chosen review tier so the staged-review resolver governs it at dispatch.
     # Only the park capture sends it (the levers are hidden for lean+auto). Optional
@@ -1271,6 +1274,7 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             goal_mode=payload.goal_mode,
             goal_max_turns=payload.goal_max_turns,
             model_override=payload.model_override,
+            provider_override=payload.provider_override,
             # P1-S3: standalone operator create couples a scout to a resolved-critical
             # task (flag/tier-gated, idempotent). Skip when this create will be parked
             # below — a held task defers its scout to release (no held-scout deadlock).
@@ -1495,6 +1499,12 @@ class UpdateTaskBody(BaseModel):
     epic_id: Optional[ShortText] = None
     # Phase B: explicit null clears the override; absent leaves it untouched.
     model_override: Optional[ShortText] = None
+    # Provider the model override belongs to (upstream #69876).
+    provider_override: Optional[ShortText] = None
+    # Upstream's explicit clear signal. The fork distinguishes "absent" from
+    # "sent as null" via model_fields_set, so this is redundant here — it is
+    # accepted so upstream clients (and upstream's tests) keep working.
+    clear_model_override: bool = False
 
 
 @core_routes.patch("/tasks/{task_id}")
@@ -1544,11 +1554,26 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
 
-        # --- model override (Phase B) ---------------------------------------
-        if "model_override" in payload.model_fields_set:
-            ok = kanban_db.set_task_model_override(
-                conn, task_id, payload.model_override,
+        # --- model / provider override (Phase B + upstream #69876) ----------
+        if (
+            payload.clear_model_override
+            or "model_override" in payload.model_fields_set
+            or "provider_override" in payload.model_fields_set
+        ):
+            new_model = (
+                None if payload.clear_model_override
+                else (payload.model_override or "").strip() or None
             )
+            try:
+                ok = kanban_db.set_model_override(
+                    conn, task_id, new_model,
+                    provider=(
+                        None if payload.clear_model_override
+                        else payload.provider_override
+                    ),
+                )
+            except (ValueError, RuntimeError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
 
@@ -1943,6 +1968,10 @@ class BulkTaskBody(BaseModel):
     summary: Optional[FreeText] = None
     metadata: Optional[dict] = None
     reclaim_first: bool = False
+    # Bulk model/provider override — same semantics as UpdateTaskBody.
+    model_override: Optional[ShortText] = None
+    provider_override: Optional[ShortText] = None
+    clear_model_override: bool = False
 
 
 @core_routes.post("/tasks/bulk")
@@ -2034,6 +2063,27 @@ def bulk_update(payload: BulkTaskBody, board: Optional[str] = Query(None)):
                             (tid, json.dumps({"priority": int(payload.priority)}),
                              int(time.time())),
                         )
+                if (
+                    payload.clear_model_override
+                    or payload.model_override is not None
+                    or payload.provider_override is not None
+                ):
+                    new_model = (
+                        None if payload.clear_model_override
+                        else (payload.model_override or "").strip() or None
+                    )
+                    try:
+                        ok = kanban_db.set_model_override(
+                            conn, tid, new_model,
+                            provider=(
+                                None if payload.clear_model_override
+                                else payload.provider_override
+                            ),
+                        )
+                        if not ok:
+                            entry.update(ok=False, error="model override refused")
+                    except (ValueError, RuntimeError) as e:
+                        entry.update(ok=False, error=str(e))
             except kanban_db.WaitMutationConflict as exc:
                 entry.update(
                     ok=False,

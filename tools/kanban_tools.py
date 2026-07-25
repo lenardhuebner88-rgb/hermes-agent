@@ -428,6 +428,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
         "completed_at": task.completed_at,
         "current_run_id": task.current_run_id,
         "model_override": task.model_override,
+        "provider_override": task.provider_override,
         "block_kind": task.block_kind,
         "due_at": task.due_at,
         "wait_for": task.wait_for,
@@ -476,6 +477,7 @@ def _handle_show(args: dict, **kw) -> str:
                     "result": t.result,
                     "current_run_id": t.current_run_id,
                     "model_override": t.model_override,
+                    "provider_override": t.provider_override,
                     "block_kind": t.block_kind,
                     "due_at": t.due_at,
                     "wait_for": t.wait_for,
@@ -520,6 +522,7 @@ def _handle_show(args: dict, **kw) -> str:
                         "workspace_path": task.workspace_path,
                         "current_run_id": task.current_run_id,
                         "model_override": task.model_override,
+                        "provider_override": task.provider_override,
                     },
                     "parents": parents,
                     "children": children,
@@ -1596,6 +1599,7 @@ def _handle_create(args: dict, **kw) -> str:
                 ),
                 skills=skills,
                 model_override=model_override,
+                provider_override=provider_override,
                 goal_mode=goal_mode,
                 goal_max_turns=(
                     int(goal_max_turns) if goal_max_turns is not None else None

@@ -1262,6 +1262,13 @@ class Task:
     # the defaults; empty list = explicitly no extra skills.
     skills: Optional[list] = None
     model_override: Optional[str] = None
+    # Provider that ``model_override`` belongs to. When set, the dispatcher
+    # passes ``--provider <name>`` alongside ``-m <model>`` so the worker
+    # resolves the model against the right backend instead of the profile's
+    # configured provider. NULL = worker profile's provider resolves the
+    # model (pre-existing behaviour). Solves the "model from provider A,
+    # profile configured for provider B" mismatch class.
+    provider_override: Optional[str] = None
     # Staged-review depth lever (B): standard | review | critical. NULL/unset =
     # unspecified → treated as ``standard`` (single verifier stage), unless the
     # auto-risk classifier is enabled (kanban.review_gate.auto_tier).
@@ -1432,6 +1439,11 @@ class Task:
             model_override=row["model_override"]
             if "model_override" in keys and row["model_override"]
             else None,
+            provider_override=(
+                row["provider_override"]
+                if "provider_override" in keys and row["provider_override"]
+                else None
+            ),
             review_tier=row["review_tier"] if "review_tier" in keys else None,
             ui_impact=row["ui_impact"] if "ui_impact" in keys else None,
             max_retries=(row["max_retries"] if "max_retries" in keys else None),
@@ -2167,6 +2179,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to the worker, overriding the profile's default model. NULL = use
     -- the profile default.
     model_override       TEXT,
+    -- Provider the model override belongs to. When set (alongside
+    -- model_override), the dispatcher passes --provider <name> so the
+    -- worker resolves the model against the right backend instead of the
+    -- profile's configured provider. NULL = profile provider.
+    provider_override    TEXT,
     -- Per-task override for the consecutive-failure circuit breaker.
     -- The value is the failure count at which the breaker trips — e.g.
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
@@ -3792,6 +3809,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
 
+    if "provider_override" not in cols:
+        # Provider the model_override belongs to. NULL = worker profile's
+        # provider resolves the model (the behaviour existing rows had).
+        _add_column_if_missing(
+            conn, "tasks", "provider_override", "provider_override TEXT"
+        )
+
     if "goal_mode" not in cols:
         # Ralph-style goal loop toggle for the dispatched worker. 0 (the
         # default) = classic single-shot worker, preserving the behaviour
@@ -5280,6 +5304,7 @@ def create_task(
     scope_contract: Optional[dict[str, object]] = None,
     board: Optional[str] = None,
     model_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
     freigabe: Optional[str] = None,
     live_test_depth: Optional[str] = None,
     review_tier: Optional[str] = None,
@@ -5309,6 +5334,10 @@ def create_task(
     specialist skill (e.g. ``skills=["translation"]`` so the worker loads the
     translation skill regardless of the profile's default config).
     """
+    model_override = (model_override or "").strip() or None
+    provider_override = (provider_override or "").strip() or None
+    if provider_override and not model_override:
+        raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
     if not title or not title.strip():
         raise ValueError("title is required")
@@ -5596,9 +5625,10 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key, max_runtime_seconds,
                         skills, max_retries, max_iterations, max_continuations,
                         goal_mode, goal_max_turns, session_id, epic_id, kind,
-                        scope_contract, model_override, freigabe, live_test_depth, review_tier,
+                        scope_contract, model_override, provider_override,
+                        freigabe, live_test_depth, review_tier,
                         ui_impact, block_kind
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -5633,7 +5663,8 @@ def create_task(
                         json.dumps(scope_contract, ensure_ascii=False)
                         if isinstance(scope_contract, dict)
                         else None,
-                        (model_override or "").strip() or None,
+                        model_override,
+                        provider_override,
                         freigabe,
                         live_test_depth,
                         review_tier_value,
@@ -5667,6 +5698,8 @@ def create_task(
                     "branch_name": task_branch_name,
                     "project_id": resolved_project_id,
                     "skills": list(skills_list) if skills_list else None,
+                    "model_override": model_override,
+                    "provider_override": provider_override,
                     "goal_mode": bool(goal_mode) or None,
                 }
                 if _inventory_lane_warning:
@@ -31830,6 +31863,14 @@ def _default_spawn(
         cmd.extend(["-m", hermes_model])
     if lane_provider and (route_is_frozen or not task.model_override):
         cmd.extend(["--provider", lane_provider])
+    elif task.provider_override and not route_is_frozen:
+        # Pin the provider too when the override names one, so the worker
+        # resolves the model against the intended backend instead of the
+        # profile's configured provider (mixing model X with provider Y is
+        # the classic mis-set that stalls a board). Upstream #69876; here it
+        # also closes the fork's own gap — a task-level model override
+        # previously suppressed the lane provider and passed none at all.
+        cmd.extend(["--provider", task.provider_override])
     if lane_fallback_providers:
         for fallback in lane_fallback_providers:
             if not isinstance(fallback, dict):
@@ -36266,18 +36307,31 @@ def _set_task_model_override_in_txn(
     conn: sqlite3.Connection,
     task_id: str,
     model: Optional[str],
+    provider: Optional[str] = None,
 ) -> bool:
     """Core of :func:`set_task_model_override` — callable from within an
     already-open write transaction (see :func:`_release_freigabe_hold_root_in_txn`
-    for the same composed-transaction pattern)."""
+    for the same composed-transaction pattern).
+
+    ``provider`` pins the backend the model belongs to (upstream #69876).
+    Clearing the model clears the provider with it: a provider without a
+    model would re-resolve the profile's model name against a different
+    backend, which is exactly the mismatch this exists to prevent.
+    """
     value = (model or "").strip() or None
+    provider_value = (provider or "").strip() or None
+    if not value:
+        provider_value = None
     cur = conn.execute(
-        "UPDATE tasks SET model_override = ? WHERE id = ?",
-        (value, task_id),
+        "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?",
+        (value, provider_value, task_id),
     )
     if cur.rowcount != 1:
         return False
-    _append_event(conn, task_id, "model_override_set", {"model": value})
+    _append_event(
+        conn, task_id, "model_override_set",
+        {"model": value, "provider": provider_value},
+    )
     return True
 
 
@@ -36295,6 +36349,48 @@ def set_task_model_override(
     """
     with write_txn(conn):
         return _set_task_model_override_in_txn(conn, task_id, model)
+
+
+def set_model_override(
+    conn: sqlite3.Connection,
+    task_id: str,
+    model: Optional[str],
+    provider: Optional[str] = None,
+) -> bool:
+    """Set (or clear) the per-task model/provider override.
+
+    Upstream's provider-aware entry point (#69876). Shares the write core
+    with the fork's lane-precedence :func:`set_task_model_override`; the
+    difference is the extra ``provider`` dimension and the archived-task
+    guard.
+
+    ``model=None`` (or empty) clears BOTH overrides — the worker falls back
+    to its profile's configured model. ``provider`` without ``model`` is
+    rejected: a bare provider switch has no defined meaning for the worker
+    spawn (``--provider`` alone would re-resolve the profile's model name
+    against a different backend, which is exactly the mismatch class this
+    feature exists to kill).
+
+    Allowed on any non-archived task, including ``running`` ones — the
+    override only takes effect on the NEXT dispatch, so setting it on a
+    running task that's about to be reclaimed/retried is the primary
+    rate-limit-recovery flow. Returns True on success.
+    """
+    model = (model or "").strip() or None
+    provider = (provider or "").strip() or None
+    if provider and not model:
+        raise ValueError("provider_override requires a model_override")
+    if not model:
+        provider = None
+    with write_txn(conn):
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] == "archived":
+            raise RuntimeError(f"cannot set model override on archived task {task_id}")
+        return _set_task_model_override_in_txn(conn, task_id, model, provider)
 
 
 _SCOUT_PREDECESSOR_PRERUN_STATUSES = frozenset({"scheduled", "todo", "ready"})
