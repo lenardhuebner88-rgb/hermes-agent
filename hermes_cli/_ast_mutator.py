@@ -22,9 +22,11 @@ Mutation operators implemented:
 * ``boolean_flip``    -- ``True``<->``False``
 
 The output is deterministic: candidate sites are discovered by a single
-depth-first walk of the tree (which visits nodes in source order), then the
-resulting mutants are stably sorted by ``(operator, lineno, col_offset)`` before
-the ``max_mutants`` cap is applied.
+depth-first walk of the tree (which visits nodes in source order), then stably
+sorted by ``(operator, lineno, col_offset, occurrence)`` and mutated in that
+order until ``max_mutants`` mutants exist. Sorting the *sites* rather than the
+finished mutants keeps the cost proportional to ``max_mutants`` instead of to
+the number of sites in the file.
 """
 
 from __future__ import annotations
@@ -475,6 +477,16 @@ def generate_mutants(
     if not sites:
         return []
 
+    # Deterministic ordering: (operator, lineno, col, occurrence). col/occurrence
+    # break ties so the order is fully stable across runs. The *sites* are sorted
+    # here -- before anything is built -- so that building can stop as soon as
+    # ``max_mutants`` mutants exist. Building every site first and cutting
+    # afterwards is quadratic: each site costs a full re-parse, transform,
+    # fix_missing_locations and unparse of the whole file, so a large target
+    # (hermes_cli/kanban_db.py: ~11k sites at ~1.3s each) burns hours to then
+    # throw all but a handful of mutants away.
+    sites.sort(key=lambda s: (s.operator, s.lineno, s.col_offset, s.occurrence))
+
     # The transformer counts occurrences relative to the *scope* tree (so that a
     # targeted function's first comparison is occurrence 0 within that scope).
     # We therefore mutate a fresh parse of the source, then navigate to the same
@@ -484,9 +496,8 @@ def generate_mutants(
     # differs from the original.
     baseline = ast.unparse(tree)
 
-    # Each entry pairs a Mutant with its sort key, built together so the two can
-    # never drift out of alignment (a site that fails to fire is simply skipped).
-    built: list[tuple[tuple[str, int, int, int], Mutant]] = []
+    # A site that fails to fire is simply skipped and does not consume the cap.
+    built: list[Mutant] = []
     for site in sites:
         fresh_tree = ast.parse(source)
         if target is not None:
@@ -512,22 +523,15 @@ def generate_mutants(
         if mutated_source == baseline:  # pragma: no cover - defensive
             continue
 
-        key = (site.operator, site.lineno, site.col_offset, site.occurrence)
         built.append(
-            (
-                key,
-                Mutant(
-                    mutated_source=mutated_source,
-                    operator=site.operator,
-                    lineno=site.lineno,
-                    description=site.description,
-                ),
+            Mutant(
+                mutated_source=mutated_source,
+                operator=site.operator,
+                lineno=site.lineno,
+                description=site.description,
             )
         )
+        if len(built) >= max_mutants:
+            break
 
-    # Deterministic ordering: (operator, lineno, col, occurrence). col/occurrence
-    # break ties so the order is fully stable across runs.
-    built.sort(key=lambda pair: pair[0])
-    ordered = [m for _, m in built]
-
-    return ordered[:max_mutants]
+    return built
