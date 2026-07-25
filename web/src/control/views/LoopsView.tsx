@@ -1612,6 +1612,10 @@ function LoopCard({
 
       {actionError ? <div className="mt-2"><NightCallout tone="alert">{actionError}</NightCallout></div> : null}
       {landNote ? <div className="mt-2"><NightCallout tone="ok">{landNote}</NightCallout></div> : null}
+      {/* Teil-Probe fehlgeschlagen: die Karte stimmt, nur commits_ahead ist
+          unzuverlässig. Sichtbar machen, sonst liest sich ein git-Timeout als
+          ehrliche 0 offener Commits. */}
+      {pack.error ? <div className="mt-2"><NightCallout tone="warn">{pack.error}</NightCallout></div> : null}
 
       {startOpen ? (
         <div className="mt-3 border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>

@@ -374,6 +374,24 @@ describe("LoopsGrid", () => {
     expect(html).toContain("ManifestError: phases fehlt in pack.yaml");
   });
 
+  it("surfaces a probe error on an otherwise healthy pack", () => {
+    // control_loops.py degrades a failed git probe into summary["error"] and
+    // still returns a full summary. Without this the card renders a confident
+    // "0 offene Commits" and the operator never learns the probe timed out.
+    const probeFailed: LoopPack = {
+      ...idleNoCommits,
+      name: "probe-failed",
+      error: "git-Probe fehlgeschlagen: Command timed out after 30 seconds",
+    };
+
+    const html = renderGrid([probeFailed]);
+
+    expect(html).toContain("probe-failed");
+    expect(html).toContain("git-Probe fehlgeschlagen");
+    // Still the normal card, not the manifest-error card.
+    expect(html).not.toContain(t.manifestError);
+  });
+
   it("renders all three scenarios together without throwing", () => {
     const html = renderGrid([runningPipeline, idleSweepWithCommits, brokenPack]);
     expect(html).toContain("builder-reviewer");

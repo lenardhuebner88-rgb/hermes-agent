@@ -466,16 +466,29 @@ def _is_running(state: Path) -> bool:
     return False
 
 
+_GIT_PROBE_ERROR_PREFIX = "git-Probe fehlgeschlagen: "
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(repo), *args],
-        capture_output=True, encoding="utf-8", errors="replace",
-        timeout=30, check=False,
-    )
+    command = ["git", "-C", str(repo), *args]
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True, encoding="utf-8", errors="replace",
+            timeout=30, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command, 124, stdout="", stderr=f"{_GIT_PROBE_ERROR_PREFIX}{exc}",
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(
+            command, 127, stdout="", stderr=f"{_GIT_PROBE_ERROR_PREFIX}{exc}",
+        )
 
 
-def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
-    """Return loop-branch commits that are still genuinely absent from main.
+def _commits_ahead_with_error(pack: loop_runner.Pack) -> tuple[list[str], str | None]:
+    """Return absent loop-branch commits and an infrastructure-error hint, if any.
 
     Loops can be reconciled by another session/worktree: the exact commit SHA then
     differs, but the patch is already present on ``main``. ``git log main..branch``
@@ -485,7 +498,8 @@ def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
     """
     res = _git(pack.repo, "cherry", "-v", "main", pack.branch)
     if res.returncode != 0:
-        return []  # Branch existiert (noch) nicht — kein Lauf bisher
+        error = res.stderr.strip()
+        return [], error if error.startswith(_GIT_PROBE_ERROR_PREFIX) else None
     commits: list[str] = []
     for line in res.stdout.splitlines():
         line = line.strip()
@@ -496,6 +510,11 @@ def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
         commits.append(f"{sha[:7]} {subject}".rstrip())
         if len(commits) >= 50:
             break
+    return commits, None
+
+
+def _commits_ahead(pack: loop_runner.Pack) -> list[str]:
+    commits, _error = _commits_ahead_with_error(pack)
     return commits
 
 
@@ -603,7 +622,8 @@ def _pack_summary(
     timer = timer_snapshot.get(pack.name) if timer_snapshot else None
     timer_enabled = timer["timer_enabled"] if timer else _timer_enabled(pack.name)
     token_usage, _phase_events = _phase_usage(state)
-    return {
+    commits, commits_error = _commits_ahead_with_error(pack)
+    summary = {
         "name": pack.name,
         "type": pack.type,
         "source": source,
@@ -625,12 +645,15 @@ def _pack_summary(
         "heartbeat": _heartbeat(state),
         "stop_requested": (state / "STOP").exists(),
         "queue": qcounts if pack.type == "pipeline" else None,
-        "commits_ahead": len(_commits_ahead(pack)),
+        "commits_ahead": len(commits),
         "timer_enabled": timer_enabled,
         "timer_schedule": timer["timer_schedule"] if timer else _timer_schedule(pack.name),
         "timer_next_run": timer["timer_next_run"] if timer else _timer_next_run(pack.name),
         "token_usage": token_usage,
     }
+    if commits_error:
+        summary["error"] = commits_error
+    return summary
 
 
 class StartBody(BaseModel):

@@ -40,6 +40,11 @@ export const LoopHeartbeatSchema = z.object({
 export const LoopPackSummarySchema = z.object({
   name: z.string(),
   type: z.enum(["pipeline", "sweep"]),
+  // Infrastruktur-Fehler einer Teil-Probe (z.B. git-Timeout beim commits_ahead-
+  // Zählen, control_loops.py). Die Summary bleibt vollständig — nur diese eine
+  // Zahl ist unzuverlässig. Ohne dieses Feld würde zod den Schlüssel still
+  // verwerfen und der Fehler wäre nirgends sichtbar.
+  error: z.string().optional(),
   // "repo" = kuratiertes Manifest, "custom" = per Werkstatt dupliziert (control_loops.py:220).
   source: z.enum(["repo", "custom"]).optional(),
   repo: z.string().catch(""),

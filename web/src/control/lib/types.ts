@@ -1288,12 +1288,22 @@ export interface LoopPackSummary {
   /** Von systemd gemeldeter nächster Lauf; null bei deaktiviertem/unbekanntem Timer. */
   timer_next_run: string | null;
   token_usage?: LoopTokenUsageSummary;
+  /**
+   * Infrastruktur-Fehler einer Teil-Probe (z.B. git-Timeout beim Zählen von
+   * ``commits_ahead``). Die Summary bleibt vollständig — nur die betroffene
+   * Zahl ist unzuverlässig, deshalb KEIN Manifest-Fehler-Pack.
+   */
+  error?: string;
 }
 
 export type LoopPack = LoopPackSummary | LoopPackError;
 
 export function isLoopPackError(pack: LoopPack): pack is LoopPackError {
-  return "error" in pack;
+  // Ein ManifestError-Pack besteht NUR aus {name, error}. Eine vollständige
+  // Summary kann seit der git-Probe-Degradation (control_loops.py) ebenfalls
+  // ein `error` tragen — sie bleibt aber eine Summary und darf nicht als
+  // Manifest-Fehler-Karte gerendert werden. `type` gibt es nur in der Summary.
+  return "error" in pack && !("type" in pack);
 }
 
 export interface LoopsResponse {
