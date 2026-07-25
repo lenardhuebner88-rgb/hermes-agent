@@ -2286,7 +2286,6 @@ export function AgentTerminalsView() {
             setAnswerClosedHint(null);
             setAnswerSheetOpen(true);
           }}
-          className="min-h-[44px] text-micro"
         />
         {orderedWindows.map((win) => {
           const active = activeTarget?.session === win.session && activeTarget.window === win.window;

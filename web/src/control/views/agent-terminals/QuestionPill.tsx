@@ -1,6 +1,6 @@
 /**
- * Clickable chip: "N Fragen" with warn semantics. Hidden when count is 0.
- * Not bronze/live (status chip, not interaction accent — DESIGN.md).
+ * Neutral "N Fragen" control with a separate warn LED. Hidden when count is 0.
+ * The button owns the affordance; warn color is reserved for the status signal.
  * Store is authoritative (I3): sole question surface; optional live age label.
  */
 import { useEffect, useState } from "react";
@@ -51,7 +51,7 @@ export function QuestionPill({
       title={title}
       onClick={onClick}
       className={cn(
-        "inline-flex shrink-0 items-center gap-1.5 self-center rounded-full border border-status-warn/40 bg-status-warn/10 px-2.5 py-1 text-[11px] font-medium text-status-warn transition hover:bg-status-warn/15",
+        "inline-flex min-h-[44px] shrink-0 items-center gap-1.5 self-center rounded-card border border-line bg-surface-2 px-2.5 py-1 text-micro font-medium text-ink transition hover:bg-surface-3",
         className,
       )}
     >
@@ -60,7 +60,7 @@ export function QuestionPill({
         <span className="h-1.5 w-1.5 rounded-full bg-status-warn" />
       </span>
       <span>{label}</span>
-      {age ? <span className="text-[10px] font-normal opacity-80">{age}</span> : null}
+      {age ? <span className="text-micro font-normal opacity-80">{age}</span> : null}
     </button>
   );
 }
