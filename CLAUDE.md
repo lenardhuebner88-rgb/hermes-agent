@@ -35,8 +35,32 @@
 Read a dependency's internals instead of guessing: `rg "x" $(opensrc path <pkg>)` / `cat $(opensrc path pypi:<pkg>)/…` — real repo source at the version tag, cached globally in `~/.opensrc/` (works without `web/node_modules` in worktrees). Full block: `AGENTS.md`.
 
 ## Code map — which navigator actually works here
-Overrides the global "CodeGraph first" rule **for this repo**. Measured 2026-07-24.
-- **`graphify query|path` = first choice** for "how does X flow / what connects X→Y". It surfaced the real kanban lifecycle spine (`create_task`:4931 → `claim_task`:11305 → `complete_task`:15485). Wide queries truncate — narrow with `--budget` or `context_filter=['call']`. Canon: `vault/00-Canon/graphify-playbook.md`. No worker rebuilds.
-- **`codegraph query|node|explore`** is good for blast radius / callers / "no covering tests" — but it **skips every file >1 MiB** (`MAX_FILE_SIZE`, `~/.codegraph/versions/v1.5.0/lib/dist/extraction/index.js:113`), and exactly two source files exceed that: `hermes_cli/kanban_db.py` (1.51 MiB) and `gateway/run.py` (1.01 MiB). So on kanban/gateway core work it silently answers with test doubles and lexical near-misses — `codegraph query dispatch_once` returns only `fake_dispatch_once`, never the real `kanban_db.py:28760`. There, use `rg` + `docs/kanban/LIFECYCLE.md`, and do **not** trust its "no covering tests found" for those two files.
+Overrides the global "CodeGraph first" rule **for this repo**. Re-measured 2026-07-25; both entries below changed that day, so trust this block over anything older.
+
+> **Never copy a line number out of this file, a plan, or a doc into your reasoning.** Both
+> navigators and every doc in this repo have been caught serving line numbers that are
+> thousands of lines stale while looking perfectly plausible. Resolve the location at the
+> moment you need it — `codegraph query <symbol>`, or `ast.parse` + `lineno`. The anchor
+> checker (`scripts/check_kanban_lifecycle_anchors.py`) is the only line-number source here
+> that is mechanically verified; everything else drifts silently.
+
+- **`codegraph query|node|explore` now covers the whole repo, including the two big files.**
+  Until 2026-07-25 it skipped every file >1 MiB, which silently excluded `hermes_cli/kanban_db.py`
+  and `gateway/run.py` — and worse, it kept serving *stale* entries for them from an older,
+  smaller revision: `dispatch_once` was reported at `kanban_db.py:14137` when it really sat at
+  L29564, 15,427 lines off, with plausible-looking code at the wrong line. That is fixed by a
+  **local patch** to `MAX_FILE_SIZE` in `~/.codegraph/versions/v1.5.0/lib/dist/extraction/index.js:113`,
+  now `Number(process.env.CODEGRAPH_MAX_FILE_SIZE) || 4 * 1024 * 1024`. Verified after
+  `codegraph index` (6,532 files, 172,902 nodes, 21.4 s, no heap trouble): all four kanban spine
+  symbols plus `gateway/run.py:24834` match the AST exactly.
+  **The patch does not survive a CodeGraph update — re-apply it and re-run `codegraph index`,
+  same discipline as the memsearch minipatch.** Backup: `index.js.bak-20260725-maxfilesize`.
+  Rollback is `CODEGRAPH_MAX_FILE_SIZE=1048576` or restoring the backup.
+- **`graphify query|path`** for "how does X flow / what connects X→Y". Wide queries truncate —
+  narrow with `--budget` or `--context call`. Canon: `vault/00-Canon/graphify-playbook.md`.
+  **`tests/` is excluded from the graph since 2026-07-25** (see `.graphifyignore` for the
+  measurement: tests were 54% of all nodes and 97% of the answers to kanban-symbol queries).
+  So graphify answers architecture questions; it can no longer answer "which tests cover X?" —
+  use codegraph for that. No worker rebuilds.
 - **Use `rg`, not `grep -r`/`find`.** Worktrees are git-excluded, so `rg` sees 1 hit where `grep -r` sees 33 copies.
 - Tools live in `/usr/local/bin` (symlinks): `codegraph`, `graphify`, `qmd`, `hermes`. Bare names resolve; the harness shell does **not** read `~/.bashrc`/`~/.profile`, so never rely on those for PATH.

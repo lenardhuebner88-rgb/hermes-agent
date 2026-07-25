@@ -11,7 +11,7 @@
 #   * Env vars blanked (conftest.py also does this, but this
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
-#   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * Safe test-Python selection (rejects Hermes-managed release venvs)
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -41,12 +41,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # A candidate must actually be able to run the suite (pytest importable), not
 # merely exist: a bare `uv venv` drops an empty .venv/ that would otherwise
 # shadow the real venv and break every test run in the checkout.
-# Probe local venvs first; fall back to the Nix devShell's editable venv
+# Probe local dev venvs first; a worktree may reuse the live checkout's .venv.
+# Fall back to the Nix devShell's editable venv
 # (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
-# pytest, pytest-asyncio, pytest-timeout, ruff, ty).
+# pytest, pytest-asyncio, ruff, ty).
 VENV=""
-for candidate in "$REPO_ROOT/.venv" "$REPO_ROOT/venv" "$HOME/.hermes/hermes-agent/venv"; do
+VENV_CANDIDATES=("$REPO_ROOT/.venv" "$REPO_ROOT/venv")
+if [ "$REPO_ROOT" != "$HOME/.hermes/hermes-agent" ]; then
+  VENV_CANDIDATES+=("$HOME/.hermes/hermes-agent/.venv")
+fi
+for candidate in "${VENV_CANDIDATES[@]}"; do
   if [ -f "$candidate/bin/activate" ]; then
+    if [ -f "$candidate/pyvenv.cfg" ] \
+        && grep -Eq '^home = .*/\.hermes-runtime/python/generation-' "$candidate/pyvenv.cfg"; then
+      echo "note: skipping $candidate (Hermes-managed release venv; tests require [all,dev,messaging])" >&2
+      continue
+    fi
     if "$candidate/bin/python" -c "import pytest" >/dev/null 2>&1; then
       VENV="$candidate"
       break
@@ -63,13 +73,13 @@ elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
   # venv (no pytest) when inherited from a wrapped `hermes` binary rather
   # than the devShell hook.
   PYTHON="$HERMES_PYTHON"
-  echo "▶ no local venv — using Nix dev venv via HERMES_PYTHON: $PYTHON"
 else
-  echo "error: no virtualenv found in $REPO_ROOT/.venv or $REPO_ROOT/venv," >&2
-  echo "       and HERMES_PYTHON is not a python with pytest (enter the Nix devShell or create a venv)" >&2
+  UV_BIN="$(command -v uv 2>/dev/null || printf 'uv')"
+  echo "error: no test Python; run: cd $REPO_ROOT && $UV_BIN sync --locked --extra all --extra dev --extra messaging" >&2
   exit 1
 fi
 
+echo "▶ using test Python: $PYTHON"
 
 # ── Live-gateway plugin (computed before we drop env) ───────────────────────
 EXTRA_PYTHONPATH=""

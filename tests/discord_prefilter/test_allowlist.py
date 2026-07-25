@@ -12,10 +12,21 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import discord
+import pytest
 
-from bridges.discord_prefilter import bot as bot_mod
-from bridges.discord_prefilter.config import PrefilterConfig
+# discord.py lives in the `messaging` extra. That extra IS part of the canonical
+# test env (AGENTS.md), but it is not part of `[all]` by policy, so any environment
+# built without it lacks discord. A bare module-level `import discord` then aborts
+# the whole `pytest --co tests/` sweep with a collection error — measured 2026-07-25:
+# one optional dependency took out a pre-deploy gate. Every other discord test in
+# this repo already imports lazily or mocks; this file was the one hard module-level
+# import left. Skip cleanly instead. Deliberately NOT the `_ensure_discord_mock()`
+# pattern used by the gateway tests: this file asserts fail-CLOSED allowlist
+# behaviour, and running it against a MagicMock would change what is being proven.
+discord = pytest.importorskip("discord")
+
+from bridges.discord_prefilter import bot as bot_mod  # noqa: E402
+from bridges.discord_prefilter.config import PrefilterConfig  # noqa: E402
 
 
 ALLOWED_ID = 207500364776341504

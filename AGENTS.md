@@ -107,11 +107,20 @@ symbols. Read `AIAgent`'s actual signature before editing it.
 Use `hermes-gates` to select and preserve the correct gate. Typical entrypoints:
 
 ```bash
-source .venv/bin/activate   # or source venv/bin/activate
 scripts/run_tests.sh <target>
 scripts/run-affected.sh
 scripts/gate-frontend.sh
 ```
+
+### Python test environment
+
+- Canonical outside Nix: `.venv/bin/python`, with locked `all` + `dev` + `messaging`.
+- Bootstrap/repair: `uv sync --locked --extra all --extra dev --extra messaging`.
+- `venv/` is the managed release runtime; never add dev deps or run tests there.
+- A naked agent shell needs neither activation nor Nix; call the wrappers above.
+- `no test Python` means: run the exact `uv sync` command printed by the wrapper.
+- Never use `python3 -m pytest`; system Python creates optional-dependency phantom errors.
+- In the Nix devShell, `HERMES_PYTHON` is the locked fallback when `.venv` is absent.
 
 Run targeted/affected checks interactively; the full suite is the nightly path.
 Use repository wrappers rather than bare pytest. In worktrees NEVER bare
@@ -149,8 +158,41 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
 
-## Code map (graphify)
+## Code map
 
-If `graphify-out/graph.json` exists: architecture / callers / "what connects X→Y" → prefer `graphify query|path` before wide rg/read. Full rules: `/home/piet/vault/00-Canon/graphify-playbook.md`. Builders never rebuild; Maintainer/timer only.
+Re-measured 2026-07-25 — this supersedes the 2026-07-24 guidance.
 
-CodeGraph blind spot (measured 2026-07-24): it skips files >1 MiB, which silently excludes `hermes_cli/kanban_db.py` and `gateway/run.py` — the kanban and gateway cores. On those two, `codegraph query` returns test doubles instead of the real symbol; use `rg` + `docs/kanban/LIFECYCLE.md` and ignore its "no covering tests found".
+- **Architecture / "what connects X→Y"** → `graphify query|path` (`--budget`, `--context call`
+  to narrow). `tests/` is excluded from the graph as of 2026-07-25; the reason and the numbers
+  are in `.graphifyignore`. Builders never rebuild; Maintainer/timer only.
+- **Callers / blast radius / "which tests cover X?"** → `codegraph query|node|explore`. Its old
+  >1 MiB blind spot is fixed by a local patch (details in `CLAUDE.md`), so `kanban_db.py` and
+  `gateway/run.py` are now indexed correctly. If a CodeGraph update reverts the patch, the
+  symptom returns silently — see `CLAUDE.md` before trusting a result on those two files.
+- **Never carry a line number over from a doc, a plan, or an earlier answer.** Resolve it when
+  you need it. Stale-but-plausible line numbers are the recurring failure mode here: CodeGraph
+  served `dispatch_once` 15,427 lines off its real location, and this repo's own docs have
+  carried spine line numbers that no longer resolve.
+
+## Working in `hermes_cli/kanban_db.py`
+
+39,727 lines. You cannot read it, and you should not try. Read these three first, in order:
+
+1. **`docs/kanban/LIFECYCLE.md`** — the map: state diagram, transition table, dispatch path
+   (tick → worker), landing path, decision order inside `complete_task`, traps. Its 144 symbol
+   anchors are mechanically verified by `scripts/check_kanban_lifecycle_anchors.py` (exit 0),
+   so its line numbers are the one set in this repo you may trust — and re-run that checker
+   after any change that moves symbols.
+2. **`docs/refactor/ownership.kanban_db.md`** — answers the question that comes *before* any
+   edit: does this symbol belong to the fork or to upstream? Editing an upstream-owned body is
+   what created the merge problem in the first place; put new fork code in a fork-owned module
+   and call it from one line.
+   **Do not quote counts from that file, and do not trust a single tool's count.** Measured
+   2026-07-25, three sources disagree about the same file: the doc itself says 733 fork-only
+   (it predates the sync), `scripts/refactor/split_module.py --ownership` says 737, and
+   `scripts/refactor/upstream_divergence.py` says 740 — they classify symbols differently, and
+   none is simply wrong. Re-run the tool that matches your question and cite *which* one, or
+   the next reader inherits a number that looks authoritative and matches nothing.
+3. **`docs/refactor/UPSTREAM-STRATEGY.md`** — why the file is like this, what was already tried,
+   and the two dead ends not to re-run. The modularization plan under `docs/refactor/` is a
+   **parked design record, not a work order**; Task 7 is blocked after two reverted attempts.

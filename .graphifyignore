@@ -28,5 +28,19 @@ graphify-out/
 # Docs site (not runtime architecture for agent/kanban/dashboard work)
 website/
 
+# Test suite — measured 2026-07-25, this is the dominant noise source.
+# Before excluding: tests/ were 96,270 of 176,685 graph nodes (54%), and for the
+# kanban lifecycle symbols they drowned the answer entirely — `graphify query
+# claim_task --context call` returned 460 nodes of which 444 (97%) were test
+# doubles (_running_task, _provisioned_task, test_* functions) and only 15 were
+# real hermes_cli code. graphify is this repo's first-choice navigator per
+# CLAUDE.md, so that ratio made it useless for exactly the question it is meant
+# to answer.
+#
+# For "which tests cover X?" use codegraph instead — since the 2026-07-25
+# MAX_FILE_SIZE patch it indexes tests/ AND the two >1 MiB files correctly.
+# Do not re-add tests/ here without re-measuring that ratio.
+tests/
+
 # Generated evidence dumps (if present)
 docs/dogfood-repo-cap-evidence/
