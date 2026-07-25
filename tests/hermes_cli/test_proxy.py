@@ -541,6 +541,120 @@ def test_xai_adapter_retry_returns_none_on_429_when_pool_exhausted(tmp_path, mon
     )
 
 
+def _write_two_xai_entries(tmp_path):
+    """Two xAI OAuth accounts so misattribution is observable."""
+    (tmp_path / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {},
+        "credential_pool": {
+            "xai-oauth": [
+                {
+                    "id": "xai-first",
+                    "label": "xai-first",
+                    "auth_type": "oauth",
+                    "priority": 0,
+                    "source": "manual:xai_pkce",
+                    "access_token": "first-access-token",
+                    "refresh_token": "first-refresh-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+                {
+                    "id": "xai-second",
+                    "label": "xai-second",
+                    "auth_type": "oauth",
+                    "priority": 1,
+                    "source": "manual:xai_pkce",
+                    "access_token": "second-access-token",
+                    "refresh_token": "second-refresh-token",
+                    "base_url": "https://api.x.ai/v1",
+                },
+            ]
+        },
+    }))
+
+
+def test_xai_adapter_401_refreshes_the_failed_account_not_the_cursor(
+    tmp_path, monkeypatch
+):
+    """A late 401 must refresh the account that issued the failed bearer.
+
+    The pool cursor is shared: another turn can advance it between the
+    request going out and its 401 coming back. Refreshing whatever
+    ``current_id`` names then spends an innocent account's rotating refresh
+    token because a DIFFERENT account got the 401.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_two_xai_entries(tmp_path)
+
+    refreshed_with = []
+
+    def fake_refresh(access_token, refresh_token, **kwargs):
+        refreshed_with.append(refresh_token)
+        return {
+            "access_token": "first-access-token-new",
+            "refresh_token": "first-refresh-token-new",
+            "last_refresh": "2026-07-25T00:00:00Z",
+        }
+
+    monkeypatch.setattr("hermes_cli.auth.refresh_xai_oauth_pure", fake_refresh)
+
+    adapter = XAIGrokAdapter()
+    failed = adapter.get_credential()
+    assert failed.bearer == "first-access-token"
+    # Another turn advanced the shared cursor while the request was in flight.
+    adapter._pool._current_id = "xai-second"
+
+    retry = adapter.get_retry_credential(
+        failed_credential=failed, status_code=401,
+    )
+
+    assert refreshed_with == ["first-refresh-token"], (
+        "the failed account's refresh token must be the one spent"
+    )
+    assert retry is not None
+    assert retry.bearer == "first-access-token-new"
+
+
+def test_xai_adapter_429_exhausts_the_failed_account_not_the_cursor(
+    tmp_path, monkeypatch
+):
+    """A 429 must cool down the rate-limited account, not the cursor's."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_two_xai_entries(tmp_path)
+
+    def _refresh_must_not_run(*args, **kwargs):
+        raise AssertionError("refresh_xai_oauth_pure must not run on 429")
+
+    monkeypatch.setattr(
+        "hermes_cli.auth.refresh_xai_oauth_pure", _refresh_must_not_run
+    )
+
+    adapter = XAIGrokAdapter()
+    failed = adapter.get_credential()
+    assert failed.bearer == "first-access-token"
+    adapter._pool._current_id = "xai-second"
+
+    adapter.get_retry_credential(failed_credential=failed, status_code=429)
+
+    statuses = {e.id: e.last_status for e in adapter._pool._entries}
+    assert statuses["xai-first"] == "exhausted", (
+        "the rate-limited account must carry the cooldown"
+    )
+    assert statuses["xai-second"] != "exhausted", (
+        "an innocent account must not be quarantined"
+    )
+
+
+def test_xai_credential_carries_its_pool_id(tmp_path, monkeypatch):
+    """The stable pool id travels with the bearer for later attribution."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _write_xai_pool_entry(tmp_path)
+
+    cred = XAIGrokAdapter().get_credential()
+
+    assert cred.credential_id == "xai123"
+
+
 def test_xai_adapter_retry_returns_none_for_unrelated_status(tmp_path, monkeypatch):
     """Non-{401, 429} statuses must NOT trigger any retry — pool
     untouched, no refresh attempted, return None immediately."""

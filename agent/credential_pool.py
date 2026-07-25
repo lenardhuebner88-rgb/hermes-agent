@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import random
@@ -523,6 +524,11 @@ def credential_pool_matches_provider(
 
 DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL = 1
 
+# How many recently issued runtime keys per credential stay attributable to
+# their issuing account. Covers in-flight requests that outlive a token
+# rotation without letting the ownership trail grow unbounded.
+_RUNTIME_KEY_GENERATIONS = 4
+
 
 def _write_through_provider_state_to_global_root(
     provider_id: str, state: Dict[str, Any]
@@ -594,6 +600,100 @@ class CredentialPool:
         # Re-armed to None on every successful selection so a recover→re-exhaust
         # transition logs promptly instead of being swallowed by a stale window.
         self._last_no_entries_log_at: Optional[float] = None
+        # Ownership trail over recently issued runtime keys. An OAuth access
+        # token can rotate while a request is still in flight, so a late 401
+        # arrives carrying a bearer that is no longer any entry's current key.
+        # Matching only the current key misses, and blaming whatever
+        # ``current_id`` names would quarantine an unrelated account.
+        # Fingerprints are keyed HMACs so no historical bearer is retained in
+        # memory or on disk; four generations cover overlapping in-flight
+        # requests without growing unbounded in a long-lived gateway.
+        self._runtime_key_fingerprint_secret = os.urandom(32)
+        self._runtime_key_owners: Dict[bytes, str] = {}
+        self._runtime_key_fingerprints_by_id: Dict[str, List[bytes]] = {}
+        for entry in self._entries:
+            self._remember_runtime_key_owner(entry)
+
+    def _runtime_key_fingerprint(self, api_key: str) -> bytes:
+        return hmac.digest(
+            self._runtime_key_fingerprint_secret,
+            api_key.encode("utf-8", errors="surrogatepass"),
+            "sha256",
+        )
+
+    def _remember_runtime_key_owner(self, entry: PooledCredential) -> None:
+        """Record that ``entry`` issued its current runtime key."""
+        api_key = entry.runtime_api_key
+        if not api_key:
+            return
+        fingerprint = self._runtime_key_fingerprint(api_key)
+        remembered = self._runtime_key_fingerprints_by_id.setdefault(entry.id, [])
+        if fingerprint in remembered:
+            return
+        remembered.append(fingerprint)
+        self._runtime_key_owners[fingerprint] = entry.id
+        while len(remembered) > _RUNTIME_KEY_GENERATIONS:
+            expired = remembered.pop(0)
+            # Only drop the mapping if it still points at this entry: another
+            # account could legitimately have been issued the same key value.
+            if self._runtime_key_owners.get(expired) == entry.id:
+                self._runtime_key_owners.pop(expired, None)
+
+    def _forget_runtime_key_owner(self, credential_id: str) -> None:
+        for fingerprint in self._runtime_key_fingerprints_by_id.pop(
+            credential_id, []
+        ):
+            if self._runtime_key_owners.get(fingerprint) == credential_id:
+                self._runtime_key_owners.pop(fingerprint, None)
+
+    def _prune_runtime_key_owners(self) -> None:
+        """Drop ownership for credentials no longer in the pool.
+
+        Entries are removed on several paths (manual removal, dead-credential
+        pruning, provider-boundary resync), all of which persist afterwards.
+        Pruning here keeps the trail bounded across add/remove churn and stops
+        a REUSED credential id from inheriting a previous credential's keys.
+        """
+        live_ids = {entry.id for entry in self._entries}
+        for stale_id in [
+            known
+            for known in self._runtime_key_fingerprints_by_id
+            if known not in live_ids
+        ]:
+            self._forget_runtime_key_owner(stale_id)
+
+    def _matching_entry_unlocked(
+        self, api_key_hint: Optional[str]
+    ) -> Optional[PooledCredential]:
+        if not api_key_hint:
+            return None
+        # A key that is CURRENT for some entry resolves by direct scan, first
+        # match winning. That is deliberate and must not change: one key can
+        # legitimately back several entries (an explicit pool entry plus a
+        # ``model_config`` entry auto-seeded from ``model.api_key``), and
+        # callers rely on getting the first — mark_exhausted_and_rotate then
+        # marks the siblings itself.
+        entry = next(
+            (e for e in self._entries if e.runtime_api_key == api_key_hint),
+            None,
+        )
+        if entry is not None:
+            return entry
+        # Only a key that is current for NOBODY falls through to the trail —
+        # i.e. one this account issued just before a rotation.
+        owner_id = self._runtime_key_owners.get(
+            self._runtime_key_fingerprint(api_key_hint)
+        )
+        if not owner_id:
+            return None
+        return next((e for e in self._entries if e.id == owner_id), None)
+
+    def matching_entry(
+        self, api_key_hint: Optional[str]
+    ) -> Optional[PooledCredential]:
+        """Return the account that issued this current or recently rotated key."""
+        with self._lock:
+            return self._matching_entry_unlocked(api_key_hint)
 
     def has_credentials(self) -> bool:
         with self._lock:
@@ -652,9 +752,16 @@ class CredentialPool:
         for idx, entry in enumerate(self._entries):
             if entry.id == old.id:
                 self._entries[idx] = new
+                # A rotated token must stay attributable to this account, and
+                # the key it replaced must stay attributable too — a request
+                # already in flight is still carrying it.
+                self._remember_runtime_key_owner(new)
                 return
 
     def _persist(self, *, removed_ids: Optional[List[str]] = None) -> None:
+        # Every path that drops an entry persists afterwards, so this is the
+        # one chokepoint where the ownership trail can be reconciled.
+        self._prune_runtime_key_owners()
         write_credential_pool(
             self.provider,
             [entry.to_dict() for entry in self._entries],
@@ -1873,10 +1980,10 @@ class CredentialPool:
                 # actually failed.  When this pool was freshly loaded from disk
                 # (another process already rotated), current() is None and
                 # _select_unlocked() would return the NEXT key — the wrong one.
-                entry = next(
-                    (e for e in self._entries if e.runtime_api_key == api_key_hint),
-                    None,
-                )
+                # The ownership trail also matches a key this account issued
+                # just before a rotation, which a plain current-key comparison
+                # would miss for a request that outlived its token.
+                entry = self._matching_entry_unlocked(api_key_hint)
             if entry is None and identity_supplied:
                 # The failed credential is identifiable but matches no entry
                 # (rotated away, or a wrapper whose runtime key differs).
@@ -2019,14 +2126,9 @@ class CredentialPool:
                 )
             if entry is None:
                 if api_key_hint:
-                    entry = next(
-                        (
-                            candidate
-                            for candidate in self._entries
-                            if candidate.runtime_api_key == api_key_hint
-                        ),
-                        None,
-                    )
+                    # Matches the current key, or one this account issued just
+                    # before a rotation the failed request did not see.
+                    entry = self._matching_entry_unlocked(api_key_hint)
                 else:
                     entry = self._current_unlocked() or self._select_unlocked(
                         refresh=False
@@ -2079,6 +2181,9 @@ class CredentialPool:
                 replace(entry, priority=new_priority)
                 for new_priority, entry in enumerate(self._entries)
             ]
+            # This path writes through instead of calling _persist(), so it
+            # has to reconcile the ownership trail itself.
+            self._prune_runtime_key_owners()
             write_credential_pool(
                 self.provider,
                 [entry.to_dict() for entry in self._entries],
@@ -2118,6 +2223,11 @@ class CredentialPool:
         with self._lock:
             entry = replace(entry, priority=_next_priority(self._entries))
             self._entries.append(entry)
+            # ``__init__`` seeds ownership for loaded rows and ``_replace_entry``
+            # records rotated tokens. Do the same for credentials added to a
+            # live pool, so a later auth failure is attributable to this account
+            # instead of failing closed as an unknown key until the next reload.
+            self._remember_runtime_key_owner(entry)
             self._persist()
             return entry
 

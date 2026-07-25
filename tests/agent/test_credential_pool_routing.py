@@ -603,3 +603,313 @@ class TestFailureAttribution:
         assert statuses["cred-0"] != "exhausted"
         swapped = agent._swap_credential.call_args[0][0]
         assert swapped.id == "cred-0"
+
+
+# ---------------------------------------------------------------------------
+# 7. Late failures for a ROTATED key still attribute to the issuing account
+# ---------------------------------------------------------------------------
+
+class TestRotatedKeyAttribution:
+    """An OAuth access token can rotate while a request is still in flight.
+
+    When that request finally fails, the bearer it used is no longer any
+    entry's ``runtime_api_key``. Matching on the current key alone therefore
+    misses, and the pool must not fall back to blaming whatever account the
+    shared cursor happens to name. A small ownership trail over recently
+    issued keys keeps the failure attributable to the account that issued it.
+    """
+
+    def _seed_pool(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "providers": {},
+                    "credential_pool": {
+                        "openrouter": [
+                            {
+                                "id": "cred-healthy",
+                                "label": "healthy",
+                                "auth_type": "api_key",
+                                "priority": 0,
+                                "source": "manual",
+                                "access_token": "sk-or-healthy",
+                            },
+                            {
+                                "id": "cred-failed",
+                                "label": "failed",
+                                "auth_type": "api_key",
+                                "priority": 1,
+                                "source": "manual",
+                                "access_token": "sk-or-failed",
+                            },
+                        ]
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        from agent.credential_pool import load_pool
+
+        return load_pool("openrouter")
+
+    def test_late_oauth_failure_matches_recently_rotated_token(
+        self, tmp_path, monkeypatch
+    ):
+        """A delayed 401 for OAuth token A-old still belongs to account A.
+
+        Another turn may already have refreshed A to A-new and advanced the
+        shared pool cursor to account B before the failed request unwinds.
+        """
+        from dataclasses import replace
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        failed = next(e for e in pool._entries if e.id == "cred-failed")
+        rotated = replace(
+            failed,
+            access_token="oauth-failed-new",
+            auth_type="oauth",
+            refresh_token="oauth-refresh",
+        )
+        pool._replace_entry(failed, rotated)
+        pool._current_id = "cred-healthy"
+
+        with patch.object(
+            pool,
+            "_refresh_entry",
+            side_effect=lambda entry, *, force: replace(
+                entry, access_token="oauth-failed-newer"
+            ),
+        ) as refresh:
+            refreshed = pool.try_refresh_matching("sk-or-failed")
+
+        assert refreshed is not None
+        assert refreshed.id == "cred-failed"
+        assert refresh.call_args.args[0].id == "cred-failed"
+        assert refresh.call_args.kwargs == {"force": True}
+
+    def test_late_rotated_key_exhausts_owner_not_current(
+        self, tmp_path, monkeypatch
+    ):
+        """Marking must follow the issuing account, never the pool cursor."""
+        from dataclasses import replace
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        failed = next(e for e in pool._entries if e.id == "cred-failed")
+        pool._replace_entry(failed, replace(failed, access_token="rotated-key"))
+        pool._current_id = "cred-healthy"
+
+        next_entry = pool.mark_exhausted_and_rotate(
+            status_code=401,
+            error_context={"reason": "invalid_token"},
+            api_key_hint="sk-or-failed",
+        )
+
+        statuses = {e.id: e.last_status for e in pool._entries}
+        assert statuses["cred-failed"] == "dead"
+        assert statuses["cred-healthy"] != "dead"
+        assert next_entry is not None
+        assert next_entry.id == "cred-healthy"
+
+    def test_matching_entry_resolves_current_and_rotated_keys(
+        self, tmp_path, monkeypatch
+    ):
+        from dataclasses import replace
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        failed = next(e for e in pool._entries if e.id == "cred-failed")
+        pool._replace_entry(failed, replace(failed, access_token="rotated-key"))
+
+        assert pool.matching_entry("rotated-key").id == "cred-failed"
+        assert pool.matching_entry("sk-or-failed").id == "cred-failed"
+        assert pool.matching_entry("never-issued-here") is None
+        assert pool.matching_entry(None) is None
+
+    def test_ownership_trail_is_bounded_and_drops_oldest(
+        self, tmp_path, monkeypatch
+    ):
+        """The trail must not grow without bound in a long-lived gateway."""
+        from dataclasses import replace
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        for generation in range(6):
+            current = next(e for e in pool._entries if e.id == "cred-failed")
+            pool._replace_entry(
+                current, replace(current, access_token=f"gen-{generation}")
+            )
+
+        assert pool.matching_entry("gen-5").id == "cred-failed"
+        assert pool.matching_entry("gen-2").id == "cred-failed"
+        # Oldest generations beyond the retained window are forgotten.
+        assert pool.matching_entry("sk-or-failed") is None
+        assert pool.matching_entry("gen-0") is None
+        assert len(pool._runtime_key_owners) <= 8
+
+    def test_live_add_entry_registers_runtime_key_owner(
+        self, tmp_path, monkeypatch
+    ):
+        """A credential added to a LIVE pool is attributable immediately."""
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        from agent.credential_pool import PooledCredential
+
+        added = pool.add_entry(
+            PooledCredential.from_dict(
+                "openrouter",
+                {
+                    "id": "cred-added",
+                    "label": "added",
+                    "auth_type": "api_key",
+                    "priority": 99,
+                    "source": "manual",
+                    "access_token": "sk-or-added-live",
+                },
+            )
+        )
+
+        assert pool.matching_entry("sk-or-added-live") == added
+
+    def test_unknown_key_hint_fails_closed_without_exhausting_current(
+        self, tmp_path, monkeypatch
+    ):
+        """A key from no known account must never quarantine an innocent one."""
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        assert pool.select().id == "cred-healthy"
+
+        pool.mark_exhausted_and_rotate(
+            status_code=401,
+            error_context={"reason": "invalid_token"},
+            api_key_hint="not-in-this-pool",
+        )
+
+        assert all(entry.last_status != "dead" for entry in pool._entries)
+
+    def test_shared_key_still_resolves_to_the_first_entry(
+        self, tmp_path, monkeypatch
+    ):
+        """One key can legitimately back several entries.
+
+        An explicit pool entry plus a ``model_config`` entry auto-seeded from
+        ``model.api_key`` carry the identical runtime key. Attribution must
+        keep returning the FIRST such entry — ``mark_exhausted_and_rotate``
+        marks the siblings itself — so the ownership trail must never let a
+        later duplicate take over an existing key.
+        """
+        from dataclasses import replace
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        healthy = next(e for e in pool._entries if e.id == "cred-healthy")
+        failed = next(e for e in pool._entries if e.id == "cred-failed")
+        # Give the SECOND entry the same runtime key as the first.
+        pool._replace_entry(failed, replace(failed, access_token="sk-or-healthy"))
+
+        assert pool.matching_entry("sk-or-healthy").id == healthy.id
+
+    def test_removed_credentials_drop_out_of_the_ownership_trail(
+        self, tmp_path, monkeypatch
+    ):
+        """Add/remove churn must not grow the trail without bound."""
+        from agent.credential_pool import PooledCredential
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        baseline = len(pool._runtime_key_owners)
+
+        for i in range(5):
+            pool.add_entry(
+                PooledCredential.from_dict(
+                    "openrouter",
+                    {
+                        "id": f"cred-temp-{i}",
+                        "label": f"temp-{i}",
+                        "auth_type": "api_key",
+                        "priority": 50 + i,
+                        "source": "manual",
+                        "access_token": f"sk-or-temp-{i}",
+                    },
+                )
+            )
+            assert pool.matching_entry(f"sk-or-temp-{i}") is not None
+            # Drop it again the way the pruning paths do, then persist.
+            pool._entries = [e for e in pool._entries if e.id != f"cred-temp-{i}"]
+            pool._persist(removed_ids=[f"cred-temp-{i}"])
+
+            assert pool.matching_entry(f"sk-or-temp-{i}") is None
+
+        assert len(pool._runtime_key_owners) == baseline
+        assert not any(
+            key.startswith("cred-temp")
+            for key in pool._runtime_key_fingerprints_by_id
+        )
+
+    def test_remove_index_also_drops_ownership(self, tmp_path, monkeypatch):
+        """``remove_index`` writes through instead of calling ``_persist``.
+
+        It therefore has to reconcile the trail itself, or a removed account
+        stays attributable and a recycled id inherits its keys.
+        """
+        from agent.credential_pool import PooledCredential
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        pool.add_entry(
+            PooledCredential.from_dict(
+                "openrouter",
+                {
+                    "id": "cred-doomed",
+                    "label": "doomed",
+                    "auth_type": "api_key",
+                    "priority": 70,
+                    "source": "manual",
+                    "access_token": "sk-or-doomed",
+                },
+            )
+        )
+        assert pool.matching_entry("sk-or-doomed") is not None
+
+        index = next(
+            i for i, e in enumerate(pool._entries, start=1) if e.id == "cred-doomed"
+        )
+        assert pool.remove_index(index) is not None
+
+        assert pool.matching_entry("sk-or-doomed") is None
+        assert "cred-doomed" not in pool._runtime_key_fingerprints_by_id
+
+    def test_reused_credential_id_does_not_inherit_old_keys(
+        self, tmp_path, monkeypatch
+    ):
+        """A recycled id must not make an old bearer attributable again."""
+        from agent.credential_pool import PooledCredential
+
+        pool = self._seed_pool(tmp_path, monkeypatch)
+        pool.add_entry(
+            PooledCredential.from_dict(
+                "openrouter",
+                {
+                    "id": "cred-recycled",
+                    "label": "first-life",
+                    "auth_type": "api_key",
+                    "priority": 60,
+                    "source": "manual",
+                    "access_token": "sk-or-first-life",
+                },
+            )
+        )
+        pool._entries = [e for e in pool._entries if e.id != "cred-recycled"]
+        pool._persist(removed_ids=["cred-recycled"])
+
+        pool.add_entry(
+            PooledCredential.from_dict(
+                "openrouter",
+                {
+                    "id": "cred-recycled",
+                    "label": "second-life",
+                    "auth_type": "api_key",
+                    "priority": 61,
+                    "source": "manual",
+                    "access_token": "sk-or-second-life",
+                },
+            )
+        )
+
+        assert pool.matching_entry("sk-or-second-life").id == "cred-recycled"
+        assert pool.matching_entry("sk-or-first-life") is None

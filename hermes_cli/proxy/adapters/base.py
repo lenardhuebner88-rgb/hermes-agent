@@ -34,6 +34,14 @@ class UpstreamCredential:
     expires_at: Optional[str] = None
     """ISO-8601 expiry timestamp for the bearer, when known. Informational."""
 
+    credential_id: Optional[str] = None
+    """Non-secret stable pool id, used to attribute delayed upstream failures.
+
+    A bearer can rotate while a request is in flight, so the token alone is
+    not a reliable way to name the account that failed. Adapters backed by a
+    credential pool set this so a late 401/429 lands on the right entry.
+    """
+
 
 class UpstreamAdapter(ABC):
     """Contract for an upstream provider the proxy can forward to."""
