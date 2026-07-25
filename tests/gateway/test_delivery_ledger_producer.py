@@ -8,6 +8,7 @@ block the send.
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -65,6 +66,13 @@ def _rows():
         ).fetchall()
 
 
+def _routing_row():
+    with dl._connect() as conn:
+        return conn.execute(
+            "SELECT reply_to, metadata_json FROM delivery_obligations"
+        ).fetchone()
+
+
 async def _run(adapter, event, response="final answer"):
     adapter._message_handler = AsyncMock(return_value=response)
     session_key = "agent:main:slack:channel:C1"
@@ -83,6 +91,23 @@ class TestProducerHook:
         assert len(rows) == 1
         assert rows[0][1] == "delivered"
         assert rows[0][2] == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_normal_turn_records_exact_reply_routing(self):
+        adapter = _Adapter()
+        event = _event()
+        event.source.thread_id = "171.001"
+        event.source.scope_id = "T1"
+
+        await _run(adapter, event)
+
+        reply_to, metadata_json = _routing_row()
+        assert reply_to == "msg-42"
+        assert json.loads(metadata_json) == {
+            "notify": True,
+            "slack_team_id": "T1",
+            "thread_id": "171.001",
+        }
 
     @pytest.mark.asyncio
     async def test_send_failure_leaves_failed_row(self):

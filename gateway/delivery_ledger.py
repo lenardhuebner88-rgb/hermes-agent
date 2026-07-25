@@ -88,6 +88,8 @@ def _connect() -> sqlite3.Connection:
             platform TEXT NOT NULL,
             chat_id TEXT NOT NULL,
             thread_id TEXT,
+            reply_to TEXT,
+            metadata_json TEXT,
             content TEXT NOT NULL,
             state TEXT NOT NULL,
             attempts INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +100,21 @@ def _connect() -> sqlite3.Connection:
             last_error TEXT
         )"""
     )
+    # Reconcile ledgers written before the routing columns existed. Both are
+    # nullable, so legacy rows keep working: a row without them redelivers
+    # with the thread_id-only metadata it always had (see sweep_recoverable).
+    columns = {
+        row[1]
+        for row in conn.execute(
+            'PRAGMA table_info("delivery_obligations")'
+        ).fetchall()
+    }
+    if "reply_to" not in columns:
+        conn.execute("ALTER TABLE delivery_obligations ADD COLUMN reply_to TEXT")
+    if "metadata_json" not in columns:
+        conn.execute(
+            "ALTER TABLE delivery_obligations ADD COLUMN metadata_json TEXT"
+        )
     return conn
 
 
@@ -162,20 +179,28 @@ def record_obligation(
     chat_id: str,
     thread_id: Optional[str],
     content: str,
+    reply_to: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Record a final response as owed to the platform (state='pending')."""
     now = time.time()
     pid, started = _owner_stamp()
+    metadata_json = (
+        json.dumps(metadata, sort_keys=True, separators=(",", ":"), default=str)
+        if metadata
+        else None
+    )
     with _DB_LOCK, _connect() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO delivery_obligations
                (obligation_id, session_key, platform, chat_id, thread_id,
-                content, state, attempts, created_at, updated_at,
-                owner_pid, owner_started_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)""",
+                reply_to, metadata_json, content, state, attempts,
+                created_at, updated_at, owner_pid, owner_started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)""",
             (obligation_id, session_key, platform, str(chat_id),
-             str(thread_id) if thread_id else None, content, now, now,
-             pid, started),
+             str(thread_id) if thread_id else None,
+             str(reply_to) if reply_to else None, metadata_json,
+             content, now, now, pid, started),
         )
     _prune()
 
@@ -190,6 +215,53 @@ def mark_delivered(obligation_id: str) -> None:
 
 def mark_failed(obligation_id: str, error: str = "") -> None:
     _update_state(obligation_id, "failed", error=error)
+
+
+def claim_owned_retry(
+    obligation_id: str, now: Optional[float] = None
+) -> Optional[int]:
+    """Spend one retry attempt for a failed row owned by this process.
+
+    Startup recovery claims a dead owner's row once. If that first send fails,
+    the row is now owned by the live gateway and a normal sweep correctly will
+    not reclaim it. This narrow transition lets that same recovery loop retry
+    in-process while preserving the durable attempt cap across crashes.
+
+    Returns the new attempt number, or None when the row is gone, not ours,
+    not in 'failed', or out of budget (in which case it is abandoned).
+    """
+    now = now if now is not None else time.time()
+    pid, started = _owner_stamp()
+    with _DB_LOCK, _connect() as conn:
+        row = conn.execute(
+            """SELECT state, attempts, created_at, owner_pid, owner_started_at
+               FROM delivery_obligations WHERE obligation_id=?""",
+            (obligation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        state, attempts, created_at, owner_pid, owner_started_at = row
+        if (
+            state != "failed"
+            or owner_pid != pid
+            or owner_started_at != started
+        ):
+            return None
+        if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
+            conn.execute(
+                """UPDATE delivery_obligations
+                   SET state='abandoned', updated_at=? WHERE obligation_id=?""",
+                (now, obligation_id),
+            )
+            return None
+        cursor = conn.execute(
+            """UPDATE delivery_obligations
+               SET attempts=attempts+1, updated_at=?
+               WHERE obligation_id=? AND state='failed'
+                 AND owner_pid=? AND owner_started_at IS ?""",
+            (now, obligation_id, pid, started),
+        )
+        return attempts + 1 if cursor.rowcount else None
 
 
 def _update_state(obligation_id: str, state: str, error: str = "") -> None:
@@ -229,13 +301,14 @@ def sweep_recoverable(
     with _DB_LOCK, _connect() as conn:
         rows = conn.execute(
             """SELECT obligation_id, session_key, platform, chat_id, thread_id,
-                      content, state, attempts, created_at,
-                      owner_pid, owner_started_at
+                      reply_to, metadata_json, content, state, attempts,
+                      created_at, owner_pid, owner_started_at
                FROM delivery_obligations
                WHERE state IN ('pending', 'attempting', 'failed')"""
         ).fetchall()
-        for (oid, session_key, platform, chat_id, thread_id, content, state,
-             attempts, created_at, owner_pid, owner_started_at) in rows:
+        for (oid, session_key, platform, chat_id, thread_id, reply_to,
+             metadata_json, content, state, attempts, created_at, owner_pid,
+             owner_started_at) in rows:
             if _owner_alive(owner_pid, owner_started_at):
                 continue  # a live gateway still owns this row
             if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:
@@ -260,12 +333,28 @@ def sweep_recoverable(
                 (pid, started, now, oid, owner_pid, owner_pid),
             )
             if cursor.rowcount:
+                # Legacy rows carry no metadata_json; fall back to the
+                # thread_id-only metadata the redelivery path used before.
+                metadata = None
+                if metadata_json:
+                    try:
+                        decoded = json.loads(metadata_json)
+                        if isinstance(decoded, dict):
+                            metadata = decoded
+                    except (TypeError, ValueError):
+                        logger.debug(
+                            "Invalid delivery metadata for obligation %s", oid
+                        )
+                if metadata is None and thread_id:
+                    metadata = {"thread_id": thread_id}
                 claimed.append({
                     "obligation_id": oid,
                     "session_key": session_key,
                     "platform": platform,
                     "chat_id": chat_id,
                     "thread_id": thread_id,
+                    "reply_to": reply_to,
+                    "metadata": metadata,
                     "content": content,
                     # pending = send never started, redeliver plainly;
                     # attempting/failed = ambiguous or rejected, carry marker.
