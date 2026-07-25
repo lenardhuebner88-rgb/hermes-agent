@@ -1,5 +1,26 @@
 # Giant-Module Modularization Implementation Plan
 
+> # STATUS 2026-07-25 — PARKED. Do not execute this plan.
+>
+> **Tasks 1–6 are done and their output is good** (the tooling in `scripts/refactor/`, the
+> ownership report, the boundary map, the patch-target enumeration). **Task 7 is BLOCKED after
+> two executed-and-reverted attempts. Task 8 is parked with the axis.**
+>
+> Two independent reasons, both measured, neither softenable by a better boundary map:
+>
+> - **Task 7 cannot work as specified.** The test suite has 470 monkeypatch sites over 104
+>   symbols and depends on `kanban_db` being one namespace. Attempt 1 (10 submodules) would not
+>   import; attempt 2 (flat module) imported and reported `API IDENTICAL` but failed 64 tests,
+>   reproduced. The carve-out repair was built, measured, and does not fix it.
+> - **The premise is refuted for this cycle.** The 187-commit sync landed 2026-07-25 touches
+>   `hermes_cli/kanban_db.py` in **zero** commits; upstream last touched it 2026-06-29. And
+>   extraction was measured to move the conflict count 14 → 14 regardless.
+>
+> **Orientation document, which outranks this plan: `docs/refactor/UPSTREAM-STRATEGY.md`.**
+> Read it first. This file is now a design record plus a working tool spec — not a work order.
+> Re-open only on a *measured* sync that collides in that file. Individual task boxes below
+> may still read as ready-to-run; that tone predates the measurements above.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **Re-aimed 2026-07-24** by `docs/refactor/2026-07-24-modularization-delta-merge-capability.md` (operator decision, grill session `work:5`). The overriding goal is now **staying merge-capable against upstream**; CodeGraph visibility is kept only where it costs nothing. Scope reduced from five files to one. The tooling (Tasks 1–4) is unchanged and still correct.
@@ -2103,6 +2124,34 @@ git commit -m "refactor: enumerate kanban_db test patch targets before extractio
 
 ## Task 7: Extract `kanban_ext` (the whole point)
 
+> ## STOP — Task 7 is BLOCKED and PARKED (2026-07-25). Do not execute the steps below.
+>
+> **It has been attempted twice and reverted twice.** Both attempts are recorded as dead ends
+> in `docs/refactor/UPSTREAM-STRATEGY.md` §3. Read that section and `patch-targets.kanban_db.md`
+> before you read one more line of this task. The steps below still describe the *intended*
+> shape and are kept for that reason — but their premise (Step 6 is a no-op) is disproved, and
+> executing them reproduces a known failure.
+>
+> 1. **Technical blocker.** The suite has 470 monkeypatch sites over 104 symbols and depends on
+>    `kanban_db` being **one namespace**. Splitting it changes monkeypatch semantics by
+>    construction; the carve-out repair was built and measured and does not fix it. See Step 6.
+> 2. **The reason for doing it is gone.** The premise of this whole axis was "every upstream
+>    update to `kanban_db.py` collides". Measured against the 187-commit sync landed
+>    2026-07-25 (`0cb41891c`): **zero** of those commits touch the file; upstream last touched
+>    it 2026-06-29. Its twelve conflict hunks sat in `gateway/`, `cron/`, `agent/` and
+>    `hermes_cli/{auth,config}.py`. The fork-loss audit found zero collateral loss.
+> 3. **It never moved the metric anyway.** Measured end to end: conflict hunks **14 → 14**.
+>    Extraction buys file size and CodeGraph visibility, not mergeability. Only Task 8 (hooks)
+>    moves the merge metric.
+>
+> **To re-open this you need a *measured* sync that actually collides in `hermes_cli/kanban_db.py`,
+> plus an answer to the 470-patch-site problem** — and that answer must be one of the three
+> options enumerated at the end of `patch-targets.kanban_db.md`, costed, not improvised.
+>
+> Note for agentic readers: earlier revisions of this task read as ready-to-run and describe the
+> tooling as complete. The tooling *is* complete and correct; that was never the blocker. Do not
+> infer readiness from the confident tone of the steps below.
+
 **Prerequisites:** Task 0 is closed (done). The Codex upstream sync has landed — verified in Step 0.
 
 **Files:**
@@ -2194,13 +2243,33 @@ Expected: **fork-only symbols in `kanban_db.py` drop from 733 to 3** (the carve-
 
 For each site whose symbol moved, change `hermes_cli.kanban_db.<symbol>` to `hermes_cli.kanban_ext.<submodule>.<symbol>`, and `setattr(kanban_db, "<symbol>", ...)` to `setattr(kanban_ext.<submodule>, "<symbol>", ...)`. Sites whose symbol stayed in `kanban_db.py` are left alone.
 
-> **Measured 2026-07-25 (Task 6): this step is a NO-OP for the approved map.** All 9 patched
-> symbols (`connect`, `init_db`, `_record_task_failure`, `_record_worker_exit`, `task_age`,
-> `kanban_db_path`, `dispatch_once`, `_pid_alive`, `_check_file_length_invariant`) are
-> **upstream-owned and stay**; the `os` / `time` / `sqlite3` module-attribute patches are
-> unaffected because submodules copy the header verbatim and share the same module objects.
-> No test file changes. Details and the control probe: `docs/refactor/patch-targets.kanban_db.md`.
-> Re-run that classification if the boundary map ever changes.
+> **CORRECTED 2026-07-25 (commit `515ccf49f`). The earlier claim in this box was wrong and
+> is retained below only as the disproved statement.** It read: *"this step is a NO-OP for the
+> approved map — all 9 patched symbols are upstream-owned and stay; no test file changes."*
+>
+> **The real number is 470 patch sites across 104 symbols, 58 of which the boundary map moves.**
+> The "9 symbols" came from two greps for the literal token `kanban_db`. The test suite almost
+> never uses that name: it aliases the module (`kb` 352x, `_kb` 78x, `kdb` 3x). Every
+> `monkeypatch.setattr(kb, "...")` was invisible to those greps. A control probe was run and
+> still missed it, because it proved the *classifier* worked without testing whether its
+> *input list* was complete.
+>
+> Task 7 was then executed against this wrong premise and **64 tests failed, reproduced
+> identically on a rerun** (890 passed / 64 failed, twice; `main` baseline on the same files:
+> 116 passed). The extraction was reverted. A second attempt as one flat module imported fine
+> and reported `API IDENTICAL` — and failed the same way.
+>
+> **Carving the 58 moved-and-patched symbols back out does not fix it.** That repair was built
+> and measured: carve-out grows to 67 after transitive closure, `kanban_db.py` lands at
+> 782,209 B, `API IDENTICAL`, imports fine — and a probe over the three worst test files still
+> failed 13 tests. The cause is a namespace fact, not a mapping fact: extracted code binds
+> cross-boundary names at import time (`from hermes_cli.kanban_db import connect, ...`), so
+> `monkeypatch.setattr(kb, "connect", fake)` rebinds the attribute on `kanban_db` while the
+> extracted module's own global still points at the original. **No boundary map avoids this.**
+>
+> Correct method, and the only one that gives a true count: resolve aliases with the AST, never
+> with grep. Full analysis, the three remaining options, and the measured cost of each:
+> `docs/refactor/patch-targets.kanban_db.md`.
 
 ```bash
 scripts/run-affected.sh
