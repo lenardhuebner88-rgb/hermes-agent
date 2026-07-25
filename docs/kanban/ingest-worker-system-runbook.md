@@ -55,7 +55,8 @@ Routing:
 
 | Work | Assignee |
 | --- | --- |
-| Multi-file code, tests, refactors | `coder` |
+| Backend code, tests, refactors; all code outside `web/` | `coder` |
+| `/control` frontend under `web/src/control/**` or `web/e2e/**` | `coder-frontend` |
 | Hard/large/reasoning-heavy code | `premium` |
 | Reading, summary, evidence, web/doc reconnaissance | `research` |
 | Pass/fail verdict gate only | `reviewer` |
@@ -163,7 +164,7 @@ hermes kanban list --status ready
 
 Expected:
 
-- Required profiles exist on disk: `coder`, `premium`, `research`, `reviewer`, `critic`.
+- Required profiles exist on disk: `coder`, `coder-frontend`, `premium`, `research`, `reviewer`, `critic`.
 - No ready backlog is stuck behind a non-existent assignee.
 - Diagnostics do not show critical stale claims, impossible deps, missing workspace, or repeated spawn failures.
 - Gateway owns dispatch; no detached dispatch loops or orphan workers run.
@@ -175,7 +176,7 @@ Use a temporary Hermes home and `HERMES_SANDBOX_MODE=1` so the test exercises re
 ```bash
 export HERMES_HOME="$(mktemp -d)"
 export HERMES_SANDBOX_MODE=1
-for p in coder premium research reviewer critic default; do
+for p in coder coder-frontend premium research reviewer critic default; do
   mkdir -p "$HERMES_HOME/profiles/$p"
   printf "model:\n  provider: test\n  name: test\n" > "$HERMES_HOME/profiles/$p/config.yaml"
 done

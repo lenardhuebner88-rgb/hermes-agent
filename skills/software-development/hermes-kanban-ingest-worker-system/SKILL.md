@@ -26,7 +26,7 @@ The detailed shared runbook lives in:
    ```bash
    hermes kanban create "<root>" --triage --assignee default --kind ops --body "<goal, gates, non-goals>" --idempotency-key "<stable-key>" --json
    ```
-3. Route children by lane: `coder` for normal code, `premium` for hard code, `research` for read-only evidence, `reviewer` for verdict, `critic` for adversarial critique. Never invent assignee names.
+3. Route children by lane: `coder` for backend and all code outside `web/`, `coder-frontend` when every edited path is under `web/src/control/**` or `web/e2e/**`, `premium` for hard code, `research` for read-only evidence, `reviewer` for verdict, `critic` for adversarial critique. Never invent assignee names.
 4. Keep graph parallel: independent children have no parents; add parents only for real data/write dependencies.
 5. Verify before dispatch/recovery:
    ```bash
@@ -46,7 +46,7 @@ Exercise real CLI/DB code without touching the production board:
 ```bash
 export HERMES_HOME="$(mktemp -d)"
 export HERMES_SANDBOX_MODE=1
-for p in coder premium research reviewer critic default; do
+for p in coder coder-frontend premium research reviewer critic default; do
   mkdir -p "$HERMES_HOME/profiles/$p"
   printf "model:\n  provider: test\n  name: test\n" > "$HERMES_HOME/profiles/$p/config.yaml"
 done

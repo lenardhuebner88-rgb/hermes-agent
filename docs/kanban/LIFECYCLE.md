@@ -276,7 +276,7 @@ kanban.review_gate:
   standard_uses_llm_verifier: false # lever 1
   judge_at_chain_tip: true          # lever 2
   critical_reviews_each_slice: false# lever 3
-  code_roles: [coder, premium]      # lever 4 (scope of the whole gate)
+  code_roles: [coder, coder-frontend, premium] # lever 4 (scope of the whole gate)
 ```
 
 **Tier resolution** —
@@ -311,10 +311,12 @@ mechanical post-merge gate.
 **Lever 3 — `critical_reviews_each_slice: false`.** Lets `critical`-tier slices
 also defer to the tip. Same trade as lever 2, applied to the highest tier.
 
-**Lever 4 — `code_roles: [coder, premium]`.** The review gate is scoped by
-*assignee name*, not by whether the diff contains code. A code-bearing task
-assigned to any other profile is never reviewed and never tier-classified; it
-still merges through the integrator with only the post-merge gate.
+**Lever 4 — `code_roles: [coder, coder-frontend, premium]`.** The review gate
+is scoped by *assignee name*, not by whether the diff contains code. Both the
+backend `coder` lane and the Control-SPA `coder-frontend` lane are therefore
+reviewed; a code-bearing task assigned to any other profile is never reviewed
+and never tier-classified. It still merges through the integrator with only
+the post-merge gate.
 
 Note `_review_gate_config` deliberately reads the **root** config: a worker's
 own profile config must not be able to disable the gate it is subject to.

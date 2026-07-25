@@ -124,6 +124,9 @@ Lane-Identität: Sie ersetzt weder Bronze als Interaktionsfarbe noch eine Farbe
 des Status-Trios. UI-Arbeit bleibt an dieses Dokument und die gerenderten
 Compact-/Expanded-Prüfungen gebunden; Backend- und gemischte Arbeit bleibt bei
 `coder`, sofern der Schwerpunkt nicht klar in `web/` liegt.
+Autoren dürfen den Live-Leitstand auf `:9119` zur Orientierung browsen; das ist
+kein Branch-Beweis. Reproduzierbare Completion-Evidenz kommt aus
+`scripts/visual-verify.sh`, das die Branch-Artefakte isoliert rendert.
 
 ## Jarvis-Zone (`/control/projekte`) — einzige Token-Ausnahme
 

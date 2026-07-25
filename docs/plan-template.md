@@ -3,6 +3,8 @@
 
 ## Slice: <short verbatim title>
 - lane: coder
+<!-- Lane rule: coder-frontend only when every edited path starts with
+web/src/control/ or web/e2e/; no web/ path or unknown paths => coder. -->
 - done-when: <verifiable done signal>
 - files: path/a, path/b
 - risk: <free text>
