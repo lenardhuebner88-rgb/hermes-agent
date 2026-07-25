@@ -945,7 +945,7 @@ def main() -> int:
             tests_done += n_tests
             # Accumulate test-level counts from parsed summary.
             tests_passed += summary.get("passed", 0)
-            tests_failed += summary.get("failed", 0)
+            tests_failed += summary.get("failed", 0) + summary.get("errors", 0)
             file_times.append((fpath, subproc_wall))
             if rc == 0:
                 pass_count += 1
@@ -982,7 +982,7 @@ def main() -> int:
     elapsed = time.monotonic() - started
     print()
     pct = min(100, (tests_done / approx_total_tests * 100)) if approx_total_tests else 0
-    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
+    print(f"=== Summary: {len(files)} files, {tests_passed} tests passed, {tests_failed} failed/errors ({pct:.0f}% complete) in {elapsed:.1f}s ({args.jobs} workers) ===")
 
     # Flaky files: failed once, passed on the automatic retry. Green, but
     # loudly reported so they get fixed instead of silently re-flaking.
@@ -1037,16 +1037,27 @@ def main() -> int:
         print()
         # Split: files with actual test failures vs non-zero exit for other reasons
         test_fail_files = [(f, s) for f, _o, s in failures if s.get("failed", 0) > 0]
+        error_files = [(f, s) for f, _o, s in failures if s.get("errors", 0) > 0]
         all_passed_but_nonzero = [(f, s) for f, _o, s in failures
-                                  if s.get("failed", 0) == 0 and s.get("passed", 0) > 0]
+                                  if s.get("failed", 0) == 0
+                                  and s.get("errors", 0) == 0
+                                  and s.get("passed", 0) > 0]
         no_tests_ran = [(f, s) for f, _o, s in failures
-                        if s.get("failed", 0) == 0 and s.get("passed", 0) == 0]
+                        if s.get("failed", 0) == 0
+                        and s.get("errors", 0) == 0
+                        and s.get("passed", 0) == 0]
         if test_fail_files:
             total_tf = sum(s.get("failed", 0) for _, s in test_fail_files)
             print(f"=== {len(test_fail_files)} file{'s' if len(test_fail_files) != 1 else ''} with test failures ({total_tf} test{'s' if total_tf != 1 else ''} failed) ===")
             for file, s in test_fail_files:
                 nf = s.get("failed", 0)
                 print(f"  {_format_file(file, repo_root)}  ({nf} test{'s' if nf != 1 else ''} failed)")
+        if error_files:
+            total_errors = sum(s.get("errors", 0) for _, s in error_files)
+            print(f"=== {len(error_files)} file{'s' if len(error_files) != 1 else ''} with pytest setup/teardown/collection errors ({total_errors} error{'s' if total_errors != 1 else ''}) ===")
+            for file, s in error_files:
+                ne = s.get("errors", 0)
+                print(f"  {_format_file(file, repo_root)}  ({ne} error{'s' if ne != 1 else ''}, {s.get('passed', 0)} passed)")
         if all_passed_but_nonzero:
             print(f"=== {len(all_passed_but_nonzero)} file{'s' if len(all_passed_but_nonzero) != 1 else ''} where all tests passed but pytest exited non-zero (warnings-as-errors, hook failures, etc.) ===")
             for file, s in all_passed_but_nonzero:

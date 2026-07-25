@@ -36,6 +36,7 @@ def server():
         get_skill_commands=lambda: {},
         scan_skill_commands=lambda: {},
         build_skill_invocation_message=lambda *_args, **_kwargs: None,
+        extract_user_instruction_from_skill_message=lambda _content: None,
     )
     with patch.dict("sys.modules", {
         "agent.skill_commands": fake_skill_commands,
