@@ -112,6 +112,11 @@ function AccountProviderCard({
   });
   const others = provider.windows.filter((w) => classifyWindow(w, config) === "other");
   const unavailable = !provider.available;
+  const usageRole = usageRoleForProvider(config, provider.provider);
+  const plan = provider.plan?.trim() || null;
+  // Subscription cards without a verified plan stay explicit — never invent SuperGrok/etc.
+  const planLabel =
+    plan || (usageRole === "subscription" && !unavailable ? "Plan nicht gemeldet" : null);
   // Ausgaben-Karte (OpenRouter = Pay-as-you-go, kein Fenster-Limit): keine
   // session/weekly-Balken, aber echte $-Details → als Karten-Körper statt als
   // muter „keine Fensterdaten"-Leerzustand rendern.
@@ -129,18 +134,30 @@ function AccountProviderCard({
     const staleLabel = staleUsageSignalLabel(provider, nowMs);
     if (staleLabel) {
       chipLabel = staleLabel;
-      chipTone = staleLabel.endsWith("d") ? "warn" : "neutral";
+      chipTone = staleLabel.startsWith("GAP") || staleLabel.endsWith("d") ? "warn" : "neutral";
     }
+  } else if (usageRole === "subscription") {
+    // Endpoint down with no usable payload: honest GAP, not a fake 0 % live bar.
+    chipLabel = "GAP";
+    chipTone = "warn";
   }
+  // Hide provenance-only details already covered by the plan subtitle.
+  const extraDetails = (provider.details || []).filter((d) => {
+    const t = d.trim().toLowerCase();
+    if (!t) return false;
+    if (planLabel && t === planLabel.toLowerCase()) return false;
+    if (!plan && t === "plan nicht gemeldet") return false;
+    return true;
+  });
   // Details-Collapse nur für Nebenfenster + Details, die NICHT schon als
   // Ausgaben-Körper gerendert werden (sonst doppelt).
-  const hasExtras = others.length > 0 || (provider.details.length > 0 && !spendCard);
+  const hasExtras = others.length > 0 || (extraDetails.length > 0 && !spendCard);
   return (
     <article className="rounded-card border border-line bg-surface-2 p-3">
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-ink">{usageProviderLabel(provider, config)}</p>
-          {provider.plan ? <p className="text-xs text-ink-3">{provider.plan}</p> : null}
+          {planLabel ? <p className="text-xs text-ink-3">{planLabel}</p> : null}
         </div>
         <div className="justify-self-end">
           <SignalChip
@@ -163,7 +180,7 @@ function AccountProviderCard({
         // Schätzung) bzw. wenn der Provider gerade offline ist: ehrlicher
         // Leerzustand statt zusammengeworfener Strichel-Fußzeile.
         <p className="mt-3 text-xs text-ink-2">
-          {unavailable ? provider.unavailable_reason ?? "nicht verfügbar" : "keine Fensterdaten vom Provider"}
+          {unavailable ? provider.unavailable_reason ?? "GAP — Provider-Endpoint nicht erreichbar" : "keine Fensterdaten vom Provider"}
         </p>
       )}
       {align ? (
@@ -182,7 +199,7 @@ function AccountProviderCard({
                 {typeof w.used_percent === "number" ? `${Math.round(w.used_percent)} %` : "—"}
               </p>
             ))}
-            {provider.details.map((detail) => <p key={detail}>{detail}</p>)}
+            {extraDetails.map((detail) => <p key={detail}>{detail}</p>)}
           </div>
         </details>
       ) : null}

@@ -548,14 +548,67 @@ def test_fetch_xai_account_usage_uses_live_billing_api(monkeypatch):
     assert snapshot.source == "billing_api"
     assert snapshot.title == "Grok"
     assert snapshot.plan == "SuperGrok"
-    assert len(snapshot.windows) == 1
-    window = snapshot.windows[0]
-    assert window.label == "Diese Woche"
-    assert window.used_percent == 21.0
-    assert window.window_key == "weekly"
-    assert window.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
-    assert snapshot.details == ("Grok Build: 18 %", "API: 3 %")
+    labels = [(w.label, w.used_percent, w.window_key) for w in snapshot.windows]
+    assert ("API", 3.0, "product") in labels
+    assert ("Grok Build", 18.0, "product") in labels
+    assert ("Gesamt", 21.0, "account_total") in labels
+    total = next(w for w in snapshot.windows if w.window_key == "account_total")
+    assert total.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
+    # Product buckets are structured windows, not freestyle details.
+    assert not any("Grok Build:" in d or "API:" in d for d in snapshot.details)
     assert snapshot.signal_at is None
+
+
+def test_fetch_xai_account_usage_bucket_neutral_without_plan_or_coder_attribution(monkeypatch):
+    """RCA live shape: Gesamt + provider product buckets, plan unknown, no route attribution."""
+    monkeypatch.setattr(
+        "agent.account_usage.resolve_xai_oauth_runtime_credentials",
+        lambda **kwargs: {"api_key": "oauth-token"},
+    )
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=15.0: _Client(
+            {
+                "config": {
+                    "billingPeriodStart": "2026-07-19T17:58:33.973068Z",
+                    "billingPeriodEnd": "2026-07-26T17:58:33.973068Z",
+                    "creditUsagePercent": 90,
+                    "currentPeriod": {
+                        "start": "2026-07-19T17:58:33.973068Z",
+                        "end": "2026-07-26T17:58:33.973068Z",
+                    },
+                    "productUsage": [
+                        {"product": "Api", "usagePercent": 66},
+                        {"product": "GrokBuild", "usagePercent": 24},
+                        {"product": "GrokChat"},
+                    ],
+                }
+            }
+        ),
+    )
+
+    snapshot = _fetch_xai_account_usage()
+
+    assert snapshot is not None
+    assert snapshot.available is True
+    assert snapshot.plan is None
+    labels = [(w.label, w.used_percent, w.window_key) for w in snapshot.windows]
+    assert ("API", 66.0, "product") in labels
+    assert ("Grok Build", 24.0, "product") in labels
+    assert ("Gesamt", 90.0, "account_total") in labels
+    blob = " ".join(
+        [
+            snapshot.title or "",
+            *(w.label for w in snapshot.windows),
+            *(w.detail or "" for w in snapshot.windows),
+            *snapshot.details,
+        ]
+    ).lower()
+    assert "coder" not in blob
+    assert "xai-oauth" not in blob
+    assert "grok-4.5" not in blob
+    assert any("route" in d.lower() and "unknown" in d.lower() for d in snapshot.details)
+    assert any("plan" in d.lower() for d in snapshot.details)
 
 
 def test_fetch_xai_account_usage_missing_oauth_is_explicit(monkeypatch):
@@ -701,7 +754,8 @@ def test_fetch_xai_account_usage_current_period_without_percent_is_unknown(monke
     assert snapshot.available is True
     assert len(snapshot.windows) == 1
     window = snapshot.windows[0]
-    assert window.window_key == "weekly"
+    assert window.window_key == "account_total"
+    assert window.label == "Gesamt"
     assert window.used_percent is None
     assert window.reset_at == datetime(2026, 7, 26, 17, 58, 33, 973068, tzinfo=timezone.utc)
 

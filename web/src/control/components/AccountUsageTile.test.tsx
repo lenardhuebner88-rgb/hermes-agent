@@ -601,4 +601,76 @@ describe("AccountUsageTile", () => {
     // Alle vier Fenster sind Primärbalken → kein Details-Collapse.
     expect(html).not.toContain("<details");
   });
+
+  it("zeigt xAI product+Gesamt bucket-neutral ohne Coder-Zuordnung und Plan-Lücke", () => {
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "xai",
+          available: true,
+          source: "billing_api",
+          fetched_at: new Date().toISOString(),
+          signal_at: new Date().toISOString(),
+          title: "Grok",
+          plan: null,
+          cached: false,
+          unavailable_reason: null,
+          windows: [
+            { label: "API", window_key: "product", used_percent: 66, reset_at: "2026-07-26T17:58:33+00:00", detail: null },
+            { label: "Grok Build", window_key: "product", used_percent: 24, reset_at: "2026-07-26T17:58:33+00:00", detail: null },
+            { label: "Gesamt", window_key: "account_total", used_percent: 90, reset_at: "2026-07-26T17:58:33+00:00", detail: null },
+          ],
+          details: ["Route→Bucket: UNKNOWN"],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={xaiCfg} />,
+    );
+    expect(html).toContain("Grok");
+    expect(html).toContain("Plan nicht gemeldet");
+    expect(html).toContain('aria-label="API: 66 % genutzt"');
+    expect(html).toContain('aria-label="Grok Build: 24 % genutzt"');
+    expect(html).toContain('aria-label="Gesamt: 90 % genutzt"');
+    expect(html).toContain("Route→Bucket: UNKNOWN");
+    // No automatic coder / route attribution in the card surface.
+    expect(html.toLowerCase()).not.toContain("coder");
+    expect(html.toLowerCase()).not.toContain("xai-oauth");
+    expect(html.toLowerCase()).not.toContain("grok-4.5");
+    // Engpass is the shared Gesamt 90 %, not a coder-primary product claim.
+    expect(html).toContain("Engpass:");
+    expect(html).toContain("Gesamt");
+    expect(html).toContain("90 %");
+  });
+
+  it("markiert last-good xAI-Fallback als GAP/stale statt Live", () => {
+    const signalAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const u: AccountUsageResponse = {
+      cache_ttl_seconds: 60,
+      providers: [
+        {
+          provider: "xai",
+          available: true,
+          source: "billing_api",
+          fetched_at: signalAt,
+          signal_at: signalAt,
+          title: "Grok",
+          plan: null,
+          cached: true,
+          fallback: true,
+          unavailable_reason: null,
+          windows: [
+            { label: "Gesamt", window_key: "account_total", used_percent: 90, reset_at: null, detail: null },
+          ],
+          details: [],
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(
+      <AccountUsageTile usage={u} loading={false} error={null} config={xaiCfg} />,
+    );
+    expect(html).toContain("GAP ·");
+    expect(html).not.toContain(">Live</");
+  });
 });

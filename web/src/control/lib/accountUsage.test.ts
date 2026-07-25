@@ -206,6 +206,30 @@ describe("shared provider presentation", () => {
     expect(staleUsageSignalLabel(provider({ fetched_at: "2026-07-21T19:30:00Z" }), now)).toBeNull();
     expect(staleUsageSignalLabel(provider({ signal_at: "2026-07-20T18:00:00Z" }), now)).toBe("Stand 1d");
   });
+
+  it("marks fallback last-good payloads as GAP/stale, never Live", () => {
+    const now = Date.parse("2026-07-21T20:00:00Z");
+    expect(
+      staleUsageSignalLabel(
+        provider({ fallback: true, fetched_at: "2026-07-21T19:30:00Z", signal_at: "2026-07-21T19:30:00Z" }),
+        now,
+      ),
+    ).toBe("GAP · stale");
+    expect(
+      staleUsageSignalLabel(
+        provider({ fallback: true, fetched_at: "2026-07-21T17:00:00Z", signal_at: "2026-07-21T17:00:00Z" }),
+        now,
+      ),
+    ).toBe("GAP · 3h");
+  });
+
+  it("uses payload product labels and account_total Gesamt without coder meaning", () => {
+    expect(windowLabelDe(win({ window_key: "product", label: "API" }))).toBe("API");
+    expect(windowLabelDe(win({ window_key: "product", label: "Grok Build" }))).toBe("Grok Build");
+    expect(windowLabelDe(win({ window_key: "account_total", label: "Gesamt" }))).toBe("Gesamt");
+    expect(classifyWindow(win({ window_key: "product" }))).toBe("weekly");
+    expect(classifyWindow(win({ window_key: "account_total" }))).toBe("weekly");
+  });
 });
 
 // AC-2 at the unit level: the helpers are config-driven — a different config yields

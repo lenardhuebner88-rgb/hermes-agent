@@ -61,6 +61,12 @@ export function classifyWindow(w: AccountUsageWindow, cfg: StatsFieldConfig = DE
 
 /** Deutsches Label für ein Fenster — über config-`window_key`, dann Heuristik, dann roher Label. */
 export function windowLabelDe(w: AccountUsageWindow, cfg: StatsFieldConfig = DEFAULT_STATS_CONFIG): string {
+  // Generic product buckets carry the provider's concrete product name in `label`
+  // (API, Grok Build, …). The shared config key only forces layout/kind.
+  if (w.window_key === "product") {
+    const payloadLabel = (w.label || "").trim();
+    if (payloadLabel) return payloadLabel;
+  }
   const field = windowField(cfg, w.window_key);
   if (field) return field.label;
   const kind = classifyWindow(w, cfg);
@@ -186,6 +192,15 @@ export function staleUsageSignalLabel(
   nowMs: number,
   maxAgeMs = 60 * 60 * 1000,
 ): string | null {
+  // Last-good / endpoint-failure payloads must never look "Live".
+  if (provider.fallback) {
+    const signalMs = Date.parse(provider.signal_at ?? provider.fetched_at ?? "");
+    if (Number.isFinite(signalMs) && nowMs - signalMs > maxAgeMs) {
+      const ageHours = Math.max(1, Math.floor((nowMs - signalMs) / (60 * 60 * 1000)));
+      return ageHours < 24 ? `GAP · ${ageHours}h` : `GAP · ${Math.floor(ageHours / 24)}d`;
+    }
+    return "GAP · stale";
+  }
   const signalMs = Date.parse(provider.signal_at ?? provider.fetched_at ?? "");
   if (!Number.isFinite(signalMs) || nowMs - signalMs <= maxAgeMs) return null;
   const ageHours = Math.max(1, Math.floor((nowMs - signalMs) / (60 * 60 * 1000)));

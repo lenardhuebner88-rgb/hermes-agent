@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1435,18 +1436,21 @@ def _fetch_xai_account_usage() -> Optional[AccountUsageSnapshot]:
         used_percent = max(0.0, min(100.0, used_percent))
     reset_at = _parse_dt(current_period.get("end") or config.get("billingPeriodEnd"))
 
-    windows: list[AccountUsageWindow] = []
-    if used_percent is not None or current_period or reset_at is not None:
-        windows.append(
-            AccountUsageWindow(
-                label="Diese Woche",
-                used_percent=used_percent,
-                reset_at=reset_at,
-                window_key="weekly",
-            )
-        )
+    def _product_label(raw: str) -> str:
+        """Humanize provider product names without inventing coder/lane meaning."""
+        text = str(raw or "").strip()
+        if not text:
+            return "Produkt"
+        if text.upper() == "API":
+            return "API"
+        # Prefer well-known payload spellings; unknown products stay payload-driven.
+        known = {"GrokBuild": "Grok Build", "GrokChat": "Grok Chat", "Api": "API"}
+        if text in known:
+            return known[text]
+        spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).replace("_", " ").replace("-", " ")
+        return spaced.strip() or text
 
-    product_labels = {"GrokBuild": "Grok Build", "GrokChat": "Grok Chat", "Api": "API"}
+    windows: list[AccountUsageWindow] = []
     details: list[str] = []
     product_usage = config.get("productUsage")
     if isinstance(product_usage, list):
@@ -1457,11 +1461,35 @@ def _fetch_xai_account_usage() -> Optional[AccountUsageSnapshot]:
             product_percent = _numeric(item.get("usagePercent"))
             if not product or product_percent is None:
                 continue
-            label = product_labels.get(product, _title_case_slug(product) or product)
-            details.append(f"{label}: {max(0.0, min(100.0, product_percent)):g} %")
+            # Structured provider-named product buckets — never attributed to a Hermes lane.
+            windows.append(
+                AccountUsageWindow(
+                    label=_product_label(product),
+                    used_percent=max(0.0, min(100.0, product_percent)),
+                    reset_at=reset_at,
+                    window_key="product",
+                )
+            )
+
+    if used_percent is not None or reset_at is not None:
+        # Shared account total from creditUsagePercent. Label stays neutral ("Gesamt");
+        # do not claim "Diese Woche" unless the UI config maps account_total that way.
+        windows.append(
+            AccountUsageWindow(
+                label="Gesamt",
+                used_percent=used_percent,
+                reset_at=reset_at,
+                window_key="account_total",
+            )
+        )
 
     raw_plan = payload.get("subscriptionTier") or config.get("subscriptionTier")
     plan = str(raw_plan).strip() if isinstance(raw_plan, str) else None
+    if not plan:
+        details.append("Plan nicht gemeldet")
+    # Route xai-oauth/grok-4.5 → product bucket remains unproven from a single snapshot.
+    if any(w.window_key == "product" for w in windows):
+        details.append("Route→Bucket: UNKNOWN")
 
     if not windows and not details:
         return _unavailable("Grok billing data empty or unrecognized shape.")

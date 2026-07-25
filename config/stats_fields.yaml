@@ -54,16 +54,26 @@ windows:
   - key: weekly
     label: Diese Woche
     kind: weekly
+  - key: account_total
+    # Shared provider account allowance (e.g. xAI creditUsagePercent). Neutral label —
+    # not a Hermes lane or product-bucket attribution.
+    label: Gesamt
+    kind: weekly
+  - key: product
+    # Provider-named productUsage buckets. Payload supplies the concrete product label
+    # (API, Grok Build, …); this key only forces primary-bar layout without coder meaning.
+    label: Produkt-Bucket
+    kind: weekly
   - key: opus_week
     label: Opus-Woche
     kind: other
   - key: sonnet_week
     label: Sonnet-Woche
     kind: other
-  # Model-scoped weekly cap (Anthropic `limits[].weekly_scoped`); the model name
-  # rides in the window `detail`, appended to the label ("Modell-Limit · Fable").
-  # kind=weekly → own primary bar (Operator-Spec 2026-07-21: Fable explizit).
   - key: scoped_week
+    # Codex rate_limit.primary when window minutes ≈ 7 days — model-scoped weekly
+    # quota (GPT/Codex), not the shared account week. kind=weekly so it stays a
+    # primary bar; distinct key so it never collides with the true account week.
     label: Modell-Limit
     kind: weekly
 
