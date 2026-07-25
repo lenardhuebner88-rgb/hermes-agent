@@ -176,5 +176,8 @@ argument list but nowhere else, check the call site.
 git diff --stat 3bfa6001f origin/main -- hermes_cli/kanban_db.py
 ```
 
-and for the symbol-level view, the AST divergence script described in
-[UPSTREAM-STRATEGY.md](UPSTREAM-STRATEGY.md) §4.
+and for the symbol-level view:
+
+```bash
+python3 scripts/refactor/upstream_divergence.py hermes_cli/kanban_db.py
+```

@@ -78,10 +78,43 @@ visible in the other direction — upstream lines not applied fell from 1,843 to
 would have left the fork both feature-poor *and* divergent.
 
 Whole-file figures for reference: 6,094 fork lines inside upstream symbols
-across 131 diverged symbols; 736 fork-only symbols. Note that much of the
-remaining "upstream not applied" is deliberate fork replacement, not backlog —
-`build_worker_context`, for instance, is 246 upstream lines against 11 fork
-lines because the fork replaced it wholesale.
+across 125 diverged top-level symbols; 737 fork-only symbols; 132 symbols
+byte-identical with upstream. Note that much of the remaining "upstream not
+applied" is deliberate fork replacement, not backlog — `build_worker_context`,
+for instance, is 246 upstream lines against 11 fork lines because the fork
+replaced it wholesale.
+
+### The plan's hook target list is the wrong seven
+
+**Read this before starting Axis B.** The plan picked its seven targets from
+the **14 conflict hunks of one specific merge**. That measures what happened to
+collide once, not the structural exposure. Ranked by fork lines inside an
+upstream symbol — the metric that actually predicts future merge cost —
+`scripts/refactor/upstream_divergence.py` gives a different top ten:
+
+| fork lines inside | symbol |
+|---:|---|
+| 997 | `_dispatch_once_locked` |
+| 448 | `complete_task` |
+| 355 | `_migrate_add_optional_columns` |
+| 299 | `create_task` |
+| 295 | `block_task` |
+| 277 | `_record_task_failure` |
+| 268 | `detect_crashed_workers` |
+| 252 | `SCHEMA_SQL` |
+| 235 | `decompose_triage_task` |
+| 186 | `archive_task` |
+
+`_dispatch_once_locked` alone carries more fork code than the plan's entire
+seven-symbol list. Four of the plan's seven (`_cleanup_worker_tmux` 7,
+`list_comments` 3, `_backup_corrupt_db` 0, and `Task` at 147) are nearly noise
+by comparison — and `_backup_corrupt_db` is now byte-identical with upstream,
+so it is not a hook target at all.
+
+This does not invalidate starting small. `_guard_existing_db_is_healthy` (49)
+is still the right *pilot* precisely because it is small and the mechanics are
+unproven. But the plan's ordering should not be followed past the pilot: after
+it, go by this table, not by the old list.
 
 **Axis A comes first, and this is not a preference — it is measured.** All seven
 hook target symbols (`Task`, `create_task`, `_default_spawn`,
@@ -126,16 +159,25 @@ git diff --stat 3bfa6001f origin/main -- hermes_cli/kanban_db.py
 git log  --oneline 3bfa6001f..origin/main -- hermes_cli/kanban_db.py
 ```
 
-**Symbol-level divergence (the Axis B metric).** Indentation-based extraction is
-useless here — `create_task` has a multi-line signature whose closing
-`) -> str:` sits back at indent 0, so a strict scan measures 36 lines instead of
-491. Use `ast.parse` with `node.lineno` / `node.end_lineno`. A ready script
-lives in the session scratchpad pattern described in
-[upstream-backlog.kanban_db.md](upstream-backlog.kanban_db.md) §4; it reports
-per symbol: upstream-only, fork-only, and lines diverged.
+**Symbol-level divergence (the Axis B metric).** Use the committed script — it
+compares file contents directly, so unlike `merge-tree` it stays valid after a
+sync:
 
-Current snapshot: 19 upstream symbols absent from the fork (411 lines),
-131 symbols diverged, 736 fork-only symbols.
+```bash
+python3 scripts/refactor/upstream_divergence.py hermes_cli/kanban_db.py
+python3 scripts/refactor/upstream_divergence.py <path> <ref> --json   # full record
+```
+
+It prints the two headline numbers (upstream lines not applied; fork lines
+inside upstream symbols) plus the worst offenders. Indentation-based extraction
+is useless here — `create_task` has a multi-line signature whose closing
+`) -> str:` sits back at indent 0, so a strict scan measures 36 lines instead of
+491. The script uses `ast.parse` with `lineno`/`end_lineno`; anything else you
+write must too.
+
+Snapshot after the Axis A adoption: 4 upstream symbols still absent (97 lines,
+all the attachment toolset the fork replaced), 125 top-level symbols diverged,
+132 byte-identical, 737 fork-only.
 
 **Ground truth beats line counts.** Prefer "these N upstream tests go red→green"
 as the acceptance criterion. Line counts drift; a test file that upstream
@@ -172,24 +214,24 @@ shipped with the feature does not.
 | [ownership.kanban_db.md](ownership.kanban_db.md) | per-symbol ownership: fork-only / upstream-identical / diverged |
 | [patch-targets.kanban_db.md](patch-targets.kanban_db.md) | the 470 monkeypatch sites and why extraction breaks them |
 | [boundary-map.kanban_ext.yaml](boundary-map.kanban_ext.yaml) | the extraction boundary map (Axis-B-adjacent, currently unused) |
+| `scripts/refactor/upstream_divergence.py` | measures both metrics; run it before and after any Axis A/B work |
 | `scripts/refactor/split_module.py` | the AST mover used for pure-move extraction |
 
 ## 7. The next concrete step
 
 Axis A is closed. What remains, in order:
 
-1. **Start Axis B** with the smallest real hook target,
-   `_guard_existing_db_is_healthy`. Characterization test committed **first**
-   and green against the unmodified function, then lift the fork logic into a
-   fork-owned hook. One symbol per commit, escalating:
-   `_guard_existing_db_is_healthy` → `Task`/`from_row` → `_default_spawn` →
-   `create_task` last (it is the lifecycle spine).
+1. **Start Axis B** with `_guard_existing_db_is_healthy` (49 fork lines) as the
+   pilot — small, and the mechanics are unproven. Characterization test
+   committed **first** and green against the unmodified function, then lift the
+   fork logic into a fork-owned hook. One symbol per commit.
    Hook design constraint: hooks are **pure functions taking what they need as
    parameters** (conn, row, config) and must not import `kanban_db` at module
    level — that is what made the extraction attempts deadlock (§3).
-2. **Re-measure the Axis B metric first** so the hook work has a baseline; the
-   pre-adoption number was 657 fork lines inside upstream symbols, and the
-   adoption moved it.
+2. **After the pilot, follow the measured table in §2, not the plan's seven.**
+   `_dispatch_once_locked` (997), `complete_task` (448) and
+   `_migrate_add_optional_columns` (355) dominate; the plan's list was derived
+   from one merge's conflict hunks and mis-ranks the work.
 3. **Report `test_wal_checkpoint_truncates_wal_file` upstream** — it is missing
    a SQLite-version skip and is red against upstream's own tree on any host with
    SQLite < 3.51.3.
