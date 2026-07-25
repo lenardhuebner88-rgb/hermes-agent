@@ -46,7 +46,8 @@ import os
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
 
@@ -75,11 +76,22 @@ def _db_path():
 
 
 def _connect() -> sqlite3.Connection:
-    from hermes_state import apply_wal_with_fallback
-
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
+    try:
+        _initialize_schema(conn)
+    except Exception:
+        # A PRAGMA/DDL failure after a successful connect() must not leak the
+        # just-opened connection back to the caller.
+        conn.close()
+        raise
+    return conn
+
+
+def _initialize_schema(conn: sqlite3.Connection) -> None:
+    from hermes_state import apply_wal_with_fallback
+
     apply_wal_with_fallback(conn, db_label="state.db (delivery_ledger)")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS delivery_obligations (
@@ -103,6 +115,8 @@ def _connect() -> sqlite3.Connection:
     # Reconcile ledgers written before the routing columns existed. Both are
     # nullable, so legacy rows keep working: a row without them redelivers
     # with the thread_id-only metadata it always had (see sweep_recoverable).
+    # Upstream moved this DDL into _initialize_schema() -> None, so the fork's
+    # migration keeps its place at the end of it but no longer returns conn.
     columns = {
         row[1]
         for row in conn.execute(
@@ -115,7 +129,26 @@ def _connect() -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE delivery_obligations ADD COLUMN metadata_json TEXT"
         )
-    return conn
+
+
+@contextmanager
+def _transaction() -> Iterator[sqlite3.Connection]:
+    """Open a connection, commit/rollback on exit, and ALWAYS close it.
+
+    ``sqlite3.Connection.__enter__``/``__exit__`` only commit or roll back the
+    transaction; they do not close the connection. Using ``with _connect()``
+    alone therefore leaks a connection — and its WAL/SHM file descriptors — on
+    every call, deferring the close to the garbage collector. On a long-running
+    gateway that exhausts ``RLIMIT_NOFILE`` (the cron-ledger sibling of this
+    bug was #69567 / PR #69594). ``record_obligation`` runs on every outbound
+    final response, so this ledger is the highest-frequency leaker.
+    """
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _owner_stamp() -> tuple[int, Optional[int]]:
@@ -190,7 +223,7 @@ def record_obligation(
         if metadata
         else None
     )
-    with _DB_LOCK, _connect() as conn:
+    with _DB_LOCK, _transaction() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO delivery_obligations
                (obligation_id, session_key, platform, chat_id, thread_id,
@@ -232,7 +265,10 @@ def claim_owned_retry(
     """
     now = now if now is not None else time.time()
     pid, started = _owner_stamp()
-    with _DB_LOCK, _connect() as conn:
+    # Fork-only function, so upstream's FD-leak fix (_connect -> _transaction)
+    # could not reach it; without this it stays the one call site that leaks a
+    # connection per retry claim.
+    with _DB_LOCK, _transaction() as conn:
         row = conn.execute(
             """SELECT state, attempts, created_at, owner_pid, owner_started_at
                FROM delivery_obligations WHERE obligation_id=?""",
@@ -265,7 +301,7 @@ def claim_owned_retry(
 
 
 def _update_state(obligation_id: str, state: str, error: str = "") -> None:
-    with _DB_LOCK, _connect() as conn:
+    with _DB_LOCK, _transaction() as conn:
         conn.execute(
             """UPDATE delivery_obligations
                SET state=?, updated_at=?, last_error=?
@@ -298,7 +334,7 @@ def sweep_recoverable(
     now = now if now is not None else time.time()
     pid, started = _owner_stamp()
     claimed: List[Dict[str, Any]] = []
-    with _DB_LOCK, _connect() as conn:
+    with _DB_LOCK, _transaction() as conn:
         rows = conn.execute(
             """SELECT obligation_id, session_key, platform, chat_id, thread_id,
                       reply_to, metadata_json, content, state, attempts,
@@ -368,7 +404,7 @@ def _prune(now: Optional[float] = None) -> None:
     now = now if now is not None else time.time()
     cutoff = now - _RETENTION_SECONDS
     try:
-        with _connect() as conn:
+        with _transaction() as conn:
             conn.execute(
                 """DELETE FROM delivery_obligations
                    WHERE state IN ('delivered', 'abandoned') AND updated_at < ?""",
@@ -412,7 +448,7 @@ def ledger_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
 
 def debug_rows(limit: int = 20) -> str:
     """Human-readable dump for ad-hoc inspection (sqlite3-free path)."""
-    with _DB_LOCK, _connect() as conn:
+    with _DB_LOCK, _transaction() as conn:
         rows = conn.execute(
             """SELECT obligation_id, session_key, state, attempts,
                       created_at, updated_at, last_error

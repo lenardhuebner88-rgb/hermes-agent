@@ -1123,7 +1123,7 @@ def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
         return {"version": AUTH_STORE_VERSION, "providers": {}}
 
     try:
-        raw = json.loads(auth_file.read_text())
+        raw = json.loads(auth_file.read_text(encoding="utf-8"))
     except Exception as exc:
         corrupt_path = auth_file.with_suffix(".json.corrupt")
         try:
@@ -3834,7 +3834,7 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     payload = None
     for attempt in range(4):
         try:
-            payload = json.loads(auth_path.read_text())
+            payload = json.loads(auth_path.read_text(encoding="utf-8"))
             break
         except (json.JSONDecodeError, ValueError, OSError) as exc:
             if attempt == 3:
@@ -3845,6 +3845,9 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
                 return None
             time.sleep(0.05)
     try:
+        # Upstream re-read the file here; the fork's retry loop above already
+        # produced ``payload`` (with upstream's explicit utf-8 encoding adopted
+        # into it), so a second read would only discard the retry.
         if not isinstance(payload, dict):
             return None
         tokens = payload.get("tokens")
@@ -5281,7 +5284,7 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         logger.debug("Shared Nous auth store at %s is unreadable: %s", path, exc)
         return None
