@@ -127,7 +127,9 @@ def test_connect_auto_repairs_index_only_corruption(tmp_path, caplog):
     assert kb._repairable_index_names(messages) == ["idx_tasks_status"]
 
     with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_db"):
-        conn = kb.connect(db_path=db_path)
+        # The normal connect path trusts the durable schema stamp. Explicit
+        # repair uses the full guarded initialization path instead.
+        conn = kb.connect(db_path=db_path, force_init=True)
     try:
         # DB is clean again and data survived.
         row = conn.execute("PRAGMA integrity_check").fetchone()
@@ -172,7 +174,7 @@ def test_guard_fails_closed_when_reindex_does_not_clean(tmp_path, monkeypatch):
         lambda path, names: (False, ["wrong # of entries in index idx_tasks_status"]),
     )
     with pytest.raises(kb.KanbanDbCorruptError) as excinfo:
-        kb.connect(db_path=db_path)
+        kb.connect(db_path=db_path, force_init=True)
     assert "REINDEX auto-repair attempted" in str(excinfo.value)
     assert excinfo.value.backup_path is not None
     assert excinfo.value.backup_path.exists()
@@ -184,7 +186,7 @@ def test_repaired_db_connects_normally_afterwards(tmp_path):
     _build_board_db(db_path)
     _corrupt_index(db_path, "idx_tasks_status")
 
-    conn = kb.connect(db_path=db_path)
+    conn = kb.connect(db_path=db_path, force_init=True)
     conn.close()
     # Second connect: healthy cache path, no new backups minted.
     before = set(tmp_path.glob("kanban.db.corrupt.*.bak"))
@@ -310,6 +312,7 @@ def test_dispatch_tick_runs_wal_checkpoint_at_interval(tmp_path, monkeypatch):
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
     # Fresh per-path clock so previous tests can't have claimed the slot.
     monkeypatch.setattr(kb, "_LAST_WAL_CHECKPOINT", {})
 
@@ -341,6 +344,7 @@ def test_wal_checkpoint_failure_never_fails_the_tick(tmp_path, monkeypatch):
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
     monkeypatch.setattr(kb, "_LAST_WAL_CHECKPOINT", {})
 
     executed: list[str] = []
@@ -357,24 +361,34 @@ def test_wal_checkpoint_failure_never_fails_the_tick(tmp_path, monkeypatch):
 
 
 def test_wal_checkpoint_truncates_wal_file(tmp_path, monkeypatch):
-    """End-to-end: the checkpoint actually truncates the -wal sidecar."""
+    """End-to-end checkpoint behavior for supported journal modes."""
     db_path = tmp_path / "kanban.db"
     _build_board_db(db_path, tasks=1)
     monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "kanban-home"))
     monkeypatch.setattr(kb, "_LAST_WAL_CHECKPOINT", {})
 
     conn = kb.connect(db_path=db_path)
     try:
-        # Generate WAL frames.
+        journal_mode = str(
+            conn.execute("PRAGMA journal_mode").fetchone()[0]
+        ).lower()
+        # Generate journal frames.
         for i in range(30):
             kb.create_task(conn, title=f"wal-{i}")
         wal = tmp_path / "kanban.db-wal"
-        assert wal.exists() and wal.stat().st_size > 0
 
         kb.dispatch_once(conn, spawn_fn=lambda *a, **k: None, dry_run=True)
-        assert wal.stat().st_size == 0, (
-            "wal_checkpoint(TRUNCATE) should reset the -wal file to 0 bytes"
-        )
+        if journal_mode == "wal":
+            assert wal.exists() and wal.stat().st_size == 0, (
+                "wal_checkpoint(TRUNCATE) should reset the -wal file to 0 bytes"
+            )
+        else:
+            # apply_wal_with_fallback deliberately selects DELETE for linked
+            # SQLite builds with known WAL-reset corruption. The checkpoint
+            # remains best-effort and there is no WAL sidecar to truncate.
+            assert journal_mode == "delete"
+            assert not wal.exists()
     finally:
         conn.close()
 
