@@ -1,6 +1,17 @@
 # Kuratierter Engine/Modell-Katalog fürs Dashboard-Dropdown (Loop-Runner v1).
 # Struktur: engines.<name>.{label, models}. "models: []" heißt "Katalog-Eintrag ohne
 # Adapter" (Dashboard zeigt die Engine, aber Start ist gesperrt).
+#
+# SINGLE SOURCE OF TRUTH für den Claude-Abo-Katalog (`engines.claude.models`).
+# Ein neues Claude-Modell wird GENAU HIER eingetragen; alles andere speist daraus:
+#   - Loops-Tab + Loop-Runner  → dieser Katalog direkt (fail-closed Membership-Check
+#     in loops/runner.py `_validate_effective_phase_catalog`)
+#   - Lanes-Tab + Fleet→Heute  → hermes_cli/claude_cli_model_catalog.py, das die
+#     Liste in Lane-Optionen übersetzt (plugins/kanban/dashboard/lane_routes.py)
+#   - Frontend-Fallbacks       → web/src/control/generated/claudeModels.ts, erzeugt
+#     von scripts/sync_model_catalog.py (Drift ist gate-rot)
+# Die Einträge müssen `claude --model <id>` akzeptieren (`claude -p` = Max-Abo-Lane).
+# Die Reihenfolge ist die Anzeigereihenfolge in den Dropdowns.
 # Codex-Modell 2026-07-09 gegen `~/.codex/config.toml` geprüft:
 # default_model = "gpt-5.6-sol"; gpt-5.5/gpt-5.3-codex bleiben als bewiesene
 # Fallbacks im Katalog.
@@ -9,7 +20,15 @@
 engines:
   claude:
     label: "Claude (Abo)"
-    models: [claude-fable-5, claude-opus-4-8, claude-sonnet-5, claude-haiku-4-5]
+    # claude-opus-5 live gegen die CLI geprüft 2026-07-25:
+    # `claude -p --model claude-opus-5 --effort xhigh` → exit 0.
+    models:
+      - claude-fable-5
+      - claude-opus-5
+      - claude-opus-4-8
+      - claude-sonnet-5
+      - claude-sonnet-4-6
+      - claude-haiku-4-5
   kimi:
     label: "Kimi (Coding-Abo)"
     models: [kimi-code/kimi-for-coding, k3]

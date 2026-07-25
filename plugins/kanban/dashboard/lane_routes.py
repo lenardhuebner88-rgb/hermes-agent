@@ -7,13 +7,15 @@ from __future__ import annotations
 # --- Lanes (night-sprint F1) — switchable profile→routing presets ---
 
 
-_LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = (
-    {"id": "claude-fable-5", "label": "Claude Fable 5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
-    {"id": "claude-opus-4-8", "label": "Claude Opus 4.8", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
-    {"id": "claude-sonnet-5", "label": "Claude Sonnet 5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
-    {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
-    {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5", "runtime": "claude-cli", "group": "Claude (Max-Abo)", "provider": None, "locked": False},
-)
+# Die Max-Abo-Modelle kommen aus der EINEN Quelle (loops/models.yaml →
+# engines.claude.models), nicht aus einer zweiten handgepflegten Liste hier:
+# ein neues Claude-Modell wird dort eingetragen und erscheint damit zugleich im
+# Loops-Tab, im Lanes-Tab und in Fleet→Heute. Gelesen wird beim Import — ein
+# Katalog-Edit wird also mit dem Dashboard-Restart wirksam, den der Deploy
+# ohnehin fährt.
+from hermes_cli.claude_cli_model_catalog import load_claude_cli_lane_models
+
+_LANE_CLAUDE_CLI_MODELS: tuple[dict[str, Any], ...] = load_claude_cli_lane_models()
 _LANE_CLAUDE_CLI_MODEL_IDS = {str(item["id"]) for item in _LANE_CLAUDE_CLI_MODELS}
 
 

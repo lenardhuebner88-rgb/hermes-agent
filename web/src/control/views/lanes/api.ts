@@ -7,6 +7,7 @@
 //   task.model_override > active lane > profile config.yaml default.
 
 import { fetchJSON } from "@/lib/api";
+import { CLAUDE_CLI_MODELS } from "@/control/generated/claudeModels";
 
 export type LaneRuntime = "hermes" | "claude-cli";
 export type LaneSpawnHealthStatus = "healthy" | "unhealthy" | "unknown";
@@ -553,10 +554,11 @@ export function persistLaneModels(
 //   "hermes|gpt-5.5" / "claude-cli|claude-fable-5" → explicit model
 
 /** Fallback catalog when the backend payload carries no `models` yet. */
+/** Notliste, wenn `GET /lanes` keine Modelle liefert. Der Claude-Block kommt aus
+ *  der einen Quelle (loops/models.yaml, generiert nach claudeModels.ts) — nur die
+ *  beiden API-Beispiele darunter sind hier von Hand gepflegt. */
 export const FALLBACK_MODELS: LaneModelOption[] = [
-  { id: "claude-fable-5", label: "Claude Fable 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
-  { id: "claude-sonnet-5", label: "Claude Sonnet 5", runtime: "claude-cli", group: "Claude (Max-Abo)", provider: null, locked: false },
+  ...CLAUDE_CLI_MODELS,
   { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex" },
   { id: "glm-5.2-fast", label: "GLM 5.2 Fast", runtime: "hermes", group: "Neuralwatt", provider: "neuralwatt" },
 ];

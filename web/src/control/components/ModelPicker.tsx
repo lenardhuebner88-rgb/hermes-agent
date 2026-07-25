@@ -1,14 +1,16 @@
 import { useEffect, useId, useState } from "react";
 import { fetchJSON } from "@/lib/api";
+import { CLAUDE_CLI_MODEL_IDS } from "@/control/generated/claudeModels";
 
 // Phase B (Programm 3): wiederverwendbarer Modell-Picker — das Datalist-Muster
 // aus der LanesView (F1) als Komponente gehoben. Freitext bleibt erlaubt;
 // Vorschläge = statischer Katalog + live default_models aus GET /lanes
 // (profiles[] kommt dynamisch aus den Profil-Configs).
+// Der Claude-Block ist NICHT handgepflegt: er kommt aus der einen Quelle
+// (loops/models.yaml → generiert nach claudeModels.ts), damit ein neues
+// Max-Abo-Modell hier nicht vergessen wird.
 const MODEL_SUGGESTIONS = [
-  "claude-opus-4-8",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
+  ...CLAUDE_CLI_MODEL_IDS,
   "gpt-5.5",
   "gpt-5.4",
   "kimi-for-coding",
