@@ -39,6 +39,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
 } from "@testing-library/react";
 
 import type { PaChatMessage, PaEnginesResponse, PaTurn } from "@/lib/api";
@@ -666,7 +667,12 @@ describe("JarvisChat (LIVE-Kontrakt /api/pa/*, Payload-Shapes aus test_pa_chat.p
     const card = await screen.findByRole("region", {
       name: "Qualität und geschätzte Kosten je Engine",
     });
-    expect(card.textContent).toContain("sol");
+    // Die Section wird UNBEDINGT gerendert (JarvisChat.tsx: aria-label liegt am
+    // <section>, nur der Body wechselt zwischen Laden/Leer/Daten). Die Region ist
+    // also sofort da und `findByRole` beweist nichts über den Inhalt — erst auf
+    // die geladenen Daten warten, sonst assertieren die synchronen Prüfungen
+    // unter Last gegen "Lade Qualitätsdaten …".
+    await waitFor(() => expect(card.textContent).toContain("sol"));
     expect(card.textContent).toContain("4 Turns");
     expect(card.textContent).toContain("Daumen: 50% positiv");
     expect(card.textContent).toContain("Kosten: $0.000321");
