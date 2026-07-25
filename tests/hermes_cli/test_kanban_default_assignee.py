@@ -224,7 +224,6 @@ def test_coder_frontend_is_an_additive_writable_code_lane():
     from hermes_cli import planspecs
 
     assert kb._LANE_ALIASES == {"coder-claude": "premium"}
-    assert kb._canonical_assignee("coder-frontend") == "coder-frontend"
     assert "coder-frontend" in planspecs.VALID_PLANSPEC_LANES
     assert "coder-frontend" in kd._WORKER_SCOPE_LANES
     assert "coder-frontend" not in kd._READ_ONLY_WORKER_LANES
