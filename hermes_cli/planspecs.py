@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import re
 from typing import Any, Literal
 
@@ -325,6 +325,13 @@ def _planspec_kanban_state_from_rows(
     resolved: str, conn: Any, rows: list[Any]
 ) -> dict[str, Any] | None:
     """Derive one source's live state from already-read specified events."""
+    resolved_name = PurePath(resolved).name
+    exact_row: Any = None
+    # Vault reorganizations move PlanSpec files after ingest (e.g. an agent
+    # directory rename) while the recorded event keeps the old absolute path.
+    # PlanSpec filenames are date-prefixed and unique, so an unambiguous
+    # basename match is a safe fallback for moved-but-unchanged files.
+    fallback_rows: dict[str, Any] = {}
     for row in rows:
         try:
             payload = json.loads(row["payload"] or "{}")
@@ -332,46 +339,54 @@ def _planspec_kanban_state_from_rows(
             continue
         if payload.get("source") != "planspec_ingest":
             continue
-        if str(payload.get("path") or "") != resolved:
-            continue
-        root_id = str(row["task_id"])
-        root = kanban_db.get_task(conn, root_id)
-        if root is None:
-            continue
-        child_ids = kanban_db.parent_ids(conn, root_id)
-        child_statuses: list[str] = []
-        for child_id in child_ids:
-            child = kanban_db.get_task(conn, child_id)
-            if child is not None:
-                child_statuses.append(child.status)
-        statuses = [root.status, *child_statuses]
-        if root.status == "done":
-            state = "completed"
-        elif root.status == "archived":
-            state = "archived"
-        elif "blocked" in statuses:
-            state = "blocked"
-        elif any(status in {"running", "review"} for status in statuses):
-            state = "running"
-        elif any(status in {"triage", "todo", "scheduled", "ready"} for status in statuses):
-            state = "queued"
-        else:
-            state = root.status or "unknown"
-        total = len(child_statuses)
-        done = sum(1 for status in child_statuses if status == "done")
-        blocked = sum(1 for status in child_statuses if status == "blocked")
-        running = sum(1 for status in child_statuses if status in {"running", "review"})
-        return {
-            "root_task_id": root_id,
-            "root_status": root.status,
-            "state": state,
-            "child_total": total,
-            "child_done": done,
-            "child_blocked": blocked,
-            "child_running": running,
-            "ingested_at": int(row["created_at"]),
-        }
-    return None
+        payload_path = str(payload.get("path") or "")
+        if payload_path == resolved:
+            exact_row = row
+            break
+        if payload_path and PurePath(payload_path).name == resolved_name:
+            fallback_rows.setdefault(payload_path, row)
+    row = exact_row
+    if row is None and len(fallback_rows) == 1:
+        row = next(iter(fallback_rows.values()))
+    if row is None:
+        return None
+    root_id = str(row["task_id"])
+    root = kanban_db.get_task(conn, root_id)
+    if root is None:
+        return None
+    child_ids = kanban_db.parent_ids(conn, root_id)
+    child_statuses: list[str] = []
+    for child_id in child_ids:
+        child = kanban_db.get_task(conn, child_id)
+        if child is not None:
+            child_statuses.append(child.status)
+    statuses = [root.status, *child_statuses]
+    if root.status == "done":
+        state = "completed"
+    elif root.status == "archived":
+        state = "archived"
+    elif "blocked" in statuses:
+        state = "blocked"
+    elif any(status in {"running", "review"} for status in statuses):
+        state = "running"
+    elif any(status in {"triage", "todo", "scheduled", "ready"} for status in statuses):
+        state = "queued"
+    else:
+        state = root.status or "unknown"
+    total = len(child_statuses)
+    done = sum(1 for status in child_statuses if status == "done")
+    blocked = sum(1 for status in child_statuses if status == "blocked")
+    running = sum(1 for status in child_statuses if status in {"running", "review"})
+    return {
+        "root_task_id": root_id,
+        "root_status": root.status,
+        "state": state,
+        "child_total": total,
+        "child_done": done,
+        "child_blocked": blocked,
+        "child_running": running,
+        "ingested_at": int(row["created_at"]),
+    }
 
 
 def _planspec_kanban_states(paths: list[Path]) -> dict[str, dict[str, dict[str, Any]]]:

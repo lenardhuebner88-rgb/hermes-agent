@@ -544,6 +544,62 @@ def test_list_planspecs_keeps_live_kanban_root_open(tmp_path: Path, monkeypatch,
     assert records[0]["closed_reason"] is None
 
 
+def _ingest_completed_root(old_path: Path) -> str:
+    with kb.connect_closing() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="PlanSpec moved",
+            assignee="coder",
+            created_by="planspec-ingest",
+            initial_status="running",
+        )
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", ("done", root_id))
+        kb.add_event(
+            conn,
+            root_id,
+            "specified",
+            {"source": "planspec_ingest", "path": str(old_path), "slice": ""},
+        )
+        conn.commit()
+    return root_id
+
+
+def test_planspec_kanban_state_falls_back_to_basename_for_moved_file(kanban_home, tmp_path):
+    # Vault reorganizations move PlanSpec files after ingest; the recorded
+    # event keeps the old absolute path (Claude/plans -> Claude-Code/plans).
+    old_path = tmp_path / "03-Agents" / "Claude" / "plans" / "2026-07-24-moved-planspec.md"
+    new_path = tmp_path / "03-Agents" / "Claude-Code" / "plans" / "2026-07-24-moved-planspec.md"
+    root_id = _ingest_completed_root(old_path)
+
+    state = planspecs._planspec_kanban_state(new_path)
+
+    assert state is not None
+    assert state["root_task_id"] == root_id
+    assert state["state"] == "completed"
+
+
+def test_planspec_kanban_state_exact_path_wins_over_basename(kanban_home, tmp_path):
+    moved_path = tmp_path / "03-Agents" / "Claude" / "plans" / "2026-07-24-moved-planspec.md"
+    exact_path = tmp_path / "03-Agents" / "Claude-Code" / "plans" / "2026-07-24-moved-planspec.md"
+    _ingest_completed_root(moved_path)
+    exact_root = _ingest_completed_root(exact_path)
+
+    state = planspecs._planspec_kanban_state(exact_path)
+
+    assert state is not None
+    assert state["root_task_id"] == exact_root
+
+
+def test_planspec_kanban_state_basename_fallback_requires_unique_match(kanban_home, tmp_path):
+    name = "2026-07-24-moved-planspec.md"
+    _ingest_completed_root(tmp_path / "03-Agents" / "Alpha" / "plans" / name)
+    _ingest_completed_root(tmp_path / "03-Agents" / "Beta" / "plans" / name)
+
+    state = planspecs._planspec_kanban_state(tmp_path / "03-Agents" / "Gamma" / "plans" / name)
+
+    assert state is None
+
+
 def test_list_planspecs_filters_valid_and_limits_server_side(tmp_path: Path):
     plans_root = tmp_path / "03-Agents"
     first_valid = _write_planspec(plans_root, "2026-06-16-alpha.md")
