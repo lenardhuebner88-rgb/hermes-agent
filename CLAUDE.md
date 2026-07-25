@@ -6,6 +6,11 @@
 - Several agent sessions edit this directory in **parallel**. ALWAYS `git status --short` first; leave foreign uncommitted/untracked work untouched.
 - `origin` = NousResearch upstream → **NEVER push** there. Push only to `piet-fork`, fast-forward only, never `--force`.
 
+## Upstream merge capability (read before touching `hermes_cli/kanban_db.py`)
+- Orientation doc, single entry point: **`docs/refactor/UPSTREAM-STRATEGY.md`** — the goal, what is measured, two dead ends not to re-run, and the next concrete step.
+- **Standing rule:** new fork code goes into a fork-owned module, never into an upstream-owned file. Every line that ignores this is a line the next sync has to fight.
+- A sync that resolves an upstream file as *ours* takes upstream's **tests** without its **implementation**. Always re-measure after a sync: `git diff --stat <old-merge-base> origin/main -- <file>`. `git merge-tree HEAD origin/main` reports 0 once `origin/main` is an ancestor — that is an artefact, not a pass.
+
 ## Worktree sessions (phone/remote)
 - Remote sessions spawn in `.claude/worktrees/bridge-cse_*` (branch `worktree-bridge-…`, forked from local HEAD). Finished work returns to the live branch via merge — no direct edits to the live checkout.
 - Worktrees start **without** `web/node_modules` → `cd <wt>/web && npm ci` (safe; only symlink/install against the LIVE web is forbidden), then run gates via the hoisted root binaries `<wt>/node_modules/.bin/{tsc,vitest}` — **never** `npx tsc/vitest` in a worktree (stub trap `ENOWORKSPACES`). NEVER gate a worktree diff in the live checkout (foreign sessions keep it dirty). Details: skill `hermes-dashboard-dev`.

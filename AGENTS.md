@@ -136,6 +136,13 @@ and invariants over snapshots or counts of expected-to-change catalogs.
 - Wiring dead code into a live path requires an end-to-end resolution test with
   real imports and temporary `HERMES_HOME`.
 - Inspect merge diffs for silent deletion/reversion when integrating stale work.
+- **New fork code never goes into an upstream-owned file.** Put it in a
+  fork-owned module and call it from one line. `hermes_cli/kanban_db.py` is the
+  cautionary tale: ~29k fork lines interleaved into upstream's ~9.8k forced the
+  2026-07-24 sync to resolve it as *ours*, which silently discarded 12 upstream
+  commits while keeping upstream's tests — 42 tests red on arrival. Before
+  touching that file, upstream syncs, or the refactor:
+  **`docs/refactor/UPSTREAM-STRATEGY.md`**.
 - Treat load-sensitive `waitFor` flakes as scoped test-timeout problems only
   after reproducing in the relevant loaded gate.
 
