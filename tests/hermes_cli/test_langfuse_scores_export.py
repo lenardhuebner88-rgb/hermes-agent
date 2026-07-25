@@ -6,7 +6,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from hermes_cli.langfuse_scores_export import export_scores
+import hermes_cli.langfuse_scores_export as langfuse_export
+from hermes_cli.langfuse_scores_export import export_scores, synthesize_traces, trace_id_for_run
 
 
 class _FakeLangfuseHandler(BaseHTTPRequestHandler):
@@ -244,3 +245,116 @@ def test_cron_mode_error_exit_nonzero(tmp_path: Path, capsys, monkeypatch) -> No
     # No key/token values must appear.
     assert "sk-test" not in captured.out
     assert "pk-test" not in captured.out
+
+
+def _make_trace_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE tasks (id TEXT PRIMARY KEY, tenant TEXT);
+        CREATE TABLE task_links (parent_id TEXT NOT NULL, child_id TEXT NOT NULL);
+        CREATE TABLE task_runs (
+          id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT,
+          started_at INTEGER, outcome TEXT, metadata TEXT, active_model TEXT,
+          cost_usd REAL
+        );
+        INSERT INTO tasks VALUES ('root', 'default'), ('child', 'default');
+        INSERT INTO task_links VALUES ('root', 'child');
+        INSERT INTO task_runs VALUES
+          (1, 'child', 'coder', 'done', 1764028800, 'completed',
+           '{"input_tokens": 10, "output_tokens": 4, "cache_read_input_tokens": 2,
+             "reasoning_tokens": 1, "cost_usd_equivalent": 0.25}', 'model-x', 0.1);
+        INSERT INTO task_runs VALUES
+          (2, 'root', 'reviewer', 'done', 1764028801, 'completed', '{}', 'model-y', 0.0);
+    """)
+    conn.close()
+
+
+def test_synthesize_traces_is_deterministic_and_uses_generation_observation(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "kanban.db"
+    _make_trace_db(db_path)
+    requests: list[tuple[str, dict]] = []
+    existing = [{"id": "live-trace", "environment": "production",
+                 "metadata": {"kanban_run_id": 2}}]
+
+    def fake_request(url: str, _authorization: str, *, method: str = "GET", payload=None):
+        if url.endswith("/retention"):
+            return {"active": False}
+        if "/traces?" in url:
+            return {"data": existing, "meta": {"totalPages": 1}}
+        assert payload is not None
+        requests.append((url, payload))
+        existing.append(payload["batch"][0]["body"])
+        return {}
+
+    monkeypatch.setattr(langfuse_export, "_request", fake_request)
+    env = {"HERMES_LANGFUSE_BASE_URL": "http://fake", "HERMES_LANGFUSE_PUBLIC_KEY": "pk",
+           "HERMES_LANGFUSE_SECRET_KEY": "sk", "HERMES_KANBAN_BOARD": "default"}
+    report = synthesize_traces(db_path=db_path, env=env)
+    assert report["synthesized"] == 1
+    assert report["skipped_live"] == 1
+    assert len(requests) == 1
+    trace, generation = requests[0][1]["batch"]
+    assert trace["type"] == "trace-create"
+    assert trace["body"]["id"] == trace_id_for_run(1)
+    assert trace["body"]["sessionId"] == "root"
+    assert trace["body"]["environment"] == "backfill"
+    assert trace["body"]["timestamp"] == "2025-11-25T00:00:00Z"
+    assert {"kanban-worker", "board:default", "profile:coder", "model:model-x",
+            "outcome:completed"}.issubset(trace["body"]["tags"])
+    assert generation["type"] == "generation-create"
+    assert generation["body"]["usageDetails"] == {
+        "input": 10, "output": 4, "cache_read_input_tokens": 2, "reasoning_tokens": 1}
+    assert generation["body"]["costDetails"] == {"total": 0.25}
+    second = synthesize_traces(db_path=db_path, env=env)
+    assert second["synthesized"] == 0
+    assert second["skipped_seen"] == 1
+    assert len(requests) == 1
+
+
+def test_synthesize_traces_batches_and_resumes(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "kanban.db"
+    _make_trace_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("INSERT INTO task_runs VALUES (3, 'root', 'coder', 'done', 1764028802, 'completed', '{}', 'm', 0)")
+    conn.commit()
+    conn.close()
+    requests: list[dict] = []
+
+    def fake_request(url: str, _authorization: str, *, method: str = "GET", payload=None):
+        if url.endswith("/retention"):
+            return {"active": False}
+        if "/traces?" in url:
+            return {"data": [], "meta": {"totalPages": 1}}
+        assert payload is not None
+        requests.append(payload)
+        return {}
+
+    monkeypatch.setattr(langfuse_export, "_request", fake_request)
+    env = {"HERMES_LANGFUSE_BASE_URL": "http://fake", "HERMES_LANGFUSE_PUBLIC_KEY": "pk",
+           "HERMES_LANGFUSE_SECRET_KEY": "sk"}
+    report = synthesize_traces(db_path=db_path, env=env, batch_size=1,
+                               resume_path=tmp_path / "resume")
+    assert len(requests) == 3
+    assert all(len(request["batch"]) == 2 for request in requests)
+    assert report["resume_after"] == 3
+    assert (tmp_path / "resume").read_text() == "3"
+
+
+def test_synthesize_traces_does_not_write_when_retention_is_active(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "kanban.db"
+    _make_trace_db(db_path)
+    calls: list[str] = []
+
+    def fake_request(url: str, _authorization: str, *, method: str = "GET", payload=None):
+        calls.append(url)
+        if url.endswith("/retention"):
+            return {"retention": {"enabled": True}}
+        raise AssertionError("trace or ingestion must not be queried after active retention")
+
+    monkeypatch.setattr(langfuse_export, "_request", fake_request)
+    env = {"HERMES_LANGFUSE_BASE_URL": "http://fake", "HERMES_LANGFUSE_PUBLIC_KEY": "pk",
+           "HERMES_LANGFUSE_SECRET_KEY": "sk"}
+    report = synthesize_traces(db_path=db_path, env=env)
+    assert report["stopped"] == "active_retention_policy"
+    assert report["posted"] == 0
+    assert calls == ["http://fake/api/public/retention"]
