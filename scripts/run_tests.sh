@@ -41,43 +41,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # A candidate must actually be able to run the suite (pytest importable), not
 # merely exist: a bare `uv venv` drops an empty .venv/ that would otherwise
 # shadow the real venv and break every test run in the checkout.
-# Probe local dev venvs first; a worktree may reuse the live checkout's .venv.
-# Fall back to the Nix devShell's editable venv
-# (HERMES_PYTHON is exported by the devShell hook and ships [dev] extras:
-# pytest, pytest-asyncio, ruff, ty).
-VENV=""
-VENV_CANDIDATES=("$REPO_ROOT/.venv" "$REPO_ROOT/venv")
-if [ "$REPO_ROOT" != "$HOME/.hermes/hermes-agent" ]; then
-  VENV_CANDIDATES+=("$HOME/.hermes/hermes-agent/.venv")
-fi
-for candidate in "${VENV_CANDIDATES[@]}"; do
-  if [ -f "$candidate/bin/activate" ]; then
-    if [ -f "$candidate/pyvenv.cfg" ] \
-        && grep -Eq '^home = .*/\.hermes-runtime/python/generation-' "$candidate/pyvenv.cfg"; then
-      echo "note: skipping $candidate (Hermes-managed release venv; tests require [all,dev,messaging])" >&2
-      continue
-    fi
-    if "$candidate/bin/python" -c "import pytest" >/dev/null 2>&1; then
-      VENV="$candidate"
-      break
-    fi
-    echo "note: skipping $candidate (no pytest importable — empty/partial venv)" >&2
-  fi
-done
-
-if [ -n "$VENV" ]; then
-  PYTHON="$VENV/bin/python"
-elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
-    && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
-  # Guard with an import check: HERMES_PYTHON may point at the RELEASE
-  # venv (no pytest) when inherited from a wrapped `hermes` binary rather
-  # than the devShell hook.
-  PYTHON="$HERMES_PYTHON"
-else
-  UV_BIN="$(command -v uv 2>/dev/null || printf 'uv')"
-  echo "error: no test Python; run: cd $REPO_ROOT && $UV_BIN sync --locked --extra all --extra dev --extra messaging" >&2
-  exit 1
-fi
+# Interpreter selection lives in the fork-owned helper below so this
+# upstream-owned file stays close to upstream, and so the probe exists exactly
+# once (collect_check.sh sources the same helper — the two inline copies drifted
+# on 2026-07-25 while a comment claimed they matched).
+# shellcheck source=lib/select_test_python.sh
+. "$SCRIPT_DIR/lib/select_test_python.sh"
+PYTHON="$(select_test_python "$REPO_ROOT")" || exit 1
 
 echo "▶ using test Python: $PYTHON"
 

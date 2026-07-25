@@ -31,38 +31,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Locate a venv that can actually run pytest. This MUST stay in sync with the probe
-# in run_tests.sh — it drifted once (2026-07-25) and the comment kept claiming they
-# matched, which is worse than no comment: the old list here still offered the
-# Hermes-managed release venv, so in a worktree (where the live .venv is not first)
-# this script could pick an interpreter run_tests.sh deliberately rejects.
-# Two guards, both load-bearing:
-#   - reject the managed release venv by its pyvenv.cfg marker (it carries [all]
-#     but not [dev], so it has no pytest and must never be selected for tests)
-#   - reject an empty/partial venv (a bare `uv venv` drops a .venv that would
-#     otherwise shadow the real one)
-VENV=""
-VENV_CANDIDATES=("$REPO_ROOT/.venv" "$REPO_ROOT/venv")
-if [ "$REPO_ROOT" != "$HOME/.hermes/hermes-agent" ]; then
-  VENV_CANDIDATES+=("$HOME/.hermes/hermes-agent/.venv")
-fi
-for candidate in "${VENV_CANDIDATES[@]}"; do
-  if [ -f "$candidate/bin/activate" ]; then
-    if [ -f "$candidate/pyvenv.cfg" ] \
-        && grep -Eq '^home = .*/\.hermes-runtime/python/generation-' "$candidate/pyvenv.cfg"; then
-      continue
-    fi
-    if "$candidate/bin/python" -c "import pytest" >/dev/null 2>&1; then
-      VENV="$candidate"
-      break
-    fi
-  fi
-done
-if [ -z "$VENV" ]; then
-  echo "error: no virtualenv with pytest found in $REPO_ROOT/.venv, venv, or ~/.hermes/hermes-agent/venv" >&2
-  exit 1
-fi
-PYTHON="$VENV/bin/python"
+# Interpreter selection is shared with run_tests.sh via a fork-owned helper.
+# It used to be an inline copy here; on 2026-07-25 the two drifted while a
+# comment still claimed they matched, so this script could pick an interpreter
+# run_tests.sh deliberately rejects. One definition, one behaviour.
+# shellcheck source=lib/select_test_python.sh
+. "$SCRIPT_DIR/lib/select_test_python.sh"
+PYTHON="$(select_test_python "$REPO_ROOT")" || exit 1
 
 # Throw-away HERMES_HOME so collection never reads live ~/.hermes state
 # (active_profile, config.yaml). conftest.py only isolates HERMES_HOME at
