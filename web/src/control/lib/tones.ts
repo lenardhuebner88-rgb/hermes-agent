@@ -42,7 +42,7 @@ const runStatusLabels: Record<string, string> = {
   scheduled: 'Geplant',
   todo: 'Offen',
   triage: 'Triage',
-  transient_retry: 'Temporärer Retry',
+  transient_retry: 'Wird erneut versucht',
   deliverable_posted_not_completed: 'Ergebnis abgelegt, nicht abgeschlossen',
   unknown: 'Unbekannt',
 };
