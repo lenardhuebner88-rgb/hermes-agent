@@ -145,10 +145,32 @@ _CHECK_FN_TTL_SECONDS = 30.0
 # as a flake (last-good True is served) rather than a real outage. Kept short
 # so a genuinely-down backend is reflected within a couple of turns.
 _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
+_CHECK_FN_ERROR_DETAIL_MAX_CHARS = 240
 _check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
 # Monotonic timestamp of the most recent True result per check_fn.
 _check_fn_last_good: Dict[Callable, float] = {}
 _check_fn_cache_lock = threading.Lock()
+
+
+def _check_fn_error_detail(exc: Exception) -> str:
+    """Return a bounded, single-line, secret-redacted exception diagnostic."""
+    exc_type = type(exc).__name__
+    try:
+        # Keep the low-level registry import chain lean on the normal path.
+        # ``force=True`` makes this logging boundary safe even when an operator
+        # has disabled redaction for ordinary tool output.
+        from agent.redact import redact_sensitive_text
+
+        message = redact_sensitive_text(str(exc), force=True)
+        detail = f"{exc_type}: {' '.join(message.split())}" if message else exc_type
+    except Exception:
+        # A diagnostic must never turn a swallowed availability-check failure
+        # into a new failure or fall back to an unredacted message.
+        detail = exc_type
+
+    if len(detail) > _CHECK_FN_ERROR_DETAIL_MAX_CHARS:
+        detail = detail[: _CHECK_FN_ERROR_DETAIL_MAX_CHARS - 3] + "..."
+    return detail
 
 
 def _check_fn_cached(fn: Callable) -> bool:
@@ -168,12 +190,12 @@ def _check_fn_cached(fn: Callable) -> bool:
             if now - ts < _CHECK_FN_TTL_SECONDS:
                 return value
 
-    raised = False
+    error_detail: Optional[str] = None
     try:
         value = bool(fn())
-    except Exception:
+    except Exception as exc:
         value = False
-        raised = True
+        error_detail = _check_fn_error_detail(exc)
 
     with _check_fn_cache_lock:
         if value:
@@ -187,10 +209,11 @@ def _check_fn_cached(fn: Callable) -> bool:
             # True and do NOT cache the failure, so the next call re-probes
             # rather than pinning a stale verdict for the full TTL.
             logger.warning(
-                "check_fn %s failed (%s) within %.0fs of last success; "
+                "check_fn %s failed (%s%s) within %.0fs of last success; "
                 "treating as transient and keeping tool(s) available",
                 getattr(fn, "__qualname__", fn),
-                "raised" if raised else "returned False",
+                "raised" if error_detail else "returned False",
+                f": {error_detail}" if error_detail else "",
                 _CHECK_FN_FAILURE_GRACE_SECONDS,
             )
             return True
@@ -198,9 +221,10 @@ def _check_fn_cached(fn: Callable) -> bool:
         # No recent success (or grace expired) — honor the failure. Log it so
         # silent tool loss in quiet mode (subagents) is diagnosable.
         logger.warning(
-            "check_fn %s %s; dependent tools will be unavailable this turn",
+            "check_fn %s %s%s; dependent tools will be unavailable this turn",
             getattr(fn, "__qualname__", fn),
-            "raised" if raised else "returned False",
+            "raised" if error_detail else "returned False",
+            f": {error_detail}" if error_detail else "",
         )
         _check_fn_cache[fn] = (now, False)
         return False

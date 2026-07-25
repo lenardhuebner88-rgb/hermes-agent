@@ -22823,7 +22823,13 @@ def start_server(
     # no TCP handshake completing (#50641). So *only on Windows* we mirror
     # uvicorn's own machinery and run on the loop factory it picks.
     if sys.platform != "win32":
-        asyncio.run(_serve())
+        try:
+            asyncio.run(_serve())
+        except KeyboardInterrupt:
+            # asyncio.run() can surface Ctrl-C again after uvicorn has already
+            # completed its graceful shutdown. Match uvicorn's CLI behavior:
+            # return cleanly instead of printing a shutdown traceback.
+            pass
         return
 
     # Windows-only path. Resolve the runner + loop factory FIRST (and fall back

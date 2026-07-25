@@ -11,6 +11,7 @@ import json
 import os
 import time
 import asyncio
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -602,6 +603,80 @@ class TestWatchUpdateProgress:
             if "Restore local changes" in str(call)
         ]
         assert len(prompt_sends) == 1
+
+    @pytest.mark.asyncio
+    async def test_stale_pending_file_is_cleaned_up(self, tmp_path):
+        """Completed update markers older than the watcher timeout are removed."""
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending_path = hermes_home / ".update_pending.json"
+        pending_path.write_text(json.dumps({
+            "platform": "telegram",
+            "chat_id": "67890",
+            "user_id": "12345",
+            "session_key": "agent:main:telegram:dm:67890",
+            "timestamp": (
+                datetime.now() - timedelta(hours=500)
+            ).isoformat(),
+        }))
+        exit_code_path = hermes_home / ".update_exit_code"
+        exit_code_path.write_text("124")
+        (hermes_home / ".update_output.txt").write_text("timed out\n")
+        (hermes_home / ".update_prompt.json").write_text("{}")
+        (hermes_home / ".update_response").write_text("y")
+        session_key = "agent:main:telegram:dm:67890"
+        runner._update_prompt_pending[session_key] = True
+        stale_mtime = time.time() - 500 * 60 * 60
+        os.utime(exit_code_path, (stale_mtime, stale_mtime))
+        runner.adapters = {}
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            await runner._watch_update_progress(
+                poll_interval=0.05,
+                stream_interval=0.1,
+                timeout=1.0,
+            )
+
+        assert not pending_path.exists()
+        assert not exit_code_path.exists()
+        assert not (hermes_home / ".update_output.txt").exists()
+        assert not (hermes_home / ".update_prompt.json").exists()
+        assert not (hermes_home / ".update_response").exists()
+        assert session_key not in runner._update_prompt_pending
+
+    @pytest.mark.asyncio
+    async def test_old_start_with_fresh_completion_is_still_notified(self, tmp_path):
+        """A long-running update is not stale immediately after completion."""
+        runner = _make_runner()
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending_path = hermes_home / ".update_pending.json"
+        pending_path.write_text(json.dumps({
+            "platform": "telegram",
+            "chat_id": "67890",
+            "session_key": "agent:main:telegram:dm:67890",
+            "timestamp": (
+                datetime.now() - timedelta(hours=500)
+            ).isoformat(),
+        }))
+        exit_code_path = hermes_home / ".update_exit_code"
+        exit_code_path.write_text("0")
+        runner.adapters = {}
+        runner._send_update_notification = AsyncMock(return_value=True)
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            await runner._watch_update_progress(
+                poll_interval=0.01,
+                stream_interval=0.1,
+                timeout=60.0,
+            )
+
+        runner._send_update_notification.assert_awaited_once()
+        assert pending_path.exists()
+        assert exit_code_path.exists()
 
 
 # ---------------------------------------------------------------------------

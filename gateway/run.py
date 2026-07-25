@@ -16912,6 +16912,7 @@ class GatewayRunner(
         output_path = _hermes_home / ".update_output.txt"
         exit_code_path = _hermes_home / ".update_exit_code"
         prompt_path = _hermes_home / ".update_prompt.json"
+        response_path = _hermes_home / ".update_response"
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -16925,6 +16926,47 @@ class GatewayRunner(
             if path.exists():
                 try:
                     pending = json.loads(path.read_text())
+
+                    # A completed update can leave notification markers behind
+                    # when its platform adapter is unavailable. Do not poll and
+                    # warn for the full timeout again on every gateway restart.
+                    if exit_code_path.exists():
+                        try:
+                            completion_age = (
+                                time.time() - exit_code_path.stat().st_mtime
+                            )
+                            if completion_age > timeout:
+                                logger.info(
+                                    "Update watcher: stale pending file "
+                                    "(completed %ds ago, exit_code=%s), "
+                                    "cleaning up",
+                                    int(completion_age),
+                                    exit_code_path.read_text().strip(),
+                                )
+                                for marker in (
+                                    pending_path,
+                                    claimed_path,
+                                    output_path,
+                                    exit_code_path,
+                                    prompt_path,
+                                    response_path,
+                                ):
+                                    marker.unlink(missing_ok=True)
+                                stale_session_key = pending.get("session_key")
+                                if not stale_session_key:
+                                    stale_platform = pending.get("platform")
+                                    stale_chat_id = pending.get("chat_id")
+                                    if stale_platform and stale_chat_id:
+                                        stale_session_key = (
+                                            f"{stale_platform}:{stale_chat_id}"
+                                        )
+                                self._update_prompt_pending.pop(
+                                    stale_session_key, None
+                                )
+                                return
+                        except OSError:
+                            pass
+
                     platform_str = pending.get("platform")
                     chat_id = pending.get("chat_id")
                     chat_type = pending.get("chat_type")

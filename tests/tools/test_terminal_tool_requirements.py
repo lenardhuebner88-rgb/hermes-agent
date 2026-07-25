@@ -153,6 +153,61 @@ class TestCheckFnTransientFailureSuppression:
         t["now"] += reg._CHECK_FN_FAILURE_GRACE_SECONDS + 1
         assert reg._check_fn_cached(probe) is False
 
+    def test_raised_exception_is_logged_with_safe_details(self, monkeypatch, caplog):
+        """Raised probes expose a useful cause without leaking credentials."""
+        import tools.registry as reg
+
+        secret = "sk-" + ("sensitive" * 8)
+
+        def bomb():
+            raise RuntimeError(
+                f"detection backend not initialized\nOPENAI_API_KEY={secret} "
+                + ("overflow " * 80)
+            )
+
+        monkeypatch.setattr(reg.time, "monotonic", lambda: 1000.0)
+
+        with caplog.at_level("WARNING", logger="tools.registry"):
+            assert reg._check_fn_cached(bomb) is False
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "raised" in message
+        assert "RuntimeError" in message
+        assert "detection backend not initialized" in message
+        assert secret not in message
+        assert "OPENAI_API_KEY=***" in message
+        assert "\n" not in message
+        assert len(reg._check_fn_error_detail(RuntimeError("x" * 1000))) <= (
+            reg._CHECK_FN_ERROR_DETAIL_MAX_CHARS
+        )
+
+    def test_raised_exception_within_grace_logs_details(self, monkeypatch, caplog):
+        """Transient exception warnings carry the same bounded diagnostic."""
+        import tools.registry as reg
+
+        calls = {"n": 0}
+
+        def flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return True
+            raise ValueError("environment config missing key")
+
+        t = {"now": 1000.0}
+        monkeypatch.setattr(reg.time, "monotonic", lambda: t["now"])
+
+        with caplog.at_level("WARNING", logger="tools.registry"):
+            assert reg._check_fn_cached(flaky) is True
+            t["now"] += reg._CHECK_FN_TTL_SECONDS + 1
+            assert reg._check_fn_cached(flaky) is True
+
+        assert len(caplog.records) == 1
+        message = caplog.records[0].getMessage()
+        assert "raised" in message
+        assert "ValueError" in message
+        assert "environment config missing key" in message
+
     def test_subagent_keeps_file_tools_through_docker_flake(self, monkeypatch):
         """End-to-end: a docker probe that flakes on the 2nd build keeps the
         file/terminal toolset available for the subagent being constructed."""

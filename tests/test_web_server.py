@@ -319,3 +319,17 @@ def test_start_server_keeps_bare_asyncio_run_on_posix(monkeypatch):
     assert runner_called["hit"] is False, (
         "POSIX must not take the Windows loop-factory branch"
     )
+
+
+def test_start_server_swallows_keyboard_interrupt_after_posix_shutdown(monkeypatch):
+    """A POSIX shutdown interrupt from asyncio.run must not print a traceback."""
+    _stub_uvicorn(monkeypatch)
+    monkeypatch.setattr(web_server.sys, "platform", "linux")
+
+    def _fake_asyncio_run(coro):
+        coro.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(asyncio, "run", _fake_asyncio_run)
+
+    web_server.start_server(host="127.0.0.1", port=0, open_browser=False)
