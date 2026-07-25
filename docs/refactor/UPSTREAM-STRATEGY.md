@@ -6,6 +6,24 @@ document; everything else in `docs/refactor/` is detail hanging off it.
 
 Last verified: 2026-07-25 against `main`.
 
+> **Status 2026-07-25 — Axis B (splitting `kanban_db.py`) is PARKED by operator
+> decision, and its premise is refuted for the current cycle.** Section 1 below
+> argues that "every upstream update to it collides". Measured against the
+> 187-commit sync landed today (`0cb41891c`): **zero** of those commits touch
+> `hermes_cli/kanban_db.py` — upstream last touched it on 2026-06-29. The sync
+> produced twelve conflict hunks in eight files, none of them that one; they sat
+> in `gateway/`, `cron/`, `agent/` and `hermes_cli/{auth,config}.py`. The
+> reproducible fork-loss audit of the previous sync found **zero** collateral
+> loss (`scripts/refactor/fork_loss_check.py`, report in
+> `docs/handoff/2026-07-25-fork-loss-audit-und-sync-REPORT.md`).
+>
+> So the merge pain of this cycle was **not** where this document predicted, and
+> a 6094-line restructuring of `kanban_db.py` is not justified by the current
+> evidence. Do not resume Axis B on the strength of section 1 alone. Re-open it
+> only when a *measured* sync actually collides there — and re-measure with the
+> fork-loss gate first. Axis A (adopting the backlog of a landed sync) is done
+> and unaffected.
+
 ---
 
 ## 1. The goal, in one paragraph
