@@ -2579,7 +2579,9 @@ async def read_managed_file(request: Request, path: str):
 
     mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     try:
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+        encoded = await asyncio.to_thread(
+            lambda: base64.b64encode(target.read_bytes()).decode("ascii")
+        )
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not readable")
     except OSError as exc:
@@ -3597,7 +3599,9 @@ async def fs_read_data_url(path: str):
     if st.st_size > _FS_DATA_URL_MAX_BYTES:
         raise HTTPException(status_code=413, detail="File too large")
     try:
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+        encoded = await asyncio.to_thread(
+            lambda: base64.b64encode(target.read_bytes()).decode("ascii")
+        )
     except PermissionError:
         raise HTTPException(status_code=403, detail="File is not readable")
     except OSError as exc:
