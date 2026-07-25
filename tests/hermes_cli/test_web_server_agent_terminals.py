@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
+import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -303,6 +306,35 @@ def test_agent_terminal_sessions_maps_tmux_timeout_to_structured_503(monkeypatch
 
     assert response.status_code == 503
     assert response.json() == {"detail": "tmux command timed out: 10 seconds"}
+
+
+def test_agent_terminal_overview_runs_service_off_event_loop_thread(monkeypatch):
+    class ThreadRecordingService(FakeAgentTerminalService):
+        call_thread: threading.Thread | None = None
+
+        def overview(self, *, tail_lines=10):
+            self.call_thread = threading.current_thread()
+            return super().overview(tail_lines=tail_lines)
+
+    service = ThreadRecordingService()
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    event_loop_thread = threading.current_thread()
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    async def request_overview() -> httpx.Response:
+        transport = httpx.ASGITransport(app=web_server.app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            return await client.get(
+                "/api/agent-terminals/overview", headers=headers
+            )
+
+    response = asyncio.run(request_overview())
+
+    assert response.status_code == 200
+    assert service.call_thread is not None
+    assert service.call_thread is not event_loop_thread
 
 
 def test_execution_capsule_api_saga_binds_and_reads_consistent_generation(

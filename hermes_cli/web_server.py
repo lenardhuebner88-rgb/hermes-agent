@@ -17601,6 +17601,11 @@ def _agent_terminal_service() -> TmuxAgentSessionService:
     return TmuxAgentSessionService()
 
 
+async def _agent_terminal_op(fn, /, *args, **kwargs):
+    """Run one blocking agent-terminal service operation off the event loop."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 def _agent_terminal_error(exc: Exception) -> HTTPException:
     status = 400 if isinstance(exc, InvalidTarget) else 503
     detail = scrub_detail(str(exc)) or exc.__class__.__name__
@@ -17692,15 +17697,18 @@ async def agent_terminal_upload(file: UploadFile = File(...)) -> Dict[str, objec
 
 @app.get("/api/agent-terminals/capabilities")
 async def agent_terminal_capabilities() -> Dict[str, object]:
-    return _agent_terminal_service().capabilities().to_dict()
+    capabilities = await _agent_terminal_op(
+        _agent_terminal_service().capabilities
+    )
+    return capabilities.to_dict()
 
 
 @app.get("/api/agent-terminals/sessions")
 async def agent_terminal_sessions() -> Dict[str, object]:
     try:
         service = _agent_terminal_service()
-        service.cleanup_stale_isolated_attaches()
-        sessions = service.list_sessions()
+        await _agent_terminal_op(service.cleanup_stale_isolated_attaches)
+        sessions = await _agent_terminal_op(service.list_sessions)
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"sessions": sessions}
@@ -17710,8 +17718,8 @@ async def agent_terminal_sessions() -> Dict[str, object]:
 async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, object]:
     try:
         service = _agent_terminal_service()
-        service.cleanup_stale_isolated_attaches()
-        windows = service.list_windows(session)
+        await _agent_terminal_op(service.cleanup_stale_isolated_attaches)
+        windows = await _agent_terminal_op(service.list_windows, session)
     except AgentTerminalError as exc:
         raise _agent_terminal_error(exc) from exc
     return {"windows": [window.to_dict() for window in windows]}
@@ -17720,7 +17728,9 @@ async def agent_terminal_windows(session: Optional[str] = None) -> Dict[str, obj
 @app.get("/api/agent-terminals/overview")
 async def agent_terminal_overview(tail_lines: int = 10) -> Dict[str, object]:
     try:
-        return _agent_terminal_service().overview(tail_lines=tail_lines)
+        return await _agent_terminal_op(
+            _agent_terminal_service().overview, tail_lines=tail_lines
+        )
     except AgentTerminalError as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17884,7 +17894,10 @@ def agent_questions_answer(
 @app.post("/api/agent-terminals/show")
 async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().show(req.session, req.window).to_dict()}
+        window = await _agent_terminal_op(
+            _agent_terminal_service().show, req.session, req.window
+        )
+        return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17892,16 +17905,14 @@ async def agent_terminal_show(req: AgentTerminalTargetRequest) -> Dict[str, obje
 @app.post("/api/agent-terminals/ensure")
 async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, object]:
     try:
-        return {
-            "window": _agent_terminal_service()
-            .ensure(
-                req.kind,
-                req.workdir,
-                start_mode=req.start_mode or "free",
-                context_profile=req.context_profile or "full",
-            )
-            .to_dict()
-        }
+        window = await _agent_terminal_op(
+            _agent_terminal_service().ensure,
+            req.kind,
+            req.workdir,
+            start_mode=req.start_mode or "free",
+            context_profile=req.context_profile or "full",
+        )
+        return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17909,16 +17920,14 @@ async def agent_terminal_ensure(req: AgentTerminalEnsureRequest) -> Dict[str, ob
 @app.post("/api/agent-terminals/create")
 async def agent_terminal_create(req: AgentTerminalCreateRequest) -> Dict[str, object]:
     try:
-        return {
-            "window": _agent_terminal_service()
-            .create_new(
-                req.kind,
-                req.workdir,
-                start_mode=req.start_mode or "free",
-                context_profile=req.context_profile or "full",
-            )
-            .to_dict()
-        }
+        window = await _agent_terminal_op(
+            _agent_terminal_service().create_new,
+            req.kind,
+            req.workdir,
+            start_mode=req.start_mode or "free",
+            context_profile=req.context_profile or "full",
+        )
+        return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17926,11 +17935,13 @@ async def agent_terminal_create(req: AgentTerminalCreateRequest) -> Dict[str, ob
 @app.post("/api/agent-terminals/respawn")
 async def agent_terminal_respawn(req: AgentTerminalRespawnRequest) -> Dict[str, object]:
     try:
-        return {
-            "window": _agent_terminal_service()
-            .respawn_dead(req.session, req.window, action=req.action or "fresh")
-            .to_dict()
-        }
+        window = await _agent_terminal_op(
+            _agent_terminal_service().respawn_dead,
+            req.session,
+            req.window,
+            action=req.action or "fresh",
+        )
+        return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17938,7 +17949,13 @@ async def agent_terminal_respawn(req: AgentTerminalRespawnRequest) -> Dict[str, 
 @app.post("/api/agent-terminals/rename")
 async def agent_terminal_rename(req: AgentTerminalRenameRequest) -> Dict[str, object]:
     try:
-        return {"window": _agent_terminal_service().rename(req.session, req.window, req.name).to_dict()}
+        window = await _agent_terminal_op(
+            _agent_terminal_service().rename,
+            req.session,
+            req.window,
+            req.name,
+        )
+        return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17946,7 +17963,9 @@ async def agent_terminal_rename(req: AgentTerminalRenameRequest) -> Dict[str, ob
 @app.post("/api/agent-terminals/kill-dead")
 async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().kill_dead(req.session, req.window)
+        await _agent_terminal_op(
+            _agent_terminal_service().kill_dead, req.session, req.window
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"ok": True}
@@ -17955,8 +17974,11 @@ async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str,
 @app.post("/api/agent-terminals/terminate")
 async def agent_terminal_terminate(req: AgentTerminalTerminateRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().terminate_live(
-            req.session, req.window, allow_external=req.external
+        await _agent_terminal_op(
+            _agent_terminal_service().terminate_live,
+            req.session,
+            req.window,
+            allow_external=req.external,
         )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
@@ -17966,7 +17988,12 @@ async def agent_terminal_terminate(req: AgentTerminalTerminateRequest) -> Dict[s
 @app.post("/api/agent-terminals/capture")
 async def agent_terminal_capture(req: AgentTerminalCaptureRequest) -> Dict[str, object]:
     try:
-        content = _agent_terminal_service().capture(req.session, req.window, start=req.start)
+        content = await _agent_terminal_op(
+            _agent_terminal_service().capture,
+            req.session,
+            req.window,
+            start=req.start,
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"content": content}
@@ -17975,7 +18002,12 @@ async def agent_terminal_capture(req: AgentTerminalCaptureRequest) -> Dict[str, 
 @app.post("/api/agent-terminals/attach-metadata")
 async def agent_terminal_attach_metadata(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
-        return {"metadata": _agent_terminal_service().attach_metadata(req.session, req.window)}
+        metadata = await _agent_terminal_op(
+            _agent_terminal_service().attach_metadata,
+            req.session,
+            req.window,
+        )
+        return {"metadata": metadata}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -17983,7 +18015,13 @@ async def agent_terminal_attach_metadata(req: AgentTerminalTargetRequest) -> Dic
 @app.post("/api/agent-terminals/handoff-draft")
 async def agent_terminal_handoff_draft(req: AgentTerminalHandoffDraftRequest) -> Dict[str, object]:
     try:
-        return {"draft": _agent_terminal_service().handoff_draft(req.session, req.window, start=req.start)}
+        draft = await _agent_terminal_op(
+            _agent_terminal_service().handoff_draft,
+            req.session,
+            req.window,
+            start=req.start,
+        )
+        return {"draft": draft}
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
 
@@ -18129,7 +18167,12 @@ def agent_terminal_get_execution_capsule(
 @app.post("/api/agent-terminals/send-keys")
 async def agent_terminal_send_keys(req: AgentTerminalSendKeysRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().send_keys(req.session, req.window, req.text)
+        await _agent_terminal_op(
+            _agent_terminal_service().send_keys,
+            req.session,
+            req.window,
+            req.text,
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"ok": True}
@@ -18138,7 +18181,9 @@ async def agent_terminal_send_keys(req: AgentTerminalSendKeysRequest) -> Dict[st
 @app.post("/api/agent-terminals/interrupt")
 async def agent_terminal_interrupt(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().interrupt(req.session, req.window)
+        await _agent_terminal_op(
+            _agent_terminal_service().interrupt, req.session, req.window
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"ok": True}
@@ -18147,7 +18192,9 @@ async def agent_terminal_interrupt(req: AgentTerminalTargetRequest) -> Dict[str,
 @app.post("/api/agent-terminals/detach-client")
 async def agent_terminal_detach_client(req: AgentTerminalDetachRequest) -> Dict[str, object]:
     try:
-        _agent_terminal_service().detach_client(req.client_id)
+        await _agent_terminal_op(
+            _agent_terminal_service().detach_client, req.client_id
+        )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
     return {"ok": True}
