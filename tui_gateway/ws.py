@@ -29,6 +29,7 @@ import json
 import logging
 import socket
 import threading
+from collections import deque
 from typing import Any
 
 from tui_gateway import server
@@ -102,10 +103,17 @@ class WSTransport:
         self._pending_tokens: list[str] = []
         self._token_flush_handle: asyncio.TimerHandle | None = None
         self._token_flush_armed = False
-        # Buffer mutation is protected by the thread lock above; actual socket
-        # writes need an async boundary because several batches can be queued on
-        # the owning loop while it recovers from a stall.
-        self._send_lock = asyncio.Lock()
+        # Batches are enqueued synchronously while _token_lock fixes their
+        # logical order, then ONE loop-owned drain task writes them. An
+        # asyncio.Lock is not enough: it is acquired in task-scheduling order,
+        # not enqueue order, so a control frame whose task was already ready
+        # could take the lock ahead of a token batch the coalesce timer had
+        # already fixed ahead of it — putting tokens on the wire after the
+        # frame that was supposed to follow them.
+        self._send_queue: deque[
+            tuple[list[str], concurrent.futures.Future]
+        ] = deque()
+        self._send_drain_task: asyncio.Task | None = None
 
     @staticmethod
     def _is_streaming_frame(obj: dict) -> bool:
@@ -146,21 +154,16 @@ class WSTransport:
         # it can never overtake the tokens that preceded it. The send is
         # scheduled INSIDE the lock so the on-the-wire order matches the buffer
         # order even if the coalesce timer fires on the loop at the same moment.
-        from agent.async_utils import safe_schedule_threadsafe
         with self._token_lock:
             self._pending_tokens.append(line)
             batch = self._pending_tokens
             self._pending_tokens = []
-            if on_loop:
-                # Fire-and-forget — don't block the loop waiting on itself.
-                self._loop.create_task(self._safe_send_many(batch))
-                return True
-            fut = safe_schedule_threadsafe(
-                self._safe_send_many(batch), self._loop
-            )
-            if fut is None:
-                self._closed = True
-                return False
+            fut = self._queue_send_locked(batch)
+        if on_loop:
+            # Fire-and-forget — don't block the loop waiting on itself. The
+            # batch's place in the queue is already fixed, so ordering holds
+            # without waiting for the drain.
+            return not self._closed
 
         try:
             fut.result(timeout=_WS_WRITE_TIMEOUT_S)
@@ -208,7 +211,7 @@ class WSTransport:
                 return
             batch = self._pending_tokens
             self._pending_tokens = []
-            self._loop.create_task(self._safe_send_many(batch))
+            self._queue_send_locked(batch)
 
     async def write_async(self, obj: dict) -> bool:
         """Send from the owning event loop. Awaits until the frame is on the wire."""
@@ -222,37 +225,138 @@ class WSTransport:
             batch = self._pending_tokens
             self._pending_tokens = []
             batch.append(json.dumps(obj, ensure_ascii=False))
-        await self._safe_send_many(batch)
+            fut = self._queue_send_locked(batch)
+        await asyncio.wrap_future(fut)
         return not self._closed
 
-    async def _safe_send_many(self, lines: list[str]) -> None:
-        """Send one indivisible batch of pre-serialized frames in wire order."""
-        async with self._send_lock:
-            if self._closed:
-                return
-            try:
-                for line in lines:
-                    if self._closed:
+    def _queue_send_locked(
+        self, lines: list[str]
+    ) -> concurrent.futures.Future:
+        """Append a batch in logical order; caller must hold ``_token_lock``.
+
+        Returns a future completed once the batch has been written (or the
+        transport latched closed), so callers that need to await the wire can.
+        """
+        completion: concurrent.futures.Future = concurrent.futures.Future()
+        if self._closed:
+            completion.set_result(None)
+            return completion
+        self._send_queue.append((lines, completion))
+        try:
+            # Always schedule the loop-side starter. Redundant callbacks are
+            # harmless and they close the empty->draining race.
+            self._loop.call_soon_threadsafe(self._ensure_send_drain)
+        except RuntimeError:
+            # The owning loop is gone, so NOTHING will drain this queue. Every
+            # batch still in it holds a completion someone may be blocked on,
+            # so release them all — not just the one we just appended.
+            self._closed = True
+            self._release_completions(self._take_queued_locked())
+        return completion
+
+    def _ensure_send_drain(self) -> None:
+        """Start the sole socket writer. Runs on the owning event loop."""
+        if self._closed or not self._send_queue:
+            return
+        task = self._send_drain_task
+        if task is None or task.done():
+            self._send_drain_task = self._loop.create_task(
+                self._drain_send_queue()
+            )
+
+    async def _drain_send_queue(self) -> None:
+        """Write queued batches FIFO; the only direct writer to the socket.
+
+        Because this is the SOLE writer, it must never die with work still
+        queued: every queued batch holds a completion future that a worker
+        thread or coroutine may be blocked on, and nobody else would resolve
+        it. Hence the cancellation and exit handling below.
+        """
+        try:
+            while True:
+                with self._token_lock:
+                    if not self._send_queue:
                         return
-                    await self._ws.send_text(line)
-            except Exception as exc:
-                # Latch while still holding the writer lock so queued batches
-                # observe the failure before they get a chance to touch the
-                # socket.
-                self._closed = True
-                _log.warning(
-                    "ws send failed peer=%s error_type=%s error=%s",
-                    self._peer, type(exc).__name__, exc,
-                )
+                    lines, completion = self._send_queue.popleft()
+
+                if self._closed:
+                    if not completion.done():
+                        completion.set_result(None)
+                    continue
+
+                try:
+                    for line in lines:
+                        if self._closed:
+                            break
+                        await self._ws.send_text(line)
+                except Exception as exc:
+                    # Latch before releasing the batch so queued batches
+                    # observe the failure before they can touch the socket.
+                    self._closed = True
+                    _log.warning(
+                        "ws send failed peer=%s error_type=%s error=%s",
+                        self._peer, type(exc).__name__, exc,
+                    )
+                finally:
+                    if not completion.done():
+                        completion.set_result(None)
+
+                if self._closed:
+                    self._discard_queued_sends()
+                    return
+        except asyncio.CancelledError:
+            # Loop teardown cancels pending tasks. Nothing further will reach
+            # the socket, so release every waiter rather than leaving them
+            # blocked on a future no one is left to resolve.
+            self._closed = True
+            self._discard_queued_sends()
+            raise
+        finally:
+            self._send_drain_task = None
+            if self._send_queue and not self._closed:
+                # Exited with work still queued (an unexpected error path):
+                # hand the remainder to a fresh drain, or those callers wait
+                # forever.
+                try:
+                    self._loop.call_soon_threadsafe(self._ensure_send_drain)
+                except RuntimeError:
+                    self._closed = True
+                    self._discard_queued_sends()
+
+    def _take_queued_locked(self) -> list:
+        """Empty the send queue and buffer; caller must hold ``_token_lock``."""
+        queued = list(self._send_queue)
+        self._send_queue.clear()
+        self._pending_tokens = []
+        return queued
+
+    @staticmethod
+    def _release_completions(queued: list) -> None:
+        for _lines, completion in queued:
+            if not completion.done():
+                completion.set_result(None)
+
+    def _discard_queued_sends(self) -> None:
+        """Release every still-queued batch so no caller waits on a dead socket."""
+        with self._token_lock:
+            queued = self._take_queued_locked()
+        self._release_completions(queued)
+
+    async def _safe_send_many(self, lines: list[str]) -> None:
+        """Queue one indivisible batch and wait until the socket consumed it."""
+        with self._token_lock:
+            completion = self._queue_send_locked(lines)
+        await asyncio.wrap_future(completion)
 
     def close(self) -> None:
-        self._closed = True
         # Cancel any pending coalesce flush. close() runs on the loop thread
         # (the handle_ws finally), so touching the TimerHandle here is safe.
         handle = self._token_flush_handle
         if handle is not None:
             handle.cancel()
             self._token_flush_handle = None
+        self._closed = True
+        self._discard_queued_sends()
 
 
 def _ws_peer_label(ws: Any) -> str:
