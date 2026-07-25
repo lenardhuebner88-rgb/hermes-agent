@@ -55,15 +55,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-# Cap for the package-directory fallback in _affected_pytest_modules: if the
-# package test directory contains more than this many test_*.py files, the
-# fallback downgrades to no selection (nightly full suite remains the
-# backstop). Must stay in sync with scripts/affected_tests.py.
-#
-# Calibrated (2026-07-16): tests/hermes_cli/=592, tests/gateway/=460,
-# tests/tools/=318 files. 800 covers all current directories; anything
-# larger would exceed the targeted-gate walltime budget.
-_FALLBACK_MAX_TEST_FILES = 800
+# Cap for the package-directory fallback in _affected_pytest_modules. Larger
+# directories turn a targeted gate into a broad suite; importing tests remain
+# selected individually and the nightly full suite remains the backstop.
+# Must stay in sync with scripts/affected_tests.py.
+_FALLBACK_MAX_TEST_FILES = 200
+
+# Source paths with feature-split test suites. Keep this identical to
+# scripts/affected_tests.py so worker and post-merge gates select the same scope.
+_MONOLITH_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
+    "hermes_cli/strategist.py": ("tests/hermes_cli/test_strategist*.py",),
+    "hermes_cli/kanban_db.py": (
+        "tests/hermes_cli/test_kanban_db*.py",
+        "tests/hermes_cli/test_kanban_lanes.py",
+        "tests/hermes_cli/test_kanban_block_kind*.py",
+        "tests/hermes_cli/test_kanban_provider_override*.py",
+        "tests/plugins/test_kanban_model_override*.py",
+        "tests/scripts/test_check_kanban_lifecycle_anchors.py",
+    ),
+    "hermes_cli/kanban_worktrees.py": (
+        "tests/hermes_cli/test_kanban_worktrees*.py",
+        "tests/hermes_cli/test_visual_gate.py",
+    ),
+}
+
+
+def _mapped_monolith_tests(repo_root: Path, source_path: str) -> list[str]:
+    """Expand a known monolith's maintained test patterns to existing files."""
+    return sorted(
+        {
+            str(path.relative_to(repo_root))
+            for pattern in _MONOLITH_TEST_PATTERNS.get(source_path, ())
+            for path in repo_root.glob(pattern)
+            if path.is_file()
+        }
+    )
 
 
 def _imports_changed_module(test_path: Path, module_import: str) -> bool:
@@ -93,9 +119,11 @@ def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) ->
     # glob is non-recursive, so the root scan only matches those.
     test_dirs = [repo_root / "tests"]
     pkg_test_dir = Path("tests") / rel_dir
-    absolute_pkg_test_dir = repo_root / pkg_test_dir
-    if pkg_test_dir != Path("tests") and absolute_pkg_test_dir.is_dir():
-        test_dirs.append(absolute_pkg_test_dir)
+    while pkg_test_dir != Path("tests"):
+        absolute_pkg_test_dir = repo_root / pkg_test_dir
+        if absolute_pkg_test_dir.is_dir():
+            test_dirs.append(absolute_pkg_test_dir)
+        pkg_test_dir = pkg_test_dir.parent
     return [
         str(path.relative_to(repo_root))
         for test_dir in test_dirs
@@ -4453,6 +4481,10 @@ def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[
         candidate = Path("tests") / rel_dir / f"test_{name}"
         if (repo_root / candidate).is_file():
             modules.add(str(candidate))
+        mapped_tests = _mapped_monolith_tests(repo_root, f)
+        if mapped_tests:
+            modules.update(mapped_tests)
+            continue
         modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
         if not (repo_root / candidate).is_file():
             pkg_test_dir = Path("tests") / rel_dir

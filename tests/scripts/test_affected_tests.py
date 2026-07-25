@@ -52,14 +52,15 @@ def test_stress_scripts_are_skipped():
     assert out == []
 
 
-def test_monolith_source_falls_back_to_package_dir():
-    """When a source file has no 1:1 test_<name>.py (e.g. gateway/run.py),
-    the entire tests/<pkg>/ directory is selected so feature-named tests
-    still run at the merge gate."""
+def test_large_package_selects_importers_without_directory_fallback():
+    """Large packages retain direct importers without selecting the directory."""
     mod = _load_module()
     # gateway/run.py has no tests/gateway/test_run.py but tests/gateway/ exists.
     out = mod.affected_pytest_modules(REPO_ROOT, ["gateway/run.py"])
-    assert "tests/gateway/" in out
+    assert out
+    assert "tests/gateway/" not in out
+    assert all(path.endswith(".py") for path in out)
+    assert not any(path.endswith("/") for path in out)
 
 
 def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
@@ -180,12 +181,12 @@ def test_changed_module_selects_root_level_sibling_tests():
     assert "tests/test_design_board_store.py" in selected
 
 
-def test_fallback_cap_covers_hermes_cli_package_dir():
-    """tests/hermes_cli/ (592 files at calibration) is under the raised cap,
-    so a hermes_cli source without a 1:1 test file selects the package
-    directory again instead of silently downgrading to no selection."""
+def test_fallback_cap_omits_large_hermes_cli_package_dir():
+    """The 200-file cap keeps tests/hermes_cli/ out of targeted gates."""
     mod = _load_module()
     # tests/hermes_cli/test_design_board_store.py does not exist (the 1:1
-    # test lives at tests/ root), so the directory fallback applies.
+    # test lives at tests/ root), so the package fallback is considered.
     out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
-    assert "tests/hermes_cli/" in out
+    assert mod._FALLBACK_MAX_TEST_FILES == 200
+    assert "tests/test_design_board_store.py" in out
+    assert "tests/hermes_cli/" not in out

@@ -39,19 +39,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Cap for the package-directory fallback: if the package test directory
-# contains more than this many test_*.py files, the fallback downgrades to
-# no selection (nightly full suite remains the backstop). This prevents a
-# monolith edit from turning the targeted gate into a de-facto full-suite
-# run, satisfying the AC-2 counter-metric: no gate-tempo-for-coverage trade.
-#
-# Calibrated against real package directories (2026-07-16):
-#   tests/hermes_cli/  592 files / 11276 tests
-#   tests/gateway/     460 files / 8647 tests
-#   tests/tools/       318 files
-# 800 covers all current directories with headroom; anything larger would
-# push walltime past the targeted-gate budget.
-_FALLBACK_MAX_TEST_FILES = 800
+# Cap for the package-directory fallback. Larger directories turn a targeted
+# gate into a broad suite; importing tests remain selected individually and
+# the nightly full suite remains the backstop. scripts/affected-tests.sh reads
+# this value through the CLI so the shell gate cannot drift from Python.
+_FALLBACK_MAX_TEST_FILES = 200
 
 # Source paths with feature-split test suites. Keep this small and explicit:
 # these entries prevent a package-wide fallback without relying on test files
@@ -122,9 +114,11 @@ def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) ->
     # glob is non-recursive, so the root scan only matches those.
     test_dirs = [repo_root / "tests"]
     pkg_test_dir = Path("tests") / rel_dir
-    absolute_pkg_test_dir = repo_root / pkg_test_dir
-    if pkg_test_dir != Path("tests") and absolute_pkg_test_dir.is_dir():
-        test_dirs.append(absolute_pkg_test_dir)
+    while pkg_test_dir != Path("tests"):
+        absolute_pkg_test_dir = repo_root / pkg_test_dir
+        if absolute_pkg_test_dir.is_dir():
+            test_dirs.append(absolute_pkg_test_dir)
+        pkg_test_dir = pkg_test_dir.parent
     return [
         str(path.relative_to(repo_root))
         for test_dir in test_dirs
@@ -210,6 +204,9 @@ def affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[s
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[1] == "--fallback-max-test-files":
+        print(_FALLBACK_MAX_TEST_FILES)
+        return 0
     ref = argv[1] if len(argv) > 1 else None
     repo_root = _repo_root()
     changed = _changed_files(repo_root, ref)

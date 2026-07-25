@@ -12,7 +12,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-FALLBACK_MAX_TEST_FILES=200
+FALLBACK_MAX_TEST_FILES="$(python3 "$SCRIPT_DIR/affected_tests.py" --fallback-max-test-files)"
 
 RAW="$(python3 "$SCRIPT_DIR/affected_tests.py" "$@")"
 TOKENS=()
