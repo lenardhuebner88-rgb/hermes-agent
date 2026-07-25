@@ -5332,6 +5332,8 @@ class BasePlatformAdapter(ABC):
                                     ),
                                     chat_id=event.source.chat_id,
                                     thread_id=getattr(event.source, "thread_id", None),
+                                    reply_to=_reply_anchor,
+                                    metadata=_final_thread_metadata,
                                     content=text_content,
                                 )
                                 mark_attempting(_obligation_id)

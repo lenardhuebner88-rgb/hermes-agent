@@ -34,6 +34,8 @@ def _record(oid="ob-1", session_key="agent:main:slack:channel:C1", **kw):
         platform=kw.get("platform", "slack"),
         chat_id=kw.get("chat_id", "C1"),
         thread_id=kw.get("thread_id", "171.001"),
+        reply_to=kw.get("reply_to"),
+        metadata=kw.get("metadata"),
         content=kw.get("content", "the final answer"),
     )
 
@@ -84,6 +86,37 @@ class TestStateMachine:
         _record()  # INSERT OR REPLACE resets to pending — same turn re-record
         assert _row("ob-1")["state"] == "pending"
 
+    def test_old_schema_gains_routing_columns(self):
+        with dl._connect() as conn:
+            conn.execute("DROP TABLE delivery_obligations")
+            conn.execute(
+                """CREATE TABLE delivery_obligations (
+                    obligation_id TEXT PRIMARY KEY,
+                    session_key TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    thread_id TEXT,
+                    content TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    owner_pid INTEGER,
+                    owner_started_at INTEGER,
+                    last_error TEXT
+                )"""
+            )
+
+        with dl._connect() as conn:
+            columns = {
+                row[1]
+                for row in conn.execute(
+                    'PRAGMA table_info("delivery_obligations")'
+                ).fetchall()
+            }
+
+        assert {"reply_to", "metadata_json"} <= columns
+
 
 class TestObligationId:
     def test_stable_and_distinct(self):
@@ -126,6 +159,20 @@ class TestSweep:
         _orphan("ob-1")
         claimed = dl.sweep_recoverable()
         assert claimed[0]["needs_marker"] is True
+
+    def test_claim_preserves_exact_reply_routing(self):
+        metadata = {
+            "thread_id": "171.001",
+            "slack_team_id": "T1",
+            "notify": True,
+        }
+        _record(reply_to="msg-42", metadata=metadata)
+        _orphan("ob-1")
+
+        claimed = dl.sweep_recoverable()
+
+        assert claimed[0]["reply_to"] == "msg-42"
+        assert claimed[0]["metadata"] == metadata
 
     def test_delivered_rows_ignored(self):
         _record()
@@ -203,6 +250,7 @@ class TestGatewayRedeliverySweep:
         _store._store = None
         runner.session_store = None
         runner._async_session_store = _store
+        runner._delivery_retry_base_seconds = 0
         return runner
 
     @staticmethod
@@ -226,6 +274,7 @@ class TestGatewayRedeliverySweep:
         sent = adapter.send.call_args.kwargs
         assert sent["content"] == "the final answer"  # no marker
         assert sent["metadata"] == {"thread_id": "171.001"}
+        assert sent["reply_to"] is None
         assert _row("ob-1")["state"] == "delivered"
         runner._async_session_store.clear_resume_pending.assert_awaited_once_with(
             "agent:main:slack:channel:C1"
@@ -246,15 +295,88 @@ class TestGatewayRedeliverySweep:
         assert sent["content"].endswith("the final answer")
 
     @pytest.mark.asyncio
-    async def test_send_failure_marks_failed_for_next_boot(self):
+    async def test_send_failure_retries_in_process_without_restart(self):
         _record()
         _orphan("ob-1")
-        runner = self._runner(self._adapter(success=False))
+        adapter = self._adapter(success=False)
+        adapter.send.side_effect = [
+            MagicMock(success=False, error="temporary"),
+            MagicMock(success=True, error=""),
+        ]
+        runner = self._runner(adapter)
+
+        n = await runner._redeliver_pending_obligations()
+
+        assert n == 1
+        assert adapter.send.await_count == 2
+        assert _row("ob-1")["attempts"] == 2
+        assert _row("ob-1")["state"] == "delivered"
+        runner._async_session_store.clear_resume_pending.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejected_exhaustion_never_arms_a_silent_duplicate(self):
+        """Exhausting the attempts budget must NOT re-arm the resume path.
+
+        An explicit SendResult(success=False) is not proof of non-delivery:
+        Slack posts a long reply chunk by chunk and reports failure when a
+        later chunk errors, after the earlier ones already landed. Resuming
+        the turn would then emit a second answer with no recovered-reply
+        marker — the silent duplicate this ledger exists to prevent.
+        """
+        _record()
+        _orphan("ob-1")
+        adapter = self._adapter(success=False)
+        runner = self._runner(adapter)
 
         n = await runner._redeliver_pending_obligations()
 
         assert n == 0
-        assert _row("ob-1")["state"] == "failed"
+        assert adapter.send.await_count == dl.MAX_ATTEMPTS
+        assert _row("ob-1")["attempts"] == dl.MAX_ATTEMPTS
+        assert _row("ob-1")["state"] == "abandoned"
+        runner._async_session_store.clear_resume_pending.assert_awaited_once_with(
+            "agent:main:slack:channel:C1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_raised_exhaustion_never_arms_a_silent_duplicate(self):
+        """Same contract when every attempt RAISES rather than returning.
+
+        A raised send may have been accepted with only the ACK lost, so it is
+        delivery-ambiguous for the same reason and must not re-run the turn.
+        """
+        _record()
+        _orphan("ob-1")
+        adapter = self._adapter(success=False)
+        adapter.send.side_effect = ConnectionError("ACK never arrived")
+        runner = self._runner(adapter)
+
+        n = await runner._redeliver_pending_obligations()
+
+        assert n == 0
+        assert adapter.send.await_count == dl.MAX_ATTEMPTS
+        assert _row("ob-1")["state"] == "abandoned"
+        runner._async_session_store.clear_resume_pending.assert_awaited_once_with(
+            "agent:main:slack:channel:C1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_redelivery_replays_full_routing_contract(self):
+        metadata = {
+            "thread_id": "171.001",
+            "slack_team_id": "T1",
+            "notify": True,
+        }
+        _record(reply_to="msg-42", metadata=metadata)
+        _orphan("ob-1")
+        adapter = self._adapter()
+        runner = self._runner(adapter)
+
+        assert await runner._redeliver_pending_obligations() == 1
+
+        sent = adapter.send.call_args.kwargs
+        assert sent["reply_to"] == "msg-42"
+        assert sent["metadata"] == metadata
 
     @pytest.mark.asyncio
     async def test_missing_adapter_leaves_row_recoverable(self):

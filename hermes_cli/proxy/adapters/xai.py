@@ -87,15 +87,33 @@ class XAIGrokAdapter(UpstreamAdapter):
             if pool is None:
                 return None
 
+            # Name the account that actually failed. The pool cursor is shared
+            # across turns and can advance between a request going out and its
+            # error coming back, so recovering against ``current_id`` would
+            # cool down — or spend the refresh token of — an innocent account.
+            _failed_id = failed_credential.credential_id
+            _failed_key = None if _failed_id else failed_credential.bearer
+
             if status_code == 429:
                 # Mark the rate-limited key with its 1-hour cooldown and rotate
                 # to the next available credential. Returns None when the pool
                 # has no other key to offer — the 429 will flow back to the client.
-                refreshed = pool.mark_exhausted_and_rotate(status_code=status_code)
+                refreshed = pool.mark_exhausted_and_rotate(
+                    status_code=status_code,
+                    credential_id=_failed_id,
+                    api_key_hint=_failed_key,
+                )
             else:
-                refreshed = pool.try_refresh_current()
+                refreshed = pool.try_refresh_matching(
+                    api_key_hint=_failed_key,
+                    credential_id=_failed_id,
+                )
                 if refreshed is None:
-                    refreshed = pool.mark_exhausted_and_rotate(status_code=status_code)
+                    refreshed = pool.mark_exhausted_and_rotate(
+                        status_code=status_code,
+                        credential_id=_failed_id,
+                        api_key_hint=_failed_key,
+                    )
             if refreshed is None:
                 return None
 
@@ -139,6 +157,7 @@ class XAIGrokAdapter(UpstreamAdapter):
             bearer=bearer,
             base_url=base_url or DEFAULT_XAI_OAUTH_BASE_URL,
             expires_at=getattr(entry, "expires_at", None),
+            credential_id=getattr(entry, "id", None),
         )
 
 

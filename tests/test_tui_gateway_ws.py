@@ -304,3 +304,114 @@ def test_ws_write_async_keeps_drained_tokens_with_current_frame():
         ]
 
     asyncio.run(scenario())
+
+
+def test_ws_timer_flush_cannot_be_overtaken_by_ready_control_task():
+    """A timer-fixed token batch must precede an already-ready control task."""
+
+    async def scenario():
+        sent = []
+
+        class FakeWS:
+            async def send_text(self, line):
+                sent.append(line)
+
+        loop = asyncio.get_running_loop()
+        transport = ws_mod.WSTransport(
+            FakeWS(), loop, peer="timer-control-order-test"
+        )
+        transport._pending_tokens.append("TOKEN")
+
+        # _flush_tokens runs first, but its create_task-based sender is
+        # scheduled AFTER this already-ready write_async task.
+        loop.call_soon(transport._flush_tokens)
+        control = asyncio.create_task(
+            transport.write_async({"kind": "CONTROL"})
+        )
+
+        assert await control is True
+        await asyncio.sleep(0)
+        assert sent == ["TOKEN", json.dumps({"kind": "CONTROL"})]
+
+    asyncio.run(scenario())
+
+
+def test_ws_drain_cancellation_releases_queued_batches():
+    """Cancelling the sole drain task must not strand queued batches.
+
+    The drain is the only socket writer, so if it dies from a CancelledError
+    (loop teardown cancels pending tasks) while batches are still queued,
+    nothing will ever resolve their completion futures and every caller
+    waiting on one blocks forever.
+    """
+
+    async def scenario():
+        release = asyncio.Event()
+
+        class FakeWS:
+            async def send_text(self, line):
+                if line == "A":
+                    await release.wait()
+
+        loop = asyncio.get_running_loop()
+        transport = ws_mod.WSTransport(FakeWS(), loop, peer="cancel-test")
+
+        first = asyncio.create_task(transport._safe_send_many(["A"]))
+        for _ in range(4):
+            await asyncio.sleep(0)
+        assert transport._send_drain_task is not None
+
+        second = asyncio.create_task(transport._safe_send_many(["B"]))
+        for _ in range(2):
+            await asyncio.sleep(0)
+
+        transport._send_drain_task.cancel()
+
+        # Neither caller may hang once the writer is gone.
+        await asyncio.wait_for(second, timeout=1.0)
+        await asyncio.wait_for(first, timeout=1.0)
+
+        # Cancellation is terminal: the transport latches closed and does NOT
+        # respawn a drain that loop teardown would only cancel again.
+        assert transport._closed is True
+        for _ in range(4):
+            await asyncio.sleep(0)
+        assert transport._send_drain_task is None
+        assert not transport._send_queue
+
+    asyncio.run(scenario())
+
+
+def test_ws_queue_failure_releases_every_waiting_batch():
+    """If the owning loop is gone, no queued batch may strand its caller.
+
+    Nothing will drain the queue once ``call_soon_threadsafe`` fails, so every
+    batch already waiting has to be released — not just the one being queued
+    when the failure is noticed.
+    """
+
+    async def scenario():
+        class FakeWS:
+            async def send_text(self, line):
+                await asyncio.Event().wait()
+
+        loop = asyncio.get_running_loop()
+        transport = ws_mod.WSTransport(FakeWS(), loop, peer="queue-fail-test")
+
+        with transport._token_lock:
+            older = transport._queue_send_locked(["OLD"])
+
+        class DeadLoop:
+            def call_soon_threadsafe(self, *args, **kwargs):
+                raise RuntimeError("Event loop is closed")
+
+        transport._loop = DeadLoop()
+        with transport._token_lock:
+            newest = transport._queue_send_locked(["NEW"])
+
+        assert newest.done()
+        assert older.done(), "an older queued batch must not be stranded"
+        assert transport._closed is True
+        assert not transport._send_queue
+
+    asyncio.run(scenario())

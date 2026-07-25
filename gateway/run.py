@@ -7589,12 +7589,16 @@ class GatewayRunner(
         Crash-ambiguity contract (see gateway/delivery_ledger.py):
         rows that were mid-send or previously rejected carry a visible
         recovered-reply marker so a possible duplicate is labeled, never
-        silent. Returns the number of redeliveries attempted.
+        silent. Transient failures consume the remaining durable attempt
+        budget in this process, so recovery does not depend on another boot.
+        Returns the number of obligations successfully redelivered.
         """
         try:
             from gateway.delivery_ledger import (
                 RECOVERED_MARKER,
+                claim_owned_retry,
                 ledger_enabled,
+                mark_attempting,
                 mark_delivered,
                 mark_failed,
                 sweep_recoverable,
@@ -7632,44 +7636,94 @@ class GatewayRunner(
                 # Platform not connected this boot — leave the row claimed;
                 # attempts cap + stale cutoff bound the retries on later boots.
                 continue
-            content = row["content"]
-            if row.get("needs_marker"):
-                content = RECOVERED_MARKER + content
-            metadata = (
-                {"thread_id": row["thread_id"]} if row.get("thread_id") else None
-            )
-            try:
-                result = await adapter.send(
-                    chat_id=row["chat_id"],
-                    content=content,
-                    metadata=metadata,
-                )
-            except Exception as send_err:
-                logger.warning(
-                    "obligation %s: redelivery send raised: %s",
-                    row["obligation_id"], send_err,
-                )
-                result = None
-            try:
+            attempt = int(row.get("attempts") or 1)
+            needs_marker = bool(row.get("needs_marker"))
+            delivered = False
+            while True:
+                content = row["content"]
+                if needs_marker:
+                    content = RECOVERED_MARKER + content
+                try:
+                    # A crash after this checkpoint is delivery-ambiguous and
+                    # must carry the marker on the next recovery.
+                    mark_attempting(row["obligation_id"])
+                except Exception:
+                    logger.debug(
+                        "delivery ledger attempting update failed", exc_info=True
+                    )
+                send_error = ""
+                try:
+                    result = await adapter.send(
+                        chat_id=row["chat_id"],
+                        content=content,
+                        reply_to=row.get("reply_to"),
+                        metadata=row.get("metadata"),
+                    )
+                except Exception as send_err:
+                    logger.warning(
+                        "obligation %s: redelivery send raised: %s",
+                        row["obligation_id"], send_err,
+                    )
+                    result = None
+                    send_error = str(send_err)
                 if result is not None and getattr(result, "success", False):
-                    mark_delivered(row["obligation_id"])
+                    try:
+                        mark_delivered(row["obligation_id"])
+                    except Exception:
+                        logger.debug(
+                            "delivery ledger delivered update failed",
+                            exc_info=True,
+                        )
                     redelivered += 1
+                    delivered = True
                     logger.info(
                         "Redelivered recovered final response to %s:%s "
                         "(obligation %s, attempt %d)",
                         row["platform"], row["chat_id"],
-                        row["obligation_id"], row["attempts"],
+                        row["obligation_id"], attempt,
                     )
-                else:
+                    break
+                try:
                     mark_failed(
                         row["obligation_id"],
-                        str(getattr(result, "error", "") or "send failed"),
+                        send_error
+                        or str(getattr(result, "error", "") or "send failed"),
                     )
-            except Exception:
-                logger.debug("delivery ledger update failed", exc_info=True)
+                    next_attempt = await asyncio.to_thread(
+                        claim_owned_retry, row["obligation_id"]
+                    )
+                except Exception:
+                    logger.debug(
+                        "delivery ledger retry update failed", exc_info=True
+                    )
+                    next_attempt = None
+                if next_attempt is None:
+                    break
+                attempt = next_attempt
+                needs_marker = True
+                delay = max(
+                    0.0,
+                    float(
+                        getattr(self, "_delivery_retry_base_seconds", 0.5) or 0
+                    ),
+                ) * (2 ** max(0, attempt - 2))
+                if delay:
+                    await asyncio.sleep(delay)
 
             # The answer reached (or was owed to) this session — don't ALSO
             # re-run the turn via the resume path.
+            #
+            # This stays unconditional even when every attempt failed. Once a
+            # send has been attempted, NO result proves non-delivery: a raised
+            # send may have been accepted with only the ACK lost, and even an
+            # explicit SendResult(success=False) can follow a PARTIAL delivery
+            # — Slack posts a long reply chunk by chunk and reports failure if
+            # any later chunk errors, after the earlier ones already landed
+            # (plugins/platforms/slack/adapter.py). Resuming the turn there
+            # would emit a second answer carrying no recovered-reply marker,
+            # i.e. exactly the silent duplicate this ledger exists to prevent.
+            # The durable attempts cap, not the resume path, is what bounds a
+            # genuinely undeliverable row.
             session_key = row.get("session_key") or ""
             if session_key:
                 try:
