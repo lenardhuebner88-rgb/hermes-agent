@@ -916,19 +916,22 @@ def test_run_slash_link_warns_for_cross_branch_same_repo_planned_workspace(kanba
             workspace_path=str(repo),
             branch_name="feature/parent",
         )
-        child = kb.create_task(
-            conn,
-            title="child",
-            workspace_kind="worktree",
-            workspace_path=str(planned_child_workspace),
-            branch_name="feature/child",
-        )
+    child_output = kc.run_slash(
+        f"create 'child' --workspace worktree:{planned_child_workspace}"
+    )
+    child_match = re.search(r"(t_[a-f0-9]+)", child_output)
+    assert child_match is not None
+    child = child_match.group(1)
+    with kb.connect() as conn:
+        child_task = kb.get_task(conn, child)
+        assert child_task is not None
+        assert child_task.branch_name is None
 
     output = kc.run_slash(f"link {parent} {child}")
 
     assert "warning" in output.lower()
     assert "feature/parent" in output
-    assert "feature/child" in output
+    assert f"wt/{child}" in output
     assert "--chain-of" in output
     assert f"Linked {parent} -> {child}" in output
     with kb.connect() as conn:
@@ -936,6 +939,38 @@ def test_run_slash_link_warns_for_cross_branch_same_repo_planned_workspace(kanba
             "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
             (parent, child),
         ).fetchone()
+
+
+def test_run_slash_link_skips_warning_for_matching_prospective_worktree_branch(
+    kanban_home, tmp_path
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    planned_child_workspace = repo / ".worktrees" / "kanban" / "planned-child"
+
+    child_output = kc.run_slash(
+        f"create 'child' --workspace worktree:{planned_child_workspace}"
+    )
+    child_match = re.search(r"(t_[a-f0-9]+)", child_output)
+    assert child_match is not None
+    child = child_match.group(1)
+    with kb.connect() as conn:
+        child_task = kb.get_task(conn, child)
+        assert child_task is not None
+        assert child_task.branch_name is None
+        parent = kb.create_task(
+            conn,
+            title="parent",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            branch_name=f"wt/{child}",
+        )
+
+    output = kc.run_slash(f"link {parent} {child}")
+
+    assert "warning" not in output.lower()
+    assert f"Linked {parent} -> {child}" in output
 
 
 @pytest.mark.parametrize(

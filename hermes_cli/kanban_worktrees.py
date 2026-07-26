@@ -1524,6 +1524,17 @@ def _workspace_repo_identity(workspace_path: str | None) -> Path | None:
     return Path(common_dir).resolve() if common_dir else None
 
 
+def _link_effective_branch(task: Any) -> str | None:
+    """Return a task's stored or dispatch-prospective branch for link checks."""
+    branch_name = getattr(task, "branch_name", None)
+    if branch_name:
+        return str(branch_name)
+    if getattr(task, "workspace_kind", None) != "worktree":
+        return None
+    task_id = getattr(task, "id", None)
+    return f"wt/{task_id}" if task_id else None
+
+
 def cross_branch_link_warning(parent: Any, child: Any) -> str | None:
     """Describe an unsafe cross-branch link, without changing link semantics."""
     supported_workspace_kinds = {"worktree", "dir"}
@@ -1532,8 +1543,8 @@ def cross_branch_link_warning(parent: Any, child: Any) -> str | None:
         or getattr(child, "workspace_kind", None) not in supported_workspace_kinds
     ):
         return None
-    parent_branch = getattr(parent, "branch_name", None)
-    child_branch = getattr(child, "branch_name", None)
+    parent_branch = _link_effective_branch(parent)
+    child_branch = _link_effective_branch(child)
     if not parent_branch or not child_branch or parent_branch == child_branch:
         return None
     parent_repo = _workspace_repo_identity(getattr(parent, "workspace_path", None))
