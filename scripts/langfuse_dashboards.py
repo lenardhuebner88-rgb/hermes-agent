@@ -183,6 +183,12 @@ class TrpcClient:
         )
         try:
             with self._opener.open(request, timeout=self._timeout) as response:
+                status = getattr(response, "status", None)
+                if status is None:
+                    getcode = getattr(response, "getcode", None)
+                    status = getcode() if callable(getcode) else None
+                if status != 200:
+                    raise ProvisionError(f"{procedure} returned HTTP {status!r}")
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             raise ProvisionError(f"{procedure} returned HTTP {exc.code}") from exc

@@ -10,10 +10,9 @@ from scripts import langfuse_dashboards as dashboards
 
 
 class _Response:
-    status = 200
-
-    def __init__(self, payload: object) -> None:
+    def __init__(self, payload: object, *, status: int = 200) -> None:
         self._payload = payload
+        self.status = status
 
     def __enter__(self) -> _Response:
         return self
@@ -32,7 +31,10 @@ class _Opener:
 
     def open(self, request: Any, *, timeout: float) -> _Response:
         self.requests.append(request)
-        return _Response(next(self._responses))
+        response = next(self._responses)
+        if isinstance(response, _Response):
+            return response
+        return _Response(response)
 
 
 def test_create_dashboard_posts_the_version_pinned_trpc_batch_envelope() -> None:
@@ -76,6 +78,22 @@ def test_trpc_error_envelope_fails_loudly_before_a_follow_up_mutation() -> None:
     client = dashboards.TrpcClient("http://langfuse.test", opener=opener)
 
     with pytest.raises(dashboards.ProvisionError, match="UNAUTHORIZED"):
+        client.create_dashboard(project_id="project_1", name="North star", description="x")
+
+    assert len(opener.requests) == 1
+
+
+@pytest.mark.parametrize("status", [401, 405])
+def test_non_success_http_status_fails_before_a_follow_up_mutation(status: int) -> None:
+    opener = _Opener(
+        [
+            _Response([{"result": {"data": {"json": {"id": "dashboard_1"}}}}], status=status),
+            [{"result": {"data": {"json": {"id": "dashboard_2"}}}}],
+        ]
+    )
+    client = dashboards.TrpcClient("http://langfuse.test", opener=opener)
+
+    with pytest.raises(dashboards.ProvisionError, match=f"HTTP {status}"):
         client.create_dashboard(project_id="project_1", name="North star", description="x")
 
     assert len(opener.requests) == 1
