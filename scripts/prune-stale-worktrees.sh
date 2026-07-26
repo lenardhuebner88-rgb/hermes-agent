@@ -6,7 +6,7 @@ set -euo pipefail
 
 APPLY=0
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-6}"
-PRUNE_REPOS="${PRUNE_REPOS:-$HOME/.hermes/hermes-agent $HOME/family-organizer}"
+WORKTREE_DEPS_ROOT="${HERMES_WORKTREE_DEPS_ROOT:-/mnt/data/hermes-worktree-deps}"
 if [[ -n "${HERMES_KANBAN_HOME:-}" ]]; then
   KANBAN_ROOT="$HERMES_KANBAN_HOME"
 elif [[ -z "${HERMES_HOME:-}" || "$HERMES_HOME" == "$HOME/.hermes" || "$HERMES_HOME" == "$HOME/.hermes/"* ]]; then
@@ -17,12 +17,165 @@ else
   KANBAN_ROOT="$HERMES_HOME"
 fi
 KANBAN_DB_PATH="${KANBAN_DB_PATH:-${HERMES_KANBAN_DB:-$KANBAN_ROOT/kanban.db}}"
+HERMES_CONFIG_PATH="${HERMES_CONFIG_PATH:-$KANBAN_ROOT/config.yaml}"
+
+declare -a PRUNE_REPO_PATHS=()
+declare -A REGISTERED_DEPS_IDENTITIES=()
+DEPS_REGISTRY_SAFE=0
+DEPS_REGISTRY_ERROR="repository source not loaded"
+PRUNE_REPOS_OVERRIDE=0
+# Whether the caller pointed the deps root somewhere explicitly. A PRUNE_REPOS
+# override narrows the repo set, so the resulting identity registry only
+# describes that subset — it must never be used to judge a deps root the caller
+# did not also name. Otherwise a test harness that overrides PRUNE_REPOS alone
+# reaps the production trees of every live worktree.
+DEPS_ROOT_EXPLICIT=0
+[[ -n "${HERMES_WORKTREE_DEPS_ROOT:-}" ]] && DEPS_ROOT_EXPLICIT=1
 
 if [[ "${1:-}" == "--apply" ]]; then
   APPLY=1
 fi
 
 now=$(date +%s)
+
+worktree_deps_identity() {
+  local wt="$1" canonical digest
+  canonical="$(readlink -m -- "$wt" 2>/dev/null || true)"
+  [[ -n "$canonical" ]] || return 1
+  digest="$(
+    printf '%s' "$canonical" | sha256sum | awk '{print substr($1, 1, 16)}'
+  )"
+  printf '%s-%s\n' "$(basename -- "$canonical")" "$digest"
+}
+
+load_prune_repo_paths() {
+  local parsed repo
+  PRUNE_REPO_PATHS=()
+  DEPS_REGISTRY_SAFE=0
+  PRUNE_REPOS_OVERRIDE=0
+
+  if [[ -v PRUNE_REPOS ]]; then
+    PRUNE_REPOS_OVERRIDE=1
+    read -r -a PRUNE_REPO_PATHS <<< "$PRUNE_REPOS"
+    if (( ${#PRUNE_REPO_PATHS[@]} == 0 )); then
+      DEPS_REGISTRY_ERROR="PRUNE_REPOS override is empty"
+      return 1
+    fi
+    return 0
+  fi
+
+  if [[ ! -r "$HERMES_CONFIG_PATH" ]]; then
+    DEPS_REGISTRY_ERROR="config unreadable: $HERMES_CONFIG_PATH"
+    return 1
+  fi
+  if ! parsed="$(
+    python3 - "$HERMES_CONFIG_PATH" 2>/dev/null <<'PY'
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+config_path = Path(sys.argv[1])
+data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+if not isinstance(data, dict):
+    raise SystemExit(1)
+kanban = data.get("kanban")
+if not isinstance(kanban, dict):
+    raise SystemExit(1)
+
+repos = []
+for gate_name in ("worker_gate", "gate"):
+    gate = kanban.get(gate_name)
+    if gate is None:
+        continue
+    if not isinstance(gate, dict):
+        raise SystemExit(1)
+    configured = gate.get("repos")
+    if configured is None:
+        continue
+    if not isinstance(configured, dict):
+        raise SystemExit(1)
+    for raw_path in configured:
+        if not isinstance(raw_path, str) or "\n" in raw_path:
+            raise SystemExit(1)
+        repo = os.path.expanduser(raw_path)
+        if not os.path.isabs(repo):
+            raise SystemExit(1)
+        if repo not in repos:
+            repos.append(repo)
+
+if not repos:
+    raise SystemExit(1)
+print("\n".join(repos))
+PY
+  )"; then
+    DEPS_REGISTRY_ERROR="cannot read gate repos from config: $HERMES_CONFIG_PATH"
+    return 1
+  fi
+
+  while IFS= read -r repo; do
+    [[ -n "$repo" ]] && PRUNE_REPO_PATHS+=("$repo")
+  done <<< "$parsed"
+  if (( ${#PRUNE_REPO_PATHS[@]} == 0 )); then
+    DEPS_REGISTRY_ERROR="no gate repos in config: $HERMES_CONFIG_PATH"
+    return 1
+  fi
+}
+
+refresh_registered_deps_identities() {
+  local repo listing line wt identity
+  REGISTERED_DEPS_IDENTITIES=()
+  DEPS_REGISTRY_SAFE=0
+
+  # A narrowed repo set may not judge a deps root the caller did not name.
+  # Worktree pruning still runs (PRUNE_REPO_PATHS stays loaded); only the
+  # dependency reaper degrades to keeping everything.
+  if (( PRUNE_REPOS_OVERRIDE )) && (( ! DEPS_ROOT_EXPLICIT )); then
+    DEPS_REGISTRY_ERROR="PRUNE_REPOS override without explicit HERMES_WORKTREE_DEPS_ROOT; refusing to judge $WORKTREE_DEPS_ROOT from a partial repo set"
+    return 1
+  fi
+
+  if (( ${#PRUNE_REPO_PATHS[@]} == 0 )); then
+    [[ -n "$DEPS_REGISTRY_ERROR" ]] ||
+      DEPS_REGISTRY_ERROR="no repositories available for dependency scan"
+    return 1
+  fi
+  for repo in "${PRUNE_REPO_PATHS[@]}"; do
+    if [[ ! -d "$repo" ]]; then
+      DEPS_REGISTRY_ERROR="configured repo path unavailable: $repo"
+      return 1
+    fi
+    if ! listing="$(git -C "$repo" worktree list --porcelain 2>/dev/null)"; then
+      DEPS_REGISTRY_ERROR="git worktree list failed: $repo"
+      return 1
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        worktree\ *)
+          wt="${line#worktree }"
+          if ! identity="$(worktree_deps_identity "$wt")"; then
+            DEPS_REGISTRY_ERROR="cannot derive worktree identity: $wt"
+            return 1
+          fi
+          REGISTERED_DEPS_IDENTITIES["$identity"]=1
+          ;;
+      esac
+    done <<< "$listing"
+  done
+  DEPS_REGISTRY_SAFE=1
+  DEPS_REGISTRY_ERROR=""
+}
+
+prepare_deps_registry() {
+  load_prune_repo_paths && refresh_registered_deps_identities
+}
+
+deps_identity_is_registered() {
+  local wanted="$1"
+  (( DEPS_REGISTRY_SAFE )) || return 2
+  [[ -n "${REGISTERED_DEPS_IDENTITIES[$wanted]+registered}" ]]
+}
 
 is_session_holder() {
   local wt="$1"
@@ -136,7 +289,16 @@ raise SystemExit(0)
 PY
 }
 
-for repo in $PRUNE_REPOS; do
+prepare_deps_registry || true
+
+# Announce an unusable registry unconditionally. The dependency section below
+# only reports when the deps root happens to exist, so without this line the
+# reaper can degrade to a silent no-op and nobody notices.
+if (( ! DEPS_REGISTRY_SAFE )); then
+  echo "deps-registry-unsafe: $DEPS_REGISTRY_ERROR" >&2
+fi
+
+for repo in "${PRUNE_REPO_PATHS[@]}"; do
   [[ -d "$repo/.git" ]] || continue
   main_ref=$(git -C "$repo" rev-parse main 2>/dev/null || true)
   [[ -n "$main_ref" ]] || continue
@@ -189,6 +351,68 @@ for repo in $PRUNE_REPOS; do
   done
 
 done
+
+# ---------------------------------------------------------------------------
+# Orphaned exclusive dependency trees
+# ---------------------------------------------------------------------------
+# Provisioned node_modules links point outside the checkout, but only to a
+# path bound to that worktree's canonical identity. Once git no longer
+# registers the worktree, the matching tree is orphaned and can be reclaimed.
+# This is intentionally part of the existing worktree reaper; no second cron
+# or independent lifecycle is introduced.
+if [[ "$WORKTREE_DEPS_ROOT" != /* || "$WORKTREE_DEPS_ROOT" == "/" ]]; then
+  echo "kept(deps-root-invalid): $WORKTREE_DEPS_ROOT" >&2
+elif [[ -L "$WORKTREE_DEPS_ROOT" ]]; then
+  echo "kept(deps-root-symlink): $WORKTREE_DEPS_ROOT" >&2
+elif [[ -d "$WORKTREE_DEPS_ROOT" ]]; then
+  deps_root_real="$(readlink -m -- "$WORKTREE_DEPS_ROOT")"
+  if (( ! DEPS_REGISTRY_SAFE )); then
+    echo "kept(deps-repo-source-unavailable): $DEPS_REGISTRY_ERROR"
+  fi
+  shopt -s nullglob
+  for deps_tree in "$deps_root_real"/*; do
+    deps_name="$(basename -- "$deps_tree")"
+    if [[ ! -d "$deps_tree" || -L "$deps_tree" ]]; then
+      echo "kept(deps-nondirectory): $deps_tree"
+      continue
+    fi
+    if [[ ! "$deps_name" =~ ^.+-[0-9a-f]{16}$ ]]; then
+      echo "kept(deps-unrecognized): $deps_tree"
+      continue
+    fi
+    if (( ! DEPS_REGISTRY_SAFE )); then
+      echo "kept(deps-membership-unknown): $deps_tree ($DEPS_REGISTRY_ERROR)"
+      continue
+    fi
+    if deps_identity_is_registered "$deps_name"; then
+      continue
+    fi
+    if (( APPLY )); then
+      # Re-read config and every Git registry immediately before deletion to
+      # close both provisioning and new-board-repo races. Any ambiguity keeps
+      # the tree.
+      if ! prepare_deps_registry; then
+        echo "kept(deps-membership-unknown): $deps_tree ($DEPS_REGISTRY_ERROR)"
+        continue
+      fi
+      if deps_identity_is_registered "$deps_name"; then
+        continue
+      fi
+      # A failed removal (e.g. --one-file-system skipping a foreign mount
+      # inside the tree) must be reported and skipped, never abort the whole
+      # script under set -e — the sections below (terminal worktrees) still
+      # need to run.
+      if rm -rf --one-file-system -- "$deps_tree"; then
+        echo "removed deps: $deps_tree (no registered worktree)"
+      else
+        echo "kept(deps-remove-failed): $deps_tree" >&2
+      fi
+    else
+      echo "would remove deps: $deps_tree (no registered worktree)"
+    fi
+  done
+  shopt -u nullglob
+fi
 
 # ---------------------------------------------------------------------------
 # Terminal isolated-write worktrees (.worktrees/terminal/{terminal_run_id})
@@ -360,7 +584,7 @@ PY
     fi
 
     removed_or_planned=0
-    for repo in ${PRUNE_REPOS}; do
+    for repo in "${PRUNE_REPO_PATHS[@]}"; do
       [[ -d "${repo}/.git" || -f "${repo}/.git" ]] || continue
       wt_path="$(terminal_canonical_registered_path "${repo}" "${run_id}")"
       [[ -n "${wt_path}" ]] || continue

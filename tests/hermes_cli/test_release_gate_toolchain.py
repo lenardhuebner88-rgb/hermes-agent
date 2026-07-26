@@ -11,8 +11,8 @@ from hermes_cli import kanban_worktrees as kwt
 
 
 @pytest.fixture
-def validation_worktree(tmp_path):
-    """Validation worktree with production-shaped shared dependency links."""
+def validation_worktree(tmp_path, monkeypatch):
+    """Validation worktree with production-shaped dedicated dependency links."""
     source_root = Path(__file__).resolve().parents[2]
     live_root = tmp_path / "live-checkout"
     validation_root = (
@@ -32,31 +32,48 @@ def validation_worktree(tmp_path):
         source_root / "web" / "package.json",
         validation_root / "web" / "package.json",
     )
+    for workspace in kwt._workspace_manifest_paths(source_root):
+        source_manifest = source_root / workspace / "package.json"
+        target_manifest = validation_root / workspace / "package.json"
+        target_manifest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_manifest, target_manifest)
+    (validation_root / ".gitignore").write_text(
+        "node_modules\n",
+        encoding="utf-8",
+    )
+    kwt._git(validation_root, "init", "-b", "main")
+    kwt._git(validation_root, "config", "user.email", "test@example.com")
+    kwt._git(validation_root, "config", "user.name", "Test User")
+    kwt._git(validation_root, "add", "-A")
+    kwt._git(validation_root, "commit", "-m", "validation fixture")
 
-    shared_root_modules = live_root / "node_modules"
-    shared_web_modules = live_root / "web" / "node_modules"
-    (shared_root_modules / "hermes-agent").mkdir(parents=True)
-    (shared_web_modules / "web").mkdir(parents=True)
+    deps_root = tmp_path / "worktree-deps"
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
+    kwt._link_shared_dependencies(live_root, validation_root)
+    dedicated_tree = kwt._worktree_deps_tree(validation_root)
+    dedicated_root_modules = dedicated_tree / "node_modules"
+    dedicated_web_modules = dedicated_tree / "web" / "node_modules"
+    (dedicated_root_modules / "hermes-agent").mkdir(parents=True)
+    (dedicated_web_modules / "web").mkdir(parents=True)
     shutil.copy2(
         source_root / "package.json",
-        shared_root_modules / "hermes-agent" / "package.json",
+        dedicated_root_modules / "hermes-agent" / "package.json",
     )
     shutil.copy2(
         source_root / "web" / "package.json",
-        shared_web_modules / "web" / "package.json",
+        dedicated_web_modules / "web" / "package.json",
     )
 
-    kwt._link_shared_dependencies(live_root, validation_root)
     assert (validation_root / "node_modules").is_symlink()
     assert (validation_root / "web" / "node_modules").is_symlink()
-    return validation_root, shared_root_modules, shared_web_modules
+    return validation_root, dedicated_root_modules, dedicated_web_modules
 
 
 def test_release_runner_keeps_healthy_toolchain_command_byte_identical(
     validation_worktree, monkeypatch,
 ):
-    validation_root, _shared_root, shared_web = validation_worktree
-    tsc = shared_web / ".bin" / "tsc"
+    validation_root, _dedicated_root, dedicated_web = validation_worktree
+    tsc = dedicated_web / ".bin" / "tsc"
     tsc.parent.mkdir()
     tsc.write_text("#!/bin/sh\n", encoding="utf-8")
     calls = []
@@ -91,32 +108,33 @@ def test_release_runner_keeps_healthy_toolchain_command_byte_identical(
     ]
 
 
-def test_release_runner_replaces_shared_links_before_private_npm_ci(
+def test_release_runner_preserves_dedicated_links_during_private_npm_ci(
     validation_worktree, monkeypatch,
 ):
-    validation_root, shared_root, shared_web = validation_worktree
-    shared_root_manifest = (shared_root / "hermes-agent" / "package.json").read_bytes()
-    shared_web_manifest = (shared_web / "web" / "package.json").read_bytes()
+    validation_root, dedicated_root, dedicated_web = validation_worktree
+    root_manifest = (dedicated_root / "hermes-agent" / "package.json").read_bytes()
+    web_manifest = (dedicated_web / "web" / "package.json").read_bytes()
     calls = []
 
     def fake_run(argv, **kwargs):
         calls.append((list(argv), kwargs["cwd"]))
         if argv == ["/usr/bin/npm", "ci"]:
-            assert Path(kwargs["cwd"]).resolve() == validation_root.resolve()
-            for rel, foreign_target in (
-                ("node_modules", shared_root),
-                ("web/node_modules", shared_web),
+            assert Path(kwargs["cwd"]).resolve() == kwt._worktree_deps_tree(
+                validation_root
+            ).resolve()
+            for rel, dedicated_target in (
+                ("node_modules", dedicated_root),
+                ("web/node_modules", dedicated_web),
             ):
                 private_modules = validation_root / rel
-                assert not private_modules.is_symlink()
-                assert private_modules.is_dir()
-                assert private_modules.resolve() != foreign_target.resolve()
+                assert private_modules.is_symlink()
+                assert private_modules.resolve() == dedicated_target.resolve()
             assert (
-                shared_root / "hermes-agent" / "package.json"
-            ).read_bytes() == shared_root_manifest
+                dedicated_root / "hermes-agent" / "package.json"
+            ).read_bytes() == root_manifest
             assert (
-                shared_web / "web" / "package.json"
-            ).read_bytes() == shared_web_manifest
+                dedicated_web / "web" / "package.json"
+            ).read_bytes() == web_manifest
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(kwt.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -130,20 +148,20 @@ def test_release_runner_replaces_shared_links_before_private_npm_ci(
     assert calls[0][0] == ["/usr/bin/npm", "ci"]
     assert calls[1][0][:2] == ["bash", "-c"]
     assert "npm run build" in calls[1][0][2]
-    assert calls[0][1] == str(validation_root)
+    assert calls[0][1] == str(kwt._worktree_deps_tree(validation_root))
     assert calls[1][1] == str(validation_root)
-    assert (shared_root / "hermes-agent" / "package.json").read_bytes() == (
-        shared_root_manifest
+    assert (dedicated_root / "hermes-agent" / "package.json").read_bytes() == (
+        root_manifest
     )
-    assert (shared_web / "web" / "package.json").read_bytes() == (
-        shared_web_manifest
+    assert (dedicated_web / "web" / "package.json").read_bytes() == (
+        web_manifest
     )
 
 
 def test_release_runner_fails_closed_when_private_npm_ci_fails(
     validation_worktree, monkeypatch,
 ):
-    validation_root, _shared_root, _shared_web = validation_worktree
+    validation_root, _dedicated_root, _dedicated_web = validation_worktree
     calls = []
 
     def fake_run(argv, **kwargs):
@@ -164,13 +182,18 @@ def test_release_runner_fails_closed_when_private_npm_ci_fails(
     assert detail.startswith("release-toolchain:")
     assert "npm ci" in detail
     assert "exit 37" in detail
-    assert calls == [(["/usr/bin/npm", "ci"], str(validation_root))]
+    assert calls == [
+        (
+            ["/usr/bin/npm", "ci"],
+            str(kwt._worktree_deps_tree(validation_root)),
+        )
+    ]
 
 
 def test_release_runner_never_repairs_live_checkout(
     validation_worktree, monkeypatch,
 ):
-    validation_root, _shared_root, _shared_web = validation_worktree
+    validation_root, _dedicated_root, _dedicated_web = validation_worktree
     calls = []
 
     def fake_run(argv, **kwargs):

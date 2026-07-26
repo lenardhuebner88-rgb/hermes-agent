@@ -53,6 +53,7 @@ def repo(tmp_path):
     (r / "a.txt").write_text("base\n")
     (r / "web").mkdir()
     (r / "web" / "index.txt").write_text("web\n")
+    (r / ".gitignore").write_text("node_modules\n.venv\n")
     _git(r, "add", "-A")
     _git(r, "commit", "-m", "base")
     return r

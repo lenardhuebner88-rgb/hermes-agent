@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import errno
+import hashlib
 import inspect
 import json
 import logging
@@ -254,11 +255,15 @@ def _is_ignorable_dirty_path(path: str) -> bool:
     parts = path.rstrip("/").split("/")
     return any(p in _IGNORED_DIRTY_DIR_PARTS for p in parts)
 
-# node_modules and .venv locations symlinked into a fresh worktree so
-# frontend gates work without an npm ci and Python tests can run without a
-# second venv install.  The .venv symlink is removed by remove_worktree via
-# the same loop — is_symlink()/unlink() so the real venv is never touched.
+# Dependency locations symlinked into a fresh worktree. node_modules targets
+# are exclusive, identity-bound trees outside the checkout and remain empty
+# until the first gate npm ci. .venv intentionally remains shared/read-only so
+# select_test_python can use the live checkout's environment. All links are
+# removed via is_symlink()/unlink(), never by following their targets.
 _NODE_MODULES_LINKS = ("node_modules", "web/node_modules", ".venv")
+_DEDICATED_NODE_MODULES_LINKS = _NODE_MODULES_LINKS[:2]
+_SHARED_READ_ONLY_DEPENDENCY_LINKS = (".venv",)
+_DEFAULT_WORKTREE_DEPS_ROOT = Path("/mnt/data/hermes-worktree-deps")
 
 FO_REPO_PATH = Path("/home/piet/projects/family-organizer")
 MERGED_GREEN = "MERGED_GREEN"
@@ -1291,8 +1296,8 @@ def ensure_worktree(repo_root: Path, root_id: str) -> dict:
             _reap_partial(repo_root, wt)
             raise
 
-    # node_modules/.venv symlinks (untracked, never committed) let worker and
-    # validation worktrees share the checkout's installed dependencies.
+    # Untracked dependency links: node_modules points at this worktree's
+    # exclusive external tree; .venv remains the checkout's read-only venv.
     _link_shared_dependencies(Path(repo_root), wt)
 
     return {"path": wt, "branch": branch, "base_branch": base_branch,
@@ -2716,23 +2721,37 @@ def _resolve_fixer_worktree(
 
 def _self_heal_release_toolchain(root: Path) -> Optional[str]:
     """Install a private, lockfile-bound toolchain in a validation worktree."""
-    for rel in ("node_modules", "web/node_modules"):
-        private_modules = root / rel
+    dedicated = any(
+        _is_dedicated_dependency_link(root, root / rel, rel)
+        for rel in _DEDICATED_NODE_MODULES_LINKS
+    )
+    install_root = root
+    if dedicated:
         try:
-            if private_modules.is_symlink():
-                private_modules.unlink()
-            private_modules.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
+            install_root = _prepare_dedicated_npm_shadow(root)
+        except (OSError, WorktreeError) as exc:
             return (
-                "release-toolchain: could not create private "
-                f"{rel}: {exc}"
+                "release-toolchain: could not prepare dedicated npm shadow: "
+                f"{exc}"
             )
+    else:
+        for rel in _DEDICATED_NODE_MODULES_LINKS:
+            private_modules = root / rel
+            try:
+                if private_modules.is_symlink():
+                    private_modules.unlink()
+                private_modules.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return (
+                    "release-toolchain: could not create private "
+                    f"{rel}: {exc}"
+                )
 
     npm_bin = shutil.which("npm") or "npm"
     try:
         proc = subprocess.run(  # noqa: S603 -- fixed argv
             [npm_bin, "ci"],
-            cwd=str(root),
+            cwd=str(install_root),
             capture_output=True,
             text=True,
             timeout=RELEASE_GATE_COMMAND_TIMEOUT,
@@ -2747,6 +2766,11 @@ def _self_heal_release_toolchain(root: Path) -> Optional[str]:
     if proc.returncode != 0:
         tail = ((proc.stdout or "") + (proc.stderr or "")).strip()[-2000:]
         return f"release-toolchain: npm ci exit {proc.returncode}\n{tail}"
+    if dedicated:
+        try:
+            _rewire_dedicated_workspace_links(root)
+        except (OSError, WorktreeError) as exc:
+            return f"release-toolchain: could not rewire workspace links: {exc}"
     return None
 
 
@@ -4808,8 +4832,9 @@ def _drop_writer_lease_for_removed_worktree(
 
 def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
     """Remove a merged chain's worktree + branch. Best-effort, but the
-    node_modules symlinks are unlinked first so ``worktree remove`` never
-    sees them as content."""
+    dependency symlinks are unlinked first so ``worktree remove`` never sees
+    them as content. The identity-bound dependency tree is then removed
+    independently; no link target is ever followed."""
     for rel in _NODE_MODULES_LINKS:
         link = Path(wt_path) / rel
         try:
@@ -4817,6 +4842,7 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
                 link.unlink()
         except OSError:
             pass
+    _remove_worktree_deps_tree(Path(wt_path))
     _git(repo_root, "worktree", "remove", str(wt_path), check=False)
     if Path(wt_path).exists():
         # Symlink edge cases can make `worktree remove` refuse; the branch
@@ -4900,12 +4926,255 @@ def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
     return None
 
 
+def _worktree_deps_root() -> Path:
+    configured = Path(
+        os.environ.get("HERMES_WORKTREE_DEPS_ROOT", str(_DEFAULT_WORKTREE_DEPS_ROOT))
+    ).expanduser()
+    if not configured.is_absolute():
+        raise WorktreeError("HERMES_WORKTREE_DEPS_ROOT must be an absolute path")
+    return configured.resolve(strict=False)
+
+
+def _ensure_worktree_deps_root_mounted(deps_root: Path) -> None:
+    """Fail closed instead of silently spilling a multi-GiB install onto /.
+
+    The default deps root (``/mnt/data/...``) is expected to live on its own
+    mounted filesystem, separate from the OS disk. If that mount is absent,
+    the mountpoint directory still exists (created by earlier provisioning)
+    and is writable, so a naive ``mkdir`` + ``npm ci`` would silently write a
+    ~1.5 GiB dependency tree onto the system disk instead — unnoticed until
+    it is nearly full. Only enforced for the built-in default: an operator
+    or test that explicitly points ``HERMES_WORKTREE_DEPS_ROOT`` elsewhere
+    has taken responsibility for that path.
+    """
+    if deps_root != _DEFAULT_WORKTREE_DEPS_ROOT.resolve(strict=False):
+        return
+    nearest = deps_root
+    while not nearest.exists():
+        parent = nearest.parent
+        if parent == nearest:
+            break
+        nearest = parent
+    try:
+        deps_dev = nearest.stat().st_dev
+        root_dev = Path("/").stat().st_dev
+    except OSError as exc:
+        raise WorktreeError(
+            f"cannot verify worktree deps root {deps_root}: {exc}"
+        ) from exc
+    if deps_dev == root_dev:
+        raise WorktreeError(
+            f"refusing to create a worktree dependency tree under {deps_root}: "
+            f"its nearest existing ancestor ({nearest}) is on the SAME "
+            "filesystem as / — the expected data-volume mount looks absent, "
+            "and installing here would silently spill a multi-GiB dependency "
+            "tree onto the system disk. Mount the data volume, or set "
+            "HERMES_WORKTREE_DEPS_ROOT to a path on a filesystem you know "
+            "has room."
+        )
+
+
+def _worktree_deps_tree(worktree: Path) -> Path:
+    canonical = Path(worktree).resolve(strict=False)
+    digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
+    return _worktree_deps_root() / f"{canonical.name}-{digest}"
+
+
+def _dedicated_dependency_target(worktree: Path, rel: str) -> Path:
+    if rel not in _DEDICATED_NODE_MODULES_LINKS:
+        raise WorktreeError(f"not a dedicated dependency path: {rel}")
+    return _worktree_deps_tree(worktree) / rel
+
+
+def _is_dedicated_dependency_link(
+    worktree: Path,
+    link: Path,
+    rel: str,
+) -> bool:
+    if not link.is_symlink():
+        return False
+    try:
+        raw_target = link.readlink()
+    except OSError:
+        return False
+    if not raw_target.is_absolute():
+        raw_target = link.parent / raw_target
+    actual = Path(os.path.abspath(raw_target))
+    return actual == _dedicated_dependency_target(worktree, rel)
+
+
+def _workspace_manifest_paths(repo_root: Path) -> list[str]:
+    lock_path = repo_root / "package-lock.json"
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        raise WorktreeError(f"cannot read npm lockfile {lock_path}: {exc}") from exc
+    packages = lock.get("packages")
+    if not isinstance(packages, dict):
+        raise WorktreeError(f"npm lockfile has no packages map: {lock_path}")
+    return sorted(
+        rel
+        for rel in packages
+        if rel
+        and not rel.startswith("node_modules/")
+        and "/node_modules/" not in rel
+    )
+
+
+def _prepare_dedicated_npm_shadow(worktree: Path) -> Path:
+    """Create a manifest-only npm workspace beside the dedicated node trees."""
+    tree = _worktree_deps_tree(worktree)
+    _ensure_worktree_deps_root_mounted(tree.parent)
+    tree.mkdir(parents=True, exist_ok=True)
+    for rel in _DEDICATED_NODE_MODULES_LINKS:
+        link = worktree / rel
+        target = _dedicated_dependency_target(worktree, rel)
+        if not link.exists() and not link.is_symlink():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(target, target_is_directory=True)
+        if not _is_dedicated_dependency_link(worktree, link, rel):
+            raise WorktreeError(
+                f"mixed local/dedicated node_modules layout at {link}: expected "
+                f"a symlink into {target}, found something else — most likely "
+                f"a plain 'npm ci' ran directly against {link} (npm removes "
+                "the dedicated symlink before installing). Fix: remove "
+                f"{link} (rm -rf) and re-run scripts/gate-frontend.sh, which "
+                "reprovisions the dedicated link and installs into the "
+                "isolated deps tree instead."
+            )
+        target.mkdir(parents=True, exist_ok=True)
+
+    for name in ("package.json", "package-lock.json"):
+        source = worktree / name
+        if not source.is_file():
+            raise WorktreeError(f"npm manifest missing: {source}")
+        shutil.copy2(source, tree / name)
+    for rel in _workspace_manifest_paths(worktree):
+        source = worktree / rel / "package.json"
+        if not source.is_file():
+            raise WorktreeError(f"workspace manifest missing: {source}")
+        target = tree / rel / "package.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    return tree
+
+
+def _rewire_dedicated_workspace_links(worktree: Path) -> None:
+    """Point installed workspace packages at this worktree's real source."""
+    tree = _worktree_deps_tree(worktree)
+    for rel in _workspace_manifest_paths(worktree):
+        manifest_path = worktree / rel / "package.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise WorktreeError(
+                f"cannot read workspace manifest {manifest_path}: {exc}"
+            ) from exc
+        package_name = manifest.get("name")
+        if not isinstance(package_name, str) or not package_name:
+            continue
+        link = tree / "node_modules" / package_name
+        if link.is_symlink():
+            link.unlink()
+        elif os.path.lexists(link):
+            raise WorktreeError(f"workspace install is not a symlink: {link}")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(worktree / rel, target_is_directory=True)
+
+
+def _remove_worktree_deps_tree(worktree: Path) -> None:
+    """Delete only this worktree's identity-bound tree, never a linked target."""
+    try:
+        deps_root = _worktree_deps_root()
+        deps_tree = _worktree_deps_tree(worktree)
+        if deps_tree.parent != deps_root:
+            _log.warning("refusing dependency cleanup outside %s: %s", deps_root, deps_tree)
+            return
+        if deps_tree.is_symlink():
+            deps_tree.unlink()
+        elif deps_tree.exists():
+            shutil.rmtree(deps_tree)
+    except (OSError, WorktreeError):
+        _log.warning(
+            "could not remove dedicated dependency tree for %s",
+            worktree,
+            exc_info=True,
+        )
+
+
+def _dependency_path_is_ignored(worktree: Path, rel: str) -> bool:
+    """Return whether Git excludes *rel* from this worktree's status.
+
+    Every caller passes a directory-only dependency path (node_modules,
+    web/node_modules, .venv) that does not exist yet in a fresh worktree.
+    ``git check-ignore`` treats a non-existent query path as a *file* unless
+    the pathspec itself ends in ``/`` — so a directory-only gitignore
+    pattern (``node_modules/``, used by family-organizer and health-track)
+    would never match a not-yet-created ``node_modules``, and the dedicated
+    link would silently be skipped for exactly the repos that need it most.
+    Querying with a trailing slash makes git evaluate the pathspec as a
+    directory regardless of whether it exists yet, while a path that is
+    genuinely not ignored is still correctly rejected.
+    """
+    query = rel if rel.endswith("/") else f"{rel}/"
+    try:
+        return bool(
+            _git(
+                worktree,
+                "check-ignore",
+                "--",
+                query,
+                check=False,
+            )
+        )
+    except (OSError, WorktreeError, subprocess.SubprocessError):
+        return False
+
+
+def _warn_dependency_path_not_ignored(
+    repo_root: Path,
+    worktree: Path,
+    rel: str,
+) -> None:
+    _log.warning(
+        "dependency link %s skipped for repo %s (worktree %s): "
+        "Git does not ignore this path; add it to the repo's .gitignore",
+        rel,
+        repo_root,
+        worktree,
+    )
+
+
 def _link_shared_dependencies(repo_root: Path, worktree: Path) -> None:
-    """Expose the checkout's dependency trees in a short-lived worktree."""
-    for rel in _NODE_MODULES_LINKS:
+    """Link exclusive node trees and the live checkout's read-only Python venv."""
+    for rel in _DEDICATED_NODE_MODULES_LINKS:
+        dst = Path(worktree) / rel
+        if not dst.exists() and not dst.is_symlink() and dst.parent.is_dir():
+            if not _dependency_path_is_ignored(worktree, rel):
+                _warn_dependency_path_not_ignored(repo_root, worktree, rel)
+                continue
+            try:
+                target = _dedicated_dependency_target(worktree, rel)
+                dst.symlink_to(target, target_is_directory=True)
+            except (OSError, WorktreeError):
+                _log.warning(
+                    "could not symlink dedicated %s into worktree %s",
+                    rel,
+                    worktree,
+                )
+
+    for rel in _SHARED_READ_ONLY_DEPENDENCY_LINKS:
         src = Path(repo_root) / rel
         dst = Path(worktree) / rel
-        if src.is_dir() and not dst.exists() and dst.parent.is_dir():
+        if (
+            src.is_dir()
+            and not dst.exists()
+            and not dst.is_symlink()
+            and dst.parent.is_dir()
+        ):
+            if not _dependency_path_is_ignored(worktree, rel):
+                _warn_dependency_path_not_ignored(repo_root, worktree, rel)
+                continue
             try:
                 dst.symlink_to(src, target_is_directory=True)
             except OSError:
@@ -4921,6 +5190,7 @@ def _cleanup_validation_worktree(repo_root: Path, worktree: Path) -> None:
                 link.unlink()
         except OSError:
             _log.warning("could not unlink %s from validation worktree", link)
+    _remove_worktree_deps_tree(worktree)
     _reap_partial(repo_root, worktree)
     try:
         worktree.rmdir()
