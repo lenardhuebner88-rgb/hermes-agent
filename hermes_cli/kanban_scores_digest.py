@@ -38,7 +38,8 @@ def _window_costs(conn: sqlite3.Connection, start_epoch: int) -> dict[int, float
         int(row["run_id"]): float(row["cost"] or 0.0)
         for row in conn.execute(
             "SELECT run_id, MAX(CAST(value AS REAL)) AS cost FROM scores "
-            "WHERE name = 'run_cost_usd' AND run_id IS NOT NULL AND created_at >= ? "
+            "WHERE name = 'run_cost_effective_usd' "
+            "AND run_id IS NOT NULL AND created_at >= ? "
             "GROUP BY run_id",
             (start_epoch,),
         )
@@ -53,9 +54,10 @@ def _top_findings(
 ) -> list[dict[str, Any]]:
     """Return at most five local, stable, cost-basis findings.
 
-    ``impact_eur`` is an estimate calculated from persisted ``run_cost_usd``
-    score rows and a fixed documented 0.92 USD→EUR conversion.  For cache and
-    queue findings it is a cost-at-risk estimate, not a claim of causal loss.
+    ``impact_eur`` is an estimate calculated from persisted
+    ``run_cost_effective_usd`` score rows and a fixed documented 0.92 USD→EUR
+    conversion. For cache and queue findings it is a cost-at-risk estimate,
+    not a claim of causal loss.
     """
     costs = _window_costs(conn, start_epoch)
     findings: list[dict[str, Any]] = []
@@ -277,12 +279,12 @@ def scores_digest(
     cost_duration: list[dict[str, Any]] = []
     for row in conn.execute(
         "SELECT s.run_id, tr.task_id, "
-        "MAX(CASE WHEN s.name = 'run_cost_usd' THEN s.value END) AS cost, "
+        "MAX(CASE WHEN s.name = 'run_cost_effective_usd' THEN s.value END) AS cost, "
         "MAX(CASE WHEN s.name = 'run_duration_seconds' THEN s.value END) AS duration "
         "FROM scores s JOIN task_runs tr ON tr.id = s.run_id "
         "WHERE s.run_id IN (SELECT run_id FROM scores WHERE name = 'review_verdict' AND value = 1.0) "
-        "AND s.name IN ('run_cost_usd', 'run_duration_seconds') "
-        "GROUP BY s.run_id ORDER BY s.run_id DESC LIMIT 20"
+        "AND s.name IN ('run_cost_effective_usd', 'run_duration_seconds') "
+        "GROUP BY s.run_id ORDER BY cost DESC, s.run_id DESC LIMIT 20"
     ):
         cost_duration.append(
             {
@@ -294,7 +296,8 @@ def scores_digest(
         )
 
     has_metrics = conn.execute(
-        "SELECT 1 FROM scores WHERE name IN ('run_cost_usd', 'run_duration_seconds') LIMIT 1"
+        "SELECT 1 FROM scores "
+        "WHERE name IN ('run_cost_effective_usd', 'run_duration_seconds') LIMIT 1"
     ).fetchone() is not None
     approved_run_metric_coverage = any(
         row.get("cost_usd") is not None or row.get("duration_seconds") is not None

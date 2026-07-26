@@ -67,6 +67,8 @@ def test_scorecard_aggregates_populated_numeric_scores_and_preserves_review_verd
         _insert_score(conn, task_id=task_b, run_id=run_b, name="review_verdict", value=0.0, value_type="binary")
         _insert_score(conn, task_id=task_a, run_id=run_a, name="run_cost_usd", value=1.5)
         _insert_score(conn, task_id=task_b, run_id=run_b, name="run_cost_usd", value=2.5)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_cost_effective_usd", value=11.5)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_cost_effective_usd", value=22.5)
         _insert_score(conn, task_id=task_a, run_id=run_a, name="run_duration_seconds", value=3.0)
         _insert_score(conn, task_id=task_b, run_id=run_b, name="run_duration_seconds", value=9.0)
         _insert_score(conn, task_id=task_a, run_id=run_a, name="run_tokens_total", value=100.0)
@@ -85,6 +87,9 @@ def test_scorecard_aggregates_populated_numeric_scores_and_preserves_review_verd
     assert payload["verdicts"] == {"approved": 1, "rejected": 1}
     scores = payload["materialized_scores"]
     assert scores["run_cost_usd"] == {"value": 2.0, "min": 1.5, "max": 2.5, "sum": 4.0, "count": 2}
+    assert scores["run_cost_effective_usd"] == {
+        "value": 17.0, "min": 11.5, "max": 22.5, "sum": 34.0, "count": 2,
+    }
     assert scores["run_duration_seconds"] == {"value": 6.0, "min": 3.0, "max": 9.0, "sum": 12.0, "count": 2}
     assert scores["run_tokens_total"] == {"value": 200.0, "min": 100.0, "max": 300.0, "sum": 400.0, "count": 2}
     assert scores["run_attempt_index"] == {"value": 2.0, "min": 1.0, "max": 3.0, "sum": 4.0, "count": 2}
@@ -97,6 +102,7 @@ def test_scorecard_returns_explicit_empty_materialized_score_entries(client):
 
     assert response.status_code == 200
     assert response.json()["materialized_scores"] == {
+        "run_cost_effective_usd": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
         "run_cost_usd": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
         "run_duration_seconds": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
         "run_tokens_total": {"value": None, "min": None, "max": None, "sum": None, "count": 0},

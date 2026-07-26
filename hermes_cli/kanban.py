@@ -4664,9 +4664,16 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
 
 
 def _cmd_backfill_metrics(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_score_materialization import materialize_scores
+
     with kb.connect_closing() as conn:
-        n = kb.backfill_run_metric_scores(conn)
-        print(f"Backfilled run-metric scores for {n} row(s).")
+        run_metric_rows = kb.backfill_run_metric_scores(conn)
+        materialized = materialize_scores(conn)
+        print(f"Backfilled run-metric scores for {run_metric_rows} row(s).")
+        print(
+            "Materialized analytics scores for "
+            f"{materialized['inserted']} row(s)."
+        )
     return 0
 
 

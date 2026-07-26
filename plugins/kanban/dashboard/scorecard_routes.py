@@ -5,6 +5,7 @@ import datetime as dt
 
 
 _NUMERIC_MATERIALIZED_SCORE_NAMES = (
+    "run_cost_effective_usd",
     "run_cost_usd",
     "run_duration_seconds",
     "run_tokens_total",

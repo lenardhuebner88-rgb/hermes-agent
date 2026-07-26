@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import hermes_cli.kanban_db as kb
 from hermes_cli.langfuse_scores_export import _score_payload
+from hermes_cli.kanban import run_slash
 from hermes_cli.kanban_score_materialization import materialize_scores
 
 
@@ -100,6 +102,130 @@ def test_materialize_scores_excludes_scheduled_and_waiting_queue_latency(tmp_pat
         assert conn.execute(
             "SELECT COUNT(*) FROM scores WHERE name = 'queue_latency_seconds'"
         ).fetchone()[0] == 0
+
+
+def test_materialize_scores_uses_real_metadata_json_for_effective_cost(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+
+    with kb.connect_closing() as conn:
+        task_ids = {
+            title: kb.create_task(conn, title=title, assignee="coder")
+            for title in (
+                "actual-and-equivalent",
+                "equivalent-only",
+                "blind",
+                "invalid-equivalent",
+            )
+        }
+        rows = [
+            (
+                task_ids["actual-and-equivalent"],
+                1.25,
+                json.dumps({"cost_usd_equivalent": "2.75"}),
+            ),
+            (
+                task_ids["equivalent-only"],
+                None,
+                json.dumps({"cost_usd_equivalent": 3.5}),
+            ),
+            (task_ids["blind"], 0.0, json.dumps({"unrelated": True})),
+            (
+                task_ids["invalid-equivalent"],
+                None,
+                json.dumps({"cost_usd_equivalent": "not-a-number"}),
+            ),
+        ]
+        conn.executemany(
+            "INSERT INTO task_runs "
+            "(task_id, status, started_at, ended_at, cost_usd, metadata) "
+            "VALUES (?, 'done', 1000, 1100, ?, ?)",
+            rows,
+        )
+
+        first = materialize_scores(conn, state_db_paths=[], created_at=1200)
+        effective = conn.execute(
+            "SELECT task_id, value FROM scores "
+            "WHERE name = 'run_cost_effective_usd' ORDER BY task_id"
+        ).fetchall()
+        second = materialize_scores(conn, state_db_paths=[], created_at=1201)
+
+    assert first["inserted"] > 0
+    assert {row["task_id"]: row["value"] for row in effective} == {
+        task_ids["actual-and-equivalent"]: 4.0,
+        task_ids["equivalent-only"]: 3.5,
+    }
+    assert second["inserted"] == 0
+
+
+def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    kb.init_db()
+    state_db = home / "state.db"
+    _state_db(state_db)
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="cli materialize",
+            assignee="coder",
+            session_id="session-1",
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done', created_at = 700 WHERE id = ?",
+            (task_id,),
+        )
+        run_id = int(
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, status, started_at, ended_at, outcome, cost_usd, metadata) "
+                "VALUES (?, 'done', 1000, 1100, 'completed', 1.0, ?)",
+                (task_id, json.dumps({"cost_usd_equivalent": 2.0})),
+            ).lastrowid
+        )
+        conn.executemany(
+            "INSERT INTO task_events "
+            "(task_id, run_id, kind, payload, created_at) VALUES (?, ?, ?, '{}', ?)",
+            [
+                (task_id, run_id, "freigabe_vetoed", 1010),
+                (task_id, run_id, "submitted_for_review", 1020),
+                (task_id, run_id, "review_approved", 1030),
+            ],
+        )
+
+    first = run_slash("backfill-metrics")
+    with kb.connect_closing() as conn:
+        names = {
+            str(row["name"])
+            for row in conn.execute(
+                "SELECT DISTINCT name FROM scores WHERE task_id = ?", (task_id,)
+            )
+        }
+    second = run_slash("backfill-metrics")
+
+    assert "Backfilled run-metric scores for " in first
+    assert "Materialized analytics scores for " in first
+    assert {
+        "operator_veto",
+        "queue_latency_seconds",
+        "review_submissions_to_approval",
+        "cache_hit_ratio",
+        "run_cost_effective_usd",
+    } <= names
+    assert second == (
+        "Backfilled run-metric scores for 0 row(s).\n"
+        "Materialized analytics scores for 0 row(s)."
+    )
 
 
 def test_task_outcome_payload_is_categorical():
