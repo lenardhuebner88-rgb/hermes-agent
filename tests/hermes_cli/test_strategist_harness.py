@@ -1089,9 +1089,8 @@ def test_deflake_is_idempotent_per_file(board_home):
     r2 = strategist.propose_deflake(board=None, out_dir=out_dir, gate_records=third)
 
     assert r1["filed"][0]["already_ingested"] is False
-    assert r2["filed"][0]["already_ingested"] is True
-    assert r1["filed"][0]["key"] == r2["filed"][0]["key"]
-    assert r1["filed"][0]["root_task_id"] == r2["filed"][0]["root_task_id"]
+    assert r2["filed"] == []
+    assert r2["skipped_existing"] == ["tests/agent/test_delegate.py"]
     # now recurring (3 distinct nights) — escalation surfaced on the summary
     assert r2["recurring"] == ["tests/agent/test_delegate.py"]
     with kb.connect() as conn:
@@ -1113,3 +1112,48 @@ def test_deflake_filing_drives_counter_metric_to_zero(board_home):
     )
     after = vm._green_gate_metric(records, deflake_filed=vm.read_deflake_filed(filed_path))
     assert after["flake_debt"]["value"] == 0
+
+
+def test_run_propose_files_deflake_before_budget_skipped_proposer_and_is_idempotent(
+    board_home, monkeypatch
+):
+    """The deterministic de-flake sibling runs before the budget-gated proposer.
+
+    A later budget skip must not swallow a neutralized fail->pass candidate, and
+    a second identical strategist run must not re-ingest that PlanSpec chain.
+    """
+    records = [_flaky_night("2026-07-18", ["python: tests/agent/test_delegate.py"])]
+    out_dir = board_home / "specs"
+    monkeypatch.setattr(vm, "read_gate_records", lambda *args, **kwargs: records)
+
+    def budget_skipped_proposer(**kwargs):
+        assert vm.read_deflake_filed() == {"GATE-DEFLAKE-PYTHON-785df46f"}
+        return {"skipped": "budget", "candidates": 0, "ingested": []}
+
+    monkeypatch.setattr(strategist, "propose", budget_skipped_proposer)
+    args = SimpleNamespace(
+        board=None,
+        out_dir=out_dir,
+        drafts_file=None,
+        budget_provider=None,
+        budget_threshold=None,
+        cap=None,
+        dry_run=False,
+    )
+
+    first = strategist.run_propose(args)
+    with kb.connect() as conn:
+        first_chain_ids = {task.id for task in kb.list_tasks(conn, limit=20)}
+    second = strategist.run_propose(args)
+
+    assert first["skipped"] == "budget"
+    assert first["deflake"]["filed"][0]["already_ingested"] is False
+    assert second["deflake"]["filed"] == []
+    assert second["deflake"]["skipped_existing"] == ["tests/agent/test_delegate.py"]
+    with kb.connect() as conn:
+        assert {task.id for task in kb.list_tasks(conn, limit=20)} == first_chain_ids
+
+
+def test_flake_debt_leaf_metric_has_negative_verdict_direction():
+    """A falling unfiled-flake count is a measurable improvement."""
+    assert strategist._resolve_verdict_direction("green_gate_streak.flake_debt.value") == -1

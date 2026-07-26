@@ -164,6 +164,9 @@ MATURITY_DAYS: int = 3
 #                                        held_over_7d is the antagonist)
 #   decision_latency_days_median      -1  faster operator absorption of held
 #                                        proposals is better (operator_load)
+#   green_gate_streak.flake_debt.value -1 fewer unfiled neutralized flakes is
+#                                        better; filing a held de-flake PlanSpec
+#                                        consumes this debt
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
@@ -174,6 +177,7 @@ _VERDICT_DIRECTION: dict[str, int] = {
     "error_escalations_per_week": -1,
     "touches_per_week": -1,
     "decision_latency_days_median": -1,
+    "green_gate_streak.flake_debt.value": -1,
 }
 
 # Keys with no defensible ROI direction: raw counts, denominators, coverage/
@@ -1796,6 +1800,7 @@ def propose_deflake(
             "reason": "keine flaky-neutralisierten Testdateien im green-gate-ledger",
             "candidates": [],
             "filed": [],
+            "skipped_existing": [],
             "recurring": [],
             "ingest_errors": [],
         }
@@ -1804,10 +1809,14 @@ def propose_deflake(
     already_filed = vision_metrics.read_deflake_filed(filed_path)
 
     filed: list[dict[str, Any]] = []
+    skipped_existing: list[str] = []
     ingest_errors: list[dict[str, Any]] = []
     newly_filed: set[str] = set()
     for cand in candidates:
         lever = _deflake_lever(cand)
+        if lever.key in already_filed:
+            skipped_existing.append(cand["file"])
+            continue
         if not do_ingest:
             filed.append(
                 {
@@ -1858,6 +1867,7 @@ def propose_deflake(
             for c in candidates
         ],
         "filed": filed,
+        "skipped_existing": skipped_existing,
         "recurring": recurring_files,
         "ingest_errors": ingest_errors,
     }
@@ -3433,6 +3443,11 @@ def run_propose(args) -> dict[str, Any]:
     if drafts_file:
         loaded = json.loads(Path(drafts_file).read_text(encoding="utf-8"))
         drafts = loaded.get("levers", loaded) if isinstance(loaded, dict) else loaded
+    deflake = propose_deflake(
+        board=getattr(args, "board", None),
+        out_dir=out_dir,
+        do_ingest=not getattr(args, "dry_run", False),
+    )
     result = propose(
         board=getattr(args, "board", None),
         out_dir=out_dir,
@@ -3444,6 +3459,7 @@ def run_propose(args) -> dict[str, Any]:
         do_ingest=not getattr(args, "dry_run", False),
         outcomes_path=state_dir / "lever-outcomes.json",
     )
+    result["deflake"] = deflake
     append_run_history(
         default_state_dir(),
         {
