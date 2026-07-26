@@ -1589,3 +1589,127 @@ def test_lane_scope_most_recent_review_snapshot_wins(repo, kanban_home):
         # and the shared branch tip, which still contains the later commit.
         assert out is not None and out["action"] == "merged"
         assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+# ---------------------------------------------------------------------------
+# V3 — auto-close never-ran ordinary chain roots so auto-land can fire
+# ---------------------------------------------------------------------------
+
+
+def test_never_ran_ordinary_root_auto_closes_when_children_terminal(
+    repo, kanban_home, monkeypatch,
+):
+    """Bookkeeping root (never assigned/ran) must auto-close after last child.
+
+    Without the never-ran finalizer, maybe_integrate_on_complete returns
+    deferred (open sibling = root) and the chain never lands.
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="bookkeeping chain root",
+            assignee=None,
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="real work child",
+            assignee="coder",
+            created_by="tester",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 1\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        # Precondition: root never ran.
+        runs = conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (root_id,),
+        ).fetchone()
+        assert runs is None
+        assert kb.get_task(conn, root_id).started_at is None
+        assert kb.get_task(conn, root_id).status == "ready"
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out["action"] == "merged"
+    assert root.status == "done"
+    assert len(auto) == 1
+    assert auto[0]["completed_by"] == child_id
+    assert (repo / "feature.py").read_text() == "VALUE = 1\n"
+
+
+def test_never_ran_root_not_auto_closed_when_it_has_task_runs(
+    repo, kanban_home, monkeypatch,
+):
+    """Guard 2: a root that has a task_runs row stays open (deferred)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn, title="ran root", assignee="coder", kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ? WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        # Simulate a prior run without going through claim (started_at/run).
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, started_at, status, profile) "
+                "VALUES (?, ?, 'running', 'coder')",
+                (root_id, int(__import__("time").time())),
+            )
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?",
+                (int(__import__("time").time()), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="child",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        _commit_in(
+            info["path"], "feature.py", "VALUE = 2\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out.get("action") == "deferred"
+    assert root.status == "ready"
+    assert auto == []
+
+

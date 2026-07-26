@@ -6735,6 +6735,159 @@ def _find_open_chain_sibling(
     return open_sibling
 
 
+def _never_ran_root_eligible(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    repo_root: Path,
+    completing_task_id: Optional[str] = None,
+) -> bool:
+    """True when an ordinary chain root is pure bookkeeping and safe to auto-close.
+
+    All of these must hold (never-ran guard for auto-land):
+    1. every non-archived chain child is terminal (done/failed/cancelled),
+       treating *completing_task_id* as already terminal (this runs inside
+       ``complete_task`` before the child row flips to done)
+    2. the root never ran (no ``task_runs`` row AND ``started_at`` empty)
+    3. no own ``branch_name`` with unmerged commits vs ``main``
+    """
+    if _is_decompose_root(conn, root_id):
+        return False
+    row = conn.execute(
+        "SELECT started_at, branch_name FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    # Guard 1 — all non-archived chain children terminal (the completing
+    # child is still open at this hook point; treat it as terminal).
+    for child_id in _chain_member_ids(conn, root_id):
+        if child_id == root_id:
+            continue
+        if completing_task_id is not None and child_id == completing_task_id:
+            continue
+        crow = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (child_id,),
+        ).fetchone()
+        if crow is None:
+            continue
+        status = crow["status"]
+        if status == "archived":
+            continue
+        if status not in {"done", "failed", "cancelled"}:
+            return False
+
+    # Guard 2 — never ran.
+    has_run = conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if has_run is not None:
+        return False
+    started = row["started_at"]
+    if started is not None and str(started).strip() != "":
+        return False
+
+    # Guard 3 — no unmerged own branch tip.
+    branch_name = str(row["branch_name"] or "").strip()
+    if branch_name and _branch_exists(repo_root, branch_name):
+        try:
+            count_raw = _git(
+                repo_root, "rev-list", "--count", f"main..{branch_name}",
+            )
+            if int(count_raw or "0") > 0:
+                return False
+        except (WorktreeError, ValueError, TypeError):
+            # Fail closed: unknown git state must not auto-close.
+            return False
+    return True
+
+
+def _auto_complete_never_ran_chain_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    completed_task_id: str,
+    outcome: dict,
+) -> None:
+    """Auto-close a never-ran ordinary chain root after children integrated.
+
+    Mirrors :func:`_auto_complete_decompose_root` event/completion shape so the
+    post-merge gate, revert+park, and already-merged recovery paths keep working
+    through the existing integration path.
+    """
+    from hermes_cli import kanban_db as kb
+
+    now = int(time.time())
+    summary = (
+        "auto-completed never-ran chain root after all children completed and "
+        f"`{outcome.get('branch', chain_branch(root_id))}` integrated"
+    )
+    stamp_after_commit = False
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET status = 'done', result = ?, completed_at = ?, "
+            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+            (summary, now, root_id),
+        )
+        if cur.rowcount != 1:
+            return
+        stamp_after_commit = True
+        run_id = kb._end_run(
+            conn,
+            root_id,
+            outcome="completed",
+            status="done",
+            summary=summary,
+            metadata={
+                "auto_completed_by": "never_ran_root_finalizer",
+                "completed_by": completed_task_id,
+                "integration_action": outcome.get("action"),
+                "merge_commit": outcome.get("merge_commit"),
+            },
+        )
+        merge_commit = str(outcome.get("merge_commit") or "").strip()
+        if (
+            outcome.get("action") == "merged"
+            and re.fullmatch(r"[0-9a-fA-F]{40}", merge_commit) is not None
+        ):
+            kb._append_event(conn, root_id, "integration_merged", outcome)
+            kb._append_event(
+                conn,
+                root_id,
+                "INTEGRATOR_VERIFIED",
+                {
+                    "merge_commit": outcome.get("merge_commit"),
+                    "gate": outcome.get("gate"),
+                    "state": outcome.get("state"),
+                },
+            )
+        payload = {
+            "completed_by": completed_task_id,
+            "integration_action": outcome.get("action"),
+            "branch": outcome.get("branch"),
+            "merge_commit": outcome.get("merge_commit"),
+            "reason": (
+                "never-ran ordinary chain root; all non-archived children "
+                "terminal; no own unmerged branch"
+            ),
+        }
+        kb._append_event(conn, root_id, "never_ran_root_auto_completed", payload)
+        kb._append_event(
+            conn,
+            root_id,
+            "completed",
+            {"result_len": len(summary), "summary": summary},
+            run_id=run_id,
+        )
+    if stamp_after_commit:
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
+
+
 def _resolve_open_sibling_finalizer(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6742,6 +6895,8 @@ def _resolve_open_sibling_finalizer(
     wt: Path,
     members: set[str],
     open_sibling,
+    *,
+    repo_root: Optional[Path] = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     """If open siblings remain, decide deferred vs auto-complete root.
 
@@ -6754,6 +6909,20 @@ def _resolve_open_sibling_finalizer(
         conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
     )
     if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
+        auto_complete_root_id = pending_root_id
+    elif (
+        pending_root_id is not None
+        and pending_root_id == root_id
+        and repo_root is not None
+        and _never_ran_root_eligible(
+            conn,
+            pending_root_id,
+            repo_root=repo_root,
+            completing_task_id=task_id,
+        )
+    ):
+        # Ordinary bookkeeping root that never ran — auto-close so integration
+        # can land (incident 2026-07-26: ready root stranded after children done).
         auto_complete_root_id = pending_root_id
     elif pending_root_id is not None:
         try:
@@ -6910,20 +7079,29 @@ def _maybe_auto_complete_after_integration(
     task_id: str,
     outcome: dict,
 ) -> None:
-    if auto_complete_root_id is not None:
-        try:
+    if auto_complete_root_id is None:
+        return
+    try:
+        if _is_decompose_root(conn, auto_complete_root_id):
             _auto_complete_decompose_root(
                 conn,
                 root_id=auto_complete_root_id,
                 completed_task_id=task_id,
                 outcome=outcome,
             )
-        except Exception:
-            _log.warning(
-                "could not auto-complete decompose root %s",
-                auto_complete_root_id,
-                exc_info=True,
+        else:
+            _auto_complete_never_ran_chain_root(
+                conn,
+                root_id=auto_complete_root_id,
+                completed_task_id=task_id,
+                outcome=outcome,
             )
+    except Exception:
+        _log.warning(
+            "could not auto-complete chain root %s",
+            auto_complete_root_id,
+            exc_info=True,
+        )
 
 
 def _record_integration_events_and_receipts(
@@ -7268,6 +7446,7 @@ def maybe_integrate_on_complete(
     open_sibling = _find_open_chain_sibling(conn, task_id, members, wt)
     deferred, auto_complete_root_id = _resolve_open_sibling_finalizer(
         conn, task_id, root_id, wt, members, open_sibling,
+        repo_root=repo_root,
     )
     if deferred is not None:
         return deferred
