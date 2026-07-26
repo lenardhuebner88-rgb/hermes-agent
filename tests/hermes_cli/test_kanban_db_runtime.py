@@ -452,12 +452,19 @@ def test_write_txn_healthy_commit_no_exception(tmp_path):
 
 
 def test_write_txn_raises_on_truncated_file(tmp_path):
-    """A mocked smaller file size triggers the torn-extend check."""
+    """A mocked smaller file size triggers the torn-extend check.
+
+    The check now reads the header side via ``PRAGMA page_count`` over the
+    existing connection instead of ``open()``-ing the database file (an
+    open/close would cancel this process's POSIX locks). The on-disk side is
+    still ``stat()``, so that is what this test fakes. The invariant only
+    applies under a rollback journal — in WAL a committed page may still be
+    in the -wal file, so the main file legitimately lags.
+    """
     from hermes_cli.kanban_db import connect, write_txn
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
     conn.execute("PRAGMA journal_mode=DELETE")
-    # Get actual page size so we can fake a smaller file
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     original_getsize = os.path.getsize
 
@@ -467,7 +474,9 @@ def test_write_txn_raises_on_truncated_file(tmp_path):
         return max(0, real_size - page_size)
 
     with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
-        with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
+        with unittest.mock.patch(
+            "hermes_cli.sqlite_safe_read.os.path.getsize", side_effect=fake_getsize
+        ):
             with write_txn(conn) as c:
                 c.execute(
                     "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
@@ -491,7 +500,7 @@ def test_write_txn_handles_transient_main_file_size_lag_by_journal_mode(tmp_path
         real_size = original_getsize(path)
         return max(0, real_size - page_size)
 
-    with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
+    with unittest.mock.patch("hermes_cli.sqlite_safe_read.os.path.getsize", side_effect=fake_getsize):
         if journal_mode == "wal":
             with write_txn(conn) as c:
                 c.execute(
@@ -568,6 +577,9 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
                 return _Cursor(("delete",))
             if "database_list" in sql:
                 return _Cursor((0, "main", str(self._db_path)))
+            if "page_count" in sql:
+                # Synthetic header claims 2 pages while the file holds 1.
+                return _Cursor((2,))
             if "page_size" in sql:
                 return _Cursor((self._page_size,))
             raise AssertionError(f"unexpected SQL: {sql}")
