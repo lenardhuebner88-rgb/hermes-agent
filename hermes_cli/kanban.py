@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
 from hermes_cli.goals import check_goal_mode_completion
 from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
@@ -369,9 +370,11 @@ def _register_create_parser(sub: argparse._SubParsersAction) -> None:
     p_create.add_argument("--assignee", default=None, help="Profile name to assign")
     p_create.add_argument("--parent", action="append", default=[],
                           help="Parent task id (repeatable)")
-    p_create.add_argument("--workspace", default="scratch",
+    p_create.add_argument("--workspace", default=None,
                           help="scratch | worktree | worktree:<path> | dir:<path> "
                                "(default: scratch)")
+    p_create.add_argument("--chain-of", default=None, metavar="TASK_ID",
+                          help="Reuse the dispatcher-provisioned worktree of a task chain")
     p_create.add_argument("--branch", default=None,
                           help="Branch name for worktree tasks, e.g. wt/t6-wire")
     p_create.add_argument("--project", default=None,
@@ -2285,14 +2288,28 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
 def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
     """Validate create flags.
 
-    Returns ``(ws_kind, ws_path, branch_name, max_runtime, max_retries,
-    max_iterations, max_continuations)`` or an int exit code on error.
+    Returns workspace, execution limits, and optional chain target, or an int
+    exit code on error.
     """
     try:
-        ws_kind, ws_path = _parse_workspace_flag(args.workspace)
+        ws_kind, ws_path = _parse_workspace_flag(
+            getattr(args, "workspace", None) or "scratch"
+        )
         branch_name = _parse_branch_flag(getattr(args, "branch", None))
     except argparse.ArgumentTypeError as exc:
         _kanban_err(exc)
+        return 2
+    if getattr(args, "chain_of", None) and (
+        getattr(args, "workspace", None) is not None
+        or getattr(args, "branch", None) is not None
+    ):
+        print(
+            "kanban: --chain-of cannot be combined with --workspace or --branch",
+            file=sys.stderr,
+        )
+        return 2
+    if getattr(args, "chain_of", None) and getattr(args, "project", None):
+        print("kanban: --chain-of cannot be combined with --project", file=sys.stderr)
         return 2
     if branch_name and ws_kind != "worktree":
         print("kanban: --branch is only valid with --workspace worktree", file=sys.stderr)
@@ -2330,7 +2347,16 @@ def _create_validate_args(args: argparse.Namespace) -> tuple[Any, ...] | int:
             file=sys.stderr,
         )
         return 2
-    return (ws_kind, ws_path, branch_name, max_runtime, max_retries, max_iterations, max_continuations)
+    return (
+        ws_kind,
+        ws_path,
+        branch_name,
+        max_runtime,
+        max_retries,
+        max_iterations,
+        max_continuations,
+        getattr(args, "chain_of", None),
+    )
 
 
 def _create_subscribe_home_channels(conn: Any, task_id: str) -> None:
@@ -2355,8 +2381,27 @@ def _cmd_create(args: argparse.Namespace) -> int:
     validated = _create_validate_args(args)
     if isinstance(validated, int):
         return validated
-    ws_kind, ws_path, branch_name, max_runtime, max_retries, max_iterations, max_continuations = validated
+    (
+        ws_kind,
+        ws_path,
+        branch_name,
+        max_runtime,
+        max_retries,
+        max_iterations,
+        max_continuations,
+        chain_of,
+    ) = validated
     with kb.connect_closing() as conn:
+        chain_branch_name = None
+        if chain_of:
+            try:
+                ws_kind, ws_path, chain_branch_name = kwt.resolve_chain_workspace(conn, chain_of)
+            except ValueError as exc:
+                _kanban_err(exc)
+                return 2
+            # The upstream create invariant accepts branch metadata only for
+            # a newly provisioned worktree, not a shared directory path.
+            branch_name = None
         task_id = kb.create_task(
             conn,
             title=args.title,
@@ -2390,6 +2435,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             # exercise the intended worker lane directly instead of a code-recon scout.
             auto_scout=not bool(getattr(args, "no_auto_scout", False)),
         )
+        if chain_of:
+            # ``create_task`` reserves ``branch_name`` for worktree-kind
+            # tasks, while a chain follow-up intentionally uses a shared
+            # directory workspace. Preserve the chain branch as metadata
+            # after the validated direct-path creation.
+            kb.set_branch_name(conn, task_id, chain_branch_name)
         # Subscribe-on-create: route this task's terminal-state notifications
         # to every configured home channel (same target as the dashboard
         # subscribe_home endpoint), so a CLI-created root — and its decompose

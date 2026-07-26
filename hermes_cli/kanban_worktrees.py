@@ -1479,6 +1479,30 @@ def chain_root_id(conn: sqlite3.Connection, task_id: str) -> str:
         seen.add(current)
 
 
+def resolve_chain_workspace(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> tuple[str, str, str]:
+    """Return the shared workspace settings for the chain containing *task_id*.
+
+    This deliberately follows only the established upward ``chain_root_id``
+    relation. Ordinary dependency links must not make otherwise independent
+    tasks share a writer lease or worktree.
+    """
+    root_id = chain_root_id(conn, task_id)
+    row = conn.execute(
+        "SELECT workspace_path, branch_name FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    workspace_path = str(row["workspace_path"] or "").strip() if row else ""
+    if not workspace_path or not is_provisioned_path(workspace_path):
+        raise ValueError(
+            f"--chain-of {task_id}: task does not resolve to a chain worktree"
+        )
+    branch_name = str(row["branch_name"] or "").strip() or chain_branch(root_id)
+    return "dir", workspace_path, branch_name
+
+
 def _is_decompose_root(conn: sqlite3.Connection, task_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM task_events "

@@ -155,6 +155,59 @@ def test_run_slash_create_worktree_path_and_branch(kanban_home, tmp_path):
     assert task.branch_name == "wt/t6-wire"
 
 
+def test_run_slash_create_chain_of_reuses_chain_workspace_and_branch(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="chain root",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path / ".worktrees" / "kanban" / "placeholder"),
+        )
+        path = tmp_path / ".worktrees" / "kanban" / root
+        kb.set_workspace_path(conn, root, path)
+        kb.set_branch_name(conn, root, f"kanban/{root}")
+        target = kb.create_task(conn, title="chain target", parents=[root])
+
+    out = kc.run_slash(f"create 'chain follow-up' --chain-of {target} --json")
+    payload = json.loads(out)
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root)
+        task = kb.get_task(conn, payload["id"])
+    assert task.workspace_kind == "dir"
+    assert task.workspace_path == root_task.workspace_path
+    assert task.branch_name == root_task.branch_name
+
+
+def test_run_slash_create_chain_of_rejects_non_chain_workspaces(kanban_home):
+    with kb.connect() as conn:
+        scratch = kb.create_task(conn, title="scratch target")
+        missing_path = kb.create_task(conn, title="missing path", workspace_kind="dir")
+
+    scratch_out = kc.run_slash(f"create 'bad scratch' --chain-of {scratch}")
+    missing_path_out = kc.run_slash(f"create 'bad path' --chain-of {missing_path}")
+
+    assert "--chain-of" in scratch_out
+    assert "chain worktree" in scratch_out
+    assert "--chain-of" in missing_path_out
+    assert "chain worktree" in missing_path_out
+
+
+def test_run_slash_create_chain_of_rejects_workspace_and_branch_flags(kanban_home):
+    with kb.connect() as conn:
+        target = kb.create_task(conn, title="target")
+
+    workspace_out = kc.run_slash(
+        f"create 'bad workspace' --chain-of {target} --workspace scratch"
+    )
+    branch_out = kc.run_slash(
+        f"create 'bad branch' --chain-of {target} --branch kanban/other"
+    )
+
+    assert "--chain-of cannot be combined with --workspace or --branch" in workspace_out
+    assert "--chain-of cannot be combined with --workspace or --branch" in branch_out
+
+
 def test_run_slash_rejects_branch_without_worktree(kanban_home):
     out = kc.run_slash("create 'bad branch' --workspace scratch --branch wt/bad")
     assert "--branch is only valid with --workspace worktree" in out
