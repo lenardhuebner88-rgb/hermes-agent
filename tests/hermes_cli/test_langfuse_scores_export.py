@@ -712,3 +712,118 @@ def test_synthesize_traces_does_not_write_when_retention_is_active(tmp_path: Pat
     assert report["stopped"] == "active_retention_policy"
     assert report["posted"] == 0
     assert calls == ["http://fake/api/public/retention"]
+
+
+def _make_cron_alert_db(path: Path, *, breached: bool) -> int:
+    """Populate seven completed days plus one current-day alert evaluation."""
+    now = 1_728_086_400
+    day = 24 * 60 * 60
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE scores (name TEXT, value REAL, created_at INTEGER)")
+    for offset, value in enumerate(range(1, 8), start=1):
+        conn.execute(
+            "INSERT INTO scores VALUES ('run_cost_usd', ?, ?)",
+            (value, now - offset * day + 60),
+        )
+    conn.executemany(
+        "INSERT INTO scores VALUES ('run_cost_usd', ?, ?)",
+        [(1.0, now + 60), (10.0 if breached else 7.0, now + 120)],
+    )
+    conn.executemany(
+        "INSERT INTO scores VALUES ('cache_hit_ratio', ?, ?)",
+        [(0.10 if breached else 0.35, now + 60), (0.20 if breached else 0.45, now + 120)],
+    )
+    conn.commit()
+    conn.close()
+    return now
+
+
+def test_cron_alert_persists_each_breached_threshold_for_later_reading(tmp_path: Path) -> None:
+    """A dashboard reader can retrieve threshold, measured value, and alert state."""
+    db_path = tmp_path / "kanban.db"
+    history_path = tmp_path / "langfuse-score-export-alert-history.json"
+    now = _make_cron_alert_db(db_path, breached=True)
+
+    alert = langfuse_export.cron_export_alert(
+        db_path=db_path,
+        now=now + 3600,
+        cost_p95_multiplier=2.0,
+        cache_hit_ratio_threshold=0.20,
+        history_path=history_path,
+    )
+
+    assert alert is not None
+    history = langfuse_export.read_cron_alert_history(history_path)
+    assert {entry["threshold"] for entry in history} == {
+        "cost_p95_vs_7d_median",
+        "cache_hit_ratio",
+    }
+    assert all(entry["state"] == "alarm" for entry in history)
+    assert all(entry["timestamp"].endswith("Z") for entry in history)
+    assert next(entry for entry in history if entry["threshold"] == "cost_p95_vs_7d_median")["value"] == 10.0
+
+
+def test_cron_alert_persists_clear_evaluations_instead_of_an_empty_history(tmp_path: Path) -> None:
+    """A successful check without a breach remains distinguishable from never checked."""
+    db_path = tmp_path / "kanban.db"
+    history_path = tmp_path / "langfuse-score-export-alert-history.json"
+    now = _make_cron_alert_db(db_path, breached=False)
+
+    alert = langfuse_export.cron_export_alert(
+        db_path=db_path,
+        now=now + 3600,
+        cost_p95_multiplier=2.0,
+        cache_hit_ratio_threshold=0.20,
+        history_path=history_path,
+    )
+
+    assert alert is None
+    history = langfuse_export.read_cron_alert_history(history_path)
+    assert len(history) == 2
+    assert {entry["state"] for entry in history} == {"clear"}
+    assert {entry["threshold"] for entry in history} == {
+        "cost_p95_vs_7d_median",
+        "cache_hit_ratio",
+    }
+
+
+def test_cron_alert_history_discards_oldest_entries_at_fixed_limit(tmp_path: Path) -> None:
+    """Bounded local history retains the most recent threshold evaluations."""
+    db_path = tmp_path / "kanban.db"
+    history_path = tmp_path / "langfuse-score-export-alert-history.json"
+    now = _make_cron_alert_db(db_path, breached=False)
+    limit = langfuse_export.CRON_ALERT_HISTORY_LIMIT
+
+    for offset in range(limit + 1):
+        langfuse_export.cron_export_alert(
+            db_path=db_path,
+            now=now + 3600 + offset,
+            cost_p95_multiplier=2.0,
+            cache_hit_ratio_threshold=0.20,
+            history_path=history_path,
+        )
+
+    history = langfuse_export.read_cron_alert_history(history_path)
+    assert len(history) == limit
+    assert history[-1]["timestamp"] == "2024-10-05T01:01:40Z"
+    assert history[0]["timestamp"] == "2024-10-05T01:00:51Z"
+
+
+def test_cron_alert_reports_unreadable_history_without_killing_export(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """History I/O is best effort and must not suppress a real threshold alert."""
+    db_path = tmp_path / "kanban.db"
+    now = _make_cron_alert_db(db_path, breached=True)
+
+    with caplog.at_level("WARNING", logger=langfuse_export.__name__):
+        alert = langfuse_export.cron_export_alert(
+            db_path=db_path,
+            now=now + 3600,
+            cost_p95_multiplier=2.0,
+            cache_hit_ratio_threshold=0.20,
+            history_path=tmp_path,
+        )
+
+    assert alert is not None
+    assert "cannot read cron alert history" in caplog.text
