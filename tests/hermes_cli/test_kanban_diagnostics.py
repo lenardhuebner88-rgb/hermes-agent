@@ -1305,3 +1305,272 @@ def test_stranded_decompose_root_branch_silent_for_running_root(kanban_home, tmp
         out = kd.find_stranded_decompose_root_branches(conn, repo_root=repo)
 
     assert root not in out
+
+
+# ---------------------------------------------------------------------------
+# Chain integration visibility (V4 + V3 diagnostic)
+# ---------------------------------------------------------------------------
+
+
+def _make_blocked_chain_with_finished_sibling(
+    repo: Path,
+    *,
+    blocked_age_hours: int,
+    sibling_status: str = "done",
+    sibling_branch: str = "kanban/t_root",
+):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        blocked = kb.create_task(
+            conn,
+            title="blocked chain member",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        sibling = kb.create_task(
+            conn,
+            title="finished slice",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            parents=[blocked],
+        )
+        assert kb.claim_task(conn, blocked) is not None
+        assert kb.block_task(
+            conn,
+            blocked,
+            reason="integration cannot proceed",
+            kind="integration",
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, branch_name = ?, completed_at = ? "
+            "WHERE id = ?",
+            (sibling_status, sibling_branch, now - 60, sibling),
+        )
+        blocked_at = now - blocked_age_hours * 3600
+        conn.execute(
+            "UPDATE task_events SET created_at = ? "
+            "WHERE task_id = ? AND kind = 'blocked'",
+            (blocked_at, blocked),
+        )
+        conn.commit()
+        task = kb.get_task(conn, blocked)
+        events = kb.list_events(conn, blocked)
+        runs = kb.list_runs(conn, blocked)
+    return blocked, sibling, task, events, runs, blocked_at, now
+
+
+def test_blocked_task_holds_finished_chain_work_hostage(kanban_home, tmp_path):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    blocked, sibling, task, events, runs, blocked_at, now = (
+        _make_blocked_chain_with_finished_sibling(
+            repo,
+            blocked_age_hours=2,
+        )
+    )
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
+    assert diag.severity == "warning"
+    assert "Blocked since" in diag.detail
+    assert "holds 1 finished slice(s) hostage" in diag.detail
+    assert sibling in diag.detail
+    assert "work not on main" in diag.detail
+    assert diag.first_seen_at == blocked_at
+    assert diag.data["held_task_ids"] == [sibling]
+    assert blocked not in diag.data["held_task_ids"]
+
+
+def test_blocked_task_hostage_detects_shared_worktree_sibling(
+    kanban_home, tmp_path
+):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        blocked = kb.create_task(conn, title="shared blocked", assignee="coder")
+        worktree = repo / ".worktrees" / "kanban" / blocked
+        worktree.mkdir(parents=True)
+        sibling = kb.create_task(conn, title="shared done", assignee="coder")
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
+            (str(worktree), blocked),
+        )
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ?, branch_name = ?, "
+            "status = 'done', completed_at = ? WHERE id = ?",
+            (str(worktree), "kanban/t_root", now - 60, sibling),
+        )
+        assert kb.claim_task(conn, blocked) is not None
+        assert kb.block_task(
+            conn,
+            blocked,
+            reason="integration wait",
+            kind="integration",
+        )
+        conn.commit()
+        task = kb.get_task(conn, blocked)
+        events = kb.list_events(conn, blocked)
+        runs = kb.list_runs(conn, blocked)
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
+    assert diag.data["held_task_ids"] == [sibling]
+
+
+@pytest.mark.parametrize(
+    ("case", "sibling_status", "sibling_branch"),
+    [
+        ("merged", "done", "kanban/t_root"),
+        ("archived", "archived", "kanban/t_root"),
+        ("missing_branch", "done", "kanban/does-not-exist"),
+    ],
+)
+def test_blocked_task_chain_hostage_silent_without_unmerged_finished_work(
+    kanban_home,
+    tmp_path,
+    case,
+    sibling_status,
+    sibling_branch,
+):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    if case == "merged":
+        _run_git(repo, "checkout", "main")
+        _run_git(repo, "merge", "--ff-only", "kanban/t_root")
+    _blocked, _sibling, task, events, runs, _blocked_at, now = (
+        _make_blocked_chain_with_finished_sibling(
+            repo,
+            blocked_age_hours=2,
+            sibling_status=sibling_status,
+            sibling_branch=sibling_branch,
+        )
+    )
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    assert all(d.kind != "blocked_task_holds_chain" for d in diags)
+
+
+def test_blocked_task_chain_hostage_escalates_after_configured_age(
+    kanban_home, tmp_path
+):
+    repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
+    _blocked, _sibling, task, events, runs, _blocked_at, now = (
+        _make_blocked_chain_with_finished_sibling(
+            repo,
+            blocked_age_hours=25,
+        )
+    )
+
+    diags = kd.compute_task_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+        config={"blocked_chain_hostage_error_hours": 24},
+    )
+
+    diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
+    assert diag.severity == "error"
+    assert diag.data["block_age_hours"] >= 25
+
+
+def _make_pending_chain_root(*, root_has_run: bool, child_status: str):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="chain root", assignee="coder")
+        child = kb.create_task(
+            conn,
+            title="chain child",
+            assignee="coder",
+            parents=[root],
+        )
+        conn.execute(
+            "UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?",
+            (
+                child_status,
+                now - 60 if child_status == "done" else None,
+                child,
+            ),
+        )
+        if root_has_run:
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?",
+                (now - 600, root),
+            )
+        conn.commit()
+        task = kb.get_task(conn, root)
+        events = kb.list_events(conn, root)
+        runs = kb.list_runs(conn, root)
+    return root, child, task, events, runs, now
+
+
+def test_chain_root_pending_integration_fires_for_ran_root(kanban_home):
+    root, _child, task, events, runs, now = _make_pending_chain_root(
+        root_has_run=True,
+        child_status="done",
+    )
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    diag = next(d for d in diags if d.kind == "chain_root_pending_integration")
+    assert diag.severity == "warning"
+    assert (
+        "Chain root waiting: all 1 children terminal, but root has run history "
+        "/ own commits — close manually to land the chain."
+        == diag.detail
+    )
+    assert diag.data["root_task_id"] == root
+    assert diag.data["has_run_history"] is True
+
+
+def test_chain_root_pending_integration_silent_for_never_ran_root(kanban_home):
+    _root, _child, task, events, runs, now = _make_pending_chain_root(
+        root_has_run=False,
+        child_status="done",
+    )
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    assert all(d.kind != "chain_root_pending_integration" for d in diags)
+
+
+def test_chain_root_pending_integration_silent_while_child_open(kanban_home):
+    _root, _child, task, events, runs, now = _make_pending_chain_root(
+        root_has_run=True,
+        child_status="todo",
+    )
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    assert all(d.kind != "chain_root_pending_integration" for d in diags)
+
+
+def test_shared_worktree_non_root_does_not_masquerade_as_chain_root(
+    kanban_home, tmp_path
+):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="shared root", assignee="coder")
+        worktree = tmp_path / "repo" / ".worktrees" / "kanban" / root
+        worktree.mkdir(parents=True)
+        child = kb.create_task(conn, title="shared child", assignee="coder")
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ?, status = 'done', "
+            "completed_at = ? WHERE id = ?",
+            (str(worktree), now - 60, root),
+        )
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ?, started_at = ? WHERE id = ?",
+            (str(worktree), now - 600, child),
+        )
+        conn.commit()
+        task = kb.get_task(conn, child)
+        events = kb.list_events(conn, child)
+        runs = kb.list_runs(conn, child)
+
+    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+
+    assert all(d.kind != "chain_root_pending_integration" for d in diags)
