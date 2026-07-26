@@ -1011,6 +1011,47 @@ def test_dispatch_once_rejects_live_dirty_declared_scope_before_worker_spawn(
     assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
 
 
+def test_dispatch_once_rejects_live_dirty_body_declared_scope(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """The body block is the scope source that actually exists in the wild.
+
+    Measured 2026-07-26 over the 309 code tasks of the previous 14 days:
+    exactly 1 carried a usable ``scope_contract["allowed_paths"]``, while 81
+    carried the ``Scope files (allowed edit paths):`` body block. Reading only
+    the structured contract leaves this preflight dead at 0.3% coverage, so the
+    wiring must resolve the union — this test fails if it regresses to the
+    contract alone.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    spawned: list[str] = []
+
+    def fake_spawn(_task, workspace):
+        spawned.append(workspace)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task with body-declared scope",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            body="Scope files (allowed edit paths):\na.txt\n",
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.reclaim_task(conn, tid, reason="prepare body-scoped retry")
+        (repo / "a.txt").write_text("foreign live edit\n")
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        rejected = _events(conn, tid, "worker_base_rejected")
+        kinds = [event.kind for event in kb.list_events(conn, tid)]
+
+    assert result.spawned == []
+    assert len(spawned) == 1, "body-declared scope overlap must stop the respawn"
+    assert rejected[-1]["reason"].endswith("before worker spawn: a.txt")
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+
+
 def test_dispatch_once_blocks_dirty_worktree_before_worker_spawn(
     kanban_home, repo, all_assignees_spawnable, monkeypatch
 ):

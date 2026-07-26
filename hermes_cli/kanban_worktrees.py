@@ -1569,7 +1569,15 @@ def prepare_reused_task_worktree(
         adopt_wip_scope_paths=_task_scope_paths(task.body, task.scope_contract),
         skip_stale_rebase=_is_conflict_fixer_task(conn, task.id),
         live_checkout=repo_root,
-        scope_files=_scope_contract_files(task.scope_contract),
+        # Union of the structured contract AND the body block, not the contract
+        # alone: measured 2026-07-26 over 309 code tasks of the last 14 days,
+        # exactly 1 carried usable scope_contract["allowed_paths"] while 81
+        # carried the "Scope files (allowed edit paths):" body block. Reading
+        # only the contract would leave this preflight dead at 0.3% coverage.
+        # The body is already trusted here for adopt_wip_scope_paths above,
+        # which adopts uncommitted work — a strictly riskier operation than
+        # refusing to spawn.
+        scope_files=_task_scope_paths(task.body, task.scope_contract),
     )
     from hermes_cli import kanban_db as kb
 
