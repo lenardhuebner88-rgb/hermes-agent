@@ -8,6 +8,7 @@ import hermes_cli.kanban_db as kb
 from hermes_cli.langfuse_scores_export import _score_payload
 from hermes_cli.kanban import run_slash
 from hermes_cli.kanban_score_materialization import materialize_scores
+from hermes_cli.kanban_score_hygiene import SYNTHETIC_RETRY_HEAVY_TASK_IDS
 
 
 def _state_db(path: Path) -> None:
@@ -202,6 +203,18 @@ def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeyp
                 (task_id, run_id, "review_approved", 1030),
             ],
         )
+        for synthetic_id in SYNTHETIC_RETRY_HEAVY_TASK_IDS:
+            conn.execute(
+                "INSERT INTO tasks (id, title, status, created_at) "
+                "VALUES (?, 'retry-heavy fixture', 'done', 700)",
+                (synthetic_id,),
+            )
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, status, started_at, ended_at) "
+                "VALUES (?, 'done', 1000, 1100)",
+                (synthetic_id,),
+            )
 
     first = run_slash("backfill-metrics")
     with kb.connect_closing() as conn:
@@ -211,6 +224,13 @@ def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeyp
                 "SELECT DISTINCT name FROM scores WHERE task_id = ?", (task_id,)
             )
         }
+        synthetic_attempts = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM scores "
+                "WHERE task_id IN (?, ?) AND name = 'run_attempt_index'",
+                SYNTHETIC_RETRY_HEAVY_TASK_IDS,
+            ).fetchone()[0]
+        )
     second = run_slash("backfill-metrics")
 
     assert "Backfilled run-metric scores for " in first
@@ -222,6 +242,7 @@ def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeyp
         "cache_hit_ratio",
         "run_cost_effective_usd",
     } <= names
+    assert synthetic_attempts == 0
     assert second == (
         "Backfilled run-metric scores for 0 row(s).\n"
         "Materialized analytics scores for 0 row(s)."
