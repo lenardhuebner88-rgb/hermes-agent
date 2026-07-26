@@ -746,6 +746,39 @@ def _commit_subject(repo: Path, commit: str) -> str:
     return _git(repo, "show", "-s", "--format=%s", commit)
 
 
+def _target_landing_is_evidenced(
+    repo: Path, target: str, path: str, branch_changed_paths: set[str]
+) -> bool:
+    """Whether target's own history gives evidence *path* landed this branch.
+
+    A matching tree entry alone is coincidence, not evidence: an unrelated
+    target commit can trivially create the same trivial content (an empty
+    ``__init__.py`` marker, say) at the same path with no relation to this
+    branch at all. Require additionally that the target commit which most
+    recently touched *path* did not also touch paths outside this branch
+    commit's own changed set -- a commit that brings in unrelated files is
+    independent work, not a partial pick of this branch's commit.
+    """
+    landing_commit = _git(repo, "log", "--format=%H", "-1", target, "--", path)
+    if not landing_commit:
+        return False
+    landing_paths = {
+        p
+        for p in _git(
+            repo,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            landing_commit,
+            strip=False,
+        ).split("\0")
+        if p
+    }
+    return landing_paths <= branch_changed_paths
+
+
 def _commit_landing_paths(
     repo: Path, target: str, commit: str
 ) -> tuple[list[str], list[str]]:
@@ -767,13 +800,26 @@ def _commit_landing_paths(
         ).split("\0")
         if path
     ]
+    changed_set = set(changed)
     landed: list[str] = []
     pending: list[str] = []
     for path in changed:
         before = _git(repo, "ls-tree", "-z", parent, "--", path, strip=False)
         after = _git(repo, "ls-tree", "-z", commit, "--", path, strip=False)
         target_entry = _git(repo, "ls-tree", "-z", target, "--", path, strip=False)
-        if before != after and target_entry == after:
+        if (
+            before != after
+            # A deletion (empty ``after``) converges to the same "absent"
+            # state regardless of who deleted it or why -- there is no
+            # content to coincide on and nothing an operator could have
+            # deliberately left out by continuing, so it never carries
+            # partial-pick risk. Only a landed path with actual resulting
+            # content is evidence worth routing through the mixed-park check
+            # below; git resolves a matching deletion on its own.
+            and after
+            and target_entry == after
+            and _target_landing_is_evidenced(repo, target, path, changed_set)
+        ):
             landed.append(path)
         else:
             pending.append(path)
@@ -1414,8 +1460,17 @@ def prepare_worker_base(
             result["adopted_wip_files"] = adopted_wip_files
             result["skipped_wip_files"] = skipped_wip_files
         return result
+    # A mixed landed/pending split is evidence a commit was partially picked
+    # onto target, but it is not proof the remaining pending portion actually
+    # conflicts -- git can often reconcile it (identical add/add, both-
+    # deleted) without any help. Try the real rebase first; only park with
+    # the partial-landing diagnosis if it turns out git had no mechanical
+    # objection (silently continuing would then re-land content an operator
+    # may have deliberately left out). A genuine conflict still raises below
+    # and keeps the S10 conflict-fixer route.
+    mixed_diagnosis = None
     if landed and pending:
-        raise WorktreeError(
+        mixed_diagnosis = (
             f"worker branch is partially landed in {target}; automatic base "
             "update skipped. Already landed commits/portions: "
             f"{'; '.join(landed)}. Not landed commits/portions: "
@@ -1445,6 +1500,9 @@ def prepare_worker_base(
                 f"clean stale worktree could not rebase onto {target}: {exc}"
             ) from exc
     else:
+        if mixed_diagnosis is not None:
+            _git(wt, "reset", "--hard", actual_head)
+            raise WorktreeError(mixed_diagnosis)
         action = "rebased"
     new_head = _git(wt, "rev-parse", "HEAD")
     post_dirty = dirty_files(wt)

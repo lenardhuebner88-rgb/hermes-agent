@@ -298,6 +298,108 @@ def test_prepare_worker_base_resets_fully_landed_two_file_commit(repo):
     assert kwt.dirty_files(worktree) == []
 
 
+def test_prepare_worker_base_rebases_through_coincidental_identical_add(repo):
+    """An empty marker file independently created on both sides must not
+    park (Ausprägung B). Unlike the genuine partial pick above, target's
+    landing commit also touches a path this branch never changed -- no
+    evidence the coincidence has anything to do with this branch, so it
+    must not block a rebase git can resolve on its own."""
+    info = kwt.ensure_worktree(repo, "t_coincidental_add")
+    worktree = info["path"]
+    pkg_dir = worktree / "tests" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("")
+    (pkg_dir / "test_new.py").write_text("def test_new():\n    assert True\n")
+    _git(worktree, "add", "tests/pkg/__init__.py", "tests/pkg/test_new.py")
+    _git(worktree, "commit", "-m", "worker: add pkg tests")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    main_pkg_dir = repo / "tests" / "pkg"
+    main_pkg_dir.mkdir(parents=True)
+    (main_pkg_dir / "__init__.py").write_text("")
+    (main_pkg_dir / "test_other.py").write_text("def test_other():\n    assert True\n")
+    _git(repo, "add", "tests/pkg/__init__.py", "tests/pkg/test_other.py")
+    _git(repo, "commit", "-m", "main: add pkg marker + other test")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "tests" / "pkg" / "test_new.py").exists()
+    assert (worktree / "tests" / "pkg" / "test_other.py").exists()
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_rebases_through_coincidental_both_deleted(repo):
+    """An independent identical deletion plus an unrelated new file must not
+    park either: delete/delete always converges to the same absent state
+    regardless of content, so it carries no partial-pick risk on its own."""
+    (repo / "keep.txt").write_text("keep\n")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-m", "add keep")
+
+    info = kwt.ensure_worktree(repo, "t_coincidental_delete")
+    worktree = info["path"]
+    (worktree / "keep.txt").unlink()
+    (worktree / "new.txt").write_text("new\n")
+    _git(worktree, "add", "keep.txt", "new.txt")
+    _git(worktree, "commit", "-m", "drop keep, add new")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "keep.txt").unlink()
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-m", "main drops keep too")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "keep.txt").exists()
+    assert (worktree / "new.txt").exists()
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_routes_real_conflict_to_fixer_despite_coincidence(repo):
+    """A genuine, unresolvable conflict must still surface as a rebase
+    failure routable to the S10 conflict fixer -- even when the same commit
+    also coincidentally deletes a file main independently deleted too
+    (Ausprägung A). Before the fix this mixed landed/pending split hard-
+    parked before ever attempting the rebase, losing the fixer route."""
+    (repo / "dead.py").write_text("obsolete\n")
+    _git(repo, "add", "dead.py")
+    _git(repo, "commit", "-m", "add dead module")
+
+    info = kwt.ensure_worktree(repo, "t_real_conflict")
+    worktree = info["path"]
+    (worktree / "dead.py").unlink()
+    (worktree / "a.txt").write_text("worker version\n")
+    _git(worktree, "add", "dead.py", "a.txt")
+    _git(worktree, "commit", "-m", "worker: drop dead module, rework a.txt")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "dead.py").unlink()
+    (repo / "a.txt").write_text("main version\n")
+    _git(repo, "add", "dead.py", "a.txt")
+    _git(repo, "commit", "-m", "main: drop dead module, other a.txt rework")
+
+    with pytest.raises(kwt.WorktreeError) as raised:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=branch_commit,
+            merge_target="main",
+        )
+
+    diagnosis = str(raised.value)
+    assert kb._is_base_prep_rebase_conflict(diagnosis)
+    assert "partially landed" not in diagnosis
+
+
 def test_prepare_worker_base_rejects_live_dirty_scope_overlap(repo):
     info = kwt.ensure_worktree(repo, "t_live_dirty_scope")
     worktree = info["path"]
