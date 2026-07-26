@@ -6393,9 +6393,7 @@ def _enforce_lane_scope_on_complete(
     Fail-open on git inspection errors: the integrator's own prechecks run
     immediately after and park on any real git problem.
     """
-    row = conn.execute(
-        "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
-    ).fetchone()
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     assignee = (row["assignee"] or "").strip().lower() if row else ""
     if assignee not in LANE_SCOPE_ENFORCED_ASSIGNEES:
         return None
@@ -6585,6 +6583,19 @@ def _enforce_lane_scope_on_complete(
     }
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
+    try:
+        from hermes_cli.kanban_lane_fixer import maybe_route_lane_scope_fixer
+
+        maybe_route_lane_scope_fixer(
+            conn,
+            row,
+            violating_paths=violating,
+            expected_lane=expected_lane,
+        )
+    except Exception:
+        # The hard gate remains authoritative: a routing failure must never
+        # turn a lane-scope violation into a successful completion.
+        _log.exception("lane-scope fixer routing failed for %s", task_id)
     return {
         "action": "parked",
         "reason": reason,

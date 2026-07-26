@@ -659,6 +659,13 @@ def test_lane_scope_coder_frontend_blocks_backend_path(repo, kanban_home):
         assert payload["violating_paths"] == ["hermes_cli/kanban.py"]
         assert payload["expected_lane"] == "coder"
         assert payload["assignee"] == "coder-frontend"
+        fixer_event = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_event) == 1
+        fixer = kb.get_task(conn, fixer_event[0]["child_id"])
+        assert fixer.assignee == "coder"
+        assert fixer.workspace_kind == "dir"
+        assert fixer.workspace_path == str(info["path"])
+        assert "hermes_cli/kanban.py" in fixer.body
     # Nothing merged; the branch survives for the operator.
     assert not (repo / "hermes_cli" / "kanban.py").exists()
     assert _git(repo, "rev-parse", info["branch"])
@@ -694,8 +701,44 @@ def test_lane_scope_coder_blocks_frontend_path(repo, kanban_home):
         assert payload["violating_paths"] == ["web/src/control/Foo.tsx"]
         assert payload["expected_lane"] == "coder-frontend"
         assert payload["assignee"] == "coder"
+        fixer_event = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_event) == 1
+        fixer = kb.get_task(conn, fixer_event[0]["child_id"])
+        assert fixer.assignee == "coder-frontend"
+        assert fixer.workspace_kind == "dir"
+        assert fixer.workspace_path == str(info["path"])
+        assert "web/src/control/Foo.tsx" in fixer.body
     assert not (repo / "web" / "src" / "control" / "Foo.tsx").exists()
     assert _git(repo, "rev-parse", info["branch"])
+
+
+def test_lane_scope_fixer_creation_failure_preserves_park(
+    repo, kanban_home, monkeypatch
+):
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_fixer_failure",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+
+        def raise_create(*args, **kwargs):
+            raise RuntimeError("fixer creation failed")
+
+        monkeypatch.setattr(kb, "create_task", raise_create)
+        out = _complete(conn, task_id)
+
+        assert out is not None
+        assert out["action"] == "parked"
+        assert len(_events(conn, task_id, "worker_gate_blocked")) == 1
+        assert _events(conn, task_id, "lane_scope_fixer_dispatched") == []
+        fixer_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks WHERE idempotency_key LIKE ?",
+            ("lane-scope-fixer:%",),
+        ).fetchone()["count"]
+        assert fixer_count == 0
 
 
 def test_lane_scope_coder_allows_upstream_web_entry(repo, kanban_home):
