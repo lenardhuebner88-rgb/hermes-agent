@@ -1479,6 +1479,85 @@ def chain_root_id(conn: sqlite3.Connection, task_id: str) -> str:
         seen.add(current)
 
 
+def resolve_chain_workspace(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> tuple[str, str, str]:
+    """Return the shared workspace settings for the chain containing *task_id*.
+
+    This deliberately follows only the established upward ``chain_root_id``
+    relation. Ordinary dependency links must not make otherwise independent
+    tasks share a writer lease or worktree.
+    """
+    root_id = chain_root_id(conn, task_id)
+    row = conn.execute(
+        "SELECT workspace_path, branch_name FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    workspace_path = str(row["workspace_path"] or "").strip() if row else ""
+    if not workspace_path or not is_provisioned_path(workspace_path):
+        raise ValueError(
+            f"--chain-of {task_id}: task does not resolve to a chain worktree"
+        )
+    branch_name = str(row["branch_name"] or "").strip() or chain_branch(root_id)
+    return "dir", workspace_path, branch_name
+
+
+def _workspace_repo_identity(workspace_path: str | None) -> Path | None:
+    """Return the shared Git directory identifying a workspace's repository.
+
+    A task can carry its planned worktree path before dispatch materializes
+    that directory.  In that case, resolve Git identity from its nearest
+    existing ancestor so link warnings still cover create-then-link flows.
+    """
+    if not workspace_path:
+        return None
+    path = Path(workspace_path).expanduser()
+    while not path.is_dir() and path != path.parent:
+        path = path.parent
+    if not path.is_dir():
+        return None
+    try:
+        common_dir = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except (WorktreeError, OSError, subprocess.SubprocessError):
+        return None
+    return Path(common_dir).resolve() if common_dir else None
+
+
+def _link_effective_branch(task: Any) -> str | None:
+    """Return a task's stored or dispatch-prospective branch for link checks."""
+    branch_name = getattr(task, "branch_name", None)
+    if branch_name:
+        return str(branch_name)
+    if getattr(task, "workspace_kind", None) != "worktree":
+        return None
+    task_id = getattr(task, "id", None)
+    return f"wt/{task_id}" if task_id else None
+
+
+def cross_branch_link_warning(parent: Any, child: Any) -> str | None:
+    """Describe an unsafe cross-branch link, without changing link semantics."""
+    supported_workspace_kinds = {"worktree", "dir"}
+    if (
+        getattr(parent, "workspace_kind", None) not in supported_workspace_kinds
+        or getattr(child, "workspace_kind", None) not in supported_workspace_kinds
+    ):
+        return None
+    parent_branch = _link_effective_branch(parent)
+    child_branch = _link_effective_branch(child)
+    if not parent_branch or not child_branch or parent_branch == child_branch:
+        return None
+    parent_repo = _workspace_repo_identity(getattr(parent, "workspace_path", None))
+    child_repo = _workspace_repo_identity(getattr(child, "workspace_path", None))
+    if parent_repo is None or parent_repo != child_repo:
+        return None
+    return (
+        "WARNING: linking tasks across branches in the same repository "
+        f"({parent_branch} -> {child_branch}). Use --chain-of when creating "
+        "follow-up tasks to keep work in the existing chain worktree."
+    )
+
+
 def _is_decompose_root(conn: sqlite3.Connection, task_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM task_events "

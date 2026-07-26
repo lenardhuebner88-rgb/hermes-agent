@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import threading
 from pathlib import Path
 
@@ -153,6 +154,59 @@ def test_run_slash_create_worktree_path_and_branch(kanban_home, tmp_path):
     assert task.workspace_kind == "worktree"
     assert task.workspace_path == target_arg
     assert task.branch_name == "wt/t6-wire"
+
+
+def test_run_slash_create_chain_of_reuses_chain_workspace_and_branch(kanban_home, tmp_path):
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="chain root",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path / ".worktrees" / "kanban" / "placeholder"),
+        )
+        path = tmp_path / ".worktrees" / "kanban" / root
+        kb.set_workspace_path(conn, root, path)
+        kb.set_branch_name(conn, root, f"kanban/{root}")
+        target = kb.create_task(conn, title="chain target", parents=[root])
+
+    out = kc.run_slash(f"create 'chain follow-up' --chain-of {target} --json")
+    payload = json.loads(out)
+
+    with kb.connect() as conn:
+        root_task = kb.get_task(conn, root)
+        task = kb.get_task(conn, payload["id"])
+    assert task.workspace_kind == "dir"
+    assert task.workspace_path == root_task.workspace_path
+    assert task.branch_name == root_task.branch_name
+
+
+def test_run_slash_create_chain_of_rejects_non_chain_workspaces(kanban_home):
+    with kb.connect() as conn:
+        scratch = kb.create_task(conn, title="scratch target")
+        missing_path = kb.create_task(conn, title="missing path", workspace_kind="dir")
+
+    scratch_out = kc.run_slash(f"create 'bad scratch' --chain-of {scratch}")
+    missing_path_out = kc.run_slash(f"create 'bad path' --chain-of {missing_path}")
+
+    assert "--chain-of" in scratch_out
+    assert "chain worktree" in scratch_out
+    assert "--chain-of" in missing_path_out
+    assert "chain worktree" in missing_path_out
+
+
+def test_run_slash_create_chain_of_rejects_workspace_and_branch_flags(kanban_home):
+    with kb.connect() as conn:
+        target = kb.create_task(conn, title="target")
+
+    workspace_out = kc.run_slash(
+        f"create 'bad workspace' --chain-of {target} --workspace scratch"
+    )
+    branch_out = kc.run_slash(
+        f"create 'bad branch' --chain-of {target} --branch kanban/other"
+    )
+
+    assert "--chain-of cannot be combined with --workspace or --branch" in workspace_out
+    assert "--chain-of cannot be combined with --workspace or --branch" in branch_out
 
 
 def test_run_slash_rejects_branch_without_worktree(kanban_home):
@@ -845,6 +899,124 @@ def test_run_slash_link_unlink(kanban_home):
     show = kc.run_slash(f"show {tb}")
     assert "todo" in show
     assert "Unlinked" in kc.run_slash(f"unlink {ta} {tb}")
+
+
+def test_run_slash_link_warns_for_cross_branch_same_repo_planned_workspace(kanban_home, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    planned_child_workspace = repo / ".worktrees" / "kanban" / "planned-child"
+    assert not planned_child_workspace.exists()
+
+    with kb.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="parent",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            branch_name="feature/parent",
+        )
+    child_output = kc.run_slash(
+        f"create 'child' --workspace worktree:{planned_child_workspace}"
+    )
+    child_match = re.search(r"(t_[a-f0-9]+)", child_output)
+    assert child_match is not None
+    child = child_match.group(1)
+    with kb.connect() as conn:
+        child_task = kb.get_task(conn, child)
+        assert child_task is not None
+        assert child_task.branch_name is None
+
+    output = kc.run_slash(f"link {parent} {child}")
+
+    assert "warning" in output.lower()
+    assert "feature/parent" in output
+    assert f"wt/{child}" in output
+    assert "--chain-of" in output
+    assert f"Linked {parent} -> {child}" in output
+    with kb.connect() as conn:
+        assert conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
+            (parent, child),
+        ).fetchone()
+
+
+def test_run_slash_link_skips_warning_for_matching_prospective_worktree_branch(
+    kanban_home, tmp_path
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    planned_child_workspace = repo / ".worktrees" / "kanban" / "planned-child"
+
+    child_output = kc.run_slash(
+        f"create 'child' --workspace worktree:{planned_child_workspace}"
+    )
+    child_match = re.search(r"(t_[a-f0-9]+)", child_output)
+    assert child_match is not None
+    child = child_match.group(1)
+    with kb.connect() as conn:
+        child_task = kb.get_task(conn, child)
+        assert child_task is not None
+        assert child_task.branch_name is None
+        parent = kb.create_task(
+            conn,
+            title="parent",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+            branch_name=f"wt/{child}",
+        )
+
+    output = kc.run_slash(f"link {parent} {child}")
+
+    assert "warning" not in output.lower()
+    assert f"Linked {parent} -> {child}" in output
+
+
+@pytest.mark.parametrize(
+    ("parent_workspace", "child_workspace", "parent_branch", "child_branch"),
+    [
+        ("worktree", "worktree", "feature/shared", "feature/shared"),
+        ("worktree", "worktree", "feature/parent", "feature/child"),
+        ("scratch", "worktree", None, "feature/child"),
+    ],
+    ids=["same-branch", "different-repositories", "scratch-workspace"],
+)
+def test_run_slash_link_skips_cross_branch_warning_when_not_applicable(
+    kanban_home,
+    tmp_path,
+    parent_workspace,
+    child_workspace,
+    parent_branch,
+    child_branch,
+):
+    parent_repo = tmp_path / "parent-repo"
+    parent_repo.mkdir()
+    subprocess.run(["git", "init", str(parent_repo)], check=True, capture_output=True)
+    child_repo = parent_repo if parent_branch == child_branch else tmp_path / "child-repo"
+    if child_repo != parent_repo:
+        child_repo.mkdir()
+        subprocess.run(["git", "init", str(child_repo)], check=True, capture_output=True)
+
+    with kb.connect() as conn:
+        parent = kb.create_task(
+            conn,
+            title="parent",
+            workspace_kind=parent_workspace,
+            workspace_path=str(parent_repo) if parent_workspace != "scratch" else None,
+            branch_name=parent_branch if parent_workspace == "worktree" else None,
+        )
+        child = kb.create_task(
+            conn,
+            title="child",
+            workspace_kind=child_workspace,
+            workspace_path=str(child_repo),
+            branch_name=child_branch if child_workspace == "worktree" else None,
+        )
+
+    output = kc.run_slash(f"link {parent} {child}")
+
+    assert "warning" not in output.lower()
 
 
 def test_board_override_is_isolated_per_concurrent_call(kanban_home, monkeypatch):
