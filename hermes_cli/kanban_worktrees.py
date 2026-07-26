@@ -742,6 +742,76 @@ def _failed_rebase_commit_precedes_target_merge(
     return False
 
 
+def _commit_subject(repo: Path, commit: str) -> str:
+    return _git(repo, "show", "-s", "--format=%s", commit)
+
+
+def _commit_landing_paths(
+    repo: Path, target: str, commit: str
+) -> tuple[list[str], list[str]]:
+    """Split one commit's changed paths by whether its resulting tree entry landed."""
+    parents = _git(repo, "show", "-s", "--format=%P", commit).split()
+    parent = parents[0] if parents else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    changed = [
+        path
+        for path in _git(
+            repo,
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            commit,
+            strip=False,
+        ).split("\0")
+        if path
+    ]
+    landed: list[str] = []
+    pending: list[str] = []
+    for path in changed:
+        before = _git(repo, "ls-tree", "-z", parent, "--", path, strip=False)
+        after = _git(repo, "ls-tree", "-z", commit, "--", path, strip=False)
+        target_entry = _git(repo, "ls-tree", "-z", target, "--", path, strip=False)
+        if before != after and target_entry == after:
+            landed.append(path)
+        else:
+            pending.append(path)
+    return landed, pending
+
+
+def _branch_landing_groups(
+    repo: Path, target: str, branch_head: str
+) -> tuple[list[str], list[str]]:
+    """Describe patch-equivalent and pending branch commits before a rebase.
+
+    ``git cherry`` supplies commit-level patch-ID equivalence.  A commit whose
+    complete patch is not equivalent can still be partially landed when an
+    operator applied only some of its files; compare the resulting tree entry
+    per changed path so that real partial-pick shape is diagnosed as well.
+    """
+    landed: list[str] = []
+    pending: list[str] = []
+    for line in _git(repo, "cherry", target, branch_head).splitlines():
+        status, commit = line.split(maxsplit=1)
+        subject = _commit_subject(repo, commit)
+        description = f"{commit} {subject}"
+        if status == "-":
+            landed.append(description)
+            continue
+        landed_paths, pending_paths = _commit_landing_paths(repo, target, commit)
+        if landed_paths and pending_paths:
+            landed.append(
+                f"{description} (landed paths: {', '.join(landed_paths)})"
+            )
+            pending.append(
+                f"{description} (not landed paths: {', '.join(pending_paths)})"
+            )
+        else:
+            pending.append(description)
+    return landed, pending
+
+
 def _first_parent_merges_reaching_branch(
     repo: Path, branch: str, target: str
 ) -> list[str]:
@@ -966,16 +1036,7 @@ def _task_scope_paths(
     scope_contract: dict[str, object] | None = None,
 ) -> list[str] | None:
     """Union edit paths declared in the structured contract and task body."""
-    paths: list[str] = []
-    if scope_contract is not None:
-        raw_paths = scope_contract.get("allowed_paths")
-        if isinstance(raw_paths, list):
-            for path in raw_paths:
-                if not isinstance(path, str):
-                    continue
-                normalized = _normalize_dirty_path(path).rstrip("/")
-                if normalized and ".." not in Path(normalized).parts:
-                    paths.append(normalized)
+    paths = _scope_contract_files(scope_contract) or []
 
     collecting = False
     for line in (body or "").splitlines():
@@ -998,9 +1059,42 @@ def _task_scope_paths(
     return list(dict.fromkeys(paths)) if scope_contract is not None or collecting else None
 
 
+def _scope_contract_files(
+    scope_contract: dict[str, object] | None,
+) -> list[str] | None:
+    """Normalized scope files from the persisted, authoritative contract."""
+    if not isinstance(scope_contract, dict):
+        return None
+    raw_paths = scope_contract.get("allowed_paths")
+    if not isinstance(raw_paths, list):
+        return None
+    paths: list[str] = []
+    for path in raw_paths:
+        if not isinstance(path, str):
+            continue
+        normalized = _normalize_dirty_path(path).rstrip("/")
+        if normalized and ".." not in Path(normalized).parts:
+            paths.append(normalized)
+    return list(dict.fromkeys(paths)) or None
+
+
 def _path_is_under(path: str, roots: Sequence[str]) -> bool:
     normalized = _normalize_dirty_path(path)
     return any(normalized == root or normalized.startswith(f"{root}/") for root in roots)
+
+
+def _dirty_scope_overlap(
+    dirty_paths: Sequence[str], scope_files: Sequence[str]
+) -> list[str]:
+    overlap: list[str] = []
+    for dirty_path in dirty_paths:
+        if any(
+            _path_is_under(dirty_path, [scope_file])
+            or _path_is_under(scope_file, [dirty_path])
+            for scope_file in scope_files
+        ):
+            overlap.append(dirty_path)
+    return sorted(dict.fromkeys(overlap))
 
 
 def _select_wip_paths(
@@ -1168,6 +1262,8 @@ def prepare_worker_base(
     adopt_wip_run_id: int | None = None,
     adopt_wip_scope_paths: Sequence[str] | None = None,
     skip_stale_rebase: bool = False,
+    live_checkout: Path | str | None = None,
+    scope_files: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Fail closed on reused-worktree drift, then update a clean stale base.
 
@@ -1254,6 +1350,21 @@ def prepare_worker_base(
                 )
     if adopted_wip_files is not None:
         actual_head = _git(wt, "rev-parse", "HEAD")
+    if live_checkout is not None:
+        if scope_files:
+            live_dirty = dirty_files(Path(live_checkout))
+            overlap = _dirty_scope_overlap(live_dirty, scope_files)
+            if overlap:
+                raise WorktreeError(
+                    "dirty files in live checkout overlap declared task scope "
+                    f"before worker spawn: {', '.join(overlap[:10])}"
+                )
+        else:
+            _log.info(
+                "worker base live-dirty overlap preflight skipped for task %s: "
+                "no scope_files declared",
+                task_id or "unknown",
+            )
     target_head = _git(wt, "rev-parse", target)
     if actual_head == target_head or _branch_is_ancestor(wt, target_head, actual_head):
         result: dict[str, Any] = {
@@ -1279,6 +1390,38 @@ def prepare_worker_base(
             result["adopted_wip_files"] = adopted_wip_files
             result["skipped_wip_files"] = skipped_wip_files
         return result
+    landed, pending = _branch_landing_groups(wt, target, actual_head)
+    if landed and not pending:
+        _git(wt, "reset", "--hard", target)
+        new_head = _git(wt, "rev-parse", "HEAD")
+        post_dirty = dirty_files(wt)
+        unexpected_dirty = [
+            path for path in post_dirty if path not in skipped_wip_files
+        ]
+        if unexpected_dirty:
+            raise WorktreeError(
+                "worktree became dirty while preparing the worker base "
+                f"({', '.join(unexpected_dirty[:8])})"
+            )
+        result = {
+            "action": "already_landed",
+            "previous_head": actual_head,
+            "head": new_head,
+            "merge_target": target,
+            "merge_target_head": target_head,
+        }
+        if adopted_wip_files is not None:
+            result["adopted_wip_files"] = adopted_wip_files
+            result["skipped_wip_files"] = skipped_wip_files
+        return result
+    if landed and pending:
+        raise WorktreeError(
+            f"worker branch is partially landed in {target}; automatic base "
+            "update skipped. Already landed commits/portions: "
+            f"{'; '.join(landed)}. Not landed commits/portions: "
+            f"{'; '.join(pending)}. A conflict fixer cannot resolve this "
+            "landing divergence; reconcile the branch and target explicitly."
+        )
     try:
         _git(wt, "rebase", target)
     except WorktreeError as exc:
@@ -1425,6 +1568,8 @@ def prepare_reused_task_worktree(
         adopt_wip_run_id=adopt_wip_run_id,
         adopt_wip_scope_paths=_task_scope_paths(task.body, task.scope_contract),
         skip_stale_rebase=_is_conflict_fixer_task(conn, task.id),
+        live_checkout=repo_root,
+        scope_files=_scope_contract_files(task.scope_contract),
     )
     from hermes_cli import kanban_db as kb
 
