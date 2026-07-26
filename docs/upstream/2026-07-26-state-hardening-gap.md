@@ -179,7 +179,7 @@ Metric per the standing rule: fork lines *inside upstream-owned symbols*
 | Item | Evidence | Effect |
 |---|---|---|
 | **B1:** adopt `sqlite_safe_read.py` verbatim | part of A1 build | new file byte-identical to upstream → future merges of it are free |
-| **B2:** converge probe symbols (`is_zeroed_state_db`, `_backup_db_file` guard, backup probes, `_check_file_length_invariant`) to upstream bodies | `upstream_divergence.py hermes_state.py`: 203 fork lines inside upstream symbols (194 in `SessionDB`); `backup.py`: 140 (`run_backup` 72); `kanban_db.py`: **6152** (`_dispatch_once_locked` 997) | replacing raw-probe bodies with upstream's bodies *reduces* the collision metric for exactly those symbols; kanban_db.py stays hot — touch only the one symbol |
+| **B2:** converge probe symbols (`is_zeroed_state_db`, `_backup_db_file` guard, backup probes, `_check_file_length_invariant`) to upstream bodies | `upstream_divergence.py hermes_state.py`: 203 fork lines inside upstream symbols (194 in `SessionDB`); `backup.py`: 140 (`run_backup` 72); `kanban_db.py`: **6152** (`_dispatch_once_locked` 997) | replacing raw-probe bodies with upstream's bodies *reduces* the collision metric for exactly those symbols; kanban_db.py stays hot — touch only the one symbol. **Done this run**: 203→194 / 140→123 / 6152→6115, +5 byte-identical symbols (§4) |
 | **B3:** adopt `tests/test_sqlite_lock_safe_inspection.py` verbatim | part of A1 build | pins the contract with upstream's own words; no fork-owned paraphrase to drift |
 | **B4 (was A2):** WAL capability gate `07e97d2f5` | measured 2026-07-26 with `.venv/bin/python` (sqlite 3.50.4): `test_fast_path_applies_connection_pragmas` EXIT=0 `1 passed`; `test_connect_falls_back_to_delete_on_locking_protocol` EXIT=0 `1 passed`; `test_wal_checkpoint_truncates_wal_file` EXIT=0 `1 passed`; `test_write_txn_wal_mode_ignores_transient_main_file_size_lag` EXIT=4 `no tests ran` (name `rg -l "def <name>" tests/` → not present) | the 4 permanently-red tests recorded in project memory (2026-07-25) are 3× green and 1× gone; the gate is still worth adopting (robustness on hosts with old libsqlite, e.g. the system interpreter), but it is CI hygiene, not an acute fix — next round |
 | **B5:** `session_recovery` (Cluster 2) | `upstream_divergence.py hermes_cli/main.py`: 308 byte-identical symbols, 0 fork-only, 321-line backlog | salvage path for a damaged state.db instead of restore-from-snapshot; main.py weaving is cheap; ~1.4k-line module verbatim; depends on Cluster 1 (adopted this run) → round 2 |
@@ -218,7 +218,45 @@ gate (B4) — plan skeletons in §2; kanban connect tracking (C4).
 
 ## 4. What was built
 
-*(filled in as commits land — see commit messages for test evidence)*
+Six commits on `qwen/upstream-state-20260726` (base `f4183cf56`):
+
+| Commit | Subject | Test evidence (one file per process, `.venv`, sqlite 3.50.4) |
+|---|---|---|
+| `9d602adc9` | docs(upstream): this report (initial) | — |
+| `ac50cf6db` | state: adopt `hermes_cli/sqlite_safe_read.py` verbatim | `cmp` vs `git show origin/main:…` identical; ruff clean |
+| `a51c8b611` | state: track SessionDB connections via sqlite_safe_read | `tests/test_hermes_state.py` EXIT=0 467 passed, 1 skipped; `tests/test_hermes_state_wal_fallback.py` EXIT=0 16 passed (after the factory-pop adaptation, mirrored from upstream's own) |
+| `ba7ec7d2d` | state: route byte probes through `read_header_bytes_preopen` | `tests/test_hermes_state.py` EXIT=0 467 passed; `tests/hermes_cli/test_backup.py` EXIT=0 188 passed |
+| `8f2a1a5b4` | kanban: lock-safe post-commit file-length invariant | `test_kanban_db_runtime.py` EXIT=0 36 passed; `test_kanban_write_txn_busy_retry.py` EXIT=0 8 passed; `test_kanban_db_init.py` EXIT=0 16 passed |
+| `fe36ad6ab` | test: adopt `test_sqlite_lock_safe_inspection.py` verbatim | **EXIT=0 14 passed, unmodified**, byte-identical to origin/main; also 14 passed in an isolated directory without the repo conftest |
+
+Regression surface: `pytest --co -q tests/` EXIT=0, **55155 tests collected,
+0 collection errors**; additionally green after the weave:
+`test_hermes_state_compression_locks.py` (20 passed),
+`test_kanban_db_spawn_workdir.py` (57 passed).
+
+**Convergence delta** (`upstream_divergence.py`, fork lines INSIDE upstream
+symbols, before → after this run): `hermes_state.py` 203 → 194 (the remaining
+194 sit in `SessionDB` itself), `backup.py` 140 → 123, `kanban_db.py`
+6152 → 6115; byte-identical symbols +5 across the three files. Every woven
+body is upstream's own, so the next sync gets these hunks for free.
+
+**Two lessons, recorded for the next round:**
+
+1. *Ordering.* The verbatim test file contains tests for every call site
+   (`test_session_db_read_only_is_tracked` needs SessionDB tracking,
+   `test_write_lock_survives_zeroed_state_db_probe` needs probe routing,
+   `test_write_lock_survives_file_length_check` needs the kanban invariant).
+   Adopting it *before* the weaving produced 1 red of 14; it went fully green
+   only after all weaves landed. Land module + weaves first, tests last.
+2. *A policy change hiding inside the fix chain.* `fbd5e5772` also **reverts
+   the WAL→DELETE fallback** for WAL-reset-vulnerable SQLite builds
+   (`_apply_delete_for_wal_reset_bug` deleted upstream; upstream's reasoning:
+   DELETE is the mode that corrupts under Hermes' concurrent writers, and the
+   WAL-reset race rates at or below SSD background failure). This fork still
+   forces DELETE on vulnerable builds (measured: the fallback warning fires
+   under `.venv`'s sqlite 3.50.4). The revert was **deliberately not woven** —
+   it changes which journal mode every board on this host runs, which is an
+   operator-grade decision, not weaving. See §7 item 3.
 
 ---
 
@@ -233,8 +271,9 @@ gate (B4) — plan skeletons in §2; kanban connect tracking (C4).
   SQLite 3.45.1; I did not re-measure it (irrelevant to the build; relevant
   only to B4's "other hosts" argument).
 - **Full-suite health after weaving.** Per the standing test-scope rule only
-  targeted files were run (one file per pytest process). A collection sweep
-  before any merge of this branch is still owed.
+  targeted files were run (one file per pytest process); the collection sweep
+  (`pytest --co -q tests/` → 55155 collected, EXIT=0) proves the weave breaks
+  no imports, but a full *run* before merging this branch is still owed.
 - **`tests/conftest.py` WAL-gate weaving cost** beyond the diffstat
   (97+/83−): not attempted, estimate only.
 
@@ -280,3 +319,11 @@ gate (B4) — plan skeletons in §2; kanban connect tracking (C4).
    Bumping it to ≥ 3.51.3 removes the DELETE fallback from the test matrix
    and retires the WAL-gate question for this host. No service was touched
    this run; this is an operator task.
+3. **WAL policy revert (found inside the fix chain, not woven):** upstream
+   `fbd5e5772` deletes `_apply_delete_for_wal_reset_bug` and keeps WAL even
+   on vulnerable builds, arguing DELETE corrupts more readily than the
+   WAL-reset race. This fork still forces DELETE (the documented "Sperre").
+   With Cluster 1 now adopted the *premise* of the old policy is gone — the
+   raw probes that made DELETE attractive no longer cancel locks. Recommend
+   re-deciding the policy on its own (it affects every board on every host),
+   not as a side effect of a weaving PR.
