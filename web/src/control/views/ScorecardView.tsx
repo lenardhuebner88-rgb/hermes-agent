@@ -1,5 +1,4 @@
 import { CheckCircle2, MinusCircle } from "lucide-react";
-import { DigestCard } from "../components/leitstand/DigestCard";
 import { KpiTile, ListRow, SectionHeader, StatusChip } from "../components/leitstand";
 import { useScorecard } from "../hooks/scorecard";
 import type { MaterializedScore } from "../lib/schemas";
@@ -73,7 +72,6 @@ export function ScorecardView() {
       <KpiTile label="Review runs" value={String(data.overall.runs)} delta="bewertete Läufe" />
       <KpiTile label="Verteilung" value={`${data.verdicts.approved} / ${data.verdicts.rejected}`} delta="approved / rejected" />
     </section>
-    <DigestCard />
     <ScoreSeriesSection scores={data.materialized_scores} />
     <section className="flex flex-col gap-3"><SectionHeader label="Lanes" meta={`${data.profiles.length} Profile`} />
       {data.profiles.map((row) => <ListRow key={row.name} leading={<span className="size-2 rounded-full bg-[var(--color-data-1)]" aria-hidden />} title={row.name} meta={`${percent(row.approval_rate)} · ${row.runs} Runs`} trailing={<StatusChip icon={CheckCircle2} label="Approval" value={percent(row.approval_rate)} hint={row.approval_rate != null && row.approval_rate >= .8 ? "stabil" : "prüfen"} tone={row.approval_rate != null && row.approval_rate >= .8 ? "emerald" : "amber"} />} />)}
