@@ -166,6 +166,7 @@ export const BoardTaskSchema = z.object({
   last_heartbeat_at: nullableEpochSeconds,
   branch_name: z.string().nullable().catch(null),
   latest_summary: z.string().nullable().catch(null),
+  has_result: z.boolean().catch(false),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),
   auto_retry_count: z.coerce.number().catch(0),
   link_counts: z.object({ parents: z.coerce.number().catch(0), children: z.coerce.number().catch(0) }).catch({ parents: 0, children: 0 }),
@@ -230,8 +231,22 @@ export const DoneBoardPageSchema = z.object({
   next_cursor: z.string().nullable().catch(null),
 });
 
+export const BoardSummarySchema = z.object({
+  total_count: z.coerce.number().int().nonnegative().catch(0),
+  open_count: z.coerce.number().int().nonnegative().catch(0),
+  status_counts: z.record(z.string(), z.coerce.number().int().nonnegative()).catch({}),
+  quick_counts: z.object({
+    unassigned_open: z.coerce.number().int().nonnegative().catch(0),
+    review: z.coerce.number().int().nonnegative().catch(0),
+    standalone_open: z.coerce.number().int().nonnegative().catch(0),
+    with_result: z.coerce.number().int().nonnegative().catch(0),
+  }),
+  observed_at: epochSeconds,
+});
+
 export const BoardResponseSchema = z.object({
   columns: z.array(z.object({ name: z.string(), tasks: z.array(BoardTaskSchema).catch([]) })).catch([]),
+  summary: BoardSummarySchema.optional(),
   tenants: z.array(z.string()).catch([]),
   assignees: z.array(z.string()).catch([]),
   latest_event_id: z.coerce.number().catch(0),
@@ -243,6 +258,7 @@ export const BoardResponseSchema = z.object({
 export type BoardTask = z.infer<typeof BoardTaskSchema>;
 export type ChainSummary = z.infer<typeof ChainSummarySchema>;
 export type DoneBoardPage = z.infer<typeof DoneBoardPageSchema>;
+export type BoardSummary = z.infer<typeof BoardSummarySchema>;
 export type BoardResponse = z.infer<typeof BoardResponseSchema>;
 
 export const BoardArchiveResponseSchema = z.object({

@@ -8,6 +8,7 @@
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Copy, SlidersHorizontal } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
@@ -20,7 +21,6 @@ import {
   type PaginatedBoardResponse,
 } from "../../hooks/workersBoard";
 import { type ChainNode } from "./shared";
-import { ExpandableText } from "./HeuteTab";
 
 interface BoardTabProps {
   board: PaginatedBoardResponse | BoardResponse | null;
@@ -73,6 +73,42 @@ const STATUS_ORDER: TaskStatus[] = [
   "blocked", "review", "done", "archived",
 ];
 
+type BoardRegister = "open" | "done" | "archive";
+type BoardQuickView = "all" | "unassigned" | "review" | "standalone" | "result";
+
+function copyTaskId(taskId: string): void {
+  if (typeof navigator === "undefined" || !navigator.clipboard) return;
+  void navigator.clipboard.writeText(taskId).catch(() => undefined);
+}
+
+/**
+ * Lade-Skeleton (L3-Spec 3.4, Befund 6): 1 KPI-Skeleton-Zeile + 5 Row-
+ * Skeletons (Avatar-Kreis + zwei Text-Bars per .hc-skeleton) statt Text-
+ * Empty — kein Layout-Sprung beim Daten-Eintreffen. Reines CSS-Markup,
+ * test-/SSR-sicher wie SkeletonCard.
+ */
+function BoardSkeleton({ label }: { label: string }) {
+  return (
+    <div className="fleet-skel" aria-live="polite" aria-busy="true">
+      <span className="sr-only">{label} …</span>
+      <div className="fleet-skel-kpis" aria-hidden>
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="hc-skeleton fleet-skel-kpi" />
+        ))}
+      </div>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <div key={i} className="fleet-skel-row" aria-hidden>
+          <div className="hc-skeleton fleet-skel-avatar" />
+          <div className="fleet-skel-lines">
+            <div className="hc-skeleton fleet-skel-bar" />
+            <div className="hc-skeleton fleet-skel-bar fleet-skel-bar-short" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 export function BoardTab({
   board,
@@ -89,6 +125,9 @@ export function BoardTab({
   const [statusFilter, setStatusFilter] = useState<TaskStatus | "all">(() =>
     initialStatusFilter && STATUS_ORDER.includes(initialStatusFilter) ? initialStatusFilter : "all",
   );
+  const [register, setRegister] = useState<BoardRegister>(() =>
+    initialStatusFilter === "done" ? "done" : initialStatusFilter === "archived" ? "archive" : "open",
+  );
   // One-shot apply if the deep-link status arrives after first mount (e.g. catalog race).
   const initialStatusAppliedRef = useRef(
     initialStatusFilter != null && STATUS_ORDER.includes(initialStatusFilter),
@@ -97,16 +136,19 @@ export function BoardTab({
     if (initialStatusAppliedRef.current) return;
     if (initialStatusFilter == null || !STATUS_ORDER.includes(initialStatusFilter)) return;
     initialStatusAppliedRef.current = true;
+    if (initialStatusFilter === "done") setRegister("done");
+    if (initialStatusFilter === "archived") setRegister("archive");
     setStatusFilter(initialStatusFilter);
   }, [initialStatusFilter]);
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
+  const [quickView, setQuickView] = useState<BoardQuickView>("all");
   const [archiveTasks, setArchiveTasks] = useState<BoardTask[]>([]);
   const [archivePage, setArchivePage] = useState<BoardArchiveResponse | null>(null);
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const archiveRequestRef = useRef<{ serial: number; controller: AbortController } | null>(null);
   const archiveSerialRef = useRef(0);
-  const isArchive = statusFilter === "archived";
+  const isArchive = register === "archive";
   const [doneTasks, setDoneTasks] = useState<BoardTask[]>([]);
   const [donePage, setDonePage] = useState<DoneBoardPage | null>(null);
   const [doneLoading, setDoneLoading] = useState(true);
@@ -227,32 +269,45 @@ export function BoardTab({
   // Alle Tasks flach, dann filtern.
   const allTasks = useMemo(() => {
     if (isArchive) return archiveTasks;
-    const flat: BoardTask[] = (board?.columns ?? []).flatMap((column) =>
-      column.name === "done" ? doneTasks : column.tasks
-    );
+    const flat: BoardTask[] = register === "done"
+      ? doneTasks
+      : (board?.columns ?? []).flatMap((column) =>
+        column.name === "done" || column.name === "archived" ? [] : column.tasks
+      );
     const ql = q.trim().toLowerCase();
     return flat.filter((t) => {
       if (statusFilter !== "all" && t.status !== statusFilter) return false;
       if (assigneeFilter !== "all" && (t.assignee ?? "") !== assigneeFilter) return false;
+      if (quickView === "unassigned" && t.assignee) return false;
+      if (quickView === "review" && t.status !== "review") return false;
+      if (quickView === "standalone" && (t.link_counts.parents !== 0 || t.link_counts.children !== 0)) return false;
+      if (quickView === "result" && !t.has_result) return false;
       if (ql) {
         const hay = `${t.title} ${t.id} ${t.assignee ?? ""} ${t.block_reason ?? ""}`.toLowerCase();
         if (!hay.includes(ql)) return false;
       }
       return true;
     });
-  }, [archiveTasks, assigneeFilter, board, doneTasks, isArchive, q, statusFilter]);
+  }, [archiveTasks, assigneeFilter, board, doneTasks, isArchive, q, quickView, register, statusFilter]);
 
-  const filtersActive = statusFilter !== "all" || assigneeFilter !== "all" || q.trim() !== "";
+  const filtersActive = statusFilter !== "all" || assigneeFilter !== "all" || q.trim() !== "" || quickView !== "all";
   const activeFilterLabels = [
     statusFilter !== "all" ? `Status: ${taskStatusLabel[statusFilter] ?? statusFilter}` : null,
     assigneeFilter !== "all" ? `Assignee: ${assigneeFilter}` : null,
     q.trim() ? `Suche: ${q.trim()}` : null,
+    quickView !== "all" ? `Ansicht: ${
+      quickView === "unassigned" ? "Ohne Assignee"
+        : quickView === "review" ? "In Review"
+          : quickView === "standalone" ? "Standalone"
+            : "Mit Ergebnis · alle Status"
+    }` : null,
   ].filter((label): label is string => label != null);
 
   const resetFilters = () => {
     setQ("");
     setStatusFilter("all");
     setAssigneeFilter("all");
+    setQuickView("all");
   };
 
   // Filtergebnis nach Status gruppieren (nur Status mit sichtbaren Tasks).
@@ -270,13 +325,83 @@ export function BoardTab({
 
   const totalCount = isArchive
     ? (archivePage?.filtered_count ?? 0)
-    : (board?.columns ?? []).reduce(
-      (n, column) => n + (column.name === "done" ? (donePage?.total_count ?? 0) : column.tasks.length),
+    : register === "done"
+      ? (donePage?.total_count ?? board?.summary?.status_counts.done ?? 0)
+      : (board?.columns ?? []).reduce(
+      (n, column) => n + (
+        column.name === "done" || column.name === "archived" ? 0 : column.tasks.length
+      ),
       0,
     );
+  const summary = board?.summary;
+  const fallbackStatusCount = (status: string) =>
+    (board?.columns ?? []).find((column) => column.name === status)?.tasks.length ?? 0;
+  const metricOpen = summary?.open_count ?? (board?.columns ?? [])
+    .filter((column) => column.name !== "done" && column.name !== "archived")
+    .reduce((count, column) => count + column.tasks.length, 0);
+  const metricRunning = summary?.status_counts.running ?? fallbackStatusCount("running");
+  const metricBlocked = summary?.status_counts.blocked ?? fallbackStatusCount("blocked");
+  const metricDone = summary?.status_counts.done ?? donePage?.total_count ?? fallbackStatusCount("done");
 
   return (
     <div className="fleet-boardtab">
+      <div className="fleet-boardtab-metrics" aria-label="Board-Kennzahlen">
+        <div><span>Offen</span><strong>{metricOpen}</strong></div>
+        {/* data-tone nur bei Wert > 0 (L3-Spec 3.3): 0 bleibt neutral. */}
+        <div data-tone={metricRunning > 0 ? "running" : undefined}><span>Laufend</span><strong>{metricRunning}</strong></div>
+        <div data-tone={metricBlocked > 0 ? "blocked" : undefined}><span>Blockiert</span><strong>{metricBlocked}</strong></div>
+        <div>
+          <span>Fertig</span><strong>{metricDone}</strong>
+          {donePage && donePage.loaded_count < metricDone ? <small>{doneTasks.length} geladen</small> : null}
+        </div>
+      </div>
+
+      <div className="fleet-boardtab-register" role="tablist" aria-label="Board-Register">
+        {([
+          ["open", "Offen", metricOpen],
+          ["done", "Fertig", metricDone],
+          ["archive", "Archiv", summary?.status_counts.archived ?? 0],
+        ] as const).map(([id, label, count]) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={register === id}
+            className={register === id ? "is-active" : ""}
+            onClick={() => {
+              setRegister(id);
+              setStatusFilter("all");
+              setQuickView("all");
+            }}
+          >
+            {label}<span>{count}</span>
+          </button>
+        ))}
+      </div>
+
+      <div className="fleet-boardtab-views" aria-label="Gespeicherte Board-Ansichten">
+        {([
+          ["all", "Alle", null],
+          ["unassigned", "Ohne Assignee", summary?.quick_counts.unassigned_open],
+          ["review", "In Review", summary?.quick_counts.review],
+          ["standalone", "Standalone", summary?.quick_counts.standalone_open],
+          ["result", "Mit Ergebnis", summary?.quick_counts.with_result],
+        ] as const).map(([id, label, count]) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={quickView === id}
+            onClick={() => {
+              setQuickView(id);
+              if (id === "review") setRegister("open");
+            }}
+            title={id === "result" ? "Alle Status" : undefined}
+          >
+            {label}{count != null ? <span>{count}</span> : null}
+          </button>
+        ))}
+      </div>
+
       {/* Filter-Leiste */}
       <div className="fleet-boardtab-filter">
         <input
@@ -287,17 +412,19 @@ export function BoardTab({
           onChange={(e) => setQ(e.target.value)}
           aria-label="Tasks durchsuchen"
         />
-        <select
+        {register === "open" ? <select
           className="fleet-boardtab-select"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as TaskStatus | "all")}
           aria-label="Nach Status filtern"
         >
           <option value="all">Alle Status</option>
-          {STATUS_ORDER.map((s) => (
+          {STATUS_ORDER.filter((status) => status !== "done" && status !== "archived").map((s) => (
             <option key={s} value={s}>{taskStatusLabel[s] ?? s}</option>
           ))}
-        </select>
+        </select> : null}
+        <details className="fleet-boardtab-more">
+          <summary aria-label="Weitere Filter"><SlidersHorizontal aria-hidden size={14} /> Filter</summary>
         <select
           className="fleet-boardtab-select"
           value={assigneeFilter}
@@ -309,6 +436,7 @@ export function BoardTab({
             <option key={a} value={a}>{a}</option>
           ))}
         </select>
+        </details>
       </div>
 
       {filtersActive ? (
@@ -342,26 +470,21 @@ export function BoardTab({
 
       {/* Status-Gruppen */}
       {isArchive && archiveLoading && archiveTasks.length === 0 ? (
-        <div className="fleet-empty" aria-live="polite">
-          <div className="fleet-empty-title">Archiv wird geladen …</div>
-          <div className="fleet-empty-sub">Die aktive Board-Abfrage bleibt dabei klein.</div>
-        </div>
+        <BoardSkeleton label="Archiv wird geladen" />
       ) : !isArchive && doneLoading && grouped.length === 0 ? (
-        <div className="fleet-empty" aria-live="polite">
-          <div className="fleet-empty-title">Board wird geladen …</div>
-        </div>
+        <BoardSkeleton label="Board wird geladen" />
       ) : grouped.length === 0 ? (
-        <div className="fleet-empty">
-          <div className="fleet-empty-title">
+        <div className="hc-fleet-empty">
+          <span className="hc-fleet-empty-title">
             {isArchive
               ? (archivePage?.total_count === 0 ? "Archiv ist leer" : "Keine Archivtreffer")
               : (totalCount === 0 ? "Keine Tasks" : "Keine Treffer")}
-          </div>
-          <div className="fleet-empty-sub">
+          </span>
+          <span className="hc-fleet-empty-desc">
             {isArchive
               ? (archivePage?.total_count === 0 ? "Es sind keine archivierten Karten vorhanden." : "Suche oder Assignee-Filter anpassen.")
               : (totalCount === 0 ? "Das Board ist leer." : "Filter anpassen.")}
-          </div>
+          </span>
         </div>
       ) : (
         grouped.map(({ status, tasks }) => (
@@ -374,7 +497,7 @@ export function BoardTab({
             </header>
             {tasks.map((t) => {
               const metaTitle = [
-                t.id.slice(0, 8),
+                t.id,
                 t.assignee,
                 t.priority !== 0 ? `Prio ${t.priority}` : null,
                 t.comment_count > 0 ? `${t.comment_count} Kommentare` : null,
@@ -394,9 +517,9 @@ export function BoardTab({
                   {t.assignee ? profileInitial(t.assignee) : "?"}
                 </span>
                 <span className="fleet-boardtab-row-main">
-                  <ExpandableText className="fleet-boardtab-title" text={t.title || t.id} />
+                  <span className="fleet-boardtab-title">{t.title || t.id}</span>
                   <span className="fleet-boardtab-meta" title={metaTitle}>
-                    <span className="fleet-boardtab-id">{t.id.slice(0, 8)}</span>
+                    <span className="fleet-boardtab-id" title={t.id}>{t.id}</span>
                     {t.assignee && <span className="fleet-boardtab-assignee">{t.assignee}</span>}
                     {t.priority !== 0 && <span className="fleet-boardtab-priority">Prio {t.priority}</span>}
                     {t.comment_count > 0 && <span className="fleet-boardtab-comments">{t.comment_count} Kommentare</span>}
@@ -428,6 +551,15 @@ export function BoardTab({
                   >
                     {content}
                   </button>
+                  <button
+                    type="button"
+                    className="fleet-boardtab-copy"
+                    onClick={() => copyTaskId(t.id)}
+                    aria-label={`Task-ID ${t.id} kopieren`}
+                    title="Task-ID kopieren"
+                  >
+                    <Copy aria-hidden size={13} />
+                  </button>
                 </div>
               );
             })}
@@ -445,7 +577,7 @@ export function BoardTab({
           {archiveLoading ? "Lädt …" : "Mehr laden"}
         </button>
       ) : null}
-      {!isArchive && donePage?.has_more && (statusFilter === "all" || statusFilter === "done") ? (
+      {register === "done" && donePage?.has_more ? (
         <button
           type="button"
           className="fleet-boardtab-load-more"

@@ -78,6 +78,9 @@ vi.mock("../../hooks/planSpecsLanes", async () => {
 });
 
 import { AktivitaetTab, NodeDetailDrawer, UebersichtTab } from "./NodeDetailDrawer";
+import { useTaskBodyOnDemand } from "../../hooks/taskBodyOnDemand";
+import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
+import { useWorkerActivity } from "../../hooks/workersBoard";
 
 // Events im echten activity-Format (GET /tasks/{id}/activity → {events: [{id, kind, note, at}]}).
 const baseEvents = [
@@ -154,7 +157,7 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
       <UebersichtTab
         now={1782508100}
         task={{ id: "t1", title: "T", status: "running", assignee: "premium", body: null }}
-        latestRun={{ profile: "premium", status: "running", runtime_seconds: 60 }}
+        latestRun={{ profile: "premium", status: "running", runtime_seconds: 60, active_model: "claude-sonnet" }}
         elapsedSec={60}
         deliverables={[]}
       />,
@@ -163,8 +166,8 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
     expect(html).toContain("Task-Lane");
     expect(html).toContain("Laufprofil");
     expect(html).toContain("premium");
-    expect(html).toContain("Assignee");
     expect(html).toContain("Modell");
+    expect(html).toContain("claude-sonnet");
     expect(html).toContain("Modell unbekannt – Telemetrie fehlt");
   });
 
@@ -234,8 +237,8 @@ describe("UebersichtTab mobile Lesbarkeit und Runtime-Semantik", () => {
       />,
     );
 
-    expect(screen.getByText("Assignee")).toBeTruthy();
-    expect(screen.getAllByText("premium-reviewer")).toHaveLength(2);
+    expect(screen.getByText("Task-Lane")).toBeTruthy();
+    expect(screen.getAllByText("premium-reviewer")).toHaveLength(1);
     expect(screen.getByText("Priorität")).toBeTruthy();
     expect(screen.getByText("7")).toBeTruthy();
     for (const label of ["Erstellt", "Gestartet", "Fertig", "Archiviert", "Fällig", "Heartbeat"]) {
@@ -328,6 +331,34 @@ describe("NodeDetailDrawer Reassign", () => {
       expect(screen.queryByRole("button", { name: "Profil ändern" })).toBeNull();
     } finally {
       hookState.taskBody.data.task.status = original;
+    }
+  });
+
+  it("lädt Fremd-Board-Details explizit und unterdrückt alle Steuerungsaktionen", () => {
+    const task = hookState.taskBody.data.task as typeof hookState.taskBody.data.task & {
+      operator_question?: boolean;
+    };
+    const original = task.operator_question;
+    task.operator_question = true;
+    try {
+      render(
+        <NodeDetailDrawer
+          taskId="t_reassign"
+          board="archive"
+          readOnly
+          chainNodes={[]}
+          now={1782508100}
+          onClose={vi.fn()}
+        />,
+      );
+
+      expect(useTaskBodyOnDemand).toHaveBeenCalledWith("t_reassign", "archive");
+      expect(useWorkerActivity).toHaveBeenCalledWith("t_reassign", "archive");
+      expect(useHermesReviewVerdicts).toHaveBeenCalledWith("archive");
+      expect(screen.queryByRole("button", { name: "Profil ändern" })).toBeNull();
+      expect(screen.queryByText("Antwort senden")).toBeNull();
+    } finally {
+      task.operator_question = original;
     }
   });
 

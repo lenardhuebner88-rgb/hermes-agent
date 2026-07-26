@@ -3,7 +3,7 @@
  *
  * Aus FleetView.tsx extrahiert — reine Zerlegung, kein Verhalten geändert.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type KeyboardEvent } from "react";
 import { Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -60,6 +60,10 @@ function copyText(value: string): void {
 
 interface NodeDetailDrawerProps {
   taskId: string;
+  /** Explizites Board für board-übergreifende Nur-Lesen-Details. */
+  board?: string | null;
+  /** Unterdrückt sämtliche Steuerungsaktionen auf fremden Boards. */
+  readOnly?: boolean;
   /** Nodes der aktuellen Kette — zur Berechnung der Ketten-Gesamtkosten im Ergebnis-Tab. */
   chainNodes: ChainNode[];
   now: number;
@@ -68,7 +72,15 @@ interface NodeDetailDrawerProps {
   onChanged?: () => void | Promise<void>;
 }
 
-export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }: NodeDetailDrawerProps) {
+export function NodeDetailDrawer({
+  taskId,
+  board = null,
+  readOnly = false,
+  chainNodes,
+  now,
+  onClose,
+  onChanged,
+}: NodeDetailDrawerProps) {
   return (
     <DrawerShell
       eyebrow="Fleet"
@@ -80,6 +92,8 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
     >
       <NodeDetailContent
         taskId={taskId}
+        board={board}
+        readOnly={readOnly}
         chainNodes={chainNodes}
         now={now}
         onClose={onClose}
@@ -89,15 +103,23 @@ export function NodeDetailDrawer({ taskId, chainNodes, now, onClose, onChanged }
   );
 }
 
-export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged }: NodeDetailDrawerProps) {
+export function NodeDetailContent({
+  taskId,
+  board = null,
+  readOnly = false,
+  chainNodes,
+  now,
+  onClose,
+  onChanged,
+}: NodeDetailDrawerProps) {
   const [tab, setTab] = useState<DetailTab>("uebersicht");
   const [copied, setCopied] = useState(false);
 
   // On-Demand-Daten (nur bei offenem Drawer)
-  const taskBody = useTaskBodyOnDemand(taskId);
-  const deliverablesResult = useTaskDeliverablesOnDemand(taskId);
-  const activity = useWorkerActivity(taskId);
-  const verdicts = useHermesReviewVerdicts();
+  const taskBody = useTaskBodyOnDemand(taskId, board);
+  const deliverablesResult = useTaskDeliverablesOnDemand(taskId, board);
+  const activity = useWorkerActivity(taskId, board);
+  const verdicts = useHermesReviewVerdicts(board);
 
   const task = taskBody.data?.task ?? null;
   const runs = taskBody.data?.runs ?? [];
@@ -137,9 +159,11 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
   // successful retry.
   const latestRun = runs.length > 0 ? runs[runs.length - 1] : null;
   const elapsedSec = latestRun?.runtime_seconds ?? (
-    latestRun?.started_at != null
-      ? (elapsedSeconds(latestRun.started_at, now) ?? Number.NaN)
-      : null
+    latestRun?.started_at != null && latestRun?.ended_at != null
+      ? Math.max(0, latestRun.ended_at - latestRun.started_at)
+      : latestRun?.started_at != null
+        ? (elapsedSeconds(latestRun.started_at, now) ?? Number.NaN)
+        : null
   );
 
   function handleCopy() {
@@ -151,10 +175,33 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
 
   const TABS: Array<{ id: DetailTab; label: string }> = [
     { id: "uebersicht", label: de.fleet.detailTabUebersicht },
-    { id: "ergebnis", label: de.fleet.detailTabErgebnis },
-    { id: "aktivitaet", label: de.fleet.detailTabAktivitaet },
+    {
+      id: "ergebnis",
+      label: `${de.fleet.detailTabErgebnis} ${
+        deliverables.length + (task?.result || task?.latest_summary || latestRun?.summary ? 1 : 0)
+      }`,
+    },
+    { id: "aktivitaet", label: `${de.fleet.detailTabAktivitaet} ${events.length}` },
     { id: "log", label: de.fleet.detailTabLog },
   ];
+
+  function moveTab(event: KeyboardEvent<HTMLButtonElement>, current: DetailTab) {
+    const index = TABS.findIndex((candidate) => candidate.id === current);
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? TABS.length - 1
+        : event.key === "ArrowRight"
+          ? (index + 1) % TABS.length
+          : event.key === "ArrowLeft"
+            ? (index - 1 + TABS.length) % TABS.length
+            : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const next = TABS[nextIndex].id;
+    setTab(next);
+    document.getElementById(`fleet-task-tab-${next}`)?.focus();
+  }
 
   return (
       <div data-fleet-theme className="fleet-drawer-inner">
@@ -192,14 +239,19 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
         }]} />
 
         {/* Tab-Leiste */}
-        <div className="fleet-detail-tabs">
+        <div className="fleet-detail-tabs" role="tablist" aria-label="Task-Detailbereiche">
           {TABS.map((t) => (
             <button
               key={t.id}
+              id={`fleet-task-tab-${t.id}`}
               type="button"
+              role="tab"
               className={`fleet-detail-tab${tab === t.id ? " fleet-detail-tab-on" : ""}`}
               onClick={() => setTab(t.id)}
-              aria-pressed={tab === t.id}
+              onKeyDown={(event) => moveTab(event, t.id)}
+              aria-selected={tab === t.id}
+              aria-controls={`fleet-task-panel-${t.id}`}
+              tabIndex={tab === t.id ? 0 : -1}
             >
               {t.label}
             </button>
@@ -207,25 +259,36 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
         </div>
 
         {/* Tab-Inhalte */}
-        <div className="fleet-detail-body">
+        <div
+          id={`fleet-task-panel-${tab}`}
+          role="tabpanel"
+          aria-labelledby={`fleet-task-tab-${tab}`}
+          className="fleet-detail-body"
+        >
           {tab === "uebersicht" && (
             <UebersichtTab
               task={task}
               now={now}
               latestRun={latestRun}
               elapsedSec={elapsedSec}
-              deliverables={deliverables}
               verdicts={taskVerdicts}
+              readOnly={readOnly}
+              loading={taskBody.loading && !taskBody.data}
+              error={taskBody.error}
             />
           )}
           {tab === "aktivitaet" && (
             <AktivitaetTab events={events} now={now} loading={activity.loading && !activity.data} />
           )}
           {tab === "log" && (
-            <LogTab taskId={taskId} />
+            <LogTab taskId={taskId} board={board} />
           )}
           {tab === "ergebnis" && (
             <ErgebnisTab
+              result={task?.result ?? null}
+              latestSummary={task?.latest_summary ?? latestRun?.summary ?? null}
+              closure={task?.closure ?? null}
+              runError={latestRun?.error ?? null}
               deliverables={deliverables}
               chainCost={chainTotalCostUsdWithSource(chainNodes)}
             />
@@ -233,7 +296,7 @@ export function NodeDetailContent({ taskId, chainNodes, now, onClose, onChanged 
         </div>
 
         {/* Steuerung — Unblock/Retry/Cancel Task/Cancel Kette (S3, tab-übergreifend) */}
-        {task ? (
+        {task && !readOnly ? (
           <div className="fleet-dr-actions">
             <TaskReassignControl
               taskId={taskId}
@@ -409,6 +472,11 @@ interface UebersichtTabProps {
     workspace_kind?: string | null;
     workspace_path?: string | null;
     acceptance_criteria?: unknown;
+    result?: string | null;
+    latest_summary?: string | null;
+    closure?: string | null;
+    diagnostics?: Array<{ kind?: string; severity?: string | null; title?: string; detail?: string | null }>;
+    planspec_source?: string | null;
   } | null;
   latestRun: {
     profile?: string | null;
@@ -427,10 +495,16 @@ interface UebersichtTabProps {
     model_source?: string | null;
     model_observed_at?: number | null;
     worker_session_id?: string | null;
+    summary?: string | null;
+    error?: string | null;
   } | null;
   elapsedSec: number | null;
-  deliverables: Array<{ filename: string; url: string; size: number }>;
+  /** Legacy test/caller compatibility; result artifacts live in ErgebnisTab. */
+  deliverables?: Array<{ filename: string; url: string; size: number }>;
   verdicts?: ReviewVerdict[];
+  readOnly?: boolean;
+  loading?: boolean;
+  error?: string | null;
 }
 
 function taskTimestamp(value: unknown, now: number): { dateTime: string | null; label: string } | null {
@@ -451,11 +525,21 @@ function taskTimestamp(value: unknown, now: number): { dateTime: string | null; 
   };
 }
 
-export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, verdicts = [] }: UebersichtTabProps) {
+export function UebersichtTab({
+  task,
+  now,
+  latestRun,
+  elapsedSec,
+  verdicts = [],
+  readOnly = false,
+  loading = false,
+  error = null,
+}: UebersichtTabProps) {
   if (!task) {
     return (
       <div className="fleet-empty" style={{ padding: "16px 4px" }}>
-        <p className="fleet-empty-sub">Lade Details …</p>
+        <p className="fleet-empty-title">{error ? "Details nicht verfügbar" : loading ? "Details werden geladen" : "Task nicht gefunden"}</p>
+        <p className="fleet-empty-sub">{error || (loading ? "Die Live-Daten werden abgerufen …" : "Für diesen Task liegen keine Detaildaten vor.")}</p>
       </div>
     );
   }
@@ -472,7 +556,8 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
   } else if (typeof ac === "string" && ac.trim()) {
     acList = [ac];
   }
-  const branchPath = task.branch_name ?? task.workspace_path ?? (task.workspace_kind ? `(${task.workspace_kind})` : null);
+  const branchPath = task.branch_name;
+  const workspacePath = task.workspace_path ?? (task.workspace_kind ? `(${task.workspace_kind})` : null);
   const timestamps = [
     ["Erstellt", task.created_at],
     ["Gestartet", task.started_at],
@@ -521,7 +606,7 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
       ) : null}
 
       {/* Operator-Frage beantworten (S6) — nur wenn blockiert + operator_question */}
-      {task.status === "blocked" && isOperatorQuestion(task.operator_question) ? (
+      {task.status === "blocked" && isOperatorQuestion(task.operator_question) && !readOnly ? (
         <AnswerQuestion taskId={task.id ?? ""} />
       ) : null}
 
@@ -533,7 +618,7 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
         </div>
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelModell}</div>
-          <div className="fleet-kv-v">{latestRun?.profile ?? "—"}</div>
+          <div className="fleet-kv-v">{latestRun?.active_model ?? latestRun?.requested_model ?? task.model_override ?? "—"}</div>
         </div>
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelLaufzeit}</div>
@@ -571,6 +656,24 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
           </div>
         </div>
         <div className="fleet-kv">
+          <div className="fleet-kv-k">Workspace</div>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <code className="min-w-0 flex-1 truncate font-data text-micro text-ink-2" title={workspacePath ?? undefined}>
+              {workspacePath ? middleEllipsis(workspacePath) : "—"}
+            </code>
+            {workspacePath ? (
+              <button
+                type="button"
+                onClick={() => copyText(workspacePath)}
+                className="flex min-h-10 min-w-10 shrink-0 items-center justify-center rounded-card border border-line text-ink-2 hover:bg-surface-1 hover:text-ink"
+                aria-label="Workspace-Pfad kopieren"
+              >
+                <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
+            ) : null}
+          </div>
+        </div>
+        <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelModelRoute}</div>
           <div className="fleet-kv-v" style={{ fontSize: 11 }}>
             <ModelRouteBadge
@@ -596,7 +699,6 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
       </div>
 
       <dl className="fleet-boardtab-details">
-        {task.assignee && <><dt>Assignee</dt><dd>{task.assignee}</dd></>}
         {typeof task.priority === "number" && <><dt>Priorität</dt><dd>{task.priority}</dd></>}
         {!chronology.valid && <><dt>Zeitfolge</dt><dd>{chronology.reason}</dd></>}
         {timestamps.map(([label, value]) => {
@@ -611,6 +713,18 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
       </dl>
 
       <ReviewVerdicts verdicts={verdicts} />
+
+      {task.diagnostics?.length ? (
+        <section className="fleet-detail-instrument">
+          <Eyebrow className="mb-1.5">Diagnostik</Eyebrow>
+          {task.diagnostics.slice(0, 4).map((diagnostic, index) => (
+            <div key={`${diagnostic.kind ?? "diagnostic"}:${index}`} className="fleet-detail-hairline">
+              <strong>{diagnostic.title || diagnostic.kind || "Befund"}</strong>
+              {diagnostic.detail ? <span>{diagnostic.detail}</span> : null}
+            </div>
+          ))}
+        </section>
+      ) : null}
 
       {/* Task-Body */}
       {task.body ? (
@@ -636,27 +750,6 @@ export function UebersichtTab({ task, now, latestRun, elapsedSec, deliverables, 
         </div>
       ) : null}
 
-      {/* Deliverables-Liste — Auth-geschützte Endpoints: openAuthedApiFile statt raw href */}
-      {deliverables.length > 0 ? (
-        <div>
-          <Eyebrow className="mb-1.5">{de.fleet.detailDeliverables}</Eyebrow>
-          {deliverables.map((d) => (
-            <button
-              key={d.url || d.filename}
-              type="button"
-              onClick={() => void openAuthedApiFile(d.url, d.filename)}
-              className="flex w-full cursor-pointer items-center gap-2 border-0 border-b border-line bg-transparent py-1.5 text-left text-sec text-live"
-            >
-              <span className="flex-1 truncate" title={d.filename}>
-                {d.filename}
-              </span>
-              <span className="font-data text-micro text-ink-3">
-                {d.size > 0 ? `${Math.round(d.size / 1024)} kB` : "↗"}
-              </span>
-            </button>
-          ))}
-        </div>
-      ) : null}
     </>
   );
 }
@@ -718,9 +811,9 @@ export function AktivitaetTab({
   );
 }
 
-function LogTab({ taskId }: { taskId: string }) {
+function LogTab({ taskId, board }: { taskId: string; board?: string | null }) {
   // WorkerLogTail gibt es schon im WorkerCard — wir renutzen es.
-  return <div className="fleet-detail-log"><WorkerLogTail taskId={taskId} /></div>;
+  return <div className="fleet-detail-log"><WorkerLogTail taskId={taskId} board={board} /></div>;
 }
 
 function ReviewVerdicts({ verdicts }: { verdicts: ReviewVerdict[] }) {
@@ -746,13 +839,22 @@ function ReviewVerdicts({ verdicts }: { verdicts: ReviewVerdict[] }) {
 }
 
 function ErgebnisTab({
+  result,
+  latestSummary,
+  closure,
+  runError,
   deliverables,
   chainCost,
 }: {
+  result: string | null;
+  latestSummary: string | null;
+  closure: string | null;
+  runError: string | null;
   deliverables: Array<{ filename: string; url: string; size: number }>;
   chainCost: CostDisplayValue;
 }) {
-  if (deliverables.length === 0 && chainCost.value == null) {
+  const handoff = result?.trim() || latestSummary?.trim() || "";
+  if (!handoff && !closure && !runError && deliverables.length === 0 && chainCost.value == null) {
     return (
       <p className="px-0.5 py-2 text-sec text-ink-3">
         {de.fleet.detailErgebnisEmpty}
@@ -762,6 +864,26 @@ function ErgebnisTab({
 
   return (
     <>
+      {handoff ? (
+        <section className="fleet-result-handoff">
+          <Eyebrow className="mb-1.5">Worker-Handoff</Eyebrow>
+          <p className="wrap-anywhere whitespace-pre-wrap text-sec leading-relaxed text-ink-2">{handoff}</p>
+        </section>
+      ) : null}
+
+      {closure ? (
+        <section className="fleet-detail-instrument">
+          <Eyebrow className="mb-1.5">Abschluss</Eyebrow>
+          <p className="wrap-anywhere whitespace-pre-wrap text-sec text-ink-2">{closure}</p>
+        </section>
+      ) : null}
+
+      {runError ? (
+        <section className="fleet-detail-instrument is-alert">
+          <Eyebrow className="mb-1.5">Letzter Lauf</Eyebrow>
+          <p className="wrap-anywhere whitespace-pre-wrap text-sec text-status-warn">{runError}</p>
+        </section>
+      ) : null}
 
       {/* Deliverables — Auth-geschützte Endpoints: openAuthedApiFile statt raw href */}
       {deliverables.length > 0 ? (

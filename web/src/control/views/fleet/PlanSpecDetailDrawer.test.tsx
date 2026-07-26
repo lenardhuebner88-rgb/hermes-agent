@@ -2,7 +2,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
 import { PlanSpecDetailDrawer } from "./PlanSpecDetailDrawer";
 import type { PlanSpecDetailResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "../../lib/types";
@@ -70,8 +69,8 @@ function renderStaticMarkup(el: Parameters<typeof renderToStaticMarkup>[0]): str
 describe("PlanSpecDetailDrawer", () => {
   afterEach(cleanup);
 
-  it("rendert Topic, mind. ein AC-Statement, Anti-Scope-Eintrag und Subtask-Titel", () => {
-    const html = renderStaticMarkup(
+  it("trennt Überblick, Ablauf und Übergabe in funktionale Detail-Tabs", () => {
+    render(
       <PlanSpecDetailDrawer
         item={baseItem}
         detail={baseDetail}
@@ -81,24 +80,20 @@ describe("PlanSpecDetailDrawer", () => {
       />,
     );
 
-    // Topic aus dem item
-    expect(html).toContain("Test-Feature bauen");
-    // Pfad
-    expect(html).toContain("vault/00-Canon/planspec-test.md");
-    // mind. ein AC-Statement
-    expect(html).toContain("Dashboard zeigt Testergebnisse live.");
-    // AC id
-    expect(html).toContain("AC1");
-    // AC-ID und Statement stehen in getrennten Elementen, damit lange IDs den Text nicht einzeilig quetschen.
-    expect(html).toContain("<span");
-    expect(html).toContain("<p class=\"whitespace-pre-wrap break-words leading-relaxed\">Dashboard zeigt Testergebnisse live.</p>");
-    // Anti-Scope
-    expect(html).toContain("Kein manueller Upload erforderlich");
-    // Subtask-Titel
-    expect(html).toContain("Backend-Endpoint bauen");
-    expect(html).toContain("Frontend-Karte rendern");
-    // Ziel
-    expect(html).toContain("Automatisch Testergebnisse sammeln und anzeigen.");
+    expect(screen.getByText("Test-Feature bauen")).toBeTruthy();
+    expect(screen.getByText("Dashboard zeigt Testergebnisse live.")).toBeTruthy();
+    expect(screen.getByText("Kein manueller Upload erforderlich")).toBeTruthy();
+    expect(screen.getByText("pytest grün")).toBeTruthy();
+    expect(screen.queryByText("Backend-Endpoint bauen")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Ablauf 2" }));
+    expect(screen.getByText("Backend-Endpoint bauen")).toBeTruthy();
+    expect(screen.getByText("Frontend-Karte rendern")).toBeTruthy();
+    expect(screen.queryByText("Dashboard zeigt Testergebnisse live.")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Übergabe" }));
+    expect(screen.getByText("Auswirkung")).toBeTruthy();
+    expect(screen.getByText("Schutz")).toBeTruthy();
   });
 
   it("macht lange Pfade kopierbar und behält den vollständigen Pfad zugänglich", () => {
@@ -115,7 +110,7 @@ describe("PlanSpecDetailDrawer", () => {
 
     expect(html).toContain('aria-label="PlanSpec-Pfad kopieren"');
     expect(html).toContain(`title="${longPath}"`);
-    expect(html).toContain("…");
+    expect(html).toContain(longPath);
   });
 
   it("rendert Lade-Skeleton wenn loading=true und kein Detail vorhanden", () => {
@@ -147,25 +142,51 @@ describe("PlanSpecDetailDrawer", () => {
     expect(html).toContain("Datei nicht gefunden");
   });
 
-  it("rendert Ketten-Link wenn kanban_root_task_id gesetzt ist", () => {
+  it("navigiert nur für Im-Board-Pläne mit Root-ID in die richtige Kette", () => {
+    const onOpenChain = vi.fn();
     const itemWithRoot: PlanSpecRecord = {
       ...baseItem,
       kanban_root_task_id: "t_root123",
       kanban_state: "running",
+      action_state: "running",
     };
-    const html = renderStaticMarkup(
-      <MemoryRouter>
-        <PlanSpecDetailDrawer
-          item={itemWithRoot}
-          detail={baseDetail}
-          loading={false}
-          error={null}
-          onClose={noop}
-        />
-      </MemoryRouter>,
+    const { rerender } = render(
+      <PlanSpecDetailDrawer
+        item={itemWithRoot}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+        onOpenChain={onOpenChain}
+      />,
     );
-    expect(html).toContain("t_root123");
-    expect(html).toContain("Kette");
+
+    fireEvent.click(screen.getByRole("button", { name: "In Ketten anzeigen" }));
+    expect(onOpenChain).toHaveBeenCalledWith("t_root123");
+
+    rerender(
+      <PlanSpecDetailDrawer
+        item={baseItem}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+        onOpenChain={onOpenChain}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "In Ketten anzeigen" })).toBeNull();
+
+    rerender(
+      <PlanSpecDetailDrawer
+        item={{ ...itemWithRoot, action_state: "completed", kanban_state: "completed" }}
+        detail={baseDetail}
+        loading={false}
+        error={null}
+        onClose={noop}
+        onOpenChain={onOpenChain}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "In Ketten anzeigen" })).toBeNull();
   });
 
   it("Klick auf Schließen-Button ruft onClose", () => {

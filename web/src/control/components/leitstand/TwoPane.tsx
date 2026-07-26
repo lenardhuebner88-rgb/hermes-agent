@@ -1,4 +1,4 @@
-import { useId, useRef, type FocusEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, type FocusEvent, type ReactNode } from "react";
 
 import { useTwoPaneExpanded } from "./useTwoPaneExpanded";
 import { X } from "lucide-react";
@@ -27,9 +27,18 @@ export function TwoPane({
   const isExpanded = useTwoPaneExpanded();
   const detailId = useId();
   const listRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLElement>(null);
   const lastListFocusRef = useRef<HTMLElement | null>(null);
+  const hadDetailRef = useRef(false);
   const visibleDetail = isExpanded ? detail ?? idleDetail : undefined;
   const hasDetail = visibleDetail !== undefined;
+
+  useEffect(() => {
+    if (hasDetail && !hadDetailRef.current) {
+      window.requestAnimationFrame(() => detailRef.current?.focus());
+    }
+    hadDetailRef.current = hasDetail;
+  }, [hasDetail, visibleDetail]);
 
   function rememberListFocus(event: FocusEvent<HTMLDivElement>) {
     if (event.target instanceof HTMLElement) lastListFocusRef.current = event.target;
@@ -58,10 +67,12 @@ export function TwoPane({
 
       {hasDetail ? (
         <section
+          ref={detailRef}
           id={detailId}
           className="min-h-0 min-w-0 overflow-hidden rounded-panel border border-line bg-surface-1"
           role="region"
           aria-label={detailLabel}
+          tabIndex={-1}
         >
           <header className="flex min-h-12 items-center gap-3 border-b border-line-soft px-4">
             <h2 className="min-w-0 flex-1 truncate font-display text-micro font-semibold uppercase tracking-[0.12em] text-ink-3">

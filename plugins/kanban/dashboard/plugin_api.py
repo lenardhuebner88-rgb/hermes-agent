@@ -756,12 +756,21 @@ def get_board(
                     return _board_not_modified(cached_etag)
                 return _board_json_response(cached_prefix, cached_etag)
 
-        tasks = kanban_db.list_tasks(
+        # Fleet needs overview counts that do not collapse to the 30 loaded done
+        # cards. Read the selected-board task set once including archived, then
+        # keep the legacy payload filter below. The response cache still keys on
+        # the DB version, so an idle board pays this only once per TTL window.
+        summary_tasks = kanban_db.list_tasks(
             conn,
             tenant=tenant,
-            include_archived=include_archived,
+            include_archived=True,
             workflow_template_id=workflow_template_id,
             current_step_key=current_step_key,
+        )
+        tasks = (
+            summary_tasks
+            if include_archived
+            else [task for task in summary_tasks if task.status != "archived"]
         )
         done_page: Optional[dict[str, Any]] = None
         compact_done_tasks: Optional[list[Any]] = None
@@ -819,6 +828,15 @@ def get_board(
                 "parents"
             ] += 1
             dependents.setdefault(row["parent_id"], []).append(row["child_id"])
+
+        from plugins.kanban.dashboard.fleet_board_readmodel import (
+            build_board_summary,
+        )
+
+        board_summary = build_board_summary(
+            summary_tasks,
+            link_counts=link_counts,
+        )
 
         # Chain root per card: the tree SINK — the task nobody depends on
         # (link convention: a child waits for its parent; decompose links the
@@ -968,6 +986,13 @@ def get_board(
                 full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None
             )
             d = _task_dict(t, latest_summary=preview)
+            # Boolean-only projection for Fleet's "Mit Ergebnis" saved view.
+            # Worker handoffs commonly live in task_runs.summary instead of the
+            # legacy tasks.result column, so both authoritative result sources
+            # count. The text itself remains stripped from the hot poll.
+            d["has_result"] = bool(
+                str(t.result or "").strip() or str(full or "").strip()
+            )
             if card_body == "none":
                 # The /control poller renders neither field on a card —
                 # body alone dominates the payload on real boards.
@@ -1045,6 +1070,7 @@ def get_board(
             "columns": [
                 {"name": name, "tasks": columns[name]} for name in columns.keys()
             ],
+            "summary": board_summary,
             "tenants": tenants,
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
@@ -1111,6 +1137,7 @@ def get_board(
 def get_task(
     task_id: str,
     board: Optional[str] = Query(None),
+    detail_view: Literal["full", "drawer"] = Query("full", alias="view"),
     run_state_type: Optional[str] = Query(
         None, description="With run_state_name: filter runs by column 'status' or 'outcome'",
     ),
@@ -1139,22 +1166,24 @@ def get_task(
         # a second round-trip. Cards on /board carry a 200-char preview.
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
+        task_d["block_reason"] = full_summary if task.status == "blocked" else None
         links = _links_for(conn, task_id)
-        child_ids = links["children"]
-        child_summaries = kanban_db.latest_summaries(conn, child_ids)
         child_results = []
-        for child_id in child_ids:
-            child = kanban_db.get_task(conn, child_id)
-            if child is not None:
-                child_results.append(
-                    {
-                        "id": child.id,
-                        "title": child.title,
-                        "status": child.status,
-                        "latest_summary": child_summaries.get(child.id),
-                        "result": child.result,
-                    }
-                )
+        if detail_view == "full":
+            child_ids = links["children"]
+            child_summaries = kanban_db.latest_summaries(conn, child_ids)
+            for child_id in child_ids:
+                child = kanban_db.get_task(conn, child_id)
+                if child is not None:
+                    child_results.append(
+                        {
+                            "id": child.id,
+                            "title": child.title,
+                            "status": child.status,
+                            "latest_summary": child_summaries.get(child.id),
+                            "result": child.result,
+                        }
+                    )
         task_d["operator_question"] = kanban_db.blocked_task_operator_questions(
             conn, [task]
         ).get(task.id, False)
@@ -1173,8 +1202,16 @@ def get_task(
         # card to its spec. None for non-PlanSpec tasks.
         planspec_source = kanban_db.planspec_source_for_task(conn, task_id)
         task_d["planspec_source"] = planspec_source
-        comments = kanban_db.list_comments(conn, task_id)
-        events = kanban_db.list_events(conn, task_id)
+        comments = (
+            kanban_db.list_comments(conn, task_id)
+            if detail_view == "full"
+            else []
+        )
+        events = (
+            kanban_db.list_events(conn, task_id)
+            if detail_view == "full"
+            else []
+        )
         task_d["vault_memory_links"] = _with_vault_memory_file_urls(
             kanban_db.vault_memory_links_for_task(
                 task,
@@ -1190,13 +1227,23 @@ def get_task(
             state_type=run_state_type,
             state_name=run_state_name,
         )
+        if detail_view == "drawer":
+            runs = runs[-20:]
         legacy_resolver = _LegacyModelRouteResolver(conn, list(runs), board=board)
         return {
             "task": task_d,
             "comments": [_comment_dict(c) for c in comments],
             "events": [_event_dict(e) for e in events],
-            "attachments": [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)],
-            "deliverables": _list_task_deliverables(task_id),
+            "attachments": (
+                [_attachment_dict(a) for a in kanban_db.list_attachments(conn, task_id)]
+                if detail_view == "full"
+                else []
+            ),
+            "deliverables": (
+                _list_task_deliverables(task_id)
+                if detail_view == "full"
+                else []
+            ),
             "links": links,
             "child_results": child_results,
             "runs": [

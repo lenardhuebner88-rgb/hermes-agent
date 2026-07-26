@@ -66,7 +66,7 @@ export function DrawerShell({
     // Mobile (<tab): bottom-sheet (items-end). From `tab` (600px): flush right
     // side-sheet (items-stretch, no gap/rounding — border-l is the only seam).
     <div
-      className="fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm tab:items-stretch"
+      className="hc-backdrop-in fixed inset-0 z-50 flex items-end justify-end bg-black/50 backdrop-blur-sm tab:items-stretch"
       role="presentation"
       onClick={onClose}
     >
@@ -93,14 +93,14 @@ export function DrawerShell({
           <button
             type="button"
             onClick={onClose}
-            className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5"
+            className="rounded-full border border-[var(--hc-border)] p-2 hc-soft hover:bg-white/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--hc-accent)]"
             aria-label={closeLabel}
           >
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4 pb-8">{children}</div>
-        {footer != null ? <div className="border-t border-[var(--hc-border)] p-3">{footer}</div> : null}
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 pb-[calc(2rem+env(safe-area-inset-bottom,0px))]">{children}</div>
+        {footer != null ? <div className="border-t border-[var(--hc-border)] p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom,0px))]">{footer}</div> : null}
       </div>
     </div>
   );

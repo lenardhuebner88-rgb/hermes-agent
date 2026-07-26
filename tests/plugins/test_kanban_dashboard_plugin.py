@@ -397,7 +397,7 @@ def test_planspecs_endpoint_passes_valid_and_limit(monkeypatch, client):
         {
             "scope": "open",
             "valid": True,
-            "limit": 8,
+            "limit": None,
             "search": None,
             "include_kanban_status": True,
             "board": None,
@@ -437,6 +437,132 @@ def test_planspecs_endpoint_surfaces_ingest_precheck_fields(monkeypatch, client)
     assert rec["ingest_disposition"] == "invalid"
     assert rec["ingest_would_block"] is True
     assert rec["ingest_findings"] == ["placeholder residue in section B1-S2"]
+
+
+def test_planspec_transition_preview_is_read_only(monkeypatch, client):
+    from plugins.kanban.dashboard import fleet_planspec_readmodel
+
+    calls = []
+    expected = {
+        "source_digest": "a" * 64,
+        "action": "create_held_chain",
+        "target_board": "default",
+        "root_cards_created": 1,
+        "child_tasks_created": 3,
+        "starts_worker": False,
+        "live_test_depth": "ui-real",
+        "workspace_mode": "mixed",
+        "review_floor": "critical",
+        "auto_scout_tasks": 0,
+        "lanes_resolvable": True,
+        "blocking_findings": [],
+        "warnings": [],
+        "can_ingest": True,
+    }
+
+    def fake_preview(path, *, board, planspecs, kanban_db):
+        calls.append((path, board, planspecs, kanban_db))
+        return expected
+
+    monkeypatch.setattr(
+        fleet_planspec_readmodel,
+        "build_transition_preview",
+        fake_preview,
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/planspecs/transition-preview",
+        json={"path": "/tmp/binding.md"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == expected
+    assert calls and calls[0][0:2] == ("/tmp/binding.md", None)
+
+
+def test_planspec_ingest_requires_and_checks_preview_digest(monkeypatch, client):
+    from hermes_cli import planspecs
+    from plugins.kanban.dashboard import fleet_planspec_readmodel
+
+    ingest = unittest.mock.Mock()
+    monkeypatch.setattr(planspecs, "ingest_planspec", ingest)
+    monkeypatch.setattr(
+        fleet_planspec_readmodel,
+        "stable_source_digest",
+        lambda path, *, planspecs: ("a" * 64, object()),
+    )
+
+    missing = client.post(
+        "/api/plugins/kanban/planspecs/ingest",
+        json={"path": "/tmp/binding.md"},
+    )
+    changed = client.post(
+        "/api/plugins/kanban/planspecs/ingest",
+        json={"path": "/tmp/binding.md", "source_digest": "b" * 64},
+    )
+
+    assert missing.status_code == 422
+    assert changed.status_code == 409
+    assert changed.json()["detail"]["error"] == "planspec_source_changed"
+    assert ingest.call_count == 0
+
+
+def test_planspec_transition_preview_maps_typed_blocks(monkeypatch, client):
+    """Route maps the typed PlanSpec exceptions by except-order, not via 409.
+
+    Regression: ``PlanSpecBlocked`` *is a* ``RuntimeError``, so a leading
+    ``except RuntimeError`` would swallow the 404/400 mappings and push the
+    frontend into its source-changed re-check loop.
+    """
+    from hermes_cli import planspecs as planspecs_module
+    from plugins.kanban.dashboard import fleet_planspec_readmodel
+
+    cases = [
+        (planspecs_module.PlanSpecNotFound(["fehlt"]), 404),
+        (planspecs_module.PlanSpecBlocked(["blockiert"]), 400),
+        (RuntimeError("kaputt"), 409),
+    ]
+    for exc, expected_status in cases:
+        def fake_preview(path, *, board, planspecs, kanban_db, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(
+            fleet_planspec_readmodel,
+            "build_transition_preview",
+            fake_preview,
+        )
+        response = client.post(
+            "/api/plugins/kanban/planspecs/transition-preview",
+            json={"path": "/tmp/binding.md"},
+        )
+        assert response.status_code == expected_status, exc
+
+
+def test_planspec_ingest_maps_typed_blocks(monkeypatch, client):
+    from hermes_cli import planspecs as planspecs_module
+    from plugins.kanban.dashboard import fleet_planspec_readmodel
+
+    monkeypatch.setattr(
+        fleet_planspec_readmodel,
+        "stable_source_digest",
+        lambda path, *, planspecs: ("a" * 64, object()),
+    )
+
+    cases = [
+        (planspecs_module.PlanSpecNotFound(["fehlt"]), 404),
+        (planspecs_module.PlanSpecBlocked(["blockiert"]), 400),
+    ]
+    for exc, expected_status in cases:
+        def fake_ingest(path, *, board, author, _exc=exc):
+            raise _exc
+
+        monkeypatch.setattr(planspecs_module, "ingest_planspec", fake_ingest)
+        response = client.post(
+            "/api/plugins/kanban/planspecs/ingest",
+            json={"path": "/tmp/binding.md", "source_digest": "a" * 64},
+        )
+        assert response.status_code == expected_status, exc
+        assert response.json()["detail"]["findings"] == exc.findings
 
 
 # ---------------------------------------------------------------------------
@@ -1853,6 +1979,31 @@ def test_task_detail_includes_cost_usd_field(client):
     data = client.get(f"/api/plugins/kanban/tasks/{t['id']}").json()
     assert "cost_usd" in data["task"]
     assert data["task"]["cost_usd"] is None
+
+
+def test_task_detail_drawer_projection_is_bounded(client):
+    parent = client.post(
+        "/api/plugins/kanban/tasks", json={"title": "drawer parent"}
+    ).json()["task"]
+    client.post(
+        "/api/plugins/kanban/tasks",
+        json={"title": "drawer child", "parents": [parent["id"]]},
+    )
+
+    full = client.get(f"/api/plugins/kanban/tasks/{parent['id']}").json()
+    drawer = client.get(
+        f"/api/plugins/kanban/tasks/{parent['id']}", params={"view": "drawer"}
+    ).json()
+
+    assert full["events"]
+    assert full["child_results"]
+    assert drawer["events"] == []
+    assert drawer["comments"] == []
+    assert drawer["attachments"] == []
+    assert drawer["deliverables"] == []
+    assert drawer["child_results"] == []
+    assert drawer["links"] == full["links"]
+    assert drawer["task"]["id"] == parent["id"]
 
 
 def test_stats_includes_k6_throughput_and_cost_keys(client):
@@ -3685,7 +3836,7 @@ def test_board_done_limit_keeps_fully_completed_omitted_chain_summary(client, mo
     }
 
 
-def test_board_without_done_limit_preserves_legacy_shape(client, monkeypatch):
+def test_board_without_done_limit_adds_only_the_fleet_summary(client, monkeypatch):
     _create_board_compaction_fixture()
     monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
 
@@ -3693,6 +3844,7 @@ def test_board_without_done_limit_preserves_legacy_shape(client, monkeypatch):
 
     assert set(data) == {
         "columns",
+        "summary",
         "tenants",
         "assignees",
         "latest_event_id",
@@ -3700,6 +3852,38 @@ def test_board_without_done_limit_preserves_legacy_shape(client, monkeypatch):
     }
     assert "chain_summaries" not in data
     assert "done_page" not in data
+
+
+def test_board_summary_is_independent_of_done_page_and_card_body(client, monkeypatch):
+    _create_board_compaction_fixture()
+    monkeypatch.setattr(_plugin_module(), "_compute_task_diagnostics", lambda *a, **k: {})
+    with kb.connect_closing() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO tasks "
+                "(id, title, status, priority, created_at, assignee, result) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("t_summary_result", "Result truth", "done", 0, 1_790_100_000, None, "evidence"),
+            )
+            conn.execute(
+                "INSERT INTO tasks "
+                "(id, title, status, priority, created_at, assignee) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("t_summary_unassigned", "Unassigned truth", "todo", 0, 1_790_100_001, None),
+            )
+
+    data = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 30, "card_body": "none", "card_diagnostics": "summary"},
+    ).json()
+
+    assert data["done_page"]["loaded_count"] == 30
+    assert data["summary"]["status_counts"]["done"] == data["done_page"]["total_count"]
+    assert data["summary"]["quick_counts"]["unassigned_open"] >= 1
+    assert data["summary"]["quick_counts"]["with_result"] == 1
+    assert data["summary"]["total_count"] > sum(
+        len(column["tasks"]) for column in data["columns"]
+    )
 
 
 def test_board_done_page_total_count_uses_untruncated_done_count(client, monkeypatch):
@@ -9208,16 +9392,14 @@ Body text.
 
 
 def _bind_detail_plans_root(monkeypatch, plans_root: Path):
-    """Make the detail endpoint resolve+parse under ``plans_root`` (the endpoint
-    calls parse_binding_planspec without a plans_root, which is otherwise bound
-    to the real vault root via the function default)."""
+    """Make the detail endpoint resolve under the isolated fixture root."""
     from hermes_cli import planspecs as _ps
 
-    real_parse = _ps.parse_binding_planspec
+    real_resolve = _ps.resolve_planspec_path
     monkeypatch.setattr(
         _ps,
-        "parse_binding_planspec",
-        lambda p, **kw: real_parse(p, plans_root=plans_root),
+        "resolve_planspec_path",
+        lambda p, **kw: real_resolve(p, plans_root=plans_root),
     )
 
 
@@ -9261,6 +9443,27 @@ def test_planspecs_detail_happy_path(client, tmp_path, monkeypatch):
         assert "lane" in st, f"subtask missing lane: {st}"
         assert "deps" in st, f"subtask missing deps: {st}"
         assert isinstance(st["deps"], list)
+
+
+def test_planspecs_detail_closed_source_remains_readable(client, tmp_path, monkeypatch):
+    plans_root = tmp_path / "vault" / "03-Agents"
+    path = _write_open_planspec_fixture(plans_root)
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "status: approved_for_ingest", "status: shipped"
+        ),
+        encoding="utf-8",
+    )
+    _bind_detail_plans_root(monkeypatch, plans_root)
+
+    response = client.get(
+        "/api/plugins/kanban/planspecs/detail",
+        params={"path": str(path)},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source_state"] == "closed"
+    assert response.json()["subtasks"][0]["title"] == "First subtask"
 
 
 def test_planspecs_detail_traversal_relative(client):
@@ -9479,6 +9682,7 @@ def test_board_block_reason_operator_hold(client):
     detail = client.get(f"/api/plugins/kanban/tasks/{tid}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["task"]["operator_question"] is True
+    assert detail.json()["task"]["block_reason"] == "operator hold"
 
 
 def test_board_block_reason_null_for_non_hold(client):

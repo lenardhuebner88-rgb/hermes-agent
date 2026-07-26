@@ -1,7 +1,18 @@
 import { useCallback } from "react";
 import { fetchJSON } from "@/lib/api";
-import { PlanSpecsResponseSchema, PlanSpecDetailResponseSchema, LanesCatalogResponseSchema, parseOrThrow } from "../lib/schemas";
-import type { PlanSpecsResponse, PlanSpecDetailResponse, LanesCatalogResponse } from "../lib/schemas";
+import {
+  PlanSpecsResponseSchema,
+  PlanSpecDetailResponseSchema,
+  PlanSpecTransitionPreviewSchema,
+  LanesCatalogResponseSchema,
+  parseOrThrow,
+} from "../lib/schemas";
+import type {
+  PlanSpecsResponse,
+  PlanSpecDetailResponse,
+  PlanSpecTransitionPreview,
+  LanesCatalogResponse,
+} from "../lib/schemas";
 import { usePolling } from "./internal";
 
 export interface PlanSpecQueryOptions {
@@ -29,6 +40,26 @@ export function usePlanSpecs(options: PlanSpecQueryOptions = {}, board: string |
     key,
     async () => parseOrThrow(PlanSpecsResponseSchema, await fetchJSON<unknown>(planSpecsUrl(options, board)), board ? `kanban/planspecs:${board}` : "kanban/planspecs"),
     15000,
+  );
+}
+
+export async function previewPlanSpecTransition(
+  path: string,
+  board: string | null,
+  signal?: AbortSignal,
+): Promise<PlanSpecTransitionPreview> {
+  const params = new URLSearchParams();
+  if (board) params.set("board", board);
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return parseOrThrow(
+    PlanSpecTransitionPreviewSchema,
+    await fetchJSON<unknown>(`/api/plugins/kanban/planspecs/transition-preview${suffix}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+      signal,
+    }),
+    "planspecs/transition-preview",
   );
 }
 

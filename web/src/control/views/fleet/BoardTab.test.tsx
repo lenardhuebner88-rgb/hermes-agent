@@ -94,7 +94,7 @@ describe("BoardTab operator information", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText("Nach Status filtern"), { target: { value: "archived" } });
+    fireEvent.click(screen.getByRole("tab", { name: /Archiv/ }));
 
     expect(await screen.findByText("Archive one")).toBeTruthy();
     expect(screen.queryByText("Operator truth card")).toBeNull();
@@ -118,15 +118,16 @@ describe("BoardTab operator information", () => {
     ["rtl", "مرحبا بالعالم ".repeat(30)],
     ["combining", "e\u0301".repeat(200)],
     ["emoji", "👩🏽‍💻🚀".repeat(80)],
-  ])("expands the complete %s title on tap", (_kind, title) => {
-    render(<BoardTab board={board([task({ title })])} onOpenNodeDetail={vi.fn()} />);
+  ])("keeps the complete %s title in one non-nested detail affordance", (_kind, title) => {
+    const onOpenNodeDetail = vi.fn();
+    render(<BoardTab board={board([task({ title })])} onOpenNodeDetail={onOpenNodeDetail} />);
 
     const titleNode = document.querySelector(".fleet-boardtab-title");
     expect(titleNode?.textContent).toBe(title);
-    expect(titleNode?.getAttribute("title")).toBeNull();
-    expect(titleNode?.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(titleNode as HTMLElement);
-    expect(titleNode?.getAttribute("aria-expanded")).toBe("true");
+    expect(titleNode?.getAttribute("role")).toBeNull();
+    expect(titleNode?.getAttribute("tabindex")).toBeNull();
+    fireEvent.click(titleNode?.closest("button") as HTMLElement);
+    expect(onOpenNodeDetail).toHaveBeenCalledWith("t_truth01");
   });
 
   it("uses the row drawer as the only detail affordance on a read-only board", () => {
@@ -151,7 +152,7 @@ describe("BoardTab operator information", () => {
 
     const meta = row?.querySelector(".fleet-boardtab-meta");
     expect(meta?.getAttribute("title")).toBe(
-      "t_truth0 · premium-reviewer · Prio 7 · 3 Kommentare · 2 Vorgänger · 4 Nachfolger · 1/4",
+      "t_truth01 · premium-reviewer · Prio 7 · 3 Kommentare · 2 Vorgänger · 4 Nachfolger · 1/4",
     );
 
     expect(screen.queryByLabelText("Weitere Informationen zu Operator truth card")).toBeNull();

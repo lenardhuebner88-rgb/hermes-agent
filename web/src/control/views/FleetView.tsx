@@ -19,7 +19,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { ArrowRight } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
-import { useHermesRunsCosts, useAccountUsage } from "../hooks/costsUsage";
+import { useHermesRunsCosts } from "../hooks/costsUsage";
 import { useKanbanDecisionQueue } from "../hooks/decisionInbox";
 import { usePlanSpecs, useLanesCatalog, usePlanSpecDetail } from "../hooks/planSpecsLanes";
 import { useHermesRunsDaily, useHermesReliability } from "../hooks/runsDigestRollup";
@@ -37,7 +37,8 @@ import { KettenTab } from "./fleet/KettenTab";
 import { BoardTab } from "./fleet/BoardTab";
 import { NodeDetailContent, NodeDetailDrawer } from "./fleet/NodeDetailDrawer";
 import { PlanSpecDetailContent, PlanSpecDetailDrawer } from "./fleet/PlanSpecDetailDrawer";
-import { PlanTab } from "./fleet/PlanTab";
+import { PlanSpecTransitionPanel } from "./fleet/PlanSpecTransitionPanel";
+import { PlanTab, type PlanSegment } from "./fleet/PlanTab";
 import { RisikoTab } from "./fleet/RisikoTab";
 import { SubtabChips, TwoPane } from "../components/leitstand";
 import { Led, StaleBadge } from "../components/atoms";
@@ -85,6 +86,15 @@ function parseDeepLinkStatus(raw: string | null): TaskStatus | null {
   return FLEET_DEEP_LINK_STATUSES.has(raw) ? (raw as TaskStatus) : null;
 }
 
+const PLAN_SEGMENTS: ReadonlySet<string> = new Set([
+  "all", "draft", "ready", "attention", "held", "board", "done",
+]);
+
+function parsePlanSegment(raw: string | null): PlanSegment | null {
+  if (raw == null || raw === "") return null;
+  return PLAN_SEGMENTS.has(raw) ? (raw as PlanSegment) : null;
+}
+
 /**
  * Resolve ?board= against the live catalog.
  * - undefined → invalid / ignore (do not change selection)
@@ -130,6 +140,7 @@ export function FleetView() {
   const [deepLinkStatusFilter, setDeepLinkStatusFilter] = useState<TaskStatus | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkConsumedRef = useRef(false);
+  const planDeepLinkConsumedRef = useRef(false);
 
   const workers = useHermesWorkers();
   const fleetWorkers = useAllBoardWorkers();
@@ -137,6 +148,10 @@ export function FleetView() {
   const { selectedBoard, setSelectedBoard } = useFleetBoardSelection(boardCatalog.data);
   const board = useBoard();
   const selectedBoardData = useBoard(selectedBoard);
+  const planspecs = usePlanSpecs({ scope: "all", limit: 500 });
+  const selectedPlanspecs = usePlanSpecs({ scope: "all", limit: 500 }, selectedBoard);
+  const planSegment = parsePlanSegment(searchParams.get("planSegment")) ?? "all";
+  const planQuery = searchParams.get("planSearch") ?? "";
 
   // Deep-link ?board=<slug>&status=<TaskStatus> und/oder ?task=<id> — one-shot
   // idiom (AgentTerminalsView). Board/Status: Katalog abwarten, Board-Subtab
@@ -193,6 +208,39 @@ export function FleetView() {
     setSelectedBoard,
   ]);
 
+  // Plan-Adressierbarkeit ist vom Board/Task-One-Shot getrennt: ?plan= wartet
+  // auf die passende PlanSpec-Liste, öffnet genau einmal und wird anschließend
+  // ersetzt. Persistente Filterparameter bleiben dagegen in der URL und setzen
+  // den Plan-Subtab bei Reload oder History-Navigation wieder aktiv.
+  useEffect(() => {
+    const planParam = searchParams.get("plan");
+    const hasPlan = planParam != null && planParam !== "";
+    const hasPlanSegment = parsePlanSegment(searchParams.get("planSegment")) != null;
+    const hasPlanSearch = (searchParams.get("planSearch") ?? "") !== "";
+    if (hasPlan || hasPlanSegment || hasPlanSearch) {
+      setSubtab("plan");
+    }
+    if (!hasPlan || planDeepLinkConsumedRef.current) return;
+    // Bei kombinierten ?board=&plan=-Links zuerst die Board-Auswahl anwenden;
+    // erst der nachfolgende Poll kennt die Plan-Liste des Ziel-Boards.
+    if ((searchParams.get("board") ?? "") !== "") return;
+    const source = selectedBoard ? selectedPlanspecs.data : planspecs.data;
+    if (source == null) return;
+
+    planDeepLinkConsumedRef.current = true;
+    const next = new URLSearchParams(searchParams);
+    next.delete("plan");
+    setSearchParams(next, { replace: true });
+    const item = source.planspecs.find((candidate) => candidate.path === planParam);
+    if (item) openPlanSpecDetail(item);
+  }, [
+    searchParams,
+    setSearchParams,
+    selectedBoard,
+    planspecs.data,
+    selectedPlanspecs.data,
+  ]);
+
   // Der Deep-Link-Status gilt nur für die MOUNT-Instanz von BoardTab, die ihn
   // konsumiert. Verlässt der Operator den Board-Subtab, ist er verbraucht —
   // sonst würde ein Remount (Heute→Board) den Filter still zurücksetzen.
@@ -201,13 +249,10 @@ export function FleetView() {
       setDeepLinkStatusFilter(null);
     }
   }, [subtab, deepLinkStatusFilter]);
-  const planspecs = usePlanSpecs({ scope: "open", limit: 10 });
-  const selectedPlanspecs = usePlanSpecs({ scope: "open", limit: 10 }, selectedBoard);
   const costs = useHermesRunsCosts();
   const daily = useHermesRunsDaily();
   const reliability = useHermesReliability();
   const lanesCatalog = useLanesCatalog();
-  const accountUsage = useAccountUsage();
   const systemHealth = useSystemHealth();
   const pressureStatus = usePressureStatus();
   const decisionQueue = useKanbanDecisionQueue();
@@ -230,6 +275,7 @@ export function FleetView() {
       setKettenRootId(null);
       setNodeDetailId(null);
       setNodeDetailChainNodes([]);
+      setPlanspecDrawerItem(null);
     }, 0);
     return () => window.clearTimeout(reset);
   }, [selectedBoard]);
@@ -247,7 +293,8 @@ export function FleetView() {
   const blockedCount = blockedTasks.length;
 
   // Offene PlanSpecs die auf Operator-Freigabe oder Kettenstart warten
-  const allPlanspecs = planspecs.data?.planspecs ?? [];
+  const planRecords = planspecs.data?.planspecs ?? [];
+  const allPlanspecs = planRecords.filter((item) => item.open);
   const pendingApprovals = allPlanspecs.filter((ps) => planSpecAwaitsPlanAction(ps)).length;
   // Geparkte Release-Gates (post-merge, wartet auf Operator-Ausführung) — einziges
   // Zuhause ist Fleet → Risiko, aus dem /control-Postfach verschoben.
@@ -309,33 +356,65 @@ export function FleetView() {
     setPlanspecDrawerItem(item);
   }
 
+  function openPlanSpecChain(rootId: string) {
+    setKettenRootId(rootId);
+    closePlanSpecDetail();
+    setSubtab("ketten");
+  }
+
+  function replacePlanFilters(nextSegment: PlanSegment, nextQuery: string) {
+    const next = new URLSearchParams(searchParams);
+    if (nextSegment === "all") next.delete("planSegment");
+    else next.set("planSegment", nextSegment);
+    if (nextQuery === "") next.delete("planSearch");
+    else next.set("planSearch", nextQuery);
+    setSearchParams(next, { replace: true });
+  }
+
+  const planAction = planspecDrawerItem ? (
+    <PlanSpecTransitionPanel
+      key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}
+      item={planspecDrawerItem}
+      boardSlug={selectedBoard}
+      readOnly={selectedBoard != null}
+      onChanged={() => selectedBoard ? selectedPlanspecs.reload() : planspecs.reload()}
+      onOpenTask={selectedBoard ? undefined : openNodeDetail}
+    />
+  ) : null;
+
   function selectBoard(boardSlug: string | null) {
     setKettenRootId(null);
     closeNodeDetail();
+    closePlanSpecDetail();
     setSelectedBoard(boardSlug);
   }
 
   const desktopDetail = isLg
     ? nodeDetailId
       ? (
-          <div id="fleet-detail-pane">
+          <div id="fleet-detail-pane" key={`${selectedBoard ?? "current"}:${nodeDetailId}`}>
             <NodeDetailContent
               taskId={nodeDetailId}
+              board={selectedBoard}
+              readOnly={selectedBoard != null}
               chainNodes={nodeDetailChainNodes}
               now={now}
               onClose={closeNodeDetail}
-              onChanged={board.reload}
+              onChanged={activeBoardState.reload}
             />
           </div>
         )
       : planspecDrawerItem
         ? (
-            <div id="fleet-detail-pane">
+            <div id="fleet-detail-pane" key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}>
               <PlanSpecDetailContent
                 item={planspecDrawerItem}
                 detail={planspecDetail.data}
                 loading={planspecDetail.loading}
                 error={planspecDetail.error}
+                stale={planspecDetail.isStale}
+                actions={planAction}
+                onOpenChain={openPlanSpecChain}
               />
             </div>
           )
@@ -353,8 +432,7 @@ export function FleetView() {
   const desktopIdleDetail = isLg
     && desktopDetail === undefined
     && kettenChipsForAside.length > 0
-    && subtab !== "ketten"
-    && subtab !== "heute"
+    && !["ketten", "heute", "board", "plan"].includes(subtab)
     ? (
         <div id="fleet-detail-pane">
           <KettenTab
@@ -365,16 +443,16 @@ export function FleetView() {
             readOnly={selectedBoard != null}
             initialRootId={selectedBoard ? null : kettenRootId ?? (kettenChipsForAside.find((c) => c.state === "active")?.rootId ?? null)}
             now={now}
-            selectedNodeId={selectedBoard ? null : nodeDetailId}
-            detailControlsId={!selectedBoard ? "fleet-detail-pane" : undefined}
-            onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
+            selectedNodeId={nodeDetailId}
+            detailControlsId="fleet-detail-pane"
+            onOpenNodeDetail={openNodeDetail}
           />
         </div>
       )
     : undefined;
 
   return (
-    <div data-fleet-theme className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
+    <div data-fleet-theme data-fleet-subtab={subtab} className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
       {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes.
           Erste Inhaltszeile direkt unter der Shell-Masthead (W3-1a). */}
       <div ref={subtabStripRef}>
@@ -399,31 +477,40 @@ export function FleetView() {
         </div>
       ) : null}
 
-      {/* "Wartet auf dich"-Zeile: kompakter warn-Callout am Kopf des Inhaltsbereichs.
-          Auf Heute übernimmt der Tab selbst den Handlungsblock (kein Doppel-Callout),
-          auf allen anderen Subtabs bleibt diese Zeile die gemeinsame Affordanz. */}
-      {pendingItems.length > 0 && subtab !== "heute" ? (
+      {/* Board und Plan tragen ihre eigene Arbeitsmenge im Register. Dort wäre
+          die globale Wartet-Zeile eine doppelte, raumgreifende Affordanz. */}
+      {pendingItems.length > 0
+        && subtab !== "heute"
+        && subtab !== "board"
+        && subtab !== "plan" ? (
         <PendingBar items={pendingItems} onNavigate={(target) => setSubtab(target)} />
       ) : null}
 
       {/* Unter lg bleibt das bestehende Drawer-Verhalten erhalten. */}
       {!isLg && nodeDetailId ? (
         <NodeDetailDrawer
+          key={`${selectedBoard ?? "current"}:${nodeDetailId}`}
           taskId={nodeDetailId}
+          board={selectedBoard}
+          readOnly={selectedBoard != null}
           chainNodes={nodeDetailChainNodes}
           now={now}
           onClose={closeNodeDetail}
-          onChanged={board.reload}
+          onChanged={activeBoardState.reload}
         />
       ) : null}
 
       {!isLg && planspecDrawerItem ? (
         <PlanSpecDetailDrawer
+          key={`${selectedBoard ?? "current"}:${planspecDrawerItem.path}`}
           item={planspecDrawerItem}
           detail={planspecDetail.data}
           loading={planspecDetail.loading}
           error={planspecDetail.error}
+          stale={planspecDetail.isStale}
           onClose={closePlanSpecDetail}
+          actions={planAction}
+          onOpenChain={openPlanSpecChain}
         />
       ) : null}
 
@@ -504,9 +591,9 @@ export function FleetView() {
                   readOnly={selectedBoard != null}
                   initialRootId={selectedBoard ? null : kettenRootId}
                   now={now}
-                  selectedNodeId={selectedBoard ? null : nodeDetailId}
-                  detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
-                  onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
+                  selectedNodeId={nodeDetailId}
+                  detailControlsId={isLg ? "fleet-detail-pane" : undefined}
+                  onOpenNodeDetail={openNodeDetail}
                 />
               </>
             )}
@@ -517,22 +604,23 @@ export function FleetView() {
                 ) : null}
                 <FleetSourceFreshness sources={[
                   { label: "PlanSpecs", ...(selectedBoard ? selectedPlanspecs : planspecs) },
-                  { label: "Kosten", ...costs },
-                  { label: "Lanes", ...lanesCatalog },
-                  { label: "Account-Nutzung", ...accountUsage },
                 ]} />
                 <PlanTab
-                  allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : allPlanspecs}
-                  costs={costs.data}
-                  lanesCatalog={lanesCatalog.data}
-                  accountUsage={accountUsage.data}
+                  allPlanspecs={selectedBoard ? (selectedPlanspecs.data?.planspecs ?? []) : planRecords}
+                  summary={selectedBoard ? selectedPlanspecs.data?.summary : planspecs.data?.summary}
+                  loading={selectedBoard ? selectedPlanspecs.loading : planspecs.loading}
+                  error={selectedBoard ? selectedPlanspecs.error : planspecs.error}
+                  onRetry={selectedBoard ? selectedPlanspecs.reload : planspecs.reload}
                   readOnly={selectedBoard != null}
+                  selectedPath={planspecDrawerItem?.path}
+                  segment={planSegment}
+                  query={planQuery}
+                  onSegmentChange={(nextSegment) => replacePlanFilters(nextSegment, planQuery)}
+                  onQueryChange={(nextQuery) => replacePlanFilters(planSegment, nextQuery)}
                   onApproveSuccess={() => {
-                    // Refetch planspecs nach Freigabe
-                    void planspecs.reload();
+                    void (selectedBoard ? selectedPlanspecs.reload() : planspecs.reload());
                   }}
                   onShowDetail={openPlanSpecDetail}
-                  onOpenTask={openNodeDetail}
                 />
               </>
             )}
@@ -546,9 +634,9 @@ export function FleetView() {
                   boardSlug={selectedBoard}
                   readOnly={selectedBoard != null}
                   initialStatusFilter={deepLinkStatusFilter}
-                  selectedNodeId={selectedBoard ? null : nodeDetailId}
-                  detailControlsId={!selectedBoard && isLg ? "fleet-detail-pane" : undefined}
-                  onOpenNodeDetail={selectedBoard ? () => undefined : openNodeDetail}
+                  selectedNodeId={nodeDetailId}
+                  detailControlsId={isLg ? "fleet-detail-pane" : undefined}
+                  onOpenNodeDetail={openNodeDetail}
                 />
               </>
             )}

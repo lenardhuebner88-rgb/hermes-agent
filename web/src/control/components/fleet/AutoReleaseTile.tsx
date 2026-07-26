@@ -33,7 +33,7 @@ const OUTCOME_TONE_DEFAULT = "border-line bg-surface-2 text-ink-3";
 
 /** Read-only Auto-Release-Statuskachel — kein Toggle (Freischalten bleibt ein
  * Config-Datei-Akt), speist sich aus GET /api/plugins/kanban/release-status. */
-export function AutoReleaseTile({ onOpenTask }: { onOpenTask?: (taskId: string) => void }) {
+export function AutoReleaseTile({ onOpenTask, compact = false }: { onOpenTask?: (taskId: string) => void; compact?: boolean }) {
   const [data, setData] = useState<ReleaseStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +61,20 @@ export function AutoReleaseTile({ onOpenTask }: { onOpenTask?: (taskId: string) 
   const recent = (data?.recent ?? []).slice(0, 5);
   const anchors = data?.anchors ?? [];
   const lastAnchor = anchors.length > 0 ? anchors[anchors.length - 1] : null;
+
+  if (compact) {
+    return (
+      <div className="fleet-auto-release-compact" role="status" aria-label="Auto-Release-Status">
+        <span>Auto-Release</span>
+        <strong>
+          {data
+            ? data.autonomous ? `AUTONOM ≤ ${data.max_tier_autonomous}` : "Kill-Switch AUS"
+            : error ? "nicht erreichbar" : "lädt …"}
+        </strong>
+        {recent.length > 0 ? <small>{recent.length} letzte</small> : null}
+      </div>
+    );
+  }
 
   return (
     <section className="mb-3 grid min-w-0 gap-3 rounded-lg border border-line bg-surface-1 p-3 text-ink">

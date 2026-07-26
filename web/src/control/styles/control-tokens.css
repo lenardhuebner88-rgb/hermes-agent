@@ -204,6 +204,18 @@ body:has([data-control]) header[role="banner"] { display: none; }
   .hc-side-sheet-in { animation: none; }
 }
 
+/* Backdrop fade-in (DrawerShell, FLEET-DESIGN-L3-SPEC M5): 120ms opacity
+   0→1 statt hartem Aufblitzen. Gilt auf allen Breiten (das Bottom-Sheet
+   mobil hat denselben Backdrop). Reduced-Motion-Klammer wie .hc-side-sheet-in. */
+@keyframes hc-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.hc-backdrop-in { animation: hc-backdrop-in 120ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .hc-backdrop-in { animation: none; }
+}
+
 /* ── Surface-depth ladder ─────────────────────────────────────────────────
    Four tiers of elevation mapping onto the existing --hc-panel* layers.
    Pick the tier by how much the surface should "lift" off the page:

@@ -4,11 +4,11 @@ import { describe, expect, it } from "vitest";
 import { de } from "./de";
 
 // Abriss S5: FlowView + OverviewView wurden entfernt. Die „Kette starten"-CTA
-// (früher an FlowView.tsx gepinnt) lebt jetzt im Fleet-Cockpit (PlanTab,
+// (früher an FlowView.tsx gepinnt) lebt jetzt im Fleet-Cockpit (TransitionPanel,
 // de.fleet.planKetteStarten*). Wir pinnen daher die überlebenden Fleet-Quellen
 // statt der gelöschten Views — die negative Verify-Copy-Prüfung deckte vorher
 // FlowView ab und liegt jetzt auf FleetPipeline/lib.fleet (unten).
-const planTabSrc = readFileSync(fileURLToPath(new URL("../views/fleet/PlanTab.tsx", import.meta.url)), "utf8");
+const planTransitionSrc = readFileSync(fileURLToPath(new URL("../views/fleet/PlanSpecTransitionPanel.tsx", import.meta.url)), "utf8");
 const fleetPipelineSrc = readFileSync(fileURLToPath(new URL("../components/fleet/FleetPipeline.tsx", import.meta.url)), "utf8");
 const fleetSrc = readFileSync(fileURLToPath(new URL("../lib/fleet.ts", import.meta.url)), "utf8");
 
@@ -21,10 +21,10 @@ describe("German gated Flow copy", () => {
 
   it("uses the chain-start CTA for the release confirmation button", () => {
     expect(de.flow.plan.releaseConfirmButton).toBe("Kette starten");
-    // Chain-start zog beim Abriss (S5) in die Fleet-PlanTab um; sie verdrahtet
+    // Chain-start zog beim Abriss (S5) in den Fleet-Plan-Detailflow um; er verdrahtet
     // die i18n-Keys statt Hardcode — hier gepinnt (Coverage-Umzug, kein -Verlust).
     expect(de.fleet.planKetteStarten).toBe("Kette starten");
-    expect(planTabSrc).toContain("de.fleet.planKetteStarten");
+    expect(planTransitionSrc).toContain("de.fleet.planKetteStarten");
   });
 
   it("offers chain-first choices when a held subtask is dispatched directly", () => {

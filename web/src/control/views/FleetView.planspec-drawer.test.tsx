@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FleetView } from "./FleetView";
@@ -101,6 +101,17 @@ vi.mock("@/lib/api", () => api);
 
 const reload = vi.fn();
 
+function RouterProbe() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  return (
+    <>
+      <output aria-label="Aktuelle URL-Suche">{location.search}</output>
+      <button type="button" onClick={() => navigate(-1)}>History zurück</button>
+    </>
+  );
+}
+
 function setLgViewport(matches: boolean) {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
@@ -127,7 +138,7 @@ const planSpec = {
   open: true,
   closed_reason: null,
   kanban_root_task_id: "t_alpha",
-  kanban_root_status: "running",
+  kanban_root_status: "scheduled",
   kanban_state: "queued",
   kanban_child_done: 1,
   kanban_child_total: 3,
@@ -300,9 +311,10 @@ describe("FleetView PlanSpec detail drawer", () => {
     setHookDefaults();
   });
 
-  function renderFleetView() {
+  function renderFleetView(initialEntry = "/control/fleet", withRouterProbe = false) {
     return render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        {withRouterProbe ? <RouterProbe /> : null}
         <FleetView />
       </MemoryRouter>,
     );
@@ -403,9 +415,9 @@ describe("FleetView PlanSpec detail drawer", () => {
     }
 
     fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
-    for (const label of ["PlanSpecs", "PlanSpec-Detail", "Kosten", "Lanes", "Account-Nutzung"]) {
-      expect(screen.getByText(label)).toBeTruthy();
-    }
+    expect(screen.getByText("PlanSpecs")).toBeTruthy();
+    expect(screen.queryByText("Kosten")).toBeNull();
+    expect(screen.queryByText("Account-Nutzung")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /Subtab Risiko/ }));
     for (const label of [
@@ -470,7 +482,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(within(kettenTab).getByText("1")).toBeTruthy();
   });
 
-  it("renders compact summary totals for a completed chain absent from columns", () => {
+  it("does not duplicate a completed chain inside the Board tab", () => {
     setLgViewport(true);
     hooks.useBoard.mockReturnValue({
       data: {
@@ -493,29 +505,92 @@ describe("FleetView PlanSpec detail drawer", () => {
     renderFleetView();
     fireEvent.click(screen.getByRole("button", { name: "Subtab Board" }));
 
+    expect(screen.queryByText("Fleet kompakte Kette")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
     const item = screen.getByText("Fleet kompakte Kette").closest(".chain-item");
     expect(item).not.toBeNull();
     expect(within(item as HTMLElement).getByText("35/35")).toBeTruthy();
   });
 
-  it("qualifies the operator approval CTA as a chain release and start action", () => {
+  it("places the chain release action in the selected PlanSpec check detail", () => {
     renderFleetView();
     fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
+    fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
+    const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
+    fireEvent.click(within(drawer).getByRole("tab", { name: "Übergabe" }));
 
-    expect(de.fleet.planFreigeben).toBe("Kette mit dieser Konfiguration freigeben und starten");
-    expect(screen.getByRole("button", { name: de.fleet.planFreigeben })).toBeTruthy();
+    expect(within(drawer).getByRole("button", { name: "Kette freigeben" })).toBeTruthy();
   });
 
-  it("opens the PlanSpec full-text drawer from Plan tab approval cards", () => {
+  it("opens the PlanSpec detail drawer from the Plan register row", () => {
     renderFleetView();
 
     fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
-    fireEvent.click(screen.getByRole("button", { name: "PlanSpec-Volltext öffnen" }));
+    fireEvent.click(screen.getByRole("button", { name: /Alpha Volltext Plan/ }));
 
     expect(hooks.usePlanSpecDetail).toHaveBeenLastCalledWith(planSpec.path);
     const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
     expect(drawer).toBeTruthy();
     expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=."));
+  });
+
+  it("öffnet ?plan=<Pfad> einmalig und entfernt den konsumierten Parameter", async () => {
+    renderFleetView(`/control/fleet?plan=${encodeURIComponent(planSpec.path)}`, true);
+
+    const drawer = await screen.findByRole("dialog", { name: "PlanSpec Details" });
+    expect(within(drawer).getByText("PlanSpec-Detail aus GET /planspecs/detail?path=.")).toBeTruthy();
+    expect(hooks.usePlanSpecDetail).toHaveBeenLastCalledWith(planSpec.path);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Aktuelle URL-Suche").textContent).toBe("");
+    });
+  });
+
+  it("ignoriert einen unbekannten ?plan=-Pfad leise", async () => {
+    renderFleetView("/control/fleet?plan=%2Fplans%2Funknown.md", true);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Aktuelle URL-Suche").textContent).toBe("");
+    });
+    expect(screen.queryByRole("dialog", { name: "PlanSpec Details" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Subtab Plan" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("rekonstruiert Plan-Filter aus der URL und ersetzt History-Einträge", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/control/fleet?planSegment=ready&planSearch=vorher",
+          "/control/fleet?planSegment=held&planSearch=Alpha",
+        ]}
+        initialIndex={1}
+      >
+        <RouterProbe />
+        <FleetView />
+      </MemoryRouter>,
+    );
+
+    const search = await screen.findByRole("searchbox", { name: "PlanSpecs durchsuchen" });
+    expect((search as HTMLInputElement).value).toBe("Alpha");
+    expect(screen.getByRole("tab", { name: "Gehalten1" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("tab", { name: "Bereit0" }));
+    await waitFor(() => {
+      const params = new URLSearchParams(screen.getByLabelText("Aktuelle URL-Suche").textContent ?? "");
+      expect(params.get("planSegment")).toBe("ready");
+    });
+    fireEvent.change(search, { target: { value: "Hermes Agent" } });
+    fireEvent.click(screen.getByRole("tab", { name: "Alle1" }));
+    await waitFor(() => {
+      const params = new URLSearchParams(screen.getByLabelText("Aktuelle URL-Suche").textContent ?? "");
+      expect(params.has("planSegment")).toBe(false);
+      expect(params.get("planSearch")).toBe("Hermes Agent");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "History zurück" }));
+    await waitFor(() => {
+      expect((screen.getByRole("searchbox", { name: "PlanSpecs durchsuchen" }) as HTMLInputElement).value).toBe("vorher");
+      expect(screen.getByRole("tab", { name: "Bereit0" }).getAttribute("aria-selected")).toBe("true");
+    });
   });
 
   it("shows signed complete parked PlanSpecs and starts the chain via flow-release", async () => {
@@ -542,12 +617,13 @@ describe("FleetView PlanSpec detail drawer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Subtab Plan" }));
 
     expect(screen.getByText("Signed Complete Plan")).toBeTruthy();
-    expect(screen.getByText("signiert · geparkt")).toBeTruthy();
-    expect(screen.getByTestId("signed-chain-start-card")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Signed Complete Plan/ }));
+    const drawer = screen.getByRole("dialog", { name: "PlanSpec Details" });
+    fireEvent.click(within(drawer).getByRole("tab", { name: "Übergabe" }));
 
-    const startButton = screen.getByRole("button", { name: "Kette starten" });
+    const startButton = within(drawer).getByRole("button", { name: "Kette starten" });
     fireEvent.click(startButton);
-    fireEvent.click(screen.getByRole("button", { name: "Start bestätigen" }));
+    fireEvent.click(within(drawer).getByRole("button", { name: "Start bestätigen" }));
 
     await waitFor(() => expect(api.fetchJSON).toHaveBeenCalledWith(
       "/api/plugins/kanban/tasks/t_signed_root/flow-release",
@@ -676,7 +752,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     expect(hooks.useChainGraph.mock.calls.some(([rootId]) => rootId === DEFAULT_OLD_ROOT.id)).toBe(false);
   });
 
-  it("uses the selected board and its root for the Plan tab active-chain fetch", async () => {
+  it("does not fetch a duplicate active chain while switching boards in Plan", async () => {
     setLgViewport(true);
     hooks.useBoardCatalog.mockReturnValue({
       data: {
@@ -702,7 +778,7 @@ describe("FleetView PlanSpec detail drawer", () => {
     hooks.useChainGraph.mockClear();
     fireEvent.change(screen.getByRole("combobox", { name: "Board auswählen" }), { target: { value: "health-track" } });
 
-    await waitFor(() => expect(hooks.useChainGraph).toHaveBeenCalledWith(HEALTH_ROOT.id, "health-track"));
-    expect(hooks.useChainGraph.mock.calls.some(([rootId, board]) => rootId === DEFAULT_ACTIVE_ROOT.id && board === "health-track")).toBe(false);
+    await waitFor(() => expect(screen.getByText("Fremd-Board · nur lesen")).toBeTruthy());
+    expect(hooks.useChainGraph).not.toHaveBeenCalled();
   });
 });

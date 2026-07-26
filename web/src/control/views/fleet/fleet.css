@@ -3,7 +3,14 @@
  * Überschreibt --hc-* nur im Fleet-Scope; alle anderen Tabs bleiben hell.
  * Licht = Leben: Glow/Puls nur bei laufender Aktivität.
  */
-[data-fleet-theme] {
+/* Alias-Palette: EINE Regel, zwei Scopes (L3-Spec, Befund 15 — zuvor war das
+ * Mapping in .fleet-plan-detail-scope wörtlich dupliziert und driftete, dort
+ * fehlten z. B. dieselben Aliase wie hier, Befund 1). .fleet-plan-detail-scope
+ * ist der portallte Drawer außerhalb von [data-fleet-theme]; Hintergrund/Farbe
+ * setzt er bewusst NICHT (kein zweiter Fleet-Hintergrund) — deshalb stehen hier
+ * nur Custom Properties, Fläche/Textfarbe bleibt [data-fleet-theme] vorbehalten. */
+[data-fleet-theme],
+.fleet-plan-detail-scope {
   --fleet-nacht: var(--color-surface-0);
   --fleet-tiefe: var(--color-surface-1);
   --fleet-karte: var(--color-surface-2);
@@ -16,10 +23,26 @@
   --fleet-gruen: var(--color-status-ok);
   --fleet-rot: var(--color-status-alert);
 
+  /* Kompat-Aliase (L3-Spec 2.1): wurden an ~7 Stellen benutzt, aber nirgends
+   * definiert — u. a. fiel die sticky Filter-Leiste dadurch transparent aus. */
+  --fleet-bg: var(--color-surface-1);
+  --fleet-red: var(--fleet-rot);
+  --fleet-amber: var(--fleet-signal);
+
+  /* Spacing-Skala (4-px-Raster, L3-Spec 2.2) */
+  --fleet-space-1: 4px;
+  --fleet-space-2: 8px;
+  --fleet-space-3: 12px;
+  --fleet-space-4: 16px;
+  --fleet-space-5: 24px;
+  --fleet-space-6: 32px;
+
   --fleet-t1: var(--color-ink);
   --fleet-t2: var(--color-ink-2);
   --fleet-t3: var(--color-ink-3);
+}
 
+[data-fleet-theme] {
   background: radial-gradient(140% 50% at 50% -12%, var(--color-surface-1) 0%, var(--fleet-nacht) 55%);
   color: var(--fleet-t1);
 }
@@ -113,11 +136,15 @@ body:has([data-fleet-theme]) [data-control] {
   background: transparent;
   position: relative;
   font-family: var(--hc-font-sans);
-  transition: color 0.1s, background 0.1s, border-color 0.1s;
+  transition: color 120ms ease-out, background-color 120ms ease-out, border-color 120ms ease-out;
 }
 .fleet-chip:hover {
   color: var(--fleet-t1);
   border-color: var(--fleet-linie-stark);
+}
+.fleet-chip:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
 }
 .fleet-chip.fleet-chip-on {
   color: var(--color-surface-0);
@@ -312,7 +339,7 @@ body:has([data-fleet-theme]) [data-control] {
   gap: 1px;
   background: var(--fleet-linie);
   border: 1px solid var(--fleet-linie);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   overflow: hidden;
 }
 /* Mobile: NIE drei gequetschte Spalten (AC-R2). Zwei Spalten, ungerade letzte
@@ -941,7 +968,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-ps {
   background: var(--fleet-tiefe);
   border: 1px solid var(--fleet-linie);
-  border-radius: 12px;
+  border-radius: var(--radius-panel);
   padding: 10px 13px;
   display: flex;
   flex-direction: column;
@@ -951,6 +978,7 @@ body:has([data-fleet-theme]) [data-control] {
   color: inherit;
   cursor: pointer;
   width: 100%;
+  transition: border-color 120ms ease-out;
 }
 .fleet-ps:hover { border-color: var(--fleet-linie-stark); }
 .fleet-ps-top {
@@ -1013,7 +1041,9 @@ body:has([data-fleet-theme]) [data-control] {
   text-align: center;
 }
 .fleet-empty-title {
-  font: italic 400 18px/1.3 var(--hc-font-display);
+  /* L3-Spec 2.3: Empty-Titel ohne Kursiv — die Machined-Instruments-Stimme
+   * kennt keine Italic-Ausnahme. */
+  font: 600 var(--text-emph)/1.35 var(--hc-font-display);
   color: var(--fleet-t2);
 }
 .fleet-empty-sub {
@@ -1029,7 +1059,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-drawer-inner {
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: var(--fleet-space-3);
   /* Überschreibe den hellen hc-surface-card-Hintergrund der Overlay-Box mit
    * dem Fleet-Dark-Hintergrund — der [data-fleet-theme]-Scope setzt die
    * CSS-Variablen, aber nicht den Background der Wrapper-Box. */
@@ -1082,11 +1112,11 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-kv {
   background: var(--fleet-karte);
   border: 1px solid var(--fleet-linie);
-  border-radius: 11px;
-  padding: 8px 11px;
+  border-radius: var(--radius-panel);
+  padding: var(--fleet-space-2) var(--fleet-space-3);
 }
 .fleet-kv-k {
-  font: 500 9.5px/1 var(--hc-font-sans);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
   color: var(--fleet-t3);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1131,18 +1161,27 @@ body:has([data-fleet-theme]) [data-control] {
   font: 500 12px/1 var(--hc-font-sans);
   color: var(--fleet-t1);
   padding: 11px 0;
-  border-radius: 11px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--fleet-linie-stark);
   background: var(--fleet-karte);
   cursor: pointer;
   min-height: 40px;
-  transition: opacity 0.1s;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
 }
-.fleet-btn:hover { opacity: 0.85; }
+.fleet-btn:hover { background: var(--fleet-karte-hi); }
+.fleet-btn:active { background: color-mix(in oklab, var(--fleet-karte-hi) 70%, var(--fleet-linie)); }
+.fleet-btn:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
 .fleet-btn-primar {
   background: color-mix(in oklab, var(--fleet-puls) 12%, transparent);
   border-color: color-mix(in oklab, var(--fleet-puls) 45%, transparent);
   color: var(--fleet-puls);
+}
+.fleet-btn-primar:hover {
+  background: color-mix(in oklab, var(--fleet-puls) 18%, transparent);
+  border-color: var(--fleet-puls);
 }
 
 /* ── Task-Steuerung (S3: NodeDetailDrawer + Risiko-Blocked-Zeilen) ─────────── */
@@ -1161,22 +1200,27 @@ body:has([data-fleet-theme]) [data-control] {
   font: 500 11px/1 var(--hc-font-sans);
   padding: 7px 11px;
   min-height: 32px;
-  border-radius: 9px;
+  border-radius: var(--radius-card);
   border: 1px solid var(--fleet-linie-stark);
   background: var(--fleet-karte);
   color: var(--fleet-t1);
   cursor: pointer;
-  transition: opacity 0.1s;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
 }
-.fleet-ta-btn:hover { opacity: 0.85; }
-.fleet-ta-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.fleet-ta-btn:hover { background: var(--fleet-karte-hi); }
+.fleet-ta-btn:active { background: color-mix(in oklab, var(--fleet-karte-hi) 70%, var(--fleet-linie)); }
+.fleet-ta-btn:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+.fleet-ta-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .fleet-ta-confirm {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border-radius: 9px;
+  border-radius: var(--radius-card);
   border: 1px solid color-mix(in oklab, var(--fleet-rot) 30%, transparent);
   background: color-mix(in oklab, var(--fleet-rot) 7%, transparent);
 }
@@ -1191,7 +1235,7 @@ body:has([data-fleet-theme]) [data-control] {
   color: var(--fleet-rot);
   background: color-mix(in oklab, var(--fleet-rot) 8%, transparent);
   border: 1px solid color-mix(in oklab, var(--fleet-rot) 25%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 6px 9px;
   word-break: break-word;
 }
@@ -1543,6 +1587,10 @@ body:has([data-fleet-theme]) [data-control] {
   align-items: center;
 }
 .fleet-detail-tab:hover { color: var(--fleet-t2); }
+.fleet-detail-tab:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: -2px;
+}
 .fleet-detail-tab-on {
   color: var(--fleet-puls);
   border-bottom-color: var(--fleet-puls);
@@ -1583,7 +1631,7 @@ body:has([data-fleet-theme]) [data-control] {
   color: var(--fleet-t2);
   background: color-mix(in oklab, var(--color-surface-0) 35%, transparent);
   border: 1px solid var(--fleet-linie);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 8px 10px;
   overflow-x: auto;
   overflow-y: auto;
@@ -1600,7 +1648,7 @@ body:has([data-fleet-theme]) [data-control] {
   padding: 3px 0;
 }
 .fleet-activity-time {
-  font: 400 10px/1.4 var(--hc-font-mono);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
   color: var(--fleet-t3);
   width: 50px;
   flex-shrink: 0;
@@ -1638,12 +1686,12 @@ body:has([data-fleet-theme]) [data-control] {
   border-color: var(--fleet-puls);
 }
 .fleet-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .fleet-plan-msg {
-  border-radius: 11px;
+  border-radius: var(--radius-card);
   padding: 9px 12px;
   font: 400 11.5px/1.5 var(--hc-font-sans);
 }
@@ -1667,7 +1715,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-plan-kopf {
   background: var(--fleet-karte);
   border: 1px solid color-mix(in oklab, var(--fleet-signal) 35%, transparent);
-  border-radius: 15px;
+  border-radius: var(--radius-panel);
   padding: 12px 13px;
   display: flex;
   flex-direction: column;
@@ -1716,7 +1764,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-lane-cfg {
   background: var(--fleet-tiefe);
   border: 1px solid var(--fleet-linie);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 3px 12px;
 }
 .fleet-lane-row {
@@ -1807,7 +1855,7 @@ body:has([data-fleet-theme]) [data-control] {
   font: 500 11px/1 var(--hc-font-mono);
   color: var(--fleet-t1);
   border: 1px solid var(--fleet-linie-stark);
-  border-radius: 9px;
+  border-radius: var(--radius-card);
   padding: 6px 9px;
   background: var(--fleet-karte);
   min-height: 40px;
@@ -1822,7 +1870,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-budget-g {
   background: var(--fleet-tiefe);
   border: 1px solid var(--fleet-linie);
-  border-radius: 13px;
+  border-radius: var(--radius-panel);
   padding: 11px 13px;
   display: flex;
   flex-direction: column;
@@ -2074,37 +2122,197 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--fleet-space-2);
+}
+
+.fleet-boardtab-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--fleet-space-2);
+  /* Desktop-Breitenkappe (L3-Spec 3.3): Signalabstand bleibt lesbar statt
+   * Kante-zu-Kante-Leere; unter 960px ohne Effekt. */
+  max-width: 960px;
+}
+
+.fleet-boardtab-metrics > div {
+  min-width: 0;
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-panel);
+  background: var(--fleet-karte);
+  padding: var(--fleet-space-2) var(--fleet-space-3);
+}
+
+/* KPI-Tönung (L3-Spec 3.3, Befund 13): Farbe nur, wenn sie eine Entscheidung
+ * trägt — das TSX setzt data-tone nur bei Wert > 0, 0 bleibt neutral. */
+.fleet-boardtab-metrics > div[data-tone="blocked"] strong { color: var(--fleet-rot); }
+.fleet-boardtab-metrics > div[data-tone="running"] strong {
+  color: var(--fleet-puls);
+  text-shadow: 0 0 14px color-mix(in oklab, var(--fleet-puls) 40%, transparent);
+}
+
+.fleet-boardtab-metrics span,
+.fleet-boardtab-metrics small {
+  display: block;
+  overflow: hidden;
+  color: var(--fleet-t3);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.fleet-boardtab-metrics strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--fleet-t1);
+  font: 600 18px/1 var(--hc-font-mono);
+}
+
+.fleet-boardtab-metrics small {
+  margin-top: 3px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.fleet-boardtab-register,
+.fleet-boardtab-views {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.fleet-boardtab-register::-webkit-scrollbar,
+.fleet-boardtab-views::-webkit-scrollbar { display: none; }
+
+.fleet-boardtab-register {
+  border-bottom: 1px solid var(--fleet-linie);
+  /* Scroll-Affordanz wie .fleet-subtabs (L3-Spec, Befund 8): der rechte Rand
+   * fadet aus statt das letzte Register mobil hart abzuschneiden. */
+  mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+}
+
+.fleet-boardtab-register button,
+.fleet-boardtab-views button {
+  display: inline-flex;
+  min-height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--fleet-t3);
+  cursor: pointer;
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+
+.fleet-boardtab-register button {
+  border-bottom: 2px solid transparent;
+  padding: 0 10px;
+}
+
+.fleet-boardtab-register button:hover,
+.fleet-boardtab-views button:hover {
+  color: var(--fleet-t1);
+}
+
+.fleet-boardtab-views button:hover {
+  border-color: var(--fleet-linie-stark);
+}
+
+.fleet-boardtab-register button:focus-visible,
+.fleet-boardtab-views button:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+
+.fleet-boardtab-register button.is-active {
+  border-color: var(--fleet-puls);
+  color: var(--fleet-t1);
+}
+
+.fleet-boardtab-register button span,
+.fleet-boardtab-views button span {
+  font: 600 9px/1 var(--hc-font-mono);
+  opacity: 0.7;
+}
+
+.fleet-boardtab-views button {
+  min-height: 32px;
+  border: 1px solid var(--fleet-linie);
+  border-radius: 999px;
+  padding: 0 9px;
+}
+
+.fleet-boardtab-views button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--fleet-puls) 45%, var(--fleet-linie));
+  background: color-mix(in srgb, var(--fleet-puls) 8%, var(--fleet-karte));
+  color: var(--fleet-t1);
 }
 
 .fleet-boardtab-filter {
   display: flex;
-  gap: 8px;
+  gap: var(--fleet-space-2);
   flex-wrap: wrap;
   position: sticky;
   top: 0;
   z-index: 2;
+  /* L3-Spec 3.3 (Befund 1): --fleet-bg war undefiniert → die Leiste war
+   * transparent und Listeninhalt schimmerte durch. Jetzt opaker Surface +
+   * Blur + Bottom-Hairline (transluzente Toolbar nach Vercel-Muster). */
   background: var(--fleet-bg);
-  padding-bottom: 8px;
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--fleet-linie);
+  padding-bottom: var(--fleet-space-2);
 }
+
+.fleet-boardtab-more {
+  position: relative;
+}
+
+.fleet-boardtab-more summary {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--fleet-linie-stark);
+  border-radius: var(--radius-card);
+  background: var(--fleet-karte-hi);
+  padding: 0 9px;
+  color: var(--fleet-t2);
+  cursor: pointer;
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  list-style: none;
+}
+
+.fleet-boardtab-more summary::-webkit-details-marker { display: none; }
+.fleet-boardtab-more[open] .fleet-boardtab-select { margin-top: 5px; }
 
 .fleet-boardtab-suche {
   flex: 1 1 140px;
   min-width: 0;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 7px 10px;
   font: 400 12px/1 var(--hc-font-sans);
   color: var(--fleet-t1);
+  transition: border-color 120ms ease-out, box-shadow 100ms ease-out;
 }
 
 .fleet-boardtab-suche::placeholder { color: var(--fleet-t3); }
 
+/* L3-Spec 3.2 (Befund 3): die gelöschte Outline wird durch einen sichtbaren
+ * Bronze-Ring ersetzt — Border + 1-px-Glow. */
 .fleet-boardtab-suche:focus,
 .fleet-boardtab-select:focus {
   outline: none;
   border-color: var(--fleet-puls);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fleet-puls) 35%, transparent);
 }
 
 .fleet-boardtab-select {
@@ -2112,7 +2320,7 @@ body:has([data-fleet-theme]) [data-control] {
   min-width: 0;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   padding: 7px 8px;
   font: 500 11px/1 var(--hc-font-sans);
   color: var(--fleet-t1);
@@ -2156,14 +2364,511 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-plan-composer-header[aria-expanded="true"] { margin-bottom: 8px; }
 
+.fleet-plantab {
+  display: grid;
+  min-width: 0;
+  gap: var(--fleet-space-2);
+}
+
+.fleet-plan-tools {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fleet-space-2);
+}
+
+.fleet-plan-new {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--color-bronze) 48%, var(--fleet-linie));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-bronze) 9%, var(--fleet-karte));
+  padding: 0 11px;
+  color: var(--fleet-t1);
+  cursor: pointer;
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+
+.fleet-plan-new:hover {
+  border-color: var(--fleet-puls);
+}
+
+.fleet-plan-new:active {
+  background: color-mix(in srgb, var(--color-bronze) 16%, var(--fleet-karte));
+}
+
+.fleet-plan-new:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+
+.fleet-auto-release-compact {
+  display: flex;
+  min-width: 0;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-card);
+  background: var(--fleet-karte);
+  padding: 0 10px;
+  color: var(--fleet-t3);
+  /* L3-Spec 2.3 (Befund 12): Compact-Typo auf denselben 11-px-Floor wie
+   * .fleet-plan-new in derselben Toolbar. */
+  font: 500 var(--text-micro)/1.3 var(--hc-font-sans);
+}
+
+.fleet-auto-release-compact strong {
+  overflow: hidden;
+  color: var(--fleet-t2);
+  font-size: var(--text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-auto-release-compact small {
+  color: var(--fleet-t3);
+  white-space: nowrap;
+}
+
+.fleet-readonly-note {
+  color: var(--fleet-t3);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+}
+
+.fleet-plan-search {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: var(--fleet-space-2);
+  border: 1px solid var(--fleet-linie-stark);
+  border-radius: var(--radius-card);
+  background: var(--fleet-karte-hi);
+  padding: 0 10px;
+  color: var(--fleet-t3);
+  transition: border-color 120ms ease-out, box-shadow 100ms ease-out;
+}
+
+.fleet-plan-search:focus-within {
+  border-color: var(--fleet-puls);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--fleet-puls) 35%, transparent);
+}
+
+.fleet-plan-search input {
+  min-width: 0;
+  flex: 1 1 auto;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--fleet-t1);
+  font: 400 11.5px/1 var(--hc-font-sans);
+}
+
+.fleet-plan-list {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-panel);
+  padding: 0;
+  list-style: none;
+  /* Desktop-Breitenkappe (L3-Spec 3.3, Befund 14). */
+  max-width: 960px;
+}
+
+.fleet-plan-list > li:last-child .fleet-plan-row { border-bottom: 0; }
+
+.fleet-plan-row {
+  display: flex;
+  width: 100%;
+  min-height: 56px;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--fleet-linie);
+  background: transparent;
+  padding: var(--fleet-space-2) var(--fleet-space-3);
+  color: var(--fleet-t1);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 120ms ease-out;
+}
+
+.fleet-plan-row:hover { background: var(--fleet-karte-hi); }
+.fleet-plan-row:active {
+  background: color-mix(in oklab, var(--fleet-karte-hi) 70%, var(--fleet-linie));
+}
+/* Innenliegender Fokus-Ring (L3-Spec 3.2): die Hairline-Teiler springen nicht. */
+.fleet-plan-row:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: -2px;
+}
+.fleet-plan-row.is-selected {
+  background: var(--color-surface-3);
+  box-shadow: inset 3px 0 var(--color-bronze);
+}
+
+.fleet-plan-row-main {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 4px;
+}
+
+.fleet-plan-row-title {
+  overflow: hidden;
+  color: var(--fleet-t1);
+  font: 600 var(--text-sec)/1.3 var(--hc-font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-plan-row-meta {
+  display: flex;
+  min-width: 0;
+  gap: var(--fleet-space-2);
+  overflow: hidden;
+  color: var(--fleet-t3);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
+  white-space: nowrap;
+}
+
+.fleet-plan-row-reason {
+  overflow: hidden;
+  color: var(--fleet-t2);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fleet-plan-transition {
+  display: grid;
+  gap: var(--fleet-space-2);
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-panel);
+  background: var(--fleet-karte);
+  padding: var(--fleet-space-3);
+}
+
+.fleet-plan-decision {
+  display: grid;
+  gap: 0;
+  margin: 12px 0 0;
+  border-block: 1px solid var(--fleet-linie);
+}
+
+.fleet-plan-decision > div {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.28fr) minmax(0, 1fr);
+  gap: 12px;
+  padding: var(--fleet-space-2) 2px;
+  border-bottom: 1px solid var(--fleet-linie);
+}
+
+.fleet-plan-decision > div:last-child { border-bottom: 0; }
+.fleet-plan-decision span,
+.fleet-plan-decision dt {
+  color: var(--fleet-t3);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.fleet-plan-decision strong,
+.fleet-plan-decision dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--fleet-t1);
+  font: 500 var(--text-micro)/1.45 var(--hc-font-sans);
+}
+
+/* Das Token-Mapping lebt jetzt in der gemeinsamen Regel
+ * `[data-fleet-theme], .fleet-plan-detail-scope` am Dateianfang (L3-Spec,
+ * Befund 15) — die Klasse selbst bleibt als Hook im Drawer-Markup. */
+
+.fleet-plan-transition-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.fleet-plan-preview {
+  display: grid;
+  gap: var(--fleet-space-2);
+}
+
+.fleet-plan-preview-effect {
+  display: grid;
+  gap: 4px;
+  border-left: 3px solid var(--color-bronze);
+  padding: 3px 0 3px 10px;
+}
+
+.fleet-plan-preview-effect strong {
+  color: var(--fleet-t1);
+  font: 600 var(--text-sec)/1.4 var(--hc-font-sans);
+}
+
+.fleet-plan-preview-effect span,
+.fleet-plan-hint {
+  color: var(--fleet-t2);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+}
+
+.fleet-plan-preview-guards {
+  display: grid;
+  margin: 0;
+  border-block: 1px solid var(--fleet-linie);
+}
+
+.fleet-plan-preview-guards > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--fleet-linie);
+}
+
+.fleet-plan-preview-guards > div:last-child { border-bottom: 0; }
+.fleet-plan-preview-guards dt,
+.fleet-plan-preview-tech dt {
+  color: var(--fleet-t3);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.fleet-plan-preview-guards dd,
+.fleet-plan-preview-tech dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--fleet-t1);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
+}
+
+.fleet-plan-preview-tech {
+  border-top: 1px dashed var(--fleet-linie);
+  padding-top: 7px;
+}
+
+.fleet-plan-preview-tech summary,
+.fleet-plan-disclosure summary,
+.fleet-plan-step-detail summary {
+  min-height: 40px;
+  color: var(--fleet-t2);
+  cursor: pointer;
+  font: 600 var(--text-micro)/40px var(--hc-font-sans);
+}
+
+.fleet-plan-preview-tech dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 4px 0;
+}
+
+.fleet-plan-transition-actions button,
+.fleet-plan-ingest {
+  min-height: 44px;
+  border: 1px solid color-mix(in srgb, var(--color-bronze) 50%, var(--fleet-linie));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-bronze) 10%, var(--fleet-karte-hi));
+  padding: 0 11px;
+  color: var(--fleet-t1);
+  cursor: pointer;
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+
+.fleet-plan-transition-actions button:hover:not(:disabled),
+.fleet-plan-ingest:hover:not(:disabled) {
+  border-color: var(--fleet-puls);
+}
+
+.fleet-plan-transition-actions button:active:not(:disabled),
+.fleet-plan-ingest:active:not(:disabled) {
+  background: color-mix(in srgb, var(--color-bronze) 16%, var(--fleet-karte-hi));
+}
+
+.fleet-plan-transition-actions button:focus-visible,
+.fleet-plan-ingest:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+
+.fleet-plan-transition-actions button.is-secondary {
+  border-color: var(--fleet-linie);
+  background: var(--fleet-karte-hi);
+}
+
+.fleet-plan-transition-actions button.is-secondary:hover:not(:disabled) {
+  border-color: var(--fleet-linie-stark);
+}
+
+.fleet-plan-transition button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.fleet-plan-preview-grid,
+.fleet-plan-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 0;
+}
+
+.fleet-detail-instrument {
+  min-width: 0;
+  border-block: 1px solid var(--fleet-linie);
+  padding: 11px 2px;
+}
+
+.fleet-detail-instrument.is-alert { border-color: color-mix(in srgb, var(--color-status-alert) 40%, transparent); }
+
+.fleet-detail-hairline {
+  display: grid;
+  gap: 3px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--fleet-linie);
+  color: var(--fleet-t2);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+}
+.fleet-detail-hairline:last-child { border-bottom: 0; }
+.fleet-detail-hairline strong { color: var(--fleet-t1); }
+
+.fleet-plan-findings-panel {
+  border-left: 3px solid var(--color-status-warn);
+  padding: 8px 0 8px 11px;
+}
+.fleet-plan-findings-panel ul,
+.fleet-plan-disclosure ul {
+  margin: 7px 0 0;
+  padding-left: 18px;
+  color: var(--fleet-t2);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+}
+
+.fleet-plan-criteria {
+  display: grid;
+  gap: 0;
+  margin: 7px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fleet-plan-criteria > li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--fleet-linie);
+}
+.fleet-plan-criteria > li:last-child { border-bottom: 0; }
+.fleet-plan-criteria > li > span {
+  color: var(--fleet-t3);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
+}
+
+.fleet-plan-disclosure {
+  border-block: 1px solid var(--fleet-linie);
+}
+
+.fleet-plan-step-rail {
+  display: grid;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.fleet-plan-step-rail > li {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 9px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--fleet-linie);
+}
+.fleet-plan-step-rail > li:last-child { border-bottom: 0; }
+.fleet-plan-step-index {
+  color: var(--color-bronze);
+  font: 500 var(--text-micro)/1.45 var(--hc-font-mono);
+}
+.fleet-plan-step-rail strong {
+  overflow-wrap: anywhere;
+  color: var(--fleet-t1);
+  font: 600 var(--text-sec)/1.3 var(--hc-font-sans);
+}
+.fleet-plan-step-rail p {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--fleet-t3);
+  font: 400 var(--text-micro)/1.45 var(--hc-font-sans);
+}
+
+.fleet-result-handoff {
+  border-left: 3px solid var(--color-status-ok);
+  padding: 8px 0 8px 11px;
+}
+
+.fleet-plan-preview-grid > div,
+.fleet-plan-check-grid > div {
+  min-width: 0;
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-card);
+  background: var(--fleet-karte-hi);
+  padding: var(--fleet-space-2);
+}
+
+.fleet-plan-preview-grid dt,
+.fleet-plan-check-grid dt {
+  color: var(--fleet-t3);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.fleet-plan-preview-grid dd,
+.fleet-plan-check-grid dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--fleet-t1);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
+}
+
+.fleet-plan-findings,
+.fleet-plan-warnings {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fleet-red);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+}
+
+.fleet-plan-warnings { color: var(--fleet-amber); }
+
+.fleet-plan-detail-scope .fleet-plan-preview-tasks {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--fleet-t1);
+  font: 400 var(--text-sec)/1.45 var(--hc-font-sans);
+}
+
 .fleet-list-expander {
   width: 100%;
   min-height: 40px;
   border: 1px dashed var(--fleet-linie);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: transparent;
   color: var(--fleet-puls);
   cursor: pointer;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+}
+
+.fleet-list-expander:hover {
+  border-color: var(--fleet-puls);
+}
+
+.fleet-list-expander:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
 }
 
 .fleet-boardtab-archive-state,
@@ -2173,10 +2878,10 @@ body:has([data-fleet-theme]) [data-control] {
   justify-content: space-between;
   gap: 6px 12px;
   border: 1px solid var(--fleet-linie);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--fleet-karte-hi);
-  padding: 8px 10px;
-  font: 500 10.5px/1.35 var(--hc-font-mono);
+  padding: var(--fleet-space-2) var(--fleet-space-3);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
   color: var(--fleet-t2);
 }
 
@@ -2189,20 +2894,29 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-load-more {
   min-height: 44px;
   border: 1px solid var(--fleet-linie-stark);
-  border-radius: 8px;
+  border-radius: var(--radius-card);
   background: var(--fleet-karte-hi);
   color: var(--fleet-t1);
   font: 600 11px/1 var(--hc-font-sans);
   cursor: pointer;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
 }
 
 .fleet-boardtab-load-more:hover:not(:disabled) { border-color: var(--fleet-puls); }
-.fleet-boardtab-load-more:disabled { cursor: wait; opacity: 0.65; }
+.fleet-boardtab-load-more:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+/* Beim Nachladen bleibt cursor: wait (L3-Spec 3.2), Disabled-Opacity ist
+ * einheitlich .5. */
+.fleet-boardtab-load-more:disabled { cursor: wait; opacity: 0.5; }
 
 .fleet-boardtab-group {
   border: 1px solid var(--fleet-linie);
-  border-radius: 10px;
+  border-radius: var(--radius-panel);
   overflow: hidden;
+  /* Desktop-Breitenkappe (L3-Spec 3.3, Befund 14). */
+  max-width: 960px;
 }
 
 .fleet-boardtab-group-header {
@@ -2223,11 +2937,12 @@ body:has([data-fleet-theme]) [data-control] {
 
 .fleet-boardtab-count {
   margin-left: auto;
-  font: 600 10px/1 var(--hc-font-mono);
+  font: 600 var(--text-micro)/1.3 var(--hc-font-mono);
   color: var(--fleet-t3);
 }
 
 .fleet-boardtab-card {
+  position: relative;
   border-bottom: 1px solid var(--fleet-linie);
 }
 
@@ -2238,20 +2953,65 @@ body:has([data-fleet-theme]) [data-control] {
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 44px 8px 12px;
   border: none;
   border-bottom: none;
   background: transparent;
   cursor: pointer;
   text-align: left;
-  font: 400 11.5px/1.3 var(--hc-font-sans);
+  font: 600 var(--text-sec)/1.3 var(--hc-font-sans);
   color: var(--fleet-t1);
   min-height: 44px;
+  transition: background-color 120ms ease-out;
+}
+
+.fleet-boardtab-copy {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  background: transparent;
+  color: var(--fleet-t3);
+  cursor: pointer;
+}
+
+.fleet-boardtab-copy:hover,
+.fleet-boardtab-copy:focus-visible {
+  border-color: var(--fleet-linie);
+  color: var(--fleet-t1);
+}
+
+/* Copy-Button-Reveal (L3-Spec M10): erst bei Row-Hover/Focus-within sichtbar,
+ * nur auf feinem Pointer — Touch sieht ihn dauerhaft. */
+@media (pointer: fine) {
+  .fleet-boardtab-copy {
+    opacity: 0;
+    transition: opacity 120ms ease-out;
+  }
+  .fleet-boardtab-card:hover .fleet-boardtab-copy,
+  .fleet-boardtab-card:focus-within .fleet-boardtab-copy {
+    opacity: 1;
+  }
 }
 
 .fleet-boardtab-row:hover { background: var(--fleet-karte-hi); }
+.fleet-boardtab-row:active {
+  background: color-mix(in oklab, var(--fleet-karte-hi) 70%, var(--fleet-linie));
+}
+/* Innenliegender Fokus-Ring (L3-Spec 3.2): die Hairline-Teiler springen nicht. */
+.fleet-boardtab-row:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: -2px;
+}
 .fleet-boardtab-row-readonly { cursor: default; }
-.fleet-boardtab-row-readonly:hover { background: transparent; }
+.fleet-boardtab-row-readonly:hover,
+.fleet-boardtab-row-readonly:active { background: transparent; }
 .fleet-boardtab-row-selected {
   background: var(--color-surface-3);
   box-shadow: inset 3px 0 var(--color-bronze);
@@ -2275,15 +3035,20 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font: 400 10px/1 var(--hc-font-mono);
+  gap: var(--fleet-space-2);
+  font: 500 var(--text-micro)/1.4 var(--hc-font-mono);
   color: var(--fleet-t3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.fleet-boardtab-id { color: var(--fleet-t3); }
+.fleet-boardtab-id {
+  max-width: 16ch;
+  overflow: hidden;
+  color: var(--fleet-t3);
+  text-overflow: ellipsis;
+}
 .fleet-boardtab-assignee { color: var(--fleet-t2); }
 .fleet-boardtab-priority,
 .fleet-boardtab-comments,
@@ -2321,24 +3086,105 @@ body:has([data-fleet-theme]) [data-control] {
 
 /* Mobile: kein horizontaler Overflow bei 390px */
 @media (max-width: 640px) {
+  .fleet-boardtab-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
   .fleet-boardtab-filter {
     gap: 6px;
   }
-  .fleet-boardtab-select { font-size: 10.5px; }
-  .fleet-boardtab-row { padding: 8px 10px; gap: 7px; }
+  .fleet-boardtab-suche { flex-basis: calc(100% - 88px); }
+  .fleet-boardtab-select { font-size: var(--text-micro); }
+  .fleet-boardtab-row { padding: 8px 42px 8px 10px; gap: 7px; }
   .fleet-boardtab-meta { gap: 6px; }
+  .fleet-boardtab-id { max-width: 12ch; }
   .fleet-boardtab-disclosure { padding-right: 10px; padding-left: 44px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fleet-led-dot {
-    animation: none;
+  .fleet-plan-tools { align-items: stretch; }
+  .fleet-plan-new { flex: 0 0 auto; }
+  .fleet-auto-release-compact {
+    flex: 1 1 auto;
+    justify-content: flex-end;
   }
-
-  /* Puls-Animationen aus */
-  @keyframes fleet-pulse { }
+  .fleet-auto-release-compact span,
+  .fleet-auto-release-compact small { display: none; }
+  .fleet-plan-row { min-height: 60px; padding: 9px 10px; }
+  .fleet-plan-row-meta { gap: 6px; }
 }
 
+/* ── L3: Skeletons, Listen-Einstieg, Empty-Modifier (FLEET-DESIGN-L3-SPEC) ── */
+
+/* Lade-Skeletons (Befund 6): reines CSS-Markup auf .hc-skeleton — Board
+ * (KPI-Zeile + 5 Rows à 56px, Avatar-Kreis + zwei Text-Bars) und Plan
+ * (5 Rows analog). Ersetzt die Text-Empty-Zustände „… wird geladen" und
+ * vermeidet den Layout-Sprung beim Daten-Eintreffen. */
+.fleet-skel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fleet-space-2);
+  max-width: 960px;
+}
+.fleet-skel-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--fleet-space-2);
+}
+.fleet-skel-kpi {
+  height: 54px;
+  border-radius: var(--radius-panel);
+}
+.fleet-skel-row {
+  display: flex;
+  align-items: center;
+  gap: var(--fleet-space-3);
+  min-height: 56px;
+  padding: var(--fleet-space-2) var(--fleet-space-3);
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-panel);
+}
+.fleet-skel-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.fleet-skel-lines {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+.fleet-skel-bar { height: 10px; }
+.fleet-skel-bar-short { width: 55%; }
+@media (max-width: 640px) {
+  .fleet-skel-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Listen-Einstieg (M8): gestaffelter Rise nur für die ersten 6 Rows, nur bei
+ * erlaubter Motion — der zentrale Kill-Switch greift zusätzlich. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes fleet-rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  .fleet-plan-list > li:nth-child(-n+6),
+  .fleet-boardtab-card:nth-child(-n+6) {
+    animation: fleet-rise 180ms cubic-bezier(.2,.7,.2,1) both;
+  }
+  .fleet-plan-list > li:nth-child(2),
+  .fleet-boardtab-card:nth-child(2) { animation-delay: 30ms; }
+  .fleet-plan-list > li:nth-child(3),
+  .fleet-boardtab-card:nth-child(3) { animation-delay: 60ms; }
+  .fleet-plan-list > li:nth-child(4),
+  .fleet-boardtab-card:nth-child(4) { animation-delay: 90ms; }
+  .fleet-plan-list > li:nth-child(5),
+  .fleet-boardtab-card:nth-child(5) { animation-delay: 120ms; }
+  .fleet-plan-list > li:nth-child(6),
+  .fleet-boardtab-card:nth-child(6) { animation-delay: 150ms; }
+}
+
+/* Empty-/Fehler-Zustände (Befund 7): Board/Plan nutzen das .hc-fleet-empty-
+ * Vokabular; der Fehlerzustand bekommt die Statusfarbe auf dem Titel
+ * (role="alert" bleibt im Markup). */
+.fleet-empty-error .hc-fleet-empty-title { color: var(--fleet-rot); }
 
 .fleet-risk-card {
   border: 1px solid var(--fleet-linie);
@@ -2465,8 +3311,29 @@ body:has([data-fleet-theme]) [data-control] {
     padding: 9px 14px;
   }
   .fleet-ta-btn {
-    min-height: 40px;
+    min-height: 44px;
     padding: 9px 14px;
+  }
+  .fleet-chip,
+  .fleet-plan-new,
+  .fleet-plan-search,
+  .fleet-boardtab-register button,
+  .fleet-plan-register button,
+  .fleet-detail-tab,
+  .fleet-copy-id,
+  .fleet-boardtab-copy,
+  .fleet-boardtab-select,
+  .fleet-boardtab-suche {
+    min-height: 44px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .fleet-root[data-fleet-subtab="board"] .leitstand-two-pane--split {
+    --two-pane-columns: minmax(460px, 52fr) minmax(420px, 48fr);
+  }
+  .fleet-root[data-fleet-subtab="plan"] .leitstand-two-pane--split {
+    --two-pane-columns: minmax(380px, 42fr) minmax(480px, 58fr);
   }
 }
 

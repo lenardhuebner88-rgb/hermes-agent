@@ -1,265 +1,190 @@
 // @vitest-environment jsdom
 
-import { readFileSync } from "node:fs";
-import path from "node:path";
-import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PlanTab } from "./PlanTab";
+import type { PlanSpecsResponse } from "../../lib/schemas";
 import type { PlanSpecRecord } from "./shared";
-import { extractIngestError } from "../../lib/fleetHub";
-import { de } from "../../i18n/de";
+import { PlanTab } from "./PlanTab";
 
-const src = readFileSync(path.resolve(import.meta.dirname, "PlanTab.tsx"), "utf8");
-
-// Voll-Suite-Last kann waitFor über den Default (1s) hinaus bouncen — großzügiger
-// Timeout hält den Ingest-Roundtrip deterministisch.
-configure({ asyncUtilTimeout: 5000 });
-
-describe("PlanTab profile approvals", () => {
-  it("uses profile selection and sends assignee overrides instead of lane model ids", () => {
-    expect(src).toContain("assigneeOverrides");
-    expect(src).toContain("<ProfileSelect");
-    expect(src).toContain("lanesCatalog?.profiles");
-    expect(src).not.toContain("setLaneModels");
-    expect(src).not.toContain("lane_models");
-  });
-
-  it("shows profile-specific accessible copy", () => {
-    expect(src).toContain("Profil-Select (je Lane)");
-    expect(src).toContain("Profil für Lane");
-  });
-});
-
-describe("PlanTab provider usage wiring", () => {
-  it("uses the shared provider/window model and keeps detail plus freshness", () => {
-    expect(src).toContain("usageProviderLabel(prov)");
-    expect(src).toContain("sortedUsageWindows(prov)");
-    expect(src).toContain("windowLabelDe(w)");
-    expect(src).toContain("w.detail");
-    expect(src).toContain("staleUsageSignalLabel(prov");
-    expect(src).toContain("setInterval(() => setNowMs(Date.now()), 60_000)");
-    expect(src).not.toContain("renderedAtMs");
-    expect(src).not.toContain("prov.title || prov.provider");
-  });
-});
-
-describe("PlanTab composer collapse", () => {
-  afterEach(() => {
-    cleanup();
-    window.localStorage.clear();
-  });
-
-  it("starts collapsed and remembers the expanded state", () => {
-    const first = renderPlanTab();
-    const toggle = screen.getByRole("button", { name: "Plan-Composer aufklappen" });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByLabelText("Plan-Text")).toBeNull();
-
-    fireEvent.click(toggle);
-    expect(screen.getByRole("button", { name: "Plan-Composer einklappen" }).getAttribute("aria-expanded")).toBe("true");
-    expect(window.localStorage.getItem("fleet-plan-composer-expanded")).toBe("true");
-    first.unmount();
-
-    renderPlanTab();
-    expect(screen.getByRole("button", { name: "Plan-Composer einklappen" }).getAttribute("aria-expanded")).toBe("true");
-  });
-});
-
-describe("PlanTab ingest wiring (source pins)", () => {
-  it("posts to the ingest route with the spec path", () => {
-    expect(src).toContain('"/api/plugins/kanban/planspecs/ingest"');
-    expect(src).toContain("JSON.stringify({ path: ps.path })");
-  });
-
-  it("drives release-eligibility off effectiveRootId, not the raw prop", () => {
-    // AC-6: solange ps.kanban_root_task_id gesetzt ist, ist effectiveRootId
-    // identisch — der Bestandspfad bleibt unverändert. Der Button-Disabled darf
-    // nach lokalem Ingest nicht mehr am rohen Prop hängen.
-    expect(src).toContain("const effectiveRootId = ps.kanban_root_task_id ?? ingestedRootId");
-    expect(src).not.toContain("|| !ps.kanban_root_task_id");
-  });
-});
-
-describe("extractIngestError", () => {
-  it("liest findings aus dem 400-FastAPI-Envelope", () => {
-    const err = new Error('400: {"detail":{"findings":["Slice A ohne done-when","Slice B ohne files"]}}');
-    expect(extractIngestError(err, "fallback")).toBe("Slice A ohne done-when · Slice B ohne files");
-  });
-
-  it("liest findings von der obersten Ebene", () => {
-    const err = new Error('400: {"findings":["nur eins"]}');
-    expect(extractIngestError(err, "fallback")).toBe("nur eins");
-  });
-
-  it("nutzt detail als String, wenn keine findings vorliegen", () => {
-    const err = new Error('500: {"detail":"interner Fehler"}');
-    expect(extractIngestError(err, "fallback")).toBe("interner Fehler");
-  });
-
-  it("fällt auf die rohe Meldung zurück, wenn der Body kein JSON ist", () => {
-    const err = new Error("network timeout after 8000ms");
-    expect(extractIngestError(err, "fallback")).toBe("network timeout after 8000ms");
-  });
-});
-
-const notIngestedSpec: PlanSpecRecord = {
-  path: "vault/03-Agents/Claude/plans/2026-07-07-ingest-demo.md",
-  agent: "claude",
-  filename: "2026-07-07-ingest-demo.md",
-  topic: "Ingest-Demo",
-  status: "open",
-  freigabe: "operator",
-  live_test_depth: null,
-  binding: true,
-  subtask_count: 1,
-  valid: true,
-  open: true,
-  closed_reason: null,
-  kanban_root_task_id: null,
-  kanban_root_status: null,
-  kanban_state: "not_ingested",
-  kanban_child_total: 0,
-  kanban_child_done: 0,
-  kanban_child_blocked: 0,
-  kanban_child_running: 0,
-  kanban_ingested_at: null,
-  ingest_disposition: "clean",
-  ingest_would_block: false,
-  ingest_findings: [],
-  errors: [],
-};
-
-// Regression-Fixture (AC-5): dieselbe PlanSpec, aber bereits ingestiert —
-// kanban_root_task_id gesetzt, Kette queued. Freigabe wartet weiter auf den
-// Operator (freigabe="operator"), darf also den Freigeben-Modus zeigen und NIE
-// den Ingest-Button. freigabe bleibt "operator" (≠ "complete") → kein signierter
-// Parked-Chain, der Freigeben-Button (nicht "Kette starten") erscheint.
-const ingestedSpec: PlanSpecRecord = {
-  ...notIngestedSpec,
-  path: "vault/03-Agents/Claude/plans/2026-07-07-ingested-demo.md",
-  filename: "2026-07-07-ingested-demo.md",
-  topic: "Ingested-Demo",
-  kanban_root_task_id: "t_existing_root",
-  kanban_root_status: "queued",
-  kanban_state: "queued",
-  kanban_child_total: 3,
-};
-
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
+function plan(overrides: Partial<PlanSpecRecord> = {}): PlanSpecRecord {
+  return {
+    path: "vault/03-Agents/Codex/plans/ready.md",
+    agent: "codex",
+    filename: "ready.md",
+    topic: "Board und Plan fertigstellen",
+    status: "open",
+    freigabe: "operator",
+    live_test_depth: "smoke",
+    binding: true,
+    subtask_count: 9,
+    valid: true,
+    open: true,
+    closed_reason: null,
+    kanban_root_task_id: null,
+    kanban_root_status: null,
+    kanban_state: "not_ingested",
+    kanban_child_total: 0,
+    kanban_child_done: 0,
+    kanban_child_blocked: 0,
+    kanban_child_running: 0,
+    kanban_ingested_at: null,
+    ingest_disposition: "clean",
+    ingest_would_block: false,
+    ingest_findings: [],
+    errors: [],
+    action_state: "ready",
+    action_reason: "Übergabe kann geprüft werden.",
+    dependency_count: 10,
+    finding_count: 0,
+    target_board: "hermes-agent",
+    next_action: "preview_ingest",
+    ...overrides,
+  };
 }
 
-function renderPlanTab(specs: PlanSpecRecord[] = [notIngestedSpec]) {
+const summary: NonNullable<PlanSpecsResponse["summary"]> = {
+  draft: 7,
+  ready: 5,
+  held: 3,
+  handed_off: 2,
+  running: 4,
+  blocked: 1,
+  completed: 11,
+  archived: 13,
+  total_matching: 46,
+  observed_at: 1_785_000_000,
+};
+
+function renderPlanTab({
+  plans = [plan()],
+  onShowDetail = vi.fn(),
+  readOnly = false,
+}: {
+  plans?: PlanSpecRecord[];
+  onShowDetail?: (item: PlanSpecRecord) => void;
+  readOnly?: boolean;
+} = {}) {
   return render(
     <PlanTab
-      allPlanspecs={specs}
-      costs={null}
-      lanesCatalog={null}
-      accountUsage={null}
+      allPlanspecs={plans}
+      summary={summary}
       onApproveSuccess={vi.fn()}
-      onShowDetail={vi.fn()}
+      onShowDetail={onShowDetail}
+      readOnly={readOnly}
     />,
   );
 }
 
-describe("PlanTab ingest behaviour", () => {
-  const fetchMock = vi.fn();
-  // Pro Test austauschbar: die Antwort der /planspecs/ingest-Route.
-  let ingestResponder: () => Response;
-
+describe("PlanTab register", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
-    Object.defineProperty(window, "__HERMES_SESSION_TOKEN__", {
-      configurable: true,
-      value: "test-token",
-    });
-    ingestResponder = () => jsonResponse({ root_task_id: "t_new", child_ids: ["t_c1"] });
-    fetchMock.mockImplementation((url: string) => {
-      const u = String(url);
-      if (u.includes("/planspecs/ingest")) return Promise.resolve(ingestResponder());
-      if (u.includes("/planspecs/detail")) return Promise.resolve(jsonResponse({ goal: "Demo", subtasks: [] }));
-      // release-status und alles Übrige: harmlose leere Antwort.
-      return Promise.resolve(jsonResponse({}));
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.clear();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      autonomous: true,
+      max_tier_autonomous: "review",
+      recent: [],
+      anchors: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
   });
 
   afterEach(() => {
     cleanup();
+    window.localStorage.clear();
     vi.unstubAllGlobals();
   });
 
-  it("AC-1/AC-2: zeigt einen aktiven Ingest-Button plus Hinweistext statt eines Freigeben-Buttons", async () => {
+  it("starts with a compact composer and remembers expansion", () => {
+    const first = renderPlanTab();
+    const toggle = screen.getByRole("button", { name: "Neuer Plan" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByLabelText("Plan-Text")).toBeNull();
+
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Composer schließen" }).getAttribute("aria-expanded")).toBe("true");
+    expect(window.localStorage.getItem("fleet-plan-composer-expanded")).toBe("true");
+    first.unmount();
+
     renderPlanTab();
-    const ingestBtn = await screen.findByRole("button", { name: de.fleet.planIngestKarte });
-    expect((ingestBtn as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByText(de.fleet.planIngestHinweis)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: de.fleet.planFreigeben })).toBeNull();
+    expect(screen.getByRole("button", { name: "Composer schließen" }).getAttribute("aria-expanded")).toBe("true");
   });
 
-  it("AC-3/AC-4: klickt Ingest → POST { path } und wechselt bei Erfolg in den Freigabe-Modus", async () => {
+  it("uses the limit-independent server summary once in the register", () => {
     renderPlanTab();
-    fireEvent.click(await screen.findByRole("button", { name: de.fleet.planIngestKarte }));
 
-    // AC-4: Karte wechselt in den Freigabe-Modus — Freigeben-Button aktiv.
-    const freigeben = await screen.findByRole("button", { name: de.fleet.planFreigeben });
-    expect((freigeben as HTMLButtonElement).disabled).toBe(false);
-
-    // AC-3: korrekter Endpoint + Body.
-    const ingestCall = fetchMock.mock.calls.find(([u]) => String(u).includes("/planspecs/ingest"));
-    expect(ingestCall).toBeTruthy();
-    expect(String(ingestCall![0])).toBe("/api/plugins/kanban/planspecs/ingest");
-    const opts = ingestCall![1] as RequestInit;
-    expect(opts.method).toBe("POST");
-    expect(JSON.parse(String(opts.body))).toEqual({ path: notIngestedSpec.path });
+    expect(screen.queryByLabelText("Plan-Kennzahlen")).toBeNull();
+    expect(screen.getByRole("tab", { name: "Alle46" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Im Board7" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Erledigt24" })).toBeTruthy();
   });
 
-  it("AC-5: zeigt bei einem 400 die findings aus der Response an", async () => {
-    ingestResponder = () =>
-      jsonResponse({ detail: { findings: ["Slice A ohne done-when", "Slice B ohne files"] } }, 400);
-    renderPlanTab();
-    fireEvent.click(await screen.findByRole("button", { name: de.fleet.planIngestKarte }));
+  it("filters by workflow segment and full-text search without shortening the label", () => {
+    const longTopic = "PlanSpec mit vollständig lesbarem, sehr langem Titel für den Operator";
+    renderPlanTab({
+      plans: [
+        plan({ topic: longTopic }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/held.md",
+          filename: "held.md",
+          topic: "Gehaltene Migration",
+          action_state: "held",
+          target_board: "family-organizer",
+        }),
+      ],
+    });
 
-    await waitFor(() => expect(screen.getByText(/Slice A ohne done-when/)).toBeTruthy());
-    // Bleibt im Ingest-Modus — kein Freigeben-Button.
-    expect(screen.queryByRole("button", { name: de.fleet.planFreigeben })).toBeNull();
+    expect(screen.getByText(longTopic).textContent).toBe(longTopic);
+    fireEvent.click(screen.getByRole("tab", { name: "Gehalten3" }));
+    expect(screen.getByText("Gehaltene Migration")).toBeTruthy();
+    expect(screen.queryByText(longTopic)).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Alle46" }));
+    fireEvent.change(screen.getByLabelText("PlanSpecs durchsuchen"), { target: { value: "family-organizer" } });
+    expect(screen.getByText("Gehaltene Migration")).toBeTruthy();
+    expect(screen.queryByText(longTopic)).toBeNull();
   });
 
-  it("AC-5 (Regression): Karte mit gesetztem kanban_root_task_id zeigt weiter Freigeben, keinen Ingest-Button", async () => {
-    renderPlanTab([ingestedSpec]);
+  it("sortiert stabil nach Zustand, Befunden, Agent und Board", () => {
+    const plans = [
+      plan({ path: "/plans/ready-first.md", topic: "Bereit zuerst", agent: "zeta", target_board: "alpha" }),
+      plan({ path: "/plans/done.md", topic: "Erledigt", action_state: "completed", agent: "beta", target_board: "epsilon" }),
+      plan({ path: "/plans/ready-second.md", topic: "Bereit danach", agent: "alpha", target_board: "gamma" }),
+      plan({ path: "/plans/attention.md", topic: "Klärung", action_state: "blocked", agent: "delta", target_board: "beta" }),
+      plan({ path: "/plans/findings.md", topic: "Mit Befunden", action_state: "draft", finding_count: 2, agent: "gamma", target_board: "delta" }),
+    ];
+    renderPlanTab({ plans });
 
-    // Freigeben-Modus: aktiver Freigeben-Button, kein Ingest-Button/-Hinweis.
-    const freigeben = await screen.findByRole("button", { name: de.fleet.planFreigeben });
-    expect((freigeben as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole("button", { name: de.fleet.planIngestKarte })).toBeNull();
-    expect(screen.queryByText(de.fleet.planIngestHinweis)).toBeNull();
+    const orderedTopics = () => Array.from(
+      screen.getByRole("list", { name: "PlanSpecs" }).querySelectorAll(".fleet-plan-row-title"),
+      (node) => node.textContent,
+    );
 
-    // Reine Anzeige (kein Klick) darf die Ingest-Route nie berühren.
-    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/planspecs/ingest"))).toBe(false);
+    expect(orderedTopics()).toEqual(["Klärung", "Bereit zuerst", "Bereit danach", "Mit Befunden", "Erledigt"]);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "findings" } });
+    expect(orderedTopics()).toEqual(["Mit Befunden", "Bereit zuerst", "Erledigt", "Bereit danach", "Klärung"]);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "agent" } });
+    expect(orderedTopics()).toEqual(["Bereit danach", "Erledigt", "Klärung", "Mit Befunden", "Bereit zuerst"]);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "board" } });
+    expect(orderedTopics()).toEqual(["Bereit zuerst", "Klärung", "Mit Befunden", "Erledigt", "Bereit danach"]);
   });
 
-  it("selects a pending PlanSpec when the click lands on its CSS-ellipsis label", () => {
-    const longTopic = "Ein vollständiger PlanSpec-Name, der deutlich länger als zweiundzwanzig Zeichen ist";
-    renderPlanTab([
-      { ...notIngestedSpec, topic: longTopic },
-      { ...ingestedSpec, path: "/tmp/second-plan.md", topic: "Zweiter Plan" },
-    ]);
+  it("opens the selected PlanSpec detail from the row", () => {
+    const onShowDetail = vi.fn();
+    const item = plan();
+    renderPlanTab({ plans: [item], onShowDetail });
 
-    const longLabel = screen.getByText(longTopic, { selector: ".fleet-kchip-label" });
-    expect(longLabel.textContent).toBe(longTopic);
+    fireEvent.click(screen.getByRole("button", { name: /Board und Plan fertigstellen/ }));
+    expect(onShowDetail).toHaveBeenCalledWith(item);
+  });
 
-    const secondLabel = screen.getByText("Zweiter Plan", { selector: ".fleet-kchip-label" });
-    const secondChip = secondLabel.closest("button");
-    expect(secondChip?.getAttribute("aria-pressed")).toBe("false");
+  it("keeps foreign boards read-only and removes transition affordances", () => {
+    renderPlanTab({ readOnly: true });
 
-    // Der Klick muss auf dem Label-Kind landen: stopPropagation im früheren
-    // ExpandableText maskierte genau diesen realen Tap-Pfad.
-    fireEvent.click(secondLabel);
-    expect(secondChip?.getAttribute("aria-pressed")).toBe("true");
-    expect(secondLabel.getAttribute("aria-expanded")).toBeNull();
+    expect(screen.getByText("Fremd-Board · nur lesen")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Neuer Plan" })).toBeNull();
+    expect(screen.queryByLabelText("Auto-Release-Status")).toBeNull();
+    expect(screen.getByRole("listitem")).toBeTruthy();
   });
 });

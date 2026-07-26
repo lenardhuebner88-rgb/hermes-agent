@@ -21,6 +21,19 @@ class PlanSpecPathBody(BaseModel):
     author: Optional[ShortText] = "dashboard"
 
 
+class PlanSpecIngestBody(PlanSpecPathBody):
+    source_digest: str = Field(
+        ...,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+
+class PlanSpecTransitionPreviewBody(BaseModel):
+    path: ShortText
+
+
 class PlanSpecCompilePreviewBody(BaseModel):
     prose: FreeText
 
@@ -46,13 +59,19 @@ def list_planspecs(
     records = planspecs.list_planspecs(
         scope=scope,
         valid=valid,
-        limit=limit,
+        # The Fleet summary is a pre-limit contract. Its counts must not change
+        # merely because the visible list requests 10 instead of 100 rows.
+        limit=None,
         search=q,
         include_kanban_status=True,
         board=board,
         prose_plans_root=get_hermes_home() / "dashboard" / "prose-plans",
     )
-    return {"planspecs": records, "count": len(records)}
+    from plugins.kanban.dashboard.fleet_planspec_readmodel import (
+        build_plan_list_response,
+    )
+
+    return build_plan_list_response(records, planspecs=planspecs, limit=limit)
 
 
 @planspec_routes.post("/planspecs/compile-preview")
@@ -105,18 +124,74 @@ def ingest_prose_planspec(payload: PlanSpecProseIngestBody, board: Optional[str]
 
 
 @planspec_routes.post("/planspecs/ingest")
-def ingest_planspec(payload: PlanSpecPathBody, board: Optional[str] = Query(None)):
+def ingest_planspec(payload: PlanSpecIngestBody, board: Optional[str] = Query(None)):
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
+    from plugins.kanban.dashboard.fleet_planspec_readmodel import (
+        stable_source_digest,
+    )
 
     board = _resolve_board(board)
     try:
+        current_digest, _ = stable_source_digest(payload.path, planspecs=planspecs)
+        if current_digest != payload.source_digest:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "planspec_source_changed",
+                    "message": "PlanSpec wurde seit der Vorschau geändert.",
+                },
+            )
         return planspecs.ingest_planspec(
             payload.path,
             board=board,
             author=payload.author or "dashboard",
         )
+    except planspecs.PlanSpecNotFound as exc:
+        raise HTTPException(status_code=404, detail={"findings": exc.findings}) from exc
     except planspecs.PlanSpecBlocked as exc:
-        raise HTTPException(status_code=400, detail={"findings": exc.findings})
+        raise HTTPException(status_code=400, detail={"findings": exc.findings}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "planspec_source_changed",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@planspec_routes.post("/planspecs/transition-preview")
+def preview_planspec_transition(
+    payload: PlanSpecTransitionPreviewBody,
+    board: Optional[str] = Query(None),
+):
+    """Preview the exact Plan → Board transition without creating anything."""
+
+    from hermes_cli import kanban_db, planspecs  # noqa: WPS433 (intentional)
+    from plugins.kanban.dashboard.fleet_planspec_readmodel import (
+        build_transition_preview,
+    )
+
+    board = _resolve_board(board)
+    try:
+        return build_transition_preview(
+            payload.path,
+            board=board,
+            planspecs=planspecs,
+            kanban_db=kanban_db,
+        )
+    except planspecs.PlanSpecNotFound as exc:
+        raise HTTPException(status_code=404, detail={"findings": exc.findings}) from exc
+    except planspecs.PlanSpecBlocked as exc:
+        raise HTTPException(status_code=400, detail={"findings": exc.findings}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "planspec_source_changed",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 @planspec_routes.post("/planspecs/sprint-prompt")
@@ -144,33 +219,13 @@ def mark_planspec_not_needed(payload: PlanSpecPathBody):
 
 @planspec_routes.get("/planspecs/detail")
 def get_planspec_detail(path: str = Query(..., max_length=1024)):
-    """Return human-readable fields parsed from a PlanSpec .md file.
+    """Return a safe, read-only display projection for one PlanSpec source.
 
-    The ``path`` parameter is attacker-influenced; security is enforced by
-    ``parse_binding_planspec`` → ``resolve_planspec_path`` (same validator used
-    by all other planspec endpoints) which:
-      - resolves symlinks and ``..`` components via ``Path.resolve(strict=False)``
-      - rejects anything whose resolved absolute path is not under
-        ``DEFAULT_PLANS_ROOT`` (/home/piet/vault/03-Agents)
-      - rejects non-``.md`` suffixes
-      - raises ``PlanSpecNotFound`` (→ 404) when the file is missing and
-        ``PlanSpecBlocked`` (→ 400) for traversal / bad suffix / malformed path
-        / malformed spec.
-
-    #13: the path is resolved + read EXACTLY ONCE (inside parse_binding_planspec)
-    — we do NOT validate first and then re-resolve+read separately, which would
-    open a TOCTOU window for a symlink swap between the two resolutions.  Error
-    findings never carry the resolved server path (see resolve_planspec_path).
-
-    Source = file parse only.  No DB read.
-
-    A dashboard prose-plan source (under ``get_hermes_home()/dashboard/
-    prose-plans/`` — see ``_persist_dashboard_prose_plan``) carries no YAML
-    frontmatter, so it can never satisfy ``parse_binding_planspec``. It is
-    tried FIRST via ``parse_prose_plan_detail``, which returns ``None`` (not
-    an exception) for any path outside that dir — falling through to the
-    unchanged binding-PlanSpec vault resolution below for every other path,
-    including one outside BOTH roots (still 400, exactly as before).
+    Path containment, suffix and existence remain enforced by the canonical
+    resolver. Execution gates are intentionally *not* applied here: closed,
+    draft and legacy sources stay inspectable, while preview/ingest continue to
+    use the strict binding parser. Dashboard prose-plan sources retain their
+    dedicated parser and allowed root.
     """
     from hermes_cli import planspecs  # noqa: WPS433 (intentional)
     from hermes_constants import get_hermes_home  # noqa: WPS433 (intentional)
@@ -184,70 +239,29 @@ def get_planspec_detail(path: str = Query(..., max_length=1024)):
     except planspecs.PlanSpecBlocked as exc:
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
     if prose_detail is not None:
-        return prose_detail
+        return {
+            **prose_detail,
+            "target_board": None,
+            "dependency_count": sum(
+                len(subtask.get("deps") or [])
+                for subtask in prose_detail.get("subtasks") or []
+            ),
+            "finding_count": 0,
+        }
 
-    # Single resolution+read. Distinguish 404 (file missing) from 400 (traversal /
-    # bad path / malformed spec) off the *exception type* — not by substring-
-    # matching the finding text, which would silently break if wording changes.
+    # Detail is intentionally tolerant: execution eligibility stays behind the
+    # strict preview/ingest parser, while closed, legacy and draft sources remain
+    # readable in Fleet.
     try:
-        spec = planspecs.parse_binding_planspec(path)
+        from plugins.kanban.dashboard.fleet_planspec_readmodel import (
+            build_readable_plan_detail,
+        )
+
+        return build_readable_plan_detail(path, planspecs=planspecs)
     except planspecs.PlanSpecNotFound as exc:
         raise HTTPException(status_code=404, detail={"findings": exc.findings})
     except planspecs.PlanSpecBlocked as exc:
         raise HTTPException(status_code=400, detail={"findings": exc.findings})
-
-    fm = spec.frontmatter
-
-    # Map acceptance_criteria: list of dicts (structured) or strings (legacy).
-    raw_ac = fm.get("acceptance_criteria") or []
-    if isinstance(raw_ac, list):
-        ac_out = []
-        for item in raw_ac:
-            if isinstance(item, dict):
-                ac_out.append(item)
-            else:
-                ac_out.append({"statement": str(item)})
-    else:
-        ac_out = []
-
-    # Map anti_scope: list of strings or a single string.
-    raw_anti = fm.get("anti_scope") or []
-    if isinstance(raw_anti, list):
-        anti_scope_out = [str(x) for x in raw_anti]
-    elif raw_anti:
-        anti_scope_out = [str(raw_anti)]
-    else:
-        anti_scope_out = []
-
-    # Map evidence_required: list of strings or a single string.
-    raw_ev = fm.get("evidence_required") or []
-    if isinstance(raw_ev, list):
-        evidence_out = [str(x) for x in raw_ev]
-    elif raw_ev:
-        evidence_out = [str(raw_ev)]
-    else:
-        evidence_out = []
-
-    # Map children → subtasks list with {id, title, lane, deps}.
-    subtasks = [
-        {
-            "id": child.get("planspec_subtask_id") or "",
-            "title": child.get("title") or "",
-            "lane": child.get("planspec_lane") or child.get("assignee") or "",
-            "deps": child.get("planspec_deps") or [],
-        }
-        for child in spec.children
-    ]
-
-    return {
-        "goal": str(fm.get("goal") or fm.get("topic") or spec.topic or ""),
-        "acceptance_criteria": ac_out,
-        "anti_scope": anti_scope_out,
-        "evidence_required": evidence_out,
-        "freigabe": spec.freigabe,
-        "live_test_depth": spec.live_test_depth,
-        "subtasks": subtasks,
-    }
 
 
 # ---------------------------------------------------------------------------

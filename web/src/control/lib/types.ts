@@ -165,6 +165,10 @@ export interface PlanSpecRecord {
   valid: boolean;
   open: boolean;
   closed_reason: string | null;
+  closed_at?: string | number | null;
+  closed_by?: string | null;
+  receipt?: string | null;
+  release_evidence?: string | null;
   kanban_root_task_id: string | null;
   kanban_root_status: string | null;
   kanban_state: "not_ingested" | "queued" | "running" | "blocked" | "completed" | "done" | "archived" | "unknown";
@@ -177,11 +181,29 @@ export interface PlanSpecRecord {
   ingest_would_block: boolean;
   ingest_findings: string[];
   errors: string[];
+  action_state?: "draft" | "ready" | "held" | "handed_off" | "running" | "blocked" | "completed" | "archived";
+  action_reason?: string;
+  next_action?: "none" | "edit" | "review_findings" | "preview_ingest" | "release" | "open_task" | "open_result";
+  dependency_count?: number;
+  finding_count?: number;
+  target_board?: string | null;
 }
 
 export interface PlanSpecsResponse {
   planspecs: PlanSpecRecord[];
   count: number;
+  summary: {
+    draft: number;
+    ready: number;
+    held: number;
+    handed_off: number;
+    running: number;
+    blocked: number;
+    completed: number;
+    archived: number;
+    total_matching: number;
+    observed_at: number;
+  };
 }
 
 export interface PlanSpecIngestResponse {
@@ -586,6 +608,7 @@ export interface BoardTask {
   last_heartbeat_at?: number | null;
   branch_name: string | null;
   latest_summary: string | null;
+  has_result?: boolean;
   vault_memory_links?: VaultMemoryLink[];
   /** Round D: block reason for blocked tasks (latest task_run summary). "operator hold" marks an operator hold. Older payloads → undefined/null. */
   block_reason?: string | null;
@@ -669,6 +692,18 @@ export interface DoneBoardPage {
 
 export interface BoardResponse {
   columns: BoardColumn[];
+  summary?: {
+    total_count: number;
+    open_count: number;
+    status_counts: Record<string, number>;
+    quick_counts: {
+      unassigned_open: number;
+      review: number;
+      standalone_open: number;
+      with_result: number;
+    };
+    observed_at: number;
+  };
   tenants: string[];
   assignees: string[];
   latest_event_id: number;
