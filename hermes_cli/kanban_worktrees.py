@@ -5738,6 +5738,19 @@ def _default_quick_gate_web(
     npm_bin = shutil.which("npm") or "npm"
     npx_bin = shutil.which("npx") or "npx"
 
+    # The canonical frontend gate owns dependency preflight and the isolated
+    # worktree layout.  Use it when a fresh integration checkout has no local
+    # toolchain yet instead of parking an otherwise valid web diff.
+    frontend_gate = repo_root / "scripts" / "gate-frontend.sh"
+    if (tsc is None or vitest is None) and frontend_gate.is_file():
+        return _quick_gate_run_cmd(
+            "frontend bootstrap",
+            [str(frontend_gate), "--skip-build"],
+            repo_root,
+            1200,
+            notes,
+        )
+
     err = _quick_gate_run_cmd(
         "lint:control", [npm_bin, "run", "lint:control"], web_root, 600, notes,
     )
