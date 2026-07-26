@@ -7,6 +7,7 @@ set -euo pipefail
 APPLY=0
 MIN_AGE_HOURS="${MIN_AGE_HOURS:-6}"
 PRUNE_REPOS="${PRUNE_REPOS:-$HOME/.hermes/hermes-agent $HOME/family-organizer}"
+WORKTREE_DEPS_ROOT="${HERMES_WORKTREE_DEPS_ROOT:-/mnt/data/hermes-worktree-deps}"
 if [[ -n "${HERMES_KANBAN_HOME:-}" ]]; then
   KANBAN_ROOT="$HERMES_KANBAN_HOME"
 elif [[ -z "${HERMES_HOME:-}" || "$HERMES_HOME" == "$HOME/.hermes" || "$HERMES_HOME" == "$HOME/.hermes/"* ]]; then
@@ -23,6 +24,32 @@ if [[ "${1:-}" == "--apply" ]]; then
 fi
 
 now=$(date +%s)
+
+worktree_deps_identity() {
+  local wt="$1" canonical digest
+  canonical="$(readlink -m -- "$wt" 2>/dev/null || true)"
+  [[ -n "$canonical" ]] || return 1
+  digest="$(
+    printf '%s' "$canonical" | sha256sum | awk '{print substr($1, 1, 16)}'
+  )"
+  printf '%s-%s\n' "$(basename -- "$canonical")" "$digest"
+}
+
+deps_identity_is_registered() {
+  local wanted="$1" repo wt identity
+  for repo in $PRUNE_REPOS; do
+    [[ -d "$repo/.git" || -f "$repo/.git" ]] || continue
+    while IFS= read -r wt; do
+      [[ -n "$wt" ]] || continue
+      identity="$(worktree_deps_identity "$wt")" || continue
+      [[ "$identity" == "$wanted" ]] && return 0
+    done < <(
+      git -C "$repo" worktree list --porcelain 2>/dev/null |
+        awk '/^worktree /{print substr($0,10)}'
+    )
+  done
+  return 1
+}
 
 is_session_holder() {
   local wt="$1"
@@ -189,6 +216,48 @@ for repo in $PRUNE_REPOS; do
   done
 
 done
+
+# ---------------------------------------------------------------------------
+# Orphaned exclusive dependency trees
+# ---------------------------------------------------------------------------
+# Provisioned node_modules links point outside the checkout, but only to a
+# path bound to that worktree's canonical identity. Once git no longer
+# registers the worktree, the matching tree is orphaned and can be reclaimed.
+# This is intentionally part of the existing worktree reaper; no second cron
+# or independent lifecycle is introduced.
+if [[ "$WORKTREE_DEPS_ROOT" != /* || "$WORKTREE_DEPS_ROOT" == "/" ]]; then
+  echo "kept(deps-root-invalid): $WORKTREE_DEPS_ROOT" >&2
+elif [[ -L "$WORKTREE_DEPS_ROOT" ]]; then
+  echo "kept(deps-root-symlink): $WORKTREE_DEPS_ROOT" >&2
+elif [[ -d "$WORKTREE_DEPS_ROOT" ]]; then
+  deps_root_real="$(readlink -m -- "$WORKTREE_DEPS_ROOT")"
+  shopt -s nullglob
+  for deps_tree in "$deps_root_real"/*; do
+    deps_name="$(basename -- "$deps_tree")"
+    if [[ ! -d "$deps_tree" || -L "$deps_tree" ]]; then
+      echo "kept(deps-nondirectory): $deps_tree"
+      continue
+    fi
+    if [[ ! "$deps_name" =~ ^.+-[0-9a-f]{16}$ ]]; then
+      echo "kept(deps-unrecognized): $deps_tree"
+      continue
+    fi
+    if deps_identity_is_registered "$deps_name"; then
+      continue
+    fi
+    if (( APPLY )); then
+      # Re-check immediately before deletion to close the provisioning race.
+      if deps_identity_is_registered "$deps_name"; then
+        continue
+      fi
+      rm -rf --one-file-system -- "$deps_tree"
+      echo "removed deps: $deps_tree (no registered worktree)"
+    else
+      echo "would remove deps: $deps_tree (no registered worktree)"
+    fi
+  done
+  shopt -u nullglob
+fi
 
 # ---------------------------------------------------------------------------
 # Terminal isolated-write worktrees (.worktrees/terminal/{terminal_run_id})

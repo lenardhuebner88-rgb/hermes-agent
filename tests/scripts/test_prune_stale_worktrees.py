@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import sqlite3
@@ -54,6 +55,7 @@ def _prune(
     db_path: Path,
     *,
     hermes_home: Path | None = None,
+    deps_root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
@@ -61,10 +63,45 @@ def _prune(
             "PRUNE_REPOS": str(repo),
             "KANBAN_DB_PATH": str(db_path),
             "HERMES_HOME": str(hermes_home or db_path.parent),
+            "HERMES_WORKTREE_DEPS_ROOT": str(
+                deps_root or db_path.parent / "worktree-deps"
+            ),
             "MIN_AGE_HOURS": "0",
         }
     )
     return _run("bash", SCRIPT, "--apply", cwd=REPO_ROOT, env=env)
+
+
+def _deps_tree(deps_root: Path, worktree: Path) -> Path:
+    canonical = str(worktree.resolve())
+    digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
+    return deps_root / f"{worktree.name}-{digest}"
+
+
+def test_pruner_removes_only_orphaned_dependency_trees(tmp_path: Path) -> None:
+    repo, worktree = _make_repo(tmp_path, "t_active_deps")
+    db_path = tmp_path / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_active_deps",
+        status="running",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    active_tree = _deps_tree(deps_root, worktree)
+    orphan_tree = deps_root / "t_orphan-0123456789abcdef"
+    (active_tree / "node_modules").mkdir(parents=True)
+    (orphan_tree / "node_modules").mkdir(parents=True)
+    active_marker = active_tree / "node_modules" / "KEEP"
+    orphan_marker = orphan_tree / "node_modules" / "REMOVE"
+    active_marker.write_text("active\n")
+    orphan_marker.write_text("orphan\n")
+
+    result = _prune(repo, db_path, deps_root=deps_root)
+
+    assert active_marker.exists()
+    assert not orphan_tree.exists()
+    assert f"removed deps: {orphan_tree} (no registered worktree)" in result.stdout
 
 
 @pytest.mark.parametrize(

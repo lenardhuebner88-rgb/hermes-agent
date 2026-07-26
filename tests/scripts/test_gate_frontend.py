@@ -30,6 +30,7 @@ worktree-local toolchain.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import stat
@@ -94,6 +95,9 @@ def _make_repo(tmp_path: Path, *, tsc: str) -> tuple[Path, Path, Path]:
     # The real helper checks commit drift against main; the fake repository
     # only needs an executable no-op so the gate can reach the behavior tested.
     _write_exec(repo / "scripts" / "check-branch-age.sh")
+    (repo / "package.json").write_text(
+        '{"name":"gate-fixture","private":true,"workspaces":[]}\n'
+    )
     (repo / "package-lock.json").write_text("{}\n")
 
     bindir = repo / "node_modules" / ".bin"
@@ -139,18 +143,43 @@ def _make_foreign_symlink(tmp_path: Path, repo: Path, *, healthy: bool) -> Path:
     return marker
 
 
+def _make_dedicated_symlink(
+    tmp_path: Path,
+    repo: Path,
+    *,
+    healthy: bool,
+) -> tuple[Path, Path]:
+    """Replace root node_modules with the exact identity-bound external tree."""
+    deps_root = tmp_path / "worktree-deps"
+    resolved_repo = repo.resolve()
+    digest = hashlib.sha256(str(resolved_repo).encode()).hexdigest()[:16]
+    target = deps_root / f"{resolved_repo.name}-{digest}" / "node_modules"
+    (target / ".bin").mkdir(parents=True)
+    _write_exec(target / ".bin" / "vitest")
+    _write_exec(target / ".bin" / "eslint")
+    if healthy:
+        _write_exec(target / ".bin" / "tsc")
+
+    shutil.rmtree(repo / "node_modules")
+    (repo / "node_modules").symlink_to(target)
+    return deps_root, target
+
+
 def _run_preflight(
     repo: Path,
     sentinel: Path,
     npm_dir: Path,
     *,
     auto_install: str = "1",
+    deps_root: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PATH"] = f"{npm_dir}{os.pathsep}{env['PATH']}"
     env["GATE_FRONTEND_PREFLIGHT_ONLY"] = "1"
     env["GATE_FRONTEND_AUTO_INSTALL"] = auto_install
     env["GATE_TEST_NPM_SENTINEL"] = str(sentinel)
+    if deps_root is not None:
+        env["HERMES_WORKTREE_DEPS_ROOT"] = str(deps_root)
     return subprocess.run(
         [str(repo / "scripts" / "gate-frontend.sh")],
         cwd=repo,
@@ -198,6 +227,74 @@ def test_preflight_healthy_foreign_symlink_blocks_without_autoinstall(tmp_path: 
     assert "FRONTEND-PREFLIGHT OK" not in r.stdout
     assert not sentinel.exists(), "npm must NOT run when auto-install is disabled"
     assert marker.exists(), "the foreign/live node_modules must be left intact"
+
+
+def test_preflight_accepts_identity_bound_dedicated_symlink(tmp_path: Path) -> None:
+    """An external link is safe only when it is the exact tree for this repo."""
+    repo, sentinel, npm_dir = _make_repo(tmp_path, tsc="healthy")
+    deps_root, target = _make_dedicated_symlink(tmp_path, repo, healthy=True)
+
+    r = _run_preflight(
+        repo,
+        sentinel,
+        npm_dir,
+        auto_install="0",
+        deps_root=deps_root,
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FRONTEND-PREFLIGHT OK" in r.stdout
+    assert (repo / "node_modules").is_symlink()
+    assert (repo / "node_modules").resolve() == target.resolve()
+    assert not sentinel.exists(), "healthy dedicated deps need no npm ci"
+
+
+def test_preflight_installs_lazy_dedicated_tree_without_replacing_link(
+    tmp_path: Path,
+) -> None:
+    repo, sentinel, npm_dir = _make_repo(tmp_path, tsc="healthy")
+    deps_root, target = _make_dedicated_symlink(tmp_path, repo, healthy=False)
+
+    r = _run_preflight(
+        repo,
+        sentinel,
+        npm_dir,
+        auto_install="1",
+        deps_root=deps_root,
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ci" in sentinel.read_text().split()
+    assert (repo / "node_modules").is_symlink()
+    assert (repo / "node_modules").resolve() == target.resolve()
+    assert (target / ".bin" / "tsc").is_file()
+
+
+def test_preflight_rejects_other_worktree_tree_under_deps_root(tmp_path: Path) -> None:
+    """Being below the base root is insufficient; identity must also match."""
+    repo, sentinel, npm_dir = _make_repo(tmp_path, tsc="healthy")
+    deps_root = tmp_path / "worktree-deps"
+    other_target = deps_root / "other-worktree-0123456789abcdef" / "node_modules"
+    (other_target / ".bin").mkdir(parents=True)
+    for binary in ("tsc", "vitest", "eslint"):
+        _write_exec(other_target / ".bin" / binary)
+    marker = other_target / "DO_NOT_TOUCH"
+    marker.write_text("belongs to another worktree\n")
+    shutil.rmtree(repo / "node_modules")
+    (repo / "node_modules").symlink_to(other_target)
+
+    r = _run_preflight(
+        repo,
+        sentinel,
+        npm_dir,
+        auto_install="0",
+        deps_root=deps_root,
+    )
+
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "FOREIGN checkout" in r.stderr
+    assert marker.exists()
+    assert not sentinel.exists()
 
 
 def test_preflight_materializes_worktree_local_from_healthy_foreign_symlink(tmp_path: Path) -> None:

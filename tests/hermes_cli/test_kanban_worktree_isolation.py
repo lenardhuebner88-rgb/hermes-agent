@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_worktrees as kwt
 
 
 @pytest.fixture
@@ -64,6 +65,71 @@ def _make_repo(tmp_path: Path) -> Path:
 def _add_worktree(repo: Path, target: Path, branch: str) -> Path:
     _git(repo, "worktree", "add", str(target), "-b", branch, "HEAD")
     return target
+
+
+def test_dependency_links_use_identity_bound_external_tree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = tmp_path / "live-checkout"
+    worktree = tmp_path / "fresh-worktree"
+    deps_root = tmp_path / "worktree-deps"
+    (repo / "node_modules").mkdir(parents=True)
+    (repo / "web" / "node_modules").mkdir(parents=True)
+    (repo / ".venv").mkdir()
+    (worktree / "web").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
+
+    kwt._link_shared_dependencies(repo, worktree)
+
+    deps_tree = kwt._worktree_deps_tree(worktree)
+    assert deps_tree.parent == deps_root.resolve()
+    assert (worktree / "node_modules").is_symlink()
+    assert (worktree / "node_modules").resolve() == deps_tree / "node_modules"
+    assert (worktree / "web" / "node_modules").is_symlink()
+    assert (
+        worktree / "web" / "node_modules"
+    ).resolve() == deps_tree / "web" / "node_modules"
+    assert (worktree / "node_modules").resolve() != (repo / "node_modules").resolve()
+    assert (worktree / "web" / "node_modules").resolve() != (
+        repo / "web" / "node_modules"
+    ).resolve()
+    assert (worktree / ".venv").resolve() == (repo / ".venv").resolve()
+
+
+def test_remove_worktree_deletes_dedicated_tree_without_following_foreign_link(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo = _make_repo(tmp_path)
+    worktree = _add_worktree(
+        repo,
+        repo / ".worktrees" / "kanban" / "t_remove_deps",
+        "kanban/t_remove_deps",
+    )
+    deps_root = tmp_path / "worktree-deps"
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
+    (repo / "node_modules").mkdir()
+    (repo / "web" / "node_modules").mkdir(parents=True)
+    (worktree / "web").mkdir(exist_ok=True)
+    kwt._link_shared_dependencies(repo, worktree)
+    deps_tree = kwt._worktree_deps_tree(worktree)
+    (deps_tree / "node_modules").mkdir(parents=True)
+    deps_marker = deps_tree / "node_modules" / "REMOVE"
+    deps_marker.write_text("dedicated\n")
+
+    foreign_target = tmp_path / "foreign-checkout" / "node_modules"
+    foreign_target.mkdir(parents=True)
+    foreign_marker = foreign_target / "DO_NOT_TOUCH"
+    foreign_marker.write_text("foreign\n")
+    root_link = worktree / "node_modules"
+    root_link.unlink()
+    root_link.symlink_to(foreign_target, target_is_directory=True)
+
+    kwt.remove_worktree(repo, worktree, "kanban/t_remove_deps")
+
+    assert not deps_tree.exists()
+    assert foreign_marker.read_text() == "foreign\n"
 
 
 def test_decompose_worktree_children_get_own_workspace(kanban_home):
