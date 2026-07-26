@@ -198,6 +198,253 @@ def test_prepare_worker_base_rebases_clean_stale_worktree(repo):
     assert kwt.dirty_files(worktree) == []
 
 
+def _make_two_file_chain_commit(repo, task_id):
+    info = kwt.ensure_worktree(repo, task_id)
+    worktree = info["path"]
+    script = worktree / "scripts" / "run_tests.sh"
+    test_file = worktree / "tests" / "test_repair.py"
+    script.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\npytest tests/test_repair.py\n")
+    test_file.write_text("def test_repair():\n    assert True\n")
+    _git(worktree, "add", "scripts/run_tests.sh", "tests/test_repair.py")
+    _git(worktree, "commit", "-m", "repair gate environment tests")
+    return worktree, _git(worktree, "rev-parse", "HEAD")
+
+
+def test_prepare_worker_base_parks_partially_landed_two_file_commit(repo):
+    """Real t_9beb1180 shape: one commit, but only one file landed on main."""
+    worktree, branch_commit = _make_two_file_chain_commit(repo, "t_partial_landing")
+
+    landed_test = repo / "tests" / "test_repair.py"
+    landed_test.parent.mkdir(parents=True)
+    landed_test.write_text("def test_repair():\n    assert True\n")
+    _git(repo, "add", "tests/test_repair.py")
+    _git(repo, "commit", "-m", "operator lands only the repair test")
+
+    with pytest.raises(kwt.WorktreeError) as raised:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=branch_commit,
+            merge_target="main",
+        )
+
+    diagnosis = str(raised.value)
+    assert "partially landed" in diagnosis
+    assert diagnosis.count(branch_commit) == 2
+    assert "repair gate environment tests" in diagnosis
+    assert "tests/test_repair.py" in diagnosis
+    assert "scripts/run_tests.sh" in diagnosis
+    assert "conflict fixer cannot resolve" in diagnosis
+    assert "could not rebase onto" not in diagnosis
+    assert not kb._is_base_prep_rebase_conflict(diagnosis)
+    assert _git(worktree, "rev-parse", "HEAD") == branch_commit
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_names_mixed_landed_and_pending_commits(repo):
+    info = kwt.ensure_worktree(repo, "t_mixed_landing")
+    worktree = info["path"]
+    (worktree / "a.txt").write_text("landed branch content\n")
+    _git(worktree, "add", "a.txt")
+    _git(worktree, "commit", "-m", "landed branch slice")
+    landed_commit = _git(worktree, "rev-parse", "HEAD")
+    (worktree / "pending.txt").write_text("still pending\n")
+    _git(worktree, "add", "pending.txt")
+    _git(worktree, "commit", "-m", "pending branch slice")
+    pending_commit = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "a.txt").write_text("landed branch content\n")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "operator lands first slice")
+
+    with pytest.raises(kwt.WorktreeError) as raised:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=pending_commit,
+            merge_target="main",
+        )
+
+    diagnosis = str(raised.value)
+    assert f"{landed_commit} landed branch slice" in diagnosis
+    assert f"{pending_commit} pending branch slice" in diagnosis
+    assert "could not rebase onto" not in diagnosis
+
+
+def test_prepare_worker_base_resets_fully_landed_two_file_commit(repo):
+    worktree, branch_commit = _make_two_file_chain_commit(repo, "t_full_landing")
+
+    script = repo / "scripts" / "run_tests.sh"
+    test_file = repo / "tests" / "test_repair.py"
+    script.parent.mkdir(parents=True)
+    test_file.parent.mkdir(parents=True)
+    script.write_text("#!/bin/sh\npytest tests/test_repair.py\n")
+    test_file.write_text("def test_repair():\n    assert True\n")
+    _git(repo, "add", "scripts/run_tests.sh", "tests/test_repair.py")
+    _git(repo, "commit", "-m", "operator lands the complete repair")
+    main_head = _git(repo, "rev-parse", "main")
+    assert main_head != branch_commit
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "already_landed"
+    assert result["previous_head"] == branch_commit
+    assert result["head"] == main_head
+    assert _git(worktree, "rev-parse", "HEAD") == main_head
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_rebases_through_coincidental_identical_add(repo):
+    """An empty marker file independently created on both sides must not
+    park (Ausprägung B). Unlike the genuine partial pick above, target's
+    landing commit also touches a path this branch never changed -- no
+    evidence the coincidence has anything to do with this branch, so it
+    must not block a rebase git can resolve on its own."""
+    info = kwt.ensure_worktree(repo, "t_coincidental_add")
+    worktree = info["path"]
+    pkg_dir = worktree / "tests" / "pkg"
+    pkg_dir.mkdir(parents=True)
+    (pkg_dir / "__init__.py").write_text("")
+    (pkg_dir / "test_new.py").write_text("def test_new():\n    assert True\n")
+    _git(worktree, "add", "tests/pkg/__init__.py", "tests/pkg/test_new.py")
+    _git(worktree, "commit", "-m", "worker: add pkg tests")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    main_pkg_dir = repo / "tests" / "pkg"
+    main_pkg_dir.mkdir(parents=True)
+    (main_pkg_dir / "__init__.py").write_text("")
+    (main_pkg_dir / "test_other.py").write_text("def test_other():\n    assert True\n")
+    _git(repo, "add", "tests/pkg/__init__.py", "tests/pkg/test_other.py")
+    _git(repo, "commit", "-m", "main: add pkg marker + other test")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert (worktree / "tests" / "pkg" / "test_new.py").exists()
+    assert (worktree / "tests" / "pkg" / "test_other.py").exists()
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_rebases_through_coincidental_both_deleted(repo):
+    """An independent identical deletion plus an unrelated new file must not
+    park either: delete/delete always converges to the same absent state
+    regardless of content, so it carries no partial-pick risk on its own."""
+    (repo / "keep.txt").write_text("keep\n")
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-m", "add keep")
+
+    info = kwt.ensure_worktree(repo, "t_coincidental_delete")
+    worktree = info["path"]
+    (worktree / "keep.txt").unlink()
+    (worktree / "new.txt").write_text("new\n")
+    _git(worktree, "add", "keep.txt", "new.txt")
+    _git(worktree, "commit", "-m", "drop keep, add new")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "keep.txt").unlink()
+    _git(repo, "add", "keep.txt")
+    _git(repo, "commit", "-m", "main drops keep too")
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=branch_commit,
+        merge_target="main",
+    )
+
+    assert result["action"] == "rebased"
+    assert not (worktree / "keep.txt").exists()
+    assert (worktree / "new.txt").exists()
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_routes_real_conflict_to_fixer_despite_coincidence(repo):
+    """A genuine, unresolvable conflict must still surface as a rebase
+    failure routable to the S10 conflict fixer -- even when the same commit
+    also coincidentally deletes a file main independently deleted too
+    (Ausprägung A). Before the fix this mixed landed/pending split hard-
+    parked before ever attempting the rebase, losing the fixer route."""
+    (repo / "dead.py").write_text("obsolete\n")
+    _git(repo, "add", "dead.py")
+    _git(repo, "commit", "-m", "add dead module")
+
+    info = kwt.ensure_worktree(repo, "t_real_conflict")
+    worktree = info["path"]
+    (worktree / "dead.py").unlink()
+    (worktree / "a.txt").write_text("worker version\n")
+    _git(worktree, "add", "dead.py", "a.txt")
+    _git(worktree, "commit", "-m", "worker: drop dead module, rework a.txt")
+    branch_commit = _git(worktree, "rev-parse", "HEAD")
+
+    (repo / "dead.py").unlink()
+    (repo / "a.txt").write_text("main version\n")
+    _git(repo, "add", "dead.py", "a.txt")
+    _git(repo, "commit", "-m", "main: drop dead module, other a.txt rework")
+
+    with pytest.raises(kwt.WorktreeError) as raised:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=branch_commit,
+            merge_target="main",
+        )
+
+    diagnosis = str(raised.value)
+    assert kb._is_base_prep_rebase_conflict(diagnosis)
+    assert "partially landed" not in diagnosis
+
+
+def test_prepare_worker_base_rejects_live_dirty_scope_overlap(repo):
+    info = kwt.ensure_worktree(repo, "t_live_dirty_scope")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    (repo / "a.txt").write_text("foreign live edit\n")
+
+    with pytest.raises(
+        kwt.WorktreeError,
+        match="dirty files in live checkout overlap declared task scope",
+    ) as raised:
+        kwt.prepare_worker_base(
+            worktree,
+            recorded_head=recorded_head,
+            merge_target="main",
+            live_checkout=repo,
+            scope_files=["a.txt"],
+        )
+
+    assert "a.txt" in str(raised.value)
+    assert _git(worktree, "rev-parse", "HEAD") == recorded_head
+    assert kwt.dirty_files(worktree) == []
+
+
+def test_prepare_worker_base_logs_but_allows_missing_scope_files(
+    repo, caplog,
+):
+    info = kwt.ensure_worktree(repo, "t_live_dirty_no_scope")
+    worktree = info["path"]
+    recorded_head = _git(worktree, "rev-parse", "HEAD")
+    (repo / "a.txt").write_text("foreign live edit\n")
+    caplog.set_level("INFO", logger=kwt.__name__)
+
+    result = kwt.prepare_worker_base(
+        worktree,
+        recorded_head=recorded_head,
+        merge_target="main",
+        task_id="t_live_dirty_no_scope",
+        live_checkout=repo,
+        scope_files=None,
+    )
+
+    assert result["action"] == "current"
+    assert "no scope_files declared" in caplog.text
+
+
 def test_prepare_worker_base_rejects_head_drift_before_rebase(repo):
     info = kwt.ensure_worktree(repo, "t_drift")
     worktree = info["path"]
@@ -834,6 +1081,79 @@ def test_dispatch_once_updates_clean_stale_worktree_before_worker_spawn(
     assert prepared[-1]["action"] == "rebased"
 
 
+def test_dispatch_once_rejects_live_dirty_declared_scope_before_worker_spawn(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    spawned: list[str] = []
+
+    def fake_spawn(_task, workspace):
+        spawned.append(workspace)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task with declared scope",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            scope_contract={"allowed_paths": ["a.txt"]},
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.reclaim_task(conn, tid, reason="prepare scoped retry")
+        (repo / "a.txt").write_text("foreign live edit\n")
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        rejected = _events(conn, tid, "worker_base_rejected")
+        kinds = [event.kind for event in kb.list_events(conn, tid)]
+
+    assert result.spawned == []
+    assert len(spawned) == 1, "scope overlap must stop before a second worker spawn"
+    assert rejected[-1]["reason"].endswith("before worker spawn: a.txt")
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+
+
+def test_dispatch_once_rejects_live_dirty_body_declared_scope(
+    kanban_home, repo, all_assignees_spawnable, monkeypatch
+):
+    """The body block is the scope source that actually exists in the wild.
+
+    Measured 2026-07-26 over the 309 code tasks of the previous 14 days:
+    exactly 1 carried a usable ``scope_contract["allowed_paths"]``, while 81
+    carried the ``Scope files (allowed edit paths):`` body block. Reading only
+    the structured contract leaves this preflight dead at 0.3% coverage, so the
+    wiring must resolve the union — this test fails if it regresses to the
+    contract alone.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "worktree")
+    spawned: list[str] = []
+
+    def fake_spawn(_task, workspace):
+        spawned.append(workspace)
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="repo task with body-declared scope",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+            body="Scope files (allowed edit paths):\na.txt\n",
+        )
+        kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert kb.reclaim_task(conn, tid, reason="prepare body-scoped retry")
+        (repo / "a.txt").write_text("foreign live edit\n")
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        rejected = _events(conn, tid, "worker_base_rejected")
+        kinds = [event.kind for event in kb.list_events(conn, tid)]
+
+    assert result.spawned == []
+    assert len(spawned) == 1, "body-declared scope overlap must stop the respawn"
+    assert rejected[-1]["reason"].endswith("before worker spawn: a.txt")
+    assert kb.CONFLICT_FIXER_DISPATCHED_EVENT not in kinds
+
+
 def test_dispatch_once_blocks_dirty_worktree_before_worker_spawn(
     kanban_home, repo, all_assignees_spawnable, monkeypatch
 ):
@@ -1154,4 +1474,3 @@ def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):
     assert kwt.isolation_mode() == "worktree"
     monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "off")
     assert kwt.isolation_mode() == "off"  # env wins
-
