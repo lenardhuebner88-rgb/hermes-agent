@@ -1116,6 +1116,10 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         "--backfill", action="store_true",
         help="Backfill scores through batched ingestion with a persistent idempotency ledger",
     )
+    p_export_scores.add_argument(
+        "--event-limit", type=int, default=None, metavar="N",
+        help="Explicit backfill canary cap: post at most N total ingestion events",
+    )
 
     p_bfcost = sub.add_parser(
         "backfill-costs",
@@ -4268,8 +4272,9 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
         result = export_scores(
             dry_run=bool(args.dry_run),
             backfill=bool(getattr(args, "backfill", False)),
+            event_limit=getattr(args, "event_limit", None),
         )
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         # --cron: errors go to stdout (single line) + non-zero exit so the
         # cron watchdog delivers. Default mode keeps errors on stderr.
         if cron:

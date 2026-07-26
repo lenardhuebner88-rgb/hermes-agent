@@ -6,6 +6,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 import hermes_cli.langfuse_scores_export as langfuse_export
 from hermes_cli.langfuse_scores_export import export_scores, synthesize_traces, trace_id_for_run
 
@@ -74,6 +76,24 @@ def _make_empty_db(path: Path) -> None:
         INSERT INTO scores VALUES (200, NULL, 't-unmatched', 'review_verdict', 1.0, 'binary', 'review_gate', 1);
         INSERT INTO scores VALUES (201, NULL, 't-also-unmatched', 'run_cost_usd', 0.5, 'numeric', 'finalizer', 1);
     """)
+    conn.close()
+
+
+def _make_historical_score_db(path: Path, score_count: int) -> None:
+    """Generate a large logical backfill without a large checked-in fixture."""
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE scores (id INTEGER PRIMARY KEY, run_id INTEGER, task_id TEXT NOT NULL,
+          name TEXT NOT NULL, value REAL, value_type TEXT NOT NULL, source TEXT, created_at INTEGER);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT,
+          active_model TEXT, outcome TEXT);
+    """)
+    conn.executemany(
+        "INSERT INTO scores VALUES (?, 999, 't-large-historical', 'run_cost_usd', 0.25, "
+        "'numeric', 'backfill-test', ?)",
+        [(score_id, score_id) for score_id in range(1, score_count + 1)],
+    )
+    conn.commit()
     conn.close()
 
 
@@ -271,6 +291,97 @@ def test_backfill_retries_transient_ingestion_failure(tmp_path: Path, monkeypatc
         thread.join()
     assert result["posted_new"] == 4
     assert sleeps == [0.5]
+
+
+def test_backfill_event_limit_plans_resumes_without_orphaned_scores(tmp_path: Path) -> None:
+    """A 100-event canary includes its anchor and resumes at the first unsent score."""
+    db_path = tmp_path / "kanban.db"
+    ledger_path = tmp_path / "ledger.json"
+    _make_historical_score_db(db_path, 150)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    _FakeLangfuseHandler.ingestions = []
+    _FakeLangfuseHandler.fail_ingestion = 0
+    server, thread = _start_server()
+    try:
+        env = _env(server)
+        preview = export_scores(
+            db_path=db_path, env=env, backfill=True, dry_run=True,
+            ledger_path=ledger_path, event_limit=100,
+        )
+        first = export_scores(
+            db_path=db_path, env=env, backfill=True,
+            ledger_path=ledger_path, event_limit=100, batch_size=30,
+        )
+        first_events = [
+            event for request in _FakeLangfuseHandler.ingestions for event in request["batch"]
+        ]
+        anchor = next(event["body"] for event in first_events if event["type"] == "trace-create")
+        _FakeLangfuseHandler.traces = [
+            {"id": anchor["id"], "metadata": anchor["metadata"]},
+        ]
+        second = export_scores(
+            db_path=db_path, env=env, backfill=True,
+            ledger_path=ledger_path, event_limit=100, batch_size=30,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert preview["would_post"] == 100
+    assert preview["planned_anchors"] == 1
+    assert preview["planned_scores"] == 99
+    assert preview["remaining_events"] == 51
+    assert len(first_events) == 100
+    assert first_events[0]["type"] == "trace-create"
+    assert all(
+        event["body"]["traceId"] == anchor["id"]
+        for event in first_events[1:]
+        if event["type"] == "score-create"
+    )
+    assert first["posted_new"] == 99
+    assert second["posted_new"] == 51
+    assert second["planned_anchors"] == 0
+    assert second["planned_scores"] == 51
+    assert len(json.loads(ledger_path.read_text())["exported_score_ids"]) == 150
+
+
+def test_backfill_event_limit_failure_does_not_advance_ledger(tmp_path: Path, monkeypatch) -> None:
+    """A failed canary batch resumes from its first event rather than skipping it."""
+    db_path = tmp_path / "kanban.db"
+    ledger_path = tmp_path / "ledger.json"
+    _make_historical_score_db(db_path, 2)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    _FakeLangfuseHandler.ingestions = []
+    _FakeLangfuseHandler.fail_ingestion = 5
+    monkeypatch.setattr(langfuse_export.time, "sleep", lambda _seconds: None)
+    server, thread = _start_server()
+    try:
+        with pytest.raises(RuntimeError):
+            export_scores(
+                db_path=db_path, env=_env(server), backfill=True,
+                ledger_path=ledger_path, event_limit=100,
+            )
+        assert not ledger_path.exists()
+        _FakeLangfuseHandler.fail_ingestion = 0
+        retry = export_scores(
+            db_path=db_path, env=_env(server), backfill=True,
+            ledger_path=ledger_path, event_limit=100,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+        _FakeLangfuseHandler.fail_ingestion = 0
+
+    assert retry["posted_new"] == 2
+    assert retry["planned_anchors"] == 1
+    assert retry["planned_scores"] == 2
+    assert len(json.loads(ledger_path.read_text())["exported_score_ids"]) == 2
 
 
 def test_export_accepts_legacy_host_env_name(tmp_path: Path) -> None:

@@ -595,6 +595,7 @@ def _export_score_backfill(
     dry_run: bool,
     ledger_path: Path | None,
     batch_size: int,
+    event_limit: int | None,
 ) -> dict[str, Any]:
     """Backfill scores through ingestion with a durable, idempotent ledger."""
     path = _score_ledger_path(ledger_path)
@@ -628,6 +629,9 @@ def _export_score_backfill(
                 pending.append((None, _score_anchor_event(row, trace_id)))
             pending.append((row, event))
 
+    planned = pending if event_limit is None else pending[:event_limit]
+    planned_anchors = sum(1 for row, _event in planned if row is None)
+    planned_scores = len(planned) - planned_anchors
     report: dict[str, Any] = {
         "total_rows": len(rows),
         "matchable": matchable,
@@ -636,16 +640,21 @@ def _export_score_backfill(
         "unmatched": unmatched,
         "anchor_count": len(anchored_tasks),
         "anchored_rows": anchored_rows,
+        "pending_events": len(pending),
+        "planned_events": len(planned),
+        "planned_anchors": planned_anchors,
+        "planned_scores": planned_scores,
+        "remaining_events": len(pending) - len(planned),
         # Keep the original result vocabulary for callers that only display
         # the generic export summary.
         "matched": matchable,
         "posted": 0,
     }
     if dry_run:
-        report["would_post"] = len(pending)
+        report["would_post"] = len(planned)
         return report
 
-    if anchored_tasks:
+    if planned_anchors:
         retention = _retention_preflight(host, authorization, env)
         report["retention"] = retention
         if retention["active"] or not retention["checked"]:
@@ -654,11 +663,16 @@ def _export_score_backfill(
             )
             return report
 
-    _write_score_ledger(path, known_ids)
+    # Preserve the old unbounded behavior, including seeding the local ledger
+    # from remote score IDs before it begins. A bounded batch instead writes
+    # only after an acknowledged ingestion request, so a failed canary cannot
+    # advance its cursor.
+    if event_limit is None:
+        _write_score_ledger(path, known_ids)
 
     effective_batch_size = max(1, batch_size)
-    for offset in range(0, len(pending), effective_batch_size):
-        batch = pending[offset:offset + effective_batch_size]
+    for offset in range(0, len(planned), effective_batch_size):
+        batch = planned[offset:offset + effective_batch_size]
         _request_with_retry(
             f"{host}/api/public/ingestion",
             authorization,
@@ -780,6 +794,7 @@ def export_scores(
     backfill: bool = False,
     ledger_path: Path | None = None,
     batch_size: int = _SCORE_BATCH_SIZE,
+    event_limit: int | None = None,
 ) -> dict[str, Any]:
     """Export active-board scores without mutating the Kanban database."""
     selected_db = db_path or kanban_db_path()
@@ -799,6 +814,11 @@ def export_scores(
     # Dry-run still resolves real traces, but never writes scores.
     runtime_env = env or os.environ
     host, authorization = _credentials(runtime_env)
+    if event_limit is not None:
+        if not backfill:
+            raise ValueError("event_limit requires backfill=True")
+        if event_limit < 1:
+            raise ValueError("event_limit must be at least 1")
     if backfill:
         return _export_score_backfill(
             rows,
@@ -808,6 +828,7 @@ def export_scores(
             dry_run=dry_run,
             ledger_path=ledger_path,
             batch_size=batch_size,
+            event_limit=event_limit,
         )
     by_run, by_task = _trace_ids(host, authorization)
     matched = unmatched = posted = 0
