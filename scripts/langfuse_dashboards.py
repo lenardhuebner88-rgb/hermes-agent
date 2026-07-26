@@ -329,28 +329,18 @@ def provision_dashboard(client: TrpcClient, dashboard: DashboardInput) -> dict[s
     if not isinstance(dashboard_id, str) or not dashboard_id:
         raise ProvisionError("dashboard.createDashboard did not return a dashboard id")
 
-    placements: list[dict[str, Any]] = []
-    for index, widget in enumerate(dashboard.widgets):
+    widget_ids: list[str] = []
+    for widget in dashboard.widgets:
         created_widget = client.create_widget(project_id=dashboard.project_id, widget=widget)
         widget_id = created_widget.get("id")
         if not isinstance(widget_id, str) or not widget_id:
             raise ProvisionError("dashboardWidgets.create did not return a widget id")
-        placements.append(
-            {
-                "type": "widget",
-                "id": f"pending-fixture-placement-{index}",
-                "widgetId": widget_id,
-                "x": 0,
-                "y": index * 6,
-                "x_size": 6,
-                "y_size": 6,
-            }
-        )
+        widget_ids.append(widget_id)
 
     updated_dashboard = client.update_dashboard_definition(
         project_id=dashboard.project_id,
         dashboard_id=dashboard_id,
-        definition={"widgets": placements},
+        definition={"widgets": _widget_placements(widget_ids)},
     )
     if updated_dashboard.get("id") != dashboard_id:
         raise ProvisionError("dashboard.updateDashboardDefinition returned an unexpected dashboard")
@@ -391,6 +381,22 @@ ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.desc
 view = EXCLUDED.view, dimensions = EXCLUDED.dimensions, metrics = EXCLUDED.metrics,
 filters = EXCLUDED.filters, chart_type = EXCLUDED.chart_type, chart_config = EXCLUDED.chart_config,
 min_version = EXCLUDED.min_version"""
+
+
+def _widget_placements(widget_ids: Sequence[str]) -> list[dict[str, Any]]:
+    """Build stable, vertically stacked dashboard placements for each widget id."""
+    return [
+        {
+            "type": "widget",
+            "id": f"pending-fixture-placement-{index}",
+            "widgetId": widget_id,
+            "x": 0,
+            "y": index * 6,
+            "x_size": 6,
+            "y_size": 6,
+        }
+        for index, widget_id in enumerate(widget_ids)
+    ]
 
 
 def _validate_sql_guards(adapter: DirectSqlAdapter, contract: SqlGuardContract) -> str:
@@ -445,6 +451,8 @@ def _app_readback_receipt(
         placements = definition.get("widgets")
         if not isinstance(placements, list):
             raise ProvisionError("app read-back definition omitted widget placements")
+        if len(placements) < len(row.dashboard.widgets):
+            raise ProvisionError("app read-back definition has fewer widget placements than configured widgets")
         understood.append({"dashboard": row.dashboard.name, "widget_placements": len(placements)})
         for widget in row.dashboard.widgets:
             source = "observations" if widget.view == "observations" else "exported_score"
@@ -504,7 +512,13 @@ def run_direct_sql_fallback(
                 raise ProvisionError("each direct-SQL dashboard needs exactly one stable widget id per widget")
             result = adapter.execute(
                 _DASHBOARD_UPSERT,
-                (row.id, project_id, row.dashboard.name, row.dashboard.description, json.dumps({"widgets": []})),
+                (
+                    row.id,
+                    project_id,
+                    row.dashboard.name,
+                    row.dashboard.description,
+                    json.dumps({"widgets": _widget_placements(row.widget_ids)}),
+                ),
             )
             if result.rows != 1:
                 raise ProvisionError("dashboard upsert returned an unexpected row count")

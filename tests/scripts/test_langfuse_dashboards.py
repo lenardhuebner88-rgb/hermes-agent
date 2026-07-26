@@ -162,12 +162,15 @@ def test_provision_uses_all_three_post_mutations_and_app_read_back() -> None:
 
 class _SqlAdapter:
     def __init__(
-        self, *, extra_column: bool = False, row_count: int = 1, changes: int = 1, mutate_home: bool = False
+        self, *, extra_column: bool = False, row_count: int = 1, changes: int = 1,
+        mutate_home: bool = False, read_back_widget_count: int = 10,
     ) -> None:
         self.calls: list[str] = []
+        self.dashboard_upsert_params: list[tuple[object, ...]] = []
         self.row_count = row_count
         self.changes = changes
         self.mutate_home = mutate_home
+        self.read_back_widget_count = read_back_widget_count
         self.home_dashboard_id = "home_unchanged"
         self.columns = {
             "dashboards": (("id", False, None, "text"),),
@@ -208,7 +211,11 @@ class _SqlAdapter:
         self.calls.append("begin")
 
     def execute(self, sql: str, params: tuple[object, ...]) -> dashboards.SqlWriteResult:
-        self.calls.append("dashboard_upsert" if "INSERT INTO dashboards" in sql else "widget_upsert")
+        if "INSERT INTO dashboards" in sql:
+            self.calls.append("dashboard_upsert")
+            self.dashboard_upsert_params.append(params)
+        else:
+            self.calls.append("widget_upsert")
         assert "ON CONFLICT (id) DO UPDATE" in sql
         return dashboards.SqlWriteResult(rows=self.row_count, changes=self.changes)
 
@@ -226,7 +233,10 @@ class _SqlAdapter:
 
     def read_back_via_app(self, project_id: str, dashboard_id: str) -> dict[str, object]:
         self.calls.append("app_read_back")
-        return {"id": dashboard_id, "definition": {"widgets": [{"type": "widget"}]}}
+        return {
+            "id": dashboard_id,
+            "definition": {"widgets": [{"type": "widget"}] * self.read_back_widget_count},
+        }
 
 
 def _sql_contract() -> dashboards.SqlGuardContract:
@@ -266,8 +276,9 @@ def test_direct_sql_is_unreachable_without_the_explicit_flag() -> None:
 
 def test_direct_sql_guards_then_upserts_once_and_receipts_app_readback() -> None:
     adapter = _SqlAdapter()
+    rows = _sql_rows()
     result = dashboards.run_direct_sql_fallback(
-        allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=rows
     )
     assert adapter.calls[:10] == [
         "health", "migrations", "columns:dashboards", "columns:dashboard_widgets",
@@ -278,10 +289,28 @@ def test_direct_sql_guards_then_upserts_once_and_receipts_app_readback() -> None
     assert adapter.calls.count("dashboard_upsert") == 3
     assert adapter.calls.count("widget_upsert") == 10
     assert adapter.calls.count("app_read_back") == 3
+    dashboard_definitions = []
+    for params in adapter.dashboard_upsert_params:
+        definition = params[4]
+        assert isinstance(definition, str)
+        dashboard_definitions.append(json.loads(definition))
+    assert [
+        [placement["widgetId"] for placement in definition["widgets"]]
+        for definition in dashboard_definitions
+    ] == [list(row.widget_ids) for row in rows]
     assert result.receipt["path"] == "direct_sql"
     assert result.receipt["changes"] == 13
     assert result.receipt["visible_export_evidence"]
     assert result.receipt["model_mix"]["denominator"] == "OBSERVATIONS with non-empty providedModelName"
+
+
+def test_direct_sql_fails_when_app_readback_omits_configured_widget_placements() -> None:
+    adapter = _SqlAdapter(read_back_widget_count=0)
+
+    with pytest.raises(dashboards.ProvisionError, match="widget placements"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        )
 
 
 def test_direct_sql_rejects_new_not_null_column_before_dump_or_write() -> None:
@@ -416,7 +445,10 @@ def test_trpc_receipt_is_built_from_app_readback(monkeypatch: pytest.MonkeyPatch
     plans = dashboards.load_dashboard_configs(project_id="project_1")
 
     def read_back(_client: object, plan: dashboards.DashboardInput) -> dict[str, object]:
-        return {"id": f"readback_{plan.name}", "definition": {"widgets": [{"type": "widget"}]}}
+        return {
+            "id": f"readback_{plan.name}",
+            "definition": {"widgets": [{"type": "widget"}] * len(plan.widgets)},
+        }
 
     monkeypatch.setattr(dashboards, "provision_dashboard", read_back)
     receipt = dashboards.provision_dashboards_with_receipt(object(), plans)  # type: ignore[arg-type]
