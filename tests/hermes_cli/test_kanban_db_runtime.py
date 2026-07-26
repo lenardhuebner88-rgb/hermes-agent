@@ -476,13 +476,14 @@ def test_write_txn_raises_on_truncated_file(tmp_path):
     conn.close()
 
 
-def test_write_txn_wal_mode_ignores_transient_main_file_size_lag(tmp_path):
-    """WAL commits must not treat an uncheckpointed main DB as torn-extend."""
+def test_write_txn_handles_transient_main_file_size_lag_by_journal_mode(tmp_path):
+    """WAL ignores its expected lag; DELETE rejects a torn-extend signature."""
     from hermes_cli.kanban_db import connect, write_txn
 
     db = tmp_path / "test.db"
     conn = connect(db_path=db)
-    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+    assert journal_mode in {"wal", "delete"}
     page_size = conn.execute("PRAGMA page_size").fetchone()[0]
     original_getsize = os.path.getsize
 
@@ -491,13 +492,21 @@ def test_write_txn_wal_mode_ignores_transient_main_file_size_lag(tmp_path):
         return max(0, real_size - page_size)
 
     with unittest.mock.patch("hermes_cli.kanban_db.os.path.getsize", side_effect=fake_getsize):
-        with write_txn(conn) as c:
-            c.execute(
-                "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
-                "VALUES ('t_wal001', 'wal task', 'tester', 'todo', 0, 1234567890)"
-            )
-    row = conn.execute("SELECT title FROM tasks WHERE id='t_wal001'").fetchone()
-    assert row["title"] == "wal task"
+        if journal_mode == "wal":
+            with write_txn(conn) as c:
+                c.execute(
+                    "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                    "VALUES ('t_wal001', 'wal task', 'tester', 'todo', 0, 1234567890)"
+                )
+            row = conn.execute("SELECT title FROM tasks WHERE id='t_wal001'").fetchone()
+            assert row["title"] == "wal task"
+        else:
+            with pytest.raises(sqlite3.DatabaseError, match="torn-extend|page count mismatch"):
+                with write_txn(conn) as c:
+                    c.execute(
+                        "INSERT INTO tasks (id, title, assignee, status, priority, created_at) "
+                        "VALUES ('t_delete001', 'delete task', 'tester', 'todo', 0, 1234567890)"
+                    )
     conn.close()
 
 

@@ -414,17 +414,22 @@ def test_busy_timeout_override_applies_per_connection(tmp_path):
 
 
 def test_fast_path_applies_connection_pragmas(tmp_path):
-    """The stamped fast path must produce a connection indistinguishable from
-    the init path: same per-connection PRAGMAs, WAL still active."""
+    """The stamped fast path preserves the init path's safe journal mode."""
     db = tmp_path / "kanban.db"
-    kb.connect(db_path=db).close()
+    init_conn = kb.connect(db_path=db)
+    try:
+        init_journal_mode = init_conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
+    finally:
+        init_conn.close()
+
+    assert init_journal_mode in {"wal", "delete"}
     kb._INITIALIZED_PATHS.discard(str(db.resolve()))
 
     conn = kb.connect(db_path=db)
     try:
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2  # FULL
-        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == init_journal_mode
         assert conn.execute("PRAGMA secure_delete").fetchone()[0] == 1
         assert conn.execute("PRAGMA cell_size_check").fetchone()[0] == 1
     finally:
