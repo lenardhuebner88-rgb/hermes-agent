@@ -1713,3 +1713,40 @@ def test_never_ran_root_not_auto_closed_when_it_has_task_runs(
     assert auto == []
 
 
+def test_lane_scope_allowlist_prevents_repark_after_fixer(
+    repo, kanban_home, monkeypatch,
+):
+    """V7 loop trap: after fixer is done, parent re-check must not re-park
+    solely for the fixer's allowlisted paths."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    from hermes_cli import kanban_lane_fixer as lane_fixer
+
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_repark",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        fixer_events = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_events) == 1
+        child_id = fixer_events[0]["child_id"]
+
+        # Mark fixer done (successful corrective handoff).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        allow = lane_fixer.allowlisted_paths_for_parent(conn, task_id)
+        assert "web/src/control/Foo.tsx" in allow
+
+        # Re-run lane enforcement: same attributed paths, but allowlisted.
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked")  # original park only
+        # No second park payload beyond the first.
+        assert len(_events(conn, task_id, "worker_gate_blocked")) == 1

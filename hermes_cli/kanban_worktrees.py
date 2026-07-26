@@ -6653,6 +6653,25 @@ def _enforce_lane_scope_on_complete(
         )
         return None
     violating, expected_lane = _lane_scope_violations(assignee, changed_files)
+    if violating:
+        # After a successful lane-scope fixer, the shared chain branch still
+        # contains the fixer's paths in this task's attributed range. Subtract
+        # paths already owned by a completed fixer child so re-complete does
+        # not re-park → re-fix → resume forever.
+        try:
+            from hermes_cli.kanban_lane_fixer import (
+                allowlisted_paths_for_parent,
+            )
+
+            allow = allowlisted_paths_for_parent(conn, task_id)
+            if allow:
+                violating = [path for path in violating if path not in allow]
+        except Exception:
+            _log.debug(
+                "lane-scope fixer allowlist lookup failed for %s",
+                task_id,
+                exc_info=True,
+            )
     if not violating:
         return None
     reason = (
@@ -7419,6 +7438,16 @@ def maybe_integrate_on_complete(
     repo_root, root_id, wt = provisioned
 
     from hermes_cli import kanban_db as kb
+
+    # Ensure lane-scope fixer lifecycle consumer is registered (no kanban_db
+    # edit — self-register via the public hook API whenever a provisioned
+    # completion runs).
+    try:
+        from hermes_cli.kanban_lane_fixer import ensure_lifecycle_hooks_registered
+
+        ensure_lifecycle_hooks_registered()
+    except Exception:
+        _log.debug("lane-scope fixer hook registration failed", exc_info=True)
 
     # Lane-scope enforcement (coder <-> coder-frontend): reject the completion
     # HERE — at the worker-commit boundary, before any sibling/integration
