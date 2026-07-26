@@ -455,6 +455,49 @@ class TestKanbanWorkerTraceMetadata:
         monkeypatch.setattr(mod.os.environ, "get", raise_on_get)
         assert mod._kanban_worker_metadata() == {}
 
+    def test_root_trace_uses_chain_and_lane_as_langfuse_dimensions(self, monkeypatch):
+        mod = importlib.import_module("plugins.observability.langfuse")
+        propagated = {}
+
+        class _Attributes:
+            def __enter__(self):
+                return None
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_propagate_attributes(**kwargs):
+            propagated.update(kwargs)
+            return _Attributes()
+
+        monkeypatch.setattr(mod, "propagate_attributes", fake_propagate_attributes)
+        self._start_root_trace_with_correlation(mod)
+
+        assert propagated["session_id"] == "chain-root"
+        assert propagated["user_id"] == "coder"
+        assert propagated["metadata"]["task_run_id"] == "77"
+        assert propagated["metadata"]["chain_id"] == "chain-root"
+        assert propagated["metadata"]["lane"] == "coder"
+
+    @staticmethod
+    def _start_root_trace_with_correlation(mod):
+        class _RootSpan:
+            def set_trace_io(self, **_kwargs):
+                pass
+
+        class _Client:
+            def create_trace_id(self, **_kwargs):
+                return "trace-id"
+
+            def start_observation(self, **_kwargs):
+                return _RootSpan()
+
+        mod._start_root_trace(
+            "task-key", task_id="turn-task", session_id="session", platform="cli",
+            provider="provider", model="model", api_mode="chat", messages=[],
+            task_run_id="77", chain_id="chain-root", lane="coder", client=_Client(),
+        )
+
 
 @pytest.fixture()
 def real_propagate_attributes():
@@ -1191,6 +1234,31 @@ class TestRequestMessageCoercion:
 
 
 class TestToolCallOutputBackfill:
+    def test_post_tool_call_ends_error_observation_from_hook_status(self, monkeypatch):
+        sys.modules.pop("plugins.observability.langfuse", None)
+        mod = importlib.import_module("plugins.observability.langfuse")
+        observation = object()
+        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state.tools["call-1"] = observation
+        monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
+        ended = {}
+
+        def fake_end_observation(obs, **kwargs):
+            ended["observation"] = obs
+            ended.update(kwargs)
+
+        monkeypatch.setattr(mod, "_end_observation", fake_end_observation)
+
+        mod.on_post_tool_call(
+            tool_name="read_file", args={}, result={"ignored": "payload"},
+            task_id="task-1", session_id="session-1", tool_call_id="call-1",
+            status="error", error_type="tool_error", error_message="permission denied",
+        )
+
+        assert ended["observation"] is observation
+        assert ended["level"] == "ERROR"
+        assert ended["status_message"] == "tool_error: permission denied"
+
     def test_post_tool_call_backfills_matching_turn_tool_call_output(self, monkeypatch):
         sys.modules.pop("plugins.observability.langfuse", None)
         mod = importlib.import_module("plugins.observability.langfuse")

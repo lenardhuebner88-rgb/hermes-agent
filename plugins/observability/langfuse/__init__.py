@@ -705,17 +705,24 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         "model": model,
         "api_mode": api_mode,
     }
-    metadata.update(_correlation_metadata(
+    correlation_metadata = _correlation_metadata(
         task_run_id=task_run_id, task_id=task_id, chain_id=chain_id, lane=lane,
         provider=provider, model=model, billing_snapshot=billing_snapshot,
-    ))
+    )
+    metadata.update(correlation_metadata)
+    worker_dimensions = {
+        key: correlation_metadata[key]
+        for key in ("task_run_id", "chain_id", "lane")
+        if key in correlation_metadata
+    }
     kanban_metadata = _kanban_worker_metadata()
     metadata.update(kanban_metadata)
 
     # session_id must be passed in trace_context for Langfuse session grouping.
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
-    if session_id:
-        trace_ctx["session_id"] = session_id
+    trace_session_id = chain_id or session_id
+    if trace_session_id:
+        trace_ctx["session_id"] = trace_session_id
 
     root_kwargs = {
         "trace_context": trace_ctx,
@@ -727,12 +734,17 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if propagate_attributes is not None:
         try:
             pa_kwargs: Dict[str, Any] = {
-                "session_id": session_id or task_key,
+                "session_id": trace_session_id or task_key,
                 "trace_name": "Hermes turn",
-                "tags": ["hermes", "langfuse"] + (["kanban-worker"] if kanban_metadata else []),
+                "tags": ["hermes", "langfuse"]
+                + (["kanban-worker"] if worker_dimensions or kanban_metadata else [])
+                + ([f"lane:{lane}"] if lane else []),
             }
-            if kanban_metadata:
-                pa_kwargs["metadata"] = kanban_metadata
+            if lane:
+                pa_kwargs["user_id"] = lane
+            propagated_metadata = {**worker_dimensions, **kanban_metadata}
+            if propagated_metadata:
+                pa_kwargs["metadata"] = propagated_metadata
             with propagate_attributes(**pa_kwargs):
                 root_span = client.start_observation(**root_kwargs)
         except Exception:
@@ -763,7 +775,8 @@ def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, 
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
-                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None) -> None:
+                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None,
+                     level: Optional[str] = None, status_message: Optional[str] = None) -> None:
     if observation is None:
         return
     try:
@@ -776,6 +789,10 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
             update_kwargs["usage_details"] = usage_details
         if cost_details:
             update_kwargs["cost_details"] = cost_details
+        if level:
+            update_kwargs["level"] = level
+        if status_message:
+            update_kwargs["status_message"] = status_message
         if update_kwargs:
             observation.update(**update_kwargs)
         observation.end()
@@ -1185,7 +1202,9 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
 @_fail_soft_hook
 def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None,
                       task_id: str = "", session_id: str = "", tool_call_id: str = "",
-                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+                      turn_id: str = "", api_request_id: str = "", status: str = "ok",
+                      error_type: Optional[str] = None, error_message: Optional[str] = None,
+                      **_: Any) -> None:
     task_key = _trace_key(
         task_id,
         session_id,
@@ -1230,10 +1249,20 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
                             function_payload["output"] = safe_result_value
                         break
 
+    error_status = status == "error"
+    short_status_message = None
+    if error_status:
+        short_status_message = ": ".join(
+            part for part in (error_type, error_message) if part
+        )[:240] or "tool error"
+    end_kwargs: Dict[str, Any] = {}
+    if error_status:
+        end_kwargs = {"level": "ERROR", "status_message": short_status_message}
     _end_observation(
         observation,
         output=safe_result_value,
         metadata={"tool_name": tool_name, "args": _redact_raw_content(args)},
+        **end_kwargs,
     )
 
 

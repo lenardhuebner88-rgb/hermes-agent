@@ -1993,6 +1993,9 @@ def run_conversation(
                         # provider client.  New consumers should read the
                         # sanitised view from ``request["body"]["messages"]``.
                         _request_payload = agent._api_request_payload_for_hook(api_kwargs)
+                        # Kanban state is resolved at a fork-owned edge; ordinary
+                        # agent requests receive no additional hook kwargs.
+                        from hermes_cli.observability_context import resolve_observability_context
                         _invoke_hook(
                             "pre_api_request",
                             task_id=effective_task_id,
@@ -2018,6 +2021,7 @@ def run_conversation(
                             started_at=api_start_time,
                             middleware_trace=list(_llm_middleware_trace),
                             request=_request_payload,
+                            **resolve_observability_context(),
                         )
                 except Exception:
                     pass
