@@ -59,18 +59,22 @@ def _make_run(conn, *, profile="coder", model="test-model"):
     return task_id, run_id
 
 
-def test_scorecard_aggregates_materialized_scores_and_preserves_review_verdicts(client):
+def test_scorecard_aggregates_populated_numeric_scores_and_preserves_review_verdicts(client):
     with kb.connect_closing() as conn:
         task_a, run_a = _make_run(conn, profile="coder", model="model-a")
         task_b, run_b = _make_run(conn, profile="reviewer", model="model-b")
         _insert_score(conn, task_id=task_a, run_id=run_a, name="review_verdict", value=1.0, value_type="binary")
         _insert_score(conn, task_id=task_b, run_id=run_b, name="review_verdict", value=0.0, value_type="binary")
-        _insert_score(conn, task_id=task_a, run_id=run_a, name="cache_hit_ratio", value=0.2)
-        _insert_score(conn, task_id=task_b, run_id=run_b, name="cache_hit_ratio", value=0.4)
-        _insert_score(conn, task_id=task_a, run_id=run_a, name="queue_latency_seconds", value=3.0)
-        _insert_score(conn, task_id=task_a, run_id=run_a, name="operator_veto", value=1.0, value_type="binary")
-        _insert_score(conn, task_id=task_a, run_id=run_a, name="task_outcome", value="done", value_type="categorical")
-        _insert_score(conn, task_id=task_b, run_id=run_b, name="task_outcome", value="blocked", value_type="categorical")
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_cost_usd", value=1.5)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_cost_usd", value=2.5)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_duration_seconds", value=3.0)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_duration_seconds", value=9.0)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_tokens_total", value=100.0)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_tokens_total", value=300.0)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_attempt_index", value=1.0)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_attempt_index", value=3.0)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="review_iterations_to_approval", value=0.0)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="review_iterations_to_approval", value=2.0)
         _insert_score(conn, task_id=task_a, run_id=run_a, name="run_outcome_kind", value="completed", value_type="categorical")
 
     response = client.get("/api/plugins/kanban/scorecard")
@@ -80,14 +84,11 @@ def test_scorecard_aggregates_materialized_scores_and_preserves_review_verdicts(
     assert payload["overall"] == {"runs": 2, "approved": 1, "approval_rate": 0.5}
     assert payload["verdicts"] == {"approved": 1, "rejected": 1}
     scores = payload["materialized_scores"]
-    assert scores["cache_hit_ratio"] == {
-        "value": pytest.approx(0.3), "count": 2,
-    }
-    assert scores["queue_latency_seconds"] == {"value": 3.0, "count": 1}
-    assert scores["operator_veto"] == {"value": 1.0, "count": 1}
-    assert scores["task_outcome"] == {
-        "value": {"blocked": 1, "done": 1}, "count": 2,
-    }
+    assert scores["run_cost_usd"] == {"value": 2.0, "min": 1.5, "max": 2.5, "sum": 4.0, "count": 2}
+    assert scores["run_duration_seconds"] == {"value": 6.0, "min": 3.0, "max": 9.0, "sum": 12.0, "count": 2}
+    assert scores["run_tokens_total"] == {"value": 200.0, "min": 100.0, "max": 300.0, "sum": 400.0, "count": 2}
+    assert scores["run_attempt_index"] == {"value": 2.0, "min": 1.0, "max": 3.0, "sum": 4.0, "count": 2}
+    assert scores["review_iterations_to_approval"] == {"value": 1.0, "min": 0.0, "max": 2.0, "sum": 2.0, "count": 2}
     assert scores["run_outcome_kind"] == {"value": {"completed": 1}, "count": 1}
 
 
@@ -96,11 +97,40 @@ def test_scorecard_returns_explicit_empty_materialized_score_entries(client):
 
     assert response.status_code == 200
     assert response.json()["materialized_scores"] == {
-        "cache_hit_ratio": {"value": None, "count": 0},
-        "queue_latency_seconds": {"value": None, "count": 0},
-        "operator_veto": {"value": None, "count": 0},
-        "task_outcome": {"value": None, "count": 0},
+        "run_cost_usd": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
+        "run_duration_seconds": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
+        "run_tokens_total": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
+        "run_attempt_index": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
+        "review_iterations_to_approval": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
         "run_outcome_kind": {"value": None, "count": 0},
+    }
+
+
+def test_scorecard_merges_numeric_and_text_run_outcome_kinds(client):
+    with kb.connect_closing() as conn:
+        task_a, run_a = _make_run(conn)
+        task_b, run_b = _make_run(conn)
+        _insert_score(conn, task_id=task_a, run_id=run_a, name="run_outcome_kind", value=1.0)
+        _insert_score(conn, task_id=task_b, run_id=run_b, name="run_outcome_kind", value="completed", value_type="categorical")
+
+    response = client.get("/api/plugins/kanban/scorecard")
+
+    assert response.status_code == 200
+    assert response.json()["materialized_scores"]["run_outcome_kind"] == {
+        "value": {"completed": 2}, "count": 2,
+    }
+
+
+def test_scorecard_preserves_unknown_numeric_run_outcome_kind(client):
+    with kb.connect_closing() as conn:
+        task_id, run_id = _make_run(conn)
+        _insert_score(conn, task_id=task_id, run_id=run_id, name="run_outcome_kind", value=99.0)
+
+    response = client.get("/api/plugins/kanban/scorecard")
+
+    assert response.status_code == 200
+    assert response.json()["materialized_scores"]["run_outcome_kind"] == {
+        "value": {"unknown_outcome_code:99.0": 1}, "count": 1,
     }
 
 
