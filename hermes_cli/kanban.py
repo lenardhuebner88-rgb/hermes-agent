@@ -3274,6 +3274,28 @@ def _complete_parse_metadata(raw_meta: Any) -> tuple[Any, int | None]:
     return metadata, None
 
 
+def _completion_status_after(task: Any) -> tuple[str, str]:
+    """Return the persisted completion status and a concise operator reason."""
+    if task is None:
+        return "unknown", "task row unavailable"
+    status = str(getattr(task, "status", None) or "unknown")
+    if status == "blocked":
+        block_kind = str(getattr(task, "block_kind", None) or "").strip()
+        if block_kind == "integration":
+            return status, "integration parked"
+        return status, f"{block_kind} block" if block_kind else "blocked"
+    reasons = {
+        "done": "completed",
+        "review": "submitted for review",
+        "ready": "workflow advanced",
+        "todo": "waiting on dependencies",
+        "archived": "archived",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }
+    return status, reasons.get(status, "transition accepted")
+
+
 def _complete_one_task(
     conn: Any,
     tid: str,
@@ -3335,7 +3357,8 @@ def _complete_one_task(
             file=sys.stderr,
         )
         return False
-    print(f"Completed {tid}")
+    status, status_reason = _completion_status_after(kb.get_task(conn, tid))
+    print(f"Completed {tid} — status now '{status}' ({status_reason})")
     return True
 
 

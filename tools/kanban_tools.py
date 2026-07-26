@@ -367,6 +367,28 @@ def _ok(**fields: Any) -> str:
     return json.dumps({"ok": True, **fields})
 
 
+def _completion_status_after(task: Any) -> tuple[str, str]:
+    """Return the persisted completion status and a model-readable reason."""
+    if task is None:
+        return "unknown", "task row unavailable"
+    status = str(getattr(task, "status", None) or "unknown")
+    if status == "blocked":
+        block_kind = str(getattr(task, "block_kind", None) or "").strip()
+        if block_kind == "integration":
+            return status, "integration parked"
+        return status, f"{block_kind} block" if block_kind else "blocked"
+    reasons = {
+        "done": "completed",
+        "review": "submitted for review",
+        "ready": "workflow advanced",
+        "todo": "waiting on dependencies",
+        "archived": "archived",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }
+    return status, reasons.get(status, "transition accepted")
+
+
 def _normalize_profile(value: Any) -> Optional[str]:
     """Normalize CLI-compatible assignee sentinels for the tool surface."""
     if value is None:
@@ -806,8 +828,20 @@ def _handle_complete(args: dict, **kw) -> str:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            status, status_reason = _completion_status_after(
+                kb.get_task(conn, tid)
+            )
             run = kb.latest_run(conn, tid)
-            return _ok(task_id=tid, run_id=run.id if run else None)
+            return _ok(
+                task_id=tid,
+                run_id=run.id if run else None,
+                status=status,
+                status_reason=status_reason,
+                message=(
+                    f"Completed {tid} — status now '{status}' "
+                    f"({status_reason})"
+                ),
+            )
         finally:
             conn.close()
     except ValueError as e:

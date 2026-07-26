@@ -9,6 +9,7 @@ import re
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -302,6 +303,48 @@ def test_run_slash_block_unblock_cycle(kanban_home):
     kc.run_slash(f"claim {tid}")
     assert "Blocked" in kc.run_slash(f"block {tid} 'need decision'")
     assert "Unblocked" in kc.run_slash(f"unblock {tid}")
+
+
+def test_unblock_echo_matches_the_ready_row_state(kanban_home, capsys):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(conn, title="echo unblock", assignee="alice")
+        assert kb.claim_task(conn, task_id) is not None
+        assert kb.block_task(conn, task_id, reason="operator input")
+
+    rc = kc._cmd_unblock(
+        argparse.Namespace(
+            task_ids=[task_id],
+            force=False,
+            reason=None,
+            override_wait=False,
+        )
+    )
+
+    assert rc == 0
+    assert f"Unblocked {task_id}" in capsys.readouterr().out
+    with kb.connect_closing() as conn:
+        assert kb.get_task(conn, task_id).status == "ready"
+
+
+def test_complete_echo_reports_actual_integration_park(monkeypatch, capsys):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    parked = SimpleNamespace(status="blocked", block_kind="integration")
+    monkeypatch.setattr(kc.kb, "complete_task", lambda *args, **kwargs: True)
+    monkeypatch.setattr(kc.kb, "get_task", lambda *args, **kwargs: parked)
+
+    assert kc._complete_one_task(
+        object(),
+        "t_parked",
+        result=None,
+        summary="finished slice",
+        metadata=None,
+    )
+
+    assert (
+        "Completed t_parked — status now 'blocked' (integration parked)"
+        in capsys.readouterr().out
+    )
 
 
 def _seed_exhausted_budget_runaway(conn):
