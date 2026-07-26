@@ -466,6 +466,30 @@ def test_default_quick_gate_web_diff_fails_when_bins_missing_everywhere(repo, mo
     assert "tsc" in detail and "not found" in detail
 
 
+def test_default_quick_gate_web_diff_bootstraps_missing_bins_with_frontend_gate(
+    repo, monkeypatch,
+):
+    scripts = repo / "scripts"
+    scripts.mkdir()
+    frontend_gate = scripts / "gate-frontend.sh"
+    frontend_gate.write_text("#!/usr/bin/env bash\n")
+    frontend_gate.chmod(0o755)
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(kwt.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+
+    ok, detail = kwt.default_quick_gate(repo, ["web/src/control/App.tsx"])
+
+    assert ok is True, detail
+    assert "frontend bootstrap ok" in detail
+    assert [str(frontend_gate), "--skip-build"] in calls
+
+
 def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch):
     calls = []
 
