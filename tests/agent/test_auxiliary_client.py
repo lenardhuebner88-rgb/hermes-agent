@@ -35,6 +35,7 @@ from agent.auxiliary_client import (
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
     _pool_runtime_base_url,
+    aux_progress_hook,
 )
 
 
@@ -1813,7 +1814,7 @@ class TestVisionClientFallback:
         real_client = SimpleNamespace(messages=messages_api)
         captured_kwargs = {}
 
-        def fake_create_anthropic_message(_client, kwargs):
+        def fake_create_anthropic_message(_client, kwargs, **_kw):
             captured_kwargs.update(kwargs)
             return final_message
 
@@ -4648,6 +4649,304 @@ class TestAuxiliaryPoolRotationRetry:
         assert len(pool.rotate_calls) == 1
         assert pool.rotate_calls[0]["status_code"] == 429
         mock_fallback.assert_not_called()
+
+
+def _progress_chunk(content=None, finish_reason=None, usage=None, model="m1", chunk_id="c1"):
+    delta = SimpleNamespace(content=content, reasoning=None, reasoning_content=None, tool_calls=None)
+    choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    return SimpleNamespace(id=chunk_id, model=model, choices=[choice], usage=usage)
+
+
+def _success_chunks(text, model="m1"):
+    """Split text across two chunks so a passing test proves real streamed
+    aggregation happened (a canned single-shot return could not produce
+    this without _aggregate_chat_stream actually running)."""
+    mid = max(1, len(text) // 2)
+    return [
+        _progress_chunk(content=text[:mid], model=model),
+        _progress_chunk(
+            content=text[mid:], finish_reason="stop", model=model,
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        ),
+    ]
+
+
+class _StepClient:
+    """Real (non-Mock) OpenAI-shaped client that replays one scripted
+    outcome per physical .create() call, in call order.
+
+    Deliberately NOT a MagicMock: MagicMock auto-creates any attribute, so
+    `hasattr(chunks, "choices")` is always true on it — which makes
+    `_create_with_progress` treat a streamed call as the "shim already
+    returned a complete response" pass-through case and a test built on it
+    would silently exercise the wrong branch. `then_stream()` calls assert
+    the request actually carried `stream=True` and hand back a real
+    iterator, so a regression to the non-streaming pass-through fails the
+    test instead of passing it by accident.
+    """
+
+    def __init__(self, base_url=""):
+        self.base_url = base_url
+        self.calls = []
+        self._steps = []
+        completions = SimpleNamespace(create=self._create)
+        self.chat = SimpleNamespace(completions=completions)
+
+    def then_raise(self, exc):
+        self._steps.append(("raise", exc))
+        return self
+
+    def then_stream(self, chunks):
+        self._steps.append(("stream", chunks))
+        return self
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        kind, payload = self._steps.pop(0)
+        if kind == "raise":
+            raise payload
+        assert kwargs.get("stream") is True, (
+            "expected a streamed request (progress hook installed); a "
+            "non-streaming call here means the code took the pass-through "
+            "branch instead of the one under test"
+        )
+        return iter(payload)
+
+
+class _TempRejected(Exception):
+    def __init__(self, msg="invalid parameter: temperature is not supported for this model"):
+        super().__init__(msg)
+
+
+class _MaxTokensRejected(Exception):
+    def __init__(self, msg="invalid parameter: max_tokens is not supported for this model"):
+        super().__init__(msg)
+
+
+class _NousModelNotFound(Exception):
+    status_code = 404
+
+    def __init__(self, msg=(
+        "Model 'nous/stale-model' not found. The requested model does not "
+        "exist in our configuration or OpenRouter catalog."
+    )):
+        super().__init__(msg)
+
+
+class _NousPaymentRequired(Exception):
+    status_code = 402
+
+    def __init__(self, msg="Payment Required: insufficient credits"):
+        super().__init__(msg)
+
+
+class _NousUnauthorized(Exception):
+    status_code = 401
+
+    def __init__(self, msg="Error code: 401 - unauthorized"):
+        super().__init__(msg)
+
+
+class _RateLimited(Exception):
+    status_code = 429
+
+    def __init__(self, msg="Rate limit exceeded, try again in 5 seconds"):
+        super().__init__(msg)
+
+
+class TestCallLlmProgressHookStreamedRetries:
+    """call_llm()'s six fork-owned retry/recovery call sites must route
+    through _create_with_progress()'s streamed branch (not the
+    non-streaming pass-through) when a caller has installed
+    aux_progress_hook — the compression path always does. Coverage gap:
+    every existing call_llm retry test uses MagicMock clients and never
+    installs the hook, so before this class all 54 _create_with_progress
+    call sites in the test suite exercised only the pass-through branch.
+    """
+
+    def test_temperature_retry_streams_with_retry_kwargs(self):
+        client = (
+            _StepClient(base_url="https://openrouter.ai/api/v1")
+            .then_raise(_TempRejected())  # 1: streamed original attempt
+            .then_raise(_TempRejected())  # 2: _create_with_progress's own non-streaming fallback for an unclassified error
+            .then_stream(_success_chunks("temperature-stripped-ok"))  # 3: this fork's temperature retry
+        )
+        ticks = []
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("auto", "some/model", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "some/model")),
+            aux_progress_hook(lambda: ticks.append(1)),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+                temperature=0.7,
+            )
+
+        assert result.choices[0].message.content == "temperature-stripped-ok"
+        assert len(client.calls) == 3
+        assert client.calls[0]["stream"] is True
+        assert client.calls[0]["temperature"] == 0.7
+        assert "stream" not in client.calls[1]
+        assert client.calls[1]["temperature"] == 0.7
+        # The fork retry site: streamed, and using retry_kwargs (temperature dropped).
+        assert client.calls[2]["stream"] is True
+        assert "temperature" not in client.calls[2]
+        assert ticks  # hook actually ticked — real streamed aggregation ran
+
+    def test_max_tokens_retry_streams_with_max_tokens_stripped(self):
+        client = (
+            _StepClient(base_url="https://integrate.api.nvidia.com/v1")
+            .then_raise(_MaxTokensRejected())
+            .then_raise(_MaxTokensRejected())
+            .then_stream(_success_chunks("max-tokens-stripped-ok"))
+        )
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("nvidia", "nvidia/model-x", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "nvidia/model-x")),
+            aux_progress_hook(lambda: None),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=500,
+            )
+
+        assert result.choices[0].message.content == "max-tokens-stripped-ok"
+        assert len(client.calls) == 3
+        assert client.calls[0]["max_tokens"] == 500
+        assert client.calls[1]["max_tokens"] == 500
+        assert client.calls[2]["stream"] is True
+        assert "max_tokens" not in client.calls[2]
+        assert "max_completion_tokens" not in client.calls[2]
+
+    def test_nous_stale_model_self_heal_streams_with_healed_model(self):
+        client = (
+            _StepClient(base_url="https://inference-api.nousresearch.com/v1")
+            .then_raise(_NousModelNotFound())
+            .then_raise(_NousModelNotFound())
+            .then_stream(_success_chunks("healed-model-ok"))
+        )
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("nous", "nous/stale-model", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "nous/stale-model")),
+            patch("agent.auxiliary_client._refresh_nous_recommended_model",
+                  return_value="nous/healed-model") as mock_heal,
+            aux_progress_hook(lambda: None),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.choices[0].message.content == "healed-model-ok"
+        mock_heal.assert_called_once()
+        assert len(client.calls) == 3
+        assert client.calls[0]["model"] == "nous/stale-model"
+        assert client.calls[2]["stream"] is True
+        # The fork retry site: same client (self-heal, not a credential
+        # refresh), streamed, using the healed model.
+        assert client.calls[2]["model"] == "nous/healed-model"
+
+    def test_nous_payment_refresh_streams_on_refreshed_client(self):
+        stale_client = (
+            _StepClient(base_url="https://inference-api.nousresearch.com/v1")
+            .then_raise(_NousPaymentRequired())  # classified -> no internal plain fallback
+        )
+        refreshed_client = (
+            _StepClient(base_url="https://inference-api.nousresearch.com/v1")
+            .then_stream(_success_chunks("payment-refreshed-ok"))
+        )
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("nous", "nous/some-model", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(stale_client, "nous/some-model")),
+            patch("agent.auxiliary_client._nous_portal_account_has_fresh_paid_access", return_value=True),
+            patch("agent.auxiliary_client._refresh_nous_auxiliary_client",
+                  return_value=(refreshed_client, "nous/refreshed-model")) as mock_refresh,
+            aux_progress_hook(lambda: None),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.choices[0].message.content == "payment-refreshed-ok"
+        mock_refresh.assert_called_once()
+        assert len(stale_client.calls) == 1
+        assert stale_client.calls[0]["stream"] is True
+        # The fork retry site: the REFRESHED client, not the stale one.
+        assert len(refreshed_client.calls) == 1
+        assert refreshed_client.calls[0]["stream"] is True
+        assert refreshed_client.calls[0]["model"] == "nous/refreshed-model"
+
+    def test_nous_401_refresh_streams_on_refreshed_client(self):
+        stale_client = (
+            _StepClient(base_url="https://inference-api.nousresearch.com/v1")
+            .then_raise(_NousUnauthorized())  # classified -> no internal plain fallback
+        )
+        refreshed_client = (
+            _StepClient(base_url="https://inference-api.nousresearch.com/v1")
+            .then_stream(_success_chunks("auth-refreshed-ok"))
+        )
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("nous", "nous/some-model", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(stale_client, "nous/some-model")),
+            patch("agent.auxiliary_client._refresh_nous_auxiliary_client",
+                  return_value=(refreshed_client, "nous/refreshed-model")) as mock_refresh,
+            aux_progress_hook(lambda: None),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.choices[0].message.content == "auth-refreshed-ok"
+        mock_refresh.assert_called_once()
+        assert len(stale_client.calls) == 1
+        assert stale_client.calls[0]["stream"] is True
+        # The fork retry site: the REFRESHED client, not the stale one.
+        assert len(refreshed_client.calls) == 1
+        assert refreshed_client.calls[0]["stream"] is True
+        assert refreshed_client.calls[0]["model"] == "nous/refreshed-model"
+
+    def test_rate_limit_retry_before_pool_recovery_streams_on_same_client(self):
+        client = (
+            _StepClient(base_url="https://openrouter.ai/api/v1")
+            .then_raise(_RateLimited())  # classified -> no internal plain fallback
+            .then_stream(_success_chunks("rate-limit-retry-ok"))
+        )
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("auto", "some/model", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client", return_value=(client, "some/model")),
+            patch("agent.auxiliary_client._recoverable_pool_provider", return_value="openrouter"),
+            patch("agent.auxiliary_client._recover_provider_pool") as mock_recover,
+            aux_progress_hook(lambda: None),
+        ):
+            result = call_llm(
+                task="compression",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert result.choices[0].message.content == "rate-limit-retry-ok"
+        assert len(client.calls) == 2
+        assert client.calls[0]["stream"] is True
+        # The fork retry site: same client and kwargs, streamed, tried
+        # BEFORE falling through to full credential-pool rotation.
+        assert client.calls[1]["stream"] is True
+        assert client.calls[1]["model"] == client.calls[0]["model"]
+        mock_recover.assert_not_called()
 
 
 class TestAnthropicAuxiliaryReasoningTranslation:
