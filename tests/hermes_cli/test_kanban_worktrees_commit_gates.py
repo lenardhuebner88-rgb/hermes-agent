@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -757,3 +758,99 @@ def test_lane_scope_coder_allows_generated_web_dist(repo, kanban_home):
         out = _complete(conn, task_id)
         assert out is not None and out["action"] == "merged"
         assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+# ---------------------------------------------------------------------------
+# Per-task attribution: siblings share ONE chain branch (worktree lease is
+# `chain:<root_task_id>`), so the lane check must diff against the task's own
+# pre_run_commit_sha, not cumulatively against the merge target.
+# ---------------------------------------------------------------------------
+
+def _insert_run_with_pre_sha(conn, task_id, pre_sha):
+    """Register a worker run carrying the worktree HEAD from before its start
+    (the value prepare_reused_task_worktree stamps into pre_run_commit_sha)."""
+    now = int(time.time())
+    cur = conn.execute(
+        "INSERT INTO task_runs "
+        "(task_id, profile, status, started_at, ended_at, outcome, "
+        " pre_run_commit_sha) "
+        "VALUES (?, 'tester', 'done', ?, ?, 'completed', ?)",
+        (task_id, now, now, pre_sha),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def _lane_scope_sibling_chain(conn, repo, root_id, b_commits):
+    """ONE chain branch, TWO tasks: coder A commits hermes_cli/foo.py and
+    completes (deferred — B is still open); coder-frontend B is then stamped
+    with the post-A HEAD as its pre_run_commit_sha and commits ``b_commits``.
+    Returns (task_b, info)."""
+    info = kwt.ensure_worktree(repo, root_id)
+    task_a = kb.create_task(
+        conn, title="chain backend slice", assignee="coder",
+        workspace_kind="dir", workspace_path=str(info["path"]),
+    )
+    task_b = kb.create_task(
+        conn, title="chain frontend slice", assignee="coder-frontend",
+        workspace_kind="dir", workspace_path=str(info["path"]),
+    )
+    _insert_run_with_pre_sha(conn, task_a, _git(info["path"], "rev-parse", "HEAD"))
+    _commit_in(
+        info["path"], "hermes_cli/foo.py", "FOO = 1\n",
+        msg=f"kanban({root_id}): backend slice",
+    )
+    out_a = _complete(conn, task_a)
+    assert out_a is not None and out_a["action"] == "deferred"
+    assert _events(conn, task_a, "worker_gate_blocked") == []
+    conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (task_a,))
+    conn.commit()
+    _insert_run_with_pre_sha(conn, task_b, _git(info["path"], "rev-parse", "HEAD"))
+    for relpath, content in b_commits:
+        _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): frontend")
+    return task_b, info
+
+
+def test_lane_scope_sibling_files_not_attributed_to_frontend_task(repo, kanban_home):
+    # The decomposer-prompt pattern: a coder child plus a coder-frontend
+    # child on the SAME chain branch. B's own diff contains only
+    # web/src/control/Bar.tsx — A's hermes_cli/foo.py must NOT be attributed
+    # to B. With the old cumulative diff this test is RED (B blocked on
+    # hermes_cli/foo.py); that control probe is cited in report-s2.md.
+    with kb.connect() as conn:
+        task_b, _info = _lane_scope_sibling_chain(
+            conn, repo, "t_ls_sib_ok",
+            b_commits=[("web/src/control/Bar.tsx", "export const Bar = 1\n")],
+        )
+        out = _complete(conn, task_b)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_b, "worker_gate_blocked") == []
+    # The full chain — A's backend file AND B's frontend file — landed.
+    assert (repo / "hermes_cli" / "foo.py").exists()
+    assert (repo / "web" / "src" / "control" / "Bar.tsx").exists()
+
+
+def test_lane_scope_sibling_block_names_only_own_violating_paths(repo, kanban_home):
+    # B genuinely crosses the lane (hermes_cli/baz.py) and stays blocked —
+    # but the payload names ONLY B's own violation, never A's sibling file.
+    with kb.connect() as conn:
+        task_b, info = _lane_scope_sibling_chain(
+            conn, repo, "t_ls_sib_bad",
+            b_commits=[
+                ("web/src/control/Bar.tsx", "export const Bar = 1\n"),
+                ("hermes_cli/baz.py", "BAZ = 1\n"),
+            ],
+        )
+        out = _complete(conn, task_b)
+        assert out is not None and out["action"] == "parked"
+        assert "lane-scope violation" in out["reason"]
+        blocked = _events(conn, task_b, "worker_gate_blocked")
+        assert len(blocked) == 1
+        payload = blocked[0]
+        assert payload["violating_paths"] == ["hermes_cli/baz.py"]
+        assert payload["expected_lane"] == "coder"
+        assert "hermes_cli/foo.py" not in payload["violating_paths"]
+        assert "hermes_cli/foo.py" not in payload["changed_files"]
+    # Nothing merged; the branch (both slices) survives for the operator.
+    assert not (repo / "hermes_cli" / "baz.py").exists()
+    assert _git(repo, "rev-parse", info["branch"])

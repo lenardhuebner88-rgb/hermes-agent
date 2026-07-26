@@ -5756,17 +5756,54 @@ def _enforce_lane_scope_on_complete(
             base = current_branch(repo_root)
         except WorktreeError:
             return None
+    # Per-task attribution. Chain worktrees are provisioned per ROOT task, so
+    # siblings of one PlanSpec share a single branch (writer lease
+    # `chain:<root_task_id>`) — including the decomposer-prompt's own pattern
+    # of a coder child plus a dependent coder-frontend child. A cumulative
+    # `{base}...{branch}` diff would therefore also see the SIBLING's files
+    # and fail-closed block exactly the split the lane rule was built for.
+    # task_runs.pre_run_commit_sha holds the worktree HEAD right before THIS
+    # task's worker run (written after prepare_worker_base in
+    # prepare_reused_task_worktree), so `<sha>..<branch>` — TWO dots, "what
+    # did this task add", not a merge-base comparison — contains exactly this
+    # task's own commits.
+    diff_spec = f"{base}...{branch}"
+    pre_run = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs "
+        "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
+        "AND pre_run_commit_sha != '' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
+    if pre_run_sha:
+        try:
+            _git(repo_root, "rev-parse", "--verify", f"{pre_run_sha}^{{commit}}")
+            diff_spec = f"{pre_run_sha}..{branch}"
+        except WorktreeError:
+            # Fallback 2: the recorded SHA no longer resolves (object collected
+            # / branch rewritten) — use the cumulative diff rather than
+            # skipping the check, and say so in the log.
+            _log.warning(
+                "lane-scope: pre_run_commit_sha %s of task %s does not "
+                "resolve; falling back to cumulative diff",
+                pre_run_sha,
+                task_id,
+            )
+    # Fallback 1 (no pre_run_commit_sha on ANY run of this task — legacy task
+    # or non-isolated run): keep the cumulative `{base}...{branch}` diff.
+    # Behavior identical to the original check, never worse.
     try:
         changed_files = [
             path
             for path in _git(
-                repo_root, "diff", "--name-only", f"{base}...{branch}",
+                repo_root, "diff", "--name-only", diff_spec,
             ).splitlines()
             if path
         ]
     except WorktreeError as exc:
         _log.warning(
-            "lane-scope check could not diff %s...%s: %s", base, branch, exc,
+            "lane-scope check could not diff %s: %s", diff_spec, exc,
         )
         return None
     violating, expected_lane = _lane_scope_violations(assignee, changed_files)
