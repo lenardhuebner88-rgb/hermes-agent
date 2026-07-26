@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 import os
 import re
@@ -26,6 +27,11 @@ _PAGE_SIZE = 100
 _TRACE_BATCH_SIZE = 50
 _SCORE_BATCH_SIZE = 50
 _SCORE_LEDGER_NAME = "langfuse-score-export-ledger.json"
+_CRON_ALERT_HISTORY_NAME = "langfuse-score-export-alert-history.json"
+CRON_ALERT_HISTORY_LIMIT = 100
+DEFAULT_CRON_BACKFILL_EVENT_LIMIT = 100
+_CRON_BACKFILL_EVENT_LIMIT_ENV = "HERMES_LANGFUSE_CRON_BACKFILL_EVENT_LIMIT"
+logger = logging.getLogger(__name__)
 _OUTCOME_NAMES = {
     1.0: "completed", 2.0: "blocked", 3.0: "iteration_budget_exhausted",
     4.0: "spawn_failed", 5.0: "gave_up", 6.0: "crashed", 7.0: "reclaimed",
@@ -150,6 +156,62 @@ def _write_score_ledger(path: Path, score_ids: set[str]) -> None:
         except OSError:
             pass
         raise
+
+
+def _cron_alert_history_path(path: Path | None = None) -> Path:
+    """Return the per-profile file alongside the score export resume ledger."""
+    return Path(path) if path is not None else get_hermes_home() / _CRON_ALERT_HISTORY_NAME
+
+
+def _load_cron_alert_history(path: Path) -> tuple[list[dict[str, Any]], str | None]:
+    """Read the bounded history without treating a missing file as an error."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], None
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], str(exc)
+    values = raw.get("entries") if isinstance(raw, dict) else raw
+    if not isinstance(values, list):
+        return [], "history payload has no entries list"
+    return [entry for entry in values if isinstance(entry, dict)], None
+
+
+def read_cron_alert_history(path: Path | None = None) -> list[dict[str, Any]]:
+    """Return persisted cron threshold evaluations for dashboard/API callers."""
+    resolved_path = _cron_alert_history_path(path)
+    entries, error = _load_cron_alert_history(resolved_path)
+    if error is not None:
+        logger.warning("cannot read cron alert history at %s: %s", resolved_path, error)
+    return entries
+
+
+def _append_cron_alert_history(path: Path, entries: list[dict[str, Any]]) -> None:
+    """Best-effort atomic persistence; cron alerts must survive history I/O faults."""
+    existing, error = _load_cron_alert_history(path)
+    if error is not None:
+        logger.warning("cannot read cron alert history at %s: %s", path, error)
+        return
+    content = json.dumps(
+        {"entries": (existing + entries)[-CRON_ALERT_HISTORY_LIMIT:]},
+        indent=2,
+        sort_keys=True,
+    ) + "\n"
+    temporary: str | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(temporary, path)
+    except OSError as exc:
+        logger.warning("cannot write cron alert history at %s: %s", path, exc)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _remote_score_ids(host: str, authorization: str) -> set[str]:
@@ -596,6 +658,7 @@ def _export_score_backfill(
     ledger_path: Path | None,
     batch_size: int,
     event_limit: int | None,
+    cron_backfill_limit: int | None = None,
 ) -> dict[str, Any]:
     """Backfill scores through ingestion with a durable, idempotent ledger."""
     path = _score_ledger_path(ledger_path)
@@ -650,6 +713,11 @@ def _export_score_backfill(
         "matched": matchable,
         "posted": 0,
     }
+    if cron_backfill_limit is not None and report["remaining_events"]:
+        report["backfill_limit_message"] = (
+            f"cron backfill capped at {cron_backfill_limit} events; "
+            f"{report['remaining_events']} event(s) remain"
+        )
     if dry_run:
         report["would_post"] = len(planned)
         return report
@@ -698,6 +766,15 @@ def _cron_env_float(name: str, default: float) -> float:
     return value if math.isfinite(value) and value > 0 else default
 
 
+def _cron_backfill_event_limit(env: Mapping[str, str]) -> int:
+    """Read a positive cron backfill limit without letting bad env break cron."""
+    try:
+        value = int(env.get(_CRON_BACKFILL_EVENT_LIMIT_ENV, DEFAULT_CRON_BACKFILL_EVENT_LIMIT))
+    except (TypeError, ValueError):
+        return DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+    return value if value > 0 else DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+
+
 def _nearest_rank_p95(values: list[float]) -> float | None:
     if not values:
         return None
@@ -711,6 +788,7 @@ def cron_export_alert(
     now: int | None = None,
     cost_p95_multiplier: float | None = None,
     cache_hit_ratio_threshold: float | None = None,
+    history_path: Path | None = None,
 ) -> str | None:
     """Return one compact daily alert, or ``None`` when the cron should stay quiet.
 
@@ -768,9 +846,21 @@ def cron_export_alert(
         return None
 
     messages: list[str] = []
+    evaluations: list[dict[str, Any]] = []
+    timestamp = datetime.fromtimestamp(current_time, tz=timezone.utc).isoformat().replace("+00:00", "Z")
     if current_cost_p95 is not None and len(historical_p95s) == 7:
         baseline = float(statistics.median(historical_p95s))
         limit = baseline * cost_p95_multiplier
+        state = "alarm" if current_cost_p95 > limit else "clear"
+        evaluations.append(
+            {
+                "timestamp": timestamp,
+                "threshold": "cost_p95_vs_7d_median",
+                "value": current_cost_p95,
+                "limit": limit,
+                "state": state,
+            }
+        )
         if current_cost_p95 > limit:
             messages.append(
                 f"cost p95 ${current_cost_p95:.4g} exceeds "
@@ -778,11 +868,32 @@ def cron_export_alert(
             )
     if cache_values:
         cache_hit_ratio = statistics.fmean(cache_values)
+        state = "alarm" if cache_hit_ratio < cache_hit_ratio_threshold else "clear"
+        evaluations.append(
+            {
+                "timestamp": timestamp,
+                "threshold": "cache_hit_ratio",
+                "value": cache_hit_ratio,
+                "limit": cache_hit_ratio_threshold,
+                "state": state,
+            }
+        )
         if cache_hit_ratio < cache_hit_ratio_threshold:
             messages.append(
                 f"cache hit ratio {cache_hit_ratio:.1%} below "
                 f"{cache_hit_ratio_threshold:.1%}"
             )
+    if not evaluations:
+        evaluations.append(
+            {
+                "timestamp": timestamp,
+                "threshold": "metrics_available",
+                "value": 0.0,
+                "limit": 1.0,
+                "state": "clear",
+            }
+        )
+    _append_cron_alert_history(_cron_alert_history_path(history_path), evaluations)
     return "; ".join(messages) or None
 
 
@@ -795,6 +906,7 @@ def export_scores(
     ledger_path: Path | None = None,
     batch_size: int = _SCORE_BATCH_SIZE,
     event_limit: int | None = None,
+    cron: bool = False,
 ) -> dict[str, Any]:
     """Export active-board scores without mutating the Kanban database."""
     selected_db = db_path or kanban_db_path()
@@ -820,6 +932,11 @@ def export_scores(
         if event_limit < 1:
             raise ValueError("event_limit must be at least 1")
     if backfill:
+        cron_backfill_limit = (
+            _cron_backfill_event_limit(runtime_env)
+            if cron and event_limit is None
+            else None
+        )
         return _export_score_backfill(
             rows,
             host=host,
@@ -828,7 +945,8 @@ def export_scores(
             dry_run=dry_run,
             ledger_path=ledger_path,
             batch_size=batch_size,
-            event_limit=event_limit,
+            event_limit=event_limit if event_limit is not None else cron_backfill_limit,
+            cron_backfill_limit=cron_backfill_limit,
         )
     by_run, by_task = _trace_ids(host, authorization)
     matched = unmatched = posted = 0
