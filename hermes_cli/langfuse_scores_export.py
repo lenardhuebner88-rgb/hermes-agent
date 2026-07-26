@@ -505,6 +505,9 @@ export_traces = synthesize_traces
 export_trace_backfill = synthesize_traces
 
 
+CATEGORICAL_SCORE_NAMES = frozenset({"review_verdict", "run_outcome_kind", "task_outcome"})
+
+
 def _score_payload(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
     name, value = str(row["name"]), row["value"]
     payload: dict[str, Any] = {"id": f"hermes-board-score-{row['id']}", "traceId": trace_id,
@@ -517,6 +520,8 @@ def _score_payload(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
     elif name == "run_outcome_kind":
         payload.update({"value": row["outcome"] or _OUTCOME_NAMES.get(float(value or 0), "unknown"),
                         "dataType": "CATEGORICAL"})
+    elif name in CATEGORICAL_SCORE_NAMES:
+        payload.update({"value": str(value), "dataType": "CATEGORICAL"})
     else:
         payload["dataType"] = "NUMERIC"
     return payload
