@@ -389,6 +389,10 @@ class TestFailureAttribution:
         (hermes_home / "auth.json").write_text(
             json.dumps({"version": 1, "credential_pool": {"anthropic": entries}})
         )
+        monkeypatch.setattr(
+            "agent.anthropic_adapter.read_claude_code_credentials",
+            lambda: None,
+        )
         from agent.credential_pool import load_pool
 
         return load_pool("anthropic")
@@ -574,6 +578,32 @@ class TestFailureAttribution:
         assert recovered is False
         assert self._statuses(pool)["cred-0"] != "exhausted"
         agent._swap_credential.assert_not_called()
+
+    def test_unmatched_key_rotates_when_another_pool_entry_exists(
+        self, tmp_path, monkeypatch
+    ):
+        """Legacy unmatched keys still move to a pool key with multiple entries."""
+        pool = self._make_pool(
+            tmp_path, monkeypatch,
+            [self._entry(0, "key-a"), self._entry(1, "key-b")],
+        )
+        assert len(pool.entries()) == 2
+        assert pool.select().id == "cred-0"
+        agent = self._agent(pool, failing_key="wrapper-runtime-key")
+        agent._is_entitlement_failure = MagicMock(return_value=False)
+
+        from agent.agent_runtime_helpers import recover_with_credential_pool
+
+        recovered, _ = recover_with_credential_pool(
+            agent, status_code=401, has_retried_429=False
+        )
+
+        assert recovered is True
+        assert all(status != "exhausted" for status in self._statuses(pool).values())
+        swapped = agent._swap_credential.call_args[0][0]
+        assert swapped.id in {"cred-0", "cred-1"}
+        assert swapped.runtime_api_key in {"key-a", "key-b"}
+        assert swapped.runtime_api_key != agent.api_key
 
     def test_stable_id_rotates_from_failed_entry_when_cursor_points_elsewhere(
         self, tmp_path, monkeypatch
