@@ -659,6 +659,13 @@ def test_lane_scope_coder_frontend_blocks_backend_path(repo, kanban_home):
         assert payload["violating_paths"] == ["hermes_cli/kanban.py"]
         assert payload["expected_lane"] == "coder"
         assert payload["assignee"] == "coder-frontend"
+        fixer_event = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_event) == 1
+        fixer = kb.get_task(conn, fixer_event[0]["child_id"])
+        assert fixer.assignee == "coder"
+        assert fixer.workspace_kind == "dir"
+        assert fixer.workspace_path == str(info["path"])
+        assert "hermes_cli/kanban.py" in fixer.body
     # Nothing merged; the branch survives for the operator.
     assert not (repo / "hermes_cli" / "kanban.py").exists()
     assert _git(repo, "rev-parse", info["branch"])
@@ -694,6 +701,13 @@ def test_lane_scope_coder_blocks_frontend_path(repo, kanban_home):
         assert payload["violating_paths"] == ["web/src/control/Foo.tsx"]
         assert payload["expected_lane"] == "coder-frontend"
         assert payload["assignee"] == "coder"
+        fixer_event = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_event) == 1
+        fixer = kb.get_task(conn, fixer_event[0]["child_id"])
+        assert fixer.assignee == "coder-frontend"
+        assert fixer.workspace_kind == "dir"
+        assert fixer.workspace_path == str(info["path"])
+        assert "web/src/control/Foo.tsx" in fixer.body
     assert not (repo / "web" / "src" / "control" / "Foo.tsx").exists()
     assert _git(repo, "rev-parse", info["branch"])
 
