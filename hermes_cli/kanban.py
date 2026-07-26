@@ -4418,6 +4418,14 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         ]
         retry_line = "Retry-Hotspots: " + ", ".join(hs_parts)
 
+    findings_line = ""
+    if digest.get("top_findings"):
+        rendered = " | ".join(
+            f"{finding['title']} €{finding['impact_eur']:.2f} ({finding['summary']})"
+            for finding in digest["top_findings"]
+        )
+        findings_line = f"Top-Befunde: {rendered} (Quelle: kanban.db/scores)"
+
     refs = ["Scorecard: /control → Scorecard", "Langfuse: loopback-Langfuse → Scores"]
 
     # Assemble mandatory text (everything except profile/model breakdowns)
@@ -4427,6 +4435,8 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     mandatory_parts.extend(cost_lines)
     if retry_line:
         mandatory_parts.append(retry_line)
+    if findings_line:
+        mandatory_parts.append(findings_line)
     mandatory_parts.extend(refs)
     mandatory_text = "\n".join(mandatory_parts)
 
@@ -4474,6 +4484,8 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     out_lines.extend(cost_lines)
     if retry_line:
         out_lines.append(retry_line)
+    if findings_line:
+        out_lines.append(findings_line)
     out_lines.extend(refs)
 
     text = "\n".join(out_lines)

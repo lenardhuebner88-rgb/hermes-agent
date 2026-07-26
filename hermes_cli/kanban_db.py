@@ -100,6 +100,7 @@ from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
 from hermes_cli import kanban_review_policy as _review_policy
+from hermes_cli.kanban_scores_digest import scores_digest as _fork_scores_digest
 from hermes_cli import kanban_templates
 from hermes_cli import kanban_worker_runtime as _worker_runtime
 
@@ -33875,6 +33876,12 @@ def scores_report(
 def scores_digest(
     conn: sqlite3.Connection, *, weeks: int = 4, now: Optional[int] = None
 ) -> dict[str, Any]:
+    return _fork_scores_digest(conn, weeks=weeks, now=now)
+
+
+def _legacy_scores_digest(
+    conn: sqlite3.Connection, *, weeks: int = 4, now: Optional[int] = None
+) -> dict[str, Any]:
     """Compact weekly digest: approval rates, per-profile/model breakdown,
     cost/duration per approved run, and retry hotspots.
 
@@ -33893,7 +33900,6 @@ def scores_digest(
             week_starts[0], _dt.time.min, tzinfo=_dt.timezone.utc
         ).timestamp()
     )
-
     # Overall approval rate — verdict rows only, same semantics as
     # scores_report (metric score rows share the table but carry raw values).
     overall = conn.execute(
@@ -33904,7 +33910,6 @@ def scores_digest(
     rows_total = int(overall["rows_total"])
     approved_rows = int(overall["approved_rows"])
     approval_rate = approved_rows / rows_total if rows_total else None
-
     # Weekly approval rates (last N weeks, same logic as scores_report)
     weekly_counts: dict[_dt.date, tuple[int, int]] = {}
     for row in conn.execute(
@@ -33919,7 +33924,6 @@ def scores_digest(
         if monday in week_starts:
             rt, ar = weekly_counts.get(monday, (0, 0))
             weekly_counts[monday] = (rt + 1, ar + int(row["value"] == 1.0))
-
     weekly: list[dict[str, Any]] = []
     for monday in week_starts:
         rt, ar = weekly_counts.get(monday, (0, 0))
@@ -33933,13 +33937,11 @@ def scores_digest(
                 "approval_rate": ar / rt if rt else None,
             }
         )
-
     # Week-over-week delta (last two weeks with data)
     wow_delta: Optional[float] = None
     rates_with_data = [w for w in weekly if w["approval_rate"] is not None]
     if len(rates_with_data) >= 2:
         wow_delta = rates_with_data[-1]["approval_rate"] - rates_with_data[-2]["approval_rate"]
-
     # Per-profile approval rate (review_verdict joined with task_runs)
     by_profile: dict[str, dict[str, Any]] = {}
     for row in conn.execute(
@@ -33959,7 +33961,6 @@ def scores_digest(
             "approved": approved,
             "approval_rate": approved / total if total else None,
         }
-
     # Per-model approval rate
     by_model: dict[str, dict[str, Any]] = {}
     for row in conn.execute(

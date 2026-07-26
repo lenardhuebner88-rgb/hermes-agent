@@ -599,3 +599,65 @@ def test_metric_scores_on_approved_runs_positive(tmp_path, monkeypatch):
     # Must NOT show the coverage-gap or no-metrics fallback
     assert "keine approved Runs mit Kosten-/Dauer-Scores" not in md
     assert "Metrik-Scores: keine vorhanden" not in md
+
+
+# ── LA-S7: deterministic weekly findings with EUR impact ───────────────
+
+
+def test_digest_top_findings_are_deterministic_and_rendered(tmp_path, monkeypatch):
+    """Top findings come only from the local score store and retain a stable order."""
+    now = _seed_db(tmp_path, monkeypatch)
+    current = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    previous = current - timedelta(weeks=1)
+    current_ts = int(current.timestamp())
+    previous_ts = int(previous.timestamp())
+
+    with kb.connect_closing() as conn:
+        retry_task = kb.create_task(conn, title="retry", assignee="tester")
+        retry_run = _create_run(conn, task_id=retry_task, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=retry_run, task_id=retry_task,
+                       name="task_runs_to_done", value=4.0, created_at=current_ts)
+        _insert_metric(conn, run_id=retry_run, task_id=retry_task,
+                       name="run_cost_usd", value=2.0, created_at=current_ts)
+
+        veto_task = kb.create_task(conn, title="veto", assignee="tester")
+        veto_run = _create_run(conn, task_id=veto_task, profile="reviewer", model="gpt5")
+        _insert_metric(conn, run_id=veto_run, task_id=veto_task,
+                       name="operator_veto", value=1.0, created_at=current_ts)
+        _insert_metric(conn, run_id=veto_run, task_id=veto_task,
+                       name="run_cost_usd", value=1.0, created_at=current_ts)
+
+        cache_task = kb.create_task(conn, title="cache", assignee="tester")
+        old_cache_run = _create_run(conn, task_id=cache_task, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=old_cache_run, task_id=cache_task,
+                       name="cache_hit_ratio", value=0.9, created_at=previous_ts)
+        current_cache_run = _create_run(conn, task_id=cache_task, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=current_cache_run, task_id=cache_task,
+                       name="cache_hit_ratio", value=0.1, created_at=current_ts)
+        _insert_metric(conn, run_id=current_cache_run, task_id=cache_task,
+                       name="run_cost_usd", value=0.5, created_at=current_ts)
+
+        queue_task = kb.create_task(conn, title="queue", assignee="tester")
+        queue_run = _create_run(conn, task_id=queue_task, profile="coder", model="qwen3")
+        _insert_metric(conn, run_id=queue_run, task_id=queue_task,
+                       name="queue_latency_seconds", value=3600.0, created_at=current_ts)
+        _insert_metric(conn, run_id=queue_run, task_id=queue_task,
+                       name="run_cost_usd", value=0.25, created_at=current_ts)
+
+        first = kb.scores_digest(conn, weeks=2, now=now)["top_findings"]
+        second = kb.scores_digest(conn, weeks=2, now=now)["top_findings"]
+
+    assert first == second
+    assert [finding["kind"] for finding in first] == [
+        "attempt_hotspot",
+        "veto_rate",
+        "cache_hit_drop",
+        "queue_p95",
+    ]
+    assert all(finding["impact_eur"] >= 0 for finding in first)
+    assert all(finding["data_source"] == "kanban.db/scores" for finding in first)
+
+    markdown = run_slash("scores --digest --weeks 2")
+    assert "Top-Befunde:" in markdown
+    assert "Attempt-" in markdown
+    assert "Quelle: kanban.db/scores" in markdown
