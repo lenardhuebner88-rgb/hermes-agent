@@ -4093,6 +4093,28 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                 "execution_capsule",
                 "execution_capsule TEXT",
             )
+        # S2: positive materialization signal for lane-scope diff-basis
+        # selection. 1 exactly when this run's pre_run_commit_sha was set
+        # from a resolved, post-provisioning worktree HEAD (the two stamp
+        # sites in kanban_worktrees.py: _stamp_first_materialized_run_head
+        # and prepare_reused_task_worktree's retry stamp) — 0/NULL means the
+        # run ended (any outcome) before its workspace was ever
+        # materialized, so its pre_run_commit_sha is a claim-time
+        # placeholder, not a basis for "what did this task add". Replaces an
+        # outcome-name blacklist (`outcome != 'spawn_retry'`), which missed
+        # `spawn_failed`/`gave_up` — the same never-materialized code path
+        # under different outcome labels. Default 0 so historical rows
+        # (predating this column) read as "not verified materialized", never
+        # as verified — see the fail-open handling in
+        # _enforce_lane_scope_on_complete for how that ambiguity is resolved
+        # without either falsely parking or falsely trusting old data.
+        if "workspace_materialized" not in run_cols:
+            _add_column_if_missing(
+                conn,
+                "task_runs",
+                "workspace_materialized",
+                "workspace_materialized INTEGER NOT NULL DEFAULT 0",
+            )
 
     # W3-S2: immutable handoff attachments — additive only.
     att_table_exists = (
@@ -4301,10 +4323,11 @@ _REBUILD_SPECS = {
         " last_heartbeat_at INTEGER, started_at INTEGER NOT NULL,"
         " ended_at INTEGER, outcome TEXT, summary TEXT, metadata TEXT,"
         # pre_run_commit_sha exists in SCHEMA_SQL; input_tokens/output_tokens/
-        # cost_usd/cost_status/verdict are appended to fresh DBs by the
-        # additive run_cols migration. Mirror them here in the same order so a
-        # rebuilt legacy task_runs stays byte-identical to fresh and does not
-        # silently drop the review baseline, budget columns, or verdict.
+        # cost_usd/cost_status/verdict/workspace_materialized are appended to
+        # fresh DBs by the additive run_cols migration. Mirror them here in
+        # the same order so a rebuilt legacy task_runs stays byte-identical
+        # to fresh and does not silently drop the review baseline, budget
+        # columns, verdict, or the lane-scope materialization signal.
         " error TEXT, pre_run_commit_sha TEXT,"
         " requested_provider TEXT, requested_model TEXT,"
         " active_provider TEXT, active_model TEXT,"
@@ -4315,7 +4338,8 @@ _REBUILD_SPECS = {
         " cost_usd REAL,"
         " cost_status TEXT CHECK (cost_status IN ('actual','estimated')),"
         " verdict TEXT,"
-        " execution_capsule TEXT)",
+        " execution_capsule TEXT,"
+        " workspace_materialized INTEGER NOT NULL DEFAULT 0)",
         (
             "CREATE INDEX idx_runs_task ON task_runs(task_id, started_at)",
             "CREATE INDEX idx_runs_status ON task_runs(status)",

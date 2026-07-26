@@ -1546,14 +1546,28 @@ def prepare_reused_task_worktree(
 ) -> Optional[dict[str, Any]]:
     """Prepare a task retry's already-provisioned worktree before spawn.
 
-    First-time chain provisioning is excluded: a sibling may legitimately
-    inherit earlier slice commits and uses separate chain-tip semantics.  A
-    task whose recorded workspace already pointed into the provisioned tree is
-    a retry/continuation and has an exact pre-run HEAD suitable for this guard.
+    First-time chain provisioning is excluded from base preparation: a sibling
+    may legitimately inherit earlier slice commits and uses separate chain-tip
+    semantics. Its current run is still stamped with that materialized chain
+    tip before returning. A task whose recorded workspace already pointed into
+    the provisioned tree is a retry/continuation and has an exact pre-run HEAD
+    suitable for the full preparation guard.
     """
     prior = split_provisioned_path(task.workspace_path)
     current = split_provisioned_path(workspace)
-    if prior is None or current is None:
+    if current is None:
+        return None
+    if prior is None:
+        _repo_root, _root_id, wt = current
+        try:
+            branch = current_branch(wt)
+        except (OSError, subprocess.SubprocessError, WorktreeError):
+            return None
+        from hermes_cli import kanban_db as kb
+
+        _stamp_first_materialized_run_head(
+            conn, task.id, wt, branch, kb,
+        )
         return None
     prior_repo, prior_root_id, prior_wt = prior
     repo_root, root_id, wt = current
@@ -1641,7 +1655,11 @@ def prepare_reused_task_worktree(
 
     with kb.write_txn(conn):
         conn.execute(
-            "UPDATE task_runs SET pre_run_commit_sha = ? WHERE id = ?",
+            # workspace_materialized = 1: `result["head"]` is
+            # `prepare_worker_base`'s prepared worktree HEAD — a real,
+            # already-materialized workspace, not a claim-time placeholder.
+            "UPDATE task_runs SET pre_run_commit_sha = ?, "
+            "workspace_materialized = 1 WHERE id = ?",
             (result["head"], run_id),
         )
         kb._append_event(
@@ -4389,6 +4407,72 @@ def finalize_decompose_root_at_dispatch(
     return "auto_completed_commitless"
 
 
+def _stamp_first_materialized_run_head(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worktree: Path,
+    branch: str,
+    kb,
+) -> None:
+    """Replace claim-time repo HEAD with the first materialized branch HEAD.
+
+    ``claim_task`` necessarily runs before managed workspace materialization,
+    so a first-run chain child may initially carry the inherited root
+    checkout's HEAD.  Once provisioning has resolved the actual chain
+    worktree, stamp only the still-current run with that branch tip.
+
+    Reused worktrees are intentionally handled by
+    :func:`prepare_reused_task_worktree`, whose post-rebase HEAD is more
+    precise.  The event guard also prevents an unusual repeated
+    materialization call from overwriting that prepared value.
+    """
+    row = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    run_id = int(row["current_run_id"]) if row and row["current_run_id"] else None
+    if run_id is None:
+        return
+    prepared = conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'worker_base_prepared' "
+        "LIMIT 1",
+        (task_id, run_id),
+    ).fetchone()
+    if prepared is not None:
+        return
+    try:
+        branch_head = _git(
+            worktree, "rev-parse", "--verify", f"{branch}^{{commit}}",
+        )
+    except (OSError, subprocess.SubprocessError, WorktreeError):
+        return
+    if not branch_head:
+        return
+    with kb.write_txn(conn):
+        conn.execute(
+            # workspace_materialized = 1 here is the positive materialization
+            # signal the lane-scope basis-selection query relies on: this
+            # UPDATE only ever fires once the worktree HEAD has actually been
+            # resolved above, i.e. the workspace is real, not a claim-time
+            # placeholder.
+            "UPDATE task_runs SET pre_run_commit_sha = ?, "
+            "workspace_materialized = 1 "
+            "WHERE id = ? AND task_id = ? "
+            "AND EXISTS ("
+            "  SELECT 1 FROM tasks "
+            "  WHERE tasks.id = ? AND tasks.current_run_id = task_runs.id"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM task_events "
+            "  WHERE task_events.task_id = ? "
+            "    AND task_events.run_id = task_runs.id "
+            "    AND task_events.kind = 'worker_base_prepared'"
+            ")",
+            (branch_head, run_id, task_id, task_id, task_id),
+        )
+
+
 def _provision_task_workspace(
     conn: sqlite3.Connection,
     task,
@@ -4493,6 +4577,13 @@ def _provision_task_workspace(
             "UPDATE tasks SET branch_name = ? WHERE id = ?",
             (info["branch"], task.id),
         )
+    _stamp_first_materialized_run_head(
+        conn,
+        task.id,
+        info["path"],
+        info["branch"],
+        kb,
+    )
     candidate = conn.execute(
         "SELECT 1 FROM task_events WHERE task_id=? AND kind='terminal_candidate_pending' LIMIT 1",
         (root_id,),
@@ -5940,6 +6031,299 @@ def integrate_chain(
 # Completion hook (maybe_integrate_on_complete)
 # ---------------------------------------------------------------------------
 
+# Lane-scope enforcement (coder <-> coder-frontend) — the MECHANICAL backing
+# for the PATH RULE that today exists only as prompt text in the decomposer
+# (hermes_cli/kanban_decompose.py, "PATH RULE for coder vs coder-frontend").
+# The prompt stays word-identical; this block is the enforcement at the
+# worker-commit boundary, where the actually changed file set is known.
+#
+# The rule (exactly this, no extension):
+#   - assignee coder-frontend: EVERY changed path must start with one of
+#     LANE_SCOPE_FRONTEND_PREFIXES; anything else is a violation.
+#   - assignee coder: NO changed path may start with one of
+#     LANE_SCOPE_FRONTEND_PREFIXES; any match is a violation.
+#   - every other lane (premium, …): not checked at all.
+LANE_SCOPE_ENFORCED_ASSIGNEES = frozenset({"coder", "coder-frontend"})
+LANE_SCOPE_FRONTEND_PREFIXES = ("web/src/control/", "web/e2e/")
+
+# Named exceptions (closed list — add nothing without a commented reason):
+#
+# 1. Generated build output. Counts as a frontend path for NEITHER lane
+#    (mirrors the decomposer prompt, kanban_decompose.py).
+LANE_SCOPE_NEVER_FRONTEND_PREFIXES = ("hermes_cli/web_dist/",)
+# 2. Upstream-owned web entry files. They belong to `coder`, NOT to
+#    `coder-frontend` (mirrors the decomposer prompt). With the current
+#    prefixes they cannot match anyway; listed explicitly so the split is
+#    documented in one place and stays correct if the prefixes ever widen.
+LANE_SCOPE_UPSTREAM_WEB_PATHS = (
+    "web/src/App.tsx",
+    "web/src/main.tsx",
+    "web/index.html",
+    "web/vite.config.ts",
+)
+# 3. Artifact paths already classified as "not real source code": the existing
+#    PRESERVABLE_ARTIFACTS_CLASS classification (`_is_preservable_artifact_path`
+#    / `_classify_dirty_paths`) is reused verbatim — not redefined here.
+
+# Event kind shared with the command-based worker gate in kanban_db.py so the
+# dashboard and evaluation pick up lane-scope blocks unchanged.
+LANE_SCOPE_BLOCKED_EVENT = "worker_gate_blocked"
+
+
+def _lane_scope_is_frontend_path(path: str) -> bool:
+    normalized = _normalize_dirty_path(path)
+    if not normalized:
+        return False
+    if normalized in LANE_SCOPE_UPSTREAM_WEB_PATHS:
+        return False
+    if any(normalized.startswith(p) for p in LANE_SCOPE_NEVER_FRONTEND_PREFIXES):
+        return False
+    return any(normalized.startswith(p) for p in LANE_SCOPE_FRONTEND_PREFIXES)
+
+
+def _lane_scope_violations(
+    assignee: str, changed_files: Sequence[str],
+) -> tuple[list[str], Optional[str]]:
+    """Return ``(violating_paths, expected_lane)`` for a lane-bound assignee.
+
+    Preservable artifact paths (existing PRESERVABLE_ARTIFACTS_CLASS
+    classification) are excluded from the checked set — they are not source
+    code and never decide a lane.
+    """
+    checked = [
+        path for path in changed_files
+        if path and not _is_preservable_artifact_path(path)
+    ]
+    if assignee == "coder-frontend":
+        return [p for p in checked if not _lane_scope_is_frontend_path(p)], "coder"
+    if assignee == "coder":
+        return (
+            [p for p in checked if _lane_scope_is_frontend_path(p)],
+            "coder-frontend",
+        )
+    return [], None
+
+
+def _enforce_lane_scope_on_complete(
+    conn: sqlite3.Connection,
+    task_id: str,
+    repo_root: Path,
+    branch: str,
+    merge_target: Optional[str],
+    kb,
+) -> Optional[dict]:
+    """Hard lane-scope check at the worker-commit boundary.
+
+    Called from :func:`maybe_integrate_on_complete` for every completion of a
+    provisioned task — BEFORE the done write — so a coder/coder-frontend task
+    whose branch diff crosses the lane split is rejected here instead of
+    landing. Returns a ``parked`` outcome on violation (caller must NOT move
+    the task to done), ``None`` when the task is not lane-bound or clean.
+
+    Fail-open on git inspection errors: the integrator's own prechecks run
+    immediately after and park on any real git problem.
+    """
+    row = conn.execute(
+        "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    assignee = (row["assignee"] or "").strip().lower() if row else ""
+    if assignee not in LANE_SCOPE_ENFORCED_ASSIGNEES:
+        return None
+    if not _branch_exists(repo_root, branch):
+        return None
+    base = merge_target
+    if not base:
+        try:
+            base = current_branch(repo_root)
+        except WorktreeError:
+            return None
+    # Per-task attribution. Chain worktrees are provisioned per ROOT task, so
+    # siblings of one PlanSpec share a single branch (writer lease
+    # `chain:<root_task_id>`) — including the decomposer-prompt's own pattern
+    # of a coder child plus a dependent coder-frontend child. A cumulative
+    # `{base}...{branch}` diff would therefore also see the SIBLING's files
+    # and fail-closed block exactly the split the lane rule was built for.
+    # task_runs.pre_run_commit_sha holds the worktree HEAD right before THIS
+    # task's first worker run (first materialization stamps it; retries retain
+    # later per-run stamps for workspace preparation).  Select the oldest
+    # available task run so `<sha>..<branch>` — TWO dots, "what did this task
+    # add across all retries", not a merge-base comparison — contains exactly
+    # this task's own commits.
+    #
+    # A run that ends before its workspace was ever materialized (a
+    # provisioning failure caught by `_record_spawn_failure`/`_record_spawn_retry`/
+    # any other outcome that funnels through `_record_task_failure` with
+    # `end_run=True` in kanban_db.py) closes while STILL carrying its
+    # claim-time stamp — the pre-materialization workspace HEAD (repo root,
+    # not yet the chain worktree). That stamp predates even a sibling's
+    # commit already on the chain branch, so picking it as the oldest
+    # candidate attributes the sibling's files to this task.
+    #
+    # A blacklist of "bad" outcome names is the wrong shape for this: on the
+    # live board `spawn_retry` (the value the first cut of this filter
+    # excluded) has 0 runs, while `spawn_failed` (148 runs) and `gave_up`
+    # (175 runs) — both reachable via the exact same never-materialized
+    # code path — were silently let through. Select on a POSITIVE
+    # materialization signal instead: `task_runs.workspace_materialized` is
+    # set to 1 at the exact two call sites that stamp a real (post-
+    # provisioning) worktree HEAD — `_stamp_first_materialized_run_head`
+    # (first-time chain provisioning) and the retry/continuation stamp in
+    # `prepare_reused_task_worktree` — and nowhere else, so it is true
+    # regardless of which outcome name eventually closes the run.
+    diff_spec = f"{base}...{branch}"
+    pre_run = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs "
+        "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
+        "AND pre_run_commit_sha != '' "
+        "AND workspace_materialized = 1 "
+        "ORDER BY id ASC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
+    if not pre_run_sha:
+        # No run of this task carries a verified materialization stamp.
+        # Two distinct populations land here and must be told apart:
+        #
+        #   (a) no run of this task has ANY pre_run_commit_sha at all
+        #       (legacy task / non-isolated run, predates per-task
+        #       attribution entirely) — Fallback 1 below keeps the
+        #       cumulative `{base}...{branch}` diff, exactly the pre-
+        #       per-task-attribution behavior. Unaffected by this change.
+        #
+        #   (b) stamps exist but NONE carry `workspace_materialized = 1`
+        #       — every run of this task was claimed/stamped before this
+        #       column existed (a narrow window: only tasks already
+        #       in-flight at deploy time). We cannot tell a poisoned
+        #       claim-time stamp apart from a perfectly good pre-migration
+        #       one, so Bestandsdaten must not silently flip either way.
+        #       Fail-CLOSED (treat as violation / park) would cost more
+        #       than it protects — exactly the bug this fix removes.
+        #       Fail-open here means SKIP the lane-scope check for this
+        #       one completion rather than guess at a basis, but that
+        #       skip must be visible, not indistinguishable from "clean":
+        #       log loudly so an operator auditing a merged lane-crossing
+        #       task can find the reason.
+        any_stamp = conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id = ? "
+            "AND pre_run_commit_sha IS NOT NULL AND pre_run_commit_sha != '' "
+            "LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if any_stamp is not None:
+            _log.warning(
+                "lane-scope: task %s has task_runs stamps that predate the "
+                "workspace_materialized signal (none of its runs carry a "
+                "verified materialization flag) — skipping lane-scope "
+                "enforcement for this completion rather than risk a false "
+                "park on an unverifiable basis",
+                task_id,
+            )
+            return None
+    # Set when the recorded stamp resolves but is no longer an ancestor of
+    # `branch` (the shared chain branch was rebased after the stamp was
+    # taken) — the merge-base subtraction below fills in `changed_files`
+    # from it instead of the plain cumulative diff.
+    exclude_pre_own_basis: Optional[str] = None
+    if pre_run_sha:
+        try:
+            _git(repo_root, "rev-parse", "--verify", f"{pre_run_sha}^{{commit}}")
+        except WorktreeError:
+            # Fallback 2: the recorded SHA no longer resolves (object collected
+            # / branch rewritten) — use the cumulative diff rather than
+            # skipping the check, and say so in the log.
+            _log.warning(
+                "lane-scope: pre_run_commit_sha %s of task %s does not "
+                "resolve; falling back to cumulative diff",
+                pre_run_sha,
+                task_id,
+            )
+        else:
+            if _branch_is_ancestor(repo_root, pre_run_sha, branch):
+                diff_spec = f"{pre_run_sha}..{branch}"
+            else:
+                # A resolvable object is not a safe two-dot basis after the
+                # shared chain branch was rebased: rebase mints new commit
+                # SHAs, so pre_run_sha's own object is orphaned even though
+                # its *content* still precedes this task's own commits on
+                # `branch`. A plain cumulative fallback would re-attribute a
+                # sibling's pre-existing files to this task (the exact bug
+                # the stamp exists to prevent) — instead, keep the
+                # cumulative diff as the candidate set but subtract whatever
+                # already existed at pre_run_sha, computed via the
+                # merge-base of the orphaned stamp and `branch` (the point
+                # their histories split, unaffected by the later rebase).
+                exclude_pre_own_basis = pre_run_sha
+                _log.warning(
+                    "lane-scope: pre_run_commit_sha %s of task %s is not "
+                    "an ancestor of branch %s after a rebase; excluding "
+                    "pre-existing paths via a merge-base diff instead of a "
+                    "plain cumulative fallback",
+                    pre_run_sha,
+                    task_id,
+                    branch,
+                )
+    # Fallback 1 (no pre_run_commit_sha on ANY run of this task — legacy task
+    # or non-isolated run): keep the cumulative `{base}...{branch}` diff.
+    # Behavior identical to the original check, never worse.
+    try:
+        changed_files = [
+            path
+            for path in _git(
+                repo_root, "diff", "--name-only", diff_spec,
+            ).splitlines()
+            if path
+        ]
+        if exclude_pre_own_basis:
+            merge_base_sha = _git(
+                repo_root, "merge-base", exclude_pre_own_basis, branch,
+            )
+            pre_existing = {
+                path
+                for path in _git(
+                    repo_root, "diff", "--name-only",
+                    f"{merge_base_sha}..{exclude_pre_own_basis}",
+                ).splitlines()
+                if path
+            }
+            changed_files = [
+                path for path in changed_files if path not in pre_existing
+            ]
+    except WorktreeError as exc:
+        _log.warning(
+            "lane-scope check could not diff %s: %s", diff_spec, exc,
+        )
+        return None
+    violating, expected_lane = _lane_scope_violations(assignee, changed_files)
+    if not violating:
+        return None
+    reason = (
+        f"lane-scope violation: assignee '{assignee}' changed paths outside "
+        f"its lane: {', '.join(violating)} — this task should have been "
+        f"assigned to lane '{expected_lane}'."
+    )
+    payload = {
+        "gate": "lane_scope",
+        "command": "lane-scope-check",
+        "returncode": 1,
+        "output_tail": reason,
+        "assignee": assignee,
+        "expected_lane": expected_lane,
+        "violating_paths": violating,
+        "changed_files": changed_files,
+        "branch": branch,
+        "merge_target": base,
+    }
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
+    return {
+        "action": "parked",
+        "reason": reason,
+        "branch": branch,
+        "target": base,
+        "lane_scope": payload,
+    }
+
+
 def _find_open_chain_sibling(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6485,6 +6869,22 @@ def maybe_integrate_on_complete(
     repo_root, root_id, wt = provisioned
 
     from hermes_cli import kanban_db as kb
+
+    # Lane-scope enforcement (coder <-> coder-frontend): reject the completion
+    # HERE — at the worker-commit boundary, before any sibling/integration
+    # logic — when the branch diff crosses the mechanical lane split. Runs for
+    # EVERY completion of a lane-bound task (not just the chain tip), so a
+    # violation is attributed to the task whose lane it breaks.
+    lane_block = _enforce_lane_scope_on_complete(
+        conn,
+        task_id,
+        repo_root,
+        chain_branch(root_id),
+        frozen_merge_target(conn, root_id),
+        kb,
+    )
+    if lane_block is not None:
+        return lane_block
 
     # Chain-complete check via BOTH signals, conservatively OR-ed:
     # (a) task_links membership from the chain root — covers unclaimed

@@ -398,6 +398,34 @@ def test_execution_capsule_column_present_and_migrates_idempotently(kanban_home)
         assert migrated.count("execution_capsule") == 1
 
 
+def test_s2_workspace_materialized_column_present_defaults_zero_and_migrates_idempotently(
+    kanban_home,
+):
+    """S2: task_runs gains ``workspace_materialized`` (additive, default 0 —
+    historical rows read as "not verified materialized"), and re-running the
+    additive migration is a no-op."""
+    with kb.connect_closing() as conn:
+        cols = [row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")]
+        assert cols.count("workspace_materialized") == 1
+        tid = kb.create_task(conn, title="fresh")
+        run_id = conn.execute(
+            "INSERT INTO task_runs (task_id, status, started_at) "
+            "VALUES (?, 'running', 0)",
+            (tid,),
+        ).lastrowid
+        row = conn.execute(
+            "SELECT workspace_materialized FROM task_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        assert row["workspace_materialized"] == 0
+        kb._migrate_add_optional_columns(conn)
+        kb._migrate_add_optional_columns(conn)
+        migrated = [
+            row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")
+        ]
+        assert migrated.count("workspace_materialized") == 1
+
+
 def test_k11_decompose_failed_column_present_and_defaults_zero(kanban_home):
     """K11: tasks gains ``decompose_failed`` (additive), defaulting to 0 on a
     fresh task."""
