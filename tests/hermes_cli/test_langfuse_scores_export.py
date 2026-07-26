@@ -154,20 +154,104 @@ def test_backfill_seeds_ledger_batches_ingestion_and_is_idempotent(tmp_path: Pat
     finally:
         server.shutdown()
         thread.join()
-    assert result == {"total_rows": 4, "matchable": 3, "posted_new": 2,
-                      "skipped_seen": 1, "unmatched": 1, "matched": 3, "posted": 2}
+    assert result["total_rows"] == 4
+    assert result["matchable"] == 4
+    assert result["matched"] == 4
+    assert result["unmatched"] == 0
+    assert result["posted_new"] == 3
+    assert result["skipped_seen"] == 1
+    assert result["anchor_count"] == 1
+    assert result["anchored_rows"] == 1
+    assert result["retention"]["checked"] is True
+    assert result["retention"]["active"] is False
     assert again["posted_new"] == 0
-    assert again["skipped_seen"] == 3
-    assert len(_FakeLangfuseHandler.ingestions) == 1
-    events = _FakeLangfuseHandler.ingestions[0]["batch"]
-    assert len(events) == 2
-    assert {event["type"] for event in events} == {"score-create"}
-    assert {event["body"]["id"] for event in events} == {
-        "hermes-board-score-124", "hermes-board-score-125",
+    assert again["skipped_seen"] == 4
+    assert again["anchor_count"] == 0
+    events = [
+        event for request in _FakeLangfuseHandler.ingestions for event in request["batch"]
+    ]
+    assert all(len(request["batch"]) <= 2 for request in _FakeLangfuseHandler.ingestions)
+    assert {event["body"]["id"] for event in events if event["type"] == "score-create"} == {
+        "hermes-board-score-124", "hermes-board-score-125", "hermes-board-score-126",
     }
+    assert sum(event["type"] == "trace-create" for event in events) == 1
     assert json.loads(ledger_path.read_text())["exported_score_ids"] == [
         "hermes-board-score-123", "hermes-board-score-124", "hermes-board-score-125",
+        "hermes-board-score-126",
     ]
+
+
+def test_backfill_anchors_historical_scores_without_live_trace(tmp_path: Path) -> None:
+    """Historical score rows get one deterministic task anchor before ingestion."""
+    db_path = tmp_path / "kanban.db"
+    ledger_path = tmp_path / "ledger.json"
+    conn = sqlite3.connect(db_path)
+    conn.executescript("""
+        CREATE TABLE scores (id INTEGER PRIMARY KEY, run_id INTEGER, task_id TEXT NOT NULL,
+          name TEXT NOT NULL, value REAL, value_type TEXT NOT NULL, source TEXT, created_at INTEGER);
+        CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT,
+          active_model TEXT, outcome TEXT);
+        INSERT INTO task_runs VALUES (7, 't-live', 'coder', 'model-x', 'completed');
+        INSERT INTO scores VALUES
+          (1, 7, 't-live', 'review_verdict', 1.0, 'binary', 'review_gate', 1),
+          (2, NULL, 't-live', 'review_iterations_to_approval', 2.0, 'numeric', 'review_gate', 2),
+          (3, 999, 't-historical', 'run_cost_usd', 0.25, 'numeric', 'finalizer', 3),
+          (4, 999, 't-historical', 'run_outcome_kind', 1.0, 'numeric', 'finalizer', 4),
+          (5, NULL, 't-historical', 'run_duration_seconds', 4.0, 'numeric', 'board-metrics', 5),
+          (6, NULL, 't-historical', 'run_attempt_index', 1.0, 'numeric', 'board-metrics', 6),
+          (7, NULL, 't-historical', 'review_verdict', 1.0, 'binary', 'review_gate', 7),
+          (8, NULL, 't-historical', 'review_iterations_to_approval', 2.0, 'numeric', 'review_gate', 8),
+          (9, NULL, 't-historical', 'run_cost_usd', 0.5, 'numeric', 'finalizer', 9),
+          (10, NULL, 't-historical', 'run_duration_seconds', 5.0, 'numeric', 'board-metrics', 10),
+          (11, NULL, 't-historical', 'run_attempt_index', 2.0, 'numeric', 'board-metrics', 11),
+          (12, NULL, 't-historical', 'review_verdict', 0.0, 'binary', 'review_gate', 12);
+    """)
+    conn.close()
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = [
+        {"id": "trace-live-run", "metadata": {"kanban_run_id": 7}},
+        {"id": "trace-live-task", "metadata": {"kanban_task_id": "t-live"}},
+    ]
+    _FakeLangfuseHandler.remote_scores = []
+    _FakeLangfuseHandler.ingestions = []
+    server, thread = _start_server()
+    try:
+        result = export_scores(db_path=db_path, env=_env(server), backfill=True,
+                               ledger_path=ledger_path, batch_size=2)
+        again = export_scores(db_path=db_path, env=_env(server), backfill=True,
+                              ledger_path=ledger_path, batch_size=2)
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert result["total_rows"] == 12
+    assert result["matched"] == 12
+    assert result["unmatched"] == 0
+    assert result["matched"] / result["total_rows"] >= 0.9
+    assert result["anchor_count"] == 1
+    assert result["anchored_rows"] == 10
+    assert result["posted_new"] == 12
+    assert again["posted_new"] == 0
+    assert again["anchor_count"] == 0
+    assert len(json.loads(ledger_path.read_text())["exported_score_ids"]) == 12
+    assert all(len(request["batch"]) <= 2 for request in _FakeLangfuseHandler.ingestions)
+    anchors = [
+        event["body"]
+        for request in _FakeLangfuseHandler.ingestions
+        for event in request["batch"]
+        if event["type"] == "trace-create"
+    ]
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    assert anchor["id"] == langfuse_export.trace_id_for_task("t-historical")
+    assert anchor["metadata"] == {
+        "kanban_task_id": "t-historical",
+        "kanban_score_anchor": True,
+        "score_cost_usd": 0.25,
+    }
+    assert anchor["sessionId"] == "t-historical"
+    assert anchor["userId"] == "unknown"
 
 
 def test_backfill_retries_transient_ingestion_failure(tmp_path: Path, monkeypatch) -> None:
@@ -185,7 +269,7 @@ def test_backfill_retries_transient_ingestion_failure(tmp_path: Path, monkeypatc
     finally:
         server.shutdown()
         thread.join()
-    assert result["posted_new"] == 3
+    assert result["posted_new"] == 4
     assert sleeps == [0.5]
 
 

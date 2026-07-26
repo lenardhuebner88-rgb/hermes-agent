@@ -214,6 +214,11 @@ def trace_id_for_run(run_id: int | str) -> str:
     return str(uuid5(NAMESPACE_URL, f"hermes-kanban-run:{run_id}"))
 
 
+def trace_id_for_task(task_id: str) -> str:
+    """Return a stable trace id for historical scores that outlived their run."""
+    return str(uuid5(NAMESPACE_URL, f"hermes-kanban-task:{task_id}"))
+
+
 def _event_id(kind: str, run_id: int | str) -> str:
     return str(uuid5(NAMESPACE_URL, f"hermes-kanban-{kind}:{run_id}"))
 
@@ -531,11 +536,7 @@ def _score_payload(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
 
 def _score_event(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
     payload = _score_payload(row, trace_id)
-    timestamp = (
-        _utc_timestamp(row["created_at"])
-        if "created_at" in row.keys() and row["created_at"] is not None
-        else datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    )
+    timestamp = _score_timestamp(row)
     return {
         "id": str(uuid5(NAMESPACE_URL, f"hermes-kanban-score-event:{row['id']}")),
         "timestamp": timestamp,
@@ -544,11 +545,53 @@ def _score_event(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
     }
 
 
+def _score_timestamp(row: sqlite3.Row) -> str:
+    if "created_at" in row.keys() and row["created_at"] is not None:
+        return _utc_timestamp(row["created_at"])
+    return datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _score_anchor_event(row: sqlite3.Row, trace_id: str) -> dict[str, Any]:
+    """Create a task-scoped trace for scores whose original run was pruned.
+
+    The task ID and event ID are deterministic, so retrying an ingestion batch
+    cannot multiply anchors. Missing historical profile data follows the run
+    trace contract and is represented as ``unknown`` rather than fabricated.
+    """
+    task_id = str(row["task_id"])
+    metadata: dict[str, Any] = {
+        "kanban_task_id": task_id,
+        "kanban_score_anchor": True,
+    }
+    if row["name"] == "run_cost_usd" and isinstance(row["value"], (int, float)):
+        cost = float(row["value"])
+        if math.isfinite(cost):
+            metadata["score_cost_usd"] = cost
+    timestamp = _score_timestamp(row)
+    body = {
+        "id": trace_id,
+        "timestamp": timestamp,
+        "name": "kanban-score-backfill",
+        "sessionId": task_id,
+        "userId": str(_row_value(row, "profile") or "unknown"),
+        "environment": "backfill",
+        "tags": ["kanban-worker", "score-anchor"],
+        "metadata": metadata,
+    }
+    return {
+        "id": _event_id("score-anchor", task_id),
+        "timestamp": timestamp,
+        "type": "trace-create",
+        "body": body,
+    }
+
+
 def _export_score_backfill(
     rows: list[sqlite3.Row],
     *,
     host: str,
     authorization: str,
+    env: Mapping[str, str],
     dry_run: bool,
     ledger_path: Path | None,
     batch_size: int,
@@ -559,24 +602,30 @@ def _export_score_backfill(
     # This seed is deliberately done before matching: deterministic IDs from
     # exports performed before the ledger existed must count as seen.
     known_ids.update(_remote_score_ids(host, authorization))
-    if not dry_run:
-        _write_score_ledger(path, known_ids)
 
     by_run, by_task = _trace_ids(host, authorization)
-    pending: list[tuple[sqlite3.Row, dict[str, Any]]] = []
-    matchable = unmatched = skipped_seen = 0
+    pending: list[tuple[sqlite3.Row | None, dict[str, Any]]] = []
+    anchored_tasks: set[str] = set()
+    matchable = unmatched = skipped_seen = anchored_rows = 0
     for row in rows:
+        task_id = str(row["task_id"])
         trace_id = by_run.get(str(row["run_id"])) if row["run_id"] is not None else None
         trace_id = trace_id or by_task.get(str(row["task_id"]))
         if not trace_id:
-            unmatched += 1
-            continue
+            trace_id = trace_id_for_task(task_id)
+            needs_anchor = True
+            anchored_rows += 1
+        else:
+            needs_anchor = False
         matchable += 1
         event = _score_event(row, trace_id)
         score_id = str(event["body"]["id"])
         if score_id in known_ids:
             skipped_seen += 1
         else:
+            if needs_anchor and task_id not in anchored_tasks:
+                anchored_tasks.add(task_id)
+                pending.append((None, _score_anchor_event(row, trace_id)))
             pending.append((row, event))
 
     report: dict[str, Any] = {
@@ -585,6 +634,8 @@ def _export_score_backfill(
         "posted_new": 0,
         "skipped_seen": skipped_seen,
         "unmatched": unmatched,
+        "anchor_count": len(anchored_tasks),
+        "anchored_rows": anchored_rows,
         # Keep the original result vocabulary for callers that only display
         # the generic export summary.
         "matched": matchable,
@@ -593,6 +644,17 @@ def _export_score_backfill(
     if dry_run:
         report["would_post"] = len(pending)
         return report
+
+    if anchored_tasks:
+        retention = _retention_preflight(host, authorization, env)
+        report["retention"] = retention
+        if retention["active"] or not retention["checked"]:
+            report["stopped"] = (
+                "active_retention_policy" if retention["active"] else "retention_preflight_failed"
+            )
+            return report
+
+    _write_score_ledger(path, known_ids)
 
     effective_batch_size = max(1, batch_size)
     for offset in range(0, len(pending), effective_batch_size):
@@ -603,11 +665,12 @@ def _export_score_backfill(
             method="POST",
             payload={"batch": [event for _row, event in batch]},
         )
-        known_ids.update(str(event["body"]["id"]) for _row, event in batch)
+        score_events = [(row, event) for row, event in batch if row is not None]
+        known_ids.update(str(event["body"]["id"]) for _row, event in score_events)
         # Persist after every acknowledged batch. If a later batch fails, the
         # next invocation resumes at exactly this boundary.
         _write_score_ledger(path, known_ids)
-        report["posted_new"] += len(batch)
+        report["posted_new"] += len(score_events)
     report["posted"] = report["posted_new"]
     return report
 
@@ -724,7 +787,7 @@ def export_scores(
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute("""
-            SELECT s.id, s.run_id, s.task_id, s.name, s.value, s.value_type, s.source,
+            SELECT s.id, s.run_id, s.task_id, s.name, s.value, s.value_type, s.source, s.created_at,
                    r.profile, r.active_model, r.outcome
             FROM scores AS s LEFT JOIN task_runs AS r ON r.id = s.run_id
             ORDER BY s.id
@@ -741,6 +804,7 @@ def export_scores(
             rows,
             host=host,
             authorization=authorization,
+            env=runtime_env,
             dry_run=dry_run,
             ledger_path=ledger_path,
             batch_size=batch_size,
