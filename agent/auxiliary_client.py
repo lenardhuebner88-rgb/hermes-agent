@@ -7736,6 +7736,17 @@ def call_llm(
             # Retries exhausted — fall through to first_err fallback handling.
             raise _last_transient
     except Exception as first_err:
+        # Fork note: with a progress hook installed (compression), an
+        # unclassified error reaching this except-chain already cost TWO
+        # physical requests inside _create_with_progress (the streamed
+        # attempt, then its own non-streaming fallback — see that
+        # function's docstring). Each classified retry below that also
+        # routes through _create_with_progress (temperature/max_tokens/
+        # stale-model self-heal) adds a third. On the compression path the
+        # resent prompt is the whole oversized transcript, not a small
+        # payload — measured 3 requests instead of 2 for the temperature
+        # and stale-model scenarios. This is accepted upstream behavior,
+        # not something to special-case here.
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
             retry_kwargs.pop("temperature", None)
@@ -7745,7 +7756,7 @@ def call_llm(
             )
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**retry_kwargs), task)
+                    _create_with_progress(client, retry_kwargs, task), task)
             except Exception as retry_err:
                 retry_err_str = str(retry_err)
                 # If retry still fails, fall through to the max_tokens /
@@ -7783,7 +7794,7 @@ def call_llm(
             kwargs.pop("max_completion_tokens", None)
             try:
                 return _validate_llm_response(
-                    client.chat.completions.create(**kwargs), task)
+                    _create_with_progress(client, kwargs, task), task)
             except Exception as retry_err:
                 # If the max_tokens retry also hits a payment or connection
                 # error, fall through to the fallback chain below.
@@ -7813,7 +7824,7 @@ def call_llm(
                 kwargs["model"] = healed_model
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _create_with_progress(client, kwargs, task), task)
                 except Exception as retry_err:
                     first_err = retry_err
 
@@ -7846,7 +7857,7 @@ def call_llm(
                     kwargs["model"] = refreshed_model
                 try:
                     return _validate_llm_response(
-                        refreshed_client.chat.completions.create(**kwargs), task)
+                        _create_with_progress(refreshed_client, kwargs, task), task)
                 except Exception as retry_err:
                     if not (
                         _is_auth_error(retry_err)
@@ -7874,7 +7885,7 @@ def call_llm(
                 if refreshed_model and refreshed_model != kwargs.get("model"):
                     kwargs["model"] = refreshed_model
                 return _validate_llm_response(
-                    refreshed_client.chat.completions.create(**kwargs), task)
+                    _create_with_progress(refreshed_client, kwargs, task), task)
 
         # ── Auth refresh retry ───────────────────────────────────────
         auth_refresh_provider = _auth_refresh_provider_for_route(
@@ -7924,7 +7935,7 @@ def call_llm(
             if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
                 try:
                     return _validate_llm_response(
-                        client.chat.completions.create(**kwargs), task)
+                        _create_with_progress(client, kwargs, task), task)
                 except Exception as retry_err:
                     if not (_is_auth_error(retry_err) or _is_payment_error(retry_err) or _is_rate_limit_error(retry_err)):
                         raise
