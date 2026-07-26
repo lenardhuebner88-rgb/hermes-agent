@@ -26,6 +26,8 @@ _PAGE_SIZE = 100
 _TRACE_BATCH_SIZE = 50
 _SCORE_BATCH_SIZE = 50
 _SCORE_LEDGER_NAME = "langfuse-score-export-ledger.json"
+DEFAULT_CRON_BACKFILL_EVENT_LIMIT = 100
+_CRON_BACKFILL_EVENT_LIMIT_ENV = "HERMES_LANGFUSE_CRON_BACKFILL_EVENT_LIMIT"
 _OUTCOME_NAMES = {
     1.0: "completed", 2.0: "blocked", 3.0: "iteration_budget_exhausted",
     4.0: "spawn_failed", 5.0: "gave_up", 6.0: "crashed", 7.0: "reclaimed",
@@ -596,6 +598,7 @@ def _export_score_backfill(
     ledger_path: Path | None,
     batch_size: int,
     event_limit: int | None,
+    cron_backfill_limit: int | None = None,
 ) -> dict[str, Any]:
     """Backfill scores through ingestion with a durable, idempotent ledger."""
     path = _score_ledger_path(ledger_path)
@@ -650,6 +653,11 @@ def _export_score_backfill(
         "matched": matchable,
         "posted": 0,
     }
+    if cron_backfill_limit is not None and report["remaining_events"]:
+        report["backfill_limit_message"] = (
+            f"cron backfill capped at {cron_backfill_limit} events; "
+            f"{report['remaining_events']} event(s) remain"
+        )
     if dry_run:
         report["would_post"] = len(planned)
         return report
@@ -696,6 +704,15 @@ def _cron_env_float(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) and value > 0 else default
+
+
+def _cron_backfill_event_limit(env: Mapping[str, str]) -> int:
+    """Read a positive cron backfill limit without letting bad env break cron."""
+    try:
+        value = int(env.get(_CRON_BACKFILL_EVENT_LIMIT_ENV, DEFAULT_CRON_BACKFILL_EVENT_LIMIT))
+    except (TypeError, ValueError):
+        return DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+    return value if value > 0 else DEFAULT_CRON_BACKFILL_EVENT_LIMIT
 
 
 def _nearest_rank_p95(values: list[float]) -> float | None:
@@ -795,6 +812,7 @@ def export_scores(
     ledger_path: Path | None = None,
     batch_size: int = _SCORE_BATCH_SIZE,
     event_limit: int | None = None,
+    cron: bool = False,
 ) -> dict[str, Any]:
     """Export active-board scores without mutating the Kanban database."""
     selected_db = db_path or kanban_db_path()
@@ -820,6 +838,11 @@ def export_scores(
         if event_limit < 1:
             raise ValueError("event_limit must be at least 1")
     if backfill:
+        cron_backfill_limit = (
+            _cron_backfill_event_limit(runtime_env)
+            if cron and event_limit is None
+            else None
+        )
         return _export_score_backfill(
             rows,
             host=host,
@@ -828,7 +851,8 @@ def export_scores(
             dry_run=dry_run,
             ledger_path=ledger_path,
             batch_size=batch_size,
-            event_limit=event_limit,
+            event_limit=event_limit if event_limit is not None else cron_backfill_limit,
+            cron_backfill_limit=cron_backfill_limit,
         )
     by_run, by_task = _trace_ids(host, authorization)
     matched = unmatched = posted = 0

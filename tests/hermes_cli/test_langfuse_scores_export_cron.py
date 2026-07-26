@@ -49,6 +49,29 @@ def test_cron_reports_one_line_for_posted_new(monkeypatch, capsys) -> None:
     ]
 
 
+def test_cron_command_passes_cron_mode_to_score_export(monkeypatch, capsys) -> None:
+    """The CLI boundary enables the cron-only backfill safety cap."""
+    import hermes_cli.langfuse_scores_export as export_module
+    from hermes_cli.kanban import _cmd_export_langfuse_scores
+
+    received: dict[str, object] = {}
+
+    def fake_export_scores(**kwargs: object) -> dict[str, int]:
+        received.update(kwargs)
+        return {"matched": 0, "unmatched": 0, "posted": 0, "posted_new": 0}
+
+    monkeypatch.setattr(export_module, "export_scores", fake_export_scores)
+    monkeypatch.setattr(export_module, "cron_export_alert", lambda **_kwargs: None)
+
+    rc = _cmd_export_langfuse_scores(
+        argparse.Namespace(dry_run=False, cron=True, backfill=True, event_limit=None)
+    )
+
+    assert rc == 0
+    assert received["cron"] is True
+    assert capsys.readouterr().out == ""
+
+
 def test_cron_alert_reports_cost_and_cache_thresholds_once(tmp_path: Path) -> None:
     """AC-2: both breaches become one compact alert string."""
     from hermes_cli.langfuse_scores_export import cron_export_alert

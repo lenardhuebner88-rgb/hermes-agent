@@ -4329,6 +4329,7 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
             dry_run=bool(args.dry_run),
             backfill=bool(getattr(args, "backfill", False)),
             event_limit=getattr(args, "event_limit", None),
+            cron=cron,
         )
     except (RuntimeError, ValueError) as exc:
         # --cron: errors go to stdout (single line) + non-zero exit so the

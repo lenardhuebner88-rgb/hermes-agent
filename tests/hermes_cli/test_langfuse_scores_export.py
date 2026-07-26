@@ -348,6 +348,101 @@ def test_backfill_event_limit_plans_resumes_without_orphaned_scores(tmp_path: Pa
     assert len(json.loads(ledger_path.read_text())["exported_score_ids"]) == 150
 
 
+def test_cron_backfill_without_explicit_limit_uses_default_cap_and_reports_remaining(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "kanban.db"
+    default_limit = langfuse_export.DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+    _make_historical_score_db(db_path, default_limit + 5)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    server, thread = _start_server()
+    try:
+        result = export_scores(
+            db_path=db_path, env=_env(server), backfill=True, cron=True, dry_run=True,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert result["planned_events"] == default_limit
+    assert result["remaining_events"] == 6  # five scores plus the task anchor
+    assert result["backfill_limit_message"] == (
+        f"cron backfill capped at {default_limit} events; 6 event(s) remain"
+    )
+
+
+def test_cron_backfill_explicit_limit_overrides_default_cap(tmp_path: Path) -> None:
+    db_path = tmp_path / "kanban.db"
+    default_limit = langfuse_export.DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+    explicit_limit = default_limit + 5
+    _make_historical_score_db(db_path, explicit_limit)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    server, thread = _start_server()
+    try:
+        result = export_scores(
+            db_path=db_path, env=_env(server), backfill=True, cron=True, dry_run=True,
+            event_limit=explicit_limit,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert result["planned_events"] == explicit_limit
+    assert result["remaining_events"] == 1
+    assert "backfill_limit_message" not in result
+
+
+def test_non_cron_backfill_without_explicit_limit_remains_unbounded(tmp_path: Path) -> None:
+    db_path = tmp_path / "kanban.db"
+    default_limit = langfuse_export.DEFAULT_CRON_BACKFILL_EVENT_LIMIT
+    _make_historical_score_db(db_path, default_limit + 5)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    server, thread = _start_server()
+    try:
+        result = export_scores(
+            db_path=db_path, env=_env(server), backfill=True, dry_run=True,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert result["planned_events"] == default_limit + 6
+    assert result["remaining_events"] == 0
+    assert "backfill_limit_message" not in result
+
+
+def test_cron_backfill_cap_reads_environment_override(tmp_path: Path) -> None:
+    db_path = tmp_path / "kanban.db"
+    _make_historical_score_db(db_path, 12)
+    original_traces = _FakeLangfuseHandler.traces
+    _FakeLangfuseHandler.traces = []
+    _FakeLangfuseHandler.remote_scores = []
+    server, thread = _start_server()
+    try:
+        env = _env(server)
+        env["HERMES_LANGFUSE_CRON_BACKFILL_EVENT_LIMIT"] = "7"
+        result = export_scores(
+            db_path=db_path, env=env, backfill=True, cron=True, dry_run=True,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        _FakeLangfuseHandler.traces = original_traces
+
+    assert result["planned_events"] == 7
+    assert result["remaining_events"] == 6
+    assert result["backfill_limit_message"] == "cron backfill capped at 7 events; 6 event(s) remain"
+
+
 def test_backfill_event_limit_failure_does_not_advance_ledger(tmp_path: Path, monkeypatch) -> None:
     """A failed canary batch resumes from its first event rather than skipping it."""
     db_path = tmp_path / "kanban.db"
