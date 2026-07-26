@@ -1503,6 +1503,43 @@ def resolve_chain_workspace(
     return "dir", workspace_path, branch_name
 
 
+def _workspace_repo_identity(workspace_path: str | None) -> Path | None:
+    """Return the shared Git directory identifying a workspace's repository."""
+    if not workspace_path:
+        return None
+    path = Path(workspace_path)
+    if not path.is_dir():
+        return None
+    try:
+        common_dir = _git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except (WorktreeError, OSError, subprocess.SubprocessError):
+        return None
+    return Path(common_dir).resolve() if common_dir else None
+
+
+def cross_branch_link_warning(parent: Any, child: Any) -> str | None:
+    """Describe an unsafe cross-branch link, without changing link semantics."""
+    supported_workspace_kinds = {"worktree", "dir"}
+    if (
+        getattr(parent, "workspace_kind", None) not in supported_workspace_kinds
+        or getattr(child, "workspace_kind", None) not in supported_workspace_kinds
+    ):
+        return None
+    parent_branch = getattr(parent, "branch_name", None)
+    child_branch = getattr(child, "branch_name", None)
+    if not parent_branch or not child_branch or parent_branch == child_branch:
+        return None
+    parent_repo = _workspace_repo_identity(getattr(parent, "workspace_path", None))
+    child_repo = _workspace_repo_identity(getattr(child, "workspace_path", None))
+    if parent_repo is None or parent_repo != child_repo:
+        return None
+    return (
+        "WARNING: linking tasks across branches in the same repository "
+        f"({parent_branch} -> {child_branch}). Use --chain-of when creating "
+        "follow-up tasks to keep work in the existing chain worktree."
+    )
+
+
 def _is_decompose_root(conn: sqlite3.Connection, task_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM task_events "

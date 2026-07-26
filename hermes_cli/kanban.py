@@ -3101,7 +3101,12 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
 
 def _cmd_link(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
+        parent = kb.get_task(conn, args.parent_id)
+        child = kb.get_task(conn, args.child_id)
         kb.link_tasks(conn, args.parent_id, args.child_id)
+    warning = kwt.cross_branch_link_warning(parent, child) if parent and child else None
+    if warning:
+        print(warning)
     print(f"Linked {args.parent_id} -> {args.child_id}")
     return 0
 
