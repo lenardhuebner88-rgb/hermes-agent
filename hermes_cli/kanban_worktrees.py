@@ -5650,6 +5650,156 @@ def integrate_chain(
 # Completion hook (maybe_integrate_on_complete)
 # ---------------------------------------------------------------------------
 
+# Lane-scope enforcement (coder <-> coder-frontend) — the MECHANICAL backing
+# for the PATH RULE that today exists only as prompt text in the decomposer
+# (hermes_cli/kanban_decompose.py, "PATH RULE for coder vs coder-frontend").
+# The prompt stays word-identical; this block is the enforcement at the
+# worker-commit boundary, where the actually changed file set is known.
+#
+# The rule (exactly this, no extension):
+#   - assignee coder-frontend: EVERY changed path must start with one of
+#     LANE_SCOPE_FRONTEND_PREFIXES; anything else is a violation.
+#   - assignee coder: NO changed path may start with one of
+#     LANE_SCOPE_FRONTEND_PREFIXES; any match is a violation.
+#   - every other lane (premium, …): not checked at all.
+LANE_SCOPE_ENFORCED_ASSIGNEES = frozenset({"coder", "coder-frontend"})
+LANE_SCOPE_FRONTEND_PREFIXES = ("web/src/control/", "web/e2e/")
+
+# Named exceptions (closed list — add nothing without a commented reason):
+#
+# 1. Generated build output. Counts as a frontend path for NEITHER lane
+#    (mirrors the decomposer prompt, kanban_decompose.py).
+LANE_SCOPE_NEVER_FRONTEND_PREFIXES = ("hermes_cli/web_dist/",)
+# 2. Upstream-owned web entry files. They belong to `coder`, NOT to
+#    `coder-frontend` (mirrors the decomposer prompt). With the current
+#    prefixes they cannot match anyway; listed explicitly so the split is
+#    documented in one place and stays correct if the prefixes ever widen.
+LANE_SCOPE_UPSTREAM_WEB_PATHS = (
+    "web/src/App.tsx",
+    "web/src/main.tsx",
+    "web/index.html",
+    "web/vite.config.ts",
+)
+# 3. Artifact paths already classified as "not real source code": the existing
+#    PRESERVABLE_ARTIFACTS_CLASS classification (`_is_preservable_artifact_path`
+#    / `_classify_dirty_paths`) is reused verbatim — not redefined here.
+
+# Event kind shared with the command-based worker gate in kanban_db.py so the
+# dashboard and evaluation pick up lane-scope blocks unchanged.
+LANE_SCOPE_BLOCKED_EVENT = "worker_gate_blocked"
+
+
+def _lane_scope_is_frontend_path(path: str) -> bool:
+    normalized = _normalize_dirty_path(path)
+    if not normalized:
+        return False
+    if normalized in LANE_SCOPE_UPSTREAM_WEB_PATHS:
+        return False
+    if any(normalized.startswith(p) for p in LANE_SCOPE_NEVER_FRONTEND_PREFIXES):
+        return False
+    return any(normalized.startswith(p) for p in LANE_SCOPE_FRONTEND_PREFIXES)
+
+
+def _lane_scope_violations(
+    assignee: str, changed_files: Sequence[str],
+) -> tuple[list[str], Optional[str]]:
+    """Return ``(violating_paths, expected_lane)`` for a lane-bound assignee.
+
+    Preservable artifact paths (existing PRESERVABLE_ARTIFACTS_CLASS
+    classification) are excluded from the checked set — they are not source
+    code and never decide a lane.
+    """
+    checked = [
+        path for path in changed_files
+        if path and not _is_preservable_artifact_path(path)
+    ]
+    if assignee == "coder-frontend":
+        return [p for p in checked if not _lane_scope_is_frontend_path(p)], "coder"
+    if assignee == "coder":
+        return (
+            [p for p in checked if _lane_scope_is_frontend_path(p)],
+            "coder-frontend",
+        )
+    return [], None
+
+
+def _enforce_lane_scope_on_complete(
+    conn: sqlite3.Connection,
+    task_id: str,
+    repo_root: Path,
+    branch: str,
+    merge_target: Optional[str],
+    kb,
+) -> Optional[dict]:
+    """Hard lane-scope check at the worker-commit boundary.
+
+    Called from :func:`maybe_integrate_on_complete` for every completion of a
+    provisioned task — BEFORE the done write — so a coder/coder-frontend task
+    whose branch diff crosses the lane split is rejected here instead of
+    landing. Returns a ``parked`` outcome on violation (caller must NOT move
+    the task to done), ``None`` when the task is not lane-bound or clean.
+
+    Fail-open on git inspection errors: the integrator's own prechecks run
+    immediately after and park on any real git problem.
+    """
+    row = conn.execute(
+        "SELECT assignee FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    assignee = (row["assignee"] or "").strip().lower() if row else ""
+    if assignee not in LANE_SCOPE_ENFORCED_ASSIGNEES:
+        return None
+    if not _branch_exists(repo_root, branch):
+        return None
+    base = merge_target
+    if not base:
+        try:
+            base = current_branch(repo_root)
+        except WorktreeError:
+            return None
+    try:
+        changed_files = [
+            path
+            for path in _git(
+                repo_root, "diff", "--name-only", f"{base}...{branch}",
+            ).splitlines()
+            if path
+        ]
+    except WorktreeError as exc:
+        _log.warning(
+            "lane-scope check could not diff %s...%s: %s", base, branch, exc,
+        )
+        return None
+    violating, expected_lane = _lane_scope_violations(assignee, changed_files)
+    if not violating:
+        return None
+    reason = (
+        f"lane-scope violation: assignee '{assignee}' changed paths outside "
+        f"its lane: {', '.join(violating)} — this task should have been "
+        f"assigned to lane '{expected_lane}'."
+    )
+    payload = {
+        "gate": "lane_scope",
+        "command": "lane-scope-check",
+        "returncode": 1,
+        "output_tail": reason,
+        "assignee": assignee,
+        "expected_lane": expected_lane,
+        "violating_paths": violating,
+        "changed_files": changed_files,
+        "branch": branch,
+        "merge_target": base,
+    }
+    with kb.write_txn(conn):
+        kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
+    return {
+        "action": "parked",
+        "reason": reason,
+        "branch": branch,
+        "target": base,
+        "lane_scope": payload,
+    }
+
+
 def _find_open_chain_sibling(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6195,6 +6345,22 @@ def maybe_integrate_on_complete(
     repo_root, root_id, wt = provisioned
 
     from hermes_cli import kanban_db as kb
+
+    # Lane-scope enforcement (coder <-> coder-frontend): reject the completion
+    # HERE — at the worker-commit boundary, before any sibling/integration
+    # logic — when the branch diff crosses the mechanical lane split. Runs for
+    # EVERY completion of a lane-bound task (not just the chain tip), so a
+    # violation is attributed to the task whose lane it breaks.
+    lane_block = _enforce_lane_scope_on_complete(
+        conn,
+        task_id,
+        repo_root,
+        chain_branch(root_id),
+        frozen_merge_target(conn, root_id),
+        kb,
+    )
+    if lane_block is not None:
+        return lane_block
 
     # Chain-complete check via BOTH signals, conservatively OR-ed:
     # (a) task_links membership from the chain root — covers unclaimed

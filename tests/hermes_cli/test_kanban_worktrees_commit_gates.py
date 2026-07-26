@@ -16,8 +16,10 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
 
 from tests.hermes_cli._kanban_test_helpers import (
+    _commit_in,
     _events,
     _git,
+    _ok_gate,
 )
 
 @pytest.fixture
@@ -596,3 +598,162 @@ def test_review_snapshot_is_detached_read_only_full_diff_and_stable(repo, monkey
     swept = kwt.hygiene_sweep_review_snapshots(repo, max_age_seconds=0)
     assert str(orphan_path) in [item["path"] for item in swept["removed"]]
     assert not orphan_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Lane-scope enforcement (coder <-> coder-frontend) at the worker-commit
+# boundary — mechanical backing for the decomposer PATH RULE prompt.
+# Real SQLite kanban DB + real git repos; no mocks for the file set.
+# ---------------------------------------------------------------------------
+
+def _lane_scope_task(conn, repo, root_id, *, assignee, commits):
+    """Provision a chain worktree, commit ``commits`` [(relpath, content)],
+    and register the completing task against that worktree."""
+    info = kwt.ensure_worktree(repo, root_id)
+    for relpath, content in commits:
+        _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): work")
+    task_id = kb.create_task(
+        conn,
+        title=f"lane-scope {assignee}",
+        assignee=assignee,
+        workspace_kind="dir",
+        workspace_path=str(info["path"]),
+    )
+    return task_id, info
+
+
+def _complete(conn, task_id):
+    return kwt.maybe_integrate_on_complete(conn, task_id, gate_runner=_ok_gate)
+
+
+def test_lane_scope_coder_frontend_allows_control_only(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_fe_ok",
+            assignee="coder-frontend",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+    assert (repo / "web" / "src" / "control" / "Foo.tsx").exists()
+
+
+def test_lane_scope_coder_frontend_blocks_backend_path(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn, repo, "t_ls_fe_bad",
+            assignee="coder-frontend",
+            commits=[
+                ("web/src/control/Foo.tsx", "export const Foo = 1\n"),
+                ("hermes_cli/kanban.py", "X = 1\n"),
+            ],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        assert "lane-scope violation" in out["reason"]
+        assert "'coder'" in out["reason"]
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        payload = blocked[0]
+        assert payload["violating_paths"] == ["hermes_cli/kanban.py"]
+        assert payload["expected_lane"] == "coder"
+        assert payload["assignee"] == "coder-frontend"
+    # Nothing merged; the branch survives for the operator.
+    assert not (repo / "hermes_cli" / "kanban.py").exists()
+    assert _git(repo, "rev-parse", info["branch"])
+
+
+def test_lane_scope_coder_allows_backend_path(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_be_ok",
+            assignee="coder",
+            commits=[("hermes_cli/kanban.py", "X = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "kanban.py").exists()
+
+
+def test_lane_scope_coder_blocks_frontend_path(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn, repo, "t_ls_be_bad",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        assert "lane-scope violation" in out["reason"]
+        assert "'coder-frontend'" in out["reason"]
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        payload = blocked[0]
+        assert payload["violating_paths"] == ["web/src/control/Foo.tsx"]
+        assert payload["expected_lane"] == "coder-frontend"
+        assert payload["assignee"] == "coder"
+    assert not (repo / "web" / "src" / "control" / "Foo.tsx").exists()
+    assert _git(repo, "rev-parse", info["branch"])
+
+
+def test_lane_scope_coder_allows_upstream_web_entry(repo, kanban_home):
+    # web/src/App.tsx is upstream-owned and belongs to `coder` (named
+    # exception, mirrors the decomposer prompt).
+    assert "web/src/App.tsx" in kwt.LANE_SCOPE_UPSTREAM_WEB_PATHS
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_upstream",
+            assignee="coder",
+            commits=[("web/src/App.tsx", "export default 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_scope_premium_lane_not_enforced(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_premium",
+            assignee="premium",
+            commits=[
+                ("web/src/control/Foo.tsx", "export const Foo = 1\n"),
+                ("hermes_cli/kanban.py", "X = 1\n"),
+            ],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_scope_coder_frontend_allows_preservable_artifact(repo, kanban_home):
+    # Preservable visual-QA artifacts (existing PRESERVABLE_ARTIFACTS_CLASS
+    # classification) are not source code and never decide a lane.
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_fe_art",
+            assignee="coder-frontend",
+            commits=[
+                ("web/src/control/Foo.tsx", "export const Foo = 1\n"),
+                ("visual-qa/lane-scope.png", "PNG\n"),
+            ],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_scope_coder_allows_generated_web_dist(repo, kanban_home):
+    # hermes_cli/web_dist/** is generated build output and never counts as a
+    # frontend path (named exception, mirrors the decomposer prompt).
+    with kb.connect() as conn:
+        task_id, _info = _lane_scope_task(
+            conn, repo, "t_ls_webdist",
+            assignee="coder",
+            commits=[("hermes_cli/web_dist/app.js", "// built\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []

@@ -59,9 +59,9 @@ def repo(tmp_path):
     return r
 
 
-def _provisioned_task(conn, repo, *, title="iso task"):
+def _provisioned_task(conn, repo, *, title="iso task", assignee="coder"):
     tid = kb.create_task(
-        conn, title=title, assignee="coder",
+        conn, title=title, assignee=assignee,
         workspace_kind="dir", workspace_path=str(repo),
     )
     task = kb.claim_task(conn, tid)
@@ -192,7 +192,8 @@ def test_web_integration_creates_parked_release_gate_child(
 ):
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     with kb.connect() as conn:
-        tid, ws = _provisioned_task(conn, repo)
+        # Lane-scope: web/src/control commits require the coder-frontend lane.
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
         _commit_in(
             ws,
             "web/src/control/App.tsx",
@@ -237,7 +238,8 @@ def test_completion_retry_reconciles_merge_after_closeout_enqueue_rollback(
     real_enqueue = kb._enqueue_closeout_in_txn
 
     with kb.connect() as conn:
-        tid, ws = _provisioned_task(conn, repo)
+        # Lane-scope: web/src/control commits require the coder-frontend lane.
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
         _commit_in(
             ws,
             "web/src/control/retry.ts",
@@ -278,7 +280,8 @@ def test_completion_retry_parks_when_green_merge_was_reverted_after_rollback(
     real_enqueue = kb._enqueue_closeout_in_txn
 
     with kb.connect() as conn:
-        tid, ws = _provisioned_task(conn, repo)
+        # Lane-scope: web/src/control commits require the coder-frontend lane.
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
         _commit_in(
             ws,
             "web/src/control/reverted.ts",
@@ -322,7 +325,8 @@ def test_required_web_release_gate_creation_failure_parks_completion(
     )
 
     with kb.connect() as conn:
-        tid, ws = _provisioned_task(conn, repo)
+        # Lane-scope: web/src/control commits require the coder-frontend lane.
+        tid, ws = _provisioned_task(conn, repo, assignee="coder-frontend")
         _commit_in(
             ws,
             "web/src/control/gated.ts",
