@@ -1345,14 +1345,28 @@ def prepare_reused_task_worktree(
 ) -> Optional[dict[str, Any]]:
     """Prepare a task retry's already-provisioned worktree before spawn.
 
-    First-time chain provisioning is excluded: a sibling may legitimately
-    inherit earlier slice commits and uses separate chain-tip semantics.  A
-    task whose recorded workspace already pointed into the provisioned tree is
-    a retry/continuation and has an exact pre-run HEAD suitable for this guard.
+    First-time chain provisioning is excluded from base preparation: a sibling
+    may legitimately inherit earlier slice commits and uses separate chain-tip
+    semantics. Its current run is still stamped with that materialized chain
+    tip before returning. A task whose recorded workspace already pointed into
+    the provisioned tree is a retry/continuation and has an exact pre-run HEAD
+    suitable for the full preparation guard.
     """
     prior = split_provisioned_path(task.workspace_path)
     current = split_provisioned_path(workspace)
-    if prior is None or current is None:
+    if current is None:
+        return None
+    if prior is None:
+        _repo_root, _root_id, wt = current
+        try:
+            branch = current_branch(wt)
+        except (OSError, subprocess.SubprocessError, WorktreeError):
+            return None
+        from hermes_cli import kanban_db as kb
+
+        _stamp_first_materialized_run_head(
+            conn, task.id, wt, branch, kb,
+        )
         return None
     prior_repo, prior_root_id, prior_wt = prior
     repo_root, root_id, wt = current
@@ -4099,6 +4113,66 @@ def finalize_decompose_root_at_dispatch(
     return "auto_completed_commitless"
 
 
+def _stamp_first_materialized_run_head(
+    conn: sqlite3.Connection,
+    task_id: str,
+    worktree: Path,
+    branch: str,
+    kb,
+) -> None:
+    """Replace claim-time repo HEAD with the first materialized branch HEAD.
+
+    ``claim_task`` necessarily runs before managed workspace materialization,
+    so a first-run chain child may initially carry the inherited root
+    checkout's HEAD.  Once provisioning has resolved the actual chain
+    worktree, stamp only the still-current run with that branch tip.
+
+    Reused worktrees are intentionally handled by
+    :func:`prepare_reused_task_worktree`, whose post-rebase HEAD is more
+    precise.  The event guard also prevents an unusual repeated
+    materialization call from overwriting that prepared value.
+    """
+    row = conn.execute(
+        "SELECT current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    run_id = int(row["current_run_id"]) if row and row["current_run_id"] else None
+    if run_id is None:
+        return
+    prepared = conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND run_id = ? AND kind = 'worker_base_prepared' "
+        "LIMIT 1",
+        (task_id, run_id),
+    ).fetchone()
+    if prepared is not None:
+        return
+    try:
+        branch_head = _git(
+            worktree, "rev-parse", "--verify", f"{branch}^{{commit}}",
+        )
+    except (OSError, subprocess.SubprocessError, WorktreeError):
+        return
+    if not branch_head:
+        return
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_runs SET pre_run_commit_sha = ? "
+            "WHERE id = ? AND task_id = ? "
+            "AND EXISTS ("
+            "  SELECT 1 FROM tasks "
+            "  WHERE tasks.id = ? AND tasks.current_run_id = task_runs.id"
+            ") "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM task_events "
+            "  WHERE task_events.task_id = ? "
+            "    AND task_events.run_id = task_runs.id "
+            "    AND task_events.kind = 'worker_base_prepared'"
+            ")",
+            (branch_head, run_id, task_id, task_id, task_id),
+        )
+
+
 def _provision_task_workspace(
     conn: sqlite3.Connection,
     task,
@@ -4203,6 +4277,13 @@ def _provision_task_workspace(
             "UPDATE tasks SET branch_name = ? WHERE id = ?",
             (info["branch"], task.id),
         )
+    _stamp_first_materialized_run_head(
+        conn,
+        task.id,
+        info["path"],
+        info["branch"],
+        kb,
+    )
     candidate = conn.execute(
         "SELECT 1 FROM task_events WHERE task_id=? AND kind='terminal_candidate_pending' LIMIT 1",
         (root_id,),
@@ -5763,23 +5844,23 @@ def _enforce_lane_scope_on_complete(
     # `{base}...{branch}` diff would therefore also see the SIBLING's files
     # and fail-closed block exactly the split the lane rule was built for.
     # task_runs.pre_run_commit_sha holds the worktree HEAD right before THIS
-    # task's worker run (written after prepare_worker_base in
-    # prepare_reused_task_worktree), so `<sha>..<branch>` — TWO dots, "what
-    # did this task add", not a merge-base comparison — contains exactly this
-    # task's own commits.
+    # task's first worker run (first materialization stamps it; retries retain
+    # later per-run stamps for workspace preparation).  Select the oldest
+    # available task run so `<sha>..<branch>` — TWO dots, "what did this task
+    # add across all retries", not a merge-base comparison — contains exactly
+    # this task's own commits.
     diff_spec = f"{base}...{branch}"
     pre_run = conn.execute(
         "SELECT pre_run_commit_sha FROM task_runs "
         "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
         "AND pre_run_commit_sha != '' "
-        "ORDER BY id DESC LIMIT 1",
+        "ORDER BY id ASC LIMIT 1",
         (task_id,),
     ).fetchone()
     pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
     if pre_run_sha:
         try:
             _git(repo_root, "rev-parse", "--verify", f"{pre_run_sha}^{{commit}}")
-            diff_spec = f"{pre_run_sha}..{branch}"
         except WorktreeError:
             # Fallback 2: the recorded SHA no longer resolves (object collected
             # / branch rewritten) — use the cumulative diff rather than
@@ -5790,6 +5871,21 @@ def _enforce_lane_scope_on_complete(
                 pre_run_sha,
                 task_id,
             )
+        else:
+            if _branch_is_ancestor(repo_root, pre_run_sha, branch):
+                diff_spec = f"{pre_run_sha}..{branch}"
+            else:
+                # A resolvable object is not a safe two-dot basis after the
+                # shared chain branch was rebased: comparing unrelated trees
+                # would attribute target drift to this task. Keep the original
+                # cumulative fallback and make the degraded attribution visible.
+                _log.warning(
+                    "lane-scope: pre_run_commit_sha %s of task %s is not "
+                    "an ancestor of branch %s; falling back to cumulative diff",
+                    pre_run_sha,
+                    task_id,
+                    branch,
+                )
     # Fallback 1 (no pre_run_commit_sha on ANY run of this task — legacy task
     # or non-isolated run): keep the cumulative `{base}...{branch}` diff.
     # Behavior identical to the original check, never worse.

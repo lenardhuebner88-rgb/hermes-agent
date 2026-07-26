@@ -9,7 +9,6 @@ import inspect
 import json
 import os
 import subprocess
-import time
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -766,48 +765,67 @@ def test_lane_scope_coder_allows_generated_web_dist(repo, kanban_home):
 # pre_run_commit_sha, not cumulatively against the merge target.
 # ---------------------------------------------------------------------------
 
-def _insert_run_with_pre_sha(conn, task_id, pre_sha):
-    """Register a worker run carrying the worktree HEAD from before its start
-    (the value prepare_reused_task_worktree stamps into pre_run_commit_sha)."""
-    now = int(time.time())
-    cur = conn.execute(
-        "INSERT INTO task_runs "
-        "(task_id, profile, status, started_at, ended_at, outcome, "
-        " pre_run_commit_sha) "
-        "VALUES (?, 'tester', 'done', ?, ?, 'completed', ?)",
-        (task_id, now, now, pre_sha),
+def _claim_and_materialize(conn, task_id):
+    """Run the production claim/materialization/base-preparation sequence."""
+    claimed = kb.claim_task(conn, task_id)
+    assert claimed is not None
+
+    def resolve_existing(task, *, board=None):
+        return Path(task.workspace_path), task.branch_name
+
+    def resolve_managed_base(task, *, board=None):
+        return Path(task.workspace_path)
+
+    materialized = kwt.materialize_dispatch_workspace(
+        conn,
+        claimed,
+        mode=kwt.MANAGED_WORKTREE_PROVISION,
+        board="default",
+        resolve_existing=resolve_existing,
+        resolve_managed_base=resolve_managed_base,
     )
-    conn.commit()
-    return cur.lastrowid
+    prepared = kwt.prepare_reused_task_worktree(
+        conn, claimed, materialized.path,
+    )
+    # `_apply_materialized_dispatch_workspace` refreshes this object in the
+    # dispatcher after preparation. Provisioning has already persisted SQLite.
+    claimed.workspace_path = str(materialized.path)
+    claimed.branch_name = materialized.branch_name
+    return claimed, materialized, prepared
 
 
-def _lane_scope_sibling_chain(conn, repo, root_id, b_commits):
-    """ONE chain branch, TWO tasks: coder A commits hermes_cli/foo.py and
-    completes (deferred — B is still open); coder-frontend B is then stamped
-    with the post-A HEAD as its pre_run_commit_sha and commits ``b_commits``.
-    Returns (task_b, info)."""
-    info = kwt.ensure_worktree(repo, root_id)
-    task_a = kb.create_task(
-        conn, title="chain backend slice", assignee="coder",
-        workspace_kind="dir", workspace_path=str(info["path"]),
-    )
+def _lane_scope_sibling_chain(conn, repo, label, b_commits):
+    """Coder A's commit precedes B on one chain branch; B uses the real path.
+
+    The sibling commit is present before B is claimed, exactly like the
+    accepted reproduction. B then goes through ``claim_task`` plus the public
+    managed-materialization facade instead of receiving a hand-inserted run.
+    """
     task_b = kb.create_task(
         conn, title="chain frontend slice", assignee="coder-frontend",
-        workspace_kind="dir", workspace_path=str(info["path"]),
+        workspace_kind="dir", workspace_path=str(repo),
     )
-    _insert_run_with_pre_sha(conn, task_a, _git(info["path"], "rev-parse", "HEAD"))
+    info = kwt.ensure_worktree(repo, task_b)
     _commit_in(
         info["path"], "hermes_cli/foo.py", "FOO = 1\n",
-        msg=f"kanban({root_id}): backend slice",
+        msg=f"kanban({label}): backend sibling slice",
     )
-    out_a = _complete(conn, task_a)
-    assert out_a is not None and out_a["action"] == "deferred"
-    assert _events(conn, task_a, "worker_gate_blocked") == []
-    conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (task_a,))
-    conn.commit()
-    _insert_run_with_pre_sha(conn, task_b, _git(info["path"], "rev-parse", "HEAD"))
+    sibling_head = _git(info["path"], "rev-parse", "HEAD")
+
+    claimed, materialized, prepared = _claim_and_materialize(conn, task_b)
+    assert materialized.path == info["path"]
+    assert prepared is None, "first-time chain materialization is not a retry"
+    run = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?",
+        (claimed.current_run_id,),
+    ).fetchone()
+    assert run["pre_run_commit_sha"] == sibling_head
+
     for relpath, content in b_commits:
-        _commit_in(info["path"], relpath, content, msg=f"kanban({root_id}): frontend")
+        _commit_in(
+            info["path"], relpath, content,
+            msg=f"kanban({label}): frontend",
+        )
     return task_b, info
 
 
@@ -854,3 +872,99 @@ def test_lane_scope_sibling_block_names_only_own_violating_paths(repo, kanban_ho
     # Nothing merged; the branch (both slices) survives for the operator.
     assert not (repo / "hermes_cli" / "baz.py").exists()
     assert _git(repo, "rev-parse", info["branch"])
+
+
+def test_lane_scope_retry_keeps_first_run_basis(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="frontend retry",
+            assignee="coder-frontend",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        first, materialized, first_prepared = _claim_and_materialize(conn, task_id)
+        assert first_prepared is None
+        first_base = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?",
+            (first.current_run_id,),
+        ).fetchone()["pre_run_commit_sha"]
+
+        # Run 1 violates the frontend lane, then ends resumably.
+        _commit_in(
+            materialized.path,
+            "hermes_cli/run_one_violation.py",
+            "VIOLATION = 1\n",
+            msg=f"kanban({task_id}): run 1 violation",
+        )
+        assert kb.block_task(conn, task_id, reason="retry cleanly")
+        assert kb.unblock_task(conn, task_id)
+
+        second, materialized_retry, second_prepared = _claim_and_materialize(
+            conn, task_id,
+        )
+        assert second_prepared is not None
+        assert second_prepared["action"] == "current"
+        second_base = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE id = ?",
+            (second.current_run_id,),
+        ).fetchone()["pre_run_commit_sha"]
+        assert second_base != first_base
+        _commit_in(
+            materialized_retry.path,
+            "web/src/control/RetryClean.tsx",
+            "export const RetryClean = 1\n",
+            msg=f"kanban({task_id}): run 2 clean",
+        )
+
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == [
+            "hermes_cli/run_one_violation.py",
+        ]
+        assert "web/src/control/RetryClean.tsx" in blocked[0]["changed_files"]
+
+
+def test_lane_scope_non_ancestor_basis_falls_back_after_rebase(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_rebased",
+            b_commits=[
+                ("web/src/control/Rebased.tsx", "export const Rebased = 1\n"),
+            ],
+        )
+        old_basis = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs "
+            "WHERE task_id = ? ORDER BY id ASC LIMIT 1",
+            (task_id,),
+        ).fetchone()["pre_run_commit_sha"]
+
+        main_only = repo / "main-only.txt"
+        main_only.write_text("target advanced\n")
+        _git(repo, "add", "main-only.txt")
+        _git(repo, "commit", "-m", "advance target before chain rebase")
+        _git(info["path"], "rebase", "main")
+        assert subprocess.run(
+            [
+                "git", "-C", str(repo), "merge-base", "--is-ancestor",
+                old_basis, info["branch"],
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode == 1
+
+        with caplog.at_level("WARNING", logger=kwt.__name__):
+            out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "parked"
+        assert "falling back to cumulative diff" in caplog.text
+        assert "is not an ancestor" in caplog.text
+        blocked = _events(conn, task_id, "worker_gate_blocked")
+        assert blocked[0]["violating_paths"] == ["hermes_cli/foo.py"]
