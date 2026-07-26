@@ -612,6 +612,17 @@ def apply_wal_with_fallback(
     (prefer DELETE).  If the on-disk DB is already WAL, keep WAL and warn
     — never live-downgrade under possible concurrent openers.
 
+    This gate (#70055) is deliberately RETAINED. An earlier revision of the
+    lock-cancellation fix (#71724) reverted it on the theory that DELETE was
+    "the mode that corrupts", but that comparison was confounded: the clean
+    WAL result came from SQLite 3.53.1, which carries BOTH the WAL-reset fix
+    AND 3.51.0's defenses against close()-broken POSIX locks, so it says
+    nothing about 3.50.4.  Re-measured on the actually-bundled 3.50.4 with
+    the lock fix in place, WAL and DELETE are both clean (0/3 each) — i.e.
+    there is no evidence that WAL is safer here, and upstream still documents
+    the WAL-reset bug as real through 3.51.2 with serious consequences.  Until
+    a fixed runtime is delivered, keep new databases out of WAL.
+
     The WARNING is deduplicated per ``db_label``: repeated connections
     to the same underlying DB (e.g. kanban_db.connect() which is called
     on every kanban operation) log once per process, not once per call.

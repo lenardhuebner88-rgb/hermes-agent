@@ -308,8 +308,8 @@ class TestGetLastInitError:
                 return super().execute(sql, *args, **kwargs)
 
         def gated_connect(*args, **kwargs):
-            # connect_tracked supplies its own factory; the caller's wins, and
-            # tracking is retrofitted for non-TrackedConnection results.
+            # connect_tracked passes a tracking-augmented factory; drop it and
+            # substitute the double, which connect_tracked will re-augment.
             kwargs.pop("factory", None)
             return real_connect(str(target), factory=_BothPragmasFailConnection, **kwargs)
 
@@ -362,8 +362,9 @@ class TestSessionDbUsesWalFallback:
         factory = _make_blocking_factory("locking protocol", attempts)
 
         def gated_connect(*args, **kwargs):
-            # connect_tracked supplies its own factory; the caller's wins, and
-            # tracking is retrofitted for non-TrackedConnection results.
+            # connect_tracked passes a tracking-augmented factory; drop it and
+            # substitute the double, which connect_tracked re-applies to the
+            # returned instance.
             kwargs.pop("factory", None)
             return real_connect(str(target), factory=factory, **kwargs)
 
