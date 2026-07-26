@@ -99,15 +99,20 @@ npm run lint:control
 npm run build                            # only when web_dist may be overwritten (deploy path)
 ```
 
-**B. Bridge worktree (`.claude/worktrees/bridge-*`), no node_modules yet:**
+**B. Bridge worktree (`.claude/worktrees/bridge-*`), deps tree not provisioned yet:**
 ```bash
-cd <worktree>/web && npm ci              # IN the worktree — safe and standard.
-                                         # (The forbidden thing is symlinking/installing
-                                         #  against the LIVE web/node_modules — orch-iso trap.)
+cd <worktree> && scripts/gate-frontend.sh   # provisions the dedicated node_modules tree
+                                            # (under HERMES_WORKTREE_DEPS_ROOT) on first call.
+cd web
 npm run lint:control
-../node_modules/.bin/tsc -b --noEmit --force   # npm ci hoists to the WORKTREE root node_modules
+../node_modules/.bin/tsc -b --noEmit --force   # hoisted to the WORKTREE root node_modules
 ../node_modules/.bin/vitest run          # full suite, same reason
 ```
+Never `cd <worktree>/web && npm ci` by hand: `web/node_modules` is a symlink into this
+worktree's exclusive deps tree, and npm removes that symlink before reifying — replacing it
+with a real (non-isolated) directory and breaking the next gate run with "mixed
+local/dedicated node_modules layout" (the error names the fix: `rm -rf` the path, re-run the
+gate). `scripts/gate-frontend.sh` runs `npm ci` the safe way, via a manifest-only shadow root.
 Python gates in a worktree (no venv there — use the live venv, it is named `venv`, NOT `.venv`):
 ```bash
 cd <worktree>
@@ -118,8 +123,8 @@ PYTHONPATH=$(pwd) /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest <tes
 ```
 - **`npx` is a stub trap in worktrees**: `npx tsc` yields `ENOWORKSPACES` or a wrong global
   tsc that "typechecks" nothing. Never `npx tsc`/`npx vitest` here — use the `.bin` paths.
-- New devDependency in `web/package.json`? After `npm ci` in the worktree it lands in the
-  **worktree root** `node_modules` (workspace hoisting) — gates just work; no live install.
+- New devDependency in `web/package.json`? Re-run `scripts/gate-frontend.sh` and it lands in
+  the **worktree root** `node_modules` (workspace hoisting) — gates just work; no live install.
 - **Never gate a worktree diff inside the live checkout** (foreign sessions keep it dirty;
   results would mix your diff with their WIP). Gate where the code is.
 

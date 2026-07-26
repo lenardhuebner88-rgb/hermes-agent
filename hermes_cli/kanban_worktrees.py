@@ -4554,6 +4554,45 @@ def _worktree_deps_root() -> Path:
     return configured.resolve(strict=False)
 
 
+def _ensure_worktree_deps_root_mounted(deps_root: Path) -> None:
+    """Fail closed instead of silently spilling a multi-GiB install onto /.
+
+    The default deps root (``/mnt/data/...``) is expected to live on its own
+    mounted filesystem, separate from the OS disk. If that mount is absent,
+    the mountpoint directory still exists (created by earlier provisioning)
+    and is writable, so a naive ``mkdir`` + ``npm ci`` would silently write a
+    ~1.5 GiB dependency tree onto the system disk instead — unnoticed until
+    it is nearly full. Only enforced for the built-in default: an operator
+    or test that explicitly points ``HERMES_WORKTREE_DEPS_ROOT`` elsewhere
+    has taken responsibility for that path.
+    """
+    if deps_root != _DEFAULT_WORKTREE_DEPS_ROOT.resolve(strict=False):
+        return
+    nearest = deps_root
+    while not nearest.exists():
+        parent = nearest.parent
+        if parent == nearest:
+            break
+        nearest = parent
+    try:
+        deps_dev = nearest.stat().st_dev
+        root_dev = Path("/").stat().st_dev
+    except OSError as exc:
+        raise WorktreeError(
+            f"cannot verify worktree deps root {deps_root}: {exc}"
+        ) from exc
+    if deps_dev == root_dev:
+        raise WorktreeError(
+            f"refusing to create a worktree dependency tree under {deps_root}: "
+            f"its nearest existing ancestor ({nearest}) is on the SAME "
+            "filesystem as / — the expected data-volume mount looks absent, "
+            "and installing here would silently spill a multi-GiB dependency "
+            "tree onto the system disk. Mount the data volume, or set "
+            "HERMES_WORKTREE_DEPS_ROOT to a path on a filesystem you know "
+            "has room."
+        )
+
+
 def _worktree_deps_tree(worktree: Path) -> Path:
     canonical = Path(worktree).resolve(strict=False)
     digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
@@ -4604,6 +4643,7 @@ def _workspace_manifest_paths(repo_root: Path) -> list[str]:
 def _prepare_dedicated_npm_shadow(worktree: Path) -> Path:
     """Create a manifest-only npm workspace beside the dedicated node trees."""
     tree = _worktree_deps_tree(worktree)
+    _ensure_worktree_deps_root_mounted(tree.parent)
     tree.mkdir(parents=True, exist_ok=True)
     for rel in _DEDICATED_NODE_MODULES_LINKS:
         link = worktree / rel
@@ -4612,7 +4652,15 @@ def _prepare_dedicated_npm_shadow(worktree: Path) -> Path:
             link.parent.mkdir(parents=True, exist_ok=True)
             link.symlink_to(target, target_is_directory=True)
         if not _is_dedicated_dependency_link(worktree, link, rel):
-            raise WorktreeError(f"mixed local/dedicated node_modules layout at {link}")
+            raise WorktreeError(
+                f"mixed local/dedicated node_modules layout at {link}: expected "
+                f"a symlink into {target}, found something else — most likely "
+                f"a plain 'npm ci' ran directly against {link} (npm removes "
+                "the dedicated symlink before installing). Fix: remove "
+                f"{link} (rm -rf) and re-run scripts/gate-frontend.sh, which "
+                "reprovisions the dedicated link and installs into the "
+                "isolated deps tree instead."
+            )
         target.mkdir(parents=True, exist_ok=True)
 
     for name in ("package.json", "package-lock.json"):
@@ -4674,14 +4722,27 @@ def _remove_worktree_deps_tree(worktree: Path) -> None:
 
 
 def _dependency_path_is_ignored(worktree: Path, rel: str) -> bool:
-    """Return whether Git excludes *rel* from this worktree's status."""
+    """Return whether Git excludes *rel* from this worktree's status.
+
+    Every caller passes a directory-only dependency path (node_modules,
+    web/node_modules, .venv) that does not exist yet in a fresh worktree.
+    ``git check-ignore`` treats a non-existent query path as a *file* unless
+    the pathspec itself ends in ``/`` — so a directory-only gitignore
+    pattern (``node_modules/``, used by family-organizer and health-track)
+    would never match a not-yet-created ``node_modules``, and the dedicated
+    link would silently be skipped for exactly the repos that need it most.
+    Querying with a trailing slash makes git evaluate the pathspec as a
+    directory regardless of whether it exists yet, while a path that is
+    genuinely not ignored is still correctly rejected.
+    """
+    query = rel if rel.endswith("/") else f"{rel}/"
     try:
         return bool(
             _git(
                 worktree,
                 "check-ignore",
                 "--",
-                rel,
+                query,
                 check=False,
             )
         )

@@ -125,7 +125,14 @@ _gate_prepare_dedicated_layout() {
       fi
     fi
     if ! _gate_is_dedicated_nm_link "$p"; then
-      echo "FAIL (frontend-preflight): mixed local/dedicated node_modules layout at $p" >&2
+      {
+        echo "FAIL (frontend-preflight): mixed local/dedicated node_modules layout at $p"
+        echo "  expected a symlink into $target, found something else — most likely a"
+        echo "  plain 'npm ci' ran directly against $p (npm removes the dedicated"
+        echo "  symlink before installing). Fix: rm -rf -- $p, then re-run this script;"
+        echo "  it reprovisions the dedicated link and installs into the isolated deps"
+        echo "  tree instead."
+      } >&2
       return 1
     fi
     if ! mkdir -p -- "$target"; then

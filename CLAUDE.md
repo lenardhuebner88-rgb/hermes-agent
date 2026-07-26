@@ -12,7 +12,7 @@
 
 ## Worktree sessions (phone/remote)
 - Remote sessions spawn in `.claude/worktrees/bridge-cse_*` (branch `worktree-bridge-…`, forked from local HEAD). Finished work returns to the live branch via merge — no direct edits to the live checkout.
-- Worktrees start **without** `web/node_modules` → `cd <wt>/web && npm ci` (safe; only symlink/install against the LIVE web is forbidden), then run gates via the hoisted root binaries `<wt>/node_modules/.bin/{tsc,vitest}` — **never** `npx tsc/vitest` in a worktree (stub trap `ENOWORKSPACES`). NEVER gate a worktree diff in the live checkout (foreign sessions keep it dirty). Details: skill `hermes-dashboard-dev`.
+- Worktrees get an exclusive `node_modules` tree under `HERMES_WORKTREE_DEPS_ROOT` (never the live checkout's) → run `scripts/gate-frontend.sh` first, it provisions deps into that tree on first call; then iterate via the hoisted root binaries `<wt>/node_modules/.bin/{tsc,vitest}`. **Never** `cd <wt>/web && npm ci` by hand — npm removes the dedicated symlink before reifying and breaks the isolation (the resulting gate error names the recovery) — and **never** `npx tsc/vitest` in a worktree (stub trap `ENOWORKSPACES`). NEVER gate a worktree diff in the live checkout (foreign sessions keep it dirty). Details: skill `hermes-dashboard-dev`.
 
 ## Dashboard (primary build target)
 - `/control` SPA (FastAPI + React/TS), port **9119** (loopback), reachable via Tailscale Serve `:9443`.

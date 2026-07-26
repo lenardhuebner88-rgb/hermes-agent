@@ -398,8 +398,15 @@ elif [[ -d "$WORKTREE_DEPS_ROOT" ]]; then
       if deps_identity_is_registered "$deps_name"; then
         continue
       fi
-      rm -rf --one-file-system -- "$deps_tree"
-      echo "removed deps: $deps_tree (no registered worktree)"
+      # A failed removal (e.g. --one-file-system skipping a foreign mount
+      # inside the tree) must be reported and skipped, never abort the whole
+      # script under set -e — the sections below (terminal worktrees) still
+      # need to run.
+      if rm -rf --one-file-system -- "$deps_tree"; then
+        echo "removed deps: $deps_tree (no registered worktree)"
+      else
+        echo "kept(deps-remove-failed): $deps_tree" >&2
+      fi
     else
       echo "would remove deps: $deps_tree (no registered worktree)"
     fi

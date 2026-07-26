@@ -158,6 +158,45 @@ def test_pruner_reports_orphan_in_dry_run_then_removes_with_apply(
     assert f"removed deps: {orphan_tree} (no registered worktree)" in applied.stdout
 
 
+def test_pruner_reports_and_continues_after_failed_deps_removal(
+    tmp_path: Path,
+) -> None:
+    """A failed dependency-tree removal (``rm -rf --one-file-system`` exits
+    non-zero — e.g. it skips a foreign mount inside the tree) must be
+    reported and skipped, never abort the whole script under ``set -e``.
+    Simulated with a permission-denied subdirectory (portable; no real
+    foreign mount needed) that leaves ``rm`` unable to fully clear the tree.
+    A second, always-removable orphan sorting AFTER it proves the loop —
+    and thus the rest of the script — keeps running past the failure."""
+    repo, worktree = _make_repo(tmp_path, "t_rm_failure")
+    db_path = tmp_path / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_rm_failure",
+        status="running",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    blocked_tree = deps_root / "t_orphan_blocked-0123456789abcdef"
+    blocked_dir = blocked_tree / "node_modules" / "blocked"
+    blocked_dir.mkdir(parents=True)
+    (blocked_dir / "file").write_text("stuck\n")
+    blocked_dir.chmod(0o000)
+    removable_tree = deps_root / "t_orphan_removable-0123456789abcdef"
+    (removable_tree / "node_modules").mkdir(parents=True)
+
+    try:
+        result = _prune(repo, db_path, deps_root=deps_root)
+    finally:
+        blocked_dir.chmod(0o755)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"kept(deps-remove-failed): {blocked_tree}" in result.stderr
+    assert blocked_tree.exists()
+    assert not removable_tree.exists()
+    assert f"removed deps: {removable_tree} (no registered worktree)" in result.stdout
+
+
 def test_pruner_refuses_deps_reaping_when_override_lacks_explicit_deps_root(
     tmp_path: Path,
 ) -> None:
