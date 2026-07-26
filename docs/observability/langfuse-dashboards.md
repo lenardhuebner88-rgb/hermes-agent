@@ -59,11 +59,11 @@ setting. Treat IDs returned by this flow as transient runtime values only.
 
 ## Direct SQL fallback, guards, and rollback
 
-Direct SQL remains an opt-in extension point, not a production transport. No
-direct-SQL adapter is shipped: `run_direct_sql_fallback` raises both without
-`allow_direct_sql=True` and with it, because a guarded adapter has not been
-approved. Consequently no database connection or write can occur through this
-script, and a tRPC failure never calls an SQL fallback.
+Direct SQL remains an explicit, dependency-injected fallback, not a production
+transport. `run_direct_sql_fallback` needs both `--allow-direct-sql` and an
+authorised `DirectSqlAdapter` plus a pinned `SqlGuardContract`; no DSN, driver,
+credential, or adapter implementation is shipped. A tRPC failure never calls
+the SQL function automatically: it requires a separate, explicit caller run.
 
 An authorised future adapter may execute a write only after it fails closed in
 this exact order:
@@ -88,24 +88,29 @@ A live caller must persist a machine-readable, secret-free receipt with:
 
 ```json
 {
+  "receipt_version": 1,
   "path": "trpc",
-  "langfuse_version": "3.224.0",
-  "fixture_version": 1,
-  "dashboards": [
-    {"name": "…", "app_read_back": true, "visible_score_or_observation": "…"}
+  "understood_definition": [{"dashboard": "Hermes North Star", "widget_placements": 3}],
+  "visible_export_evidence": [
+    {"widget": "Euro equivalent per done task", "source": "exported_score"},
+    {"widget": "Model mix", "source": "observations"}
   ],
   "model_mix": {
-    "view": "OBSERVATIONS",
-    "field": "providedModelName",
+    "source": "OBSERVATIONS",
+    "dimension": "providedModelName",
     "denominator": "OBSERVATIONS with non-empty providedModelName"
-  }
+  },
+  "changes": 13
 }
 ```
 
-For a direct-SQL run, `path` must instead be `direct_sql` and include the
-passed guard names plus the rollback dump reference. Never include dashboard,
-widget, project, user, session, or secret IDs. A changed denominator must be
-shown identically in its widget and receipt.
+The implemented receipt has `receipt_version`, `path`,
+`understood_definition`, `visible_export_evidence`, `model_mix`, and `changes`.
+It is built only after app read-back (`dashboard.getDashboard` for tRPC or the
+adapter's app-read-back method for SQL). It contains no dashboard, widget,
+project, user, session, or secret IDs. `changes: 0` is valid for a second,
+idempotent SQL upsert when every write result reports an unchanged row; a
+changed denominator must be shown identically in its widget and receipt.
 
 ## Safe validation and recovery
 
@@ -116,8 +121,9 @@ shown identically in its widget and receipt.
 Dry-run validates the Golden Fixture and all three configurations, creates no
 transport, does not contact Langfuse or PostgreSQL, and prints
 `{"changes": 0, "dashboard_count": 3, "status": "fixture_ready"}`. The
-CLI flags are `--dry-run` and `--allow-direct-sql`; the latter remains inert
-without an independently provided, fully guarded adapter.
+CLI flags are `--dry-run` and `--allow-direct-sql`; the latter is only useful
+to an explicit programmatic caller that also injects a fully guarded adapter
+and contract.
 
 If the fixture, configuration, or app read-back is invalid, stop immediately:
 no subsequent mutation and no SQL fallback is permitted. Preserve the existing

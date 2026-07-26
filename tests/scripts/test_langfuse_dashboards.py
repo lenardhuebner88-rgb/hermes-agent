@@ -160,27 +160,157 @@ def test_provision_uses_all_three_post_mutations_and_app_read_back() -> None:
     assert update_body["0"]["json"]["definition"]["widgets"][0]["widgetId"] == "widget_1"
 
 
-def test_direct_sql_is_unreachable_without_the_explicit_flag() -> None:
-    calls: list[str] = []
+class _SqlAdapter:
+    def __init__(
+        self, *, extra_column: bool = False, row_count: int = 1, changes: int = 1, mutate_home: bool = False
+    ) -> None:
+        self.calls: list[str] = []
+        self.row_count = row_count
+        self.changes = changes
+        self.mutate_home = mutate_home
+        self.home_dashboard_id = "home_unchanged"
+        self.columns = {
+            "dashboards": (("id", False, None, "text"),),
+            "dashboard_widgets": (("id", False, None, "text"),),
+        }
+        if extra_column:
+            self.columns["dashboards"] += (("new_required", False, None, "text"),)
 
-    def write() -> None:
-        calls.append("write")
+    def health_version(self) -> str:
+        self.calls.append("health")
+        return dashboards.EXPECTED_LANGFUSE_VERSION
 
-    with pytest.raises(dashboards.ProvisionError, match="--allow-direct-sql"):
-        dashboards.run_direct_sql_fallback(allow_direct_sql=False, write=write)
+    def migration_ids(self) -> tuple[str, ...]:
+        self.calls.append("migrations")
+        return ("migration_1", "migration_2")
 
-    assert calls == []
+    def table_columns(self, table: str) -> tuple[tuple[str, bool, object, str], ...]:
+        self.calls.append(f"columns:{table}")
+        return self.columns[table]
+
+    def enum_labels(self, enum_name: str) -> set[str]:
+        self.calls.append(f"enum:{enum_name}")
+        return {"NORMAL"}
+
+    def projects_named(self, slug: str) -> list[dict[str, str]]:
+        self.calls.append("project")
+        return [{"id": "project_1", "name": slug}]
+
+    def widget_min_version(self) -> int:
+        self.calls.append("min_version")
+        return 1
+
+    def dump_tables(self, tables: tuple[str, ...]) -> None:
+        assert tables == ("dashboards", "dashboard_widgets")
+        self.calls.append("dump")
+
+    def begin(self) -> None:
+        self.calls.append("begin")
+
+    def execute(self, sql: str, params: tuple[object, ...]) -> dashboards.SqlWriteResult:
+        self.calls.append("dashboard_upsert" if "INSERT INTO dashboards" in sql else "widget_upsert")
+        assert "ON CONFLICT (id) DO UPDATE" in sql
+        return dashboards.SqlWriteResult(rows=self.row_count, changes=self.changes)
+
+    def commit(self) -> None:
+        self.calls.append("commit")
+
+    def rollback(self) -> None:
+        self.calls.append("rollback")
+
+    def project_home_dashboard_id(self, project_id: str) -> str:
+        self.calls.append("home")
+        if self.mutate_home and self.calls.count("home") == 2:
+            return "home_changed"
+        return self.home_dashboard_id
+
+    def read_back_via_app(self, project_id: str, dashboard_id: str) -> dict[str, object]:
+        self.calls.append("app_read_back")
+        return {"id": dashboard_id, "definition": {"widgets": [{"type": "widget"}]}}
 
 
-def test_direct_sql_flag_does_not_bypass_the_missing_guarded_adapter() -> None:
-    calls: list[str] = []
+def _sql_contract() -> dashboards.SqlGuardContract:
+    return dashboards.SqlGuardContract(
+        expected_migrations=frozenset({"migration_1", "migration_2"}),
+        newest_migration="migration_2",
+        table_fingerprints={
+            "dashboards": (("id", False, None, "text"),),
+            "dashboard_widgets": (("id", False, None, "text"),),
+        },
+        enum_labels={"DashboardType": frozenset({"NORMAL"})},
+        expected_min_version=1,
+    )
 
-    with pytest.raises(dashboards.ProvisionError, match="no approved guarded adapter"):
-        dashboards.run_direct_sql_fallback(
-            allow_direct_sql=True, write=lambda: calls.append("write")
+
+def _sql_rows() -> tuple[dashboards.SqlDashboardInput, ...]:
+    return tuple(
+        dashboards.SqlDashboardInput(
+            id=f"dashboard_{dashboard_index}",
+            dashboard=plan,
+            widget_ids=tuple(
+                f"widget_{dashboard_index}_{widget_index}" for widget_index in range(len(plan.widgets))
+            ),
         )
+        for dashboard_index, plan in enumerate(dashboards.load_dashboard_configs(project_id="project_1"))
+    )
 
-    assert calls == []
+
+def test_direct_sql_is_unreachable_without_the_explicit_flag() -> None:
+    adapter = _SqlAdapter()
+    with pytest.raises(dashboards.ProvisionError, match="--allow-direct-sql"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=False, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        )
+    assert adapter.calls == []
+
+
+def test_direct_sql_guards_then_upserts_once_and_receipts_app_readback() -> None:
+    adapter = _SqlAdapter()
+    result = dashboards.run_direct_sql_fallback(
+        allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+    )
+    assert adapter.calls[:10] == [
+        "health", "migrations", "columns:dashboards", "columns:dashboard_widgets",
+        "enum:DashboardType", "project", "min_version", "dump", "home", "begin",
+    ]
+    assert adapter.calls.count("begin") == adapter.calls.count("commit") == 1
+    assert adapter.calls.count("rollback") == 0
+    assert adapter.calls.count("dashboard_upsert") == 3
+    assert adapter.calls.count("widget_upsert") == 10
+    assert adapter.calls.count("app_read_back") == 3
+    assert result.receipt["path"] == "direct_sql"
+    assert result.receipt["changes"] == 13
+    assert result.receipt["visible_export_evidence"]
+    assert result.receipt["model_mix"]["denominator"] == "OBSERVATIONS with non-empty providedModelName"
+
+
+def test_direct_sql_rejects_new_not_null_column_before_dump_or_write() -> None:
+    adapter = _SqlAdapter(extra_column=True)
+    with pytest.raises(dashboards.ProvisionError, match="new NOT NULL column"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        )
+    assert "dump" not in adapter.calls
+    assert "begin" not in adapter.calls
+    assert "dashboard_upsert" not in adapter.calls
+
+
+def test_direct_sql_rolls_back_when_an_upsert_has_an_unexpected_row_count() -> None:
+    adapter = _SqlAdapter(row_count=2)
+    with pytest.raises(dashboards.ProvisionError, match="unexpected row count"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        )
+    assert adapter.calls[-1] == "rollback"
+
+
+def test_direct_sql_rolls_back_if_home_dashboard_id_changes() -> None:
+    adapter = _SqlAdapter(mutate_home=True)
+    with pytest.raises(dashboards.ProvisionError, match="home_dashboard_id changed"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=True, adapter=adapter, contract=_sql_contract(), rows=_sql_rows()
+        )
+    assert adapter.calls[-1] == "rollback"
 
 
 def test_dry_run_validates_fixture_without_opening_network_or_writing(
@@ -247,3 +377,49 @@ def test_all_dashboard_configs_are_fixture_shaped_and_cover_required_metrics() -
     assert model_mix.dimensions == [{"field": "providedModelName"}]
     assert model_mix.metrics == [{"agg": "count", "measure": "count"}]
     assert model_mix.chart_config == {"type": "LINE_TIME_SERIES"}
+
+
+def test_all_dashboard_configs_structurally_preserve_the_four_golden_fixture_fields() -> None:
+    fixture = dashboards.load_golden_fixture()
+    for path in dashboards.CONFIGURATION_PATHS:
+        config = dashboards._read_json_object(path)
+        for field in ("definition", "dimensions", "metrics", "chart_config"):
+            assert config[field] == fixture[field]
+
+
+@pytest.mark.parametrize("field", ["definition", "dimensions", "metrics", "chart_config"])
+def test_config_fixture_drift_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: object, field: str) -> None:
+    config = dashboards._read_json_object(dashboards.CONFIGURATION_PATHS[0])
+    config[field] = {} if field in {"definition", "chart_config"} else [{"drift": True}]
+    path = tmp_path / "drift.json"  # type: ignore[operator]
+    path.write_text(json.dumps(config), encoding="utf-8")  # type: ignore[union-attr]
+    monkeypatch.setattr(dashboards, "CONFIGURATION_PATHS", (path,))
+    with pytest.raises(dashboards.ProvisionError, match="fixture shape"):
+        dashboards.load_dashboard_configs(project_id="project_1")
+
+
+def test_receipt_is_secret_free_and_a_deterministic_second_equivalent_run_has_zero_changes() -> None:
+    first = dashboards.run_direct_sql_fallback(
+        allow_direct_sql=True, adapter=_SqlAdapter(changes=1), contract=_sql_contract(), rows=_sql_rows()
+    )
+    second = dashboards.run_direct_sql_fallback(
+        allow_direct_sql=True, adapter=_SqlAdapter(changes=0), contract=_sql_contract(), rows=_sql_rows()
+    )
+    receipt = second.receipt
+    assert first.receipt["changes"] == 13
+    assert receipt["changes"] == 0
+    assert set(receipt) >= {"path", "understood_definition", "visible_export_evidence", "model_mix", "changes"}
+    assert "project_1" not in json.dumps(receipt)
+
+
+def test_trpc_receipt_is_built_from_app_readback(monkeypatch: pytest.MonkeyPatch) -> None:
+    plans = dashboards.load_dashboard_configs(project_id="project_1")
+
+    def read_back(_client: object, plan: dashboards.DashboardInput) -> dict[str, object]:
+        return {"id": f"readback_{plan.name}", "definition": {"widgets": [{"type": "widget"}]}}
+
+    monkeypatch.setattr(dashboards, "provision_dashboard", read_back)
+    receipt = dashboards.provision_dashboards_with_receipt(object(), plans)  # type: ignore[arg-type]
+    assert receipt["path"] == "trpc"
+    assert receipt["changes"] == 13
+    assert receipt["understood_definition"]

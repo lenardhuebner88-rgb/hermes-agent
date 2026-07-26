@@ -2,6 +2,10 @@
   "fixture_version": 1,
   "name": "Hermes Reviewer Diagnose",
   "description": "Source-grounded reviewer outcome indicators.",
+  "definition": {"widgets": [{"x": 0, "y": 0, "id": "<REDACTED_ID>", "type": "widget", "x_size": 6, "y_size": 6, "widgetId": "<REDACTED_ID>"}]},
+  "dimensions": [],
+  "metrics": [{"agg": "count", "measure": "count"}],
+  "chart_config": {"type": "LINE_TIME_SERIES"},
   "widgets": [
     {
       "name": "First-pass approval",

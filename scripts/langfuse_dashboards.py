@@ -12,10 +12,10 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_FIXTURE_PATH = REPOSITORY_ROOT / "tests/scripts/fixtures/langfuse-dashboard-golden.json"
@@ -56,6 +56,61 @@ class DashboardInput:
     name: str
     description: str
     widgets: tuple[WidgetInput, ...]
+
+
+ColumnFingerprint = tuple[str, bool, object | None, str]
+
+
+@dataclass(frozen=True)
+class SqlWriteResult:
+    """The adapter's row-count result; ``changes`` may be zero for an idempotent upsert."""
+
+    rows: int
+    changes: int
+
+
+@dataclass(frozen=True)
+class SqlDashboardInput:
+    """Caller-owned stable IDs for the explicit SQL-only fallback path."""
+
+    id: str
+    dashboard: DashboardInput
+    widget_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SqlGuardContract:
+    """Pinned guard expectations supplied by the authorised SQL integration."""
+
+    expected_migrations: frozenset[str]
+    newest_migration: str
+    table_fingerprints: Mapping[str, tuple[ColumnFingerprint, ...]]
+    enum_labels: Mapping[str, frozenset[str]]
+    expected_min_version: int
+    allowed_versions: frozenset[str] = frozenset({EXPECTED_LANGFUSE_VERSION})
+
+
+@dataclass(frozen=True)
+class SqlProvisionResult:
+    receipt: dict[str, Any]
+
+
+class DirectSqlAdapter(Protocol):
+    """Narrow dependency-injection boundary; no DSN or driver is bundled here."""
+
+    def health_version(self) -> str: ...
+    def migration_ids(self) -> Sequence[str]: ...
+    def table_columns(self, table: str) -> Sequence[ColumnFingerprint]: ...
+    def enum_labels(self, enum_name: str) -> set[str]: ...
+    def projects_named(self, slug: str) -> Sequence[Mapping[str, Any]]: ...
+    def widget_min_version(self) -> int: ...
+    def dump_tables(self, tables: tuple[str, ...]) -> None: ...
+    def begin(self) -> None: ...
+    def execute(self, sql: str, params: tuple[object, ...]) -> SqlWriteResult: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> None: ...
+    def project_home_dashboard_id(self, project_id: str) -> object | None: ...
+    def read_back_via_app(self, project_id: str, dashboard_id: str) -> Mapping[str, Any]: ...
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -99,6 +154,9 @@ def load_dashboard_configs(*, project_id: str) -> list[DashboardInput]:
         config = _read_json_object(path)
         if config.get("fixture_version") != fixture["fixture_version"]:
             raise ProvisionError(f"{path} is not derived from the current golden fixture version")
+        for field in ("definition", "dimensions", "metrics", "chart_config"):
+            if config.get(field) != fixture[field]:
+                raise ProvisionError(f"{path} {field} has drifted from the golden fixture shape")
         name, description, widgets = config.get("name"), config.get("description"), config.get("widgets")
         if not isinstance(name, str) or not name or not isinstance(description, str):
             raise ProvisionError(f"{path} lacks a valid dashboard name or description")
@@ -302,13 +360,176 @@ def provision_dashboard(client: TrpcClient, dashboard: DashboardInput) -> dict[s
     return read_back
 
 
-def run_direct_sql_fallback(*, allow_direct_sql: bool, write: Callable[[], None]) -> None:
-    """Keep direct SQL unreachable until a fully guarded adapter is approved."""
+def provision_dashboards_with_receipt(
+    client: TrpcClient, dashboards: Sequence[DashboardInput]
+) -> dict[str, Any]:
+    """Primary tRPC path with a secret-free receipt built from required app read-back."""
+    read_backs = [provision_dashboard(client, dashboard) for dashboard in dashboards]
+    rows: list[SqlDashboardInput] = []
+    for dashboard, read_back in zip(dashboards, read_backs, strict=True):
+        dashboard_id = read_back.get("id")
+        if not isinstance(dashboard_id, str) or not dashboard_id:
+            raise ProvisionError("app read-back omitted the created dashboard id")
+        rows.append(SqlDashboardInput(id=dashboard_id, dashboard=dashboard, widget_ids=()))
+    return _app_readback_receipt(
+        path="trpc",
+        rows=rows,
+        read_backs=read_backs,
+        changes=sum(1 + len(dashboard.widgets) for dashboard in dashboards),
+    )
+
+
+_TABLES = ("dashboards", "dashboard_widgets")
+_DASHBOARD_UPSERT = """INSERT INTO dashboards (id, project_id, name, description, definition)
+VALUES (%s, %s, %s, %s, %s)
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
+definition = EXCLUDED.definition"""
+_WIDGET_UPSERT = """INSERT INTO dashboard_widgets
+(id, project_id, name, description, view, dimensions, metrics, filters, chart_type, chart_config, min_version)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description,
+view = EXCLUDED.view, dimensions = EXCLUDED.dimensions, metrics = EXCLUDED.metrics,
+filters = EXCLUDED.filters, chart_type = EXCLUDED.chart_type, chart_config = EXCLUDED.chart_config,
+min_version = EXCLUDED.min_version"""
+
+
+def _validate_sql_guards(adapter: DirectSqlAdapter, contract: SqlGuardContract) -> str:
+    """Run all read-only guards in the required order, before dumping or writing."""
+    version = adapter.health_version()
+    if version not in contract.allowed_versions:
+        raise ProvisionError("Langfuse health version is not in the direct-SQL allowlist")
+
+    migrations = tuple(adapter.migration_ids())
+    if frozenset(migrations) != contract.expected_migrations or not migrations:
+        raise ProvisionError("_prisma_migrations does not match the complete expected set")
+    if migrations[-1] != contract.newest_migration:
+        raise ProvisionError("_prisma_migrations newest migration does not match the contract")
+
+    for table in _TABLES:
+        actual = tuple(adapter.table_columns(table))
+        expected = contract.table_fingerprints.get(table)
+        if expected is None:
+            raise ProvisionError(f"missing expected information_schema fingerprint for {table}")
+        expected_names = {column[0] for column in expected}
+        for name, nullable, default, _type in actual:
+            if name not in expected_names and not nullable and default is None:
+                raise ProvisionError(f"{table} has a new NOT NULL column without a default: {name}")
+        if actual != expected:
+            raise ProvisionError(f"{table} information_schema fingerprint does not match the contract")
+
+    for enum_name, expected_labels in contract.enum_labels.items():
+        if adapter.enum_labels(enum_name) != set(expected_labels):
+            raise ProvisionError(f"pg_enum labels for {enum_name} do not match the contract")
+
+    projects = tuple(adapter.projects_named("hermes-agent"))
+    if len(projects) != 1 or not isinstance(projects[0].get("id"), str):
+        raise ProvisionError("expected exactly one hermes-agent project row")
+    if adapter.widget_min_version() != contract.expected_min_version:
+        raise ProvisionError("dashboard widget min_version does not match the contract")
+    return str(projects[0]["id"])
+
+
+def _app_readback_receipt(
+    *, path: str, rows: Sequence[SqlDashboardInput], read_backs: Sequence[Mapping[str, Any]], changes: int
+) -> dict[str, Any]:
+    """Create a secret-free record from app read-back plus explicit visible export evidence."""
+    if len(rows) != len(read_backs):
+        raise ProvisionError("app read-back count does not match the provisioned dashboards")
+    understood: list[dict[str, Any]] = []
+    evidence: list[dict[str, str]] = []
+    model_mix: dict[str, str] | None = None
+    for row, read_back in zip(rows, read_backs, strict=True):
+        if read_back.get("id") != row.id or not isinstance(read_back.get("definition"), dict):
+            raise ProvisionError("app read-back did not return the expected dashboard definition")
+        definition = read_back["definition"]
+        placements = definition.get("widgets")
+        if not isinstance(placements, list):
+            raise ProvisionError("app read-back definition omitted widget placements")
+        understood.append({"dashboard": row.dashboard.name, "widget_placements": len(placements)})
+        for widget in row.dashboard.widgets:
+            source = "observations" if widget.view == "observations" else "exported_score"
+            evidence.append(
+                {"dashboard": row.dashboard.name, "widget": widget.name, "source": source,
+                 "denominator": _widget_denominator(row.dashboard, widget.name)}
+            )
+            if widget.name == "Model mix":
+                model_mix = {
+                    "source": "OBSERVATIONS", "dimension": "providedModelName",
+                    "denominator": _widget_denominator(row.dashboard, widget.name),
+                }
+    if not any(item["source"] == "exported_score" for item in evidence) or not any(
+        item["source"] == "observations" for item in evidence
+    ):
+        raise ProvisionError("app receipt requires visible exported score and observation evidence")
+    if model_mix is None:
+        raise ProvisionError("app receipt requires the Model mix observation denominator")
+    return {
+        "receipt_version": 1, "path": path, "understood_definition": understood,
+        "visible_export_evidence": evidence, "model_mix": model_mix, "changes": changes,
+    }
+
+
+def _widget_denominator(dashboard: DashboardInput, name: str) -> str:
+    for path in CONFIGURATION_PATHS:
+        config = _read_json_object(path)
+        if config.get("name") != dashboard.name:
+            continue
+        for widget in config.get("widgets", []):
+            if isinstance(widget, dict) and widget.get("name") == name and isinstance(widget.get("denominator"), str):
+                return widget["denominator"]
+    raise ProvisionError(f"no explicit denominator found for {dashboard.name}/{name}")
+
+
+def run_direct_sql_fallback(
+    *, allow_direct_sql: bool, adapter: DirectSqlAdapter, contract: SqlGuardContract,
+    rows: Sequence[SqlDashboardInput],
+) -> SqlProvisionResult:
+    """Run an opt-in guarded upsert; tRPC callers never invoke this function automatically."""
     if not allow_direct_sql:
         raise ProvisionError("direct SQL is disabled; pass --allow-direct-sql explicitly")
-    del write
-    raise ProvisionError(
-        "direct SQL has no approved guarded adapter; no connection or write was attempted"
+    if not rows:
+        raise ProvisionError("direct SQL requires at least one explicitly identified dashboard row")
+    project_id = _validate_sql_guards(adapter, contract)
+    if any(row.dashboard.project_id != project_id for row in rows):
+        raise ProvisionError("SQL rows do not belong to the uniquely guarded hermes-agent project")
+    adapter.dump_tables(_TABLES)
+    before_home_dashboard_id = adapter.project_home_dashboard_id(project_id)
+    started = False
+    changes = 0
+    try:
+        adapter.begin()
+        started = True
+        for row in rows:
+            if len(row.widget_ids) != len(row.dashboard.widgets):
+                raise ProvisionError("each direct-SQL dashboard needs exactly one stable widget id per widget")
+            result = adapter.execute(
+                _DASHBOARD_UPSERT,
+                (row.id, project_id, row.dashboard.name, row.dashboard.description, json.dumps({"widgets": []})),
+            )
+            if result.rows != 1:
+                raise ProvisionError("dashboard upsert returned an unexpected row count")
+            changes += result.changes
+            for widget_id, widget in zip(row.widget_ids, row.dashboard.widgets, strict=True):
+                result = adapter.execute(
+                    _WIDGET_UPSERT,
+                    (widget_id, project_id, widget.name, widget.description, widget.view,
+                     json.dumps(widget.dimensions), json.dumps(widget.metrics), json.dumps(widget.filters),
+                     widget.chart_type, json.dumps(widget.chart_config), widget.min_version),
+                )
+                if result.rows != 1:
+                    raise ProvisionError("dashboard widget upsert returned an unexpected row count")
+                changes += result.changes
+        if adapter.project_home_dashboard_id(project_id) != before_home_dashboard_id:
+            raise ProvisionError("projects.home_dashboard_id changed during direct-SQL provisioning")
+        adapter.commit()
+        started = False
+    except Exception:
+        if started:
+            adapter.rollback()
+        raise
+    read_backs = [adapter.read_back_via_app(project_id, row.id) for row in rows]
+    return SqlProvisionResult(
+        receipt=_app_readback_receipt(path="direct_sql", rows=rows, read_backs=read_backs, changes=changes)
     )
 
 
