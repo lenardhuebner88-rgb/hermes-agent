@@ -1066,3 +1066,241 @@ def test_lane_scope_spawn_retry_stamp_excluded_own_violation_still_parks(
         assert blocked[0]["violating_paths"] == ["hermes_cli/own_violation.py"]
         assert "hermes_cli/foo.py" not in blocked[0]["violating_paths"]
     assert not (repo / "hermes_cli" / "own_violation.py").exists()
+
+
+def test_lane_scope_spawn_failed_stamp_excluded_sibling_not_attributed(
+    repo, kanban_home,
+):
+    # S2 residual gap: _record_spawn_failure (outcome='spawn_failed') closes
+    # a never-materialized run through the exact same _record_task_failure
+    # machinery as _record_spawn_retry (outcome='spawn_retry'), leaving the
+    # same claim-time poisoned stamp — but an outcome-name blacklist that
+    # only excludes 'spawn_retry' lets it straight through: 'spawn_retry'
+    # has 0 runs on the live board while 'spawn_failed' has 148 (49 with a
+    # stamp). The positive workspace_materialized signal must exclude this
+    # run's stamp regardless of which outcome name closed it.
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="chain root", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, root)
+        _commit_in(
+            info["path"], "hermes_cli/foo.py", "FOO = 1\n",
+            msg=f"kanban({root}): backend sibling slice",
+        )
+        task_b = kb.create_task(
+            conn, title="frontend slice", assignee="coder-frontend",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        kb.link_tasks(conn, root, task_b)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (root,))
+        conn.execute(
+            "UPDATE tasks SET status='ready' WHERE id=?", (task_b,),
+        )
+        conn.commit()
+
+        # RUN 1: claim, then a provisioning failure before the
+        # materialization stamp, closed via the spawn_failed path (below
+        # the failure limit, so the task returns to 'ready' for a retry).
+        claimed1 = kb.claim_task(conn, task_b)
+        assert claimed1 is not None
+        kb._record_spawn_failure(conn, task_b, "worktree provisioning failed: git lock")
+
+        # RUN 2: the real materialization pipeline.
+        claimed2 = kb.claim_task(conn, task_b)
+        assert claimed2 is not None
+        workspace = kwt.provision_for_task(conn, claimed2, Path(repo))
+        kwt.prepare_reused_task_worktree(conn, claimed2, workspace)
+        kb.set_workspace_path(conn, task_b, str(workspace))
+
+        # Worker B commits ONLY its own frontend file.
+        _commit_in(
+            workspace, "web/src/control/Bar.tsx", "export const Bar = 1\n",
+            msg=f"kanban({task_b}): frontend",
+        )
+
+        out = _complete(conn, task_b)
+
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_b, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "foo.py").exists()
+    assert (repo / "web" / "src" / "control" / "Bar.tsx").exists()
+
+
+def test_lane_scope_gave_up_stamp_excluded_sibling_not_attributed(
+    repo, kanban_home,
+):
+    # Same never-materialized-poisoned-stamp shape, but the breaker trips
+    # inside the spawn-retry gap itself (a real board population: 175
+    # gave_up runs, 53 carrying a stamp). The trip flips the task to
+    # 'blocked'; the dispatcher's own recovery path unblocks it for the
+    # next attempt — mirrored here via kb.unblock_task.
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="chain root", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, root)
+        _commit_in(
+            info["path"], "hermes_cli/foo.py", "FOO = 1\n",
+            msg=f"kanban({root}): backend sibling slice",
+        )
+        task_b = kb.create_task(
+            conn, title="frontend slice", assignee="coder-frontend",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        kb.link_tasks(conn, root, task_b)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (root,))
+        conn.execute(
+            "UPDATE tasks SET status='ready' WHERE id=?", (task_b,),
+        )
+        conn.commit()
+
+        # RUN 1: claim, then a provisioning failure that trips the breaker
+        # (failure_limit=1) before the materialization stamp — closes with
+        # outcome='gave_up' and blocks the task.
+        claimed1 = kb.claim_task(conn, task_b)
+        assert claimed1 is not None
+        tripped = kb._record_spawn_failure(
+            conn, task_b, "worktree provisioning failed: git lock",
+            failure_limit=1,
+        )
+        assert tripped is True
+        run1 = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? "
+            "ORDER BY id ASC LIMIT 1",
+            (task_b,),
+        ).fetchone()
+        assert run1["outcome"] == "gave_up"
+        assert kb.unblock_task(conn, task_b)
+
+        # RUN 2: the real materialization pipeline.
+        claimed2 = kb.claim_task(conn, task_b)
+        assert claimed2 is not None
+        workspace = kwt.provision_for_task(conn, claimed2, Path(repo))
+        kwt.prepare_reused_task_worktree(conn, claimed2, workspace)
+        kb.set_workspace_path(conn, task_b, str(workspace))
+
+        # Worker B commits ONLY its own frontend file.
+        _commit_in(
+            workspace, "web/src/control/Bar.tsx", "export const Bar = 1\n",
+            msg=f"kanban({task_b}): frontend",
+        )
+
+        out = _complete(conn, task_b)
+
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_b, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "foo.py").exists()
+    assert (repo / "web" / "src" / "control" / "Bar.tsx").exists()
+
+
+def test_lane_scope_spawn_failed_own_violation_still_parks(repo, kanban_home):
+    # Positive counter-probe for the spawn_failed path (mirrors the existing
+    # spawn_retry counter-probe above): a task that survives a spawn_failed
+    # gap and then genuinely commits outside its own lane must still park —
+    # the materialization signal removes a poisoned STAMP, not the check.
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn, title="chain root", assignee="coder",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, root)
+        _commit_in(
+            info["path"], "hermes_cli/foo.py", "FOO = 1\n",
+            msg=f"kanban({root}): backend sibling slice",
+        )
+        task_b = kb.create_task(
+            conn, title="frontend slice", assignee="coder-frontend",
+            workspace_kind="dir", workspace_path=str(repo),
+        )
+        kb.link_tasks(conn, root, task_b)
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (root,))
+        conn.execute(
+            "UPDATE tasks SET status='ready' WHERE id=?", (task_b,),
+        )
+        conn.commit()
+
+        claimed1 = kb.claim_task(conn, task_b)
+        assert claimed1 is not None
+        kb._record_spawn_failure(conn, task_b, "worktree provisioning failed: git lock")
+
+        claimed2 = kb.claim_task(conn, task_b)
+        assert claimed2 is not None
+        workspace = kwt.provision_for_task(conn, claimed2, Path(repo))
+        kwt.prepare_reused_task_worktree(conn, claimed2, workspace)
+        kb.set_workspace_path(conn, task_b, str(workspace))
+
+        # Worker B commits its own out-of-lane file (genuine violation) plus
+        # a legit frontend file.
+        _commit_in(
+            workspace, "web/src/control/Bar.tsx", "export const Bar = 1\n",
+            msg=f"kanban({task_b}): frontend",
+        )
+        _commit_in(
+            workspace, "hermes_cli/own_violation.py", "OWN = 1\n",
+            msg=f"kanban({task_b}): own violation",
+        )
+
+        out = _complete(conn, task_b)
+
+        assert out is not None and out["action"] == "parked"
+        blocked = _events(conn, task_b, "worker_gate_blocked")
+        assert len(blocked) == 1
+        assert blocked[0]["violating_paths"] == ["hermes_cli/own_violation.py"]
+        assert "hermes_cli/foo.py" not in blocked[0]["violating_paths"]
+    assert not (repo / "hermes_cli" / "own_violation.py").exists()
+
+
+def test_lane_scope_no_materialized_run_skips_check_visibly(
+    repo, kanban_home, caplog,
+):
+    # Bestandsdaten: a task whose ONLY run predates the workspace_materialized
+    # migration (pre_run_commit_sha set by plain claim_task, flag never set
+    # because neither stamping call site — _stamp_first_materialized_run_head
+    # nor prepare_reused_task_worktree — ran) is an unverifiable basis: we
+    # cannot tell a poisoned claim-time stamp apart from a legitimately
+    # materialized pre-migration one. Fail-closed (park) would cost more
+    # than it protects, so this must fail OPEN — but visibly (a WARNING),
+    # not as a silent "clean" no-op indistinguishable from an actually clean
+    # completion.
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn, repo, "t_ls_legacy", assignee="coder-frontend", commits=[],
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready' WHERE id=?", (task_id,),
+        )
+        conn.commit()
+        # Plain claim_task stamps pre_run_commit_sha at claim time; neither
+        # materialization call site runs here, so workspace_materialized
+        # stays at its column default (0) — exactly the pre-migration shape.
+        claimed = kb.claim_task(conn, task_id)
+        assert claimed is not None
+        run = conn.execute(
+            "SELECT pre_run_commit_sha, workspace_materialized "
+            "FROM task_runs WHERE id = ?",
+            (claimed.current_run_id,),
+        ).fetchone()
+        assert run["pre_run_commit_sha"]
+        assert run["workspace_materialized"] == 0
+
+        # Worker commits a backend path from a coder-frontend task — a
+        # genuine violation the check would normally catch.
+        _commit_in(
+            info["path"], "hermes_cli/backend_from_frontend.py", "X = 1\n",
+            msg=f"kanban({task_id}): backend path from a coder-frontend task",
+        )
+
+        with caplog.at_level("WARNING", logger=kwt.__name__):
+            out = _complete(conn, task_id)
+
+        # The lane-scope check itself is skipped (fail-open on an
+        # unverifiable basis), so completion proceeds exactly as if the
+        # task were clean — but the skip is logged, not silent.
+        assert out is not None and out["action"] == "merged"
+        assert "workspace_materialized" in caplog.text
+        assert "skipping lane-scope enforcement" in caplog.text
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "backend_from_frontend.py").exists()

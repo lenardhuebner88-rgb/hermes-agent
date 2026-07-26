@@ -1444,7 +1444,11 @@ def prepare_reused_task_worktree(
 
     with kb.write_txn(conn):
         conn.execute(
-            "UPDATE task_runs SET pre_run_commit_sha = ? WHERE id = ?",
+            # workspace_materialized = 1: `result["head"]` is
+            # `prepare_worker_base`'s prepared worktree HEAD — a real,
+            # already-materialized workspace, not a claim-time placeholder.
+            "UPDATE task_runs SET pre_run_commit_sha = ?, "
+            "workspace_materialized = 1 WHERE id = ?",
             (result["head"], run_id),
         )
         kb._append_event(
@@ -4157,7 +4161,13 @@ def _stamp_first_materialized_run_head(
         return
     with kb.write_txn(conn):
         conn.execute(
-            "UPDATE task_runs SET pre_run_commit_sha = ? "
+            # workspace_materialized = 1 here is the positive materialization
+            # signal the lane-scope basis-selection query relies on: this
+            # UPDATE only ever fires once the worktree HEAD has actually been
+            # resolved above, i.e. the workspace is real, not a claim-time
+            # placeholder.
+            "UPDATE task_runs SET pre_run_commit_sha = ?, "
+            "workspace_materialized = 1 "
             "WHERE id = ? AND task_id = ? "
             "AND EXISTS ("
             "  SELECT 1 FROM tasks "
@@ -5850,25 +5860,75 @@ def _enforce_lane_scope_on_complete(
     # add across all retries", not a merge-base comparison — contains exactly
     # this task's own commits.
     #
-    # A run whose provisioning never got past a transient spawn-retry
-    # (`_record_spawn_retry` in kanban_db.py, the git-lock-contention path)
-    # closes with `outcome='spawn_retry'` while STILL carrying its claim-time
-    # stamp — the pre-materialization workspace HEAD (repo root, not yet the
-    # chain worktree). That stamp predates even a sibling's commit already on
-    # the chain branch, so picking it as the oldest candidate attributes the
-    # sibling's files to this task. Exclude spawn_retry runs from candidacy:
-    # they never touched the tree, so their stamp is not a basis for "what
-    # did this task add".
+    # A run that ends before its workspace was ever materialized (a
+    # provisioning failure caught by `_record_spawn_failure`/`_record_spawn_retry`/
+    # any other outcome that funnels through `_record_task_failure` with
+    # `end_run=True` in kanban_db.py) closes while STILL carrying its
+    # claim-time stamp — the pre-materialization workspace HEAD (repo root,
+    # not yet the chain worktree). That stamp predates even a sibling's
+    # commit already on the chain branch, so picking it as the oldest
+    # candidate attributes the sibling's files to this task.
+    #
+    # A blacklist of "bad" outcome names is the wrong shape for this: on the
+    # live board `spawn_retry` (the value the first cut of this filter
+    # excluded) has 0 runs, while `spawn_failed` (148 runs) and `gave_up`
+    # (175 runs) — both reachable via the exact same never-materialized
+    # code path — were silently let through. Select on a POSITIVE
+    # materialization signal instead: `task_runs.workspace_materialized` is
+    # set to 1 at the exact two call sites that stamp a real (post-
+    # provisioning) worktree HEAD — `_stamp_first_materialized_run_head`
+    # (first-time chain provisioning) and the retry/continuation stamp in
+    # `prepare_reused_task_worktree` — and nowhere else, so it is true
+    # regardless of which outcome name eventually closes the run.
     diff_spec = f"{base}...{branch}"
     pre_run = conn.execute(
         "SELECT pre_run_commit_sha FROM task_runs "
         "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
         "AND pre_run_commit_sha != '' "
-        "AND (outcome IS NULL OR outcome != 'spawn_retry') "
+        "AND workspace_materialized = 1 "
         "ORDER BY id ASC LIMIT 1",
         (task_id,),
     ).fetchone()
     pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
+    if not pre_run_sha:
+        # No run of this task carries a verified materialization stamp.
+        # Two distinct populations land here and must be told apart:
+        #
+        #   (a) no run of this task has ANY pre_run_commit_sha at all
+        #       (legacy task / non-isolated run, predates per-task
+        #       attribution entirely) — Fallback 1 below keeps the
+        #       cumulative `{base}...{branch}` diff, exactly the pre-
+        #       per-task-attribution behavior. Unaffected by this change.
+        #
+        #   (b) stamps exist but NONE carry `workspace_materialized = 1`
+        #       — every run of this task was claimed/stamped before this
+        #       column existed (a narrow window: only tasks already
+        #       in-flight at deploy time). We cannot tell a poisoned
+        #       claim-time stamp apart from a perfectly good pre-migration
+        #       one, so Bestandsdaten must not silently flip either way.
+        #       Fail-CLOSED (treat as violation / park) would cost more
+        #       than it protects — exactly the bug this fix removes.
+        #       Fail-open here means SKIP the lane-scope check for this
+        #       one completion rather than guess at a basis, but that
+        #       skip must be visible, not indistinguishable from "clean":
+        #       log loudly so an operator auditing a merged lane-crossing
+        #       task can find the reason.
+        any_stamp = conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id = ? "
+            "AND pre_run_commit_sha IS NOT NULL AND pre_run_commit_sha != '' "
+            "LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if any_stamp is not None:
+            _log.warning(
+                "lane-scope: task %s has task_runs stamps that predate the "
+                "workspace_materialized signal (none of its runs carry a "
+                "verified materialization flag) — skipping lane-scope "
+                "enforcement for this completion rather than risk a false "
+                "park on an unverifiable basis",
+                task_id,
+            )
+            return None
     # Set when the recorded stamp resolves but is no longer an ancestor of
     # `branch` (the shared chain branch was rebased after the stamp was
     # taken) — the merge-base subtraction below fills in `changed_files`
