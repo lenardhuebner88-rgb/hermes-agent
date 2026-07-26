@@ -1101,6 +1101,17 @@ def _register_stats_notify_parsers(sub: argparse._SubParsersAction) -> None:
         "--weeks", type=int, default=4,
         help="Number of weeks for --digest (default: 4)",
     )
+    p_scores.add_argument(
+        "--auto-ingest",
+        action="store_true",
+        help="Ingest material digest findings as operator-gated PlanSpecs",
+    )
+    p_scores.add_argument(
+        "--auto-ingest-threshold-eur",
+        type=float,
+        default=10.0,
+        help="Minimum EUR impact for --auto-ingest (default: 10.0)",
+    )
 
     p_export_scores = sub.add_parser(
         "export-langfuse-scores",
@@ -4377,6 +4388,20 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
     with kb.connect_closing() as conn:
         digest = kb.scores_digest(conn, weeks=weeks)
 
+    auto_ingest: dict[str, Any] | None = None
+    if getattr(args, "auto_ingest", False):
+        from hermes_cli.planspecs import auto_ingest_score_findings
+
+        try:
+            auto_ingest = auto_ingest_score_findings(
+                digest.get("top_findings", []),
+                threshold_eur=float(getattr(args, "auto_ingest_threshold_eur", 10.0)),
+            )
+        except (TypeError, ValueError) as exc:
+            print(f"error: invalid auto-ingest threshold: {exc}", file=sys.stderr)
+            return 2
+        digest["auto_ingest"] = auto_ingest
+
     # Write JSON sidecar atomically — required artifact (AC-2).
     # Real I/O errors propagate as non-zero exit; never swallowed.
     import tempfile
@@ -4496,6 +4521,14 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         )
         findings_line = f"Top-Befunde: {rendered} (Quelle: kanban.db/scores)"
 
+    auto_ingest_line = ""
+    if auto_ingest is not None:
+        auto_ingest_line = (
+            "PlanSpec-Auto-Ingest: "
+            f"created={len(auto_ingest['created'])} "
+            f"suppressed={len(auto_ingest['suppressed'])}"
+        )
+
     refs = ["Scorecard: /control → Scorecard", "Langfuse: loopback-Langfuse → Scores"]
 
     # Assemble mandatory text (everything except profile/model breakdowns)
@@ -4507,6 +4540,8 @@ def _cmd_scores_digest(args: argparse.Namespace) -> int:
         mandatory_parts.append(retry_line)
     if findings_line:
         mandatory_parts.append(findings_line)
+    if auto_ingest_line:
+        mandatory_parts.append(auto_ingest_line)
     mandatory_parts.extend(refs)
     mandatory_text = "\n".join(mandatory_parts)
 

@@ -1,0 +1,51 @@
+{
+  "fixture_version": 1,
+  "name": "Hermes Effizienz",
+  "description": "Source-grounded execution-efficiency indicators.",
+  "widgets": [
+    {
+      "name": "Cache-hit ratio",
+      "description": "Visible exported cache-hit-ratio score.",
+      "view": "scores-numeric",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "runs with exported cache-token accounting"
+    },
+    {
+      "name": "Exclusive token buckets",
+      "description": "Visible exported exclusive-token-bucket score.",
+      "view": "scores-numeric",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "runs with disjoint exported token buckets"
+    },
+    {
+      "name": "Model mix",
+      "description": "Observation-backed model mix; not task-page model fields.",
+      "view": "OBSERVATIONS",
+      "dimensions": [{"field": "providedModelName"}],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "OBSERVATIONS with non-empty providedModelName"
+    },
+    {
+      "name": "Queue latency seconds",
+      "description": "Visible exported queue_latency_seconds score.",
+      "view": "scores-numeric",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "queued runs with exported queue_latency_seconds"
+    }
+  ]
+}

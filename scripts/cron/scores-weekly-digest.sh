@@ -38,4 +38,4 @@ if [[ -z "${HERMES}" ]]; then
     fi
 fi
 
-exec "$HERMES" kanban scores --digest "$@"
+exec "$HERMES" kanban scores --digest --auto-ingest "$@"

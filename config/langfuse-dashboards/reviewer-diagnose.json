@@ -1,0 +1,40 @@
+{
+  "fixture_version": 1,
+  "name": "Hermes Reviewer Diagnose",
+  "description": "Source-grounded reviewer outcome indicators.",
+  "widgets": [
+    {
+      "name": "First-pass approval",
+      "description": "Visible exported first-pass-approval score.",
+      "view": "scores-boolean",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "review submissions with an approval outcome"
+    },
+    {
+      "name": "Review submissions to approval",
+      "description": "Visible exported review_submissions_to_approval score.",
+      "view": "scores-numeric",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "approved tasks with an exported review-submission count"
+    },
+    {
+      "name": "Operator veto",
+      "description": "Visible exported operator_veto score.",
+      "view": "scores-boolean",
+      "dimensions": [],
+      "metrics": [{"agg": "count", "measure": "count"}],
+      "filters": [],
+      "chart_type": "LINE_TIME_SERIES",
+      "chart_config": {"type": "LINE_TIME_SERIES"},
+      "denominator": "reviewed tasks with an exported operator-veto score"
+    }
+  ]
+}

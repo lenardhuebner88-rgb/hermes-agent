@@ -1,0 +1,32 @@
+{
+  "fixture_version": 1,
+  "source": {
+    "langfuse_version": "3.224.0",
+    "revision": "d044f366816282235898a0673d5700e05ccbee8c",
+    "export_kind": "sanitised-ui-created-normal-widget",
+    "id_redaction": "<REDACTED_ID>"
+  },
+  "definition": {
+    "widgets": [
+      {
+        "x": 0,
+        "y": 0,
+        "id": "<REDACTED_ID>",
+        "type": "widget",
+        "x_size": 6,
+        "y_size": 6,
+        "widgetId": "<REDACTED_ID>"
+      }
+    ]
+  },
+  "dimensions": [],
+  "metrics": [
+    {
+      "agg": "count",
+      "measure": "count"
+    }
+  ],
+  "chart_config": {
+    "type": "LINE_TIME_SERIES"
+  }
+}

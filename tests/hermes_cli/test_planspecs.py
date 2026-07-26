@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 import pytest
 
 from hermes_cli import kanban_db as kb
+from hermes_cli import kanban as kanban_cli
 from hermes_cli import planspecs
 from hermes_cli.subcommands import plan as plan_subcommand
 
@@ -165,6 +168,121 @@ def test_ingest_accepts_prose(kanban_home, tmp_path: Path, capsys):
     children = [row for row in rows if row["planspec_source"]]
     assert {row["title"] for row in children} == {"Parse prose", "Compile children"}
     assert {row["planspec_source"] for row in children} == {str(path.resolve(strict=False))}
+
+
+def test_auto_ingest_score_findings_writes_prose_plan_and_cooldown(kanban_home):
+    finding = {
+        "key": "approval-rate-low",
+        "label": "Approval rate is below target",
+        "impact_eur": 42.5,
+    }
+    now = datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc)
+
+    created = planspecs.auto_ingest_score_findings(
+        [finding], threshold_eur=10, now=now
+    )
+
+    assert created["created"] == ["approval-rate-low"]
+    prose_path = (
+        kanban_home
+        / "dashboard"
+        / "prose-plans"
+        / "score-finding-approval-rate-low-20260726.md"
+    )
+    assert prose_path.exists()
+    assert "freigabe:" not in prose_path.read_text(encoding="utf-8")
+    with kb.connect_closing() as conn:
+        root = conn.execute(
+            "SELECT freigabe FROM tasks WHERE id = ?",
+            (created["results"][0]["root_task_id"],),
+        ).fetchone()
+    assert root["freigabe"] == "operator"
+
+    suppressed = planspecs.auto_ingest_score_findings(
+        [finding], threshold_eur=10, now=now + timedelta(days=13, hours=23)
+    )
+    assert suppressed["suppressed"] == [{"key": "approval-rate-low", "reason": "cooldown"}]
+    cooldown_state = json.loads(
+        (kanban_home / "dashboard" / "prose-plans" / "auto-ingest-cooldown.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert cooldown_state["accepted"]["approval-rate-low"] == now.isoformat()
+
+    after_cooldown = planspecs.auto_ingest_score_findings(
+        [finding], threshold_eur=10, now=now + timedelta(days=14)
+    )
+    assert after_cooldown["created"] == ["approval-rate-low"]
+    decisions = (kanban_home / "dashboard" / "prose-plans" / "auto-ingest-decisions.jsonl").read_text(
+        encoding="utf-8"
+    )
+    assert '"reason": "created"' in decisions
+    assert '"reason": "cooldown"' in decisions
+
+
+def test_auto_ingest_score_findings_suppresses_below_threshold(kanban_home):
+    result = planspecs.auto_ingest_score_findings(
+        [{"key": "small-impact", "label": "Small impact", "impact_eur": 9.99}],
+        threshold_eur=10,
+        now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+
+    assert result["created"] == []
+    assert result["suppressed"] == [
+        {"key": "small-impact", "reason": "below_threshold"}
+    ]
+    assert _task_count() == 0
+    assert '"reason": "below_threshold"' in (
+        kanban_home / "dashboard" / "prose-plans" / "auto-ingest-decisions.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_auto_ingest_score_findings_uses_digest_kind_and_subject_as_key(kanban_home):
+    result = planspecs.auto_ingest_score_findings(
+        [
+            {
+                "kind": "queue_p95",
+                "subject": "queue",
+                "title": "Queue-p95-Ausreißer",
+                "impact_eur": 15,
+            }
+        ],
+        threshold_eur=10,
+        now=datetime(2026, 7, 26, tzinfo=timezone.utc),
+    )
+
+    assert result["created"] == ["queue_p95:queue"]
+    assert (
+        kanban_home / "dashboard" / "prose-plans" / "score-finding-queue-p95-queue-20260726.md"
+    ).exists()
+
+
+def test_scores_digest_auto_ingest_dispatches_top_findings(kanban_home, monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        kanban_cli.kb,
+        "scores_digest",
+        lambda _conn, *, weeks: {
+            "top_findings": [{"kind": "queue_p95", "subject": "queue", "impact_eur": 21}],
+        },
+    )
+    monkeypatch.setattr(
+        planspecs,
+        "auto_ingest_score_findings",
+        lambda findings, *, threshold_eur: captured.update(
+            findings=findings, threshold_eur=threshold_eur
+        )
+        or {"created": ["queue_p95:queue"], "suppressed": [], "results": []},
+    )
+
+    assert kanban_cli._cmd_scores_digest(
+        Namespace(weeks=4, auto_ingest=True, auto_ingest_threshold_eur=20, json=True)
+    ) == 0
+    assert captured == {
+        "findings": [{"kind": "queue_p95", "subject": "queue", "impact_eur": 21}],
+        "threshold_eur": 20.0,
+    }
 
 
 def test_ingest_binding_unchanged(monkeypatch, tmp_path: Path, capsys):

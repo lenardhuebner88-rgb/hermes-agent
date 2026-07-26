@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 import yaml
 
+from hermes_constants import get_hermes_home
 from hermes_cli import kanban_db
 from hermes_cli.plan_compiler import (
     AcceptanceCriterion,
@@ -2630,6 +2631,182 @@ def ingest_prose_plan(
         }
     finally:
         conn.close()
+
+
+_AUTO_INGEST_COOLDOWN_DAYS = 14
+
+
+def _auto_ingest_root() -> Path:
+    return get_hermes_home() / "dashboard" / "prose-plans"
+
+
+def _auto_ingest_paths() -> tuple[Path, Path]:
+    root = _auto_ingest_root()
+    return root / "auto-ingest-cooldown.json", root / "auto-ingest-decisions.jsonl"
+
+
+def _load_auto_ingest_cooldown(path: Path) -> dict[str, str]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        accepted = payload.get("accepted", {})
+    except (OSError, ValueError, TypeError):
+        return {}
+    return {str(key): str(value) for key, value in accepted.items()}
+
+
+def _write_auto_ingest_cooldown(path: Path, accepted: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"accepted": accepted}, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _record_auto_ingest_decision(
+    path: Path,
+    *,
+    finding_key: str,
+    reason: str,
+    recorded_at: datetime,
+    impact_eur: float,
+) -> None:
+    entry = {
+        "finding_key": finding_key,
+        "reason": reason,
+        "recorded_at": recorded_at.isoformat(),
+        "impact_eur": impact_eur,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    logger.info("score finding auto-ingest decision: %s", entry)
+
+
+def _score_finding_plan_text(*, finding_key: str, label: str, impact_eur: float) -> str:
+    """Render the intentionally small, fully deterministic Plan prose template."""
+    return f"""# Score finding: {label}
+
+**Goal:** Address the score finding `{finding_key}` with a reproducible diagnosis and verification; estimated impact is EUR {impact_eur:.2f}.
+
+## Slice: Diagnose {finding_key}
+- lane: coder
+- done-when: The score finding `{finding_key}` has a documented, reproducible root-cause diagnosis.
+
+## Slice: Verify {finding_key}
+- lane: verifier
+- deps: Diagnose {finding_key}
+- done-when: A focused verification proves the remediation outcome for `{finding_key}`.
+"""
+
+
+def auto_ingest_score_findings(
+    findings: list[dict[str, Any]],
+    *,
+    threshold_eur: float,
+    board: str = "default",
+    freigabe: Literal["complete", "operator"] = "operator",
+    cooldown_days: int = _AUTO_INGEST_COOLDOWN_DAYS,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Ingest material score findings while persisting deterministic cooldown state.
+
+    This deliberately accepts the digest's already-local data model rather than
+    querying score storage itself, keeping the decision point at the dispatch
+    boundary.  The returned structure is also suitable for CLI/cron reporting.
+    """
+    if threshold_eur < 0:
+        raise ValueError("threshold_eur must be non-negative")
+    if cooldown_days < 1:
+        raise ValueError("cooldown_days must be at least one day")
+
+    recorded_at = now or datetime.now(timezone.utc)
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    else:
+        recorded_at = recorded_at.astimezone(timezone.utc)
+    cooldown_path, decisions_path = _auto_ingest_paths()
+    accepted = _load_auto_ingest_cooldown(cooldown_path)
+    created: list[str] = []
+    suppressed: list[dict[str, str]] = []
+    results: list[dict[str, Any]] = []
+
+    for finding in findings:
+        finding_key = str(finding.get("key") or "").strip()
+        if not finding_key and finding.get("kind"):
+            finding_key = f"{finding['kind']}:{finding.get('subject', 'global')}"
+        label = str(finding.get("label") or finding.get("title") or finding_key).strip()
+        try:
+            impact_eur = float(finding.get("impact_eur", 0))
+        except (TypeError, ValueError):
+            impact_eur = 0.0
+        if not finding_key:
+            suppressed.append({"key": "", "reason": "missing_key"})
+            _record_auto_ingest_decision(
+                decisions_path,
+                finding_key="",
+                reason="missing_key",
+                recorded_at=recorded_at,
+                impact_eur=impact_eur,
+            )
+            continue
+        if impact_eur < threshold_eur:
+            suppressed.append({"key": finding_key, "reason": "below_threshold"})
+            _record_auto_ingest_decision(
+                decisions_path,
+                finding_key=finding_key,
+                reason="below_threshold",
+                recorded_at=recorded_at,
+                impact_eur=impact_eur,
+            )
+            continue
+        previous = accepted.get(finding_key)
+        if previous:
+            try:
+                previous_at = datetime.fromisoformat(previous)
+                if previous_at.tzinfo is None:
+                    previous_at = previous_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                previous_at = None
+            if previous_at and recorded_at - previous_at < timedelta(days=cooldown_days):
+                suppressed.append({"key": finding_key, "reason": "cooldown"})
+                _record_auto_ingest_decision(
+                    decisions_path,
+                    finding_key=finding_key,
+                    reason="cooldown",
+                    recorded_at=recorded_at,
+                    impact_eur=impact_eur,
+                )
+                continue
+
+        safe_key = re.sub(r"[^a-z0-9]+", "-", finding_key.lower()).strip("-") or "finding"
+        prose_path = _auto_ingest_root() / (
+            f"score-finding-{safe_key}-{recorded_at:%Y%m%d}.md"
+        )
+        prose_path.parent.mkdir(parents=True, exist_ok=True)
+        prose_path.write_text(
+            _score_finding_plan_text(
+                finding_key=finding_key, label=label or finding_key, impact_eur=impact_eur
+            ),
+            encoding="utf-8",
+        )
+        result = ingest_prose_plan(
+            prose_path, board=board, freigabe=freigabe, author="score-auto-ingest"
+        )
+        accepted[finding_key] = recorded_at.isoformat()
+        _write_auto_ingest_cooldown(cooldown_path, accepted)
+        created.append(finding_key)
+        results.append(result)
+        _record_auto_ingest_decision(
+            decisions_path,
+            finding_key=finding_key,
+            reason="created",
+            recorded_at=recorded_at,
+            impact_eur=impact_eur,
+        )
+
+    return {"created": created, "suppressed": suppressed, "results": results}
 
 
 def sprint_prompt_for_planspec(path: str | Path, *, plans_root: Path = DEFAULT_PLANS_ROOT) -> dict[str, Any]:
