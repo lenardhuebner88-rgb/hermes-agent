@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Iterable
@@ -17,6 +18,8 @@ from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
+
+_log = logging.getLogger(__name__)
 
 LANE_FIXER_IDEM_PREFIX = "lane-scope-fixer:"
 LANE_FIXER_DISPATCHED_EVENT = "lane_scope_fixer_dispatched"
@@ -213,5 +216,6 @@ def maybe_route_lane_scope_fixer(
                 },
             )
     except Exception:
+        _log.warning("lane-scope fixer creation failed for %s", parent_id, exc_info=True)
         return None
     return child_id

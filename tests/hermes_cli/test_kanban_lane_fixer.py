@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import pytest
@@ -125,7 +126,7 @@ def test_exhausted_fixer_budget_emits_operator_escalation(lane_parent):
 
 
 def test_lane_fixer_never_routes_a_fixer_and_creation_failure_is_soft(
-    lane_parent, monkeypatch
+    lane_parent, monkeypatch, caplog
 ):
     conn, parent, _ = lane_parent
     child_id = lane_fixer.maybe_route_lane_scope_fixer(
@@ -161,11 +162,13 @@ def test_lane_fixer_never_routes_a_fixer_and_creation_failure_is_soft(
         raise RuntimeError("creation failed")
 
     monkeypatch.setattr(lane_fixer.kb, "create_task", raise_create)
-    assert lane_fixer.maybe_route_lane_scope_fixer(
-        conn,
-        second_parent,
-        violating_paths=["web/src/control/Other.tsx"],
-        expected_lane="coder-frontend",
-        now=102,
-    ) is None
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.kanban_lane_fixer"):
+        assert lane_fixer.maybe_route_lane_scope_fixer(
+            conn,
+            second_parent,
+            violating_paths=["web/src/control/Other.tsx"],
+            expected_lane="coder-frontend",
+            now=102,
+        ) is None
     assert not _events(conn, second_parent_id, lane_fixer.LANE_FIXER_DISPATCHED_EVENT)
+    assert "lane-scope fixer creation failed" in caplog.text
