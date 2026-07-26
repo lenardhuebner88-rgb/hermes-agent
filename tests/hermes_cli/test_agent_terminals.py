@@ -372,6 +372,14 @@ def test_missing_path_hermes_reports_unavailable_without_cwd_fallback(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(shutil, "which", lambda name: None)
+    original_exists = Path.exists
+
+    def without_host_hermes_binary(candidate: Path) -> bool:
+        if candidate in {Path("/usr/local/bin/hermes"), Path("/usr/bin/hermes")}:
+            return False
+        return original_exists(candidate)
+
+    monkeypatch.setattr(agent_terminals.Path, "exists", without_host_hermes_binary)
     service = TmuxAgentSessionService(tmux_binary="tmux", hermes_home=tmp_path)
 
     with pytest.raises(CapabilityError, match="not found"):
