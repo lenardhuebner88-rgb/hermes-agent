@@ -5849,15 +5849,31 @@ def _enforce_lane_scope_on_complete(
     # available task run so `<sha>..<branch>` — TWO dots, "what did this task
     # add across all retries", not a merge-base comparison — contains exactly
     # this task's own commits.
+    #
+    # A run whose provisioning never got past a transient spawn-retry
+    # (`_record_spawn_retry` in kanban_db.py, the git-lock-contention path)
+    # closes with `outcome='spawn_retry'` while STILL carrying its claim-time
+    # stamp — the pre-materialization workspace HEAD (repo root, not yet the
+    # chain worktree). That stamp predates even a sibling's commit already on
+    # the chain branch, so picking it as the oldest candidate attributes the
+    # sibling's files to this task. Exclude spawn_retry runs from candidacy:
+    # they never touched the tree, so their stamp is not a basis for "what
+    # did this task add".
     diff_spec = f"{base}...{branch}"
     pre_run = conn.execute(
         "SELECT pre_run_commit_sha FROM task_runs "
         "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
         "AND pre_run_commit_sha != '' "
+        "AND (outcome IS NULL OR outcome != 'spawn_retry') "
         "ORDER BY id ASC LIMIT 1",
         (task_id,),
     ).fetchone()
     pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
+    # Set when the recorded stamp resolves but is no longer an ancestor of
+    # `branch` (the shared chain branch was rebased after the stamp was
+    # taken) — the merge-base subtraction below fills in `changed_files`
+    # from it instead of the plain cumulative diff.
+    exclude_pre_own_basis: Optional[str] = None
     if pre_run_sha:
         try:
             _git(repo_root, "rev-parse", "--verify", f"{pre_run_sha}^{{commit}}")
@@ -5876,12 +5892,22 @@ def _enforce_lane_scope_on_complete(
                 diff_spec = f"{pre_run_sha}..{branch}"
             else:
                 # A resolvable object is not a safe two-dot basis after the
-                # shared chain branch was rebased: comparing unrelated trees
-                # would attribute target drift to this task. Keep the original
-                # cumulative fallback and make the degraded attribution visible.
+                # shared chain branch was rebased: rebase mints new commit
+                # SHAs, so pre_run_sha's own object is orphaned even though
+                # its *content* still precedes this task's own commits on
+                # `branch`. A plain cumulative fallback would re-attribute a
+                # sibling's pre-existing files to this task (the exact bug
+                # the stamp exists to prevent) — instead, keep the
+                # cumulative diff as the candidate set but subtract whatever
+                # already existed at pre_run_sha, computed via the
+                # merge-base of the orphaned stamp and `branch` (the point
+                # their histories split, unaffected by the later rebase).
+                exclude_pre_own_basis = pre_run_sha
                 _log.warning(
                     "lane-scope: pre_run_commit_sha %s of task %s is not "
-                    "an ancestor of branch %s; falling back to cumulative diff",
+                    "an ancestor of branch %s after a rebase; excluding "
+                    "pre-existing paths via a merge-base diff instead of a "
+                    "plain cumulative fallback",
                     pre_run_sha,
                     task_id,
                     branch,
@@ -5897,6 +5923,21 @@ def _enforce_lane_scope_on_complete(
             ).splitlines()
             if path
         ]
+        if exclude_pre_own_basis:
+            merge_base_sha = _git(
+                repo_root, "merge-base", exclude_pre_own_basis, branch,
+            )
+            pre_existing = {
+                path
+                for path in _git(
+                    repo_root, "diff", "--name-only",
+                    f"{merge_base_sha}..{exclude_pre_own_basis}",
+                ).splitlines()
+                if path
+            }
+            changed_files = [
+                path for path in changed_files if path not in pre_existing
+            ]
     except WorktreeError as exc:
         _log.warning(
             "lane-scope check could not diff %s: %s", diff_spec, exc,
