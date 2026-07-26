@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ScorecardResponse } from "../lib/schemas";
+import { ScorecardResponseSchema, type ScorecardResponse } from "../lib/schemas";
 
 const mockState = vi.hoisted(() => ({ data: null as ScorecardResponse | null }));
 
@@ -22,6 +22,19 @@ const baseData = (): ScorecardResponse => ({
 
 describe("ScorecardView", () => {
   beforeEach(() => { mockState.data = baseData(); });
+
+  it("preserves nullable numeric distribution statistics from the scorecard response", () => {
+    const scores = ScorecardResponseSchema.parse({
+      ...baseData(),
+      materialized_scores: {
+        run_cost_usd: { value: 1.5, min: 0.5, max: 2.5, sum: 3, count: 2 },
+        run_outcome_kind: { value: { completed: 2 }, count: 2 },
+      },
+    }).materialized_scores;
+
+    expect(scores.run_cost_usd).toMatchObject({ value: 1.5, min: 0.5, max: 2.5, sum: 3, count: 2 });
+    expect(scores.run_outcome_kind).toMatchObject({ value: { completed: 2 }, count: 2 });
+  });
 
   it("renders the scorecard endpoint aggregation shape", () => {
     const markup = renderToStaticMarkup(<ScorecardView />);
@@ -49,6 +62,19 @@ describe("ScorecardView", () => {
     // … und die bestehende review_verdict-Darstellung bleibt unverändert.
     expect(markup).toContain("75.0 %");
     expect(markup).toContain("coder");
+  });
+
+  it("zeigt kategoriale Score-Häufigkeiten ohne sie als Zahl zu erzwingen", () => {
+    mockState.data = {
+      ...baseData(),
+      materialized_scores: { run_outcome_kind: { value: { completed: 2 }, count: 2 } },
+    };
+
+    const markup = renderToStaticMarkup(<ScorecardView />);
+
+    expect(markup).toContain("run_outcome_kind");
+    expect(markup).toContain("kategorial");
+    expect(markup).toContain("n = 2");
   });
 
   it("kennzeichnet einen Score mit dünnem Nenner und stellt ihn nicht als Zielwert dar", () => {

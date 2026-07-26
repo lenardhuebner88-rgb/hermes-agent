@@ -7,9 +7,12 @@ const ScoreRateSchema = z.object({
   approval_rate: z.coerce.number().nullable().catch(null),
 });
 const ScoreGroupSchema = ScoreRateSchema.extend({ name: z.string().catch("unknown") });
-/** Materialisierte Event-/Usage-Scores aus SC-S1: Mittelwert (0..1) plus Row-Anzahl. */
+/** Materialisierte numerische Serien oder kategoriale Häufigkeits-Maps aus SC-S1. */
 const MaterializedScoreSchema = z.object({
-  value: z.coerce.number().nullable().catch(null),
+  value: z.union([z.coerce.number(), z.record(z.string(), z.coerce.number())]).nullable().catch(null),
+  min: z.coerce.number().nullable().catch(null).optional(),
+  max: z.coerce.number().nullable().catch(null).optional(),
+  sum: z.coerce.number().nullable().catch(null).optional(),
   count: z.coerce.number().catch(0),
 });
 export const ScorecardResponseSchema = z.object({

@@ -5,6 +5,8 @@ import type { MaterializedScore } from "../lib/schemas";
 
 const percent = (value: number | null) => value == null ? "–" : `${(value * 100).toFixed(1)} %`;
 
+const scoreValue = (value: MaterializedScore["value"]) => typeof value === "number" ? percent(value) : "kategorial";
+
 /**
  * Datenserien-Palette (DESIGN.md: mehrere Serien = Datenfarben, kein
  * Statusvokabular). Volle Literal-Klassen, damit Tailwind sie generiert.
@@ -68,7 +70,7 @@ function ScoreSeriesSection({ scores }: { scores: Record<string, MaterializedSco
           const thin = score.count < MIN_EVIDENCE_ROWS;
           const meta = score.count === 0
             ? "keine Rows · dünne Datenlage"
-            : `${percent(score.value)} · n = ${score.count}${thin ? " · dünne Datenlage" : ""}`;
+            : `${scoreValue(score.value)} · n = ${score.count}${thin ? " · dünne Datenlage" : ""}`;
           return (
             <ListRow
               key={name}
