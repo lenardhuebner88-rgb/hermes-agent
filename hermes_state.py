@@ -811,9 +811,29 @@ def _backup_db_file(db_path: Path) -> Optional[Path]:
     Raw file copy on purpose: the DB won't open cleanly, so we preserve the
     bytes exactly for forensics / manual restore. WAL and SHM sidecars are
     copied too when present. Returns the backup path, or None on failure.
+
+    Refuses when a connection to this database is still live in the process:
+    reading the file would ``close()`` a descriptor for it and cancel that
+    connection's POSIX advisory locks (see ``hermes_cli.sqlite_safe_read``).
+    The repair path can be entered by one SessionDB while the gateway holds
+    others, so this is a real possibility rather than a theoretical one.
     """
     import datetime
     import shutil
+
+    try:
+        from hermes_cli.sqlite_safe_read import has_live_connection
+    except ImportError:
+        has_live_connection = None  # type: ignore[assignment]
+
+    if has_live_connection is not None and has_live_connection(db_path):
+        logger.error(
+            "Refusing to raw-copy %s for backup: a connection to it is still "
+            "open in this process and the copy would cancel that connection's "
+            "POSIX locks. Close all SessionDB handles first.",
+            db_path,
+        )
+        return None
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = db_path.with_name(f"{db_path.name}.malformed-backup-{stamp}")
@@ -1692,8 +1712,18 @@ def _connect_tracked_db(path, tracking_path=None, **kwargs):
     )
 
 
-def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
+def is_zeroed_state_db(
+    path: Path, *, probe_bytes: int = 100, force: bool = False
+) -> bool:
     """Detect the #68474 zeroed state.db signature (size>0, NUL header).
+
+    Byte-level probe, so it is only safe BEFORE any connection to *path*
+    exists in this process: ``close()`` cancels every POSIX advisory lock the
+    process holds on the file, which can pull the EXCLUSIVE lock out from
+    under a running VACUUM and corrupt the database. The read is routed
+    through ``read_header_bytes_preopen``, which refuses (returning False
+    here) once a connection is live. Pass ``force=True`` only for offline
+    files -- quarantined copies, snapshots, archives.
 
     Prefer ``hermes_cli.backup.is_zeroed_sqlite_file`` when available; this
     local copy keeps SessionDB openable without importing the CLI package
@@ -1702,7 +1732,7 @@ def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
     try:
         from hermes_cli.backup import is_zeroed_sqlite_file
 
-        return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes)
+        return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes, force=force)
     except Exception:
         pass
     try:
@@ -1711,11 +1741,11 @@ def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100) -> bool:
         return False
     if size <= 0:
         return False
-    try:
-        with open(path, "rb") as fh:
-            head = fh.read(max(16, probe_bytes))
-    except OSError:
-        return False
+    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+
+    head = read_header_bytes_preopen(
+        path, length=max(16, probe_bytes), force=force
+    )
     if not head or head.startswith(b"SQLite format 3"):
         return False
     return all(byte == 0 for byte in head)
