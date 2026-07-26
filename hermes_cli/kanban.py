@@ -4261,7 +4261,7 @@ def _cmd_scores(args: argparse.Namespace) -> int:
 
 def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
     """Export the active board's scores without changing its SQLite database."""
-    from hermes_cli.langfuse_scores_export import export_scores
+    from hermes_cli.langfuse_scores_export import cron_export_alert, export_scores
 
     cron = bool(getattr(args, "cron", False))
     try:
@@ -4280,6 +4280,10 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
     matched = result.get("matched", 0)
     unmatched = result.get("unmatched", 0)
     posted = result.get("posted", 0)
+    # `--backfill` supplies the ledger-backed delta.  Keep the prior
+    # --cron invocation usable for operators who call it directly without
+    # --backfill; the shipped scheduler always enables the ledger.
+    posted_new = result.get("posted_new", posted)
     dry = " (dry-run)" if args.dry_run else ""
     summary = f"Langfuse export{dry}: matched={matched} unmatched={unmatched} posted={posted}"
     if cron:
@@ -4287,8 +4291,12 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
         # was newly posted -> no Discord delivery; exactly one line on N>0.
         # Diagnostics always go to stderr so they never trigger delivery.
         print(summary, file=sys.stderr)
-        if posted > 0:
-            print(f"langfuse-scores-export: posted {posted} score(s) to Langfuse")
+        alert = cron_export_alert()
+        if posted_new > 0:
+            message = f"langfuse-scores-export: posted {posted_new} new score(s) to Langfuse"
+            print(f"{message}; alert: {alert}" if alert else message)
+        elif alert:
+            print(f"langfuse-scores-export: alert: {alert}")
         return 0
     # Default mode: summary on stderr, full JSON result on stdout.
     print(summary, file=sys.stderr)

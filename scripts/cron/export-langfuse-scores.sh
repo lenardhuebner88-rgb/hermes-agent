@@ -60,4 +60,4 @@ fi
 # hermes_cli/main.py.  Invoke -m hermes_cli.main (never bare -m hermes_cli,
 # which exits 1 with "No module named hermes_cli.__main__").
 # Pass stdout/exit-code through; --cron controls the silent contract.
-"${py}" -m hermes_cli.main kanban export-langfuse-scores --cron
+"${py}" -m hermes_cli.main kanban export-langfuse-scores --cron --backfill

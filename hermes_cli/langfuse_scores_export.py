@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import sqlite3
+import statistics
 import tempfile
 import time
 import urllib.error
@@ -608,6 +610,103 @@ def _export_score_backfill(
         report["posted_new"] += len(batch)
     report["posted"] = report["posted_new"]
     return report
+
+
+def _cron_env_float(name: str, default: float) -> float:
+    """Read a finite positive alert threshold without breaking a cron run."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def _nearest_rank_p95(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+
+
+def cron_export_alert(
+    *,
+    db_path: Path | None = None,
+    now: int | None = None,
+    cost_p95_multiplier: float | None = None,
+    cache_hit_ratio_threshold: float | None = None,
+) -> str | None:
+    """Return one compact daily alert, or ``None`` when the cron should stay quiet.
+
+    The cost baseline intentionally uses seven *completed* UTC days, so a
+    partially accrued current day cannot inflate its own reference median.
+    """
+    cost_p95_multiplier = (
+        cost_p95_multiplier
+        if cost_p95_multiplier is not None
+        else _cron_env_float("HERMES_LANGFUSE_COST_P95_MULTIPLIER", 3.0)
+    )
+    cache_hit_ratio_threshold = (
+        cache_hit_ratio_threshold
+        if cache_hit_ratio_threshold is not None
+        else _cron_env_float("HERMES_LANGFUSE_CACHE_HIT_RATIO_THRESHOLD", 0.20)
+    )
+    if cost_p95_multiplier <= 0 or cache_hit_ratio_threshold <= 0:
+        return None
+
+    current_time = int(time.time()) if now is None else int(now)
+    day_seconds = 24 * 60 * 60
+    today_start = current_time // day_seconds * day_seconds
+    path = Path(db_path) if db_path is not None else kanban_db_path()
+    try:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            def _values(name: str, start: int, end: int) -> list[float]:
+                rows = conn.execute(
+                    "SELECT value FROM scores "
+                    "WHERE name = ? AND created_at >= ? AND created_at < ? "
+                    "AND value IS NOT NULL",
+                    (name, start, end),
+                ).fetchall()
+                return [float(row["value"]) for row in rows]
+
+            current_cost_p95 = _nearest_rank_p95(
+                _values("run_cost_usd", today_start, today_start + day_seconds)
+            )
+            historical_p95s = [
+                p95
+                for offset in range(1, 8)
+                if (p95 := _nearest_rank_p95(_values(
+                    "run_cost_usd",
+                    today_start - offset * day_seconds,
+                    today_start - (offset - 1) * day_seconds,
+                ))) is not None
+            ]
+            cache_values = _values(
+                "cache_hit_ratio", today_start, today_start + day_seconds
+            )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    messages: list[str] = []
+    if current_cost_p95 is not None and len(historical_p95s) == 7:
+        baseline = float(statistics.median(historical_p95s))
+        limit = baseline * cost_p95_multiplier
+        if current_cost_p95 > limit:
+            messages.append(
+                f"cost p95 ${current_cost_p95:.4g} exceeds "
+                f"{cost_p95_multiplier:.4g}x 7d median ${baseline:.4g}"
+            )
+    if cache_values:
+        cache_hit_ratio = statistics.fmean(cache_values)
+        if cache_hit_ratio < cache_hit_ratio_threshold:
+            messages.append(
+                f"cache hit ratio {cache_hit_ratio:.1%} below "
+                f"{cache_hit_ratio_threshold:.1%}"
+            )
+    return "; ".join(messages) or None
 
 
 def export_scores(
