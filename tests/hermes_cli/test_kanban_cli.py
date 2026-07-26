@@ -901,10 +901,12 @@ def test_run_slash_link_unlink(kanban_home):
     assert "Unlinked" in kc.run_slash(f"unlink {ta} {tb}")
 
 
-def test_run_slash_link_warns_for_cross_branch_same_repo_workspace(kanban_home, tmp_path):
+def test_run_slash_link_warns_for_cross_branch_same_repo_planned_workspace(kanban_home, tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    planned_child_workspace = repo / ".worktrees" / "kanban" / "planned-child"
+    assert not planned_child_workspace.exists()
 
     with kb.connect() as conn:
         parent = kb.create_task(
@@ -918,7 +920,7 @@ def test_run_slash_link_warns_for_cross_branch_same_repo_workspace(kanban_home, 
             conn,
             title="child",
             workspace_kind="worktree",
-            workspace_path=str(repo),
+            workspace_path=str(planned_child_workspace),
             branch_name="feature/child",
         )
 

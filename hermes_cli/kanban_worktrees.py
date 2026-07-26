@@ -1504,10 +1504,17 @@ def resolve_chain_workspace(
 
 
 def _workspace_repo_identity(workspace_path: str | None) -> Path | None:
-    """Return the shared Git directory identifying a workspace's repository."""
+    """Return the shared Git directory identifying a workspace's repository.
+
+    A task can carry its planned worktree path before dispatch materializes
+    that directory.  In that case, resolve Git identity from its nearest
+    existing ancestor so link warnings still cover create-then-link flows.
+    """
     if not workspace_path:
         return None
-    path = Path(workspace_path)
+    path = Path(workspace_path).expanduser()
+    while not path.is_dir() and path != path.parent:
+        path = path.parent
     if not path.is_dir():
         return None
     try:
