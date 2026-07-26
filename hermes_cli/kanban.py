@@ -4364,6 +4364,15 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
         # was newly posted -> no Discord delivery; exactly one line on N>0.
         # Diagnostics always go to stderr so they never trigger delivery.
         print(summary, file=sys.stderr)
+        if args.dry_run and bool(getattr(args, "backfill", False)):
+            print(
+                "langfuse-scores-export: dry-run "
+                f"pending_events={result.get('pending_events', 0)} "
+                f"planned_events={result.get('planned_events', 0)} "
+                f"remaining_events={result.get('remaining_events', 0)} "
+                f"effective_event_limit={result.get('effective_event_limit')}"
+            )
+            return 0
         alert = cron_export_alert()
         if posted_new > 0:
             message = f"langfuse-scores-export: posted {posted_new} new score(s) to Langfuse"
