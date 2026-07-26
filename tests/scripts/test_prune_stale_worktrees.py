@@ -25,6 +25,7 @@ def _run(*args: str | Path, cwd: Path, env: dict[str, str] | None = None) -> sub
 
 
 def _make_repo(tmp_path: Path, task_id: str) -> tuple[Path, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     repo = tmp_path / "repo"
     repo.mkdir()
     _run("git", "init", "-b", "main", cwd=repo)
@@ -40,6 +41,7 @@ def _make_repo(tmp_path: Path, task_id: str) -> tuple[Path, Path]:
 
 
 def _write_board(db_path: Path, *, task_id: str, status: str, workspace_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             "CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, workspace_path TEXT)"
@@ -56,11 +58,13 @@ def _prune(
     *,
     hermes_home: Path | None = None,
     deps_root: Path | None = None,
+    use_config_repos: bool = False,
+    config_path: Path | None = None,
+    apply: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.update(
         {
-            "PRUNE_REPOS": str(repo),
             "KANBAN_DB_PATH": str(db_path),
             "HERMES_HOME": str(hermes_home or db_path.parent),
             "HERMES_WORKTREE_DEPS_ROOT": str(
@@ -69,13 +73,165 @@ def _prune(
             "MIN_AGE_HOURS": "0",
         }
     )
-    return _run("bash", SCRIPT, "--apply", cwd=REPO_ROOT, env=env)
+    if use_config_repos:
+        env.pop("PRUNE_REPOS", None)
+    else:
+        env["PRUNE_REPOS"] = str(repo)
+    if config_path is not None:
+        env["HERMES_CONFIG_PATH"] = str(config_path)
+    args: tuple[str | Path, ...] = ("bash", SCRIPT)
+    if apply:
+        args += ("--apply",)
+    return _run(*args, cwd=REPO_ROOT, env=env)
 
 
 def _deps_tree(deps_root: Path, worktree: Path) -> Path:
     canonical = str(worktree.resolve())
     digest = hashlib.sha256(canonical.encode()).hexdigest()[:16]
     return deps_root / f"{worktree.name}-{digest}"
+
+
+def _write_gate_config(config_path: Path, *repos: Path) -> None:
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["kanban:", "  worker_gate:", "    repos:"]
+    lines.extend(f"      {repo}: {{}}" for repo in repos)
+    config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_pruner_keeps_configured_repo_dependency_tree_without_override(
+    tmp_path: Path,
+) -> None:
+    repo, worktree = _make_repo(tmp_path / "configured", "t_configured_deps")
+    hermes_home = tmp_path / "hermes"
+    config_path = hermes_home / "config.yaml"
+    _write_gate_config(config_path, repo)
+    db_path = hermes_home / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_configured_deps",
+        status="running",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    active_tree = _deps_tree(deps_root, worktree)
+    marker = active_tree / "node_modules" / "KEEP"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("active\n")
+
+    result = _prune(
+        repo,
+        db_path,
+        hermes_home=hermes_home,
+        deps_root=deps_root,
+        use_config_repos=True,
+    )
+
+    assert marker.exists()
+    assert "removed deps:" not in result.stdout
+
+
+def test_pruner_reports_orphan_in_dry_run_then_removes_with_apply(
+    tmp_path: Path,
+) -> None:
+    repo, worktree = _make_repo(tmp_path, "t_dry_run_deps")
+    db_path = tmp_path / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_dry_run_deps",
+        status="running",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    orphan_tree = deps_root / "t_orphan-0123456789abcdef"
+    marker = orphan_tree / "node_modules" / "ORPHAN"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("orphan\n")
+
+    dry_run = _prune(repo, db_path, deps_root=deps_root, apply=False)
+
+    assert marker.exists()
+    assert f"would remove deps: {orphan_tree} (no registered worktree)" in dry_run.stdout
+
+    applied = _prune(repo, db_path, deps_root=deps_root)
+
+    assert not orphan_tree.exists()
+    assert f"removed deps: {orphan_tree} (no registered worktree)" in applied.stdout
+
+
+def test_pruner_keeps_everything_when_config_is_unreadable(tmp_path: Path) -> None:
+    repo, worktree = _make_repo(tmp_path, "t_unreadable_config")
+    hermes_home = tmp_path / "hermes"
+    db_path = hermes_home / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_unreadable_config",
+        status="done",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    orphan_tree = deps_root / "t_orphan-0123456789abcdef"
+    marker = orphan_tree / "node_modules" / "KEEP"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("unknown\n")
+    missing_config = hermes_home / "missing-config.yaml"
+
+    result = _prune(
+        repo,
+        db_path,
+        hermes_home=hermes_home,
+        deps_root=deps_root,
+        use_config_repos=True,
+        config_path=missing_config,
+    )
+
+    assert worktree.exists()
+    assert marker.exists()
+    assert (
+        f"kept(deps-repo-source-unavailable): config unreadable: {missing_config}"
+        in result.stdout
+    )
+    assert f"kept(deps-membership-unknown): {orphan_tree}" in result.stdout
+
+
+@pytest.mark.parametrize("repo_failure", ["missing", "not-git"])
+def test_pruner_keeps_dependency_trees_when_configured_repo_is_unavailable(
+    tmp_path: Path,
+    repo_failure: str,
+) -> None:
+    repo, worktree = _make_repo(tmp_path / "valid", "t_partial_registry")
+    unsafe_repo = tmp_path / repo_failure
+    if repo_failure == "not-git":
+        unsafe_repo.mkdir()
+    hermes_home = tmp_path / "hermes"
+    config_path = hermes_home / "config.yaml"
+    _write_gate_config(config_path, repo, unsafe_repo)
+    db_path = hermes_home / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_partial_registry",
+        status="running",
+        workspace_path=worktree,
+    )
+    deps_root = tmp_path / "worktree-deps"
+    orphan_tree = deps_root / "t_orphan-0123456789abcdef"
+    marker = orphan_tree / "node_modules" / "KEEP"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("unknown\n")
+
+    result = _prune(
+        repo,
+        db_path,
+        hermes_home=hermes_home,
+        deps_root=deps_root,
+        use_config_repos=True,
+    )
+
+    assert marker.exists()
+    assert f"kept(deps-membership-unknown): {orphan_tree}" in result.stdout
+    if repo_failure == "missing":
+        assert f"configured repo path unavailable: {unsafe_repo}" in result.stdout
+    else:
+        assert f"git worktree list failed: {unsafe_repo}" in result.stdout
 
 
 def test_pruner_removes_only_orphaned_dependency_trees(tmp_path: Path) -> None:
