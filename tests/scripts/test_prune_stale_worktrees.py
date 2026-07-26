@@ -158,6 +158,51 @@ def test_pruner_reports_orphan_in_dry_run_then_removes_with_apply(
     assert f"removed deps: {orphan_tree} (no registered worktree)" in applied.stdout
 
 
+def test_pruner_refuses_deps_reaping_when_override_lacks_explicit_deps_root(
+    tmp_path: Path,
+) -> None:
+    """A narrowed PRUNE_REPOS set must never judge the default deps root.
+
+    Regression: a harness that overrode PRUNE_REPOS but left
+    HERMES_WORKTREE_DEPS_ROOT unset reaped the dependency tree of every live
+    worktree on the machine, because the partial repo set still marked the
+    identity registry as safe.
+
+    Deliberately a dry run: a test that only fails *after* deleting the trees
+    it is meant to protect would be the very trap being closed here. The
+    stderr assertion is the host-independent proof; the stdout assertions
+    catch the regression on any host that has the production root.
+    """
+    repo, worktree = _make_repo(tmp_path, "t_override_no_root")
+    db_path = tmp_path / "kanban.db"
+    _write_board(
+        db_path,
+        task_id="t_override_no_root",
+        status="running",
+        workspace_path=worktree,
+    )
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "KANBAN_DB_PATH": str(db_path),
+            "HERMES_HOME": str(db_path.parent),
+            "PRUNE_REPOS": str(repo),
+            "MIN_AGE_HOURS": "0",
+        }
+    )
+    env.pop("HERMES_WORKTREE_DEPS_ROOT", None)
+
+    result = _run("bash", SCRIPT, cwd=REPO_ROOT, env=env)
+
+    assert (
+        "deps-registry-unsafe: PRUNE_REPOS override without explicit "
+        "HERMES_WORKTREE_DEPS_ROOT" in result.stderr
+    )
+    assert "would remove deps:" not in result.stdout
+    assert "removed deps:" not in result.stdout
+
+
 def test_pruner_keeps_everything_when_config_is_unreadable(tmp_path: Path) -> None:
     repo, worktree = _make_repo(tmp_path, "t_unreadable_config")
     hermes_home = tmp_path / "hermes"

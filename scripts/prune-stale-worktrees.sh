@@ -23,6 +23,14 @@ declare -a PRUNE_REPO_PATHS=()
 declare -A REGISTERED_DEPS_IDENTITIES=()
 DEPS_REGISTRY_SAFE=0
 DEPS_REGISTRY_ERROR="repository source not loaded"
+PRUNE_REPOS_OVERRIDE=0
+# Whether the caller pointed the deps root somewhere explicitly. A PRUNE_REPOS
+# override narrows the repo set, so the resulting identity registry only
+# describes that subset — it must never be used to judge a deps root the caller
+# did not also name. Otherwise a test harness that overrides PRUNE_REPOS alone
+# reaps the production trees of every live worktree.
+DEPS_ROOT_EXPLICIT=0
+[[ -n "${HERMES_WORKTREE_DEPS_ROOT:-}" ]] && DEPS_ROOT_EXPLICIT=1
 
 if [[ "${1:-}" == "--apply" ]]; then
   APPLY=1
@@ -44,8 +52,10 @@ load_prune_repo_paths() {
   local parsed repo
   PRUNE_REPO_PATHS=()
   DEPS_REGISTRY_SAFE=0
+  PRUNE_REPOS_OVERRIDE=0
 
   if [[ -v PRUNE_REPOS ]]; then
+    PRUNE_REPOS_OVERRIDE=1
     read -r -a PRUNE_REPO_PATHS <<< "$PRUNE_REPOS"
     if (( ${#PRUNE_REPO_PATHS[@]} == 0 )); then
       DEPS_REGISTRY_ERROR="PRUNE_REPOS override is empty"
@@ -117,6 +127,14 @@ refresh_registered_deps_identities() {
   local repo listing line wt identity
   REGISTERED_DEPS_IDENTITIES=()
   DEPS_REGISTRY_SAFE=0
+
+  # A narrowed repo set may not judge a deps root the caller did not name.
+  # Worktree pruning still runs (PRUNE_REPO_PATHS stays loaded); only the
+  # dependency reaper degrades to keeping everything.
+  if (( PRUNE_REPOS_OVERRIDE )) && (( ! DEPS_ROOT_EXPLICIT )); then
+    DEPS_REGISTRY_ERROR="PRUNE_REPOS override without explicit HERMES_WORKTREE_DEPS_ROOT; refusing to judge $WORKTREE_DEPS_ROOT from a partial repo set"
+    return 1
+  fi
 
   if (( ${#PRUNE_REPO_PATHS[@]} == 0 )); then
     [[ -n "$DEPS_REGISTRY_ERROR" ]] ||
@@ -272,6 +290,13 @@ PY
 }
 
 prepare_deps_registry || true
+
+# Announce an unusable registry unconditionally. The dependency section below
+# only reports when the deps root happens to exist, so without this line the
+# reaper can degrade to a silent no-op and nobody notices.
+if (( ! DEPS_REGISTRY_SAFE )); then
+  echo "deps-registry-unsafe: $DEPS_REGISTRY_ERROR" >&2
+fi
 
 for repo in "${PRUNE_REPO_PATHS[@]}"; do
   [[ -d "$repo/.git" ]] || continue

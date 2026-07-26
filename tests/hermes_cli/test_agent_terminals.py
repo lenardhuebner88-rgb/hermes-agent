@@ -2517,6 +2517,10 @@ def test_isolated_write_temp_git_e2e_preserves_dirty_and_ahead_on_terminate_and_
             "PRUNE_REPOS": str(home),
             "KANBAN_DB_PATH": str(tmp_path / "missing-kanban.db"),
             "HERMES_HOME": str(tmp_path),
+            # Never let this test reach the production deps root: PRUNE_REPOS
+            # narrows the repo set, so an unpinned root would judge every live
+            # worktree's dependency tree as orphaned.
+            "HERMES_WORKTREE_DEPS_ROOT": str(tmp_path / "worktree-deps"),
             "MIN_AGE_HOURS": "0",
             "TERMINAL_PRUNE_MIN_AGE_SECONDS": "0",
         }
