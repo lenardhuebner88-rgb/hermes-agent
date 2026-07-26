@@ -308,6 +308,9 @@ class TestGetLastInitError:
                 return super().execute(sql, *args, **kwargs)
 
         def gated_connect(*args, **kwargs):
+            # connect_tracked supplies its own factory; the caller's wins, and
+            # tracking is retrofitted for non-TrackedConnection results.
+            kwargs.pop("factory", None)
             return real_connect(str(target), factory=_BothPragmasFailConnection, **kwargs)
 
         with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
@@ -359,6 +362,9 @@ class TestSessionDbUsesWalFallback:
         factory = _make_blocking_factory("locking protocol", attempts)
 
         def gated_connect(*args, **kwargs):
+            # connect_tracked supplies its own factory; the caller's wins, and
+            # tracking is retrofitted for non-TrackedConnection results.
+            kwargs.pop("factory", None)
             return real_connect(str(target), factory=factory, **kwargs)
 
         with patch("hermes_state.sqlite3.connect", side_effect=gated_connect):
