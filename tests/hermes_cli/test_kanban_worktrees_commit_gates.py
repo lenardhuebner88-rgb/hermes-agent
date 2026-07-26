@@ -650,6 +650,22 @@ def _complete(conn, task_id):
     return kwt.maybe_integrate_on_complete(conn, task_id, gate_runner=_ok_gate)
 
 
+def _record_review_snapshot_event(
+    conn, task_id, *, base_commit, candidate_commit,
+):
+    """Record the same commit-pair event that review snapshot provisioning emits."""
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            task_id,
+            "review_snapshot_provisioned",
+            {
+                "base_commit": base_commit,
+                "candidate_commit": candidate_commit,
+            },
+        )
+
+
 def test_lane_scope_coder_frontend_allows_control_only(repo, kanban_home):
     with kb.connect() as conn:
         task_id, _info = _lane_scope_task(
@@ -1371,3 +1387,205 @@ def test_lane_scope_no_materialized_run_skips_check_visibly(
         assert "skipping lane-scope enforcement" in caplog.text
         assert _events(conn, task_id, "worker_gate_blocked") == []
     assert (repo / "hermes_cli" / "backend_from_frontend.py").exists()
+
+
+# ---------------------------------------------------------------------------
+# Review-snapshot attribution: use the exact reviewed base..candidate pair,
+# rather than the shared chain branch's moving tip.
+# ---------------------------------------------------------------------------
+
+
+def _lane_scope_pre_run_basis(conn, task_id):
+    row = conn.execute(
+        "SELECT pre_run_commit_sha FROM task_runs "
+        "WHERE task_id = ? AND workspace_materialized = 1 "
+        "ORDER BY id ASC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    assert row is not None
+    return row["pre_run_commit_sha"]
+
+
+def test_lane_scope_review_snapshot_excludes_foreign_later_chain_commit(
+    repo, kanban_home,
+):
+    # Regression: B's review was clean, but a different task appended a
+    # backend commit to the same shared branch after B's candidate. The
+    # pre_run..branch range incorrectly attributes that foreign path to B.
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_foreign",
+            b_commits=[("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n")],
+        )
+        base = _lane_scope_pre_run_basis(conn, task_id)
+        candidate = _git(info["path"], "rev-parse", "HEAD")
+        _commit_in(
+            info["path"],
+            "hermes_cli/foreign_after_review.py",
+            "FOREIGN = 1\n",
+            msg="kanban(foreign): commit after reviewed candidate",
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=base,
+            candidate_commit=candidate,
+        )
+
+        out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_scope_review_snapshot_still_blocks_own_violation(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_own_violation",
+            b_commits=[
+                ("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n"),
+                ("hermes_cli/own_reviewed_violation.py", "OWN = 1\n"),
+            ],
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=_lane_scope_pre_run_basis(conn, task_id),
+            candidate_commit=_git(info["path"], "rev-parse", "HEAD"),
+        )
+
+        out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "parked"
+        assert _events(conn, task_id, "worker_gate_blocked")[0]["violating_paths"] == [
+            "hermes_cli/own_reviewed_violation.py",
+        ]
+
+
+def test_lane_scope_without_review_snapshot_keeps_pre_run_branch_fallback(
+    repo, kanban_home,
+):
+    # No snapshot remains the current pre_run..branch behavior: a later
+    # foreign backend path is visible and blocks the frontend task.
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_absent",
+            b_commits=[("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n")],
+        )
+        _commit_in(
+            info["path"],
+            "hermes_cli/foreign_without_snapshot.py",
+            "FOREIGN = 1\n",
+            msg="kanban(foreign): commit without snapshot",
+        )
+
+        out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "parked"
+        assert _events(conn, task_id, "worker_gate_blocked")[0]["violating_paths"] == [
+            "hermes_cli/foreign_without_snapshot.py",
+        ]
+
+
+def test_lane_scope_review_snapshot_missing_base_uses_fallback(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_missing_base",
+            b_commits=[("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n")],
+        )
+        _commit_in(
+            info["path"],
+            "hermes_cli/foreign_missing_base.py",
+            "FOREIGN = 1\n",
+            msg="kanban(foreign): missing snapshot base",
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=None,
+            candidate_commit=_git(info["path"], "rev-parse", "HEAD"),
+        )
+
+        out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "parked"
+        assert _events(conn, task_id, "worker_gate_blocked")[0]["violating_paths"] == [
+            "hermes_cli/foreign_missing_base.py",
+        ]
+
+
+def test_lane_scope_unresolvable_review_snapshot_uses_fallback_and_logs(
+    repo, kanban_home, caplog,
+):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_unresolvable",
+            b_commits=[("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n")],
+        )
+        _commit_in(
+            info["path"],
+            "hermes_cli/foreign_unresolvable.py",
+            "FOREIGN = 1\n",
+            msg="kanban(foreign): unresolved snapshot candidate",
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=_lane_scope_pre_run_basis(conn, task_id),
+            candidate_commit="f" * 40,
+        )
+
+        with caplog.at_level("WARNING", logger=kwt.__name__):
+            out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "parked"
+        assert "review snapshot" in caplog.text
+        assert "does not resolve" in caplog.text
+
+
+def test_lane_scope_most_recent_review_snapshot_wins(repo, kanban_home):
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_sibling_chain(
+            conn,
+            repo,
+            "t_ls_snapshot_latest",
+            b_commits=[("web/src/control/Reviewed.tsx", "export const Reviewed = 1\n")],
+        )
+        base = _lane_scope_pre_run_basis(conn, task_id)
+        clean_candidate = _git(info["path"], "rev-parse", "HEAD")
+        _commit_in(
+            info["path"],
+            "hermes_cli/newer_reviewed_violation.py",
+            "NEWER = 1\n",
+            msg="kanban(task): newer reviewed violation",
+        )
+        violating_candidate = _git(info["path"], "rev-parse", "HEAD")
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=base,
+            candidate_commit=violating_candidate,
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=base,
+            candidate_commit=clean_candidate,
+        )
+
+        out = _complete(conn, task_id)
+
+        # The newer clean event must beat both the older violating snapshot
+        # and the shared branch tip, which still contains the later commit.
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []

@@ -6387,6 +6387,77 @@ def _lane_scope_violations(
     return [], None
 
 
+def _lane_scope_review_snapshot_diff_spec(
+    conn: sqlite3.Connection,
+    task_id: str,
+    repo_root: Path,
+) -> Optional[str]:
+    """Return the latest usable reviewed ``base..candidate`` pair for a task.
+
+    Review provisioning records immutable commit pairs, unlike a shared chain
+    branch whose tip can acquire sibling commits or be rebased before this
+    completion hook runs.  Ignore malformed or incomplete events and retain
+    the existing task-run attribution as the caller's fallback.
+    """
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'review_snapshot_provisioned' "
+        "ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    snapshot_pair: Optional[tuple[str, str]] = None
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        base_commit = payload.get("base_commit")
+        candidate_commit = payload.get("candidate_commit")
+        if not isinstance(base_commit, str) or not isinstance(candidate_commit, str):
+            continue
+        base_commit = base_commit.strip()
+        candidate_commit = candidate_commit.strip()
+        if base_commit and candidate_commit:
+            snapshot_pair = (base_commit, candidate_commit)
+            break
+
+    if snapshot_pair is None:
+        _log.info(
+            "lane-scope: no usable review snapshot commit pair for task %s; "
+            "falling back to task-run attribution",
+            task_id,
+        )
+        return None
+
+    base_commit, candidate_commit = snapshot_pair
+    try:
+        resolved_base = _git(
+            repo_root, "rev-parse", "--verify", f"{base_commit}^{{commit}}",
+        ).strip()
+        resolved_candidate = _git(
+            repo_root, "rev-parse", "--verify", f"{candidate_commit}^{{commit}}",
+        ).strip()
+    except WorktreeError:
+        _log.warning(
+            "lane-scope: review snapshot commit pair %s..%s for task %s does "
+            "not resolve; falling back to task-run attribution",
+            base_commit,
+            candidate_commit,
+            task_id,
+        )
+        return None
+
+    _log.info(
+        "lane-scope: using review snapshot commit pair %s..%s for task %s",
+        resolved_base,
+        resolved_candidate,
+        task_id,
+    )
+    return f"{resolved_base}..{resolved_candidate}"
+
+
 def _enforce_lane_scope_on_complete(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6451,17 +6522,24 @@ def _enforce_lane_scope_on_complete(
     # (first-time chain provisioning) and the retry/continuation stamp in
     # `prepare_reused_task_worktree` — and nowhere else, so it is true
     # regardless of which outcome name eventually closes the run.
-    diff_spec = f"{base}...{branch}"
-    pre_run = conn.execute(
-        "SELECT pre_run_commit_sha FROM task_runs "
-        "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
-        "AND pre_run_commit_sha != '' "
-        "AND workspace_materialized = 1 "
-        "ORDER BY id ASC LIMIT 1",
-        (task_id,),
-    ).fetchone()
+    snapshot_diff_spec = _lane_scope_review_snapshot_diff_spec(
+        conn, task_id, repo_root,
+    )
+    diff_spec = snapshot_diff_spec or f"{base}...{branch}"
+    pre_run = (
+        conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs "
+            "WHERE task_id = ? AND pre_run_commit_sha IS NOT NULL "
+            "AND pre_run_commit_sha != '' "
+            "AND workspace_materialized = 1 "
+            "ORDER BY id ASC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if snapshot_diff_spec is None
+        else None
+    )
     pre_run_sha = str(pre_run["pre_run_commit_sha"]).strip() if pre_run else ""
-    if not pre_run_sha:
+    if not pre_run_sha and snapshot_diff_spec is None:
         # No run of this task carries a verified materialization stamp.
         # Two distinct populations land here and must be told apart:
         #
