@@ -1,83 +1,125 @@
 # Langfuse dashboard provisioning
 
-Status: **safety scaffold only**. The tRPC contract in
-`scripts/langfuse_dashboards.py` is pinned to Langfuse 3.224.0 upstream revision
-`d044f366816282235898a0673d5700e05ccbee8c`. It deliberately does not create a
-live dashboard until the required Golden Fixture is exported from a manually
-created UI dashboard.
+Status: **fixture-backed primary-path implementation**. The provisioning contract
+in `scripts/langfuse_dashboards.py` is pinned to Langfuse `3.224.0`, upstream
+revision `d044f366816282235898a0673d5700e05ccbee8c`.
 
 ## Authentication and primary path
 
-The only evidenced provider is NextAuth `credentials`. Dashboard mutations need
-a human-authenticated browser session with `dashboards:CUD` on the
-`hermes-agent` project; app read-back needs `dashboards:read`. Do not put a
-cookie, token, password, DSN, or session export in a CLI argument, file, task
-comment, receipt, or log.
+The only evidenced provider is NextAuth `credentials`. A live run requires an
+approved, already human-authenticated browser-session adapter for a user with
+`dashboards:CUD` on project `hermes-agent`; app read-back needs
+`dashboards:read`. Do not place cookies, tokens, passwords, DSNs, or session
+exports in CLI arguments, repository files, task comments, receipts, or logs.
 
-The injectable `TrpcClient` uses POST batch requests to these version-pinned
-procedures:
+`TrpcClient` sends POST batch mutations, in this fixed order, and fails closed
+on an HTTP error, malformed batch, tRPC error, or unexpected response:
 
-- `dashboard.createDashboard`
-- `dashboardWidgets.create`
-- `dashboard.updateDashboardDefinition`
-- `dashboard.getDashboard` for app-level read-back
+1. `dashboard.createDashboard`
+2. `dashboardWidgets.create` (once per configured widget)
+3. `dashboard.updateDashboardDefinition`
+4. `dashboard.getDashboard` as the required **app-level read-back**
 
-It rejects HTTP, malformed batch, tRPC error, and unexpected result envelopes
-before a later mutation is attempted. The test-only transport proves the exact
-request route, POST method, and batch body without network traffic.
+There is no automatic fallback after a tRPC failure. The injectable transport is
+intentional: the CLI does not create a session transport and cannot mutate a
+live dashboard by accident.
 
-## Golden Fixture and configuration
+## Golden Fixture and derived configuration
 
-Before adding any files under `config/langfuse-dashboards/`, an authorised human
-must create one dashboard and widget in the Langfuse UI, then provide a
-sanitised structural export. It must retain the exported JSONB shapes
-`definition`, `dimensions`, `metrics`, and `chart_config`, redact IDs
-consistently, and record Langfuse version/revision plus export date. Never
-hand-author these shapes from route names.
+`tests/scripts/fixtures/langfuse-dashboard-golden.json` is a versioned,
+sanitary export of the normal widget manually created in the Langfuse UI. It
+contains the UI-observed `definition`, `dimensions`, `metrics`, and
+`chart_config` structures; every ID is consistently `<REDACTED_ID>`. The
+metadata pins the Langfuse release and source revision.
 
-Only after that export may the three derived configuration files be added:
-`north-star.json`, `reviewer-diagnose.json`, and `effizienz.json`. The
-model-mix widget must use `OBSERVATIONS` and `providedModelName`; its displayed
-receipt must name its denominator.
+The three version-matched configuration files are:
+
+- `config/langfuse-dashboards/north-star.json`
+- `config/langfuse-dashboards/reviewer-diagnose.json`
+- `config/langfuse-dashboards/effizienz.json`
+
+Each widget carries an explicit `denominator`, so sparse coverage cannot be
+silently presented as a population-wide rate. The model-mix widget uses the
+Langfuse API’s normalized `observations` view (the underlying enum is
+`OBSERVATIONS`) and `providedModelName`; its denominator is
+`OBSERVATIONS with non-empty providedModelName`, not the under-populated tasks
+page model field.
+
+The primary path is invoked only by code that supplies both a real project ID
+and the approved session adapter, for example:
+
+```python
+plans = load_dashboard_configs(project_id=project_id)
+client = TrpcClient("http://127.0.0.1:13000", opener=approved_session_opener)
+read_backs = [provision_dashboard(client, plan) for plan in plans]
+```
+
+`approved_session_opener` is deliberately not a CLI option or a persisted
+setting. Treat IDs returned by this flow as transient runtime values only.
 
 ## Direct SQL fallback, guards, and rollback
 
-Direct SQL is not implemented or configured in this scaffold. It is physically
-unreachable unless a caller explicitly invokes `run_direct_sql_fallback` with
-`--allow-direct-sql`; the command-line runner supplies no adapter. This is
-intentional: no sanctioned DSN provider is available and PostgreSQL must not
-become an implicit primary path.
+Direct SQL remains an opt-in extension point, not a production transport. No
+direct-SQL adapter is shipped: `run_direct_sql_fallback` raises both without
+`allow_direct_sql=True` and with it, because a guarded adapter has not been
+approved. Consequently no database connection or write can occur through this
+script, and a tRPC failure never calls an SQL fallback.
 
-When the authorised implementation is added, its adapter must fail closed
-before every write unless all of these guards pass:
+An authorised future adapter may execute a write only after it fails closed in
+this exact order:
 
 1. `GET /api/public/health` reports an allow-listed Langfuse version.
-2. `_prisma_migrations` matches the full expected set and newest migration.
-3. `information_schema` fingerprints both target tables and rejects every new
-   NOT NULL column lacking a default.
+2. `_prisma_migrations` matches the complete expected set and newest migration.
+3. `information_schema` fingerprints `dashboards` and `dashboard_widgets` and
+   rejects each new NOT NULL column without a default.
 4. `pg_enum` labels match the expected dashboard enum sets.
-5. Exactly one `projects` row for `hermes-agent` exists and `min_version`
-   matches the export.
-6. `pg_dump` has captured both dashboard tables for rollback.
+5. Exactly one `projects` row for `hermes-agent` exists and widget
+   `min_version` matches the fixture contract.
+6. `pg_dump` captures both dashboard tables as a rollback point.
 
-The eventual fallback must use one transaction, `ON CONFLICT (id) DO UPDATE`,
-rollback on unexpected row counts, and never change `projects.home_dashboard_id`.
-Its receipt must state primary/fallback path, app read-back, observed data
-sources, changes, and `changes: 0` for an idempotent second run.
+The adapter must then use one transaction, `ON CONFLICT (id) DO UPDATE`, and
+rollback on any unexpected row count or schema drift. It must never update
+`projects.home_dashboard_id`. Restore only from the pre-write `pg_dump` after
+examining the guard failure; do not retry through a different path.
 
-## Safe dry-run and recovery
+## Receipt schema
+
+A live caller must persist a machine-readable, secret-free receipt with:
+
+```json
+{
+  "path": "trpc",
+  "langfuse_version": "3.224.0",
+  "fixture_version": 1,
+  "dashboards": [
+    {"name": "…", "app_read_back": true, "visible_score_or_observation": "…"}
+  ],
+  "model_mix": {
+    "view": "OBSERVATIONS",
+    "field": "providedModelName",
+    "denominator": "OBSERVATIONS with non-empty providedModelName"
+  }
+}
+```
+
+For a direct-SQL run, `path` must instead be `direct_sql` and include the
+passed guard names plus the rollback dump reference. Never include dashboard,
+widget, project, user, session, or secret IDs. A changed denominator must be
+shown identically in its widget and receipt.
+
+## Safe validation and recovery
 
 ```bash
 .venv/bin/python scripts/langfuse_dashboards.py --dry-run
 ```
 
-Dry-run creates no transport, does not contact Langfuse or PostgreSQL, and
-prints `{"changes": 0, "status": "requires_golden_fixture"}` until a
-versioned export and approved session adapter are available. The exact CLI
-flags presently supported are `--dry-run` and `--allow-direct-sql`; the latter
-is reserved and does not enable a database connection.
+Dry-run validates the Golden Fixture and all three configurations, creates no
+transport, does not contact Langfuse or PostgreSQL, and prints
+`{"changes": 0, "dashboard_count": 3, "status": "fixture_ready"}`. The
+CLI flags are `--dry-run` and `--allow-direct-sql`; the latter remains inert
+without an independently provided, fully guarded adapter.
 
-If a fixture or app response becomes invalid, stop without a follow-up write,
-retain the existing dashboard state, and re-export/review the fixture from the
-UI. Recovery from an eventual SQL fallback is the captured `pg_dump`, after
-first determining why its guard failed.
+If the fixture, configuration, or app read-back is invalid, stop immediately:
+no subsequent mutation and no SQL fallback is permitted. Preserve the existing
+dashboard state, re-export the UI-derived fixture if the release changed, and
+rerun the fixture/config tests before any authorised retry.

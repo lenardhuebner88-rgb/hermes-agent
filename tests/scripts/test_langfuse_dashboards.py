@@ -154,7 +154,18 @@ def test_direct_sql_is_unreachable_without_the_explicit_flag() -> None:
     assert calls == []
 
 
-def test_dry_run_requires_a_ui_export_without_opening_network_or_writing(
+def test_direct_sql_flag_does_not_bypass_the_missing_guarded_adapter() -> None:
+    calls: list[str] = []
+
+    with pytest.raises(dashboards.ProvisionError, match="no approved guarded adapter"):
+        dashboards.run_direct_sql_fallback(
+            allow_direct_sql=True, write=lambda: calls.append("write")
+        )
+
+    assert calls == []
+
+
+def test_dry_run_validates_fixture_without_opening_network_or_writing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     def forbidden(*args: object, **kwargs: object) -> None:
@@ -163,4 +174,58 @@ def test_dry_run_requires_a_ui_export_without_opening_network_or_writing(
     monkeypatch.setattr(dashboards, "TrpcClient", forbidden)
 
     assert dashboards.main(["--dry-run"]) == 0
-    assert "requires_golden_fixture" in capsys.readouterr().out
+    assert '"status": "fixture_ready"' in capsys.readouterr().out
+
+
+def test_versioned_golden_fixture_preserves_the_sanitised_ui_shapes() -> None:
+    fixture = dashboards.load_golden_fixture()
+
+    assert fixture["source"]["langfuse_version"] == "3.224.0"
+    assert fixture["source"]["revision"] == "d044f366816282235898a0673d5700e05ccbee8c"
+    assert fixture["definition"] == {
+        "widgets": [
+            {
+                "x": 0,
+                "y": 0,
+                "id": "<REDACTED_ID>",
+                "type": "widget",
+                "x_size": 6,
+                "y_size": 6,
+                "widgetId": "<REDACTED_ID>",
+            }
+        ]
+    }
+    assert fixture["dimensions"] == []
+    assert fixture["metrics"] == [{"agg": "count", "measure": "count"}]
+    assert fixture["chart_config"] == {"type": "LINE_TIME_SERIES"}
+
+
+def test_all_dashboard_configs_are_fixture_shaped_and_cover_required_metrics() -> None:
+    configs = dashboards.load_dashboard_configs(project_id="project_1")
+
+    assert [config.name for config in configs] == [
+        "Hermes North Star",
+        "Hermes Reviewer Diagnose",
+        "Hermes Effizienz",
+    ]
+    widget_names = {widget.name for config in configs for widget in config.widgets}
+    assert {
+        "Euro equivalent per done task",
+        "Cost p50/p95",
+        "Resolve rate",
+        "First-pass approval",
+        "Review submissions to approval",
+        "Operator veto",
+        "Cache-hit ratio",
+        "Exclusive token buckets",
+        "Model mix",
+        "Queue latency seconds",
+    } <= widget_names
+
+    model_mix = next(
+        widget for config in configs for widget in config.widgets if widget.name == "Model mix"
+    )
+    assert model_mix.view == "observations"
+    assert model_mix.dimensions == [{"field": "providedModelName"}]
+    assert model_mix.metrics == [{"agg": "count", "measure": "count"}]
+    assert model_mix.chart_config == {"type": "LINE_TIME_SERIES"}
