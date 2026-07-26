@@ -452,7 +452,7 @@ export function FleetView() {
     : undefined;
 
   return (
-    <div data-fleet-theme data-fleet-subtab={subtab} className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%", overflow: "hidden" }}>
+    <div data-fleet-theme data-fleet-subtab={subtab} className="fleet-root flex min-h-0 flex-col" style={{ maxWidth: "100%" }}>
       {/* Subtab-Chips — geteilter Leitstand-Baustein, Fleet-Skin via classes.
           Erste Inhaltszeile direkt unter der Shell-Masthead (W3-1a). */}
       <div ref={subtabStripRef}>
