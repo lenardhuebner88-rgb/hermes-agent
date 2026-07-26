@@ -4673,11 +4673,44 @@ def _remove_worktree_deps_tree(worktree: Path) -> None:
         )
 
 
+def _dependency_path_is_ignored(worktree: Path, rel: str) -> bool:
+    """Return whether Git excludes *rel* from this worktree's status."""
+    try:
+        return bool(
+            _git(
+                worktree,
+                "check-ignore",
+                "--",
+                rel,
+                check=False,
+            )
+        )
+    except (OSError, WorktreeError, subprocess.SubprocessError):
+        return False
+
+
+def _warn_dependency_path_not_ignored(
+    repo_root: Path,
+    worktree: Path,
+    rel: str,
+) -> None:
+    _log.warning(
+        "dependency link %s skipped for repo %s (worktree %s): "
+        "Git does not ignore this path; add it to the repo's .gitignore",
+        rel,
+        repo_root,
+        worktree,
+    )
+
+
 def _link_shared_dependencies(repo_root: Path, worktree: Path) -> None:
     """Link exclusive node trees and the live checkout's read-only Python venv."""
     for rel in _DEDICATED_NODE_MODULES_LINKS:
         dst = Path(worktree) / rel
         if not dst.exists() and not dst.is_symlink() and dst.parent.is_dir():
+            if not _dependency_path_is_ignored(worktree, rel):
+                _warn_dependency_path_not_ignored(repo_root, worktree, rel)
+                continue
             try:
                 target = _dedicated_dependency_target(worktree, rel)
                 dst.symlink_to(target, target_is_directory=True)
@@ -4697,6 +4730,9 @@ def _link_shared_dependencies(repo_root: Path, worktree: Path) -> None:
             and not dst.is_symlink()
             and dst.parent.is_dir()
         ):
+            if not _dependency_path_is_ignored(worktree, rel):
+                _warn_dependency_path_not_ignored(repo_root, worktree, rel)
+                continue
             try:
                 dst.symlink_to(src, target_is_directory=True)
             except OSError:

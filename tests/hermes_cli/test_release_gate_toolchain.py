@@ -37,6 +37,15 @@ def validation_worktree(tmp_path, monkeypatch):
         target_manifest = validation_root / workspace / "package.json"
         target_manifest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_manifest, target_manifest)
+    (validation_root / ".gitignore").write_text(
+        "node_modules\n",
+        encoding="utf-8",
+    )
+    kwt._git(validation_root, "init", "-b", "main")
+    kwt._git(validation_root, "config", "user.email", "test@example.com")
+    kwt._git(validation_root, "config", "user.name", "Test User")
+    kwt._git(validation_root, "add", "-A")
+    kwt._git(validation_root, "commit", "-m", "validation fixture")
 
     deps_root = tmp_path / "worktree-deps"
     monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))

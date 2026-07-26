@@ -16,6 +16,7 @@ Two-part fix under test:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
@@ -71,13 +72,20 @@ def test_dependency_links_use_identity_bound_external_tree(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    repo = tmp_path / "live-checkout"
+    repo_parent = tmp_path / "identity-bound"
+    repo_parent.mkdir()
+    repo = _make_repo(repo_parent)
     worktree = tmp_path / "fresh-worktree"
     deps_root = tmp_path / "worktree-deps"
-    (repo / "node_modules").mkdir(parents=True)
-    (repo / "web" / "node_modules").mkdir(parents=True)
+    (repo / ".gitignore").write_text("node_modules\n.venv\n", encoding="utf-8")
+    (repo / "web").mkdir()
+    (repo / "web" / ".keep").write_text("", encoding="utf-8")
+    _git(repo, "add", ".gitignore", "web/.keep")
+    _git(repo, "commit", "-m", "ignore dependency trees")
+    worktree = _add_worktree(repo, worktree, "identity-bound")
+    (repo / "node_modules").mkdir()
+    (repo / "web" / "node_modules").mkdir()
     (repo / ".venv").mkdir()
-    (worktree / "web").mkdir(parents=True)
     monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
 
     kwt._link_shared_dependencies(repo, worktree)
@@ -97,11 +105,81 @@ def test_dependency_links_use_identity_bound_external_tree(
     assert (worktree / ".venv").resolve() == (repo / ".venv").resolve()
 
 
+def test_dependency_links_require_git_ignored_paths(
+    tmp_path: Path,
+    monkeypatch,
+    caplog,
+) -> None:
+    deps_root = tmp_path / "worktree-deps"
+    monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
+
+    ignored_parent = tmp_path / "ignored"
+    ignored_parent.mkdir()
+    ignored_repo = _make_repo(ignored_parent)
+    (ignored_repo / ".gitignore").write_text("node_modules\n", encoding="utf-8")
+    (ignored_repo / "web").mkdir()
+    (ignored_repo / "web" / ".keep").write_text("", encoding="utf-8")
+    _git(ignored_repo, "add", ".gitignore", "web/.keep")
+    _git(ignored_repo, "commit", "-m", "ignore node dependencies")
+    ignored_worktree = _add_worktree(
+        ignored_repo,
+        ignored_parent / "worktree",
+        "ignored-dependencies",
+    )
+
+    kwt._link_shared_dependencies(ignored_repo, ignored_worktree)
+
+    assert (ignored_worktree / "node_modules").is_symlink()
+    assert (ignored_worktree / "web" / "node_modules").is_symlink()
+
+    visible_parent = tmp_path / "visible"
+    visible_parent.mkdir()
+    visible_repo = _make_repo(visible_parent)
+    (visible_repo / "web").mkdir()
+    (visible_repo / "web" / ".keep").write_text("", encoding="utf-8")
+    _git(visible_repo, "add", "web/.keep")
+    _git(visible_repo, "commit", "-m", "add web workspace")
+    visible_worktree = _add_worktree(
+        visible_repo,
+        visible_parent / "worktree",
+        "visible-dependencies",
+    )
+    (visible_repo / ".venv").mkdir()
+
+    with caplog.at_level(logging.WARNING, logger=kwt.__name__):
+        kwt._link_shared_dependencies(visible_repo, visible_worktree)
+
+    assert not (visible_worktree / "node_modules").exists()
+    assert not (visible_worktree / "node_modules").is_symlink()
+    assert not (visible_worktree / "web" / "node_modules").exists()
+    assert not (visible_worktree / "web" / "node_modules").is_symlink()
+    assert not (visible_worktree / ".venv").exists()
+    assert not (visible_worktree / ".venv").is_symlink()
+    status = subprocess.run(
+        ["git", "-C", str(visible_worktree), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+    assert any(
+        "node_modules" in record.message
+        and str(visible_repo) in record.message
+        and ".gitignore" in record.message
+        for record in caplog.records
+    )
+
+
 def test_remove_worktree_deletes_dedicated_tree_without_following_foreign_link(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     repo = _make_repo(tmp_path)
+    (repo / ".gitignore").write_text("node_modules\n", encoding="utf-8")
+    (repo / "web").mkdir()
+    (repo / "web" / ".keep").write_text("", encoding="utf-8")
+    _git(repo, "add", ".gitignore", "web/.keep")
+    _git(repo, "commit", "-m", "ignore node dependencies")
     worktree = _add_worktree(
         repo,
         repo / ".worktrees" / "kanban" / "t_remove_deps",
@@ -110,8 +188,7 @@ def test_remove_worktree_deletes_dedicated_tree_without_following_foreign_link(
     deps_root = tmp_path / "worktree-deps"
     monkeypatch.setenv("HERMES_WORKTREE_DEPS_ROOT", str(deps_root))
     (repo / "node_modules").mkdir()
-    (repo / "web" / "node_modules").mkdir(parents=True)
-    (worktree / "web").mkdir(exist_ok=True)
+    (repo / "web" / "node_modules").mkdir()
     kwt._link_shared_dependencies(repo, worktree)
     deps_tree = kwt._worktree_deps_tree(worktree)
     (deps_tree / "node_modules").mkdir(parents=True)

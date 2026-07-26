@@ -53,6 +53,7 @@ def repo(tmp_path):
     (r / "a.txt").write_text("base\n")
     (r / "web").mkdir()
     (r / "web" / "index.txt").write_text("web\n")
+    (r / ".gitignore").write_text("node_modules\n.venv\n")
     _git(r, "add", "-A")
     _git(r, "commit", "-m", "base")
     return r
@@ -1154,4 +1155,3 @@ def test_isolation_mode_reads_root_config(kanban_home, monkeypatch):
     assert kwt.isolation_mode() == "worktree"
     monkeypatch.setenv("HERMES_KANBAN_WORKER_ISOLATION", "off")
     assert kwt.isolation_mode() == "off"  # env wins
-
