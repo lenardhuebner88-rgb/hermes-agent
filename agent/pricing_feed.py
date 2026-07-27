@@ -28,12 +28,14 @@ _PRICE_PROVIDER_BY_LITELLM_PROVIDER = {
     "moonshot": "moonshot",
     "xai": "xai",
     "dashscope": "alibaba",
+    "zai": "zai",
 }
 
 _MODEL_PREFIX_BY_PRICE_PROVIDER = {
     "moonshot": "moonshot/",
     "xai": "xai/",
     "alibaba": "dashscope/",
+    "zai": "zai/",
 }
 
 
@@ -141,4 +143,3 @@ def load_vendored_pricing(
             fetched_at=fetched_at,
         )
     return entries
-

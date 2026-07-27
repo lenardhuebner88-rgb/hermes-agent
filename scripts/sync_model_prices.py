@@ -5,7 +5,7 @@ Filter contract:
 
 * only priced chat/text models are retained;
 * only the direct Hermes price-provider families Anthropic, OpenAI, Moonshot,
-  xAI, and Alibaba/DashScope are retained;
+  xAI, Alibaba/DashScope, and Z.AI are retained;
 * provider-specific duplicates (Azure, Bedrock, Vertex, hosted replicas) are
   excluded because Hermes prices those routes separately;
 * official-doc snapshots in ``agent.usage_pricing`` are never read or written,
@@ -45,6 +45,7 @@ _ALLOWED_MODEL_PREFIXES = {
     "moonshot": "moonshot/",
     "xai": "xai/",
     "dashscope": "dashscope/",
+    "zai": "zai/",
 }
 _ALLOWED_BARE_PROVIDERS = {"anthropic", "openai"}
 _PRICE_FIELDS = (
@@ -129,7 +130,7 @@ def build_payload(
             "pricing_version": pricing_version(models),
             "filter": (
                 "priced chat/text models for anthropic, openai, moonshot, "
-                "xai, and dashscope direct-provider routes"
+                "xai, dashscope, and zai direct-provider routes"
             ),
         },
         "models": models,

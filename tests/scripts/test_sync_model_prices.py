@@ -16,6 +16,27 @@ def _feed(price: float = 0.000001) -> dict:
     }
 
 
+def test_filter_includes_direct_zai_models_but_not_hosted_replicas():
+    feed = {
+        "zai/glm-5.1": {
+            "litellm_provider": "zai",
+            "mode": "chat",
+            "input_cost_per_token": 0.0000014,
+            "output_cost_per_token": 0.0000044,
+        },
+        "cloudflare/@cf/zai-org/glm-5.2": {
+            "litellm_provider": "cloudflare",
+            "mode": "chat",
+            "input_cost_per_token": 0.0000014,
+            "output_cost_per_token": 0.0000044,
+        },
+    }
+
+    selected = sync_model_prices.select_models(feed)
+
+    assert set(selected) == {"zai/glm-5.1"}
+
+
 def test_sync_prints_price_diff_and_changes_version(tmp_path, monkeypatch, capsys):
     output = tmp_path / "prices.json"
     before = sync_model_prices.build_payload(

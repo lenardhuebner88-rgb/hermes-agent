@@ -11,6 +11,7 @@ def test_vendored_feed_entries_are_typed_and_traceable():
     assert ("anthropic", "claude-fable-5") in entries
     assert ("xai", "grok-4.5") in entries
     assert ("openai", "gpt-5.3-codex") in entries
+    assert ("zai", "glm-5.1") in entries
     assert entries
     for entry in entries.values():
         assert entry.source == "litellm_feed"
