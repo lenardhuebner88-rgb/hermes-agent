@@ -17,7 +17,10 @@
 # (e.g. HEAD~1, main...HEAD).
 # Frontend gates stay separate as before — this wrapper covers only the pytest part.
 set -euo pipefail
-"$(dirname "$0")/check-branch-age.sh" || exit 1
+if ! "$(dirname "$0")/check-branch-age.sh"; then
+  echo "run-affected: branch-age preflight failed — NO test ran. Fix: git merge main; for a deliberate stale-worktree override use HERMES_GATE_STALE_OK=1." >&2
+  exit 3
+fi
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILES=$("$DIR/affected-tests.sh" "$@")
 if [ -z "${FILES// /}" ]; then
