@@ -83,6 +83,24 @@ reported unknown bucket. `classification_status` is `partial` whenever unknown
 facts are present, so consumers cannot mistake either ratio for a complete
 attribution.
 
+## Subscription rate-limit snapshots
+
+`rate_limits` is a read-only projection of
+`/mnt/data/hermes-observability/foreign_rate_limit_snapshots.jsonl`, which is
+sidecar state rather than a usage fact. The projection streams the JSONL file
+and retains only the latest valid observation per `origin`; it never returns
+raw `run_id`, `context_window`, or historical records.
+
+`rate_limits.snapshots` is keyed only by worlds with a sidecar observation. A
+snapshot includes the source `captured_at`, `age_seconds`, `freshness`, and its
+provider-supplied `rate_limits` values. `freshness` becomes `stale` at one hour
+or older, so consumers must not present yesterday's window as current. Worlds
+without sidecar data are absent rather than represented with null values.
+
+If the sidecar file cannot be read, the regular usage-facts payload remains
+available and `rate_limits` is `{ "available": false, "reason":
+"sidecar_unavailable", "snapshots": {} }`.
+
 ## Billing contract
 
 Dollar and quota values are structurally separate:

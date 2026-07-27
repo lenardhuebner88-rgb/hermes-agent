@@ -265,6 +265,89 @@ def test_payload_omits_route_change_calibration_without_board_database(
     assert "route_change_calibration" not in kanban
 
 
+def test_payload_uses_latest_rate_limit_snapshot_per_origin_and_marks_stale(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    sidecar_path = tmp_path / "foreign_rate_limit_snapshots.jsonl"
+    _seed_usage_fixture(usage_path)
+    sidecar_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "captured_at": "2026-07-27T14:00:00+00:00",
+                    "origin": "codex_cli",
+                    "run_id": "old-run",
+                    "context_window": 42,
+                    "rate_limits": {"primary": {"used_percent": 10}},
+                },
+                {
+                    "captured_at": "2026-07-27T15:59:00+00:00",
+                    "origin": "codex_cli",
+                    "run_id": "new-run",
+                    "context_window": 84,
+                    "rate_limits": {"primary": {"used_percent": 25}},
+                },
+                {
+                    "captured_at": "2026-07-26T15:00:00+00:00",
+                    "origin": "kimi_cli",
+                    "run_id": "stale-run",
+                    "context_window": 21,
+                    "rate_limits": {"primary": {"used_percent": 90}},
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path,
+        rate_limit_path=sidecar_path,
+        generated_at="2026-07-27T16:00:00+00:00",
+    )
+
+    snapshots = payload["rate_limits"]
+    assert snapshots["available"] is True
+    assert snapshots["snapshots"] == {
+        "codex_cli": {
+            "captured_at": "2026-07-27T15:59:00+00:00",
+            "age_seconds": 60,
+            "freshness": "fresh",
+            "rate_limits": {"primary": {"used_percent": 25}},
+        },
+        "kimi_cli": {
+            "captured_at": "2026-07-26T15:00:00+00:00",
+            "age_seconds": 90_000,
+            "freshness": "stale",
+            "rate_limits": {"primary": {"used_percent": 90}},
+        },
+    }
+    assert "grok_cli" not in snapshots["snapshots"]
+    assert "run_id" not in json.dumps(snapshots)
+    assert "context_window" not in json.dumps(snapshots)
+
+
+def test_payload_keeps_usage_facts_usable_when_rate_limit_sidecar_is_missing(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    _seed_usage_fixture(usage_path)
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path,
+        rate_limit_path=tmp_path / "missing.jsonl",
+    )
+
+    assert payload["summary"]["fact_rows"] > 0
+    assert payload["rate_limits"] == {
+        "available": False,
+        "reason": "sidecar_unavailable",
+        "snapshots": {},
+    }
+
+
 def test_s7_example_fixture_matches_contract_version() -> None:
     example = json.loads(
         (FIXTURE_ROOT / "s7_payload_example.json").read_text(encoding="utf-8")

@@ -61,6 +61,10 @@ _ONE_MILLION = Decimal("1000000")
 _MAIN_CALL_KINDS = frozenset({"main", "main_loop"})
 _SUBAGENT_CALL_KIND = "subagent"
 _WORKLOAD_ROLES = ("main", "subagent", "unknown")
+DEFAULT_RATE_LIMIT_SIDECAR_PATH = Path(
+    "/mnt/data/hermes-observability/foreign_rate_limit_snapshots.jsonl"
+)
+RATE_LIMIT_STALE_AFTER_SECONDS = 60 * 60
 
 _TOKEN_COLUMNS = (
     "input_tokens",
@@ -264,6 +268,7 @@ def build_usage_facts_payload(
     *,
     kanban_path: str | Path | None = None,
     profiles_root: str | Path | None = None,
+    rate_limit_path: str | Path | None = None,
     origins: Sequence[str] | None = None,
     captured_from: str | None = None,
     captured_to: str | None = None,
@@ -273,6 +278,7 @@ def build_usage_facts_payload(
     """Build the complete S7 payload from read-only SQLite inputs."""
 
     started = time.perf_counter()
+    payload_generated_at = generated_at or _utc_now_iso()
     usage_path = Path(usage_facts_path)
     where_sql, params = _usage_filters(
         origins=origins,
@@ -367,11 +373,20 @@ def build_usage_facts_payload(
         immutable_evidence=immutable_evidence,
     )
     kanban_ms = (time.perf_counter() - kanban_started) * 1000
+    rate_limits = _rate_limit_projection(
+        (
+            Path(rate_limit_path)
+            if rate_limit_path is not None
+            else DEFAULT_RATE_LIMIT_SIDECAR_PATH
+        ),
+        observed_at=_parse_utc_datetime(payload_generated_at)
+        or datetime.now(timezone.utc),
+    )
 
     finished = time.perf_counter()
     return {
         "contract_version": CONTRACT_VERSION,
-        "generated_at": generated_at or _utc_now_iso(),
+        "generated_at": payload_generated_at,
         "scope": {
             "origins": sorted(set(origins)) if origins else None,
             "captured_from": captured_from,
@@ -382,6 +397,7 @@ def build_usage_facts_payload(
         "groups": groups,
         "unattributed": _unattributed_payload(groups),
         "kanban": kanban,
+        "rate_limits": rate_limits,
         "database": database_counts,
         "timing_ms": {
             "facts_query": round(query_ms, 3),
@@ -1147,6 +1163,73 @@ def _usage_coverage_by_run(
                 if row["has_tokens"]:
                     token_rows.add(run_id)
     return fact_rows, token_rows
+
+
+def _rate_limit_projection(
+    path: Path,
+    *,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Stream the sidecar and retain only the newest valid snapshot per origin."""
+
+    latest: dict[str, tuple[datetime, str, Mapping[str, Any]]] = {}
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping):
+                    continue
+                origin = record.get("origin")
+                captured_at = record.get("captured_at")
+                rate_limits = record.get("rate_limits")
+                if (
+                    not isinstance(origin, str)
+                    or not isinstance(captured_at, str)
+                    or not isinstance(rate_limits, Mapping)
+                ):
+                    continue
+                origin = origin.strip()
+                captured = _parse_utc_datetime(captured_at)
+                if not origin or captured is None:
+                    continue
+                current = latest.get(origin)
+                if current is None or captured > current[0]:
+                    latest[origin] = (captured, captured_at, rate_limits)
+    except OSError:
+        return {
+            "available": False,
+            "reason": "sidecar_unavailable",
+            "snapshots": {},
+        }
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    for origin in sorted(latest):
+        captured, captured_at, rate_limits = latest[origin]
+        age_seconds = max(0, int((observed_at - captured).total_seconds()))
+        snapshots[origin] = {
+            "captured_at": captured_at,
+            "age_seconds": age_seconds,
+            "freshness": (
+                "stale"
+                if age_seconds >= RATE_LIMIT_STALE_AFTER_SECONDS
+                else "fresh"
+            ),
+            "rate_limits": dict(rate_limits),
+        }
+    return {"available": True, "snapshots": snapshots}
+
+
+def _parse_utc_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 @contextmanager
