@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Mapping, Optional
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
 from utils import base_url_host_matches
@@ -16,16 +16,18 @@ _ONE_MILLION = Decimal("1000000")
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
 _NEURALWATT_DEFAULT_BASE_URL = "https://api.neuralwatt.com/v1"
 
-CostStatus = Literal["actual", "estimated", "included", "unknown"]
+CostStatus = Literal["actual", "estimated", "equivalent", "included", "unknown"]
 CostSource = Literal[
     "provider_cost_api",
     "provider_generation_api",
     "provider_models_api",
+    "litellm_feed",
     "official_docs_snapshot",
     "user_override",
     "custom_contract",
     "none",
 ]
+ReasoningBilling = Literal["included_in_output", "separate_rate"]
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,9 @@ class CanonicalUsage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
+    cache_read_tokens_observed: bool = False
+    cache_write_tokens_observed: bool = False
+    reasoning_tokens_observed: bool = False
     request_count: int = 1
     raw_usage: Optional[dict[str, Any]] = None
 
@@ -61,6 +66,18 @@ class CanonicalUsage:
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
+            cache_read_tokens_observed=(
+                self.cache_read_tokens_observed
+                and other.cache_read_tokens_observed
+            ),
+            cache_write_tokens_observed=(
+                self.cache_write_tokens_observed
+                and other.cache_write_tokens_observed
+            ),
+            reasoning_tokens_observed=(
+                self.reasoning_tokens_observed
+                and other.reasoning_tokens_observed
+            ),
             request_count=self.request_count + other.request_count,
             raw_usage=None,
         )
@@ -81,6 +98,8 @@ class PricingEntry:
     cache_read_cost_per_million: Optional[Decimal] = None
     cache_write_cost_per_million: Optional[Decimal] = None
     request_cost: Optional[Decimal] = None
+    reasoning_billing: ReasoningBilling = "included_in_output"
+    reasoning_cost_per_million: Optional[Decimal] = None
     source: CostSource = "none"
     source_url: Optional[str] = None
     pricing_version: Optional[str] = None
@@ -179,6 +198,58 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source="official_docs_snapshot",
         source_url="https://openrouter.ai/anthropic/claude-opus-4.8-fast",
         pricing_version="anthropic-pricing-2026-05",
+    ),
+    # Kimi K3 list pricing is independent of the Kimi Coding subscription.
+    # Subscription routes remain zero-cost in ``estimate_usage_cost`` and use
+    # this row only through ``estimate_equivalent_cost``.
+    (
+        "moonshot",
+        "k3",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("3.00"),
+        output_cost_per_million=Decimal("15.00"),
+        cache_read_cost_per_million=Decimal("0.30"),
+        source="official_docs_snapshot",
+        source_url="https://platform.kimi.ai/docs/pricing/chat-k3",
+        pricing_version="moonshot-k3-2026-07",
+    ),
+    (
+        "moonshot",
+        "kimi-k2.7-code",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.95"),
+        output_cost_per_million=Decimal("4.00"),
+        cache_read_cost_per_million=Decimal("0.19"),
+        source="official_docs_snapshot",
+        source_url="https://platform.kimi.ai/docs/pricing/chat",
+        pricing_version="moonshot-kimi-k2.7-code-2026-06",
+    ),
+    # LiteLLM's direct Z.AI family currently stops at GLM-5.1. Keep GLM-5.2
+    # as an official-doc snapshot until the direct zai/glm-5.2 row appears.
+    (
+        "zai",
+        "glm-5.2",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("1.40"),
+        output_cost_per_million=Decimal("4.40"),
+        cache_read_cost_per_million=Decimal("0.26"),
+        source="official_docs_snapshot",
+        source_url="https://docs.z.ai/guides/overview/pricing",
+        pricing_version="zai-glm-5.2-2026-06",
+    ),
+    # Qwen3.8-Max-Preview is Token-Plan-exclusive and has no published PAYG
+    # price.  Its list-equivalent row is deliberately versioned as a proxy
+    # against the current international Qwen3.7-Max list price instead of
+    # presenting an invented Qwen3.8 PAYG rate.
+    (
+        "alibaba",
+        "qwen3.8-max-preview",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("2.50"),
+        output_cost_per_million=Decimal("7.50"),
+        source="official_docs_snapshot",
+        source_url="https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+        pricing_version="alibaba-qwen3.8-list-equivalent-qwen3.7-2026-07",
     ),
     # ── Anthropic Claude Sonnet 5 ────────────────────────────────────────
     # Launched 2026-06-30. Introductory pricing ($2/$10 per MTok) runs
@@ -896,6 +967,20 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+def _usage_field_observed(container: Any, name: str) -> bool:
+    """Whether a provider payload actually carried a nullable usage field."""
+    if container is None:
+        return False
+    if isinstance(container, Mapping):
+        return name in container and container.get(name) is not None
+    fields_set = getattr(container, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(container, "__fields_set__", None)
+    if isinstance(fields_set, (set, frozenset)):
+        return name in fields_set and getattr(container, name, None) is not None
+    return hasattr(container, name) and getattr(container, name, None) is not None
+
+
 def resolve_billing_route(
     model_name: str,
     provider: Optional[str] = None,
@@ -910,8 +995,37 @@ def resolve_billing_route(
             provider_name = inferred_provider
             model = bare_model
 
+    if model.lower() == "glm-5.2" and provider_name in {
+        "custom",
+        "alibaba-token-plan",
+    }:
+        return BillingRoute(
+            provider="zai",
+            model="glm-5.2",
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
+
+    subscription_aliases = {
+        "claude-cli": "anthropic",
+        "kimi-coding": "moonshot",
+        "xai-oauth": "xai",
+        "alibaba-token-plan": "alibaba",
+    }
+    if provider_name in subscription_aliases:
+        return BillingRoute(
+            provider=subscription_aliases[provider_name],
+            model=model.split("/")[-1],
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
     if provider_name == "openai-codex":
-        return BillingRoute(provider="openai-codex", model=model, base_url=base_url or "", billing_mode="subscription_included")
+        return BillingRoute(
+            provider="openai",
+            model=model.split("/")[-1],
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
     if provider_name == "openrouter" or base_url_host_matches(base_url or "", "openrouter.ai"):
         return BillingRoute(provider="openrouter", model=model, base_url=base_url or "", billing_mode="official_models_api")
     if provider_name == "nous" or base_url_host_matches(base_url or "", "inference-api.nousresearch.com"):
@@ -920,6 +1034,27 @@ def resolve_billing_route(
         return BillingRoute(provider="neuralwatt", model=model, base_url=base_url or _NEURALWATT_DEFAULT_BASE_URL, billing_mode="official_models_api")
     if provider_name == "anthropic":
         return BillingRoute(provider="anthropic", model=model.split("/")[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+    if provider_name in {"kimi", "moonshot"}:
+        return BillingRoute(
+            provider="moonshot",
+            model=model.split("/")[-1],
+            base_url=base_url or "",
+            billing_mode="official_docs_snapshot",
+        )
+    if provider_name == "xai":
+        return BillingRoute(
+            provider="xai",
+            model=model.split("/")[-1],
+            base_url=base_url or "",
+            billing_mode="official_docs_snapshot",
+        )
+    if provider_name in {"alibaba", "dashscope"}:
+        return BillingRoute(
+            provider="alibaba",
+            model=model.split("/")[-1],
+            base_url=base_url or "",
+            billing_mode="official_docs_snapshot",
+        )
     # "openai-api" is the picker/registry slug for direct api.openai.com; it
     # bills identically to bare "openai", so normalize it here — otherwise the
     # ("openai", <model>) _OFFICIAL_DOCS_PRICING keys are unreachable from the
@@ -937,6 +1072,13 @@ def resolve_billing_route(
         # Fireworks model ids look like accounts/fireworks/models/<name>;
         # rsplit("/", 1)[-1] yields just <name> which is what the dict keys on.
         return BillingRoute(provider="fireworks", model=model.rsplit("/", 1)[-1], base_url=base_url or "", billing_mode="official_docs_snapshot")
+    if provider_name == "custom" and model.lower() == "qwen3.8-max-preview":
+        return BillingRoute(
+            provider="alibaba",
+            model=model.lower(),
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
     if provider_name in {"custom", "local"} or (base and "localhost" in base):
         return BillingRoute(provider=provider_name or "custom", model=model, base_url=base_url or "", billing_mode="unknown")
     return BillingRoute(provider=provider_name or "unknown", model=model.split("/")[-1] if model else "", base_url=base_url or "", billing_mode="unknown")
@@ -1084,18 +1226,9 @@ def get_pricing_entry(
     api_key: Optional[str] = None,
 ) -> Optional[PricingEntry]:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
-    if route.billing_mode == "subscription_included":
-        return PricingEntry(
-            input_cost_per_million=_ZERO,
-            output_cost_per_million=_ZERO,
-            cache_read_cost_per_million=_ZERO,
-            cache_write_cost_per_million=_ZERO,
-            source="none",
-            pricing_version="included-route",
-        )
     if route.provider == "openrouter":
         return _openrouter_pricing_entry(route)
-    if route.base_url:
+    if route.base_url and route.billing_mode != "subscription_included":
         entry = _pricing_entry_from_metadata(
             fetch_endpoint_model_metadata(route.base_url, api_key=api_key or ""),
             route.model,
@@ -1104,7 +1237,15 @@ def get_pricing_entry(
         )
         if entry:
             return entry
-    return _lookup_official_docs_pricing(route)
+    official_entry = _lookup_official_docs_pricing(route)
+    if official_entry:
+        return official_entry
+    try:
+        from agent.pricing_feed import load_vendored_pricing
+
+        return load_vendored_pricing().get((route.provider, route.model.lower()))
+    except (OSError, ValueError):
+        return None
 
 
 def normalize_usage(
@@ -1135,6 +1276,12 @@ def normalize_usage(
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
         cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
         cache_write_tokens = _to_int(getattr(response_usage, "cache_creation_input_tokens", 0))
+        cache_read_tokens_observed = _usage_field_observed(
+            response_usage, "cache_read_input_tokens"
+        )
+        cache_write_tokens_observed = _usage_field_observed(
+            response_usage, "cache_creation_input_tokens"
+        )
     elif mode == "codex_responses":
         input_total = _to_int(getattr(response_usage, "input_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
@@ -1142,6 +1289,12 @@ def normalize_usage(
         cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
         cache_write_tokens = _to_int(
             getattr(details, "cache_creation_tokens", 0) if details else 0
+        )
+        cache_read_tokens_observed = _usage_field_observed(
+            details, "cached_tokens"
+        )
+        cache_write_tokens_observed = _usage_field_observed(
+            details, "cache_creation_tokens"
         )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
@@ -1154,10 +1307,11 @@ def normalize_usage(
         # fallback, cache writes are undercounted as 0 and cache reads can be
         # missed when the proxy only surfaces them at the top level.
         # Port of cline/cline#10266.
-        cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
-        if not cache_read_tokens:
+        if _usage_field_observed(details, "cached_tokens"):
+            cache_read_tokens = _to_int(getattr(details, "cached_tokens"))
+        elif _usage_field_observed(response_usage, "cache_read_input_tokens"):
             cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
-        if not cache_read_tokens:
+        elif _usage_field_observed(response_usage, "prompt_cache_hit_tokens"):
             # DeepSeek's native API (api.deepseek.com) reports context-cache
             # hits as top-level prompt_cache_hit_tokens (+ the complementary
             # prompt_cache_miss_tokens; prompt_tokens = hit + miss), not the
@@ -1166,16 +1320,43 @@ def normalize_usage(
             cache_read_tokens = _to_int(
                 getattr(response_usage, "prompt_cache_hit_tokens", 0)
             )
-        cache_write_tokens = _to_int(
-            getattr(details, "cache_write_tokens", 0) if details else 0
+        else:
+            cache_read_tokens = 0
+        cache_read_tokens_observed = any(
+            (
+                _usage_field_observed(details, "cached_tokens"),
+                _usage_field_observed(
+                    response_usage, "cache_read_input_tokens"
+                ),
+                _usage_field_observed(
+                    response_usage, "prompt_cache_hit_tokens"
+                ),
+            )
         )
-        if not cache_write_tokens:
+        if _usage_field_observed(details, "cache_write_tokens"):
+            cache_write_tokens = _to_int(
+                getattr(details, "cache_write_tokens")
+            )
+        elif _usage_field_observed(
+            response_usage, "cache_creation_input_tokens"
+        ):
             cache_write_tokens = _to_int(
                 getattr(response_usage, "cache_creation_input_tokens", 0)
             )
+        else:
+            cache_write_tokens = 0
+        cache_write_tokens_observed = any(
+            (
+                _usage_field_observed(details, "cache_write_tokens"),
+                _usage_field_observed(
+                    response_usage, "cache_creation_input_tokens"
+                ),
+            )
+        )
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
     reasoning_tokens = 0
+    reasoning_tokens_observed = False
     # Responses API shape: output_tokens_details.reasoning_tokens.
     # Chat Completions shape (OpenAI, OpenRouter, DeepSeek, etc.):
     # completion_tokens_details.reasoning_tokens. Reading only the former
@@ -1184,14 +1365,19 @@ def normalize_usage(
     # dominates output spend on models like deepseek-v4-flash (measured:
     # single calls burning 21K reasoning tokens to emit 500 visible tokens).
     output_details = getattr(response_usage, "output_tokens_details", None)
-    if output_details:
-        reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
-    if not reasoning_tokens:
-        completion_details = getattr(response_usage, "completion_tokens_details", None)
-        if completion_details:
-            reasoning_tokens = _to_int(
-                getattr(completion_details, "reasoning_tokens", 0)
-            )
+    completion_details = getattr(
+        response_usage, "completion_tokens_details", None
+    )
+    if _usage_field_observed(output_details, "reasoning_tokens"):
+        reasoning_tokens = _to_int(
+            getattr(output_details, "reasoning_tokens", 0)
+        )
+        reasoning_tokens_observed = True
+    elif _usage_field_observed(completion_details, "reasoning_tokens"):
+        reasoning_tokens = _to_int(
+            getattr(completion_details, "reasoning_tokens", 0)
+        )
+        reasoning_tokens_observed = True
 
     return CanonicalUsage(
         input_tokens=input_tokens,
@@ -1199,6 +1385,128 @@ def normalize_usage(
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
+        cache_read_tokens_observed=cache_read_tokens_observed,
+        cache_write_tokens_observed=cache_write_tokens_observed,
+        reasoning_tokens_observed=reasoning_tokens_observed,
+    )
+
+
+def _estimate_priced_usage(
+    *,
+    route: BillingRoute,
+    usage: CanonicalUsage,
+    entry: PricingEntry,
+    result_status: Literal["estimated", "equivalent"] = "estimated",
+) -> CostResult:
+    notes: list[str] = []
+    amount = _ZERO
+
+    if usage.input_tokens and entry.input_cost_per_million is None:
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source=entry.source,
+            label="n/a",
+        )
+    if usage.output_tokens and entry.output_cost_per_million is None:
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source=entry.source,
+            label="n/a",
+        )
+    if usage.cache_read_tokens:
+        if entry.cache_read_cost_per_million is None:
+            return CostResult(
+                amount_usd=None,
+                status="unknown",
+                source=entry.source,
+                label="n/a",
+                notes=("cache-read pricing unavailable for route",),
+            )
+    if usage.cache_write_tokens:
+        if entry.cache_write_cost_per_million is None:
+            return CostResult(
+                amount_usd=None,
+                status="unknown",
+                source=entry.source,
+                label="n/a",
+                notes=("cache-write pricing unavailable for route",),
+            )
+    if (
+        usage.reasoning_tokens
+        and entry.reasoning_billing == "separate_rate"
+        and entry.reasoning_cost_per_million is None
+    ):
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source=entry.source,
+            label="n/a",
+            notes=("reasoning pricing unavailable for separate-rate model",),
+        )
+
+    if entry.input_cost_per_million is not None:
+        amount += (
+            Decimal(usage.input_tokens)
+            * entry.input_cost_per_million
+            / _ONE_MILLION
+        )
+    if entry.output_cost_per_million is not None:
+        amount += (
+            Decimal(usage.output_tokens)
+            * entry.output_cost_per_million
+            / _ONE_MILLION
+        )
+    if entry.cache_read_cost_per_million is not None:
+        amount += (
+            Decimal(usage.cache_read_tokens)
+            * entry.cache_read_cost_per_million
+            / _ONE_MILLION
+        )
+    if entry.cache_write_cost_per_million is not None:
+        amount += (
+            Decimal(usage.cache_write_tokens)
+            * entry.cache_write_cost_per_million
+            / _ONE_MILLION
+        )
+    if (
+        entry.reasoning_billing == "separate_rate"
+        and entry.reasoning_cost_per_million is not None
+    ):
+        amount += (
+            Decimal(usage.reasoning_tokens)
+            * entry.reasoning_cost_per_million
+            / _ONE_MILLION
+        )
+    if entry.request_cost is not None and usage.request_count:
+        amount += Decimal(usage.request_count) * entry.request_cost
+
+    status: CostStatus = result_status
+    label = (
+        f"~${amount:.2f} list equivalent"
+        if result_status == "equivalent"
+        else f"~${amount:.2f}"
+    )
+    if (
+        result_status == "estimated"
+        and entry.source == "none"
+        and amount == _ZERO
+    ):
+        status = "included"
+        label = "included"
+
+    if route.provider == "openrouter":
+        notes.append("OpenRouter cost is estimated from the models API until reconciled.")
+
+    return CostResult(
+        amount_usd=amount,
+        status=status,
+        source=entry.source,
+        label=label,
+        fetched_at=entry.fetched_at,
+        pricing_version=entry.pricing_version,
+        notes=tuple(notes),
     )
 
 
@@ -1220,64 +1528,56 @@ def estimate_usage_cost(
             pricing_version="included-route",
         )
 
-    entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
+    entry = get_pricing_entry(
+        model_name,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+    )
     if not entry:
-        return CostResult(amount_usd=None, status="unknown", source="none", label="n/a")
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source="none",
+            label="n/a",
+        )
+    return _estimate_priced_usage(route=route, usage=usage, entry=entry)
 
-    notes: list[str] = []
-    amount = _ZERO
 
-    if usage.input_tokens and entry.input_cost_per_million is None:
-        return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
-    if usage.output_tokens and entry.output_cost_per_million is None:
-        return CostResult(amount_usd=None, status="unknown", source=entry.source, label="n/a")
-    if usage.cache_read_tokens:
-        if entry.cache_read_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-read pricing unavailable for route",),
-            )
-    if usage.cache_write_tokens:
-        if entry.cache_write_cost_per_million is None:
-            return CostResult(
-                amount_usd=None,
-                status="unknown",
-                source=entry.source,
-                label="n/a",
-                notes=("cache-write pricing unavailable for route",),
-            )
+def estimate_equivalent_cost(
+    model_name: str,
+    usage: CanonicalUsage,
+    *,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> CostResult:
+    """Value any route at the corresponding public list price.
 
-    if entry.input_cost_per_million is not None:
-        amount += Decimal(usage.input_tokens) * entry.input_cost_per_million / _ONE_MILLION
-    if entry.output_cost_per_million is not None:
-        amount += Decimal(usage.output_tokens) * entry.output_cost_per_million / _ONE_MILLION
-    if entry.cache_read_cost_per_million is not None:
-        amount += Decimal(usage.cache_read_tokens) * entry.cache_read_cost_per_million / _ONE_MILLION
-    if entry.cache_write_cost_per_million is not None:
-        amount += Decimal(usage.cache_write_tokens) * entry.cache_write_cost_per_million / _ONE_MILLION
-    if entry.request_cost is not None and usage.request_count:
-        amount += Decimal(usage.request_count) * entry.request_cost
+    In particular, subscription routes keep their real cost semantics in
+    ``estimate_usage_cost`` while this function exposes the comparable PAYG
+    value from the official override or vendored LiteLLM table.
+    """
 
-    status: CostStatus = "estimated"
-    label = f"~${amount:.2f}"
-    if entry.source == "none" and amount == _ZERO:
-        status = "included"
-        label = "included"
-
-    if route.provider == "openrouter":
-        notes.append("OpenRouter cost is estimated from the models API until reconciled.")
-
-    return CostResult(
-        amount_usd=amount,
-        status=status,
-        source=entry.source,
-        label=label,
-        fetched_at=entry.fetched_at,
-        pricing_version=entry.pricing_version,
-        notes=tuple(notes),
+    route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
+    entry = get_pricing_entry(
+        model_name,
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+    )
+    if not entry:
+        return CostResult(
+            amount_usd=None,
+            status="unknown",
+            source="none",
+            label="n/a",
+        )
+    return _estimate_priced_usage(
+        route=route,
+        usage=usage,
+        entry=entry,
+        result_status="equivalent",
     )
 
 

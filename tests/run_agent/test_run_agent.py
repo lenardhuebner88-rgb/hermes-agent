@@ -4616,6 +4616,54 @@ class TestRunConversation:
         assert any(msg.get("role") == "user" and msg.get("content") == "search something" for msg in pre_request_calls[0]["request_messages"])
         assert all("usage" in c and "response" in c for c in post_request_calls)
         assert all("assistant_message" in c["response"] for c in post_request_calls)
+        assert all(c["first_token_ms"] is None for c in post_request_calls)
+
+    def test_post_api_request_reports_measured_first_token_timing(
+        self,
+        agent,
+    ):
+        self._setup_agent(agent)
+        response = _mock_response(
+            content="streamed answer",
+            finish_reason="stop",
+        )
+        agent.client = SimpleNamespace()
+        hook_calls = []
+
+        def _stream(_api_kwargs, *, on_first_delta=None):
+            assert on_first_delta is not None
+            on_first_delta()
+            return response
+
+        def _record_hook(name, **kwargs):
+            hook_calls.append((name, kwargs))
+            return []
+
+        with (
+            patch.object(
+                agent,
+                "_interruptible_streaming_api_call",
+                side_effect=_stream,
+            ),
+            patch(
+                "hermes_cli.plugins.has_hook",
+                side_effect=lambda name: name == "post_api_request",
+            ),
+            patch("hermes_cli.plugins.invoke_hook", side_effect=_record_hook),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["final_response"] == "streamed answer"
+        post_request = next(
+            kwargs
+            for name, kwargs in hook_calls
+            if name == "post_api_request"
+        )
+        assert post_request["first_token_ms"] is not None
+        assert post_request["first_token_ms"] >= 0
 
     def test_provider_call_stamps_in_flight_and_confirmed_kanban_route(self, agent):
         self._setup_agent(agent)
@@ -6619,12 +6667,17 @@ class TestHookPayloadSanitizesSimpleNamespace:
             content="",
             tool_calls=[tool_call],
         )
-        response = SimpleNamespace(model="anthropic.claude-3", usage=None)
+        response = SimpleNamespace(
+            id="response-provider-1",
+            model="anthropic.claude-3",
+            usage=None,
+        )
 
         payload = agent._api_response_payload_for_hook(
             response, assistant_message, finish_reason="tool_calls"
         )
 
+        assert payload["id"] == "response-provider-1"
         assert payload["model"] == "anthropic.claude-3"
         assert payload["finish_reason"] == "tool_calls"
         normalized_call = payload["assistant_message"]["tool_calls"][0]

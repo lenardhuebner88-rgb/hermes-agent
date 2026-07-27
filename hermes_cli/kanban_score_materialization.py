@@ -6,6 +6,8 @@ readable.  The natural key is ``(task_id, run_id, name)``.
 """
 from __future__ import annotations
 
+import json
+import math
 import sqlite3
 import time
 from pathlib import Path
@@ -107,6 +109,40 @@ def _reasoning_is_output_subset(usage: dict[str, Any]) -> bool:
     return normalized.reasoning_tokens <= normalized.output_tokens
 
 
+def _metadata_dict(raw: object) -> dict[str, Any]:
+    """Parse the persisted ``task_runs.metadata`` JSON object defensively."""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _finite_nonnegative_number(raw: object) -> float | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def _effective_run_cost(cost_usd: object, metadata: object) -> float | None:
+    """Return actual plus equivalent cost, or ``None`` when the run is blind."""
+    actual = _finite_nonnegative_number(cost_usd)
+    equivalent = _finite_nonnegative_number(
+        _metadata_dict(metadata).get("cost_usd_equivalent")
+    )
+    if not any(value is not None and value > 0 for value in (actual, equivalent)):
+        return None
+    return (actual or 0.0) + (equivalent or 0.0)
+
+
 def materialize_scores(
     conn: sqlite3.Connection,
     *,
@@ -142,14 +178,27 @@ def materialize_scores(
 
     runs = conn.execute(
         """
-        SELECT task_runs.id, task_runs.task_id, task_runs.outcome, tasks.session_id
+        SELECT task_runs.id, task_runs.task_id, task_runs.outcome, tasks.session_id,
+               task_runs.ended_at, task_runs.cost_usd, task_runs.metadata
         FROM task_runs JOIN tasks ON tasks.id = task_runs.task_id
         ORDER BY task_runs.id
         """
     ).fetchall()
-    for run_id, task_id, outcome, session_id in runs:
+    for run_id, task_id, outcome, session_id, ended_at, cost_usd, metadata in runs:
         if outcome:
             inserted += _insert_score(conn, task_id=task_id, run_id=run_id, name="run_outcome_kind", value=str(outcome), value_type="categorical", created_at=now)
+        if ended_at is not None:
+            effective_cost = _effective_run_cost(cost_usd, metadata)
+            if effective_cost is not None:
+                inserted += _insert_score(
+                    conn,
+                    task_id=task_id,
+                    run_id=run_id,
+                    name="run_cost_effective_usd",
+                    value=effective_cost,
+                    value_type="numeric",
+                    created_at=now,
+                )
         usage = usage_by_session.get(str(session_id)) if session_id else None
         if usage:
             input_tokens = int(usage.get("input_tokens") or 0)

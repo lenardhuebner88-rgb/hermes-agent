@@ -80,6 +80,80 @@ def test_digest_approval_rate_matches_scores_report(tmp_path, monkeypatch):
         assert dw["approved_rows"] == rw["approved_rows"]
 
 
+def test_digest_keeps_fixture_metrics_and_reports_run_classes(
+    tmp_path, monkeypatch
+):
+    now = _seed_db(tmp_path, monkeypatch)
+    created_at = int(datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp())
+
+    with kb.connect_closing() as conn:
+        real_task = kb.create_task(conn, title="production", assignee="coder")
+        fixture_task = kb.create_task(conn, title="time-travel", assignee="w")
+        real_run = _create_run(
+            conn,
+            task_id=real_task,
+            profile="coder",
+            model="real-model",
+        )
+        fixture_run = _create_run(
+            conn,
+            task_id=fixture_task,
+            profile="w",
+            model="fixture-model",
+        )
+        _insert_verdict(
+            conn,
+            task_id=real_task,
+            run_id=real_run,
+            value=1.0,
+            created_at=created_at,
+        )
+        _insert_metric(
+            conn,
+            run_id=real_run,
+            task_id=real_task,
+            name="run_duration_seconds",
+            value=222.0,
+            created_at=created_at,
+        )
+        _insert_verdict(
+            conn,
+            task_id=fixture_task,
+            run_id=fixture_run,
+            value=0.0,
+            created_at=created_at,
+        )
+        _insert_metric(
+            conn,
+            run_id=fixture_run,
+            task_id=fixture_task,
+            name="run_duration_seconds",
+            value=0.0,
+            created_at=created_at,
+        )
+
+        digest = kb.scores_digest(conn, weeks=2, now=now)
+        persisted = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+
+    assert digest["rows_total"] == 2
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 0.5
+    assert digest["run_classes"] == {
+        "produktiv": 1,
+        "fixture": 1,
+        "nie_gelaufen": 0,
+    }
+    assert digest["cost_duration_per_approved_run"] == [
+        {
+            "run_id": real_run,
+            "task_id": real_task,
+            "cost_usd": None,
+            "duration_seconds": 222.0,
+        }
+    ]
+    assert persisted == 4
+
+
 # ── AC-1: Markdown digest output ──────────────────────────────────────
 
 
@@ -92,7 +166,7 @@ def test_digest_markdown_output(tmp_path, monkeypatch, capsys):
         rid = _create_run(conn, task_id=tid, profile="coder", model="qwen3")
         _insert_verdict(conn, task_id=tid, run_id=rid, value=1.0,
                         created_at=int(monday.timestamp()))
-        _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_usd",
+        _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_effective_usd",
                        value=0.042, created_at=int(monday.timestamp()))
         _insert_metric(conn, run_id=rid, task_id=tid, name="run_duration_seconds",
                        value=120.0, created_at=int(monday.timestamp()))
@@ -235,7 +309,7 @@ def test_digest_high_cardinality_budgeted_output(tmp_path, monkeypatch):
                 value=0.0 if i < 3 else 1.0,
                 created_at=int(monday.timestamp()),
             )
-            _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_usd",
+            _insert_metric(conn, run_id=rid, task_id=tid, name="run_cost_effective_usd",
                            value=0.05, created_at=int(monday.timestamp()))
             _insert_metric(conn, run_id=rid, task_id=tid, name="run_duration_seconds",
                            value=90.0, created_at=int(monday.timestamp()))
@@ -537,7 +611,7 @@ def test_metric_scores_only_on_non_approved_runs(tmp_path, monkeypatch):
         t2 = kb.create_task(conn, title="t2", assignee="tester")
         r2 = _create_run(conn, task_id=t2, profile="coder", model="qwen3")
         _insert_verdict(conn, task_id=t2, run_id=r2, value=0.0, created_at=ts)
-        _insert_metric(conn, run_id=r2, task_id=t2, name="run_cost_usd",
+        _insert_metric(conn, run_id=r2, task_id=t2, name="run_cost_effective_usd",
                        value=0.15, created_at=ts)
         _insert_metric(conn, run_id=r2, task_id=t2, name="run_duration_seconds",
                        value=120.0, created_at=ts)
@@ -545,7 +619,7 @@ def test_metric_scores_only_on_non_approved_runs(tmp_path, monkeypatch):
         # Unreviewed run WITH metrics (no verdict at all)
         t3 = kb.create_task(conn, title="t3", assignee="tester")
         r3 = _create_run(conn, task_id=t3, profile="coder", model="qwen3")
-        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_usd",
+        _insert_metric(conn, run_id=r3, task_id=t3, name="run_cost_effective_usd",
                        value=0.20, created_at=ts)
 
         digest = kb.scores_digest(conn, weeks=4, now=now)
@@ -581,7 +655,7 @@ def test_metric_scores_on_approved_runs_positive(tmp_path, monkeypatch):
         t1 = kb.create_task(conn, title="t1", assignee="tester")
         r1 = _create_run(conn, task_id=t1, profile="coder", model="qwen3")
         _insert_verdict(conn, task_id=t1, run_id=r1, value=1.0, created_at=ts)
-        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_usd",
+        _insert_metric(conn, run_id=r1, task_id=t1, name="run_cost_effective_usd",
                        value=0.05, created_at=ts)
         _insert_metric(conn, run_id=r1, task_id=t1, name="run_duration_seconds",
                        value=90.0, created_at=ts)
@@ -601,6 +675,66 @@ def test_metric_scores_on_approved_runs_positive(tmp_path, monkeypatch):
     assert "Metrik-Scores: keine vorhanden" not in md
 
 
+def test_digest_ranks_approved_runs_by_effective_cost(tmp_path, monkeypatch):
+    now = _seed_db(tmp_path, monkeypatch)
+    ts = int(datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp())
+
+    with kb.connect_closing() as conn:
+        low_task = kb.create_task(conn, title="low effective", assignee="tester")
+        low_run = _create_run(
+            conn, task_id=low_task, profile="coder", model="metered"
+        )
+        high_task = kb.create_task(conn, title="high effective", assignee="tester")
+        high_run = _create_run(
+            conn, task_id=high_task, profile="coder", model="subscription"
+        )
+        for task_id, run_id in ((low_task, low_run), (high_task, high_run)):
+            _insert_verdict(
+                conn, task_id=task_id, run_id=run_id, value=1.0, created_at=ts
+            )
+        _insert_metric(
+            conn,
+            run_id=low_run,
+            task_id=low_task,
+            name="run_cost_usd",
+            value=100.0,
+            created_at=ts,
+        )
+        _insert_metric(
+            conn,
+            run_id=low_run,
+            task_id=low_task,
+            name="run_cost_effective_usd",
+            value=1.0,
+            created_at=ts,
+        )
+        _insert_metric(
+            conn,
+            run_id=high_run,
+            task_id=high_task,
+            name="run_cost_usd",
+            value=0.5,
+            created_at=ts,
+        )
+        _insert_metric(
+            conn,
+            run_id=high_run,
+            task_id=high_task,
+            name="run_cost_effective_usd",
+            value=50.0,
+            created_at=ts,
+        )
+
+        rows = kb.scores_digest(conn, weeks=4, now=now)[
+            "cost_duration_per_approved_run"
+        ]
+
+    assert [(row["run_id"], row["cost_usd"]) for row in rows] == [
+        (high_run, 50.0),
+        (low_run, 1.0),
+    ]
+
+
 # ── LA-S7: deterministic weekly findings with EUR impact ───────────────
 
 
@@ -618,14 +752,14 @@ def test_digest_top_findings_are_deterministic_and_rendered(tmp_path, monkeypatc
         _insert_metric(conn, run_id=retry_run, task_id=retry_task,
                        name="task_runs_to_done", value=4.0, created_at=current_ts)
         _insert_metric(conn, run_id=retry_run, task_id=retry_task,
-                       name="run_cost_usd", value=2.0, created_at=current_ts)
+                       name="run_cost_effective_usd", value=2.0, created_at=current_ts)
 
         veto_task = kb.create_task(conn, title="veto", assignee="tester")
         veto_run = _create_run(conn, task_id=veto_task, profile="reviewer", model="gpt5")
         _insert_metric(conn, run_id=veto_run, task_id=veto_task,
                        name="operator_veto", value=1.0, created_at=current_ts)
         _insert_metric(conn, run_id=veto_run, task_id=veto_task,
-                       name="run_cost_usd", value=1.0, created_at=current_ts)
+                       name="run_cost_effective_usd", value=1.0, created_at=current_ts)
 
         cache_task = kb.create_task(conn, title="cache", assignee="tester")
         old_cache_run = _create_run(conn, task_id=cache_task, profile="coder", model="qwen3")
@@ -635,14 +769,14 @@ def test_digest_top_findings_are_deterministic_and_rendered(tmp_path, monkeypatc
         _insert_metric(conn, run_id=current_cache_run, task_id=cache_task,
                        name="cache_hit_ratio", value=0.1, created_at=current_ts)
         _insert_metric(conn, run_id=current_cache_run, task_id=cache_task,
-                       name="run_cost_usd", value=0.5, created_at=current_ts)
+                       name="run_cost_effective_usd", value=0.5, created_at=current_ts)
 
         queue_task = kb.create_task(conn, title="queue", assignee="tester")
         queue_run = _create_run(conn, task_id=queue_task, profile="coder", model="qwen3")
         _insert_metric(conn, run_id=queue_run, task_id=queue_task,
                        name="queue_latency_seconds", value=3600.0, created_at=current_ts)
         _insert_metric(conn, run_id=queue_run, task_id=queue_task,
-                       name="run_cost_usd", value=0.25, created_at=current_ts)
+                       name="run_cost_effective_usd", value=0.25, created_at=current_ts)
 
         first = kb.scores_digest(conn, weeks=2, now=now)["top_findings"]
         second = kb.scores_digest(conn, weeks=2, now=now)["top_findings"]

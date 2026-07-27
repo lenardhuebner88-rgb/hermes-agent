@@ -708,11 +708,14 @@ def _export_score_backfill(
         "planned_anchors": planned_anchors,
         "planned_scores": planned_scores,
         "remaining_events": len(pending) - len(planned),
+        "effective_event_limit": event_limit,
         # Keep the original result vocabulary for callers that only display
         # the generic export summary.
         "matched": matchable,
         "posted": 0,
     }
+    if cron_backfill_limit is not None:
+        report["cron_backfill_event_limit"] = cron_backfill_limit
     if cron_backfill_limit is not None and report["remaining_events"]:
         report["backfill_limit_message"] = (
             f"cron backfill capped at {cron_backfill_limit} events; "

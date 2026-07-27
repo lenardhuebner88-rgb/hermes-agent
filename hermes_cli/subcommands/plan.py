@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 from hermes_cli import planspecs
@@ -13,6 +14,14 @@ from hermes_cli.plan_prose import compile_prose_plan, parse_prose_plan
 
 
 _PA_PLANS_ROOT_ENV = "HERMES_PA_PLANS_ROOT"
+
+
+def _json_default(value: object) -> str:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(
+        f"Object of type {type(value).__name__} is not JSON serializable"
+    )
 
 
 def _pa_plans_root_kwargs() -> dict[str, Path]:
@@ -116,7 +125,13 @@ def plan_command(args: argparse.Namespace) -> int:
                 include_kanban_status=True,
             )
             if getattr(args, "json", False):
-                print(json.dumps({"planspecs": records}, ensure_ascii=False))
+                print(
+                    json.dumps(
+                        {"planspecs": records},
+                        ensure_ascii=False,
+                        default=_json_default,
+                    )
+                )
             else:
                 for item in records:
                     marker = "OK" if item["valid"] else "BLOCKED"

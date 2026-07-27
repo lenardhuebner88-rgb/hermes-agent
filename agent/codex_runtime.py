@@ -998,7 +998,8 @@ def _consume_codex_event_stream(
       is supplied, commentary also uses this legacy fallback.
     * ``on_commentary_message(str)`` — fires once per completed
       ``phase=commentary`` message, before any following tool item executes.
-    * ``on_first_delta()`` — one-shot, fires on the first text delta only.
+    * ``on_first_delta()`` — one-shot, fires on the first content-bearing delta
+      (text, reasoning, commentary, or tool arguments).
     * ``on_event(event)`` — fires for every event before any other processing.
       Used for watchdog activity, debug logging, anything wire-shape-agnostic.
     * ``interrupt_check()`` — returns True to break the loop early.
@@ -1034,6 +1035,20 @@ def _consume_codex_event_stream(
         event_type = _event_field(event, "type", "")
         if not isinstance(event_type, str):
             event_type = ""
+
+        # Tool turns often emit reasoning/commentary or function arguments but
+        # no final-answer text. Measure their first generated content as well.
+        if (
+            not first_delta_fired
+            and event_type.endswith(".delta")
+            and _event_field(event, "delta", None) not in (None, "")
+        ):
+            first_delta_fired = True
+            if on_first_delta is not None:
+                try:
+                    on_first_delta()
+                except Exception:
+                    logger.debug("Codex stream on_first_delta raised", exc_info=True)
 
         # ``error`` SSE frames carry the provider's real failure reason
         # (subscription / quota / model-not-available / rejected-reasoning-replay)

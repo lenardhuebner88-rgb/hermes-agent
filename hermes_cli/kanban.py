@@ -4404,6 +4404,15 @@ def _cmd_export_langfuse_scores(args: argparse.Namespace) -> int:
         # was newly posted -> no Discord delivery; exactly one line on N>0.
         # Diagnostics always go to stderr so they never trigger delivery.
         print(summary, file=sys.stderr)
+        if args.dry_run and bool(getattr(args, "backfill", False)):
+            print(
+                "langfuse-scores-export: dry-run "
+                f"pending_events={result.get('pending_events', 0)} "
+                f"planned_events={result.get('planned_events', 0)} "
+                f"remaining_events={result.get('remaining_events', 0)} "
+                f"effective_event_limit={result.get('effective_event_limit')}"
+            )
+            return 0
         alert = cron_export_alert()
         if posted_new > 0:
             message = f"langfuse-scores-export: posted {posted_new} new score(s) to Langfuse"
@@ -4704,9 +4713,18 @@ def _cmd_backfill_costs(args: argparse.Namespace) -> int:
 
 
 def _cmd_backfill_metrics(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_score_hygiene import (
+        backfill_run_metric_scores_without_retry_fixtures,
+    )
+    from hermes_cli.usage_facts_db import usage_facts_db_path
+
     with kb.connect_closing() as conn:
-        n = kb.backfill_run_metric_scores(conn)
-        print(f"Backfilled run-metric scores for {n} row(s).")
+        run_metric_rows = backfill_run_metric_scores_without_retry_fixtures(conn)
+        print(f"Backfilled run-metric scores for {run_metric_rows} row(s).")
+        print(
+            "Agent usage facts remain authoritative in "
+            f"{usage_facts_db_path()}; no analytics scores were materialized."
+        )
     return 0
 
 

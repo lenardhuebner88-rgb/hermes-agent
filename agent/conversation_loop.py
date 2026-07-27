@@ -1854,6 +1854,7 @@ def run_conversation(
             logging.debug(f"Total message size: ~{approx_tokens:,} tokens")
         
         api_start_time = time.time()
+        first_token_at = None
         retry_count = 0
         max_retries = agent._api_max_retries
         _retry = TurnRetryState()
@@ -2047,7 +2048,8 @@ def run_conversation(
                 # streaming automatically if the provider doesn't
                 # support it.
                 def _stop_spinner():
-                    nonlocal thinking_spinner
+                    nonlocal first_token_at, thinking_spinner
+                    first_token_at = first_token_at or time.time()
                     if thinking_spinner:
                         thinking_spinner.stop("")
                         thinking_spinner = None
@@ -5332,6 +5334,11 @@ def run_conversation(
                         api_mode=agent.api_mode,
                         api_call_count=api_call_count,
                         api_duration=api_duration,
+                        first_token_ms=(
+                            (first_token_at - api_start_time) * 1000
+                            if first_token_at is not None
+                            else None
+                        ),
                         started_at=api_start_time,
                         ended_at=_api_ended_at,
                         finish_reason=finish_reason,

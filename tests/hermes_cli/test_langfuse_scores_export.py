@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import hermes_cli.langfuse_scores_export as langfuse_export
+from hermes_cli.kanban import run_slash
 from hermes_cli.langfuse_scores_export import export_scores, synthesize_traces, trace_id_for_run
 
 
@@ -369,9 +370,39 @@ def test_cron_backfill_without_explicit_limit_uses_default_cap_and_reports_remai
 
     assert result["planned_events"] == default_limit
     assert result["remaining_events"] == 6  # five scores plus the task anchor
+    assert result["effective_event_limit"] == default_limit
+    assert result["cron_backfill_event_limit"] == default_limit
     assert result["backfill_limit_message"] == (
         f"cron backfill capped at {default_limit} events; 6 event(s) remain"
     )
+
+
+def test_cron_backfill_dry_run_cli_reports_cap_and_remaining(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        langfuse_export,
+        "export_scores",
+        lambda **_kwargs: {
+            "matched": 10,
+            "unmatched": 0,
+            "posted": 0,
+            "posted_new": 0,
+            "pending_events": 10,
+            "planned_events": 7,
+            "remaining_events": 3,
+            "effective_event_limit": 7,
+            "cron_backfill_event_limit": 7,
+        },
+    )
+
+    output = run_slash("export-langfuse-scores --cron --backfill --dry-run")
+
+    assert (
+        "langfuse-scores-export: dry-run "
+        "pending_events=10 planned_events=7 remaining_events=3 "
+        "effective_event_limit=7"
+    ) in output
 
 
 def test_cron_backfill_explicit_limit_overrides_default_cap(tmp_path: Path) -> None:
@@ -395,6 +426,8 @@ def test_cron_backfill_explicit_limit_overrides_default_cap(tmp_path: Path) -> N
 
     assert result["planned_events"] == explicit_limit
     assert result["remaining_events"] == 1
+    assert result["effective_event_limit"] == explicit_limit
+    assert "cron_backfill_event_limit" not in result
     assert "backfill_limit_message" not in result
 
 
@@ -417,6 +450,8 @@ def test_non_cron_backfill_without_explicit_limit_remains_unbounded(tmp_path: Pa
 
     assert result["planned_events"] == default_limit + 6
     assert result["remaining_events"] == 0
+    assert result["effective_event_limit"] is None
+    assert "cron_backfill_event_limit" not in result
     assert "backfill_limit_message" not in result
 
 

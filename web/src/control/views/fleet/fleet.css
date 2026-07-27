@@ -110,6 +110,10 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-root {
   flex: 1 0 auto;
+  /* Horizontales Eindämmen breiter Inhalte (mobil). Auf Desktop per Media
+   * Query wieder geöffnet — overflow erzeugt einen Scrollport, der
+   * position:sticky der Filterleisten sonst blockiert. */
+  overflow: hidden;
 }
 
 /* ── Chips (Subtabs) ──────────────────────────────────────────────────────── */
@@ -2102,6 +2106,22 @@ body:has([data-fleet-theme]) [data-control] {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+  }
+
+  /* Desktop: die Seite scrollt (hc-page wächst per min-height, main ist der
+   * echte Scrollport — Live-Abnahme 2026-07-26). Jeder overflow-Wert in der
+   * Kette erzeugt einen eigenen Scrollport, der nie scrollt, und frisst damit
+   * position:sticky der Board-/Plan-Filterleiste. Kette öffnen, damit sticky
+   * gegen den Page-Scroller greift. */
+  .fleet-root,
+  .fleet-root .leitstand-two-pane,
+  .fleet-root .leitstand-two-pane > div,
+  .fleet-tablet-main {
+    overflow: visible;
+  }
+
+  .fleet-tablet-main-scroll {
+    overflow-y: visible;
   }
 }
 

@@ -2,11 +2,47 @@ from types import SimpleNamespace
 
 from agent.usage_pricing import (
     CanonicalUsage,
+    PricingEntry,
+    estimate_equivalent_cost,
     estimate_usage_cost,
     get_pricing_entry,
     normalize_usage,
     resolve_billing_route,
 )
+
+
+def test_normalize_usage_tracks_missing_and_explicit_zero_optional_buckets():
+    missing = normalize_usage(
+        SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        provider="openai",
+        api_mode="chat_completions",
+    )
+    explicit_zero = normalize_usage(
+        SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=2,
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=0,
+                cache_write_tokens=0,
+            ),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+        provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert missing.cache_read_tokens == 0
+    assert missing.cache_write_tokens == 0
+    assert missing.reasoning_tokens == 0
+    assert missing.cache_read_tokens_observed is False
+    assert missing.cache_write_tokens_observed is False
+    assert missing.reasoning_tokens_observed is False
+    assert explicit_zero.cache_read_tokens == 0
+    assert explicit_zero.cache_write_tokens == 0
+    assert explicit_zero.reasoning_tokens == 0
+    assert explicit_zero.cache_read_tokens_observed is True
+    assert explicit_zero.cache_write_tokens_observed is True
+    assert explicit_zero.reasoning_tokens_observed is True
 
 
 def test_normalize_usage_anthropic_keeps_cache_buckets_separate():
@@ -203,6 +239,142 @@ def test_estimate_usage_cost_marks_subscription_routes_included():
 
     assert result.status == "included"
     assert float(result.amount_usd) == 0.0
+
+
+def test_subscription_provider_aliases_resolve_to_price_providers():
+    expected = {
+        "claude-cli": "anthropic",
+        "kimi-coding": "moonshot",
+        "kimi": "moonshot",
+        "xai-oauth": "xai",
+        "alibaba-token-plan": "alibaba",
+    }
+
+    for provider, price_provider in expected.items():
+        route = resolve_billing_route("model-name", provider=provider)
+        assert route.provider == price_provider, provider
+
+    assert (
+        resolve_billing_route("model-name", provider="kimi").billing_mode
+        == "official_docs_snapshot"
+    )
+    for provider in (
+        "claude-cli",
+        "kimi-coding",
+        "xai-oauth",
+        "alibaba-token-plan",
+    ):
+        assert (
+            resolve_billing_route("model-name", provider=provider).billing_mode
+            == "subscription_included"
+        )
+
+
+def test_real_runtime_provider_model_pairs_all_resolve_pricing():
+    pairs = (
+        ("claude-cli", "claude-opus-4-8"),
+        ("kimi-coding", "k3"),
+        ("xai-oauth", "grok-4.5"),
+        ("custom", "qwen3.8-max-preview"),
+        ("claude-cli", "claude-fable-5"),
+    )
+
+    for provider, model in pairs:
+        entry = get_pricing_entry(model, provider=provider)
+        assert entry is not None, f"{provider}/{model}"
+        assert entry.input_cost_per_million is not None, f"{provider}/{model}"
+        assert entry.output_cost_per_million is not None, f"{provider}/{model}"
+
+
+def test_review_gap_provider_model_pairs_all_resolve_pricing():
+    pairs = (
+        ("custom", "glm-5.2"),
+        ("alibaba-token-plan", "glm-5.2"),
+        ("kimi-coding", "kimi-k2.7-code"),
+    )
+
+    for provider, model in pairs:
+        entry = get_pricing_entry(model, provider=provider)
+        assert entry is not None, f"{provider}/{model}"
+        assert entry.input_cost_per_million is not None, f"{provider}/{model}"
+        assert entry.output_cost_per_million is not None, f"{provider}/{model}"
+
+
+def test_glm_5_2_subscription_routes_use_zai_pricing():
+    for provider in ("custom", "alibaba-token-plan"):
+        route = resolve_billing_route("glm-5.2", provider=provider)
+        assert route.provider == "zai"
+        assert route.model == "glm-5.2"
+        assert route.billing_mode == "subscription_included"
+
+
+def test_official_docs_pricing_overrides_litellm_feed():
+    entry = get_pricing_entry("claude-opus-4-8", provider="claude-cli")
+
+    assert entry is not None
+    assert entry.source == "official_docs_snapshot"
+    assert entry.source_url == "https://platform.claude.com/docs/en/about-claude/pricing"
+    assert entry.pricing_version == "anthropic-pricing-2026-05"
+
+
+def test_subscription_run_has_zero_actual_and_nonzero_list_equivalent():
+    usage = CanonicalUsage(input_tokens=1_000_000, output_tokens=500_000)
+
+    actual = estimate_usage_cost(
+        "gpt-5.3-codex",
+        usage,
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+    equivalent = estimate_equivalent_cost(
+        "gpt-5.3-codex",
+        usage,
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+    )
+
+    assert actual.status == "included"
+    assert actual.amount_usd == 0
+    assert equivalent.status == "equivalent"
+    assert equivalent.amount_usd is not None
+    assert equivalent.amount_usd > 0
+    assert equivalent.source == "litellm_feed"
+
+
+def test_reasoning_tokens_are_billed_only_for_separate_rate(monkeypatch):
+    usage = CanonicalUsage(
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        reasoning_tokens=1_000_000,
+    )
+    included = PricingEntry(
+        input_cost_per_million=1,
+        output_cost_per_million=2,
+        reasoning_billing="included_in_output",
+        source="user_override",
+    )
+    separate = PricingEntry(
+        input_cost_per_million=1,
+        output_cost_per_million=2,
+        reasoning_billing="separate_rate",
+        reasoning_cost_per_million=3,
+        source="user_override",
+    )
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.get_pricing_entry",
+        lambda *args, **kwargs: included,
+    )
+    included_result = estimate_usage_cost("reasoning-model", usage, provider="test")
+
+    monkeypatch.setattr(
+        "agent.usage_pricing.get_pricing_entry",
+        lambda *args, **kwargs: separate,
+    )
+    separate_result = estimate_usage_cost("reasoning-model", usage, provider="test")
+
+    assert included_result.amount_usd == 3
+    assert separate_result.amount_usd == 6
 
 
 def test_estimate_usage_cost_refuses_cache_pricing_without_official_cache_rate(monkeypatch):
