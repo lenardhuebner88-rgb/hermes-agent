@@ -20349,6 +20349,18 @@ def archive_task(
     if not archived_ok:
         return False
     recompute_ready(conn)
+    # Fork-owned archive re-trigger (2026-07-26 incident): an archive that makes
+    # a chain fully terminal must re-run the integration check, otherwise the
+    # stranded chain stays invisible. One-line wire; logic lives in
+    # kanban_worktrees, fail-soft so an archive can never crash here.
+    try:
+        from hermes_cli.kanban_worktrees import (
+            maybe_retrigger_integration_after_archive,
+        )
+
+        maybe_retrigger_integration_after_archive(conn, task_id)
+    except Exception:  # noqa: BLE001 - fail-soft by design
+        _log.debug("archive integration re-trigger failed for %s", task_id, exc_info=True)
     return True
 
 

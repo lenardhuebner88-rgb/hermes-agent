@@ -1957,3 +1957,88 @@ def test_never_ran_root_parks_when_children_only_failed(
     assert "kein Kind erfolgreich" in (blocked[-1].get("reason") or "")
 
 
+def test_archive_retrigger_runs_integration_when_chain_becomes_terminal(
+    repo, kanban_home, monkeypatch,
+):
+    """F3 / M1 incident replay: last code child completes while siblings open
+    → deferred; later archives make the chain terminal → the archive_task wire
+    re-fires integration and can auto-complete the decompose root.
+
+    Covers the production wire: ``kb.archive_task`` calls the fork-owned
+    ``maybe_retrigger_integration_after_archive`` after ``recompute_ready``.
+    Without that one-line wire in ``kanban_db.archive_task`` the root stays
+    ``ready`` here (red).
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="decompose root stranded by late archive",
+            triage=True,
+        )
+        # Mark as decompose root (inverted links + durable decomposed event).
+        child_a, child_b, child_c = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "code A", "assignee": "coder", "parents": []},
+                {"title": "code B open then archive", "assignee": "coder", "parents": []},
+                {"title": "code C open then archive", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        # Provision via ensure_worktree (root may not claim cleanly after decompose).
+        info = kwt.ensure_worktree(repo, root)
+        shared_wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+                "workspace_path = ?, workspace_kind = 'dir', started_at = NULL "
+                "WHERE id = ?",
+                (str(shared_wt), root),
+            )
+            for cid in (child_a, child_b, child_c):
+                conn.execute(
+                    "UPDATE tasks SET status = 'running', workspace_path = ?, "
+                    "workspace_kind = 'dir' WHERE id = ?",
+                    (str(shared_wt), cid),
+                )
+
+        _commit_in(
+            shared_wt,
+            "feature_a.py",
+            "A = 1\n",
+            msg=f"kanban({child_a}): work",
+        )
+        # Child A completes → siblings B/C still open → deferred.
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1 is not None
+        assert out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+                (int(__import__("time").time()), child_a),
+            )
+
+        # B and C archived ~later (incident: ~3 minutes). The archive_task
+        # wire must re-fire integration once the LAST sibling goes terminal —
+        # no explicit helper call here, the wire alone has to do it.
+        assert kb.archive_task(conn, child_b)
+        assert kb.get_task(conn, root).status == "ready", (
+            "chain not terminal yet (child_c open) — wire must not fire"
+        )
+        assert kb.archive_task(conn, child_c)
+        assert kb.get_task(conn, child_b).status == "archived"
+        assert kb.get_task(conn, child_c).status == "archived"
+        root_after = kb.get_task(conn, root)
+
+    # Wire-driven integration landed the chain and auto-completed the root.
+    assert root_after.status == "done", (
+        "archive_task wire did not re-trigger integration (root still "
+        f"{root_after.status!r})"
+    )
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"

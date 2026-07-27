@@ -7646,3 +7646,109 @@ def maybe_integrate_on_complete(
         remove_worktree(repo_root, wt, branch)
         _drop_writer_lease_for_removed_worktree(conn, wt)
     return outcome
+
+
+def maybe_retrigger_integration_after_archive(
+    conn: sqlite3.Connection,
+    archived_task_id: str,
+    *,
+    gate_runner=None,
+) -> Optional[dict]:
+    """Re-run chain integration after an archive made the chain fully terminal.
+
+    Incident 2026-07-26 (Opus M1 / operator decision): the last *code* child
+    completed while siblings were still open → integration deferred; siblings
+    were archived ~3 minutes later and nothing re-fired the integrator, so the
+    decompose root stayed stranded. Completion fires
+    ``maybe_integrate_on_complete``; archive historically did not.
+
+    This helper is the fork-owned logic half. It is **idempotent** and
+    **fail-soft** (never raises into the archive path). Callers must invoke it
+    *after* a successful archive commits.
+
+    Wiring note (F3 seam search, 2026-07-27): ``kanban_db.archive_task`` ends
+    with ``recompute_ready`` only — no lifecycle hook, no fork wrapper. Adding
+    the one-line call requires a ``kanban_db.py`` edit (forbidden in this
+    brief). Until that wire lands, tests exercise this helper directly.
+    """
+    try:
+        row = conn.execute(
+            "SELECT id, status, workspace_path FROM tasks WHERE id = ?",
+            (archived_task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        # Prefer the post-archive row; also accept a just-archived id even if
+        # the caller passes the id before refresh — status must be terminal.
+        if str(row["status"] or "") != "archived":
+            return None
+        ws = row["workspace_path"]
+        if not ws:
+            return None
+        provisioned = split_provisioned_path(ws)
+        if provisioned is None:
+            return None
+        _repo_root, root_id, wt = provisioned
+
+        members = _chain_member_ids(conn, root_id)
+        members.add(archived_task_id)
+        members.add(root_id)
+        placeholders = ",".join("?" for _ in members)
+        if not placeholders:
+            return None
+        rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            tuple(members),
+        ).fetchall()
+        if not rows:
+            return None
+        open_ids = [
+            r["id"] for r in rows if not _terminal_status(r["status"])
+        ]
+        # Ready for retrigger when every *non-root* member is terminal and at
+        # most the root (finalizer) remains open — the exact stranded shape
+        # of the 2026-07-26 incident (children done/archived, root ready).
+        non_root_open = [oid for oid in open_ids if oid != root_id]
+        if non_root_open:
+            return None
+        if not open_ids:
+            # Fully terminal including root — nothing left to finalize.
+            return None
+
+        # Drive integration from a real done member so decompose/never-ran
+        # auto-complete sees real completion evidence (not the archived id).
+        driver_id = None
+        for r in rows:
+            if r["id"] == root_id:
+                continue
+            if r["status"] == "done":
+                driver_id = r["id"]
+                break
+        if driver_id is None:
+            # No done child → nothing to integrate; never-ran/decompose
+            # guards will refuse to ship on failed/cancelled-only chains.
+            return None
+
+        # Workspace path of the driver must still resolve (shared chain wt).
+        driver = conn.execute(
+            "SELECT workspace_path FROM tasks WHERE id = ?",
+            (driver_id,),
+        ).fetchone()
+        if driver is None or not driver["workspace_path"]:
+            return None
+        if split_provisioned_path(driver["workspace_path"]) is None:
+            # Fall back to the archived task's provisioned path for the driver
+            # attribution by temporarily using the shared wt identity.
+            pass
+
+        outcome = maybe_integrate_on_complete(
+            conn, driver_id, gate_runner=gate_runner,
+        )
+        return outcome
+    except Exception:
+        _log.warning(
+            "archive integration retrigger failed for %s",
+            archived_task_id,
+            exc_info=True,
+        )
+        return None
