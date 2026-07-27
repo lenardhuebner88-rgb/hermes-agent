@@ -85,6 +85,74 @@ describe("BoardResponseSchema", () => {
     expect(malformed.chain_summaries).toEqual([]);
   });
 
+  it("maps LV-2 wire fields (chain_identifier, stations, cost_usd) onto the Laufkarte domain", () => {
+    const base = {
+      columns: [],
+      tenants: [],
+      assignees: [],
+      latest_event_id: 1,
+      source_errors: [],
+      now: 1_783_800_300,
+    };
+    const enriched = parseOrThrow(BoardResponseSchema, {
+      ...base,
+      chain_summaries: [{
+        root_id: "t_root",
+        root_title: "Freigabelauf",
+        total: 4,
+        done: 1,
+        status_counts: { done: 1, running: 2, todo: 1 },
+        latest_completed_at: null,
+        state: "laeuft",
+        chain_identifier: "2026-07-27-running-plan",
+        station_limit: 5,
+        state_age_seconds: 42,
+        cost_usd: 0.5,
+        stations: [
+          { id: "t_1", title: "Source", status: "done", lane: "researcher",
+            runtime_seconds: 10, cost_usd: 0.5, started_at: 1_010, completed_at: 1_020 },
+          { id: "t_2", title: "Build", status: "running", lane: "coder",
+            runtime_seconds: null, cost_usd: 0, started_at: 1_030, completed_at: null },
+          { id: "t_3", title: "Gate", status: "blocked", lane: "verifier",
+            runtime_seconds: null, cost_usd: 0, started_at: null, completed_at: null },
+          { id: "t_4", title: "Ship", status: "todo", lane: null,
+            runtime_seconds: null, cost_usd: 0, started_at: null, completed_at: null },
+        ],
+      }],
+    }, "enriched board");
+    const summary = enriched.chain_summaries?.[0];
+    expect(summary).toMatchObject({
+      state: "laeuft",
+      kennung: "2026-07-27-running-plan",
+      state_age_seconds: 42,
+      total_cost_usd: 0.5,
+      stations_total: 4,
+    });
+    expect(summary?.stations?.map((st) => st.state)).toEqual(["fertig", "laeuft", "gehalten", "offen"]);
+    expect(summary?.stations?.[0]).toMatchObject({
+      id: "t_1", title: "Source", lane: "researcher",
+      runtime_seconds: 10, cost_usd: 0.5, started_at: 1_010, completed_at: 1_020,
+    });
+    expect(summary?.stations?.[1]).toMatchObject({ runtime_seconds: null, completed_at: null });
+
+    const unknownState = parseOrThrow(BoardResponseSchema, {
+      ...base,
+      chain_summaries: [{
+        root_id: "t_root2",
+        root_title: "Alt",
+        total: 1,
+        done: 0,
+        status_counts: {},
+        latest_completed_at: null,
+        state: "irgendwas-unbekanntes",
+        stations: "kaputt",
+      }],
+    }, "unknown state board");
+    expect(unknownState.chain_summaries?.[0].state).toBeUndefined();
+    expect(unknownState.chain_summaries?.[0].stations).toBeUndefined();
+    expect(unknownState.chain_summaries?.[0].kennung).toBeUndefined();
+  });
+
   it("preserves malformed timestamp contamination as invalid instead of absent/zero", () => {
     const parsed = parseOrThrow(BoardResponseSchema, {
       columns: [{

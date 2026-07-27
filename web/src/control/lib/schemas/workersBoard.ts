@@ -9,6 +9,7 @@ import {
   TaskStatusSchema,
   VaultMemoryLinkSchema,
 } from "./common";
+import type { ChainStationState, ChainSummaryState } from "../types";
 
 export const RunInspectSchema = z.object({
   cpu_percent: z.coerce.number().catch(0),
@@ -275,6 +276,38 @@ export const BoardTaskSchema = z.object({
   cost_effective_usd: z.coerce.number().nullable().catch(null),
 });
 
+// LV-2 (Ketten-Lesevertrag) ergänzt state/chain_identifier/stations auf der
+// Wire; das Transform bildet die Wire-Namen auf die Laufkarten-Domäne ab
+// (chain_identifier→kennung, cost_usd→total_cost_usd, status→Station-State).
+// Fehlende Felder degradiieren ehrlich: die Karte zeigt dann nur Kennung,
+// Zustand und Fortschritt — nie erfundene Stationen.
+const CHAIN_STATION_STATE_BY_STATUS: Record<string, ChainStationState> = {
+  done: "fertig",
+  running: "laeuft",
+  blocked: "gehalten",
+  held: "gehalten",
+  parked: "gehalten",
+  scheduled: "gehalten",
+};
+
+const CHAIN_SUMMARY_STATES: ReadonlySet<string> = new Set([
+  "laeuft",
+  "angebrochen",
+  "gehalten",
+  "fertig",
+]);
+
+const ChainStationWireSchema = z.object({
+  id: z.string().catch(""),
+  title: z.string().catch("Ohne Titel"),
+  status: z.string().catch(""),
+  lane: z.string().nullable().catch(null),
+  runtime_seconds: z.coerce.number().nullable().catch(null),
+  cost_usd: z.coerce.number().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  completed_at: nullableEpochSeconds,
+});
+
 export const ChainSummarySchema = z.object({
   root_id: z.string().catch(""),
   root_title: z.string().catch("Ohne Titel"),
@@ -282,7 +315,38 @@ export const ChainSummarySchema = z.object({
   done: z.coerce.number().int().nonnegative().catch(0),
   status_counts: z.record(z.string(), z.coerce.number().int().nonnegative()).catch({}),
   latest_completed_at: nullableEpochSeconds,
-});
+  state: z.string().optional().catch(undefined),
+  chain_identifier: z.string().optional().catch(undefined),
+  station_limit: z.coerce.number().int().nonnegative().optional().catch(undefined),
+  state_age_seconds: z.coerce.number().nullable().optional().catch(undefined),
+  cost_usd: z.coerce.number().nullable().optional().catch(undefined),
+  stations: z.array(ChainStationWireSchema).optional().catch(undefined),
+}).transform((s) => ({
+  root_id: s.root_id,
+  root_title: s.root_title,
+  total: s.total,
+  done: s.done,
+  status_counts: s.status_counts,
+  latest_completed_at: s.latest_completed_at,
+  state: (CHAIN_SUMMARY_STATES.has(s.state ?? "") ? s.state : undefined) as
+    ChainSummaryState | undefined,
+  kennung: s.chain_identifier,
+  state_age_seconds: s.state_age_seconds ?? null,
+  total_cost_usd: s.cost_usd ?? null,
+  stations: s.stations?.map((st) => ({
+    id: st.id,
+    kennung: null,
+    title: st.title,
+    state: CHAIN_STATION_STATE_BY_STATUS[st.status] ?? "offen",
+    lane: st.lane,
+    runtime_seconds: st.runtime_seconds,
+    cost_usd: st.cost_usd,
+    started_at: st.started_at,
+    completed_at: st.completed_at,
+    wait_reason: null,
+  })),
+  stations_total: s.total,
+}));
 
 export const DoneBoardPageSchema = z.object({
   total_count: z.coerce.number().int().nonnegative().catch(0),
