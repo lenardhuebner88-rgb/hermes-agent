@@ -1564,6 +1564,288 @@ body:has([data-fleet-theme]) [data-control] {
   white-space: nowrap;
 }
 
+/* ── Ketten-Laufkarte (LK-1, Design-Board c_ee80d956 / e_a4b27b43) ─────────────
+ * Eine Kette ist ein Werkstück, das durch Stationen wandert; jede stempelt ab.
+ * Links trägt eine durchgehende Stanzkante den Block — je Station ein Segment.
+ * Der Zustand einer Station ist an der FORM des Segments erkennbar (AC-2):
+ *   erledigt = massiver Stahl mit Querkerbe (Stempel), laufend = massive Bronze,
+ *   offen = ausgestanzte Kontur, gehalten = ausgestanzte Kontur in Warnfarbe.
+ * Die Zustandszeile nennt Zustand + Fortschritt in Worten — nie nur Farbe (AC-4).
+ * Abgestempelte Stationen tragen die kühle Stahl-Tinte --color-stamp (operator-
+ * freigegebene Abweichung), damit ein Stempel nicht wie ein grünes Ampellicht
+ * wirkt und der Status-Kanal frei bleibt. */
+.ketten-v4 .lk-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--fleet-space-3);
+  margin-bottom: var(--fleet-space-4);
+}
+.ketten-v4 .lk-card {
+  position: relative;
+  background: var(--fleet-karte);
+  border: 1px solid var(--fleet-linie);
+  border-radius: var(--radius-card);
+  /* 30px links: Raum für die Stanzkante */
+  padding: var(--fleet-space-3) var(--fleet-space-4) var(--fleet-space-3) 30px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--fleet-space-2);
+}
+.ketten-v4 .lk-card[data-state="laeuft"] {
+  border-color: color-mix(in oklab, var(--color-live) 35%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-live);
+}
+.ketten-v4 .lk-card[data-state="angebrochen"] {
+  border-color: color-mix(in oklab, var(--color-status-alert) 35%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-status-alert);
+}
+.ketten-v4 .lk-card[data-state="gehalten"] {
+  border-color: color-mix(in oklab, var(--color-status-warn) 30%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in oklab, var(--color-status-warn) 55%, transparent);
+}
+.ketten-v4 .lk-card-active {
+  border-color: var(--fleet-linie-stark);
+  box-shadow: inset 2px 0 0 var(--color-brand), 0 0 0 1px var(--fleet-linie-stark);
+}
+
+/* Kopf = Auswahl-Fläche (lädt die Kette in die Detail-Sektionen) */
+.ketten-v4 .lk-select {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.ketten-v4 .lk-select:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+  border-radius: var(--radius-card);
+}
+.ketten-v4 .lk-eyeb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font: 500 var(--text-micro)/1.2 var(--font-data);
+  letter-spacing: 0.05em;
+  text-transform: uppercase; /* Zustandswort = Chrome, keine Daten */
+  color: var(--fleet-t3);
+  margin: 0 0 4px;
+}
+.ketten-v4 .lk-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fleet-t3);
+  flex: none;
+}
+.ketten-v4 .lk-card[data-state="laeuft"] .lk-eyeb { color: var(--color-bronze-hi); }
+.ketten-v4 .lk-card[data-state="laeuft"] .lk-led {
+  background: var(--color-live);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--color-live) 60%, transparent);
+  animation: lk-led-puls 1.8s ease-in-out infinite;
+}
+.ketten-v4 .lk-card[data-state="angebrochen"] .lk-eyeb { color: var(--color-status-alert); }
+.ketten-v4 .lk-card[data-state="angebrochen"] .lk-led { background: var(--color-status-alert); }
+.ketten-v4 .lk-card[data-state="gehalten"] .lk-eyeb { color: var(--color-status-warn); }
+.ketten-v4 .lk-card[data-state="gehalten"] .lk-led { background: var(--color-status-warn); }
+.ketten-v4 .lk-card[data-state="fertig"] .lk-led { background: var(--color-stamp); }
+@keyframes lk-led-puls {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Kennung = lautestes Element im Block (AC-3); klemmt mit Ellipsis (AC-8) */
+.ketten-v4 .lk-kennung {
+  display: block;
+  font: 700 1.05rem/1.25 var(--font-display);
+  letter-spacing: 0.02em;
+  color: var(--fleet-t1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ketten-v4 .lk-card[data-state="gehalten"] .lk-kennung { color: var(--fleet-t2); }
+.ketten-v4 .lk-titel {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font: 400 var(--text-sec)/1.35 var(--font-display);
+  color: var(--fleet-t3);
+  margin-top: 2px;
+}
+
+/* Stationen untereinander — die Stanzkante verbindet die Segmente */
+.ketten-v4 .lk-stationen {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.ketten-v4 .lk-st { position: relative; padding: 4px 0; }
+.ketten-v4 .lk-notch {
+  position: absolute;
+  left: -30px;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+}
+.ketten-v4 .lk-notch b {
+  position: absolute;
+  left: 5px;
+  top: 5px;
+  bottom: -9px; /* verbindet das Segment mit dem der nächsten Station */
+  width: 4px;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-brand) 45%, transparent);
+}
+.ketten-v4 .lk-st:last-child .lk-notch b { bottom: 7px; }
+.ketten-v4 .lk-st.is-done .lk-notch b { background: var(--color-stamp); box-shadow: none; }
+/* Querkerbe des Stempels — Form-Marker für „erledigt“ */
+.ketten-v4 .lk-st.is-done .lk-notch::after {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 10px;
+  width: 12px;
+  height: 1.5px;
+  background: var(--color-stamp);
+}
+.ketten-v4 .lk-st.is-now .lk-notch b {
+  background: var(--color-live);
+  box-shadow: 0 0 7px color-mix(in oklab, var(--color-live) 55%, transparent);
+}
+.ketten-v4 .lk-st.is-wait .lk-notch b {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--color-brand) 45%, transparent);
+}
+.ketten-v4 .lk-st.is-held .lk-notch b {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--color-status-warn);
+}
+.ketten-v4 .lk-name {
+  font: 500 var(--text-sec)/1.35 var(--font-display);
+  color: var(--fleet-t2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ketten-v4 .lk-st.is-done .lk-name { color: var(--fleet-t3); padding-right: 18px; }
+.ketten-v4 .lk-st.is-now .lk-name { color: var(--fleet-t1); }
+.ketten-v4 .lk-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  font: 400 var(--text-micro)/1.4 var(--font-data);
+  color: var(--fleet-t3);
+}
+.ketten-v4 .lk-meta-em { color: var(--color-bronze-hi); }
+.ketten-v4 .lk-stamp {
+  position: absolute;
+  right: 0;
+  top: 4px;
+  color: var(--color-stamp);
+  font: 600 11px/1 var(--font-data);
+}
+.ketten-v4 .lk-more {
+  font: 400 var(--text-micro)/1.4 var(--font-data);
+  color: var(--fleet-t3);
+  padding: 3px 0 0;
+}
+
+.ketten-v4 .lk-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--fleet-space-2);
+  margin-top: 2px;
+}
+.ketten-v4 .lk-age {
+  font: 400 var(--text-micro)/1.4 var(--font-data);
+  color: var(--fleet-t3);
+}
+.ketten-v4 .lk-card[data-state="angebrochen"] .lk-age { color: var(--color-status-alert); }
+/* Der einzige Startknopf am Block — wirkt auf die ganze Kette (AC-7) */
+.ketten-v4 .lk-freigeben {
+  font: 500 var(--text-micro)/1 var(--font-data);
+  letter-spacing: 0.06em;
+  text-transform: uppercase; /* Chrome-Label, keine Daten */
+  color: var(--color-bronze-hi);
+  background: color-mix(in oklab, var(--color-live) 10%, transparent);
+  border: 1px solid var(--color-live);
+  border-radius: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.ketten-v4 .lk-freigeben:hover { background: color-mix(in oklab, var(--color-live) 20%, transparent); }
+.ketten-v4 .lk-freigeben:disabled { opacity: 0.55; cursor: default; }
+.ketten-v4 .lk-freigeben:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+.ketten-v4 .lk-fehler {
+  font: 400 var(--text-micro)/1.4 var(--font-data);
+  color: var(--color-status-alert);
+  margin: 2px 0 0;
+}
+
+/* Fertige Kette = abgestempelte Kompaktzeile (Mockup .done1) */
+.ketten-v4 .lk-done-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--fleet-space-3);
+  width: 100%;
+  background: var(--fleet-tiefe);
+  border: 1px solid var(--fleet-linie);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ketten-v4 .lk-done-row:hover { border-color: var(--fleet-linie-stark); }
+.ketten-v4 .lk-done-row:focus-visible {
+  outline: 2px solid var(--fleet-puls);
+  outline-offset: 2px;
+}
+.ketten-v4 .lk-done-row-active { border-color: var(--fleet-linie-stark); }
+.ketten-v4 .lk-done-links { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ketten-v4 .lk-done-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-stamp);
+  flex: none;
+}
+.ketten-v4 .lk-done-kennung {
+  font: 500 var(--text-micro)/1.2 var(--font-data);
+  letter-spacing: 0.04em;
+  color: var(--fleet-t2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ketten-v4 .lk-done-meta {
+  font: 400 var(--text-micro)/1.2 var(--font-data);
+  color: var(--fleet-t3);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ketten-v4 .lk-card[data-state="laeuft"] .lk-led { animation: none; }
+}
+
 /* ── Karten-Detail-Drawer (Node-Detail) ──────────────────────────────────── */
 
 /* Tab-Leiste des Detail-Drawers */

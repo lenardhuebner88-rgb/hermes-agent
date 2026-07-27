@@ -25,13 +25,14 @@ import {
   heartbeatAge,
 } from "../../lib/fleetHub";
 import { formatEffectiveCost } from "../../lib/derive";
+import { fetchJSON } from "@/lib/api";
 import { de } from "../../i18n/de";
 import { useChainGraph } from "../../hooks/chainFlow";
 import { useHermesChainCosts } from "../../hooks/costsUsage";
-import { ExpandableText } from "./HeuteTab";
 import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
 import { useHermesWorkers } from "../../hooks/workersBoard";
-import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
+import type { BoardResponse, BoardTask, ChainStationSummary, ChainSummary, Worker } from "../../lib/types";
+import { type ChainChipDef } from "../../lib/fleetHub";
 import type { ChainCostsResponse } from "../../lib/schemas";
 import { FleetSourceFreshness } from "./FleetSourceFreshness";
 import { type ChainNode } from "./shared";
@@ -40,6 +41,191 @@ import { ModelRouteBadge } from "../../components/fleet/ModelRouteBadge";
 import "./ketten-v4.css";
 
 // ─── Ketten-Subtab ────────────────────────────────────────────────────────────
+
+// ── Laufkarte (LK-1, Design-Board c_ee80d956 / e_a4b27b43) ───────────────────
+// Eine Kette rendert als zusammenhängender Block mit ihren Stationen
+// untereinander — nicht als einzelne Zeile in einer flachen Liste (AC-1).
+// Datenquelle ist die Stationsliste aus dem Ketten-Lesevertrag
+// (PlanSpec 2026-07-27-ketten-lesevertrag-backend.md, LV-2). Liefert die
+// Zusammenfassung die Liste noch nicht, degradiert die Karte sichtbar auf
+// Kennung, Zustand und Fortschritt — sie zeigt nie erfundene Stationen.
+
+type LaufChainState = "laeuft" | "angebrochen" | "gehalten" | "fertig" | "wartet";
+
+/** Sichtbare Stationen, bevor die Kürzungszeile mit der Gesamtzahl greift (AC-6). */
+const LAUF_VISIBLE_STATIONS = 4;
+
+/** LV-1-Backend-Zustand gewinnt; sonst Fallback aus dem Chip-Zustand. */
+function deriveChainState(chip: ChainChipDef, summary: ChainSummary | undefined): LaufChainState {
+  const s = summary?.state;
+  if (s === "laeuft" || s === "angebrochen" || s === "gehalten" || s === "fertig") return s;
+  switch (chip.state) {
+    case "completed": return "fertig";
+    case "active": return "laeuft";
+    case "blocked":
+    case "held": return chip.done > 0 ? "angebrochen" : "gehalten";
+    default: return chip.done > 0 ? "angebrochen" : "wartet";
+  }
+}
+
+/** Zustandszeile in Worten: Zustand UND Fortschritt, nie nur Farbe (AC-4). */
+function laufEyebrow(state: LaufChainState, done: number, total: number): string {
+  switch (state) {
+    case "laeuft": return de.fleet.laufEyebrowLaeuft(Math.min(done + 1, Math.max(total, 1)), total);
+    case "angebrochen": return de.fleet.laufEyebrowAngebrochen(done, total);
+    case "gehalten": return done > 0 ? de.fleet.laufEyebrowGehaltenDurch(done, total) : de.fleet.laufEyebrowGehaltenLeer;
+    case "fertig": return de.fleet.laufEyebrowFertig(done, total);
+    default: return de.fleet.laufEyebrowWartetLeer;
+  }
+}
+
+/** Age-Format der Referenz: „6 min“, „14 h“, „3 Tagen“. */
+function fmtChainAge(seconds: number): string {
+  if (seconds < 90) return de.fleet.laufAgeGeradeEben;
+  const min = Math.round(seconds / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `${h} h`;
+  return `${Math.round(h / 24)} Tagen`;
+}
+
+/** Stationszustand → Segment-Klasse. Unbekanntes degradiert zu „offen“. */
+function stationStateClass(state: ChainStationSummary["state"] | undefined): "is-done" | "is-now" | "is-wait" | "is-held" {
+  switch (state) {
+    case "fertig": return "is-done";
+    case "laeuft": return "is-now";
+    case "gehalten": return "is-held";
+    default: return "is-wait";
+  }
+}
+
+interface LaufkarteProps {
+  chip: ChainChipDef;
+  summary: ChainSummary | undefined;
+  selected: boolean;
+  now: number;
+  readOnly: boolean;
+  releaseBusy: boolean;
+  releaseError: string | null;
+  onSelect: () => void;
+  onRelease: () => void;
+}
+
+function Laufkarte({ chip, summary, selected, now, readOnly, releaseBusy, releaseError, onSelect, onRelease }: LaufkarteProps) {
+  const state = deriveChainState(chip, summary);
+  const kennung = summary?.kennung?.trim() ? summary.kennung.trim() : chip.label;
+  const titel = summary && summary.root_title.trim() && summary.root_title.trim() !== kennung
+    ? summary.root_title.trim()
+    : null;
+  const stations = Array.isArray(summary?.stations) ? summary.stations : null;
+  const stationsTotal = summary?.stations_total ?? stations?.length ?? 0;
+  const visibleStations = stations ? stations.slice(0, LAUF_VISIBLE_STATIONS) : [];
+  const hiddenStations = Math.max(0, stationsTotal - visibleStations.length);
+
+  const footParts: string[] = [];
+  const ageSeconds = summary?.state_age_seconds ?? null;
+  if (ageSeconds != null) {
+    const age = fmtChainAge(ageSeconds);
+    footParts.push(
+      state === "laeuft" ? de.fleet.laufAgeLaeuft(age)
+        : state === "gehalten" ? de.fleet.laufAgeWartet(age)
+          : de.fleet.laufAgeSteht(age),
+    );
+  }
+  if (state === "laeuft" && summary?.total_cost_usd != null) footParts.push(fmtUsd(summary.total_cost_usd));
+
+  // AC-7: der einzige Startknopf am Block wirkt auf die ganze Kette; es gibt
+  // keine Möglichkeit, eine einzelne Station zu starten.
+  const counts = summary?.status_counts;
+  const heldCount = (counts?.blocked ?? 0) + (counts?.parked ?? 0) + (counts?.scheduled ?? 0);
+  const runningCount = counts?.running ?? 0;
+  const canRelease = !readOnly && (summary
+    ? heldCount > 0 && runningCount === 0
+    : chip.state === "blocked" || chip.state === "held");
+
+  return (
+    <article className={`lk-card${selected ? " lk-card-active" : ""}`} data-state={state}>
+      <button type="button" className="lk-select" onClick={onSelect} aria-pressed={selected}>
+        <p className="lk-eyeb"><span className="lk-led" aria-hidden="true" />{laufEyebrow(state, chip.done, chip.total)}</p>
+        <span className="lk-kennung" title={kennung}>{kennung}</span>
+        {titel ? <span className="lk-titel" title={titel}>{titel}</span> : null}
+      </button>
+      {stations ? (
+        <ol className="lk-stationen">
+          {visibleStations.map((st) => {
+            const stClass = stationStateClass(st.state);
+            const meta: { text: string; em?: boolean }[] = [];
+            if (st.lane) meta.push({ text: st.lane });
+            if (stClass === "is-done") {
+              if (st.runtime_seconds != null) meta.push({ text: fmtSeconds(st.runtime_seconds) });
+              if (st.cost_usd != null) meta.push({ text: fmtUsd(st.cost_usd) });
+            } else if (stClass === "is-now") {
+              const runSecs = st.started_at != null ? Math.max(0, Math.round(now - st.started_at)) : st.runtime_seconds;
+              meta.push({ text: runSecs != null ? de.fleet.laufStationLaeuft(fmtSeconds(runSecs)) : de.fleet.kettenStateActive, em: true });
+            } else if (stClass === "is-held") {
+              meta.push({ text: st.wait_reason?.trim() || de.fleet.laufStationWartet });
+            } else {
+              meta.push({ text: de.fleet.laufStationBereit });
+            }
+            return (
+              <li key={st.id} className={`lk-st ${stClass}`}>
+                <span className="lk-notch" aria-hidden="true"><b /></span>
+                <span className="lk-name">{st.title}</span>
+                <span className="lk-meta">
+                  {meta.map((m) => <span key={m.text} className={m.em ? "lk-meta-em" : undefined}>{m.text}</span>)}
+                </span>
+                {stClass === "is-done" ? <span className="lk-stamp" aria-hidden="true">✓</span> : null}
+              </li>
+            );
+          })}
+          {hiddenStations > 0 ? (
+            <li className="lk-more">{de.fleet.laufWeitere(hiddenStations, stationsTotal)}</li>
+          ) : null}
+        </ol>
+      ) : null}
+      {footParts.length > 0 || canRelease ? (
+        <div className="lk-foot">
+          <span className="lk-age">{footParts.join(" · ")}</span>
+          {canRelease ? (
+            <button type="button" className="lk-freigeben" onClick={onRelease} disabled={releaseBusy}>
+              {releaseBusy ? de.fleet.laufFreigebenBusy : de.fleet.laufFreigeben}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {releaseError ? <p className="lk-fehler" role="alert">{releaseError}</p> : null}
+    </article>
+  );
+}
+
+interface LaufDoneRowProps {
+  chip: ChainChipDef;
+  summary: ChainSummary | undefined;
+  selected: boolean;
+  now: number;
+  onSelect: () => void;
+}
+
+/** Fertige Kette = abgestempelte Kompaktzeile (Referenz .done1). */
+function LaufDoneRow({ chip, summary, selected, now, onSelect }: LaufDoneRowProps) {
+  const kennung = summary?.kennung?.trim() ? summary.kennung.trim() : chip.label;
+  const completedAt = summary?.latest_completed_at ?? chip.completedAt;
+  const age = completedAt != null ? fmtChainAge(Math.max(0, Math.round(now - completedAt))) : null;
+  return (
+    <button
+      type="button"
+      className={`lk-done-row${selected ? " lk-done-row-active" : ""}`}
+      onClick={onSelect}
+      aria-pressed={selected}
+    >
+      <span className="lk-done-links">
+        <span className="lk-done-led" aria-hidden="true" />
+        <span className="lk-done-kennung" title={kennung}>{kennung}</span>
+      </span>
+      <span className="lk-done-meta">{chip.done}/{chip.total}{age ? ` · ${age}` : ""}</span>
+    </button>
+  );
+}
 
 interface KettenTabProps {
   board: BoardResponse | null;
@@ -92,6 +278,33 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
     setUserSelectedRootId(rootId);
   }, []);
 
+  const summaryByRoot = useMemo(() => {
+    const m = new Map<string, ChainSummary>();
+    for (const s of board?.chain_summaries ?? []) m.set(s.root_id, s);
+    return m;
+  }, [board?.chain_summaries]);
+
+  // AC-7: „Kette freigeben“ wirkt über das bestehende Flow-Release auf die
+  // ganze Kette (dasselbe Backend wie die Freigabe im Plan-Reiter).
+  const [releaseBusyRoot, setReleaseBusyRoot] = useState<string | null>(null);
+  const [releaseError, setReleaseError] = useState<{ rootId: string; message: string } | null>(null);
+  const handleChainRelease = useCallback(async (rootId: string) => {
+    setReleaseBusyRoot(rootId);
+    setReleaseError(null);
+    try {
+      const query = boardSlug ? `?board=${encodeURIComponent(boardSlug)}` : "";
+      await fetchJSON(`/api/plugins/kanban/tasks/${encodeURIComponent(rootId)}/flow-release${query}`, {
+        method: "POST",
+        body: JSON.stringify({ release_level: "live" }),
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setReleaseError({ rootId, message: de.fleet.laufFreigebenFehler(detail) });
+    } finally {
+      setReleaseBusyRoot(null);
+    }
+  }, [boardSlug]);
+
   // FIX-2: aktive + wartende Ketten immer zeigen, fertige auf die jüngsten 3
   // cappen (chips sind bereits active→pending→completed sortiert).
   const [completedExpanded, setCompletedExpanded] = useState(false);
@@ -99,7 +312,6 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const completedChips = chips.filter((c) => c.state === "completed");
   const visibleCompletedChips = completedExpanded ? completedChips : completedChips.slice(0, 3);
   const hiddenCompletedCount = completedChips.length - 3;
-  const visibleChips = [...activeOrPendingChips, ...visibleCompletedChips];
 
   const chainGraphState = useChainGraph(validRootId, boardSlug);
   const { data: chainGraph, loading: chainLoading } = chainGraphState;
@@ -144,54 +356,36 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   return (
     <div className="ketten-v4">
       {freshness}
-      {/* ── SECTION 1: Ketten-Liste ───────────────────────────────────────── */}
+      {/* ── SECTION 1: Ketten-Liste als Laufkarten ─────────────────────────── */}
       <div className="chain-list-header">
-        <span className="section-title">Ketten</span>
+        <span className="section-title">{de.fleet.laufkartenTitle}</span>
         <span className="section-count">{chips.length}</span>
       </div>
-      <div className="chain-list">
-        {visibleChips.map((chip) => {
-          const isActive = chip.state === "active";
-          const isDone = chip.state === "completed";
-          const stateLabel = {
-            active: de.fleet.kettenStateActive,
-            blocked: de.fleet.kettenStateBlocked,
-            held: de.fleet.kettenStateHeld,
-            pending: de.fleet.kettenStatePending,
-            completed: de.fleet.kettenStateCompleted,
-          }[chip.state];
-          const pct = chip.total > 0 ? Math.round((chip.done / chip.total) * 100) : 0;
-
-          return (
-            <button
-              key={chip.rootId}
-              type="button"
-              className={`chain-item${selectedRootId === chip.rootId ? " chain-item-active" : ""}${isDone ? " chain-item-done" : ""}`}
-              onClick={() => handleChipSelect(chip.rootId)}
-            >
-              <span className={`chain-glyph ${isActive ? "glyph-active" : isDone ? "glyph-done" : "glyph-waiting"}`}>
-                {isActive ? "▶" : isDone ? "✓" : "⋯"}
-              </span>
-              <div className="chain-content">
-                <div className="chain-title-row">
-                  <ExpandableText className="chain-title" text={chip.label} />
-                  <span className={`chain-badge ${isActive ? "badge-running" : isDone ? "badge-done" : "badge-waiting"}`}>
-                    {stateLabel}
-                  </span>
-                </div>
-                <div className="chain-meta-row">
-                  <span className="chain-mini-prog">
-                    <span
-                      className={`chain-mini-prog-fill ${isActive ? "fill-live" : isDone ? "fill-ok" : "fill-warn"}`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </span>
-                  <span className="chain-meta-text">{chip.done}/{chip.total}</span>
-                </div>
-              </div>
-            </button>
-          );
-        })}
+      <div className="lk-list">
+        {activeOrPendingChips.map((chip) => (
+          <Laufkarte
+            key={chip.rootId}
+            chip={chip}
+            summary={summaryByRoot.get(chip.rootId)}
+            selected={selectedRootId === chip.rootId}
+            now={now}
+            readOnly={readOnly}
+            releaseBusy={releaseBusyRoot === chip.rootId}
+            releaseError={releaseError?.rootId === chip.rootId ? releaseError.message : null}
+            onSelect={() => handleChipSelect(chip.rootId)}
+            onRelease={() => { void handleChainRelease(chip.rootId); }}
+          />
+        ))}
+        {visibleCompletedChips.map((chip) => (
+          <LaufDoneRow
+            key={chip.rootId}
+            chip={chip}
+            summary={summaryByRoot.get(chip.rootId)}
+            selected={selectedRootId === chip.rootId}
+            now={now}
+            onSelect={() => handleChipSelect(chip.rootId)}
+          />
+        ))}
       </div>
       {completedChips.length > 3 ? (
         <button

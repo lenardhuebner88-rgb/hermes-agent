@@ -11,7 +11,7 @@ const heuteSrc = readFileSync(path.resolve(import.meta.dirname, "HeuteTab.tsx"),
 
 describe("KettenTab v4 — redesign checks", () => {
   it("makes all interactive elements keyboard-focus-visible", () => {
-    expect(src).toMatch(/chain-item/);
+    expect(src).toMatch(/lk-card/);
     expect(src).toMatch(/detail/);
     expect(src).toMatch(/uitem/);
     expect(src).toMatch(/done-item/);
@@ -82,9 +82,9 @@ describe("KettenTab v4 — redesign checks", () => {
     expect(kettenCss).toMatch(/\.ketten-v4 \.pipe-scroll\s*\{[^}]*mask-image:\s*linear-gradient/s);
   });
 
-  it("FIX-1: chain-list fraction uses done/total (not the 0..1 progress ratio)", () => {
-    expect(src).toContain("chip.done / chip.total");
+  it("FIX-1: chain progress renders done/total (not the 0..1 progress ratio)", () => {
     expect(src).toContain("{chip.done}/{chip.total}");
+    expect(src).toContain("laufEyebrow(state, chip.done, chip.total)");
     expect(src).not.toMatch(/chip\.progress \/ chip\.total/);
   });
 
@@ -125,7 +125,7 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { KettenTab } from "./KettenTab";
-import type { BoardResponse, BoardTask } from "../../lib/types";
+import type { BoardResponse, BoardTask, ChainStationSummary } from "../../lib/types";
 import { de } from "../../i18n/de";
 
 const ROOT_ID = "t_231b62fc";
@@ -268,10 +268,11 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
       <KettenTab board={holdBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
     );
 
-    await waitFor(() => expect(container.querySelector(".chain-badge")?.textContent).toBe("gehalten"));
-    expect(container.querySelector(".chain-badge")?.textContent).not.toContain("läuft");
-    expect(container.querySelector(".glyph-waiting")).toBeTruthy();
-    expect(container.querySelector(".glyph-active")).toBeNull();
+    const card = container.querySelector('article.lk-card[data-state="gehalten"]');
+    expect(card).not.toBeNull();
+    const eyeb = card!.querySelector(".lk-eyeb");
+    expect(eyeb?.textContent).toContain("Gehalten");
+    expect(eyeb?.textContent).not.toContain("Läuft");
   });
 
   it("renders authoritative totals for a completed chain omitted from compact columns", () => {
@@ -299,22 +300,19 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
       <KettenTab board={compactBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
     );
 
-    const item = screen.getByText("Kompakte fertige Kette").closest(".chain-item");
+    const item = screen.getByText("Kompakte fertige Kette").closest(".lk-done-row");
     expect(item).not.toBeNull();
-    expect(within(item as HTMLElement).getByText("37/37")).toBeTruthy();
-    expect(within(item as HTMLElement).getByText(de.fleet.kettenStateCompleted)).toBeTruthy();
+    expect(within(item as HTMLElement).getByText(/37\/37/)).toBeTruthy();
+    expect(item!.querySelector(".lk-done-led")).not.toBeNull();
   });
 
-  it("expands clipped chain titles on tap while retaining other title fallbacks", async () => {
+  it("clamps clipped chain titles with the full text as title fallback (graph titles keep it too)", async () => {
     render(
       <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
     );
 
-    const chainTitle = await screen.findByText("Ketten v4 Fixes", { selector: ".chain-title" });
-    expect(chainTitle.getAttribute("title")).toBeNull();
-    expect(chainTitle.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(chainTitle);
-    expect(chainTitle.getAttribute("aria-expanded")).toBe("true");
+    const kennung = await screen.findByText("Ketten v4 Fixes", { selector: ".lk-kennung" });
+    expect(kennung.getAttribute("title")).toBe("Ketten v4 Fixes");
     const focusTitle = await screen.findByText("Slice B — running", { selector: ".detail-title" });
     expect(focusTitle.getAttribute("title")).toBe("Slice B — running");
   });
@@ -395,3 +393,253 @@ describe("KettenTab v4 — Rollen-Track (FIX-5) + Header-Chips (FIX-4), echtes P
     expect(chainCostsCalls).toHaveLength(1);
   });
 });
+
+// ─── LK-1: Laufkarte mit Stanzkante und Stationen ────────────────────────────
+// Verbindliche Vorlage: Design-Board c_ee80d956 / e_a4b27b43
+// („B v2 — Blatt 1 von 2: KETTEN-TAB als Laufkarte“).
+
+const themeCss = readFileSync(path.resolve(import.meta.dirname, "../../theme.css"), "utf8");
+
+function station(over: Partial<ChainStationSummary> & { id: string }): ChainStationSummary {
+  return {
+    kennung: null,
+    title: over.id,
+    state: "offen",
+    lane: null,
+    runtime_seconds: null,
+    cost_usd: null,
+    started_at: null,
+    completed_at: null,
+    wait_reason: null,
+    ...over,
+  };
+}
+
+const LAUF_ROOT = "t_lauf_kf";
+const LAUF_BOARD: BoardResponse = {
+  ...BOARD,
+  chain_summaries: [{
+    root_id: LAUF_ROOT,
+    root_title: "Kettenweite Freigabe und Ketten-Sichtbarkeit im Fleet-Board",
+    total: 6,
+    done: 2,
+    status_counts: { done: 2, parked: 4 },
+    latest_completed_at: null,
+    state: "gehalten",
+    kennung: "Kettenweite Freigabe",
+    state_age_seconds: 6 * 3600,
+    total_cost_usd: 0.34,
+    stations: [
+      station({ id: "s1", title: "Einzelsperre fail-closed ablehnen", state: "fertig", lane: "coder", runtime_seconds: 246, cost_usd: 0.11, started_at: 1000, completed_at: 1246 }),
+      station({ id: "s2", title: "Ketten-Freigabe-Endpunkt", state: "fertig", lane: "coder", runtime_seconds: 531, cost_usd: 0.23, started_at: 1300, completed_at: 1831 }),
+      station({ id: "s3", title: "Laufkarte im Ketten-Reiter", state: "gehalten", lane: "coder-frontend", wait_reason: "wartet auf Freigabe" }),
+      station({ id: "s4", title: "Review-Urteil zum Hebel", state: "offen", lane: "reviewer" }),
+      station({ id: "s5", title: "PlanSpec-Gate", state: "offen" }),
+      station({ id: "s6", title: "Abschluss-Receipt", state: "offen" }),
+    ],
+    stations_total: 6,
+  }],
+};
+
+describe("KettenTab LK-1 — Laufkarte mit Stanzkante und Stationen", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeFetch();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("AC-1+AC-5: rendert die Kette als Block mit Stationen, Lane und zustandsgemäßen Meta-Angaben", () => {
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const card = container.querySelector('article.lk-card[data-state="gehalten"]');
+    expect(card).not.toBeNull();
+
+    const doneRows = card!.querySelectorAll("li.lk-st.is-done");
+    expect(doneRows).toHaveLength(2);
+    expect(doneRows[0].textContent).toContain("Einzelsperre fail-closed ablehnen");
+    expect(doneRows[0].textContent).toContain("coder");
+    expect(doneRows[0].textContent).toContain("4 min"); // Laufzeit
+    expect(doneRows[0].textContent).toContain("$0,11"); // Kosten
+    // Stempel-Haken an erledigten Stationen
+    expect(doneRows[0].querySelector(".lk-stamp")?.textContent).toBe("✓");
+
+    const held = card!.querySelector("li.lk-st.is-held");
+    expect(held?.textContent).toContain("coder-frontend");
+    expect(held?.textContent).toContain("wartet auf Freigabe"); // Grund des Wartens
+
+    const waiting = card!.querySelector("li.lk-st.is-wait");
+    expect(waiting?.textContent).toContain("reviewer");
+    expect(waiting?.textContent).toContain("bereit");
+  });
+
+  it("AC-6: kürzt lange Ketten sichtbar und nennt die Gesamtzahl", () => {
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const card = container.querySelector("article.lk-card")!;
+    const stationRows = card.querySelectorAll("li.lk-st");
+    expect(stationRows).toHaveLength(4); // Kappung auf die ersten Stationen
+    const more = card.querySelector("li.lk-more");
+    expect(more?.textContent).toBe("… +2 weitere von 6 Stationen");
+  });
+
+  it("AC-3: die Kennung ist das lauteste Element — größer und stärker als der Prosatitel", () => {
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const card = container.querySelector("article.lk-card")!;
+    const kennung = card.querySelector(".lk-kennung");
+    expect(kennung?.textContent).toBe("Kettenweite Freigabe");
+    const titel = card.querySelector(".lk-titel");
+    expect(titel?.textContent).toBe("Kettenweite Freigabe und Ketten-Sichtbarkeit im Fleet-Board");
+    // Kennung steht vor dem Titel im Kopf
+    expect(kennung!.compareDocumentPosition(titel!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // CSS-Vertrag: Kennung 700/1.05rem Display, Titel nur Sekundär-Skalenstufe
+    const kRule = fleetCss.match(/\.lk-kennung\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(kRule).toMatch(/font:\s*700\s+1\.05rem/);
+    expect(kRule).toContain("var(--font-display)");
+    const tRule = fleetCss.match(/\.lk-titel\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(tRule).toContain("var(--text-sec)");
+  });
+
+  it("AC-4: die Zustandszeile nennt Zustand und Fortschritt in Worten", () => {
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const eyeb = container.querySelector('article.lk-card[data-state="gehalten"] .lk-eyeb');
+    expect(eyeb?.textContent).toContain("Gehalten · Station 2 von 6 durch");
+    expect(eyb_led(eyeb)).not.toBeNull();
+
+    const runBoard: BoardResponse = {
+      ...BOARD,
+      chain_summaries: [{
+        root_id: "t_lauf_run",
+        root_title: "Laufende Kette",
+        total: 5,
+        done: 1,
+        status_counts: { done: 1, running: 1, todo: 3 },
+        latest_completed_at: null,
+        state: "laeuft",
+      }],
+    };
+    const { container: runContainer } = render(
+      <KettenTab board={runBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const runEyeb = runContainer.querySelector('article.lk-card[data-state="laeuft"] .lk-eyeb');
+    expect(runEyeb?.textContent).toContain("Läuft · Station 2 von 5");
+  });
+
+  it("AC-2: Segment-Form pro Stationszustand — Stahl mit Querkerbe, massiv, Kontur", () => {
+    // erledigt = massiver Stahl mit Querkerbe (nie das Ampel-Grün des Status-Kanals)
+    const doneRule = fleetCss.match(/\.lk-st\.is-done \.lk-notch b\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(doneRule).toContain("var(--color-stamp)");
+    expect(doneRule).not.toContain("--color-status-ok");
+    expect(fleetCss).toMatch(/\.lk-st\.is-done \.lk-notch::after/); // Querkerbe
+    // laufend = massiv in Bronze
+    expect(fleetCss).toMatch(/\.lk-st\.is-now \.lk-notch b\s*\{[^}]*var\(--color-live\)/);
+    // offen + gehalten = ausgestanzte Kontur (inset-Rahmen, transparente Füllung)
+    const waitRule = fleetCss.match(/\.lk-st\.is-wait \.lk-notch b\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(waitRule).toContain("background: transparent");
+    expect(waitRule).toMatch(/box-shadow:\s*inset/);
+    const heldRule = fleetCss.match(/\.lk-st\.is-held \.lk-notch b\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(heldRule).toContain("background: transparent");
+    expect(heldRule).toMatch(/box-shadow:\s*inset/);
+    // Stahl-Tinte ist ein Token in theme.css, keine Rohfarbe in der Komponenten-CSS
+    expect(themeCss).toMatch(/--color-stamp:\s*#[0-9a-f]{6}/i);
+    expect(themeCss).toMatch(/--color-stamp-2:\s*#[0-9a-f]{6}/i);
+    const doneRuleHex = fleetCss.match(/\.lk-st\.is-done \.lk-notch b\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(doneRuleHex).not.toMatch(/#[0-9a-f]{3,8}/i);
+  });
+
+  it("AC-7: einziger Startknopf ist „Kette freigeben“ und wirkt auf die ganze Kette", async () => {
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const card = container.querySelector("article.lk-card")!;
+    // Keine Möglichkeit, eine einzelne Station zu starten
+    const list = card.querySelector("ol.lk-stationen")!;
+    expect(within(list as HTMLElement).queryByRole("button")).toBeNull();
+
+    const releaseBtn = within(card as HTMLElement).getByRole("button", { name: de.fleet.laufFreigeben });
+    fireEvent.click(releaseBtn);
+    await waitFor(() => {
+      expect(fetchJSONMock).toHaveBeenCalledWith(
+        `/api/plugins/kanban/tasks/${LAUF_ROOT}/flow-release`,
+        expect.objectContaining({ method: "POST", body: JSON.stringify({ release_level: "live" }) }),
+      );
+    });
+  });
+
+  it("AC-7: readOnly blendet den Freigabe-Knopf aus", () => {
+    render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} readOnly onOpenNodeDetail={() => undefined} />,
+    );
+    expect(screen.queryByRole("button", { name: de.fleet.laufFreigeben })).toBeNull();
+  });
+
+  it("meldet einen Freigabe-Fehler als sichtbaren Alert", async () => {
+    fetchJSONMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("flow-release")) return Promise.reject(new Error("HTTP 409: Konflikt"));
+      if (u.includes("/chain-graph")) return Promise.resolve(CHAIN_GRAPH_PAYLOAD);
+      return Promise.resolve({});
+    });
+    render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: de.fleet.laufFreigeben }));
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("Freigabe fehlgeschlagen");
+    });
+  });
+
+  it("degradiert ohne Stationsliste auf Kennung, Zustand und Fortschritt — keine erfundenen Stationen", () => {
+    const { container } = render(
+      <KettenTab board={BOARD} initialRootId={ROOT_ID} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    expect(container.querySelector("ol.lk-stationen")).toBeNull();
+    const kennung = container.querySelector(".lk-kennung");
+    expect(kennung?.textContent).toBe("Ketten v4 Fixes");
+    const eyeb = container.querySelector(".lk-eyeb");
+    expect(eyeb?.textContent).toContain("Läuft · Station 2 von 3");
+  });
+
+  it("AC-8: lange Titel klemmen mit Ellipsis und tragen den Volltext als title-Fallback", () => {
+    const kRule = fleetCss.match(/\.lk-kennung\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(kRule).toContain("white-space: nowrap");
+    expect(kRule).toContain("overflow: hidden");
+    expect(kRule).toContain("text-overflow: ellipsis");
+    const tRule = fleetCss.match(/\.lk-titel\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(tRule).toContain("-webkit-line-clamp: 2");
+
+    // 215 Zeichen — die im Live-Board vorkommende Titellänge
+    const longTitle = "L".repeat(215);
+    const longBoard: BoardResponse = {
+      ...BOARD,
+      chain_summaries: [{
+        root_id: "t_lauf_long",
+        root_title: longTitle,
+        total: 2,
+        done: 0,
+        status_counts: { parked: 2 },
+        latest_completed_at: null,
+      }],
+    };
+    const { container } = render(
+      <KettenTab board={longBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const kennung = container.querySelector(".lk-kennung");
+    expect(kennung?.getAttribute("title")).toBe(longTitle);
+    // Kein doppelter Prosatitel, wenn Kennung-Fallback dem Titel entspricht
+    expect(container.querySelector(".lk-titel")).toBeNull();
+  });
+});
+
+function eyb_led(eyeb: Element | null): Element | null {
+  return eyeb?.querySelector(".lk-led") ?? null;
+}

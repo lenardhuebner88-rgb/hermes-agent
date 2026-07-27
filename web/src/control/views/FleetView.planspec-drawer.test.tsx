@@ -507,9 +507,9 @@ describe("FleetView PlanSpec detail drawer", () => {
 
     expect(screen.queryByText("Fleet kompakte Kette")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Subtab Ketten" }));
-    const item = screen.getByText("Fleet kompakte Kette").closest(".chain-item");
+    const item = screen.getByText("Fleet kompakte Kette").closest(".lk-done-row");
     expect(item).not.toBeNull();
-    expect(within(item as HTMLElement).getByText("35/35")).toBeTruthy();
+    expect(within(item as HTMLElement).getByText(/35\/35/)).toBeTruthy();
   });
 
   it("places the chain release action in the selected PlanSpec check detail", () => {

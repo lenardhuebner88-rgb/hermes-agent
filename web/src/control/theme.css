@@ -49,6 +49,14 @@
   --color-status-warn: #d9b23a;
   --color-status-alert: #e0604f;
 
+  /* Stempel-Stahl (Laufkarte, LK-1): kühle Stahl-Tinte für abgestempelte
+   * Stationen. Operator-freigegebene Abweichung vom Token-Satz — Werte aus dem
+   * Mockup-HTML am Design-Board-Eintrag c_ee80d956 / e_a4b27b43. Bewusst KEIN
+   * Status-Grün: ein Stempel darf nicht wie ein grünes Ampellicht wirken, der
+   * Status-Kanal bleibt frei. */
+  --color-stamp: #77857f;
+  --color-stamp-2: #59665f;
+
   /* data identity only — never status, affordance, or a color-only signal.
    * Deliberately DISTINCT from bronze + status trio + lane-prem: identity dots/
    * chips share the dot/chip FORM with status LEDs, so value-aliasing the status

@@ -673,6 +673,33 @@ export interface BoardSourceError {
   retry_count: number;
 }
 
+/**
+ * Abgeleiteter Kettenzustand aus dem Ketten-Lesevertrag (PlanSpec
+ * 2026-07-27-ketten-lesevertrag-backend.md, LV-1). Genau vier Werte.
+ */
+export type ChainSummaryState = "laeuft" | "angebrochen" | "gehalten" | "fertig";
+
+/** Stationszustand im Lesevertrag (LV-2). */
+export type ChainStationState = "fertig" | "laeuft" | "offen" | "gehalten";
+
+/**
+ * Eine Station der Laufkarte (Lesevertrag LV-2, additiv). Wird erst geliefert,
+ * wenn das Backend die Stationsliste materialisiert — bis dahin degradiert die
+ * Laufkarte sichtbar auf Kennung, Zustand und Fortschritt.
+ */
+export interface ChainStationSummary {
+  id: string;
+  kennung: string | null;
+  title: string;
+  state: ChainStationState | string;
+  lane: string | null;
+  runtime_seconds: number | null;
+  cost_usd: number | null;
+  started_at: number | null;
+  completed_at: number | null;
+  wait_reason: string | null;
+}
+
 export interface ChainSummary {
   root_id: string;
   root_title: string;
@@ -680,6 +707,18 @@ export interface ChainSummary {
   done: number;
   status_counts: Record<string, number>;
   latest_completed_at: number | null;
+  // LV-1 (additiv): abgeleiteter Zustand, menschenlesbare Kennung,
+  // Zustandsalter in Sekunden, aufsummierte Kosten. Optional, bis das Backend
+  // die Felder liefert — das Frontend faellt dann auf Chip-Zustand und
+  // root_title zurueck und erfindet nie Werte.
+  state?: ChainSummaryState;
+  kennung?: string;
+  state_age_seconds?: number | null;
+  total_cost_usd?: number | null;
+  // LV-2 (additiv): Stationsliste, gedeckelt; stations_total nennt die
+  // Gesamtzahl, damit die Kuerzung sichtbar begruendet werden kann.
+  stations?: ChainStationSummary[];
+  stations_total?: number;
 }
 
 export interface DoneBoardPage {
