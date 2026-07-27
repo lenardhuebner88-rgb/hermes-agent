@@ -497,6 +497,134 @@ def test_agent_terminal_terminate_external_flag_reaches_service(monkeypatch):
     assert calls[-1] == ("work", "hermes", False)
 
 
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
+def test_special_window_inventory_and_terminate_prefers_window_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression for live `work:cq:hermes-agent`: the unsafe display name stays
+    rejected, while the inventory's stable tmux ID can terminate it."""
+    socket = tmp_path / "tmux.sock"
+    service = TmuxAgentSessionService(socket_path=socket, hermes_home=tmp_path)
+    special_name = "cq:hermes-agent"
+    subprocess.run(
+        [
+            "tmux",
+            "-S",
+            str(socket),
+            "new-session",
+            "-d",
+            "-s",
+            "work",
+            "-n",
+            special_name,
+            "sh",
+            "-c",
+            "while :; do sleep 60; done",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(web_server, "_agent_terminal_service", lambda: service)
+    client = TestClient(web_server.app)
+    headers = {web_server._SESSION_HEADER_NAME: web_server._SESSION_TOKEN}
+
+    try:
+        inventory = client.get(
+            "/api/agent-terminals/windows",
+            headers=headers,
+        )
+        assert inventory.status_code == 200
+        payload = inventory.json()["windows"]
+        special = next(item for item in payload if item["window"] == special_name)
+        assert special["session"] == "work"
+        assert special["window_id"].startswith("@")
+
+        refused = client.post(
+            "/api/agent-terminals/terminate",
+            json={
+                "session": "work",
+                "window": special_name,
+                "external": True,
+            },
+            headers=headers,
+        )
+        assert refused.status_code == 400
+        assert "invalid window" in refused.text
+
+        terminated = client.post(
+            "/api/agent-terminals/terminate",
+            json={
+                "session": "work",
+                "window": special_name,
+                "window_id": special["window_id"],
+                "external": True,
+            },
+            headers=headers,
+        )
+        assert terminated.status_code == 200
+        assert terminated.json() == {"ok": True}
+    finally:
+        subprocess.run(
+            ["tmux", "-S", str(socket), "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required")
+def test_real_isolated_attach_enables_aggressive_resize(
+    tmp_path: Path,
+) -> None:
+    socket = tmp_path / "tmux.sock"
+    service = TmuxAgentSessionService(socket_path=socket, hermes_home=tmp_path)
+    subprocess.run(
+        [
+            "tmux",
+            "-S",
+            str(socket),
+            "new-session",
+            "-d",
+            "-s",
+            "work",
+            "-n",
+            "hermes",
+            "sh",
+            "-c",
+            "while :; do sleep 60; done",
+        ],
+        check=True,
+    )
+    try:
+        isolated = service.create_isolated_attach(
+            "work",
+            "hermes",
+            attach_id="resize-test",
+        )
+        option = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                str(socket),
+                "show-options",
+                "-w",
+                "-v",
+                "-t",
+                isolated.session,
+                "aggressive-resize",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert option.stdout.strip() == "on"
+    finally:
+        subprocess.run(
+            ["tmux", "-S", str(socket), "kill-server"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+
 def test_four_real_isolated_websockets_keep_distinct_same_session_windows(monkeypatch, tmp_path: Path):
     socket = tmp_path / "tmux.sock"
     service = TmuxAgentSessionService(socket_path=socket)

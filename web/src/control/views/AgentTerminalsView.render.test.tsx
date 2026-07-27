@@ -1280,6 +1280,108 @@ describe("AgentTerminalsView desktop rendering", () => {
     );
   });
 
+  it("migrates a legacy stored target and prefers window_id for attach and terminate", async () => {
+    const specialWindow = {
+      session: "work",
+      window: "cq:hermes-agent",
+      window_id: "@140",
+      active: true,
+      pane_id: "%140",
+      pid: 222,
+      command: "node",
+      cwd: "/home/piet/.hermes/hermes-agent",
+      managed: false,
+    } as AgentTerminalWindow;
+    window.localStorage.setItem(
+      "hermes-terminals-last-target",
+      JSON.stringify({ session: "work", window: "cq:hermes-agent" }),
+    );
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [specialWindow],
+    });
+
+    await renderView();
+
+    await waitFor(() => {
+      expect(
+        JSON.parse(
+          window.localStorage.getItem("hermes-terminals-last-target") ?? "{}",
+        ),
+      ).toEqual({
+        session: "work",
+        window: "cq:hermes-agent",
+        window_id: "@140",
+      });
+    });
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const attachCalls = vi
+        .mocked(buildWsUrl)
+        .mock.calls.filter(
+          ([path]) => path === "/api/agent-terminals/attach",
+        );
+      expect(
+        attachCalls.some(
+          ([, params]) =>
+            params?.window === "cq:hermes-agent" &&
+            params?.window_id === "@140",
+        ),
+      ).toBe(true);
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Externes Fenster beenden work:cq:hermes-agent",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. work:cq:hermes-agent",
+      }),
+    );
+    await waitFor(() =>
+      expect(apiMock.terminateAgentTerminalWindow).toHaveBeenCalledWith(
+        "work",
+        "cq:hermes-agent",
+        true,
+        "@140",
+      ),
+    );
+  });
+
+  it("prefers window_id when removing a dead foreign window", async () => {
+    const deadForeign = {
+      session: "work",
+      window: "cq:dead-agent",
+      window_id: "@141",
+      active: false,
+      pane_id: "%141",
+      pid: null,
+      command: "",
+      cwd: "/home/piet",
+      dead: true,
+      managed: false,
+    } as AgentTerminalWindow;
+    apiMock.getAgentTerminalWindows.mockResolvedValue({
+      windows: [deadForeign],
+    });
+
+    await renderView();
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Fenster schließen work:cq:dead-agent",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(apiMock.killDeadAgentTerminalWindow).toHaveBeenCalledWith(
+        "work",
+        "cq:dead-agent",
+        "@141",
+      ),
+    );
+  });
+
   it("managed terminate keeps two-arg call (external defaults false)", async () => {
     const managedWin = {
       session: "work",

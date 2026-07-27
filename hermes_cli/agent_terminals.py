@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - tmux is Unix-only; import safety for W
     _fcntl = None
 
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_WINDOW_ID_RE = re.compile(r"^@\d+$")
 _SECRET_KEY_RE = re.compile(r"(TOKEN|SECRET|PASSWORD|KEY|CREDENTIAL|AUTH)", re.IGNORECASE)
 _TRAILING_NUMBER_RE = re.compile(r"-\d+$")
 _MAX_NUMBERED_WINDOWS = 9
@@ -560,6 +561,7 @@ class IsolatedAttachTarget:
     source_window: str
     session: str
     window: str
+    window_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -629,6 +631,9 @@ class TmuxWindow:
     # foreign (visible/attachable, but close would 503); None = unknown (callers
     # that did not compute it — safe default so older constructors stay valid).
     managed: bool | None = None
+    # tmux's stable, globally unique window identity. Unlike the display name,
+    # this survives renames and can address names outside _SAFE_NAME_RE.
+    window_id: str | None = None
     # Server-resolved identity survives arbitrary window renames; clients must
     # prefer it over parsing the display name.
     agent_kind: str | None = None
@@ -655,6 +660,7 @@ class TmuxWindow:
             "dead": self.dead,
             "activity": self.activity,
             "managed": self.managed,
+            "window_id": self.window_id,
             "agent_kind": self.agent_kind,
             "task_id": self.task_id,
             "run_id": self.run_id,
@@ -855,11 +861,31 @@ class TmuxAgentSessionService:
             raise InvalidTarget(f"invalid {field}: {value!r}")
         return value
 
+    @staticmethod
+    def validate_window_id(value: str, *, field: str = "window_id") -> str:
+        if not _WINDOW_ID_RE.fullmatch(value or ""):
+            raise InvalidTarget(f"invalid {field}: {value!r}")
+        return value
+
+    @classmethod
+    def validate_window_target(cls, value: str, *, field: str = "window") -> str:
+        if _WINDOW_ID_RE.fullmatch(value or ""):
+            return cls.validate_window_id(value, field="window_id")
+        return cls.validate_name(value, field=field)
+
+    @classmethod
+    def _window_target(cls, window: str, window_id: str | None = None) -> str:
+        if window_id is not None:
+            return cls.validate_window_id(window_id)
+        return cls.validate_window_target(window)
+
     def _target(self, session: str, window: str | None = None) -> str:
         session = self.validate_name(session, field="session")
         if window is None:
             return session
-        window = self.validate_name(window, field="window")
+        window = self.validate_window_target(window)
+        if window.startswith("@"):
+            return window
         return f"{session}:{window}"
 
     def _cmd_target(self, session: str, window: str) -> str:
@@ -870,7 +896,9 @@ class TmuxAgentSessionService:
         keys could land in the wrong pane.
         """
         session = self.validate_name(session, field="session")
-        window = self.validate_name(window, field="window")
+        window = self.validate_window_target(window)
+        if window.startswith("@"):
+            return window
         return f"{session}:={window}"
 
     def _tmux_cmd(self, *args: str) -> list[str]:
@@ -1211,7 +1239,13 @@ class TmuxAgentSessionService:
                     return kind, "home"
         raise CapabilityError(f"window {window!r} is not a dashboard-managed agent window")
 
-    def identity_for(self, session: str, window: str) -> tuple[str, str]:
+    def identity_for(
+        self,
+        session: str,
+        window: str,
+        *,
+        fallback_window: str | None = None,
+    ) -> tuple[str, str]:
         """Resolve (kind, workdir key) for a window, preferring window options.
 
         `@hermes_kind`/`@hermes_workdir` are set at spawn time and survive a
@@ -1229,7 +1263,7 @@ class TmuxAgentSessionService:
                 workdir_key in _WORKDIR_BY_KEY or workdir_key.startswith("dir:")
             ):
                 return kind, workdir_key
-        return self._identity_from_window(window)
+        return self._identity_from_window(fallback_window or window)
 
     def _window_option(
         self, session: str, window: str, name: str
@@ -1373,7 +1407,13 @@ class TmuxAgentSessionService:
         )
         return previous
 
-    def is_managed_window(self, session: str, window: str) -> bool:
+    def is_managed_window(
+        self,
+        session: str,
+        window: str,
+        *,
+        fallback_window: str | None = None,
+    ) -> bool:
         """True iff terminate_live() would accept this window (not raise CapabilityError).
 
         Mirrors terminate_live guards: session must be ``work`` and identity_for
@@ -1383,7 +1423,11 @@ class TmuxAgentSessionService:
         if session != "work":
             return False
         try:
-            self.identity_for(session, window)
+            self.identity_for(
+                session,
+                window,
+                fallback_window=fallback_window,
+            )
         except (CapabilityError, InvalidTarget):
             return False
         return True
@@ -2114,34 +2158,71 @@ class TmuxAgentSessionService:
         session: str,
         window: str,
         *,
+        window_id: str | None = None,
         attach_id: str | None = None,
         now: int | None = None,
     ) -> IsolatedAttachTarget:
-        source_session = self.validate_name(session, field="session")
-        source_window = self.validate_name(window, field="window")
+        requested_session = self.validate_name(session, field="session")
+        source_target = self._window_target(window, window_id)
+        source_info = self.show(requested_session, source_target)
+        source_session = source_info.session
+        source_window = source_info.window
         if source_session.startswith(_EPHEMERAL_ATTACH_PREFIX):
             raise InvalidTarget("ephemeral attach sessions cannot be used as sources")
-        if not self.window_exists(source_session, source_window):
-            raise KeyError(f"tmux target not found: {source_session}:{source_window}")
         token = self.validate_name(attach_id or secrets.token_hex(6), field="attach_id")
         group = self.validate_name(f"{_EPHEMERAL_ATTACH_PREFIX}{token}", field="session")
         if group in {name for name, *_rest in self._isolated_attach_rows()}:
             raise InvalidTarget(f"isolated attach already exists: {group}")
         created = int(self._now() if now is None else now)
+        marker_window = source_target if source_target.startswith("@") else source_window
         try:
             self._run("new-session", "-d", "-t", source_session, "-s", group)
-            self._run("select-window", "-t", self._cmd_target(group, source_window))
+            self._run("select-window", "-t", self._cmd_target(group, source_target))
+            self.ensure_isolated_attach_options(group)
             for option, value in (
                 (_EPHEMERAL_ATTACH_MARKER, "1"),
                 (_EPHEMERAL_ATTACH_SOURCE, source_session),
-                (_EPHEMERAL_ATTACH_WINDOW, source_window),
+                (_EPHEMERAL_ATTACH_WINDOW, marker_window),
                 (_EPHEMERAL_ATTACH_CREATED_AT, str(created)),
             ):
                 self._run("set-option", "-t", group, option, value)
         except Exception:
             self._run("kill-session", "-t", group, check=False)
             raise
-        return IsolatedAttachTarget(source_session, source_window, group, source_window)
+        return IsolatedAttachTarget(
+            source_session,
+            source_window,
+            group,
+            source_window,
+            source_info.window_id,
+        )
+
+    def ensure_isolated_attach_options(self, session: str) -> None:
+        """Best-effort window sizing for one dashboard-created attach group."""
+        try:
+            session = self.validate_name(session, field="session")
+            proc = self._run(
+                "set-option",
+                "-w",
+                "-t",
+                session,
+                "aggressive-resize",
+                "on",
+                check=False,
+            )
+            if proc.returncode != 0:
+                self._log_event(
+                    "ensure_isolated_attach_options_failed",
+                    session=session,
+                    option="aggressive-resize",
+                    stderr=proc.stderr.strip()[:200],
+                )
+        except Exception:
+            with contextlib.suppress(Exception):
+                self._log_event(
+                    "ensure_isolated_attach_options_error",
+                    session=str(session),
+                )
 
     def cleanup_isolated_attach(self, session: str) -> bool:
         target = self.validate_name(session, field="session")
@@ -2150,12 +2231,30 @@ class TmuxAgentSessionService:
             return False
         return self._run("kill-session", "-t", target, check=False).returncode == 0
 
-    def cleanup_related_isolated_attaches(self, source_session: str, source_window: str | None = None) -> list[str]:
+    def cleanup_related_isolated_attaches(
+        self,
+        source_session: str,
+        source_window: str | None = None,
+        *,
+        window_id: str | None = None,
+    ) -> list[str]:
         source = self.validate_name(source_session, field="session")
-        window = self.validate_name(source_window, field="window") if source_window is not None else None
+        windows: set[str] = set()
+        if source_window is not None:
+            try:
+                windows.add(self.validate_window_target(source_window))
+            except InvalidTarget:
+                if window_id is None:
+                    raise
+        if window_id is not None:
+            windows.add(self.validate_window_id(window_id))
         cleaned: list[str] = []
         for name, marker, row_source, row_window, _created, _attached in self._isolated_attach_rows():
-            if marker != "1" or row_source != source or (window is not None and row_window != window):
+            if (
+                marker != "1"
+                or row_source != source
+                or (windows and row_window not in windows)
+            ):
                 continue
             if self.cleanup_isolated_attach(name):
                 cleaned.append(name)
@@ -2185,7 +2284,7 @@ class TmuxAgentSessionService:
             "list-windows",
             "-a",
             "-F",
-            "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{@hermes_ephemeral_attach}\t#{pane_current_path}",
+            "#{session_name}\t#{window_name}\t#{window_id}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{@hermes_ephemeral_attach}\t#{pane_current_path}",
         ]
         if session:
             args.insert(1, "-t")
@@ -2195,29 +2294,37 @@ class TmuxAgentSessionService:
             return []
         windows: list[TmuxWindow] = []
         for line in proc.stdout.splitlines():
-            parts = line.split("\t", 9)
-            if len(parts) < 10:
+            parts = line.split("\t", 10)
+            if len(parts) < 11:
                 continue
-            if parts[8] == "1":
+            if parts[9] == "1":
                 continue
-            pid = int(parts[4]) if parts[4].isdigit() else None
-            dead = parts[5] == "1"
-            activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
-            cwd = ("\t".join(parts[9:]) or None) if len(parts) > 9 else None
+            pid = int(parts[5]) if parts[5].isdigit() else None
+            dead = parts[6] == "1"
+            activity = int(parts[8]) if parts[8].isdigit() else None
+            cwd = ("\t".join(parts[10:]) or None) if len(parts) > 10 else None
             session_name = parts[0]
             window_name = parts[1]
+            window_id = parts[2] if _WINDOW_ID_RE.fullmatch(parts[2]) else None
+            lookup_window = window_id or window_name
             # managed gates the UI terminate affordance only; kill_dead stays
             # available for dead foreign panes (intentional cleanup path).
-            managed = self.is_managed_window(session_name, window_name)
+            managed = self.is_managed_window(
+                session_name,
+                lookup_window,
+                fallback_window=window_name,
+            )
             agent_kind = None
             if managed:
                 with contextlib.suppress(CapabilityError, InvalidTarget):
                     agent_kind, _workdir_key = self.identity_for(
-                        session_name, window_name
+                        session_name,
+                        lookup_window,
+                        fallback_window=window_name,
                     )
             try:
                 correlation = self.execution_correlation_for(
-                    session_name, window_name
+                    session_name, lookup_window
                 )
             except (AgentTerminalError, OSError, subprocess.CalledProcessError):
                 correlation = {
@@ -2226,7 +2333,10 @@ class TmuxAgentSessionService:
                     "correlation_id": None,
                 }
             try:
-                launch_state = self.terminal_launch_state_for(session_name, window_name)
+                launch_state = self.terminal_launch_state_for(
+                    session_name,
+                    lookup_window,
+                )
             except (AgentTerminalError, OSError, subprocess.CalledProcessError):
                 launch_state = {
                     "terminal_run_id": None,
@@ -2241,14 +2351,15 @@ class TmuxAgentSessionService:
                 TmuxWindow(
                     session_name,
                     window_name,
-                    parts[2] == "1",
-                    parts[3],
+                    parts[3] == "1",
+                    parts[4],
                     pid,
-                    parts[6],
+                    parts[7],
                     cwd,
                     dead,
                     activity,
                     managed,
+                    window_id=window_id,
                     agent_kind=agent_kind,
                     task_id=correlation["task_id"],
                     run_id=correlation["run_id"],
@@ -2777,36 +2888,69 @@ class TmuxAgentSessionService:
                 return None
             raise
 
-    def kill_dead(self, session: str, window: str) -> None:
+    def kill_dead(
+        self,
+        session: str,
+        window: str,
+        *,
+        window_id: str | None = None,
+    ) -> None:
         """Remove a dead pane's window — guarded so live sessions cannot be killed.
 
         Idempotent: a window that is already gone is a success (no raise), so
         double-click / stale UI state does not surface as a permanent 503.
         """
-        info = self._show_if_present(session, window)
+        target = self._window_target(window, window_id)
+        info = self._show_if_present(session, target)
         if info is None:
-            self._log_event("kill_dead", session=session, window=window, already_gone=True)
+            self._log_event(
+                "kill_dead",
+                session=session,
+                window=window,
+                window_id=window_id,
+                already_gone=True,
+            )
             return
         if not info.dead:
-            raise CapabilityError(f"window {session}:{window} is not marked dead; refusing kill")
+            raise CapabilityError(
+                f"window {info.session}:{info.window} is not marked dead; refusing kill"
+            )
         terminal_run_id = None
         with contextlib.suppress(Exception):
             terminal_run_id = self._read_window_option(
-                info.session, info.window, _TERMINAL_RUN_ID_OPTION
+                info.session,
+                info.window_id or info.window,
+                _TERMINAL_RUN_ID_OPTION,
             )
-        self.cleanup_related_isolated_attaches(info.session, info.window)
-        if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
-            raise AgentTerminalError(f"failed to kill window {session}:{window}")
+        self.cleanup_related_isolated_attaches(
+            info.session,
+            info.window,
+            window_id=info.window_id,
+        )
+        if not self._kill_window_idempotent(
+            info.session,
+            target,
+            pane_id=info.pane_id or None,
+        ):
+            raise AgentTerminalError(
+                f"failed to kill window {info.session}:{info.window}"
+            )
         self.mark_terminal_run_ended(terminal_run_id)
         self._log_event(
             "kill_dead",
-            session=session,
-            window=window,
+            session=info.session,
+            window=info.window,
+            window_id=info.window_id,
             terminal_run_id=terminal_run_id,
         )
 
     def terminate_live(
-        self, session: str, window: str, *, allow_external: bool = False
+        self,
+        session: str,
+        window: str,
+        *,
+        window_id: str | None = None,
+        allow_external: bool = False,
     ) -> None:
         """Terminate a live (or dead) agent window.
 
@@ -2818,13 +2962,16 @@ class TmuxAgentSessionService:
         killed here too — the frontend may hold a stale ``dead`` flag and call
         terminate instead of kill-dead; that race must not 503.
         """
-        info = self._show_if_present(session, window)
+        target = self._window_target(window, window_id)
+        info = self._show_if_present(session, target)
         if info is None:
             log_fields: dict[str, object] = {
                 "session": session,
                 "window": window,
                 "already_gone": True,
             }
+            if window_id is not None:
+                log_fields["window_id"] = window_id
             if allow_external:
                 log_fields["external"] = True
             self._log_event("terminate", **log_fields)
@@ -2832,44 +2979,90 @@ class TmuxAgentSessionService:
         if not allow_external:
             if info.session != "work":
                 raise CapabilityError(
-                    f"window {session}:{window} is not a dashboard-managed agent window"
+                    f"window {info.session}:{info.window} is not a dashboard-managed agent window"
                 )
-            kind, _workdir = self.identity_for(info.session, info.window)
+            kind, _workdir = self.identity_for(
+                info.session,
+                info.window_id or info.window,
+                fallback_window=info.window,
+            )
         else:
             try:
-                kind, _workdir = self.identity_for(info.session, info.window)
+                kind, _workdir = self.identity_for(
+                    info.session,
+                    info.window_id or info.window,
+                    fallback_window=info.window,
+                )
             except (CapabilityError, InvalidTarget):
                 kind = "external"
         # Isolated-attach cleanup is only meaningful for managed windows
         # (source markers are set by dashboard attach of work-session targets).
-        if not allow_external or self.is_managed_window(info.session, info.window):
-            self.cleanup_related_isolated_attaches(info.session, info.window)
+        if not allow_external or self.is_managed_window(
+            info.session,
+            info.window_id or info.window,
+            fallback_window=info.window,
+        ):
+            self.cleanup_related_isolated_attaches(
+                info.session,
+                info.window,
+                window_id=info.window_id,
+            )
         terminal_run_id = None
         with contextlib.suppress(Exception):
-            terminal_run_id = self._read_window_option(info.session, info.window, _TERMINAL_RUN_ID_OPTION)
-        if not self._kill_window_idempotent(session, window, pane_id=info.pane_id or None):
-            raise AgentTerminalError(f"failed to kill window {session}:{window}")
+            terminal_run_id = self._read_window_option(
+                info.session,
+                info.window_id or info.window,
+                _TERMINAL_RUN_ID_OPTION,
+            )
+        if not self._kill_window_idempotent(
+            info.session,
+            target,
+            pane_id=info.pane_id or None,
+        ):
+            raise AgentTerminalError(
+                f"failed to kill window {info.session}:{info.window}"
+            )
         # Isolated-write worktrees are never auto-removed on terminate; only the
         # run manifest is marked ended so the pruner can decide later.
         self.mark_terminal_run_ended(terminal_run_id)
-        log_fields = {"kind": kind, "session": session, "window": window}
+        log_fields = {
+            "kind": kind,
+            "session": info.session,
+            "window": info.window,
+            "window_id": info.window_id,
+        }
         if terminal_run_id:
             log_fields["terminal_run_id"] = terminal_run_id
         if allow_external:
             log_fields["external"] = True
         self._log_event("terminate", **log_fields)
 
-    def rename(self, session: str, window: str, new_name: str) -> TmuxWindow:
+    def rename(
+        self,
+        session: str,
+        window: str,
+        new_name: str,
+        *,
+        window_id: str | None = None,
+    ) -> TmuxWindow:
         """Rename a dashboard-managed window, preserving its respawn identity."""
         new_name = self.validate_name(new_name, field="window")
+        target_window = self._window_target(window, window_id)
+        info = self.show(session, target_window)
         # identity_for raises CapabilityError for windows this service doesn't
         # manage — renaming a foreign tmux window is refused, not allowlisted.
-        kind, workdir_key = self.identity_for(session, window)
-        if self.window_exists(session, new_name):
-            raise CapabilityError(f"window {session}:{new_name} already exists")
-        target = self._cmd_target(session, window)
+        kind, workdir_key = self.identity_for(
+            info.session,
+            info.window_id or target_window,
+            fallback_window=info.window,
+        )
+        if self.window_exists(info.session, new_name):
+            raise CapabilityError(f"window {info.session}:{new_name} already exists")
+        target = self._cmd_target(info.session, target_window)
         terminal_run_id = self._read_window_option(
-            session, window, _TERMINAL_RUN_ID_OPTION
+            info.session,
+            info.window_id or target_window,
+            _TERMINAL_RUN_ID_OPTION,
         )
         if terminal_run_id:
             manifest = self.read_terminal_manifest(terminal_run_id)
@@ -2877,7 +3070,10 @@ class TmuxAgentSessionService:
                 raise CapabilityError(
                     f"rename refused: missing terminal-run manifest for {terminal_run_id}"
                 )
-            if manifest.get("session") != session or manifest.get("window") != window:
+            if (
+                manifest.get("session") != info.session
+                or manifest.get("window") != info.window
+            ):
                 raise CapabilityError(
                     "rename refused: terminal-run manifest target mismatch"
                 )
@@ -2907,14 +3103,36 @@ class TmuxAgentSessionService:
                     self._run(
                         "rename-window",
                         "-t",
-                        self._cmd_target(session, new_name),
-                        window,
+                        self._cmd_target(info.session, new_name),
+                        info.window,
                     )
                 raise
-        self._log_event("rename", session=session, window=window, new_window=new_name, kind=kind, workdir=workdir_key)
-        return self.show(session, new_name)
+        self._log_event(
+            "rename",
+            session=info.session,
+            window=info.window,
+            window_id=info.window_id,
+            new_window=new_name,
+            kind=kind,
+            workdir=workdir_key,
+        )
+        return self.show(info.session, new_name)
 
     def show(self, session: str, window: str) -> TmuxWindow:
+        session = self.validate_name(session, field="session")
+        window = self.validate_window_target(window)
+        if window.startswith("@"):
+            info = next(
+                (
+                    candidate
+                    for candidate in self.list_windows()
+                    if candidate.window_id == window
+                ),
+                None,
+            )
+            if info is None:
+                raise CapabilityError(f"window {window} not found")
+            return info
         target = self._cmd_target(session, window)
         if not self.window_exists(session, window):
             raise CapabilityError(f"window {session}:{window} not found")
@@ -2924,7 +3142,7 @@ class TmuxAgentSessionService:
                 "-p",
                 "-t",
                 target,
-                "#{session_name}\t#{window_name}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
+                "#{session_name}\t#{window_name}\t#{window_id}\t#{window_active}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}\t#{window_activity}\t#{pane_current_path}",
             )
         except subprocess.CalledProcessError as exc:
             # Window can vanish between list-panes and display-message (TOCTOU);
@@ -2938,24 +3156,36 @@ class TmuxAgentSessionService:
                 f"tmux display-message failed for {session}:{window}: {detail}"
             ) from exc
         parts = proc.stdout.rstrip("\n").split("\t")
-        pid = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
-        dead = len(parts) > 5 and parts[5] == "1"
-        activity = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else None
-        cwd = ("\t".join(parts[8:]) or None) if len(parts) > 8 else None
+        pid = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else None
+        dead = len(parts) > 6 and parts[6] == "1"
+        activity = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else None
+        cwd = ("\t".join(parts[9:]) or None) if len(parts) > 9 else None
         session_name = parts[0]
         window_name = parts[1]
+        window_id = (
+            parts[2]
+            if len(parts) > 2 and _WINDOW_ID_RE.fullmatch(parts[2])
+            else None
+        )
+        lookup_window = window_id or window_name
         # Cheap for a single window (two show-options + optional name parse) —
         # same rule as list_windows so show/ensure/respawn payloads stay consistent.
-        managed = self.is_managed_window(session_name, window_name)
+        managed = self.is_managed_window(
+            session_name,
+            lookup_window,
+            fallback_window=window_name,
+        )
         agent_kind = None
         if managed:
             with contextlib.suppress(CapabilityError, InvalidTarget):
                 agent_kind, _workdir_key = self.identity_for(
-                    session_name, window_name
+                    session_name,
+                    lookup_window,
+                    fallback_window=window_name,
                 )
         try:
             correlation = self.execution_correlation_for(
-                session_name, window_name
+                session_name, lookup_window
             )
         except (AgentTerminalError, OSError, subprocess.CalledProcessError):
             correlation = {
@@ -2964,7 +3194,10 @@ class TmuxAgentSessionService:
                 "correlation_id": None,
             }
         try:
-            launch_state = self.terminal_launch_state_for(session_name, window_name)
+            launch_state = self.terminal_launch_state_for(
+                session_name,
+                lookup_window,
+            )
         except (AgentTerminalError, OSError, subprocess.CalledProcessError):
             launch_state = {
                 "terminal_run_id": None,
@@ -2978,14 +3211,15 @@ class TmuxAgentSessionService:
         return TmuxWindow(
             session_name,
             window_name,
-            parts[2] == "1",
-            parts[3],
+            parts[3] == "1",
+            parts[4],
             pid,
-            parts[6] if len(parts) > 6 else "",
+            parts[7] if len(parts) > 7 else "",
             cwd,
             dead,
             activity,
             managed,
+            window_id=window_id,
             agent_kind=agent_kind,
             task_id=correlation["task_id"],
             run_id=correlation["run_id"],
@@ -3146,11 +3380,18 @@ class TmuxAgentSessionService:
         self._capture_cache.invalidate_server(self._capture_server_id)
         self._log_event("interrupt", session=session, window=window)
 
-    def attach_argv(self, session: str, window: str) -> list[str]:
+    def attach_argv(
+        self,
+        session: str,
+        window: str,
+        *,
+        window_id: str | None = None,
+    ) -> list[str]:
         # Exact-match target: with suffix windows (claude-fo, …) a fuzzy prefix
         # match could attach a different workdir terminal if the exact window
         # disappeared between listing and attach.
-        return self._tmux_cmd("attach-session", "-t", self._cmd_target(session, window))
+        target = self._window_target(window, window_id)
+        return self._tmux_cmd("attach-session", "-t", self._cmd_target(session, target))
 
     def attach_metadata(self, session: str, window: str) -> dict[str, object]:
         info = self.show(session, window)

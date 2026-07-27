@@ -215,7 +215,7 @@ export function pickDeepLinkedTarget(
   windows: AgentTerminalWindow[],
   session: string,
   window?: string | null,
-): { session: string; window: string } | null {
+): PaneTarget | null {
   // Exaktes Fenster zuerst; kennt die Inventur das Fenster nicht (stale Link,
   // Index-statt-Name aus älteren Backends), fällt der Link auf die Session
   // zurück statt auf die globale Default-Auswahl (ui-verify 2026-07-18).
@@ -259,13 +259,25 @@ export function AgentTerminalsView() {
   const [capability, setCapability] = useState<AgentTerminalCapabilityState | null>(null);
   const [windows, setWindows] = useState<AgentTerminalWindow[]>([]);
   const [selectedKind, setSelectedKind] = useState<AgentTerminalKind>("hermes");
-  const [target, setTarget] = useState<{ session: string; window: string; terminal_run_id?: string | null } | null>(() => {
+  const [target, setTarget] = useState<
+    (PaneTarget & { terminal_run_id?: string | null }) | null
+  >(() => {
     try {
       const raw = window.localStorage.getItem(TARGET_STORAGE_KEY);
       if (!raw) return null;
-      const parsed = JSON.parse(raw) as { session?: unknown; window?: unknown };
+      const parsed = JSON.parse(raw) as {
+        session?: unknown;
+        window?: unknown;
+        window_id?: unknown;
+      };
       if (typeof parsed.session === "string" && typeof parsed.window === "string") {
-        return { session: parsed.session, window: parsed.window };
+        return {
+          session: parsed.session,
+          window: parsed.window,
+          ...(typeof parsed.window_id === "string"
+            ? { window_id: parsed.window_id }
+            : {}),
+        };
       }
       return null;
     } catch {
@@ -284,9 +296,19 @@ export function AgentTerminalsView() {
       const parsed = JSON.parse(window.localStorage.getItem(PANE_TARGETS_STORAGE_KEY) ?? "[]") as unknown;
       if (!Array.isArray(parsed)) return [null, null, null];
       return [0, 1, 2].map((index) => {
-        const item = parsed[index] as { session?: unknown; window?: unknown } | undefined;
+        const item = parsed[index] as {
+          session?: unknown;
+          window?: unknown;
+          window_id?: unknown;
+        } | undefined;
         return item && typeof item.session === "string" && typeof item.window === "string"
-          ? { session: item.session, window: item.window }
+          ? {
+              session: item.session,
+              window: item.window,
+              ...(typeof item.window_id === "string"
+                ? { window_id: item.window_id }
+                : {}),
+            }
           : null;
       });
     } catch {
@@ -469,7 +491,14 @@ export function AgentTerminalsView() {
   const activeTarget = paneTargets[Math.min(activePane, visiblePaneCount - 1)] ?? target;
   const selectedWindow = useMemo(() => {
     if (!activeTarget) return null;
-    return windows.find((w) => w.session === activeTarget.session && w.window === activeTarget.window) ?? null;
+    return (
+      windows.find((candidate) =>
+        activeTarget.window_id
+          ? candidate.window_id === activeTarget.window_id
+          : candidate.session === activeTarget.session &&
+            candidate.window === activeTarget.window,
+      ) ?? null
+    );
   }, [activeTarget, windows]);
   const activeConnection = activePane === 0
     ? { ready: socketReady, connecting: socketConnecting, error: null }
@@ -920,6 +949,7 @@ export function AgentTerminalsView() {
     void buildWsUrl("/api/agent-terminals/attach", {
       session: target.session,
       window: target.window,
+      ...(target.window_id ? { window_id: target.window_id } : {}),
       client_id: "agent-terminals-ui-pane-0",
       cols: attachCols,
       rows: attachRows,
@@ -1072,11 +1102,19 @@ export function AgentTerminalsView() {
   );
 
   const killWindow = useCallback(
-    async (win: { session: string; window: string }) => {
+    async (win: AgentTerminalWindow) => {
       actionErrorRef.current = null;
       setError(null);
       try {
-        await api.killDeadAgentTerminalWindow(win.session, win.window);
+        if (win.window_id) {
+          await api.killDeadAgentTerminalWindow(
+            win.session,
+            win.window,
+            win.window_id,
+          );
+        } else {
+          await api.killDeadAgentTerminalWindow(win.session, win.window);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         actionErrorRef.current = msg;
@@ -1099,7 +1137,7 @@ export function AgentTerminalsView() {
   // live tmux the native dialog hung for ~30s and still did not close the window. The
   // guard is therefore in-app — arming a row, never blocking, and auto-disarming so a
   // forgotten armed row cannot be killed by a later stray click.
-  const requestTerminate = useCallback((win: { session: string; window: string }) => {
+  const requestTerminate = useCallback((win: AgentTerminalWindow) => {
     actionErrorRef.current = null;
     setError(null);
     setPendingTerminate(paneTargetKey(win));
@@ -1117,7 +1155,14 @@ export function AgentTerminalsView() {
       setTerminateBusy(true);
       try {
         const external = !isManagedWindow(win);
-        if (external) {
+        if (win.window_id) {
+          await api.terminateAgentTerminalWindow(
+            win.session,
+            win.window,
+            external,
+            win.window_id,
+          );
+        } else if (external) {
           await api.terminateAgentTerminalWindow(win.session, win.window, true);
         } else {
           await api.terminateAgentTerminalWindow(win.session, win.window);
@@ -1289,7 +1334,18 @@ export function AgentTerminalsView() {
     setRenameBusy(true);
     setRenameError(null);
     try {
-      const response = await api.renameAgentTerminalWindow(selectedWindow.session, selectedWindow.window, name);
+      const response = selectedWindow.window_id
+        ? await api.renameAgentTerminalWindow(
+            selectedWindow.session,
+            selectedWindow.window,
+            name,
+            selectedWindow.window_id,
+          )
+        : await api.renameAgentTerminalWindow(
+            selectedWindow.session,
+            selectedWindow.window,
+            name,
+          );
       const oldKey = `${selectedWindow.session}:${selectedWindow.window}`;
       const newKey = `${selectedWindow.session}:${name}`;
       if (oldKey !== newKey) {
@@ -1925,7 +1981,7 @@ export function AgentTerminalsView() {
                     )}
                     {/* Live close: managed keeps the original two-step labels; extern gets a
                         sharper confirm (external:true) and stronger status-alert chrome. */}
-                    {!dead && (pendingTerminate === `${win.session}:${win.window}` ? (
+                    {!dead && (pendingTerminate === paneTargetKey(win) ? (
                       <>
                         <button
                           type="button"
@@ -2498,7 +2554,7 @@ export function AgentTerminalsView() {
         {/* Same two-step guard as the desktop rail: the first tap arms, the second kills.
             The sheet stays open in between so the armed state is visible where it was armed.
             Extern (managed===false) uses sharper German confirm labels + external:true. */}
-        {!sessionSheetDead && (pendingTerminate === `${selectedWindow.session}:${selectedWindow.window}` ? (
+        {!sessionSheetDead && (pendingTerminate === paneTargetKey(selectedWindow) ? (
           <button
             type="button"
             aria-label={sessionSheetManaged ? `Beenden bestätigen ${selectedWindow.session}:${selectedWindow.window}` : `Externes Fenster wirklich beenden? Gehört einem anderen Agenten/Prozess. ${selectedWindow.session}:${selectedWindow.window}`}
@@ -2745,6 +2801,7 @@ export function AgentTerminalsView() {
         <div className="grid gap-2 sm:grid-cols-2">
           {orderedOverview.map((win) => {
             const key = `${win.session}:${win.window}`;
+            const terminateKey = paneTargetKey(win);
             return (
               <FleetCard
                 key={key}
@@ -2758,7 +2815,7 @@ export function AgentTerminalsView() {
                 onRespawn={() => void respawnWindow(win)}
                 onKill={() => void killWindow(win)}
                 onTerminate={() => requestTerminate(win)}
-                terminateArmed={pendingTerminate === key}
+                terminateArmed={pendingTerminate === terminateKey}
                 terminateBusy={terminateBusy}
                 onConfirmTerminate={() => void confirmTerminate(win)}
                 onCancelTerminate={cancelTerminate}

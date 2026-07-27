@@ -44,4 +44,25 @@ describe("terminal multiview layout", () => {
     expect(resolvePaneTargets(windows, prior, 2)).toEqual(prior);
     expect(resolvePaneTargets(windows, prior, 1)).toEqual(prior);
   });
+
+  it("resolves legacy name targets and migrates them to stable IDs", () => {
+    const available: TerminalTarget[] = [
+      { session: "work", window: "cq:hermes-agent", window_id: "@140" },
+      { session: "work", window: "claude", window_id: "@141" },
+    ];
+    const legacy: Array<TerminalTarget | null> = [
+      { session: "work", window: "cq:hermes-agent" },
+      null,
+      null,
+      null,
+    ];
+
+    expect(resolvePaneTargets(available, legacy, 2)).toEqual([
+      available[0],
+      available[1],
+      null,
+      null,
+    ]);
+    expect(targetKey(available[0])).toBe("@140");
+  });
 });

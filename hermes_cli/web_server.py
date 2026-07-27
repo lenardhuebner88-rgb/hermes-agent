@@ -1856,6 +1856,7 @@ class AgentTerminalCreateRequest(AgentTerminalEnsureRequest):
 class AgentTerminalTargetRequest(BaseModel):
     session: str
     window: str
+    window_id: Optional[str] = None
 
 
 class AgentTerminalRespawnRequest(AgentTerminalTargetRequest):
@@ -20459,11 +20460,17 @@ async def agent_terminal_respawn(req: AgentTerminalRespawnRequest) -> Dict[str, 
 @app.post("/api/agent-terminals/rename")
 async def agent_terminal_rename(req: AgentTerminalRenameRequest) -> Dict[str, object]:
     try:
+        target_kwargs = (
+            {"window_id": req.window_id}
+            if req.window_id is not None
+            else {}
+        )
         window = await _agent_terminal_op(
             _agent_terminal_service().rename,
             req.session,
             req.window,
             req.name,
+            **target_kwargs,
         )
         return {"window": window.to_dict()}
     except (AgentTerminalError, OSError) as exc:
@@ -20473,8 +20480,16 @@ async def agent_terminal_rename(req: AgentTerminalRenameRequest) -> Dict[str, ob
 @app.post("/api/agent-terminals/kill-dead")
 async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str, object]:
     try:
+        target_kwargs = (
+            {"window_id": req.window_id}
+            if req.window_id is not None
+            else {}
+        )
         await _agent_terminal_op(
-            _agent_terminal_service().kill_dead, req.session, req.window
+            _agent_terminal_service().kill_dead,
+            req.session,
+            req.window,
+            **target_kwargs,
         )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
@@ -20484,11 +20499,17 @@ async def agent_terminal_kill_dead(req: AgentTerminalTargetRequest) -> Dict[str,
 @app.post("/api/agent-terminals/terminate")
 async def agent_terminal_terminate(req: AgentTerminalTerminateRequest) -> Dict[str, object]:
     try:
+        target_kwargs = (
+            {"window_id": req.window_id}
+            if req.window_id is not None
+            else {}
+        )
         await _agent_terminal_op(
             _agent_terminal_service().terminate_live,
             req.session,
             req.window,
             allow_external=req.external,
+            **target_kwargs,
         )
     except (AgentTerminalError, OSError) as exc:
         raise _agent_terminal_error(exc) from exc
@@ -20759,17 +20780,44 @@ async def agent_terminal_attach_ws(ws: WebSocket) -> None:
     isolated_target = None
     try:
         session = TmuxAgentSessionService.validate_name(ws.query_params.get("session") or "", field="session")
-        window = TmuxAgentSessionService.validate_name(ws.query_params.get("window") or "", field="window")
+        window = ws.query_params.get("window") or ""
+        window_id_raw = ws.query_params.get("window_id")
+        window_id = (
+            TmuxAgentSessionService.validate_window_id(window_id_raw)
+            if window_id_raw is not None
+            else None
+        )
+        if window_id is None:
+            window = TmuxAgentSessionService.validate_name(window, field="window")
         service = _agent_terminal_service()
+        if window_id is not None:
+            source_info = service.show(session, window_id)
+            session = source_info.session
         # Harden the source session before creating an isolated grouped client.
         service.ensure_session_options(session)
         attach_session = session
         attach_window = window
+        attach_window_id = window_id
         if ws.query_params.get("isolated") == "1":
-            isolated_target = service.create_isolated_attach(session, window)
+            if window_id is not None:
+                isolated_target = service.create_isolated_attach(
+                    session,
+                    window,
+                    window_id=window_id,
+                )
+            else:
+                isolated_target = service.create_isolated_attach(session, window)
             attach_session = isolated_target.session
             attach_window = isolated_target.window
-        argv = service.attach_argv(attach_session, attach_window)
+            attach_window_id = getattr(isolated_target, "window_id", None)
+        if attach_window_id is not None:
+            argv = service.attach_argv(
+                attach_session,
+                attach_window,
+                window_id=attach_window_id,
+            )
+        else:
+            argv = service.attach_argv(attach_session, attach_window)
     except (AgentTerminalError, KeyError) as exc:
         if isolated_target is not None:
             service.cleanup_isolated_attach(isolated_target.session)

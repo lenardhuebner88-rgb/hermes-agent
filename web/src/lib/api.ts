@@ -500,6 +500,8 @@ export interface AgentTerminalCapabilityState {
 export interface AgentTerminalWindow {
   session: string;
   window: string;
+  /** Stable tmux identity; preferred over the mutable display name when present. */
+  window_id?: string | null;
   active: boolean;
   pane_id: string;
   pid: number | null;
@@ -1239,17 +1241,27 @@ export const api = {
       `/api/agent-terminals/execution-capsule?${params.toString()}`,
     );
   },
-  killDeadAgentTerminalWindow: (session: string, window: string) =>
+  killDeadAgentTerminalWindow: (session: string, window: string, windowId?: string | null) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/kill-dead", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, window }),
+      body: JSON.stringify({ session, window, ...(windowId ? { window_id: windowId } : {}) }),
     }),
-  terminateAgentTerminalWindow: (session: string, window: string, external = false) =>
+  terminateAgentTerminalWindow: (
+    session: string,
+    window: string,
+    external = false,
+    windowId?: string | null,
+  ) =>
     fetchJSON<{ ok: boolean }>("/api/agent-terminals/terminate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, window, external }),
+      body: JSON.stringify({
+        session,
+        window,
+        external,
+        ...(windowId ? { window_id: windowId } : {}),
+      }),
     }),
   captureAgentTerminalWindow: (session: string, window: string, start?: number) =>
     fetchJSON<AgentTerminalCaptureResponse>("/api/agent-terminals/capture", {
@@ -1286,11 +1298,21 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ client_id: clientId }),
     }),
-  renameAgentTerminalWindow: (session: string, window: string, name: string) =>
+  renameAgentTerminalWindow: (
+    session: string,
+    window: string,
+    name: string,
+    windowId?: string | null,
+  ) =>
     fetchJSON<AgentTerminalWindowResponse>("/api/agent-terminals/rename", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session, window, name }),
+      body: JSON.stringify({
+        session,
+        window,
+        name,
+        ...(windowId ? { window_id: windowId } : {}),
+      }),
     }),
   getAgentTerminalOverview: () =>
     fetchJSON<AgentTerminalOverviewResponse>("/api/agent-terminals/overview"),

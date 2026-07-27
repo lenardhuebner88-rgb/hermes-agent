@@ -174,16 +174,29 @@ export function isManagedWindow(window: AgentTerminalWindow): boolean {
 export function pickInitialTarget(
   windows: AgentTerminalWindow[],
   preferredKind: AgentTerminalKind,
-  previous: { session: string; window: string } | null,
-): { session: string; window: string } | null {
+  previous: { session: string; window: string; window_id?: string | null } | null,
+): { session: string; window: string; window_id?: string | null } | null {
   if (!windows.length) return null;
-  if (previous && windows.some((w) => w.session === previous.session && w.window === previous.window)) return previous;
+  const previousWindow = previous
+    ? windows.find((candidate) =>
+        previous.window_id
+          ? candidate.window_id === previous.window_id
+          : candidate.session === previous.session && candidate.window === previous.window,
+      )
+    : undefined;
+  if (previousWindow) return targetFromWindow(previousWindow);
   const preferred = windows.find((w) => w.window === preferredKind);
-  return preferred ? { session: preferred.session, window: preferred.window } : { session: windows[0].session, window: windows[0].window };
+  return targetFromWindow(preferred ?? windows[0]);
 }
 
-export function targetFromWindow(window: AgentTerminalWindow): { session: string; window: string } {
-  return { session: window.session, window: window.window };
+export function targetFromWindow(
+  window: AgentTerminalWindow,
+): { session: string; window: string; window_id?: string | null } {
+  return {
+    session: window.session,
+    window: window.window,
+    ...(window.window_id ? { window_id: window.window_id } : {}),
+  };
 }
 
 export function orderWindowsForStrip(windows: AgentTerminalWindow[]): AgentTerminalWindow[] {

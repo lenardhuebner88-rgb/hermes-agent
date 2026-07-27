@@ -69,6 +69,14 @@ def test_validate_name_rejects_tmux_option_and_shell_payload() -> None:
         with pytest.raises(InvalidTarget):
             service.validate_name(value)
 
+    assert service.validate_window_id("@140") == "@140"
+    assert service.validate_window_target("@140") == "@140"
+    assert service._cmd_target("work", "@140") == "@140"
+    assert service._cmd_target("work", "claude") == "work:=claude"
+    for value in ("140", "@", "@-1", "@1;kill-server", "work:@140"):
+        with pytest.raises(InvalidTarget):
+            service.validate_window_id(value)
+
 
 def test_run_raises_on_tmux_stall(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -398,6 +406,8 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     created = service.ensure("hermes")
     assert created.session == "work"
     assert created.window == "hermes"
+    assert created.window_id is not None
+    assert created.to_dict()["window_id"] == created.window_id
     assert created.cwd == str(Path.home())
     assert any(w.window == "hermes" for w in service.list_windows("work"))
 
@@ -411,6 +421,11 @@ def test_temp_tmux_lifecycle_capture_send_and_secret_safe_logging(tmp_path: Path
     attach_argv = metadata["attach_argv"]
     assert isinstance(attach_argv, list)
     assert attach_argv[-1] == "work:=hermes"
+    assert service.attach_argv(
+        created.session,
+        created.window,
+        window_id=created.window_id,
+    )[-1] == created.window_id
     draft = service.handoff_draft("work", "hermes", start=-20)
     assert draft["target"] == "work:hermes"
     assert "content" not in draft or draft.get("content") is None
@@ -749,6 +764,60 @@ def test_terminate_live_allow_external_kills_non_parseable_work_window(
     service.terminate_live("work", "scratch-thing", allow_external=True)
 
 
+def test_window_id_drives_rename_and_dead_window_cleanup(
+    tmp_path: Path,
+    tmux_service: TmuxAgentSessionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = Path.home()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    _fake_agent_cli(home, "claude")
+    service = TmuxAgentSessionService(
+        socket_path=tmux_service.socket_path,
+        hermes_home=tmp_path,
+    )
+
+    managed = service.ensure("claude")
+    assert managed.window_id is not None
+    renamed = service.rename(
+        "work",
+        "ignored:unsafe-name",
+        "claude-renamed",
+        window_id=managed.window_id,
+    )
+    assert renamed.window == "claude-renamed"
+    assert renamed.window_id == managed.window_id
+
+    service._run("set-option", "-g", "remain-on-exit", "on")
+    special_name = "cq:dead-agent"
+    service._run(
+        "new-window",
+        "-d",
+        "-t",
+        "work:",
+        "-n",
+        special_name,
+        "sh -c 'exit 0'",
+    )
+    time.sleep(0.3)
+    special = next(
+        item
+        for item in service.list_windows("work")
+        if item.window == special_name
+    )
+    assert special.window_id is not None
+    assert special.dead or not special.pid
+    service.kill_dead(
+        "work",
+        special_name,
+        window_id=special.window_id,
+    )
+    assert all(
+        item.window_id != special.window_id
+        for item in service.list_windows("work")
+    )
+
+
 def test_terminate_live_already_killed_window_is_success(
     tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -895,7 +964,7 @@ def test_kill_dead_kill_window_toctou_already_gone_is_success(
     service.ensure("claude")
 
     # Force dead classification via display-message fixture, then fail kill-window.
-    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t\t{home}\n"
+    stdout = f"work\tclaude\t@2\t1\t%1\t12345\t1\tsh\t1751500000\t{home}\n"
     real_run = TmuxAgentSessionService._run
     calls: list[tuple[str, ...]] = []
 
@@ -1160,7 +1229,7 @@ def test_respawn_and_kill_refuse_unparsable_pid_when_pane_not_marked_dead(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\tnot-a-pid\t0\tsh\t1751500000\t\t{home}\n"
+    stdout = f"work\tclaude\t@2\t1\t%1\tnot-a-pid\t0\tsh\t1751500000\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     with pytest.raises(CapabilityError, match="not marked dead"):
@@ -1302,7 +1371,7 @@ def test_list_windows_parses_real_tab_separated_format_matches_create_new_base_n
     fo_dir.mkdir(parents=True)
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
 
-    fixture = f"work\tclaude-fo\t1\t%9\t9999\t0\tclaude\t1751500000\t\t{fo_dir}\n"
+    fixture = f"work\tclaude-fo\t@42\t1\t%9\t9999\t0\tclaude\t1751500000\t\t{fo_dir}\n"
     calls = _patch_list_windows_output(monkeypatch, fixture)
     windows = service.list_windows("work")
 
@@ -1310,6 +1379,7 @@ def test_list_windows_parses_real_tab_separated_format_matches_create_new_base_n
     parsed = windows[0]
     assert parsed.session == "work"
     assert parsed.window == "claude-fo"
+    assert parsed.window_id == "@42"
     assert parsed.active is True
     assert parsed.pane_id == "%9"
     assert parsed.pid == 9999
@@ -1337,7 +1407,7 @@ def test_kill_dead_kills_when_pane_dead_flag_set_even_with_pid_present(
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
     service.ensure("claude")
 
-    stdout = f"work\tclaude\t1\t%1\t12345\t1\tsh\t1751500000\t\t{home}\n"
+    stdout = f"work\tclaude\t@2\t1\t%1\t12345\t1\tsh\t1751500000\t{home}\n"
     calls = _patch_display_message(monkeypatch, stdout)
 
     service.kill_dead("work", "claude")
@@ -1396,7 +1466,11 @@ def test_kill_dead_surfaces_manifest_lifecycle_write_failure(
         "_read_window_option",
         lambda *_args: "run-manifest-failure",
     )
-    monkeypatch.setattr(service, "cleanup_related_isolated_attaches", lambda *_args: [])
+    monkeypatch.setattr(
+        service,
+        "cleanup_related_isolated_attaches",
+        lambda *_args, **_kwargs: [],
+    )
     monkeypatch.setattr(service, "_kill_window_idempotent", lambda *_args, **_kwargs: True)
 
     def fail_update(_terminal_run_id: str, **_fields: object) -> dict[str, object]:

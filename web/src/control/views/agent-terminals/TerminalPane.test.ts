@@ -14,6 +14,24 @@ describe("TerminalPane helpers", () => {
     });
   });
 
+  it("prefers a stable window_id while retaining the display name", () => {
+    expect(
+      buildAttachQuery(
+        { session: "work", window: "cq:hermes-agent", window_id: "@140" },
+        0,
+        80,
+        24,
+        true,
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        session: "work",
+        window: "cq:hermes-agent",
+        window_id: "@140",
+      }),
+    );
+  });
+
   it("omits isolated mode for a direct single-pane attach", () => {
     expect(buildAttachQuery({ session: "work", window: "hermes" }, 0, 80, 24, false)).not.toHaveProperty("isolated");
   });

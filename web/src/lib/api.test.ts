@@ -351,6 +351,56 @@ describe("agent terminal worker contract", () => {
     );
   });
 
+  it("prefers optional window_id for lifecycle calls and keeps name fallback", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => mockResponse(200, { jsonBody: { ok: true } })));
+
+    await api.killDeadAgentTerminalWindow("work", "cq:dead-agent", "@141");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-terminals/kill-dead",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session: "work",
+          window: "cq:dead-agent",
+          window_id: "@141",
+        }),
+      }),
+    );
+
+    await api.terminateAgentTerminalWindow("work", "cq:hermes-agent", true, "@140");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-terminals/terminate",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session: "work",
+          window: "cq:hermes-agent",
+          external: true,
+          window_id: "@140",
+        }),
+      }),
+    );
+
+    await api.renameAgentTerminalWindow("work", "claude", "claude-renamed", "@142");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-terminals/rename",
+      expect.objectContaining({
+        body: JSON.stringify({
+          session: "work",
+          window: "claude",
+          name: "claude-renamed",
+          window_id: "@142",
+        }),
+      }),
+    );
+
+    await api.killDeadAgentTerminalWindow("work", "claude");
+    expect(fetch).toHaveBeenLastCalledWith(
+      "/api/agent-terminals/kill-dead",
+      expect.objectContaining({
+        body: JSON.stringify({ session: "work", window: "claude" }),
+      }),
+    );
+  });
+
   it("bindAgentTerminalExecutionCapsule sends only the closed handoff contract", async () => {
     vi.stubGlobal(
       "fetch",

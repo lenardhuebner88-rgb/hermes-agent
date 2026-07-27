@@ -165,6 +165,20 @@ describe("AgentTerminalsView state helpers", () => {
     expect(pickInitialTarget(windows, "codex", null)).toEqual({ session: "hermes-agents", window: "codex" });
     expect(pickInitialTarget([], "hermes", null)).toBeNull();
   });
+
+  it("migrates a legacy stored name target to the inventory window_id", () => {
+    const inventory = [{ ...running, window_id: "@140" }];
+    expect(
+      pickInitialTarget(inventory, "hermes", {
+        session: running.session,
+        window: running.window,
+      }),
+    ).toEqual({
+      session: running.session,
+      window: running.window,
+      window_id: "@140",
+    });
+  });
 });
 
 describe("pickDeepLinkedTarget", () => {

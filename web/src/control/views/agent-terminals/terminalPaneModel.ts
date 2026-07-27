@@ -20,6 +20,7 @@ export function buildAttachQuery(
 ): Record<string, string> {
   return {
     session: target.session, window: target.window,
+    ...(target.window_id ? { window_id: target.window_id } : {}),
     client_id: `agent-terminals-ui-pane-${paneOrder}`,
     cols: String(cols), rows: String(rows),
     ...(isolated ? { isolated: "1" } : {}),
