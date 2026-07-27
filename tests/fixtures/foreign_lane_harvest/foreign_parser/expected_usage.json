@@ -1,0 +1,12 @@
+{
+  "usage": {
+    "input_tokens": 139820,
+    "cache_read_input_tokens": 4615936,
+    "output_tokens": 41402,
+    "reasoning_tokens": 34745,
+    "total_tokens": 4797158
+  },
+  "sessionId": "019f9fdd-f904-7f82-a4b1-4157789d4310",
+  "num_turns": 47,
+  "total_cost_usd": 1.9128328
+}
