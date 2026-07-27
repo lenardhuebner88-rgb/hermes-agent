@@ -65,7 +65,14 @@ DEFAULT_STATE_ROOT = _HERMES_HOME / "loops"
 NOTIFY_SCRIPT = _HERMES_HOME / "scripts" / "discord-notify.py"
 
 QUEUE_STAGES = ("00-planned", "10-building", "20-verified", "30-landed", "90-bounced")
-DEFAULT_STOP = {"max_rounds": 12, "max_hours": 7, "fail_streak": 2, "dry_rounds": 2}
+DEFAULT_STOP = {
+    "max_rounds": 12,
+    "max_hours": 7,
+    "fail_streak": 2,
+    "dry_rounds": 2,
+    # N pipeline-nights ending DRY in a row before ledger+notify. 0 = off.
+    "dry_streak_alert": 3,
+}
 
 
 def _utc_iso() -> str:
@@ -321,7 +328,15 @@ def load_pack(packs_dir: Path, name: str) -> Pack:
     for key, val in (raw.get("stop") or {}).items():
         if key not in DEFAULT_STOP:
             raise ManifestError(f"Pack {name!r}: stop.{key} unbekannt (erlaubt: {sorted(DEFAULT_STOP)})")
-        if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+        if not isinstance(val, int) or isinstance(val, bool):
+            raise ManifestError(f"Pack {name!r}: stop.{key} muss Ganzzahl sein")
+        # dry_streak_alert: 0 schaltet die Eskalation ab; alle anderen stop-Keys > 0.
+        if key == "dry_streak_alert":
+            if val < 0:
+                raise ManifestError(
+                    f"Pack {name!r}: stop.{key} muss nicht-negative Ganzzahl sein"
+                )
+        elif val <= 0:
             raise ManifestError(f"Pack {name!r}: stop.{key} muss positive Ganzzahl sein")
         stop[key] = val
 
@@ -1089,6 +1104,73 @@ class LoopRunner:
             return self.status_path.read_text(encoding="utf-8").splitlines()[0].strip()
         except (FileNotFoundError, IndexError):
             return ""
+
+    @property
+    def dry_streak_path(self) -> Path:
+        """Persistent DRY-night counter for this pack (not LEDGER.md)."""
+        return self.state / "dry-streak.json"
+
+    def _read_dry_streak(self) -> int:
+        """Best-effort read of consecutive DRY nights. Corrupt/missing → 0."""
+        try:
+            raw = json.loads(self.dry_streak_path.read_text(encoding="utf-8"))
+            n = raw.get("streak", 0) if isinstance(raw, dict) else 0
+            if not isinstance(n, int) or isinstance(n, bool) or n < 0:
+                return 0
+            return n
+        except Exception:  # noqa: BLE001 — unreadable state never aborts a run
+            return 0
+
+    def _write_dry_streak(self, streak: int) -> None:
+        """Best-effort write of the DRY-night counter. Never raises."""
+        try:
+            self.state.mkdir(parents=True, exist_ok=True)
+            payload = {"streak": int(streak), "updated_at": _utc_iso()}
+            self.dry_streak_path.write_text(
+                json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        except Exception as exc:  # noqa: BLE001 — counter must not crash the loop
+            logger.warning("dry-streak write fehlgeschlagen: %s", exc)
+
+    def _reset_dry_streak(self) -> None:
+        """Clear the counter after a non-DRY productive end (plans/build)."""
+        try:
+            if self._read_dry_streak() == 0 and not self.dry_streak_path.exists():
+                return
+            self._write_dry_streak(0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dry-streak reset fehlgeschlagen: %s", exc)
+
+    def _note_dry_end(self, status: str) -> None:
+        """Increment DRY streak; from threshold on, ledger + Discord notify.
+
+        Never raises. Return value of the night stay True — escalation reports,
+        it does not abort.
+        """
+        try:
+            streak = self._read_dry_streak() + 1
+            self._write_dry_streak(streak)
+            threshold = self.stop_cfg("dry_streak_alert")
+            if threshold <= 0 or streak < threshold:
+                return
+            # Operator-Klartext (Discord): Pack, Nächte, last-status wörtlich, Bitte.
+            msg = (
+                f"{self.pack.name}: DRY-Streak {streak} Nächte in Folge "
+                f"(last-status: {status}) — bitte Loop prüfen oder stilllegen"
+            )
+            self.ledger(
+                f"DRY-STREAK: {streak} Nächte in Folge (status={status})"
+            )
+            self.ledger_event(
+                phase="plan",
+                verdict="dry_streak",
+                streak=streak,
+                threshold=threshold,
+                reason=status,
+            )
+            self.notify(msg)
+        except Exception as exc:  # noqa: BLE001 — same house style as ledger_event
+            logger.warning("dry-streak note fehlgeschlagen: %s", exc)
 
     def stop_requested(self) -> bool:
         return self.stop_path.exists()
@@ -1883,7 +1965,9 @@ class LoopRunner:
                 status = self.last_status()
                 if status.startswith("DRY"):
                     # Echter DRY-Kontrakt: nichts zu bauen, still-ok Ende.
+                    # Zählt für die DRY-Streak-Eskalation (Serie = toter Loop).
                     self.say("Keine Pläne — nichts zu bauen.")
+                    self._note_dry_end(status)
                     self.report()
                     return True
                 # Anomalie (leer, TIMEOUT, sonst ohne Statuskontrakt): genau 1 Retry.
@@ -1894,7 +1978,9 @@ class LoopRunner:
                 if self.qcount("00-planned") == 0:
                     status2 = self.last_status()
                     if status2.startswith("DRY"):
+                        # Auch der Plan-Retry-DRY-Ausgang zählt (beide DRY-Exits).
                         self.say("Keine Pläne — nichts zu bauen.")
+                        self._note_dry_end(status2)
                         self.report()
                         return True
                     msg = (
@@ -1911,6 +1997,9 @@ class LoopRunner:
                     self.report()
                     return True
                 # Retry hat Pläne geliefert → normal weiter in cmd_run.
+        # Nicht-DRY-Ende (Pläne vorhanden / skip_plan / Build-Pfad) → Streak nullen.
+        # Sweep-DRY in cmd_run bleibt unberührt (kein _note_dry_end dort).
+        self._reset_dry_streak()
         self.cmd_run(fresh=fresh)
         if self.pack.autoland and self._autoland_pending():
             if self._manual_land_required("night"):
