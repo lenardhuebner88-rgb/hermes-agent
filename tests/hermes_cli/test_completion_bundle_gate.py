@@ -125,7 +125,7 @@ def test_tool_completion_result_reports_actual_integration_park(
     assert payload["status"] == "blocked"
     assert payload["status_reason"] == "integration parked"
     assert (
-        f"Completed {worker_env} — status now 'blocked' (integration parked)"
+        f"{worker_env} accepted — status now 'blocked' (integration parked)"
         == payload["message"]
     )
 

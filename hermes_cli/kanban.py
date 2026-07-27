@@ -2714,13 +2714,23 @@ def _show_print_header(task: Any) -> None:
         print(f"  due:       {_fmt_ts(task.due_at)}")
 
 
-def _show_print_diagnostics(task: Any, events: Any, runs: Any) -> None:
+def _show_print_diagnostics(
+    task: Any,
+    events: Any,
+    runs: Any,
+    conn: Any,
+) -> None:
     """Print the diagnostics block used by human-readable ``show`` output."""
     # Diagnostics section — surface active distress signals at the top
     # of show output so CLI users see them before scrolling through
     # comments / runs.
     from hermes_cli import kanban_diagnostics as kd
-    diags = kd.compute_task_diagnostics(task, events, runs)
+    diags = kd.compute_task_diagnostics(
+        task,
+        events,
+        runs,
+        config=kd.config_for_board_connection({}, conn),
+    )
     if diags:
         sev_marker = {"warning": "⚠", "error": "!!", "critical": "!!!"}
         print(f"\n  Diagnostics ({len(diags)}):")
@@ -2827,19 +2837,19 @@ def _cmd_show(args: argparse.Namespace) -> int:
         # looking like a no-op when the worker actually did real work.
         latest_summary = kb.latest_summary(conn, args.task_id)
 
-    if getattr(args, "json", False):
-        payload = _show_build_json_payload(
-            task, comments, events, parents, children, runs, latest_summary,
-        )
-        _emit_json(payload)
-        return 0
+        if getattr(args, "json", False):
+            payload = _show_build_json_payload(
+                task, comments, events, parents, children, runs, latest_summary,
+            )
+            _emit_json(payload)
+            return 0
 
-    _show_print_header(task)
-    _show_print_diagnostics(task, events, runs)
-    _show_print_timeline(
-        task, parents, children, latest_summary, comments, events, runs,
-    )
-    return 0
+        _show_print_header(task)
+        _show_print_diagnostics(task, events, runs, conn)
+        _show_print_timeline(
+            task, parents, children, latest_summary, comments, events, runs,
+        )
+        return 0
 
 
 def _cmd_assign(args: argparse.Namespace) -> int:
@@ -2934,6 +2944,7 @@ def _diagnostics_collect(
     Pure extraction of the DB/collection phase of ``_cmd_diagnostics``.
     Missing-task early exit raises ``_DiagnosticsEarlyExit``.
     """
+    diag_config = kd.config_for_board_connection(diag_config, conn)
     # Either one-task mode or fleet mode.
     if getattr(args, "task", None):
         task = kb.get_task(conn, args.task)
@@ -3358,7 +3369,8 @@ def _complete_one_task(
         )
         return False
     status, status_reason = _completion_status_after(kb.get_task(conn, tid))
-    print(f"Completed {tid} — status now '{status}' ({status_reason})")
+    prefix = f"Completed {tid}" if status == "done" else f"{tid} accepted"
+    print(f"{prefix} — status now '{status}' ({status_reason})")
     return True
 
 
@@ -3630,7 +3642,12 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
             else:
                 if reason:
                     kb.add_comment(conn, tid, author, f"UNBLOCK: {reason}")
-                print(f"Unblocked {tid}" + (f": {reason}" if reason else ""))
+                task = kb.get_task(conn, tid)
+                status = str(getattr(task, "status", None) or "unknown")
+                print(
+                    f"Unblocked {tid} — status now '{status}'"
+                    + (f": {reason}" if reason else "")
+                )
     return 0 if not failed else 1
 
 def _cmd_promote(args: argparse.Namespace) -> int:

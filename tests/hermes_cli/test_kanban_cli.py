@@ -305,11 +305,21 @@ def test_run_slash_block_unblock_cycle(kanban_home):
     assert "Unblocked" in kc.run_slash(f"unblock {tid}")
 
 
-def test_unblock_echo_matches_the_ready_row_state(kanban_home, capsys):
+def test_unblock_echo_matches_the_todo_row_state(kanban_home, capsys):
     with kb.connect_closing() as conn:
-        task_id = kb.create_task(conn, title="echo unblock", assignee="alice")
-        assert kb.claim_task(conn, task_id) is not None
-        assert kb.block_task(conn, task_id, reason="operator input")
+        parent_id = kb.create_task(conn, title="open parent", assignee="alice")
+        task_id = kb.create_task(
+            conn,
+            title="echo unblock",
+            assignee="alice",
+            parents=[parent_id],
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'operator' "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
 
     rc = kc._cmd_unblock(
         argparse.Namespace(
@@ -321,9 +331,12 @@ def test_unblock_echo_matches_the_ready_row_state(kanban_home, capsys):
     )
 
     assert rc == 0
-    assert f"Unblocked {task_id}" in capsys.readouterr().out
+    assert (
+        f"Unblocked {task_id} — status now 'todo'\n"
+        == capsys.readouterr().out
+    )
     with kb.connect_closing() as conn:
-        assert kb.get_task(conn, task_id).status == "ready"
+        assert kb.get_task(conn, task_id).status == "todo"
 
 
 def test_complete_echo_reports_actual_integration_park(monkeypatch, capsys):
@@ -342,7 +355,7 @@ def test_complete_echo_reports_actual_integration_park(monkeypatch, capsys):
     )
 
     assert (
-        "Completed t_parked — status now 'blocked' (integration parked)"
+        "t_parked accepted — status now 'blocked' (integration parked)"
         in capsys.readouterr().out
     )
 

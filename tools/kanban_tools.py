@@ -831,6 +831,11 @@ def _handle_complete(args: dict, **kw) -> str:
             status, status_reason = _completion_status_after(
                 kb.get_task(conn, tid)
             )
+            prefix = (
+                f"Completed {tid}"
+                if status == "done"
+                else f"{tid} accepted"
+            )
             run = kb.latest_run(conn, tid)
             return _ok(
                 task_id=tid,
@@ -838,7 +843,7 @@ def _handle_complete(args: dict, **kw) -> str:
                 status=status,
                 status_reason=status_reason,
                 message=(
-                    f"Completed {tid} — status now '{status}' "
+                    f"{prefix} — status now '{status}' "
                     f"({status_reason})"
                 ),
             )
