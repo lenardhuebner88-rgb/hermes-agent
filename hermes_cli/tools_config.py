@@ -2647,26 +2647,6 @@ def _visible_providers(
 
     return visible
 
-
-def _hidden_nous_gateway_message(
-    cat: dict,
-    config: dict,
-    capability: str,
-    *,
-    force_fresh: bool = False,
-) -> str:
-    """Deprecated: Nous Tool Gateway rows are no longer hidden.
-
-    Previously this returned a "log in / upgrade" banner shown above a
-    category when its Nous-managed rows were filtered out for unentitled
-    users. Those rows are now always listed (see ``_visible_providers``), and
-    the login + entitlement guidance happens inline when the user selects one
-    (``ensure_nous_portal_access``). Kept as a no-op so call sites stay simple;
-    always returns an empty string.
-    """
-    return ""
-
-
 _POST_SETUP_INSTALLED: dict = {
     # post_setup_key -> predicate(): True when the install side-effect
     # is already satisfied. Used by `_toolset_needs_configuration_prompt`
@@ -2913,12 +2893,6 @@ def _configure_tool_category(
     icon = cat.get("icon", "")
     name = cat["name"]
     providers = _visible_providers(cat, config, force_fresh=force_fresh)
-    hidden_nous_message = _hidden_nous_gateway_message(
-        cat,
-        config,
-        f"the Nous Subscription provider for {name}",
-        force_fresh=force_fresh,
-    )
 
     # Check Python version requirement
     if cat.get("requires_python"):
@@ -2939,9 +2913,6 @@ def _configure_tool_category(
         # For single-provider tools, show a note if available
         if cat.get("setup_note"):
             _print_info(f"  {cat['setup_note']}")
-        if hidden_nous_message:
-            for line in hidden_nous_message.splitlines():
-                _print_warning(f"  {line}")
         _configure_provider(provider, config, force_fresh=force_fresh)
     else:
         # Multiple providers - let user choose
@@ -2951,9 +2922,6 @@ def _configure_tool_category(
         print(color(f"  --- {icon} {name} - {title} ---", Colors.CYAN))
         if cat.get("setup_note"):
             _print_info(f"  {cat['setup_note']}")
-        if hidden_nous_message:
-            for line in hidden_nous_message.splitlines():
-                _print_warning(f"  {line}")
         print()
 
         # Plain text labels only (no ANSI codes in menu items)
@@ -3982,27 +3950,15 @@ def _configure_tool_category_for_reconfig(
     icon = cat.get("icon", "")
     name = cat["name"]
     providers = _visible_providers(cat, config, force_fresh=force_fresh)
-    hidden_nous_message = _hidden_nous_gateway_message(
-        cat,
-        config,
-        f"the Nous Subscription provider for {name}",
-        force_fresh=force_fresh,
-    )
 
     if len(providers) == 1:
         provider = providers[0]
         print()
         print(color(f"  --- {icon} {name} ({provider['name']}) ---", Colors.CYAN))
-        if hidden_nous_message:
-            for line in hidden_nous_message.splitlines():
-                _print_warning(f"  {line}")
         _reconfigure_provider(provider, config, force_fresh=force_fresh)
     else:
         print()
         print(color(f"  --- {icon} {name} - Choose a provider ---", Colors.CYAN))
-        if hidden_nous_message:
-            for line in hidden_nous_message.splitlines():
-                _print_warning(f"  {line}")
         print()
 
         provider_choices = []
