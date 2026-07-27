@@ -3797,14 +3797,14 @@ def test_board_done_limit_returns_authoritative_full_chain_summary(client, monke
     data = response.json()
     summaries = {row["root_id"]: row for row in data["chain_summaries"]}
     large = summaries[fixture["large_root"]]
-    assert large == {
+    assert {
         "root_id": fixture["large_root"],
         "root_title": "Large chain root",
         "total": 32,
         "done": 31,
         "status_counts": {"done": 31, "running": 1},
         "latest_completed_at": 1_800_000_030,
-    }
+    }.items() <= large.items()
     done_cards = next(column["tasks"] for column in data["columns"] if column["name"] == "done")
     assert len(done_cards) <= 30
     assert any(task["id"] == fixture["active"] for column in data["columns"] for task in column["tasks"])
@@ -3826,14 +3826,14 @@ def test_board_done_limit_keeps_fully_completed_omitted_chain_summary(client, mo
         for row in data["chain_summaries"]
         if row["root_id"] == fixture["completed_root"]
     )
-    assert summary == {
+    assert {
         "root_id": fixture["completed_root"],
         "root_title": "Completed omitted root",
         "total": 2,
         "done": 2,
         "status_counts": {"done": 2},
         "latest_completed_at": 1_800_000_200,
-    }
+    }.items() <= summary.items()
 
 
 def test_board_without_done_limit_adds_only_the_fleet_summary(client, monkeypatch):

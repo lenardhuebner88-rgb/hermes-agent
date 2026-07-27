@@ -82,6 +82,7 @@ scorecard_routes = route_contract.namespace("scorecard")
 _SHORT_TEXT_MAX_LENGTH = 512
 _FREE_TEXT_MAX_LENGTH = 20_000
 _LIST_MAX_LENGTH = 1_000
+_CHAIN_SUMMARY_STATION_LIMIT = 12
 _PUSH_HOOKS_REGISTERED = False
 _PUSH_DISABLED_REASONS_LOGGED: set[str] = set()
 _PUSH_OPERATOR_EVENT_IDS: OrderedDict[int, None] = OrderedDict()
@@ -90,6 +91,151 @@ _PUSH_OPERATOR_EVENT_IDS_MAX = 2_000
 
 ShortText = Annotated[str, Field(max_length=_SHORT_TEXT_MAX_LENGTH)]
 FreeText = Annotated[str, Field(max_length=_FREE_TEXT_MAX_LENGTH)]
+
+
+def _ordered_chain_stations(
+    members: list[Any],
+    predecessors: dict[str, set[str]],
+) -> list[Any]:
+    """Order chain members by dependency, with stable branch tie-breaking.
+
+    A station only follows its in-chain predecessors.  Independent branches
+    are ordered by ``created_at, id`` so repeated board reads remain stable;
+    malformed cyclic links fall back to that same order after their acyclic
+    prefix rather than making the compact summary non-deterministic.
+    """
+    member_by_id = {member.id: member for member in members}
+    member_ids = set(member_by_id)
+    pending = {
+        member.id: set(predecessors.get(member.id, set())) & member_ids
+        for member in members
+    }
+    ordered: list[Any] = []
+    ready = [member for member in members if not pending[member.id]]
+    key = lambda member: (member.created_at, member.id)
+
+    while ready:
+        member = min(ready, key=key)
+        ready.remove(member)
+        ordered.append(member)
+        for candidate in members:
+            if member.id not in pending[candidate.id]:
+                continue
+            pending[candidate.id].remove(member.id)
+            if not pending[candidate.id] and candidate not in ordered:
+                ready.append(candidate)
+
+    if len(ordered) != len(members):
+        ordered.extend(
+            sorted(
+                (member for member in members if member not in ordered),
+                key=key,
+            )
+        )
+    return ordered
+
+
+def _task_chain_context(conn: sqlite3.Connection, task: Any) -> Optional[dict[str, Any]]:
+    """Return additive navigation context when a task is linked into a chain."""
+    tasks = kanban_db.list_tasks(conn, include_archived=True)
+    task_by_id = {candidate.id: candidate for candidate in tasks}
+    if task.id not in task_by_id:
+        return None
+
+    link_rows = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    if not any(task.id in {row["parent_id"], row["child_id"]} for row in link_rows):
+        return None
+
+    dependents: dict[str, list[str]] = {}
+    predecessors: dict[str, set[str]] = {}
+    for row in link_rows:
+        parent_id = row["parent_id"]
+        child_id = row["child_id"]
+        if parent_id not in task_by_id or child_id not in task_by_id:
+            continue
+        dependents.setdefault(parent_id, []).append(child_id)
+        predecessors.setdefault(child_id, set()).add(parent_id)
+
+    root_cache: dict[str, str] = {}
+
+    def resolve_root(task_id: str) -> str:
+        visited: list[str] = []
+        current = task_id
+        while current not in root_cache:
+            if current in visited:
+                break
+            visited.append(current)
+            next_ids = dependents.get(current)
+            if not next_ids:
+                break
+            current = min(next_ids)
+        root_id = root_cache.get(current, current)
+        for visited_id in visited:
+            root_cache[visited_id] = root_id
+        return root_id
+
+    root_id = resolve_root(task.id)
+    members = [candidate for candidate in tasks if resolve_root(candidate.id) == root_id]
+    ordered_members = _ordered_chain_stations(members, predecessors)
+    position = next(
+        (index for index, member in enumerate(ordered_members) if member.id == task.id),
+        None,
+    )
+    if position is None:
+        return None
+
+    member_ids = {member.id for member in members}
+    first_members = [
+        member
+        for member in members
+        if not (predecessors.get(member.id, set()) & member_ids)
+    ]
+    first_member = min(
+        first_members or members,
+        key=lambda member: (member.created_at, member.id),
+    )
+    planspec_sources = {
+        row["id"]: row["planspec_source"]
+        for row in conn.execute(
+            "SELECT id, planspec_source FROM tasks "
+            "WHERE planspec_source IS NOT NULL"
+        ).fetchall()
+    }
+    planspec_source = next(
+        (
+            planspec_sources[member.id]
+            for member in sorted(members, key=lambda member: (member.created_at, member.id))
+            if member.id in planspec_sources
+        ),
+        None,
+    )
+    statuses = {member.status for member in members}
+    done_statuses = {"done", "archived"}
+    if statuses <= done_statuses:
+        chain_state = "fertig"
+    elif statuses & done_statuses and "scheduled" in statuses:
+        chain_state = "angebrochen"
+    elif statuses == {"scheduled"}:
+        chain_state = "gehalten"
+    else:
+        chain_state = "laeuft"
+
+    def station(member: Any) -> dict[str, str]:
+        return {"id": member.id, "title": member.title}
+
+    return {
+        "root_id": root_id,
+        "chain_identifier": Path(planspec_source).stem if planspec_source else first_member.title,
+        "chain_state": chain_state,
+        "position": position + 1,
+        "total": len(ordered_members),
+        "previous_station": station(ordered_members[position - 1]) if position else None,
+        "next_station": (
+            station(ordered_members[position + 1])
+            if position + 1 < len(ordered_members)
+            else None
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +964,7 @@ def get_board(
         # resolve each card's chain root below.
         link_counts: dict[str, dict[str, int]] = {}
         dependents: dict[str, list[str]] = {}
+        predecessors: dict[str, set[str]] = {}
         for row in conn.execute(
             "SELECT parent_id, child_id FROM task_links"
         ).fetchall():
@@ -828,6 +975,7 @@ def get_board(
                 "parents"
             ] += 1
             dependents.setdefault(row["parent_id"], []).append(row["child_id"])
+            predecessors.setdefault(row["child_id"], set()).add(row["parent_id"])
 
         from plugins.kanban.dashboard.fleet_board_readmodel import (
             build_board_summary,
@@ -862,6 +1010,22 @@ def get_board(
                 root_cache[v] = sink
             return sink
 
+        # Keep summary costs and PlanSpec labels on the same constant-query
+        # footing as card enrichment below. Both maps deliberately cover the
+        # full board, because chain summaries are computed before done paging.
+        all_task_ids = [task.id for task in tasks]
+        cost_map = kanban_db.batch_task_costs(conn, all_task_ids)
+        planspec_source_map: dict[str, str] = {}
+        if all_task_ids:
+            placeholders = ",".join("?" for _ in all_task_ids)
+            planspec_source_map = {
+                row["id"]: row["planspec_source"]
+                for row in conn.execute(
+                    f"SELECT id, planspec_source FROM tasks WHERE id IN ({placeholders}) AND planspec_source IS NOT NULL",
+                    all_task_ids,
+                ).fetchall()
+            }
+
         chain_summaries: Optional[list[dict[str, Any]]] = None
         if done_limit is not None:
             # Authoritative roll-up over the FULL board, before the done page is
@@ -888,17 +1052,95 @@ def get_board(
                     for member in members
                     if member.completed_at is not None
                 ]
+                member_ids = {member.id for member in members}
+                first_members = [
+                    member
+                    for member in members
+                    if not (predecessors.get(member.id, set()) & member_ids)
+                ]
+                first_member = min(
+                    first_members or members,
+                    key=lambda member: (member.created_at, member.id),
+                )
+                planspec_source = next(
+                    (
+                        planspec_source_map[member.id]
+                        for member in sorted(
+                            members,
+                            key=lambda member: (member.created_at, member.id),
+                        )
+                        if member.id in planspec_source_map
+                    ),
+                    None,
+                )
+                chain_identifier = (
+                    Path(planspec_source).stem if planspec_source else first_member.title
+                )
+                statuses = {member.status for member in members}
+                done_statuses = {"done", "archived"}
+                if statuses <= done_statuses:
+                    chain_state = "fertig"
+                    state_since = max(completed_values) if completed_values else None
+                elif statuses & done_statuses and "scheduled" in statuses:
+                    chain_state = "angebrochen"
+                    state_since = min(completed_values) if completed_values else None
+                elif statuses == {"scheduled"}:
+                    chain_state = "gehalten"
+                    state_since = min(member.created_at for member in members)
+                else:
+                    chain_state = "laeuft"
+                    state_since = min(member.created_at for member in members)
+                state_age_seconds = (
+                    max(0, int(time.time() - state_since))
+                    if state_since is not None
+                    else None
+                )
+                station_limit = (
+                    0 if chain_state == "fertig" else _CHAIN_SUMMARY_STATION_LIMIT
+                )
+                ordered_members = _ordered_chain_stations(members, predecessors)
+                stations = [
+                    {
+                        "id": member.id,
+                        "title": member.title,
+                        "status": member.status,
+                        "lane": member.assignee,
+                        "runtime_seconds": (
+                            max(
+                                0,
+                                int((member.completed_at or time.time()) - member.started_at),
+                            )
+                            if member.started_at is not None
+                            else None
+                        ),
+                        "cost_usd": float(
+                            cost_map.get(member.id, {}).get("cost_usd") or 0
+                        ),
+                        "started_at": member.started_at,
+                        "completed_at": member.completed_at,
+                    }
+                    for member in ordered_members[:station_limit]
+                ]
                 chain_summaries.append(
                     {
                         "root_id": root_id,
                         "root_title": root.title,
                         "total": len(members),
+                        "station_limit": station_limit,
+                        "stations": stations,
                         "done": sum(
                             member.status in {"done", "archived"} for member in members
                         ),
                         "status_counts": status_counts,
                         "latest_completed_at": (
                             max(completed_values) if completed_values else None
+                        ),
+                        "state": chain_state,
+                        "chain_identifier": chain_identifier,
+                        "state_age_seconds": state_age_seconds,
+                        "cost_usd": sum(
+                            float(cost_map.get(member.id, {}).get("cost_usd") or 0)
+                            for member in members
                         ),
                     }
                 )
@@ -950,10 +1192,7 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
-        # Per-task cost/token rollup for the Flow-board card footer — one batch
-        # query (mirrors the chain-graph per-node aggregate). Tasks with no runs
-        # are omitted, so their cards render no cost footer.
-        cost_map = kanban_db.batch_task_costs(conn, [t.id for t in tasks])
+
         # Slice b: the live review stage (verifier→reviewer→critic) currently
         # targeted, for the chain card's stage pill. One batch query; only surfaced
         # for tasks actually in ``review`` (below), so a done task that was once
@@ -969,17 +1208,6 @@ def get_board(
         if blocked_ids:
             block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
             operator_question_map = kanban_db.blocked_task_operator_questions(conn, tasks)
-        planspec_source_map: dict[str, str] = {}
-        if tasks:
-            placeholders = ",".join("?" for _ in tasks)
-            planspec_source_map = {
-                row["id"]: row["planspec_source"]
-                for row in conn.execute(
-                    f"SELECT id, planspec_source FROM tasks WHERE id IN ({placeholders}) AND planspec_source IS NOT NULL",
-                    [t.id for t in tasks],
-                ).fetchall()
-            }
-
         for t in tasks:
             full = summary_map.get(t.id)
             preview = (
@@ -1167,6 +1395,9 @@ def get_task(
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
         task_d["block_reason"] = full_summary if task.status == "blocked" else None
+        chain_context = _task_chain_context(conn, task)
+        if chain_context is not None:
+            task_d["chain_context"] = chain_context
         links = _links_for(conn, task_id)
         child_results = []
         if detail_view == "full":
