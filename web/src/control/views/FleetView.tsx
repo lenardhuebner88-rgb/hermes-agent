@@ -647,6 +647,7 @@ export function FleetView() {
                   selectedNodeId={nodeDetailId}
                   detailControlsId={isLg ? "fleet-detail-pane" : undefined}
                   onOpenNodeDetail={openNodeDetail}
+                  onOpenChain={openPlanSpecChain}
                 />
               </>
             )}

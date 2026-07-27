@@ -213,3 +213,66 @@ describe("BoardTab operator information", () => {
     expect(screen.queryByLabelText("Weitere Informationen zu Adversarial time card")).toBeNull();
   });
 });
+
+describe("KF-5: Ketten-Chip", () => {
+  function chainBoard(chainIdentities: Record<string, string> = { t_root001: "pl-spec-foo" }): BoardResponse {
+    return {
+      ...board([
+        task({
+          id: "t_root001",
+          title: "Wurzel",
+          status: "blocked",
+          link_counts: { parents: 0, children: 1 },
+          root_id: "t_root001",
+          chain: { identity_id: "t_root001", position: 1, total: 2 },
+        }),
+        task({
+          id: "t_leaf002",
+          title: "Blatt",
+          status: "blocked",
+          root_id: "t_root001",
+          link_counts: { parents: 1, children: 0 },
+          chain: { identity_id: "t_root001", position: 2, total: 2 },
+        }),
+        task({ id: "t_solo999", title: "Eigenständig", status: "blocked", root_id: "t_solo999", link_counts: { parents: 0, children: 0 } }),
+      ]),
+      chain_identities: chainIdentities,
+    };
+  }
+
+  it("zeigt Chip mit Kennung und Position auf jedem Kettenglied (AC-1)", () => {
+    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
+    const chips = screen.getAllByRole("button", { name: /pl-spec-foo/ });
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("1/2");
+    expect(chips[1].textContent).toContain("2/2");
+  });
+
+  it("ersetzt den nackten → t_abcd12-Verweis auf Blatt-Karten (AC-2)", () => {
+    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
+    expect(screen.queryByText("→ t_root00")).toBeNull();
+  });
+
+  it("zeigt keinen Chip auf eigenständigen Karten", () => {
+    render(<BoardTab board={chainBoard()} onOpenNodeDetail={vi.fn()} />);
+    const soloCard = screen.getByText("Eigenständig").closest(".fleet-boardtab-card");
+    expect(soloCard?.querySelector(".fleet-boardtab-chainchip")).toBeNull();
+  });
+
+  it("Klick auf den Chip ruft onOpenChain mit der Root-Id, nicht den Detail-Drawer (AC-3)", () => {
+    const onOpenChain = vi.fn();
+    const onOpenNodeDetail = vi.fn();
+    render(<BoardTab board={chainBoard()} onOpenNodeDetail={onOpenNodeDetail} onOpenChain={onOpenChain} />);
+    fireEvent.click(screen.getAllByRole("button", { name: /pl-spec-foo/ })[1]);
+    expect(onOpenChain).toHaveBeenCalledWith("t_root001");
+    expect(onOpenNodeDetail).not.toHaveBeenCalled();
+  });
+
+  it("fällt ohne Kennungs-Mapping auf die Root-Id zurück", () => {
+    const { container } = render(<BoardTab board={chainBoard({})} onOpenNodeDetail={vi.fn()} />);
+    const chips = container.querySelectorAll(".fleet-boardtab-chainchip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toContain("t_root001");
+    expect(chips[0].textContent).toContain("1/2");
+  });
+});
