@@ -624,17 +624,33 @@ def write_calls_batch(
     *,
     db_path: Path,
     dry_run: bool = False,
+    update_existing_only: bool = False,
 ) -> int:
-    """Persist many calls in one SQLite transaction. Returns write count."""
+    """Persist many calls in one SQLite transaction. Returns write count.
+
+    ``update_existing_only`` is an explicit backfill mode: it can update only
+    Claude fact identities already present in the target DB snapshot. It never
+    creates rows for newly discovered raw transcript records.
+    """
     items = list(drafts)
     if not items:
         return 0
     if dry_run:
         return len(items)
     with usage_facts_db_mod._connection(db_path) as conn:
+        written = 0
         for draft in items:
+            if update_existing_only:
+                existing = conn.execute(
+                    "SELECT 1 FROM run_usage_facts "
+                    "WHERE run_id=? AND origin=?",
+                    (draft.run_id, ORIGIN),
+                ).fetchone()
+                if existing is None:
+                    continue
             _record_llm_call_on_conn(conn, draft)
-    return len(items)
+            written += 1
+    return written
 
 
 def harvest(
@@ -643,6 +659,7 @@ def harvest(
     db_path: Path | str | None = None,
     state_path: Path | str | None = None,
     dry_run: bool = False,
+    update_existing_only: bool = False,
     progress_every: int = 200,
     log: Optional[TextIO] = None,
 ) -> HarvestStats:
@@ -650,8 +667,10 @@ def harvest(
 
     Files are streamed one-by-one.  Each file's drafts are written in a single
     transaction (not held for the whole tree), so a 1.9 GB corpus does not
-    accumulate in RAM.  Cross-file ``--resume`` duplicates collapse via the
-    global ``(message.id, requestId)`` run_id upsert.
+    accumulate in RAM. Cross-file ``--resume`` duplicates collapse via the
+    global ``(message.id, requestId)`` run_id upsert. In explicit
+    ``update_existing_only`` mode, raw calls with an absent Claude fact
+    identity are skipped rather than inserted.
     """
     root = Path(projects_root)
     resolved_db = usage_facts_db_path(db_path)
@@ -694,6 +713,7 @@ def harvest(
             drafts.values(),
             db_path=resolved_db,
             dry_run=dry_run,
+            update_existing_only=update_existing_only,
         )
         stats.calls_written += written
 
@@ -755,6 +775,14 @@ def build_arg_parser():
         help="Parse and merge only; do not write the DB or update HWM",
     )
     parser.add_argument(
+        "--update-existing-only",
+        action="store_true",
+        help=(
+            "Backfill only existing Claude fact identities; skip newly "
+            "discovered transcript records"
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=200,
@@ -771,6 +799,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         db_path=args.db,
         state_path=args.state,
         dry_run=args.dry_run,
+        update_existing_only=args.update_existing_only,
         progress_every=args.progress_every,
     )
     print(

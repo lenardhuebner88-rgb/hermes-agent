@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -190,6 +191,64 @@ def test_reharvest_backfills_billing_mode_without_changing_tokens(
     assert second.files_processed >= 1
     assert billing_mode == "unknown"
     assert after == before
+
+
+def test_update_existing_only_backfill_skips_new_raw_facts(
+    db_path: Path, tmp_path: Path
+) -> None:
+    projects_root = tmp_path / "projects"
+    shutil.copytree(PROJECTS / "flat-project", projects_root)
+    state = tmp_path / "hwm.json"
+    harvest(projects_root=projects_root, db_path=db_path, state_path=state)
+
+    expected = GOLDEN["flat_streaming"]
+    existing_run_id = make_run_id(expected["message_id"], expected["request_id"])
+    new_message_id = "new-message-not-in-snapshot"
+    new_run_id = make_run_id(new_message_id, expected["request_id"])
+    source = next(projects_root.glob("*.jsonl"))
+    (projects_root / "new-raw-fact.jsonl").write_text(
+        source.read_text(encoding="utf-8").replace(
+            expected["message_id"], new_message_id
+        ),
+        encoding="utf-8",
+    )
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE run_usage_facts SET billing_mode=NULL WHERE run_id=?",
+            (existing_run_id,),
+        )
+        before = conn.execute(
+            "SELECT COUNT(*) AS rows, SUM(input_tokens) AS input_tokens, "
+            "SUM(output_tokens) AS output_tokens FROM run_usage_facts"
+        ).fetchone()
+        conn.commit()
+
+    persisted_hwm = json.loads(state.read_text(encoding="utf-8"))
+    persisted_hwm["format_version"] = CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION - 1
+    state.write_text(json.dumps(persisted_hwm), encoding="utf-8")
+    harvest(
+        projects_root=projects_root,
+        db_path=db_path,
+        state_path=state,
+        update_existing_only=True,
+    )
+
+    with _connect(db_path) as conn:
+        after = conn.execute(
+            "SELECT COUNT(*) AS rows, SUM(input_tokens) AS input_tokens, "
+            "SUM(output_tokens) AS output_tokens FROM run_usage_facts"
+        ).fetchone()
+        billing_mode = conn.execute(
+            "SELECT billing_mode FROM run_usage_facts WHERE run_id=?",
+            (existing_run_id,),
+        ).fetchone()["billing_mode"]
+        new_fact = conn.execute(
+            "SELECT 1 FROM run_usage_facts WHERE run_id=?", (new_run_id,)
+        ).fetchone()
+
+    assert billing_mode == "unknown"
+    assert after == before
+    assert new_fact is None
 
 
 def test_resume_pair_is_idempotent_across_sessions(db_path: Path, tmp_path: Path) -> None:
