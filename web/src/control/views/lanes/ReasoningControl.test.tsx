@@ -65,9 +65,10 @@ describe("ReasoningControl 5-level claude-cli claude_effort strip (S1)", () => {
     expect(screen.getByTitle("low")).toBeTruthy();
     expect(screen.getByTitle("medium")).toBeTruthy();
     expect(screen.getByTitle("high")).toBeTruthy();
-    // The staged value is marked pressed.
-    expect(screen.getByTitle("xhigh").getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByTitle("max").getAttribute("aria-pressed")).toBe("false");
+    // The staged value is the checked radio.
+    expect(screen.getByTitle("xhigh").getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTitle("max").getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByTitle("xhigh").getAttribute("role")).toBe("radio");
     // No empty-state hint leaks into the active control.
     expect(screen.queryByText(/keinen Reasoning-Knopf/)).toBeNull();
   });

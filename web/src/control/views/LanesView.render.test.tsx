@@ -128,7 +128,7 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
 
     const modelSelect = await screen.findByLabelText<HTMLButtonElement>("Modell für coder");
     expect(modelSelect.disabled).toBe(true);
-    const reasoning = screen.getByRole("group", { name: "Reasoning für coder" });
+    const reasoning = screen.getByRole("radiogroup", { name: "Reasoning für coder" });
     expect(Array.from(reasoning.querySelectorAll("button")).every((button) => button.disabled)).toBe(true);
   });
 
@@ -181,7 +181,7 @@ describe("LanesView greenfield (rendered against the real live fixture)", () => 
     // …but the Reasoning segment is selectively active: none of its buttons are
     // disabled, and the full 5-level claude_effort strip renders (xhi + max beyond
     // the hermes trio).
-    const reasoning = screen.getByRole("group", { name: "Reasoning für premium" });
+    const reasoning = screen.getByRole("radiogroup", { name: "Reasoning für premium" });
     const buttons = Array.from(reasoning.querySelectorAll("button"));
     expect(buttons.length).toBeGreaterThan(0);
     expect(buttons.every((button) => !button.disabled)).toBe(true);

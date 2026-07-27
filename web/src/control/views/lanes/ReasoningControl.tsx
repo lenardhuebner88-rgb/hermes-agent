@@ -1,11 +1,16 @@
+import { useRef } from "react";
 import { cn } from "@/lib/utils";
 
-// ReasoningControl — segment buttons for a model's transportable reasoning
-// efforts (S1 `reasoning_support`). Bronze marks the SELECTED segment (bronze =
+// ReasoningControl — radio segments for a model's transportable reasoning
+// efforts (S1 `reasoning_support`). Bronze marks the CHECKED segment (bronze =
 // interactive, DESIGN.md rule 1). When the model has no Reasoning-Knopf
 // (support empty — honest for grok/qwen/alibaba, no transport branch) the whole
 // control renders disabled with an explaining hint instead of a fake-enabled
 // selector (PlanSpec risk #3: Reasoning-Ehrlichkeit).
+//
+// A11y: a real radiogroup — role/aria-checked, roving tabindex, ArrowLeft/
+// ArrowRight move AND select (radio-group behavior), so the joined strip is
+// one Tab stop instead of six.
 
 const SHORT: Record<string, string> = {
   minimal: "min",
@@ -41,18 +46,20 @@ export function ReasoningControl({
   hint?: string | null;
   onChange: (value: string | null) => void;
 }) {
+  const groupRef = useRef<HTMLDivElement>(null);
+
   if (support.length === 0) {
     const noKnopf = hint ?? "Modell hat keinen Reasoning-Knopf";
     return (
       <div className="min-w-0">
         <div
-          className="inline-flex min-h-8 cursor-not-allowed items-center rounded-card border border-line bg-surface-1 px-2 font-data text-micro uppercase tracking-wide text-ink-3 opacity-60"
+          className="inline-flex min-h-8 cursor-not-allowed items-center rounded-card border border-line bg-surface-1 px-2 font-data text-micro uppercase tracking-wide text-ink-3"
           aria-disabled="true"
           title={noKnopf}
         >
           {STD}
         </div>
-        <p className="mt-1 text-micro text-ink-3">{noKnopf}</p>
+        <p className="mt-1 text-micro text-ink-2">{noKnopf}</p>
       </div>
     );
   }
@@ -62,15 +69,34 @@ export function ReasoningControl({
     ...support.map((s) => ({ value: s, label: SHORT[s] ?? s, full: s })),
   ];
 
+  const moveSelection = (dir: 1 | -1) => {
+    const current = options.findIndex((opt) => opt.value === value);
+    const next = (current + dir + options.length) % options.length;
+    onChange(options[next]!.value);
+    const radios = groupRef.current?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+    radios?.[next]?.focus();
+  };
+
   // Joined segments (mockup AB1/AB4): one bordered strip, hairline dividers, no
   // wrap — dense mono STD·MIN·LOW·MED·HIGH (hermes) or STD·LOW·MED·HIGH·XHI·MAX
   // (claude-cli's 5-level claude_effort set, S1). Touch target: 44px on
-  // phone/tablet (<52rem, min-h-11) per the ≥44px mobile rule, the dense 32px
+  // phone/tablet (<56rem matrix panel width, min-h-11) per the ≥44px mobile rule, the dense 32px
   // (min-h-8) on desktop — both clear the WCAG 2.5.8 ≥24px floor.
   return (
     <div
-      role="group"
+      ref={groupRef}
+      role="radiogroup"
       aria-label={ariaLabel}
+      onKeyDown={(e) => {
+        if (disabled) return;
+        if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+          e.preventDefault();
+          moveSelection(1);
+        } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+          e.preventDefault();
+          moveSelection(-1);
+        }
+      }}
       className="inline-flex items-stretch overflow-hidden rounded-card border border-line bg-surface-1"
     >
       {options.map((opt, index) => {
@@ -79,12 +105,14 @@ export function ReasoningControl({
           <button
             key={opt.full}
             type="button"
+            role="radio"
+            aria-checked={on}
+            tabIndex={on ? 0 : -1}
             disabled={disabled}
-            aria-pressed={on}
             title={opt.full}
             onClick={() => onChange(opt.value)}
             className={cn(
-              "min-h-11 px-2 font-data text-micro uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 min-[52rem]:min-h-8",
+              "min-h-11 px-2 font-data text-micro uppercase tracking-wide transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 @min-[56rem]:min-h-8",
               index > 0 && "border-l border-line-soft",
               on
                 ? "bg-live/15 font-semibold text-bronze-hi"

@@ -15,6 +15,7 @@ import {
   modelLabel,
   modelsForProvider,
   persistLaneModels,
+  persistPayloadFromEditorRows,
   profilesFromEditorRows,
   providerOptions,
   smokeCheckLaneConfig,
@@ -621,5 +622,80 @@ describe("editor rows", () => {
     expect(reverted.model).toBeNull();
     expect(reverted.provider).toBeNull();
     expect(reverted.choice).toBe("");
+  });
+});
+
+describe("fast mode stage", () => {
+  const FAST_MODELS: LaneModelOption[] = [
+    { id: "gpt-5.5", label: "GPT-5.5", runtime: "hermes", group: "OpenAI Codex", provider: "openai-codex", fast_supported: true },
+    { id: "kimi-k2.5", label: "Kimi K2.5", runtime: "hermes", group: "Kimi Coding", provider: "kimi-coding", fast_supported: false },
+  ];
+  const catalog: LaneCatalogProfile[] = [
+    {
+      name: "coder",
+      worker_runtime: "hermes",
+      default_model: "gpt-5.5",
+      default_provider: "openai-codex",
+      description: "",
+      service_tier: "fast",
+      fast_supported: true,
+    },
+    { name: "premium", worker_runtime: "claude-cli", default_model: "claude-fable-5", description: "", fast_supported: true },
+  ];
+  const lane: Lane = {
+    id: "lane_1",
+    name: "test",
+    active: true,
+    builtin: false,
+    created_at: 0,
+    updated_at: 0,
+    profiles: {},
+  };
+
+  it("editorRows surfaces the persisted fast mode and support flag", () => {
+    const rows = editorRows(lane, catalog, FAST_MODELS);
+    const coder = rows.find((r) => r.profile === "coder")!;
+    expect(coder.fastMode).toBe("fast");
+    expect(coder.defaultFastMode).toBe("fast");
+    expect(coder.fastSupport).toBe(true);
+    const premium = rows.find((r) => r.profile === "premium")!;
+    expect(premium.fastMode ?? null).toBeNull();
+    expect(premium.fastSupport).toBe(true);
+  });
+
+  it("serializes a fast change; an unchanged row omits service_tier", () => {
+    const rows = editorRows(lane, catalog, FAST_MODELS);
+    const coder = rows.find((r) => r.profile === "coder")!;
+    // unchanged: staged == persisted → no service_tier in the payload
+    expect(profilesFromEditorRows([{ ...coder, touched: true }]).coder?.service_tier).toBeUndefined();
+    // Std against a persisted "fast" → explicit off-state "normal"
+    const off = profilesFromEditorRows([{ ...coder, touched: true, fastMode: null }]);
+    expect(off.coder?.service_tier).toBe("normal");
+    // premium: null → "fast"
+    const premium = rows.find((r) => r.profile === "premium")!;
+    const on = profilesFromEditorRows([{ ...premium, touched: true, fastMode: "fast" }]);
+    expect(on.premium?.service_tier).toBe("fast");
+  });
+
+  it("persistPayloadFromEditorRows carries service_tier with the default-model fallback", () => {
+    const rows = editorRows(lane, catalog, FAST_MODELS);
+    const coder = rows.find((r) => r.profile === "coder")!;
+    const payload = persistPayloadFromEditorRows([{ ...coder, touched: true, fastMode: null }]);
+    expect(payload.coder).toMatchObject({
+      worker_runtime: "hermes",
+      model: "gpt-5.5",
+      service_tier: "normal",
+    });
+  });
+
+  it("applyChoice drops a staged fast the new model cannot transport", () => {
+    const rows = editorRows(lane, catalog, FAST_MODELS);
+    const coder = { ...rows.find((r) => r.profile === "coder")!, fastMode: "fast" as const };
+    const switched = applyChoice(coder, "hermes|kimi-coding|kimi-k2.5", FAST_MODELS);
+    expect(switched.fastSupport).toBe(false);
+    expect(switched.fastMode).toBeNull();
+    // reverting to Standard restores the profile default's support
+    const reverted = applyChoice({ ...switched, fastMode: null }, "", FAST_MODELS);
+    expect(reverted.fastSupport).toBe(true);
   });
 });

@@ -11,8 +11,8 @@
 // (and the captured live fixture) omit both fields; absent ≠ false, so those
 // models are still scored (fail-soft) — just without the auth/sinnvoll bonus.
 
-import type { LaneModelOption, ModelProbeResult } from "./api";
-import { probeKey, UNREACHABLE_PROBE_STATUSES } from "./api";
+import type { LaneCatalogProfile, LaneModelOption, LaneProfileEntry, ModelProbeResult } from "./api";
+import { filterSinnvoll, probeKey, UNREACHABLE_PROBE_STATUSES } from "./api";
 
 // Re-exported so fit consumers (and tests) can key probes through one surface.
 export { probeKey };
@@ -206,4 +206,89 @@ export function rankModelsForRole(
   return models
     .map((model) => ({ model, ...scoreModelForRole(model, role, probes) }))
     .sort((a, b) => b.score - a.score || a.model.id.localeCompare(b.model.id));
+}
+
+// --- S5 guided lane build: Kompass presets -----------------------------------
+//
+// A preset turns the compass ranking into a complete lane draft: every catalog
+// profile whose name is a compass role gets that role's top-ranked model
+// (respecting the preset's price doctrine). Locked profiles are skipped — the
+// operator reviews the draft in the matrix and persists via the normal SaveBar.
+
+export type LanePresetId = "guenstig" | "premium";
+
+export interface LanePreset {
+  id: LanePresetId;
+  label: string;
+  blurb: string;
+}
+
+export const LANE_PRESETS: LanePreset[] = [
+  {
+    id: "guenstig",
+    label: "Coding-Team günstig",
+    blurb: "Spitzenmodell je Rolle unter der Preisgrenze — Kosten zuerst.",
+  },
+  {
+    id: "premium",
+    label: "Premium",
+    blurb: "Spitzenmodell je Rolle ohne Preisbremse — Qualität zuerst.",
+  },
+];
+
+/** Combined $/1Mtok price cap for the „günstig" preset. */
+const GUENSTIG_PRICE_CAP_USD = 8;
+
+function combinedPrice(model: LaneModelOption): number | null {
+  if (model.price_in_per_mtok_usd == null && model.price_out_per_mtok_usd == null) return null;
+  return (model.price_in_per_mtok_usd ?? 0) + (model.price_out_per_mtok_usd ?? 0);
+}
+
+function presetPick(
+  ranked: ModelFit[],
+  preset: LanePresetId,
+): LaneModelOption | null {
+  const viable = ranked.filter((fit) => fit.score > 0);
+  if (viable.length === 0) return null;
+  if (preset === "premium") return viable[0]!.model;
+  // günstig: best score under the cap; if nothing is under it, the cheapest
+  // viable model wins (deterministic: rank order, then id).
+  const underCap = viable.filter((fit) => {
+    const price = combinedPrice(fit.model);
+    return price != null && price <= GUENSTIG_PRICE_CAP_USD;
+  });
+  if (underCap.length > 0) return underCap[0]!.model;
+  return (
+    [...viable].sort((a, b) => {
+      const pa = combinedPrice(a.model) ?? Number.POSITIVE_INFINITY;
+      const pb = combinedPrice(b.model) ?? Number.POSITIVE_INFINITY;
+      return pa - pb || a.model.id.localeCompare(b.model.id);
+    })[0]?.model ?? null
+  );
+}
+
+/** Build a lane-draft `profiles` payload from a preset: one entry per catalog
+ *  profile that maps to a compass role. Unknown/locked profiles stay untouched
+ *  (they keep the profile-config default in the new lane). */
+export function buildPresetDraft(
+  preset: LanePresetId,
+  models: LaneModelOption[],
+  catalog: LaneCatalogProfile[],
+  probes?: Record<string, ModelProbeResult>,
+): Record<string, Partial<LaneProfileEntry>> {
+  const candidates = filterSinnvoll(models);
+  const out: Record<string, Partial<LaneProfileEntry>> = {};
+  for (const profile of catalog) {
+    if (profile.locked) continue;
+    if (!COMPASS_ROLES.includes(profile.name as CompassRole)) continue;
+    const ranked = rankModelsForRole(candidates, profile.name as CompassRole, probes);
+    const pick = presetPick(ranked, preset);
+    if (!pick) continue;
+    out[profile.name] = {
+      worker_runtime: pick.runtime,
+      provider: pick.runtime === "hermes" ? (pick.provider ?? null) : null,
+      model: pick.id,
+    };
+  }
+  return out;
 }

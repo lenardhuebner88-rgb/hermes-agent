@@ -716,3 +716,288 @@ def test_lane_model_catalog_reuses_last_good_inventory_on_failure(plugin_module,
     second = {row["id"] for row in plugin_module._lane_model_catalog([])}
     assert "kimi-k2.7-code" in second  # resilient: cached inventory reused
     assert "qwen3.5-397b-fast" in second
+
+
+# --- Fast mode / service tier (2026-07-27) ----------------------------------
+
+
+def test_persist_writes_service_tier_fast_for_supported_hermes_model(
+    kanban_home, client, plugin_module,
+):
+    """gpt-5.5 on openai-codex passes the upstream spawn gate
+    (``model_supports_fast_mode``) — the toggle must land in
+    ``agent.service_tier`` and read back through the profile catalog."""
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "service_tier": "fast",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    cfg = yaml.safe_load(
+        (kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert cfg["agent"]["service_tier"] == "fast"
+
+    catalog = {p["name"]: p for p in plugin_module._scan_lane_profiles()}
+    assert catalog["coder"]["service_tier"] == "fast"
+    assert catalog["coder"]["fast_supported"] is True
+
+
+def test_persist_writes_service_tier_normal(kanban_home, client, plugin_module):
+    """"normal" is the explicit off-state: cli.py maps it to no request
+    overrides, and the catalog read-back reports it (≠ unset/STD)."""
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\nagent:\n  service_tier: fast\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "service_tier": "normal",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    cfg = yaml.safe_load(
+        (kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert cfg["agent"]["service_tier"] == "normal"
+    catalog = {p["name"]: p for p in plugin_module._scan_lane_profiles()}
+    assert catalog["coder"]["service_tier"] == "normal"
+
+
+def test_persist_omitted_service_tier_leaves_config_untouched(kanban_home, client):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {"worker_runtime": "hermes", "provider": "openai-codex", "model": "gpt-5.5"},
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    cfg = yaml.safe_load(
+        (kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert "service_tier" not in cfg.get("agent", {})
+
+
+def test_persist_claude_fast_mode_bool_write_and_read_back(
+    kanban_home, client, plugin_module,
+):
+    """claude-cli rows persist the top-level ``claude_fast_mode`` spawn bool
+    (kanban_worker_runtime.claude_profile_fast_mode), not agent.service_tier;
+    the catalog read-back normalizes it to the "fast"/None vocabulary."""
+    _write_profile_config(
+        kanban_home,
+        "premium",
+        "worker_runtime: claude-cli\nclaude_model: claude-opus-4-8\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "premium": {
+                    "worker_runtime": "claude-cli",
+                    "provider": None,
+                    "model": "claude-opus-4-8",
+                    "service_tier": "fast",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    cfg_path = kanban_home / "profiles" / "premium" / "config.yaml"
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["claude_fast_mode"] is True
+    assert "service_tier" not in cfg.get("agent", {})
+
+    catalog = {p["name"]: p for p in plugin_module._scan_lane_profiles()}
+    assert catalog["premium"]["service_tier"] == "fast"
+    assert catalog["premium"]["fast_supported"] is True
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "premium": {
+                    "worker_runtime": "claude-cli",
+                    "provider": None,
+                    "model": "claude-opus-4-8",
+                    "service_tier": "normal",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert cfg["claude_fast_mode"] is False
+    catalog = {p["name"]: p for p in plugin_module._scan_lane_profiles()}
+    assert catalog["premium"]["service_tier"] is None
+
+
+def test_persist_rejects_fast_for_unsupported_model(kanban_home, client, plugin_module, monkeypatch):
+    """A "fast" request the spawn gate would silently drop is a 400, never a
+    persisted no-op (same honesty rule as the reasoning validator)."""
+    monkeypatch.setattr(
+        plugin_module,
+        "_lane_model_catalog",
+        lambda _profiles, _active_lane=None: [
+            {
+                "id": "gpt-5.5",
+                "label": "GPT-5.5",
+                "runtime": "hermes",
+                "group": "OpenAI Codex",
+                "provider": "openai-codex",
+            },
+            {
+                "id": "kimi-k2.5",
+                "label": "Kimi K2.5",
+                "runtime": "hermes",
+                "group": "Kimi Coding",
+                "provider": "kimi-coding",
+            },
+        ],
+    )
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: kimi-coding\n  default: kimi-k2.5\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "kimi-coding",
+                    "model": "kimi-k2.5",
+                    "service_tier": "fast",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "unsupported fast mode"
+    assert detail["profiles"] == ["coder"]
+    cfg = yaml.safe_load(
+        (kanban_home / "profiles" / "coder" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert "service_tier" not in cfg.get("agent", {})
+
+
+def test_persist_rejects_invalid_service_tier_value(kanban_home, client):
+    _write_profile_config(
+        kanban_home,
+        "coder",
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "service_tier": "ludicrous",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["error"] == "invalid service_tier"
+
+
+def test_persist_service_tier_rolls_back_when_a_later_write_fails(
+    kanban_home, client, monkeypatch,
+):
+    """The service_tier write rides the same all-or-nothing transaction: a
+    failing sibling restores every profile config byte-identically."""
+    coder_path = _write_profile_config(
+        kanban_home,
+        "coder",
+        "worker_runtime: hermes\nmodel:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+    reviewer_path = _write_profile_config(
+        kanban_home,
+        "reviewer",
+        "worker_runtime: hermes\nmodel:\n  provider: openai-codex\n  default: gpt-5.5\n",
+    )
+    originals = {coder_path: coder_path.read_bytes(), reviewer_path: reviewer_path.read_bytes()}
+
+    import utils
+
+    real_update = utils.atomic_roundtrip_yaml_update
+
+    def fail_reviewer(path, key_path, value, **kwargs):
+        if Path(path) == reviewer_path:
+            raise OSError("simulated reviewer write failure")
+        return real_update(path, key_path, value, **kwargs)
+
+    monkeypatch.setattr(utils, "atomic_roundtrip_yaml_update", fail_reviewer)
+    response = client.post(
+        "/api/plugins/kanban/lanes/persist",
+        json={
+            "profiles": {
+                "coder": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "service_tier": "fast",
+                },
+                "reviewer": {
+                    "worker_runtime": "hermes",
+                    "provider": "openai-codex",
+                    "model": "gpt-5.5",
+                    "service_tier": "fast",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["written"] == []
+    assert response.json()["failed"][0]["profile"] == "reviewer"
+    assert coder_path.read_bytes() == originals[coder_path]
+    assert reviewer_path.read_bytes() == originals[reviewer_path]

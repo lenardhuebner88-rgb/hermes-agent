@@ -8,6 +8,7 @@
  *    custom-property reference, so providerColors.ts emits no raw hex and
  *    Tailwind never has to generate a dynamic `bg-data-N` class.
  *  - the active-lane accent is an inset bronze edge (the mockup's lane card).
+ *  - the 3-zone workbench cut (rail | matrix | dock) and the skeleton shimmer.
  *  - the central reduced-motion kill switch for every transition in the view.
  */
 
@@ -41,6 +42,16 @@
   box-shadow: inset 3px 0 0 var(--color-live);
 }
 
+/* --- one bronze focus ring for every interactive element in the view
+ *     (DESIGN.md: bronze = the interactive accent, focus ring included) --- */
+.lp button:focus-visible,
+.lp select:focus-visible,
+.lp input:focus-visible,
+.lp [role="radio"]:focus-visible {
+  outline: 2px solid var(--color-live);
+  outline-offset: 1px;
+}
+
 /* --- neutral score meter (compass): ink-2 fill on a canvas track.
  *     Bronze is forbidden as a meter fill (DESIGN.md: bronze = interactive/live
  *     only); the shared MeterBar's only non-status fill is bronze, so the
@@ -59,36 +70,67 @@
   transition: width 160ms ease-out;
 }
 
-/* --- horizontal lane-pill scroll on mobile (no visible scrollbar) --- */
+/* --- horizontal lane-rail scroll: snap + fade affordance at the trailing edge --- */
 .lp .lane-scroll {
   scrollbar-width: none;
+  scroll-snap-type: x proximity;
+  mask-image: linear-gradient(to right, black 0, black calc(100% - 1.75rem), transparent 100%);
 }
 .lp .lane-scroll::-webkit-scrollbar {
   display: none;
 }
 
-/* --- Mobile: pin the lane switcher to the top while the long matrix scrolls
- *     (S2 priority 3). The save bar is already sticky-bottom (W5), so this keeps
- *     BOTH operator actions — lane switching + Speichern & aktivieren — in reach
- *     without a new nav paradigm. Only below the 2-pane cut (840px): from there up
- *     the side-by-side panes keep everything visible, so the desktop layout stays
- *     untouched (priority 5). bg = page canvas so matrix rows scroll cleanly
- *     beneath; a soft hairline marks the pinned edge. --- */
+/* --- loading skeleton (Laden ≠ Leer ≠ Fehler): quiet surface-2 shimmer.
+ *     The reduced-motion kill switch below stills the animation. --- */
+.lp .lp-skel {
+  border-radius: var(--radius-card);
+  background: var(--color-surface-2);
+  animation: lp-skel-pulse 1.4s ease-in-out infinite;
+}
+@keyframes lp-skel-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* --- Mobile: pin the lane rail to the top while the long matrix scrolls.
+ *     The save bar is already sticky-bottom, so this keeps BOTH operator
+ *     actions — lane switching + Speichern & aktivieren — in reach without a
+ *     new nav paradigm. Only below the 2-pane cut (840px). backdrop-blur +
+ *     translucent canvas so scrolled rows read through softly (Sticky-Strip-
+ *     Idiom aus ProjekteView). --- */
 @media (max-width: 839px) {
   .lp .lp-lanebar {
     position: sticky;
     top: 0;
     z-index: 20;
-    background: var(--color-surface-0);
+    background: color-mix(in srgb, var(--color-surface-0) 90%, transparent);
+    backdrop-filter: blur(8px);
     padding-top: 0.25rem;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--color-line-soft);
   }
 }
 
-/* --- main 2-pane split: 62/38 from 840px, stacked below.
- *     840px is the Brief's expanded-tier cut; it is drawn here (not via a new
- *     theme.css breakpoint) so the shared token sheet stays untouched. --- */
+/* --- SaveBar vs. fixed BottomBar (<tab/600px): a bottom-0 sticky bar pins to
+ *     the VIEWPORT bottom, where ControlShell's fixed BottomBar (min-h-12 +
+ *     1px border + safe-area inset) would cover the primary „Speichern +
+ *     aktivieren" action. Lift the sticky floor above the nav for exactly the
+ *     viewport range in which the BottomBar exists. --- */
+@media (max-width: 599.98px) {
+  .lp .lp-savebar {
+    bottom: calc(3.0625rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* --- main split: stacked below 840px; matrix | evidence-dock (62/38) from
+ *     840px; the full 3-zone workbench (rail | matrix | dock) from 1248px.
+ *     Both cuts are drawn here (not via new theme breakpoints) so the shared
+ *     token sheet stays untouched. --- */
 .lp-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -98,6 +140,42 @@
 @media (min-width: 840px) {
   .lp-main {
     grid-template-columns: minmax(0, 62fr) minmax(0, 38fr);
+  }
+  .lp-main > .lp-lanebar {
+    grid-column: 1 / -1;
+  }
+}
+@media (min-width: 1248px) {
+  .lp-main {
+    grid-template-columns: minmax(11rem, 13rem) minmax(0, 58fr) minmax(0, 42fr);
+  }
+  .lp-main > .lp-lanebar {
+    grid-column: auto;
+  }
+  /* rail mode: vertical stack, full-width cards, no horizontal fade */
+  .lp .lane-scroll {
+    flex-direction: column;
+    overflow-x: visible;
+    overflow-y: auto;
+    max-height: 75vh;
+    padding-bottom: 0;
+    scroll-snap-type: none;
+    mask-image: none;
+  }
+  .lp .lane-scroll > * {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+/* --- @container context for drawer bodies (statistik.css idiom): KPI grids
+ *     collapse to one column when the sheet gets narrow. --- */
+.lp .lp-cq {
+  container-type: inline-size;
+}
+@container (max-width: 18rem) {
+  .lp .lp-kpis {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

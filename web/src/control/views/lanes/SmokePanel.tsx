@@ -1,6 +1,6 @@
 import { Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { KpiTile, ListRow, SignalChip } from "../../components/leitstand";
+import { KpiTile, ListRow, SectionHeader, SignalChip } from "../../components/leitstand";
 import {
   filterSinnvoll,
   probeKey,
@@ -16,6 +16,7 @@ import { PROBE_STATUS_LABEL, probeTone, t } from "./strings";
 // that batch-probes the sinnvoll set (sequential, capped — moderate cost), and
 // a result feed. Per-row probes triggered from the matrix land in the same
 // shared probe map, so they show up here too. No polling — probes are explicit.
+// Failures surface inline (catalogError) instead of vanishing into a catch{}.
 
 function effectiveProbe(
   model: LaneModelOption,
@@ -41,12 +42,18 @@ export function SmokePanel({
   probes,
   busy,
   batchRunning,
+  catalogError,
+  truncated,
   onCatalogProbe,
 }: {
   models: LaneModelOption[];
   probes: Record<string, ModelProbeResult>;
   busy: boolean;
   batchRunning: boolean;
+  /** Last batch-probe failure (shown inline, retry via the same CTA). */
+  catalogError?: string | null;
+  /** The backend capped the last batch (limit) — honest truncation hint. */
+  truncated?: boolean;
   onCatalogProbe: () => void;
 }) {
   const probeable = filterSinnvoll(models).filter((model) => model.runtime === "hermes");
@@ -64,7 +71,9 @@ export function SmokePanel({
 
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-3 gap-2">
+      {/* lp-kpis: collapses to one column inside narrow drawer containers
+          (@container rule in lanes.css). */}
+      <div className="lp-kpis grid grid-cols-3 gap-2">
         <KpiTile label={t.erreichbar} value={t.of(reachable, probeable.length)} />
         <KpiTile label={t.p50} value={p50 != null ? `${p50}` : t.noProbeData} suffix={p50 != null ? "ms" : undefined} />
         <KpiTile label={t.blockiert} value={String(blocked)} dot={blocked > 0 ? "error" : "idle"} />
@@ -80,6 +89,17 @@ export function SmokePanel({
         {batchRunning ? t.measuring : t.katalogMessen(probeable.length)}
       </button>
 
+      {catalogError ? (
+        <p className="text-micro text-status-alert" role="alert">
+          {t.katalogFehler}: {catalogError}
+        </p>
+      ) : null}
+      {truncated ? (
+        <div>
+          <SignalChip tone="warn" label={t.truncated(8)} />
+        </div>
+      ) : null}
+
       {feed.length === 0 ? (
         <div className="rounded-card border border-dashed border-line p-4">
           <p className="text-sec text-ink-2">{t.smokeEmptyTitle}</p>
@@ -88,13 +108,17 @@ export function SmokePanel({
         </div>
       ) : (
         <div className="space-y-1.5">
-          {feed[0]?.at ? (
-            <p className="font-data text-micro tabular-nums text-ink-3">
-              {t.zuletztGemessen(
-                new Date(feed[0].at * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
-              )}
-            </p>
-          ) : null}
+          <SectionHeader
+            label={t.probeFeed}
+            rule={false}
+            meta={
+              feed[0]?.at
+                ? t.zuletztGemessen(
+                    new Date(feed[0].at * 1000).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }),
+                  )
+                : undefined
+            }
+          />
           {feed.map((probe) => {
             const model =
               models.find((m) => m.id === probe.model && (m.provider ?? "") === (probe.provider ?? "")) ??

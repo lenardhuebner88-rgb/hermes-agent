@@ -7,9 +7,15 @@ export const t = {
   title: "Lanes",
   emptyLanesTitle: "Keine Lanes",
   emptyLanesDesc: "Beim ersten Laden werden api-standard und max-abo angelegt.",
+  reload: "Neu laden",
+
+  // Frische / Stand (FleetSourceFreshness-Stil)
+  stand: (time: string) => `Stand ${time}`,
+  stale: "veraltet",
 
   // LaneBar
   aktiv: "Aktiv",
+  ansicht: "Ansicht",
   activate: "Aktivieren",
   activateConfirm: "Als aktive Lane setzen?",
   confirmYes: "Bestätigen",
@@ -23,40 +29,79 @@ export const t = {
   eigeneLane: "eigene Lane",
   zuletzt: (time: string) => `zuletzt ${time}`,
 
+  // Lane-Verwaltung (Umbenennen / Duplizieren / Löschen)
+  manage: "Verwalten",
+  manageTitle: "Lane verwalten",
+  rename: "Umbenennen",
+  renameSave: "Namen speichern",
+  duplicate: "Duplizieren",
+  deleteLane: "Lane löschen",
+  deleteConfirm: (name: string) => `Lane „${name}" endgültig löschen? Overrides gehen verloren.`,
+  deleteYes: "Endgültig löschen",
+  builtinNoDelete: "Builtin-Lanes können nicht gelöscht werden.",
+
+  // Lane-Entwurf (Kompass-Presets, S5)
+  presetLabel: "Entwurf",
+  presetLeer: "Leer",
+  presetGuenstig: "Coding-Team günstig",
+  presetPremium: "Premium",
+  presetHint: "Preset füllt alle Rollen mit dem Kompass-Spitzenmodell.",
+
+  // Gesundheits-Strip (S5)
+  healthEyebrow: "Gesundheit",
+  unhealthy: (n: number) => (n === 1 ? "1 unhealthy" : `${n} unhealthy`),
+  spawnOk: "alle spawn-bereit",
+  spawnUnknown: "keine Spawn-Evidenz",
+  jumpToRow: "zur Zeile",
+
   // ProfileMatrix
   colRole: "Rolle",
   colModel: "Modell",
   colReasoning: "Reasoning",
+  colFast: "Fast",
   colFallback: "Fallback",
   colProbe: "Probe",
   colOverride: "Override",
   standard: "Standard",
   override: "Override",
-  fallbacks: (n: number) => (n === 0 ? "—" : String(n)),
+  fallbacks: (n: number) => (n === 0 ? "Fallback —" : `Fallback ${n}`),
   fallbackEdit: "Fallbacks bearbeiten",
   probeUngeprüft: "ungeprüft",
   probeMessen: "Modell messen",
   probing: "misst …",
+  probeFehler: "Probe fehlgeschlagen",
   save: "Speichern + aktivieren",
   saving: "speichert …",
+  savedOk: "Gespeichert ✓",
   discard: "Verwerfen",
   saveHint: "wirkt ab dem nächsten Spawn",
   matrixEyebrow: "Profil-Matrix",
   currently: (value: string) => `aktuell: ${value}`,
+  spawnHealth: (status: string) => `Spawn: ${status}`,
+
+  // FastControl (service tier / fast mode)
+  fastStd: "Std",
+  fastFast: "Fast",
+  fastStdFull: "Standard (Profil-Config)",
+  fastFastFull: "Fast Mode (service_tier=priority / speed=fast)",
+  fastUnsupported: "Modell unterstützt keinen Fast Mode (kein service_tier/speed-Transport)",
 
   // Fallback drawer
   fallbackTitle: "Fallback-Kette",
   fallbackProvider: "Provider",
   fallbackModel: "Modell",
+  fallbackChooseProvider: "Provider wählen …",
+  fallbackChooseModel: "Modell wählen …",
+  fallbackIncomplete: "Provider und Modell wählen — unvollständige Zeilen werden verworfen.",
   fallbackAdd: "Fallback hinzufügen",
   fallbackRemove: "entfernen",
   fallbackEmpty: "Keine Fallbacks — primäres Modell ohne Ausweichkette.",
   apply: "Übernehmen",
-  close: "Schließen",
 
   // Rauch (smoke) panel
   rauch: "Rauch",
   katalogMessen: (n: number) => `Katalog messen · ${n} sinnvolle Modelle`,
+  katalogFehler: "Katalog-Messung fehlgeschlagen",
   measuring: "misst …",
   erreichbar: "erreichbar",
   blockiert: "blockiert",
@@ -72,16 +117,32 @@ export const t = {
   // Kompass (compass) panel
   kompass: "Kompass",
   übernehmen: "Übernehmen",
-  übernommen: "Übernehmen ✓",
+  übernommen: "Übernommen ✓",
   aktuellMarker: "● aktuell",
   fitTop: "Top-Modelle für diese Rolle",
   bench: "Bench",
+  benchFehler: "Bench fehlgeschlagen",
   benchSelect: "2–4 Modelle wählen",
   benchRun: "Bench starten",
   benchRunning: "Bench läuft …",
   benchRepeat: "Bench mit Auswahl wiederholen",
   benchEmpty: "Keine Auswahl — mindestens zwei Modelle für einen Vergleich wählen.",
+  benchColModel: "Modell",
+  benchColStatus: "Status",
+  benchColLatency: "Latenz",
+  benchColPrice: "Preis",
+  benchColReasoning: "Reasoning",
   compassHint: "Scoring aus Latenz, Preis, Reasoning-Support und Kontext gegen das Rollen-Profil.",
+
+  // Vergleich (Lane-Diff, S5)
+  vergleich: "Vergleich",
+  diffLaneA: "Lane A",
+  diffLaneB: "Lane B",
+  diffOnlyChanges: "nur Abweichungen",
+  diffAll: "alle Rollen",
+  diffColRole: "Rolle",
+  diffIdentical: "Keine Abweichungen — beide Lanes sind identisch verdrahtet.",
+  diffNeedTwo: "Zwei Lanes für einen Vergleich wählen.",
 
   // shared
   loading: "Lade Modelle …",

@@ -59,6 +59,48 @@ def _lane_reasoning_support(runtime: str, provider: str | None, model: str) -> l
     return reasoning_support_for(provider, model)
 
 
+def _lane_fast_support(runtime: str, provider: str | None, model: str) -> dict[str, Any]:
+    """Fast-mode/service-tier truth for a Lanes row (2026-07-27).
+
+    claude-cli rows are always supported: ``claude_fast_mode`` is a plain
+    top-level profile bool the worker spawn reads via
+    ``kanban_worker_runtime.claude_profile_fast_mode`` — no model gate.
+
+    hermes rows mirror EXACTLY what the spawn gate will apply: the worker
+    reads ``agent.service_tier`` from the profile config and maps it through
+    ``hermes_cli.models.resolve_fast_mode_overrides(model)`` — an unsupported
+    model yields ``request_overrides=None``, i.e. a silently dropped toggle.
+    So the UI offer and the persist validator both use
+    ``model_supports_fast_mode`` (Anthropic Opus 4.6 → ``speed=fast``; OpenAI
+    flagship ids → ``service_tier=priority``).
+
+    Codex note (verified 2026-07-27): upstream ``_is_openai_fast_model``
+    excludes ids CONTAINING "codex" (``gpt-5.3-codex`` …) because "the Codex
+    Responses API doesn't accept service_tier". For the ChatGPT-subscription
+    backend (provider ``openai-codex``) that premise is outdated — the wire
+    accepts ``service_tier="priority"`` (the subscription's Fast Mode). The
+    operator's codex models (``gpt-5.5``, ``gpt-5.6-sol`` …) contain no
+    "codex" substring, so they ALREADY pass the upstream gate end-to-end
+    (UI → persist → spawn). Lifting the exclusion for ``*-codex`` ids would
+    need the runtime gate in upstream-owned ``hermes_cli/models.py`` to apply
+    the override at spawn too — out of scope here, so those ids stay
+    honestly disabled rather than writing a config that silently no-ops.
+    """
+    if runtime == "claude-cli":
+        return {"supported": True, "hint": None}
+    try:
+        from hermes_cli.models import model_supports_fast_mode
+
+        if model and model_supports_fast_mode(model):
+            return {"supported": True, "hint": None}
+    except Exception:
+        log.exception("lanes: fast-mode support probe failed for %s/%s", provider, model)
+    return {
+        "supported": False,
+        "hint": "Modell unterstützt keinen Fast Mode (kein service_tier/speed-Transport)",
+    }
+
+
 def _lane_image_model(provider: str | None, model_id: str) -> bool:
     """True for image/video-generation models that cannot echo a chat token (W2).
 
@@ -210,6 +252,7 @@ def _append_lane_model_option(
         "configured": configured,
         **_lane_model_metadata(provider, model),
         "reasoning_support": _lane_reasoning_support(runtime, provider, model),
+        "fast_supported": _lane_fast_support(runtime, provider, model)["supported"],
         "probe": _lane_model_probe_for(provider, model),
     }
     if source:
@@ -487,10 +530,23 @@ def _scan_lane_profiles() -> list[dict]:
                         # `claude_effort` (→ `--effort` at spawn), NOT
                         # agent.reasoning_effort. Unset → STD (None).
                         raw_reasoning_effort = cfg.get("claude_effort")
+                        # Fast mode read-back: top-level `claude_fast_mode`
+                        # bool (kanban_worker_runtime.claude_profile_fast_mode).
+                        service_tier = "fast" if cfg.get("claude_fast_mode") else None
                     else:
                         raw_reasoning_effort = (
                             agent_cfg.get("reasoning_effort")
                             if isinstance(agent_cfg, dict)
+                            else None
+                        )
+                        raw_service_tier = (
+                            agent_cfg.get("service_tier")
+                            if isinstance(agent_cfg, dict)
+                            else None
+                        )
+                        service_tier = (
+                            raw_service_tier.strip().lower()
+                            if isinstance(raw_service_tier, str) and raw_service_tier.strip()
                             else None
                         )
                     reasoning_effort = (
@@ -504,14 +560,17 @@ def _scan_lane_profiles() -> list[dict]:
                     provider = None
                     fallback_providers = []
                     reasoning_effort = None
+                    service_tier = None
             else:
                 provider = None
                 fallback_providers = []
                 reasoning_effort = None
+                service_tier = None
         except Exception:
             provider = None
             fallback_providers = []
             reasoning_effort = None
+            service_tier = None
             pass
         out.append({
             "name": entry.name,
@@ -528,6 +587,13 @@ def _scan_lane_profiles() -> list[dict]:
             # active for claude-cli now (the relay-3 "nicht schaltbar" hint was
             # false and is removed).
             "reasoning_support": _lane_reasoning_support(runtime, provider, model or ""),
+            # Fast mode: "fast" | "normal" (persisted) | None (unset → STD).
+            # claude-cli read-back normalizes the claude_fast_mode bool to the
+            # same vocabulary so the UI control is runtime-agnostic.
+            "service_tier": service_tier,
+            "fast_supported": _lane_fast_support(
+                runtime, provider, claude_model or model or ""
+            )["supported"],
             "description": read_profile_meta(entry).get("description", ""),
             "locked": runtime == "claude-cli",
             "locked_reason": "Claude-CLI / claude -p excluded from this slice" if runtime == "claude-cli" else None,
@@ -1789,6 +1855,11 @@ class LanePersistProfileEntry(BaseModel):
     # profile fallback chain and the active-lane override.
     fallback_providers: Optional[list[LanePersistFallbackEntry]] = None
     reasoning_effort: str | None = None
+    # Fast mode / service tier. ``None`` = leave the profile field untouched;
+    # "fast"/"normal" write ``agent.service_tier`` (hermes) or the
+    # ``claude_fast_mode`` bool (claude-cli). "fast" on a model the spawn gate
+    # cannot transport is a 400, never a silently dropped toggle.
+    service_tier: str | None = None
 
 
 class LanePersistBody(BaseModel):
@@ -1833,6 +1904,8 @@ def persist_lane_models_endpoint(
         bad_runtime_models: list[dict[str, str]] = []
         bad_claude_providers: list[dict[str, str]] = []
         bad_reasoning_profiles: list[str] = []
+        bad_service_tier_values: list[dict[str, str]] = []
+        bad_fast_profiles: list[str] = []
         catalog_profiles_by_name = {profile["name"]: profile for profile in catalog_profiles}
         for name, entry in payload.profiles.items():
             if entry.model not in known_models:
@@ -1850,7 +1923,7 @@ def persist_lane_models_endpoint(
                 )
             if entry.worker_runtime == "claude-cli" and entry.provider:
                 bad_claude_providers.append({"profile": name, "provider": str(entry.provider)})
-            if entry.reasoning_effort not in {None, ""}:
+            if entry.reasoning_effort not in {None, ""} or entry.service_tier not in {None, ""}:
                 profile = catalog_profiles_by_name[name]
                 model_row = next(
                     (
@@ -1867,12 +1940,27 @@ def persist_lane_models_endpoint(
                     or profile.get("default_provider")
                 )
                 target_model = entry.model or profile.get("default_model") or ""
-                if entry.reasoning_effort not in _lane_reasoning_support(
-                    entry.worker_runtime,
-                    target_provider,
-                    target_model,
+                if entry.reasoning_effort not in {None, ""} and (
+                    entry.reasoning_effort
+                    not in _lane_reasoning_support(
+                        entry.worker_runtime,
+                        target_provider,
+                        target_model,
+                    )
                 ):
                     bad_reasoning_profiles.append(name)
+                if entry.service_tier not in {None, ""}:
+                    tier = entry.service_tier.strip().lower()
+                    if tier not in {"fast", "normal"}:
+                        bad_service_tier_values.append(
+                            {"profile": name, "service_tier": str(entry.service_tier)}
+                        )
+                    elif tier == "fast" and not _lane_fast_support(
+                        entry.worker_runtime,
+                        target_provider,
+                        target_model,
+                    )["supported"]:
+                        bad_fast_profiles.append(name)
         if bad_models:
             raise HTTPException(
                 status_code=400,
@@ -1894,6 +1982,19 @@ def persist_lane_models_endpoint(
                 detail={
                     "error": "unsupported reasoning effort",
                     "profiles": bad_reasoning_profiles,
+                },
+            )
+        if bad_service_tier_values:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "invalid service_tier", "profiles": bad_service_tier_values},
+            )
+        if bad_fast_profiles:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "unsupported fast mode",
+                    "profiles": bad_fast_profiles,
                 },
             )
 
@@ -2003,6 +2104,25 @@ def persist_lane_models_endpoint(
                             config_path,
                             "agent.reasoning_effort",
                             entry.reasoning_effort,
+                        )
+                if entry.service_tier is not None and entry.service_tier.strip():
+                    tier = entry.service_tier.strip().lower()
+                    if entry.worker_runtime == "claude-cli":
+                        # claude-cli fast mode is the top-level spawn bool
+                        # (kanban_worker_runtime.claude_profile_fast_mode), not
+                        # the hermes request-override path.
+                        atomic_roundtrip_yaml_update(
+                            config_path,
+                            "claude_fast_mode",
+                            tier == "fast",
+                        )
+                    else:
+                        # cli.py maps "fast" → priority/speed request overrides
+                        # and "normal" → None at the next spawn (hot-read).
+                        atomic_roundtrip_yaml_update(
+                            config_path,
+                            "agent.service_tier",
+                            tier,
                         )
 
             failed_profile = "__active_lane__"

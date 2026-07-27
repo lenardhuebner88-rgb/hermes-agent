@@ -145,6 +145,14 @@ export interface LaneCatalogProfile {
    *  transport, e.g. grok/qwen/alibaba). claude-cli rows have an ACTIVE 5-level
    *  control since S1 (persists `claude_effort`) and carry no hint. */
   reasoning_hint?: string | null;
+  /** Persisted fast mode: `agent.service_tier` (hermes: "fast"/"normal") or
+   *  the `claude_fast_mode` bool normalized to "fast"/null (claude-cli).
+   *  null = unset → STD. */
+  service_tier?: "fast" | "normal" | null;
+  /** Can the profile-default model transport fast mode (spawn-gate truth)? */
+  fast_supported?: boolean;
+  /** Honest hint shown on a disabled Fast control when unsupported. */
+  fast_hint?: string | null;
 }
 
 /** Result of a single model reachability/latency probe (S1). The backend always
@@ -198,6 +206,8 @@ export interface LaneModelOption {
   admitted?: boolean;
   /** Operator-curated offer exclusion (W1 codex -pro / W2 image models); absent on older payloads. */
   offer_excluded?: boolean;
+  /** Can this model transport fast mode (spawn-gate truth: resolve_fast_mode_overrides)? */
+  fast_supported?: boolean;
 }
 
 export interface LanesResponse {
@@ -219,6 +229,10 @@ export interface LanePersistProfileEntry {
    *  it lands in top-level `claude_effort` (→ `--effort`), for hermes in
    *  `agent.reasoning_effort`. */
   reasoning_effort?: string | null;
+  /** Fast mode: omit = untouched; "fast"/"normal" write `agent.service_tier`
+   *  (hermes) or the `claude_fast_mode` bool (claude-cli). "fast" on an
+   *  unsupported model is a backend 400, never a silent no-op. */
+  service_tier?: "fast" | "normal" | null;
 }
 
 export interface LanePersistResult {
@@ -741,6 +755,17 @@ export interface EditorRow {
   /** The profile's current reasoning level (agent.reasoning_effort or, for
    *  claude-cli, claude_effort), for the "aktuell: X" display. */
   defaultReasoning?: string | null;
+  // --- Fast-mode stage (all optional: older payloads/catalogs omit them) ---
+  /** Fast-mode transport truth of the row's EFFECTIVE model. */
+  fastSupport?: boolean;
+  /** Honest hint on a disabled Fast control when fastSupport is false. */
+  fastHint?: string | null;
+  /** Fast support of the profile-DEFAULT model — the "Standard" revert target. */
+  defaultFastSupport?: boolean;
+  /** Staged fast mode; null = "Std" (normal/untouched on persist). */
+  fastMode?: "fast" | null;
+  /** The profile's current fast mode (service_tier/claude_fast_mode read-back). */
+  defaultFastMode?: "fast" | null;
 }
 
 /** One row per catalog profile (catalog order) plus any extra profiles the
@@ -768,6 +793,10 @@ export function editorRows(
     const reasoningHint = effectiveModel?.reasoning_hint ?? p.reasoning_hint ?? null;
     const reasoning =
       profileReasoning != null && support.includes(profileReasoning) ? profileReasoning : null;
+    // Fast stage: same effective-model rule as reasoning — a model switch moves
+    // the toggle's availability with it (spawn-gate truth per model row).
+    const fastSupport = effectiveModel?.fast_supported ?? p.fast_supported ?? false;
+    const profileFast: "fast" | null = p.service_tier === "fast" ? "fast" : null;
     return {
       touched: false,
       initialChoice: choiceFromEntry(entry),
@@ -790,6 +819,11 @@ export function editorRows(
       defaultReasoningSupport: p.reasoning_support ?? [],
       reasoning,
       defaultReasoning: profileReasoning,
+      fastSupport,
+      fastHint: p.fast_hint ?? null,
+      defaultFastSupport: p.fast_supported ?? false,
+      fastMode: profileFast,
+      defaultFastMode: profileFast,
     };
   });
   const extras = Object.keys(lane.profiles)
@@ -822,6 +856,11 @@ export function editorRows(
       defaultReasoningSupport: [],
       reasoning: null,
       defaultReasoning: null,
+      fastSupport: false,
+      fastHint: null,
+      defaultFastSupport: false,
+      fastMode: null,
+      defaultFastMode: null,
     });
   }
   return rows;
@@ -846,6 +885,7 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
   const entry = entryFromProviderAwareChoice(choice);
   if (!entry) {
     const support = row.defaultReasoningSupport ?? row.reasoningSupport ?? [];
+    const fastSupport = row.defaultFastSupport ?? row.fastSupport ?? false;
     return {
       ...row,
       choice: "",
@@ -855,6 +895,8 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
       fallbackProviders: row.defaultFallbackProviders,
       reasoningSupport: support,
       reasoning: row.reasoning != null && support.includes(row.reasoning) ? row.reasoning : null,
+      fastSupport,
+      fastMode: row.fastMode === "fast" && !fastSupport ? null : row.fastMode ?? null,
     };
   }
   const model = models.find((candidate) => modelOptionValue(candidate) === choice);
@@ -867,6 +909,10 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
     : model?.reasoning_support ?? [];
   const nextReasoning =
     row.reasoning != null && nextSupport.includes(row.reasoning) ? row.reasoning : null;
+  // Same rule for the Fast toggle: a staged "fast" the new model cannot
+  // transport drops back to "Std" instead of 400ing the whole save.
+  const nextFastSupport = model?.fast_supported ?? false;
+  const nextFastMode = row.fastMode === "fast" && !nextFastSupport ? null : row.fastMode ?? null;
   return {
     ...row,
     choice,
@@ -876,6 +922,8 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
     fallbackProviders: runtime === "hermes" ? row.fallbackProviders : [],
     reasoningSupport: nextSupport,
     reasoning: nextReasoning,
+    fastSupport: nextFastSupport,
+    fastMode: nextFastMode,
   };
 }
 
@@ -884,8 +932,8 @@ export function applyChoice(row: EditorRow, choice: string, models: LaneModelOpt
  *  block saving the primary choice. */
 export function profilesFromEditorRows(
   rows: EditorRow[],
-): Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> {
-  const out: Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null }> = {};
+): Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null; service_tier?: "fast" | "normal" | null }> {
+  const out: Record<string, Partial<LaneProfileEntry> & { reasoning_effort?: string | null; service_tier?: "fast" | "normal" | null }> = {};
   for (const row of rows) {
     if (!row.touched) continue;
     const fallbackProviders = cloneFallbacks(row.fallbackProviders).filter(
@@ -895,12 +943,18 @@ export function profilesFromEditorRows(
     const reasoningEffort = reasoningChanged
       ? (row.reasoning == null || row.reasoning === "" || row.reasoning === "Standard" ? "" : row.reasoning)
       : undefined;
+    // Fast stage: a staged "Std" (null) against a persisted "fast" is a real
+    // change — it serializes as the explicit off-state "normal" (both backends
+    // understand it; there is no delete-key operation on purpose).
+    const fastChanged = (row.fastMode ?? null) !== (row.defaultFastMode ?? null);
+    const serviceTier = fastChanged ? (row.fastMode ?? "normal") : undefined;
     const hasStructuredOverride =
       row.provider !== null ||
       row.model !== null ||
       fallbackProviders.length > 0 ||
       row.choice !== "" ||
-      reasoningChanged;
+      reasoningChanged ||
+      fastChanged;
     if (!hasStructuredOverride) continue;
     if (row.locked || row.worker_runtime === "claude-cli") {
       const entry = entryFromProviderAwareChoice(row.choice);
@@ -916,9 +970,11 @@ export function profilesFromEditorRows(
         base.worker_runtime === "hermes"
           ? { ...base, fallback_providers: fallbackProviders }
           : base;
-      out[row.profile] = reasoningChanged
-        ? { ...withFallbacks, reasoning_effort: reasoningEffort }
-        : withFallbacks;
+      out[row.profile] = {
+        ...withFallbacks,
+        ...(reasoningChanged ? { reasoning_effort: reasoningEffort } : {}),
+        ...(fastChanged ? { service_tier: serviceTier } : {}),
+      };
       continue;
     }
     out[row.profile] = {
@@ -927,6 +983,7 @@ export function profilesFromEditorRows(
       model: row.model,
       fallback_providers: fallbackProviders,
       ...(reasoningChanged ? { reasoning_effort: reasoningEffort } : {}),
+      ...(fastChanged ? { service_tier: serviceTier } : {}),
     };
   }
   return out;
@@ -944,10 +1001,10 @@ export function removedProfilesFromEditorRows(rows: EditorRow[]): string[] {
 }
 
 /** Normalizes `profilesFromEditorRows` output into full persist entries.
- *  Reasoning-only rows (model still "Standard") fall back to the profile-default
+ *  Reasoning-/fast-only rows (model still "Standard") fall back to the profile-default
  *  model so the payload is always a valid `{worker_runtime, model}` the backend
  *  can validate the reasoning value against; entries with neither a model nor a
- *  reasoning value are dropped (nothing to persist). */
+ *  reasoning/fast value are dropped (nothing to persist). */
 export function persistPayloadFromEditorRows(
   rows: EditorRow[],
 ): Record<string, LanePersistProfileEntry> {
@@ -966,7 +1023,7 @@ export function persistPayloadFromEditorRows(
         ...(fallback.base_url ? { base_url: fallback.base_url } : {}),
       }));
     const model = entry.model ?? row?.defaultModel ?? "";
-    if (!model && (entry.reasoning_effort == null || entry.reasoning_effort === "")) continue;
+    if (!model && (entry.reasoning_effort == null || entry.reasoning_effort === "") && entry.service_tier == null) continue;
     const payload: LanePersistProfileEntry = {
       worker_runtime: entry.worker_runtime ?? row?.defaultRuntime ?? "hermes",
       provider: entry.provider ?? null,
@@ -975,6 +1032,9 @@ export function persistPayloadFromEditorRows(
     };
     if (entry.reasoning_effort != null) {
       payload.reasoning_effort = entry.reasoning_effort;
+    }
+    if (entry.service_tier != null) {
+      payload.service_tier = entry.service_tier;
     }
     out[profile] = payload;
   }
@@ -1016,4 +1076,102 @@ export function laneEntryWarnings(row: EditorRow): string[] {
     warnings.push("Fallback fehlt.");
   }
   return warnings;
+}
+
+
+// --- S5 Werkbank: lane diff + spawn-health summary (pure; unit-tested) -------
+
+/** One compared profile row of the lane-diff workbench (S5). Labels are
+ *  operator-facing (model label or "Standard (…)"); probes ride along as
+ *  per-cell evidence. */
+export interface LaneDiffRow {
+  profile: string;
+  aLabel: string;
+  bLabel: string;
+  differs: boolean;
+  aProbe: ModelProbeResult | null;
+  bProbe: ModelProbeResult | null;
+}
+
+function diffCellLabel(
+  entry: LaneProfileEntry | undefined,
+  catalogProfile: LaneCatalogProfile | undefined,
+  models: LaneModelOption[],
+): string {
+  if (entry?.model) {
+    const runtime = entry.worker_runtime ?? (entry.model.startsWith("claude") ? "claude-cli" : "hermes");
+    return `${runtime === "claude-cli" ? "cli · " : ""}${modelLabel(entry.model, models)}`;
+  }
+  const fallback = catalogProfile?.default_model ? modelLabel(catalogProfile.default_model, models) : "automatisch";
+  return `Standard (${fallback})`;
+}
+
+function diffCellProbe(
+  entry: LaneProfileEntry | undefined,
+  catalogProfile: LaneCatalogProfile | undefined,
+  models: LaneModelOption[],
+  probes: Record<string, ModelProbeResult> | undefined,
+): ModelProbeResult | null {
+  const modelId = entry?.model ?? catalogProfile?.default_model ?? null;
+  if (!modelId) return null;
+  const provider =
+    entry?.worker_runtime === "claude-cli"
+      ? ""
+      : (entry?.provider ?? catalogProfile?.default_provider ?? "");
+  const fresh = probes?.[probeKey(provider, modelId)];
+  if (fresh) return fresh;
+  return models.find((m) => m.id === modelId)?.probe ?? null;
+}
+
+/** Compare two lanes profile-by-profile (catalog order, lane-only extras
+ *  appended sorted). `differs` keys on the full provider-aware choice wiring,
+ *  so a provider-only flip counts as a deviation. */
+export function laneDiffRows(
+  a: Lane,
+  b: Lane,
+  catalog: LaneCatalogProfile[],
+  models: LaneModelOption[],
+  probes?: Record<string, ModelProbeResult>,
+): LaneDiffRow[] {
+  const known = new Set(catalog.map((p) => p.name));
+  const extras = Array.from(
+    new Set([...Object.keys(a.profiles), ...Object.keys(b.profiles)].filter((n) => !known.has(n))),
+  ).sort((x, y) => x.localeCompare(y));
+  const names = [...catalog.map((p) => p.name), ...extras];
+  return names.map((name) => {
+    const catalogProfile = catalog.find((p) => p.name === name);
+    const entryA = a.profiles[name];
+    const entryB = b.profiles[name];
+    return {
+      profile: name,
+      aLabel: diffCellLabel(entryA, catalogProfile, models),
+      bLabel: diffCellLabel(entryB, catalogProfile, models),
+      differs: providerAwareChoiceFromEntry(entryA) !== providerAwareChoiceFromEntry(entryB),
+      aProbe: diffCellProbe(entryA, catalogProfile, models, probes),
+      bProbe: diffCellProbe(entryB, catalogProfile, models, probes),
+    };
+  });
+}
+
+export interface LaneHealthSummary {
+  healthy: number;
+  unhealthy: number;
+  unknown: number;
+  /** Per-profile detail for the strip's jump-to-row affordance. */
+  rows: Array<{ profile: string; health: LaneSpawnHealth | null }>;
+}
+
+/** Spawn-health rollup of one lane over the catalog profiles (S5 strip):
+ *  passive evidence only (lane entry wins over catalog, else unknown). */
+export function laneHealthSummary(lane: Lane, catalog: LaneCatalogProfile[]): LaneHealthSummary {
+  const rows = catalog.map((p) => ({
+    profile: p.name,
+    health: laneProfileSpawnHealth(p.name, lane, catalog),
+  }));
+  return {
+    healthy: rows.filter((r) => r.health?.status === "healthy").length,
+    unhealthy: rows.filter((r) => r.health?.status === "unhealthy").length,
+    unknown: rows.filter((r) => r.health === null || r.health.status === "unknown").length,
+    rows,
+  };
 }

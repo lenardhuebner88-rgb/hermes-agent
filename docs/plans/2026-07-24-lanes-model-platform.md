@@ -46,6 +46,8 @@ reasoning_support-Regeln (statisch, Backend-SoT):
   xai/grok, alibaba-token-plan/qwen, neuralwatt → [] (keine Transport-Verzweigung = kein Knopf, ehrlich)
 ```
 
+**Fast Mode / Service-Tier (2026-07-27, Fork-Slice):** Matrix-Spalte „Fast" (Std·Fast-Segment neben Reasoning). `LanePersistProfileEntry.service_tier` (`null`=unverändert · `"fast"`/`"normal"`) schreibt hermes→`agent.service_tier`, claude-cli→`claude_fast_mode` (bool); Katalog liefert `service_tier` + `fast_supported` pro Profil/Modell (Spawn-Gate-Wahrheit `model_supports_fast_mode`, claude-cli immer true). `"fast"` auf nicht-transportfähigem Modell → 400 `unsupported fast mode`, nie ein stiller No-op. Wirkt ab dem nächsten Spawn (bestehender Save-Hint). Codex-Notiz: das ChatGPT-Abo-Backend akzeptiert `service_tier="priority"`; die Operator-Modelle (gpt-5.5, gpt-5.6-sol) passieren das Upstream-Gate bereits — `*-codex`-Ids bleiben disabled, weil das Upstream-Spawn-Gate (`hermes_cli/models.py`, upstream-owned) den Override dort beim Spawn fallen ließe.
+
 ## Greenfield-Design (innerhalb DESIGN.md "Bronze auf Graphit" — Mockup = Anker, S2 baut dagegen)
 
 ```
