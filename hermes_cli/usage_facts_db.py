@@ -325,6 +325,8 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
         """
         SELECT
             COUNT(*) AS llm_call_count,
+            -- Token totals are useful only when every call was observed;
+            -- partial sums would understate usage.
             CASE WHEN COUNT(input_tokens)=COUNT(*) THEN SUM(input_tokens) END
                 AS input_tokens,
             CASE WHEN COUNT(output_tokens)=COUNT(*) THEN SUM(output_tokens) END
@@ -339,12 +341,14 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS tool_call_count,
             CASE WHEN COUNT(tool_output_chars)>0 THEN SUM(tool_output_chars) END
                 AS tool_output_chars,
+            -- Duration is additive, but a partial sum would understate the run.
             CASE WHEN COUNT(duration_ms)=COUNT(*) THEN SUM(duration_ms) END
                 AS duration_ms,
-            CASE WHEN COUNT(first_token_ms)=COUNT(*) THEN MIN(first_token_ms) END
-                AS first_token_ms,
-            CASE WHEN COUNT(context_window_used)=COUNT(*) THEN MAX(context_window_used) END
-                AS context_window_used
+            -- First-token latency is the earliest available measurement; later
+            -- calls without a measurement do not invalidate that observation.
+            MIN(first_token_ms) AS first_token_ms,
+            -- Context usage is the maximum available observation, not a sum.
+            MAX(context_window_used) AS context_window_used
         FROM run_llm_calls
         WHERE run_id=?
         """,
@@ -353,7 +357,9 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
     if row is None or row["llm_call_count"] == 0:
         return
     columns = tuple(row.keys())
-    assignments = ", ".join(f"{column}=?" for column in columns)
+    assignments = ", ".join(
+        f"{column}=COALESCE(?, {column})" for column in columns
+    )
     conn.execute(
         f"UPDATE run_usage_facts SET {assignments}, captured_at=? WHERE run_id=?",
         [*(row[column] for column in columns), utc_now_iso(), run_id],

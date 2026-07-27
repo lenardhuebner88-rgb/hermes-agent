@@ -121,7 +121,7 @@ def metric_run_class_counts(conn: sqlite3.Connection) -> dict[str, int]:
         f"SELECT run_class, COUNT(*) AS count FROM {relation} "
         "GROUP BY run_class"
     ):
-        counts[str(row["run_class"])] = int(row["count"])
+        counts[str(row[0])] = int(row[1])
     return counts
 
 

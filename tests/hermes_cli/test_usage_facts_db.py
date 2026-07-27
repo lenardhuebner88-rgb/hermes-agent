@@ -10,6 +10,7 @@ from hermes_cli.usage_facts_db import (
     purge_expired_traces,
     record_llm_call,
     record_trace,
+    upsert_run_facts,
 )
 
 
@@ -140,6 +141,10 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
     path = tmp_path / "facts.db"
     calls = (
         {
+            "input_tokens": 30,
+            "output_tokens": 6,
+        },
+        {
             "input_tokens": 10,
             "output_tokens": 4,
             "cache_read_tokens": 2,
@@ -156,10 +161,6 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
             "reasoning_tokens": 0,
             "tool_call_count": 1,
             "tool_output_chars": 6,
-        },
-        {
-            "input_tokens": 30,
-            "output_tokens": 6,
         },
     )
     for call_index, fields in enumerate(calls, start=1):
@@ -183,6 +184,51 @@ def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
     assert fact["cache_read_tokens"] is None
     assert fact["cache_write_tokens"] is None
     assert fact["reasoning_tokens"] is None
+
+
+def test_first_token_uses_earliest_available_call_measurement(tmp_path):
+    path = tmp_path / "facts.db"
+    for call_index in range(1, 5):
+        fields = {"input_tokens": call_index}
+        if call_index == 4:
+            fields["first_token_ms"] = 1322.96
+        record_llm_call(
+            "run-sparse-first-token",
+            call_index,
+            fields,
+            path=path,
+        )
+
+    fact = _row(
+        path,
+        "SELECT first_token_ms FROM run_usage_facts "
+        "WHERE run_id='run-sparse-first-token'",
+    )
+
+    assert fact["first_token_ms"] == 1322.96
+
+
+def test_refresh_aggregates_never_replaces_an_observation_with_null(tmp_path):
+    path = tmp_path / "facts.db"
+    upsert_run_facts(
+        "run-preserved-observation",
+        {"duration_ms": 4321, "source": "measured"},
+        path=path,
+    )
+
+    record_llm_call(
+        "run-preserved-observation",
+        1,
+        {"input_tokens": 10},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT duration_ms FROM run_usage_facts "
+        "WHERE run_id='run-preserved-observation'",
+    )
+    assert fact["duration_ms"] == 4321
 
 
 def test_schema_initialization_is_cached_per_database_file(

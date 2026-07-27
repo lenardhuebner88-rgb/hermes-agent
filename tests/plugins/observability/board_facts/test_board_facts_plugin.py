@@ -538,6 +538,29 @@ def test_sampling_fields_reads_real_reasoning_transport_shapes(
     assert fields["reasoning_effort"] == expected
 
 
+def test_sampling_fields_reads_the_actual_codex_worker_request_kwargs(
+    monkeypatch,
+    tmp_path,
+):
+    from agent.transports.codex import ResponsesApiTransport
+
+    plugin = _reload(monkeypatch, tmp_path)
+    body = ResponsesApiTransport().build_kwargs(
+        model="gpt-5.6-terra",
+        messages=[{"role": "user", "content": "inspect the task"}],
+        tools=[],
+        reasoning_config=None,
+        is_codex_backend=True,
+    )
+
+    fields = plugin._sampling_fields({"request": {"body": body}})
+
+    assert body["reasoning"]["effort"] == "medium"
+    assert "service_tier" not in body
+    assert fields["reasoning_effort"] == "medium"
+    assert fields["serving_tier"] is None
+
+
 def test_optional_usage_buckets_distinguish_missing_from_explicit_zero(
     monkeypatch,
     tmp_path,

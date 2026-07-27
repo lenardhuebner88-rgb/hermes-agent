@@ -723,6 +723,65 @@ def test_consume_codex_stream_routes_commentary_phase_deltas_to_reasoning(monkey
     assert response.output_text == ""
 
 
+def test_consume_codex_stream_measures_tool_and_final_call_first_deltas():
+    from agent.codex_runtime import _consume_codex_event_stream
+
+    measured_calls = []
+    for call_index in range(1, 4):
+        function_item = SimpleNamespace(
+            type="function_call",
+            id=f"fc_{call_index}",
+            call_id=f"call_{call_index}",
+            name="terminal",
+            arguments="{}",
+        )
+        response = _consume_codex_event_stream(
+            _FakeCreateStream(
+                [
+                    SimpleNamespace(
+                        type="response.reasoning_text.delta",
+                        delta=f"reasoning-{call_index}",
+                    ),
+                    SimpleNamespace(
+                        type="response.output_item.added",
+                        item=SimpleNamespace(type="function_call"),
+                    ),
+                    SimpleNamespace(
+                        type="response.output_item.done",
+                        item=function_item,
+                    ),
+                    SimpleNamespace(
+                        type="response.completed",
+                        response=SimpleNamespace(status="completed"),
+                    ),
+                ]
+            ),
+            model="gpt-5.6-terra",
+            on_first_delta=lambda index=call_index: measured_calls.append(index),
+        )
+        assert response.output == [function_item]
+
+    final_response = _consume_codex_event_stream(
+        _FakeCreateStream(
+            [
+                SimpleNamespace(
+                    type="response.output_text.delta",
+                    delta="final answer",
+                ),
+                SimpleNamespace(
+                    type="response.completed",
+                    response=SimpleNamespace(status="completed"),
+                ),
+            ]
+        ),
+        model="gpt-5.6-terra",
+        on_first_delta=lambda: measured_calls.append(4),
+    )
+
+    assert final_response.output_text == "final answer"
+    assert measured_calls == [1, 2, 3, 4]
+
+
 def test_consume_codex_stream_separates_commentary_from_analysis(monkeypatch):
     from agent.codex_runtime import _consume_codex_event_stream
 

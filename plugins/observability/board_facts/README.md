@@ -58,6 +58,29 @@ Anthropic's `thinking`/`output_config.effort` shapes from
 are reversed only for the four exact budgets used by that adapter; other
 budgets remain unknown.
 
+Expected sparse provider fields
+-------------------------------
+
+`openai-codex` worker requests do not set `service_tier` by default; the
+Responses transport receives it only through an explicit request override.
+`NULL` is therefore expected for ordinary workers.
+
+The same transport does set `reasoning.effort` (default `medium`). Tool-heavy
+worker requests can exceed the 50,000-character hook-payload limit, however.
+`AIAgent._sanitize_hook_payload` then replaces the structured request with a
+truncated preview object before plugins run, so `board_facts` has no reliable
+effort field to read. It deliberately leaves `reasoning_effort` as `NULL`
+instead of inferring the transport default, because reasoning can be disabled
+or overridden per request.
+
+`cache_write_tokens` is also expected to be `NULL` for current
+`openai-codex` Responses usage. The normalizer already accepts Anthropic's
+`cache_creation_input_tokens`, OpenAI-compatible
+`prompt_tokens_details.cache_write_tokens`, and Codex
+`input_tokens_details.cache_creation_tokens`. Live Codex usage supplies
+`input_tokens_details.cached_tokens` (including explicit zero) but omits the
+cache-creation field, so there is no measured write-token value to record.
+
 Structurally leere Felder
 -------------------------
 

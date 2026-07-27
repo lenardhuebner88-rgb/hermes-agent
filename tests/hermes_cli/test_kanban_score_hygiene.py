@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import hermes_cli.kanban_db as kb
@@ -65,6 +66,44 @@ def test_metric_run_classification_is_ordered_and_profile_null_is_neutral():
         )
         == RUN_CLASS_PRODUCTIVE
     )
+
+
+def test_metric_run_class_counts_accepts_a_naked_sqlite_connection():
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE task_runs (
+                id INTEGER PRIMARY KEY,
+                task_id TEXT,
+                profile TEXT,
+                active_model TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cost_usd REAL,
+                started_at REAL,
+                ended_at REAL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO task_runs "
+            "(task_id, profile, active_model, input_tokens, output_tokens, "
+            " cost_usd, started_at, ended_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                ("real", None, "model", 10, 2, 0.1, 1, 2),
+                ("never", "coder", None, None, None, None, 2, 2),
+            ),
+        )
+
+        assert metric_run_class_counts(conn) == {
+            RUN_CLASS_PRODUCTIVE: 1,
+            RUN_CLASS_FIXTURE: 0,
+            RUN_CLASS_NEVER_RAN: 1,
+        }
+    finally:
+        conn.close()
 
 
 def test_backfill_measures_fixture_and_productive_runs_without_deleting_scores(
