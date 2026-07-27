@@ -1,0 +1,36 @@
+{
+  "source_file": "rollout-2026-07-27T16-03-41-019fa3e3-77e9-7983-8a4a-1a184542c3f4.jsonl",
+  "session_id": "019fa3e3-77e9-7983-8a4a-1a184542c3f4",
+  "model": "gpt-5.6-sol",
+  "token_count_events": 76,
+  "sum_last_input_tokens": 11534483,
+  "final_total_input_tokens": 11534483,
+  "sum_last_output_tokens": 22186,
+  "final_total_output_tokens": 22186,
+  "sum_last_cached_input_tokens": 11090432,
+  "final_total_cached_input_tokens": 11090432,
+  "sum_last_reasoning_output_tokens": 6370,
+  "final_total_reasoning_output_tokens": 6370,
+  "aggregation": "session_last_total",
+  "has_rate_limits": true,
+  "model_context_window": 258400,
+  "final_rate_limits": {
+    "limit_id": "codex",
+    "limit_name": null,
+    "primary": {
+      "used_percent": 38.0,
+      "window_minutes": 10080,
+      "resets_at": 1785611923
+    },
+    "secondary": null,
+    "credits": {
+      "has_credits": false,
+      "unlimited": false,
+      "balance": "0"
+    },
+    "individual_limit": null,
+    "spend_control_reached": null,
+    "plan_type": "pro",
+    "rate_limit_reached_type": null
+  }
+}
