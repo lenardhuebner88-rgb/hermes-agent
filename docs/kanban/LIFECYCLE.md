@@ -47,60 +47,60 @@ archived parent is deliberately not treated as done.
 
 | from → to | function (anchored) | who triggers it | guard that can block it | observable symptom when it stalls |
 |---|---|---|---|---|
-| creation → triage | [`create_task`](../../hermes_cli/kanban_db.py#L5399) | CLI / automation | invalid initial fields, missing parents, role/workspace contract | no row is created; caller gets a validation error |
-| creation → todo | [`create_task`](../../hermes_cli/kanban_db.py#L5399) | CLI / automation | missing parent IDs | new card waits in `todo`; an unfinished parent is visible |
-| creation → ready | [`create_task`](../../hermes_cli/kanban_db.py#L5399) | CLI / automation | unfinished parents route to `todo` instead | card is `todo`, not `ready` |
-| creation → blocked | [`create_task`](../../hermes_cli/kanban_db.py#L5399) | CLI / automation | only the explicit blocked initial mode is accepted | card is born as an operator park |
-| triage → todo | [`specify_triage_task`](../../hermes_cli/kanban_db.py#L19113) | CLI / sweep | row must still be in `triage` | specify returns false; status did not change |
-| todo → ready | [`recompute_ready`](../../hermes_cli/kanban_db.py#L11759) | dispatcher daemon / completion sweep | parents, due time, typed wait, sticky block, active escalation, failure limit | card remains `todo` or `blocked`; no `promoted` event |
-| todo\|blocked → ready | [`promote_task`](../../hermes_cli/kanban_db.py#L18269) | CLI | typed wait or unfinished parents; blocked tasks cannot force past parents | command reports the refusing parent/wait |
-| ready → todo | [`claim_task`](../../hermes_cli/kanban_db.py#L11899) | dispatcher daemon / CLI claimer | active wait or any parent not `done` | `claim_rejected` event; reason is `active_wait` or `parents_not_done` |
-| ready → running | [`claim_task`](../../hermes_cli/kanban_db.py#L11899) | dispatcher daemon / CLI claimer | code contract, wait, parents, claim CAS | card stays `ready`; no current run is opened |
-| review → running | [`claim_review_task`](../../hermes_cli/kanban_db.py#L12138) | review gate / dispatcher daemon | already claimed, wrong status, unavailable review profile before claim | card stays `review`; review hold event identifies the target |
-| running\|ready → blocked | [`block_task`](../../hermes_cli/kanban_db.py#L17928) | worker / CLI / review gate | stale run ID, wrong status, invalid review-origin contract | block returns false; rejection event explains the mismatch |
-| running\|ready → todo | [`block_task`](../../hermes_cli/kanban_db.py#L17928) | worker | a valid unsatisfied dependency wait deliberately parks on `todo` | `wait_registered` plus a `blocked` event whose status is `todo` |
-| running\|ready → triage | [`block_task`](../../hermes_cli/kanban_db.py#L17928) | worker / sweep | same non-review block kind must reach [`BLOCK_RECURRENCE_LIMIT`](../../hermes_cli/kanban_db.py#L175) | `block_loop_detected` event; card is in `triage` |
-| running\|ready\|blocked → review | [`_submit_for_review`](../../hermes_cli/kanban_db.py#L15408) | worker / review gate | workflow identity, worker gate, expected run CAS | task blocks on identity failure or completion raises a worker-gate error |
-| running → blocked | [`hold_task`](../../hermes_cli/kanban_db.py#L12825) | CLI | task must still be running | hold returns false; worker/status won the race |
-| triage\|todo\|scheduled\|ready\|running\|review → blocked | [`cancel_chain`](../../hermes_cli/kanban_db.py#L12928) | CLI | final/already-blocked members are skipped | result lists members under `skipped` |
-| running\|ready\|blocked → ready | [`_advance_workflow_step`](../../hermes_cli/kanban_db.py#L15772) | worker / workflow gate | no valid next step, stale run ID, wrong status | task completes normally or update returns false |
-| running → review | [`_maybe_advance_review_chain`](../../hermes_cli/kanban_db.py#L15936) | review gate | verdict must be approved, workflow identity valid, another stage exists | identity failure blocks; final stage proceeds to `done` |
-| running\|ready\|blocked → done | [`complete_task`](../../hermes_cli/kanban_db.py#L16252) | worker / CLI / review gate | hallucinated cards, worker/review gate, stale run, integration park | exception/event or card moves to `review`/`blocked` instead |
-| running → ready\|review | [`release_stale_claims`](../../hermes_cli/kanban_db.py#L12547) | dispatcher daemon | live local PID plus fresh heartbeat extends claim; surviving process prevents release | `claim_extended` or `reclaim_deferred`; card remains `running` |
-| running\|ready\|blocked → ready | [`reclaim_task`](../../hermes_cli/kanban_db.py#L12730) | CLI | a worker process group that survives termination | `reclaim_deferred`; claim stays owned |
-| blocked\|scheduled → todo\|ready | [`unblock_task`](../../hermes_cli/kanban_db.py#L18974) | CLI / automation | typed wait unless audited override; unfinished parents route to `todo` | unblock returns false or succeeds into `todo` |
-| todo\|ready\|running\|blocked → scheduled | [`schedule_task`](../../hermes_cli/kanban_db.py#L20954) | CLI / cron / worker | active typed wait, stale expected run ID | schedule returns false; previous status remains |
-| any non-archived → archived | [`archive_task`](../../hermes_cli/kanban_db.py#L20170) | CLI / sweep | dependent wait, changed ownership generation, surviving worker | archive refuses; wait conflict or `reclaim_deferred` is visible |
+| creation → triage | [`create_task`](../../hermes_cli/kanban_db.py#L5392) | CLI / automation | invalid initial fields, missing parents, role/workspace contract | no row is created; caller gets a validation error |
+| creation → todo | [`create_task`](../../hermes_cli/kanban_db.py#L5392) | CLI / automation | missing parent IDs | new card waits in `todo`; an unfinished parent is visible |
+| creation → ready | [`create_task`](../../hermes_cli/kanban_db.py#L5392) | CLI / automation | unfinished parents route to `todo` instead | card is `todo`, not `ready` |
+| creation → blocked | [`create_task`](../../hermes_cli/kanban_db.py#L5392) | CLI / automation | only the explicit blocked initial mode is accepted | card is born as an operator park |
+| triage → todo | [`specify_triage_task`](../../hermes_cli/kanban_db.py#L19106) | CLI / sweep | row must still be in `triage` | specify returns false; status did not change |
+| todo → ready | [`recompute_ready`](../../hermes_cli/kanban_db.py#L11752) | dispatcher daemon / completion sweep | parents, due time, typed wait, sticky block, active escalation, failure limit | card remains `todo` or `blocked`; no `promoted` event |
+| todo\|blocked → ready | [`promote_task`](../../hermes_cli/kanban_db.py#L18262) | CLI | typed wait or unfinished parents; blocked tasks cannot force past parents | command reports the refusing parent/wait |
+| ready → todo | [`claim_task`](../../hermes_cli/kanban_db.py#L11892) | dispatcher daemon / CLI claimer | active wait or any parent not `done` | `claim_rejected` event; reason is `active_wait` or `parents_not_done` |
+| ready → running | [`claim_task`](../../hermes_cli/kanban_db.py#L11892) | dispatcher daemon / CLI claimer | code contract, wait, parents, claim CAS | card stays `ready`; no current run is opened |
+| review → running | [`claim_review_task`](../../hermes_cli/kanban_db.py#L12131) | review gate / dispatcher daemon | already claimed, wrong status, unavailable review profile before claim | card stays `review`; review hold event identifies the target |
+| running\|ready → blocked | [`block_task`](../../hermes_cli/kanban_db.py#L17921) | worker / CLI / review gate | stale run ID, wrong status, invalid review-origin contract | block returns false; rejection event explains the mismatch |
+| running\|ready → todo | [`block_task`](../../hermes_cli/kanban_db.py#L17921) | worker | a valid unsatisfied dependency wait deliberately parks on `todo` | `wait_registered` plus a `blocked` event whose status is `todo` |
+| running\|ready → triage | [`block_task`](../../hermes_cli/kanban_db.py#L17921) | worker / sweep | same non-review block kind must reach [`BLOCK_RECURRENCE_LIMIT`](../../hermes_cli/kanban_db.py#L175) | `block_loop_detected` event; card is in `triage` |
+| running\|ready\|blocked → review | [`_submit_for_review`](../../hermes_cli/kanban_db.py#L15401) | worker / review gate | workflow identity, worker gate, expected run CAS | task blocks on identity failure or completion raises a worker-gate error |
+| running → blocked | [`hold_task`](../../hermes_cli/kanban_db.py#L12818) | CLI | task must still be running | hold returns false; worker/status won the race |
+| triage\|todo\|scheduled\|ready\|running\|review → blocked | [`cancel_chain`](../../hermes_cli/kanban_db.py#L12921) | CLI | final/already-blocked members are skipped | result lists members under `skipped` |
+| running\|ready\|blocked → ready | [`_advance_workflow_step`](../../hermes_cli/kanban_db.py#L15765) | worker / workflow gate | no valid next step, stale run ID, wrong status | task completes normally or update returns false |
+| running → review | [`_maybe_advance_review_chain`](../../hermes_cli/kanban_db.py#L15929) | review gate | verdict must be approved, workflow identity valid, another stage exists | identity failure blocks; final stage proceeds to `done` |
+| running\|ready\|blocked → done | [`complete_task`](../../hermes_cli/kanban_db.py#L16245) | worker / CLI / review gate | hallucinated cards, worker/review gate, stale run, integration park | exception/event or card moves to `review`/`blocked` instead |
+| running → ready\|review | [`release_stale_claims`](../../hermes_cli/kanban_db.py#L12540) | dispatcher daemon | live local PID plus fresh heartbeat extends claim; surviving process prevents release | `claim_extended` or `reclaim_deferred`; card remains `running` |
+| running\|ready\|blocked → ready | [`reclaim_task`](../../hermes_cli/kanban_db.py#L12723) | CLI | a worker process group that survives termination | `reclaim_deferred`; claim stays owned |
+| blocked\|scheduled → todo\|ready | [`unblock_task`](../../hermes_cli/kanban_db.py#L18967) | CLI / automation | typed wait unless audited override; unfinished parents route to `todo` | unblock returns false or succeeds into `todo` |
+| todo\|ready\|running\|blocked → scheduled | [`schedule_task`](../../hermes_cli/kanban_db.py#L20947) | CLI / cron / worker | active typed wait, stale expected run ID | schedule returns false; previous status remains |
+| any non-archived → archived | [`archive_task`](../../hermes_cli/kanban_db.py#L20163) | CLI / sweep | dependent wait, changed ownership generation, surviving worker | archive refuses; wait conflict or `reclaim_deferred` is visible |
 
 ## Dispatch path: tick to worker process
 
-1. [`dispatch_once`](../../hermes_cli/kanban_db.py#L29600) resolves the board DB
+1. [`dispatch_once`](../../hermes_cli/kanban_db.py#L29593) resolves the board DB
    and enters [`_dispatch_tick_lock`](../../hermes_cli/kanban_db.py#L2830), a
    non-blocking OS lock on the DB-adjacent `.dispatch.lock`. A loser returns
    `skipped_locked=True` and performs no tick writes.
-2. [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29691) reaps zombies
+2. [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29684) reaps zombies
    and pending continuations, refreshes Claude-CLI heartbeats through
-   [`heartbeat_live_claude_cli_workers`](../../hermes_cli/kanban_db.py#L22143),
+   [`heartbeat_live_claude_cli_workers`](../../hermes_cli/kanban_db.py#L22136),
    reclaims stale/dead/timed-out runs, optionally retries settled blocks, then
-   calls [`recompute_ready`](../../hermes_cli/kanban_db.py#L11759).
+   calls [`recompute_ready`](../../hermes_cli/kanban_db.py#L11752).
 3. It selects unclaimed `ready` rows by priority and age. Before claim it applies
    global and per-profile concurrency, assignee spawnability, repo/chain/writer
    serialization, daily budget, G1 cumulative input tokens, role-fit, code
-   contract, and [`check_respawn_guard`](../../hermes_cli/kanban_db.py#L27912).
-   Advisory holds leave the row `ready`; [`summarize_dispatch_holds`](../../hermes_cli/kanban_db.py#L28152)
+   contract, and [`check_respawn_guard`](../../hermes_cli/kanban_db.py#L27905).
+   Advisory holds leave the row `ready`; [`summarize_dispatch_holds`](../../hermes_cli/kanban_db.py#L28145)
    groups the operator-visible buckets.
-4. [`claim_task`](../../hermes_cli/kanban_db.py#L11899) performs the
+4. [`claim_task`](../../hermes_cli/kanban_db.py#L11892) performs the
    `ready → running` CAS, stamps claim expiry and immutable route identity, and
    creates the run. Review rows take the parallel
-   [`claim_review_task`](../../hermes_cli/kanban_db.py#L12138) path.
-5. [`_resolve_dispatch_workspace`](../../hermes_cli/kanban_db.py#L20844)
+   [`claim_review_task`](../../hermes_cli/kanban_db.py#L12131) path.
+5. [`_resolve_dispatch_workspace`](../../hermes_cli/kanban_db.py#L20837)
    chooses managed worktree provisioning or existing-workspace resolution.
-   [`resolve_workspace`](../../hermes_cli/kanban_db.py#L20750) defines the
+   [`resolve_workspace`](../../hermes_cli/kanban_db.py#L20743) defines the
    scratch, absolute directory, and linked-worktree behavior. Base-preparation
    drift/conflict is checked before the materialized path is persisted.
 6. A writable shared chain worktree acquires a writer lease. Then
-   [`_default_spawn`](../../hermes_cli/kanban_db.py#L32094) freezes the worker
-   environment and launch route, and [`_launch_worker_process`](../../hermes_cli/kanban_db.py#L31455)
+   [`_default_spawn`](../../hermes_cli/kanban_db.py#L32087) freezes the worker
+   environment and launch route, and [`_launch_worker_process`](../../hermes_cli/kanban_db.py#L31448)
    starts a new-session subprocess with its per-task log. The PID is attached
    only if the claim generation is still current.
 
@@ -110,12 +110,12 @@ This is the single most consequential mechanic in the dispatch path and the one
 most likely to mislead. The worker's model/provider is **not** read from the
 task row at spawn time. It is resolved once at *claim* time and frozen.
 
-1. [`claim_task`](../../hermes_cli/kanban_db.py#L11899) (and
-   [`claim_review_task`](../../hermes_cli/kanban_db.py#L12138)) call
-   [`_spawn_identity_metadata`](../../hermes_cli/kanban_db.py#L8083), which
+1. [`claim_task`](../../hermes_cli/kanban_db.py#L11892) (and
+   [`claim_review_task`](../../hermes_cli/kanban_db.py#L12131)) call
+   [`_spawn_identity_metadata`](../../hermes_cli/kanban_db.py#L8076), which
    resolves model and provider and persists them on the run.
-2. [`_default_spawn`](../../hermes_cli/kanban_db.py#L32094) reads that stamp back
-   via [`_persisted_spawn_identity`](../../hermes_cli/kanban_db.py#L31887) and
+2. [`_default_spawn`](../../hermes_cli/kanban_db.py#L32087) reads that stamp back
+   via [`_persisted_spawn_identity`](../../hermes_cli/kanban_db.py#L31880) and
    sets its local `route_is_frozen` flag from it. Resolving the
    stamp *before* consulting the mutable lane is deliberate: a lane edited
    between claim and launch must not be able to change the argv of a run already
@@ -131,12 +131,12 @@ Precedence inside the stamp — first match wins:
 | 4 | assignee profile config | `profile` | no override anywhere |
 
 Both spellings in row 1 resolve identically —
-[`_resolve_model_override`](../../hermes_cli/kanban_db.py#L7946) is the single
+[`_resolve_model_override`](../../hermes_cli/kanban_db.py#L7939) is the single
 resolver, and
 `tests/hermes_cli/test_kanban_provider_override_dispatch_fork.py` pins that
 equivalence. An override whose model belongs to a *different* provider family
 than the resolved provider is a poison pill: it is refused by
-[`_handle_incompatible_model_override`](../../hermes_cli/kanban_db.py#L8060),
+[`_handle_incompatible_model_override`](../../hermes_cli/kanban_db.py#L8053),
 the stamp carries no model at all, and the spawn then fails closed with
 `no concrete model route` rather than quietly running on the profile default.
 
@@ -150,23 +150,23 @@ reasoning applies to `--max-turns`.
 > stamp, `route_is_frozen` is true for every dispatched task, so any code that
 > reads the *mutable* task row for routing at spawn time is unreachable. The
 > `elif task.provider_override and not route_is_frozen` branch inside
-> [`_default_spawn`](../../hermes_cli/kanban_db.py#L32094) is exactly that — it
+> [`_default_spawn`](../../hermes_cli/kanban_db.py#L32087) is exactly that — it
 > is kept byte-identical to upstream for merge-cost reasons, not because it
 > fires. Fixes to routing belong in the stamp. Editing `model_override` on an
 > already-running task has no effect until the next claim, with no warning.
 
 ### What the spawned worker sees
 
-[`build_worker_context`](../../hermes_cli/kanban_db.py#L33551) returns the
+[`build_worker_context`](../../hermes_cli/kanban_db.py#L33544) returns the
 canonical phase-aware bounded brief built by
-[`render_worker_brief_for_task`](../../hermes_cli/kanban_db.py#L33512). It
+[`render_worker_brief_for_task`](../../hermes_cli/kanban_db.py#L33505). It
 contains task/workflow identity, assignee, status, tenant, materialized
 workspace/branch, task body and expanded scope contract, knowledge pointers,
 attachments, continuation notice, parent results, reviewer findings, comments,
 prior runs, same-tenant role history (not for scouts), and the immutable review
 diff when applicable. Oversized sections become hashed per-run artifacts.
 
-[`_default_spawn`](../../hermes_cli/kanban_db.py#L32094) additionally pins the
+[`_default_spawn`](../../hermes_cli/kanban_db.py#L32087) additionally pins the
 task ID, workspace, run ID, claim lock, board DB/slug/workspace root, profile,
 tenant, branch, iteration/runtime controls, and terminal working directory in
 the child environment. The worker must end by calling the task-scoped complete
@@ -175,10 +175,10 @@ or block lifecycle command; a clean exit without either is a protocol violation.
 ### Heartbeats
 
 Workers update task and run liveness through
-[`heartbeat_worker`](../../hermes_cli/kanban_db.py#L21959); Claude-CLI lanes are
-bridged by [`heartbeat_live_claude_cli_workers`](../../hermes_cli/kanban_db.py#L22143).
+[`heartbeat_worker`](../../hermes_cli/kanban_db.py#L21952); Claude-CLI lanes are
+bridged by [`heartbeat_live_claude_cli_workers`](../../hermes_cli/kanban_db.py#L22136).
 The daemon publishes board counts and tick health through
-[`write_kanban_dispatcher_heartbeat`](../../hermes_cli/kanban_db.py#L27857).
+[`write_kanban_dispatcher_heartbeat`](../../hermes_cli/kanban_db.py#L27850).
 An expired claim with a live local PID is extended only while observable
 heartbeat progress remains fresh.
 
@@ -191,22 +191,22 @@ which is why it is easy to miss when reading the monolith alone.
 
 ### Order of decisions inside `complete_task`
 
-[`complete_task`](../../hermes_cli/kanban_db.py#L16252) is a funnel, not a
+[`complete_task`](../../hermes_cli/kanban_db.py#L16245) is a funnel, not a
 single write. The order matters and is load-bearing:
 
 1. **Workflow step routing** — a non-final workflow step re-queues instead of
    completing.
-2. **Review gate** — [`_review_gate_should_apply`](../../hermes_cli/kanban_db.py#L14759):
+2. **Review gate** — [`_review_gate_should_apply`](../../hermes_cli/kanban_db.py#L14752):
    gate enabled, this run did *not* originate from review (anti-loop), and the
    assignee is in `code_roles`. Anything else falls straight through to done.
-3. **Token levers** — [`_deterministic_review_skip`](../../hermes_cli/kanban_db.py#L15228)
-   and [`_tip_defer_review`](../../hermes_cli/kanban_db.py#L15270) may skip the
-   LLM review; otherwise [`_submit_for_review`](../../hermes_cli/kanban_db.py#L15408)
+3. **Token levers** — [`_deterministic_review_skip`](../../hermes_cli/kanban_db.py#L15221)
+   and [`_tip_defer_review`](../../hermes_cli/kanban_db.py#L15263) may skip the
+   LLM review; otherwise [`_submit_for_review`](../../hermes_cli/kanban_db.py#L15401)
    parks the task in `review`.
 4. **Review verdict authority** — a review-originated run must carry a
    machine-readable verdict or `ReviewVerdictRequiredError` is raised;
    `REQUEST_CHANGES` routes to `block_task`.
-5. **Stage advance** — [`_maybe_advance_review_chain`](../../hermes_cli/kanban_db.py#L15936)
+5. **Stage advance** — [`_maybe_advance_review_chain`](../../hermes_cli/kanban_db.py#L15929)
    re-parks an APPROVED *intermediate* stage for the next reviewer. Placed
    before integration so a mid-chain stage never triggers a premature merge.
 6. **Integration hook** — `maybe_integrate_on_complete`, guarded so it only runs
@@ -217,29 +217,29 @@ single write. The order matters and is load-bearing:
 
 ### The serialized integrator
 
-[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6217) is *the* single
+[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6222) is *the* single
 merge point and it never pushes. It holds a file lock in the repo's `.git` dir
 (invisible to `git status`), then runs these stages, each of which can park:
 
 | # | stage | anchored | parks when |
 |---|---|---|---|
-| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5885) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
-| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5922) | chain worktree dirty with non-preservable files |
-| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5975) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
+| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5890) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
+| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5927) | chain worktree dirty with non-preservable files |
+| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5980) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
 | 3 | dirty overlap | inline in `integrate_chain` | a foreign dirty file in the live checkout overlaps the branch diff |
-| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6103) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
-| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6153) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
+| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6108) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
+| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6158) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
 
 The post-merge gate runs at the exact merge commit inside a detached validation
-worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5537)
+worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5542)
 — never in the possibly-dirty live checkout. Every exception path there returns
 `(False, …)` — it fails **closed**.
 
 Gate selection is
 [`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L372):
 a per-repo command list from `kanban.integration_gate.repos` if configured, else
-[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5819) for the FO
-repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5792).
+[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5824) for the FO
+repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5797).
 **This repo is not in `integration_gate.repos`, so it uses `default_quick_gate`.**
 
 `default_quick_gate` = ruff over the changed `.py` files, then the *affected*
@@ -248,16 +248,16 @@ touches `web/`. `npm run build` is deliberately excluded (it mutates generated
 dashboard assets and belongs to the release gate).
 
 Outcomes: `merged` / `clean` (nothing to merge) / `parked` / `rebase_conflict`.
-A park becomes [`_park_integration`](../../hermes_cli/kanban_db.py#L17592),
+A park becomes [`_park_integration`](../../hermes_cli/kanban_db.py#L17585),
 which blocks the task and stamps the closing run `integration_parked` rather
 than `completed` — a parked integration must not count as a success for the
 respawn guard or per-profile stats.
 
 ### Chain semantics: only the last task merges
 
-[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7217) only
+[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7222) only
 integrates when this completion closes the **last open task** of a provisioned
-chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6699)
+chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6704)
 ORs two signals conservatively: `task_links` membership from the chain root, and
 any task whose `workspace_path` lives under the same worktree. Consequence: an
 ordinary mid-chain slice goes `done` with **nothing merged**, and the merge
@@ -280,18 +280,18 @@ kanban.review_gate:
 ```
 
 **Tier resolution** —
-[`_effective_review_tier`](../../hermes_cli/kanban_db.py#L13417) treats the
+[`_effective_review_tier`](../../hermes_cli/kanban_db.py#L13410) treats the
 deterministic classifier as a *floor*: an operator may always RAISE the tier,
 but a downgrade below the floor only applies with a logged
 `review_tier_downgrade_ack` event, checked by
-[`_review_tier_downgrade_acked`](../../hermes_cli/kanban_db.py#L13470). The
+[`_review_tier_downgrade_acked`](../../hermes_cli/kanban_db.py#L13463). The
 classifier itself,
 [`classify_review_tier`](../../hermes_cli/control_plane_gate.py#L337), reads
 **only prose** — `risk_class`, the title, and the body. It never sees the diff.
 
 **Lever 1 — `standard_uses_llm_verifier: false`.** A standard-tier completion
 skips the LLM verifier when the deterministic worker gate ran green. The skip
-requires *positive* evidence: [`_run_worker_gate`](../../hermes_cli/kanban_db.py#L15135)
+requires *positive* evidence: [`_run_worker_gate`](../../hermes_cli/kanban_db.py#L15128)
 returns `{"configured": False}` (no `passed` key) whenever the gate is disabled,
 the assignee is not code-bearing, the workspace is missing, or no commands match
 the repo — and `stamp.get("passed") is True` is then False, so the task parks in
@@ -301,7 +301,7 @@ protect against is a gate that passes **vacuously** — see the trap below.
 **Lever 2 — `judge_at_chain_tip: true`.** A non-tip `review`-tier slice defers
 its LLM review to the chain tip, so one judgment covers the feature instead of
 one per slice. Cost: the tip's review diff is captured by
-[`_capture_review_diff_snapshot`](../../hermes_cli/kanban_db.py#L14911) against
+[`_capture_review_diff_snapshot`](../../hermes_cli/kanban_db.py#L14904) against
 that run's own `pre_run_commit_sha`. In a shared chain worktree the earlier
 slices are already in that baseline, so a mid-chain regression is **outside the
 diff the tip judge sees**. The against-main baseline exists but is only used for
@@ -326,20 +326,20 @@ own profile config must not be able to disable the gate it is subject to.
 | mode | trigger | enforcing code | confirm live | clear |
 |---|---|---|---|---|
 | Dispatch tick lock | another process owns the board lock, or lock setup cannot prove ownership | [`_dispatch_tick_lock`](../../hermes_cli/kanban_db.py#L2830) | tick result has `skipped_locked=True`; no maintenance/spawn writes from that tick | stop the duplicate dispatcher or repair lock-path access; next tick retries automatically |
-| Respawn cooldown/duplicate-work guard | recent rate limit/transient retry/auth failure/success, active PR, or invalid code contract | [`check_respawn_guard`](../../hermes_cli/kanban_db.py#L27912) | card remains `ready`; deduped `respawn_guarded` event names the reason | wait for cooldown, correct auth/contract, close or deliberately requeue after successful work, resolve the PR |
-| G1 cumulative input-token runaway | all-run input sum exceeds configured per-task cap; one actionable review extension may be allowed | [`_park_budget_runaway`](../../hermes_cli/kanban_db.py#L25226) | card becomes capacity-blocked; `budget_runaway_parked` and operator-escalation events include sum/cap/run count | inspect the runaway, then operator unblocks/reassigns/closes; raising the cap alone does not change the parked state |
-| Dispatch holds | repo, chain-worktree, writer lease, daily budget, role mismatch, or per-profile concurrency is occupied | [`summarize_dispatch_holds`](../../hermes_cli/kanban_db.py#L28152) | card stays `ready`; tick bucket/event names `repo_serialized`, `chain_worktree_serialized`, `worktree_writer_active`, `budget_held`, `role_fit_held`, or profile cap | let holder finish/reclaim, repair stale writer ownership, adjust routing/cap, or remove the conflicting work |
-| Review ping-pong breaker | repeated review-origin `REQUEST_CHANGES` reaches configured maximum rounds | [`block_task`](../../hermes_cli/kanban_db.py#L17928) | task is `blocked` as `needs_input`; reason starts `review ping-pong breaker`; operator escalation class is `review_pingpong` | operator resolves findings and explicitly unblocks/respecs/reassigns; it does not auto-retry |
-| Parent/wait gate | parent is not `done`, due time is future, or typed wait remains unsatisfied/invalid | [`recompute_ready`](../../hermes_cli/kanban_db.py#L11759) | task remains `todo`/`blocked`; claim may emit `claim_rejected` | finish parent, wait for due/event, or use the audited wait override |
-| Global/profile concurrency | live running count reaches board, spawn, or profile cap | [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29691) | no spawn; profile-capped tasks appear in the hold result, global cap returns early | allow running tasks to terminate/reclaim or change the configured cap |
-| Nonspawnable assignee | assigned name is not an on-disk Hermes profile | [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29691) | `nonspawnable` event; unknown lanes also emit one operator escalation | assign a real profile or provision the intended profile; terminal pull-only lanes remain intentionally held |
-| Workspace provisioning/base drift | invalid path, worktree lock/timeout, rebase conflict, or reused base differs | [`_resolve_dispatch_workspace`](../../hermes_cli/kanban_db.py#L20844) | claimed run is requeued/blocked; events include spawn retry/failure or `worker_base_rejected` | fix path/git state; transient timeouts back off; conflicts use the bounded fixer path or operator repair |
-| Claim/heartbeat expiry | TTL expires and no sufficiently fresh observable progress exists | [`release_stale_claims`](../../hermes_cli/kanban_db.py#L12547) | `reclaimed`, `claim_extended`, or `reclaim_deferred` event; status is `ready`, `review`, or still `running` | healthy workers heartbeat; terminate/reclaim a wedged process; never clear ownership while its process survives |
-| Worker exits without terminal lifecycle call | subprocess exits zero while task is still running | [`detect_crashed_workers`](../../hermes_cli/kanban_db.py#L22663) | `protocol_violation` or `deliverable_posted_not_completed`; bounded repeats end in `gave_up` | recover posted evidence or rerun with the required complete/block call; operator unblocks after breaker trip |
-| Spawn/config failure breaker | model route, executable, workspace, or repeated spawn fails | [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24244) | failure counter and spawn events accumulate; terminal attempt becomes blocked/auto-blocked | repair deterministic config; allow bounded transient retry, then explicitly unblock after correction |
-| Sticky worker/operator block | latest block or active escalation requires a decision | [`_has_sticky_block`](../../hermes_cli/kanban_db.py#L11574) | card stays `blocked` even when every parent is done | [`unblock_task`](../../hermes_cli/kanban_db.py#L18974) after resolving the stated cause |
-| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6217) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17592) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
-| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6103) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
+| Respawn cooldown/duplicate-work guard | recent rate limit/transient retry/auth failure/success, active PR, or invalid code contract | [`check_respawn_guard`](../../hermes_cli/kanban_db.py#L27905) | card remains `ready`; deduped `respawn_guarded` event names the reason | wait for cooldown, correct auth/contract, close or deliberately requeue after successful work, resolve the PR |
+| G1 cumulative input-token runaway | all-run input sum exceeds configured per-task cap; one actionable review extension may be allowed | [`_park_budget_runaway`](../../hermes_cli/kanban_db.py#L25219) | card becomes capacity-blocked; `budget_runaway_parked` and operator-escalation events include sum/cap/run count | inspect the runaway, then operator unblocks/reassigns/closes; raising the cap alone does not change the parked state |
+| Dispatch holds | repo, chain-worktree, writer lease, daily budget, role mismatch, or per-profile concurrency is occupied | [`summarize_dispatch_holds`](../../hermes_cli/kanban_db.py#L28145) | card stays `ready`; tick bucket/event names `repo_serialized`, `chain_worktree_serialized`, `worktree_writer_active`, `budget_held`, `role_fit_held`, or profile cap | let holder finish/reclaim, repair stale writer ownership, adjust routing/cap, or remove the conflicting work |
+| Review ping-pong breaker | repeated review-origin `REQUEST_CHANGES` reaches configured maximum rounds | [`block_task`](../../hermes_cli/kanban_db.py#L17921) | task is `blocked` as `needs_input`; reason starts `review ping-pong breaker`; operator escalation class is `review_pingpong` | operator resolves findings and explicitly unblocks/respecs/reassigns; it does not auto-retry |
+| Parent/wait gate | parent is not `done`, due time is future, or typed wait remains unsatisfied/invalid | [`recompute_ready`](../../hermes_cli/kanban_db.py#L11752) | task remains `todo`/`blocked`; claim may emit `claim_rejected` | finish parent, wait for due/event, or use the audited wait override |
+| Global/profile concurrency | live running count reaches board, spawn, or profile cap | [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29684) | no spawn; profile-capped tasks appear in the hold result, global cap returns early | allow running tasks to terminate/reclaim or change the configured cap |
+| Nonspawnable assignee | assigned name is not an on-disk Hermes profile | [`_dispatch_once_locked`](../../hermes_cli/kanban_db.py#L29684) | `nonspawnable` event; unknown lanes also emit one operator escalation | assign a real profile or provision the intended profile; terminal pull-only lanes remain intentionally held |
+| Workspace provisioning/base drift | invalid path, worktree lock/timeout, rebase conflict, or reused base differs | [`_resolve_dispatch_workspace`](../../hermes_cli/kanban_db.py#L20837) | claimed run is requeued/blocked; events include spawn retry/failure or `worker_base_rejected` | fix path/git state; transient timeouts back off; conflicts use the bounded fixer path or operator repair |
+| Claim/heartbeat expiry | TTL expires and no sufficiently fresh observable progress exists | [`release_stale_claims`](../../hermes_cli/kanban_db.py#L12540) | `reclaimed`, `claim_extended`, or `reclaim_deferred` event; status is `ready`, `review`, or still `running` | healthy workers heartbeat; terminate/reclaim a wedged process; never clear ownership while its process survives |
+| Worker exits without terminal lifecycle call | subprocess exits zero while task is still running | [`detect_crashed_workers`](../../hermes_cli/kanban_db.py#L22656) | `protocol_violation` or `deliverable_posted_not_completed`; bounded repeats end in `gave_up` | recover posted evidence or rerun with the required complete/block call; operator unblocks after breaker trip |
+| Spawn/config failure breaker | model route, executable, workspace, or repeated spawn fails | [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24237) | failure counter and spawn events accumulate; terminal attempt becomes blocked/auto-blocked | repair deterministic config; allow bounded transient retry, then explicitly unblock after correction |
+| Sticky worker/operator block | latest block or active escalation requires a decision | [`_has_sticky_block`](../../hermes_cli/kanban_db.py#L11567) | card stays `blocked` even when every parent is done | [`unblock_task`](../../hermes_cli/kanban_db.py#L18967) after resolving the stated cause |
+| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6222) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17585) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
+| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6108) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
 | Integration retry exhausted | a `transient`-classed park kept failing | [`_integration_park_class`](../../hermes_cli/kanban_worktrees.py#L485) | bounded `integration_retry` events; re-park once reclassified non-transient | resolve the underlying dirt/lock; the retry counter is separate from the failure breaker |
 
 ## Traps
@@ -376,17 +376,17 @@ chat-subcommand `-m` are computed by different fallback chains in
 
 **`_record_spawn_failure` is a wrapper, not the engine.** The counter and
 breaker logic lives in
-[`_record_task_failure`](../../hermes_cli/kanban_db.py#L23836);
-[`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24244) delegates to it.
+[`_record_task_failure`](../../hermes_cli/kanban_db.py#L23829);
+[`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24237) delegates to it.
 Grep finds the old name first, so a change applied only there misses the crash
 and timeout paths that call `_record_task_failure` directly.
 
 **A green gate can be an empty gate.** Both the worker gate and the post-merge
 gate select tests from the diff, and both treat "nothing selected" as pass:
 `scripts/run-affected.sh` prints `skipping pytest` and exits 0, and
-[`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5792) notes
+[`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5797) notes
 `pytest skipped (no affected test modules)` and returns green. The mapper,
-[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4866) with
+[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4871) with
 [`_feature_named_sibling_tests`](../../hermes_cli/kanban_worktrees.py#L117), only
 scans `tests/` root and `tests/<dir-of-the-source-file>` — so a source file in a
 **nested package** whose tests live one level up matched nothing. Measured
@@ -414,7 +414,7 @@ files to zero merge-gate selection because `tests/agent/`, `tests/gateway/` and
 `tests/hermes_cli/` all exceed 200.
 
 **A park cannot demote a task that is already `done`.**
-[`_park_integration`](../../hermes_cli/kanban_db.py#L17592) blocks via an UPDATE
+[`_park_integration`](../../hermes_cli/kanban_db.py#L17585) blocks via an UPDATE
 constrained to `status IN ('running','ready','blocked')` and returns `False`
 when `rowcount != 1` — silently, with the `integration_parked` event already
 written. When the integrator runs after the row reached `done`, the event
@@ -437,7 +437,7 @@ reached it and 92 anchors had drifted unnoticed.
 ## Other entry points into the lifecycle
 
 The transition table starts at
-[`create_task`](../../hermes_cli/kanban_db.py#L5399) because that is the common
+[`create_task`](../../hermes_cli/kanban_db.py#L5392) because that is the common
 path, but it is not the only one. Tasks also enter the board through epic/triage
 fan-out (`hermes_cli/kanban_decompose.py`), PlanSpec ingest
 (`hermes_cli/planspecs.py`, plus `hermes_cli/pa_planspec.py` for drafts), and
@@ -455,33 +455,33 @@ transition table still applies once the row exists.
 | 1679 | [Vault / Memory link extraction](../../hermes_cli/kanban_db.py#L1721) |
 | 2113 | [Schema](../../hermes_cli/kanban_db.py#L2155) |
 | 2526 | [Connection helpers](../../hermes_cli/kanban_db.py#L2573) |
-| 4157 | [ID generation](../../hermes_cli/kanban_db.py#L4557) |
-| 4200 | [Task creation / mutation](../../hermes_cli/kanban_db.py#L4600) |
-| 5959 | [Links](../../hermes_cli/kanban_db.py#L6455) |
-| 6316 | [Comments & events](../../hermes_cli/kanban_db.py#L6812) |
-| 6403 | [Attachments](../../hermes_cli/kanban_db.py#L6899) |
-| 10195 | [Dependency resolution (todo -> ready)](../../hermes_cli/kanban_db.py#L10789) |
-| 11301 | [Claim / complete / block](../../hermes_cli/kanban_db.py#L11895) |
-| 12645 | [Review gate (Phase 2: independent verification before 'done')](../../hermes_cli/kanban_db.py#L13239) |
-| 16100 | [Workspace / tmux cleanup](../../hermes_cli/kanban_db.py#L16866) |
-| 16579 | [First-use tip for scratch workspaces](../../hermes_cli/kanban_db.py#L17347) |
-| 19637 | [Workspace resolution](../../hermes_cli/kanban_db.py#L20440) |
-| 20188 | [Dispatcher (one-shot pass)](../../hermes_cli/kanban_db.py#L21021) |
-| 20218 | [Respawn guard constants](../../hermes_cli/kanban_db.py#L21051) |
-| 24185 | [G1: per-task cumulative input-token runaway guard](../../hermes_cli/kanban_db.py#L25020) |
-| 27527 | [OpenClaw cross-system dispatch (Mission-Control via HMAC-signed envelopes)](../../hermes_cli/kanban_db.py#L28367) |
-| 27764 | [B1a — tree-wide inventory/hygiene must not land on research/premium LLM loops](../../hermes_cli/kanban_db.py#L28604) |
-| 31557 | [Long-lived dispatcher daemon](../../hermes_cli/kanban_db.py#L32415) |
-| 31631 | [Worker context builder (what a spawned worker sees)](../../hermes_cli/kanban_db.py#L32489) |
-| 32263 | [Scope-contract template expansion (PlanSpec B)](../../hermes_cli/kanban_db.py#L33121) |
-| 32705 | [Stats + SLA helpers](../../hermes_cli/kanban_db.py#L33565) |
-| 35429 | [Epics (N-E3) — durable goals spanning multiple task trees](../../hermes_cli/kanban_db.py#L36298) |
-| 35603 | [Disposition Ledger (FRD-S1) — additive; no wiring into completion path yet](../../hermes_cli/kanban_db.py#L36472) |
-| 36457 | [Lanes (night-sprint F1) — switchable profile→(runtime, model) presets](../../hermes_cli/kanban_db.py#L37386) |
-| 36887 | [Notification subscriptions (used by the gateway kanban-notifier)](../../hermes_cli/kanban_db.py#L37824) |
-| 37006 | [Browser Web Push subscriptions (used by the control dashboard)](../../hermes_cli/kanban_db.py#L37943) |
-| 37408 | [Retention + garbage collection](../../hermes_cli/kanban_db.py#L38345) |
-| 37457 | [Worker log accessor](../../hermes_cli/kanban_db.py#L38394) |
-| 37506 | [Assignee enumeration (known profiles + per-profile board stats)](../../hermes_cli/kanban_db.py#L38443) |
-| 37598 | [Runs (attempt history on a task)](../../hermes_cli/kanban_db.py#L38535) |
-| 37646 | [Durable Kanban ↔ TMAX execution capsule](../../hermes_cli/kanban_db.py#L38583) |
+| 4157 | [ID generation](../../hermes_cli/kanban_db.py#L4550) |
+| 4200 | [Task creation / mutation](../../hermes_cli/kanban_db.py#L4593) |
+| 5959 | [Links](../../hermes_cli/kanban_db.py#L6448) |
+| 6316 | [Comments & events](../../hermes_cli/kanban_db.py#L6805) |
+| 6403 | [Attachments](../../hermes_cli/kanban_db.py#L6892) |
+| 10195 | [Dependency resolution (todo -> ready)](../../hermes_cli/kanban_db.py#L10782) |
+| 11301 | [Claim / complete / block](../../hermes_cli/kanban_db.py#L11888) |
+| 12645 | [Review gate (Phase 2: independent verification before 'done')](../../hermes_cli/kanban_db.py#L13232) |
+| 16100 | [Workspace / tmux cleanup](../../hermes_cli/kanban_db.py#L16859) |
+| 16579 | [First-use tip for scratch workspaces](../../hermes_cli/kanban_db.py#L17340) |
+| 19637 | [Workspace resolution](../../hermes_cli/kanban_db.py#L20433) |
+| 20188 | [Dispatcher (one-shot pass)](../../hermes_cli/kanban_db.py#L21014) |
+| 20218 | [Respawn guard constants](../../hermes_cli/kanban_db.py#L21044) |
+| 24185 | [G1: per-task cumulative input-token runaway guard](../../hermes_cli/kanban_db.py#L25013) |
+| 27527 | [OpenClaw cross-system dispatch (Mission-Control via HMAC-signed envelopes)](../../hermes_cli/kanban_db.py#L28360) |
+| 27764 | [B1a — tree-wide inventory/hygiene must not land on research/premium LLM loops](../../hermes_cli/kanban_db.py#L28597) |
+| 31557 | [Long-lived dispatcher daemon](../../hermes_cli/kanban_db.py#L32408) |
+| 31631 | [Worker context builder (what a spawned worker sees)](../../hermes_cli/kanban_db.py#L32482) |
+| 32263 | [Scope-contract template expansion (PlanSpec B)](../../hermes_cli/kanban_db.py#L33114) |
+| 32705 | [Stats + SLA helpers](../../hermes_cli/kanban_db.py#L33558) |
+| 35429 | [Epics (N-E3) — durable goals spanning multiple task trees](../../hermes_cli/kanban_db.py#L36291) |
+| 35603 | [Disposition Ledger (FRD-S1) — additive; no wiring into completion path yet](../../hermes_cli/kanban_db.py#L36465) |
+| 36457 | [Lanes (night-sprint F1) — switchable profile→(runtime, model) presets](../../hermes_cli/kanban_db.py#L37379) |
+| 36887 | [Notification subscriptions (used by the gateway kanban-notifier)](../../hermes_cli/kanban_db.py#L37817) |
+| 37006 | [Browser Web Push subscriptions (used by the control dashboard)](../../hermes_cli/kanban_db.py#L37936) |
+| 37408 | [Retention + garbage collection](../../hermes_cli/kanban_db.py#L38338) |
+| 37457 | [Worker log accessor](../../hermes_cli/kanban_db.py#L38387) |
+| 37506 | [Assignee enumeration (known profiles + per-profile board stats)](../../hermes_cli/kanban_db.py#L38436) |
+| 37598 | [Runs (attempt history on a task)](../../hermes_cli/kanban_db.py#L38528) |
+| 37646 | [Durable Kanban ↔ TMAX execution capsule](../../hermes_cli/kanban_db.py#L38576) |
