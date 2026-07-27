@@ -41,6 +41,14 @@ else
 fi
 
 echo "== pytest (affected, per-file isoliert via run-affected.sh) =="
-"$WT/scripts/run-affected.sh" "$REF" || { echo "GATE_FAIL: pytest"; exit 12; }
+"$WT/scripts/run-affected.sh" "$REF"
+affected_rc=$?
+if [[ "$affected_rc" -eq 3 ]]; then
+  echo "GATE_NOT_RUN: pytest"
+  exit 3
+elif [[ "$affected_rc" -ne 0 ]]; then
+  echo "GATE_FAIL: pytest"
+  exit 12
+fi
 
 echo "GATE_PASS"
