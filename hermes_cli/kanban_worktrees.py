@@ -58,6 +58,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from hermes_cli.affected_test_mapping import (
     EXPLICIT_TEST_PATTERNS,
+    GitTimeoutError as AffectedTestGitTimeout,
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError as AffectedTestMappingError,
     affected_pytest_modules as _shared_affected_pytest_modules,
@@ -428,6 +429,9 @@ def _integration_park_class(reason: str) -> str:
     text = (reason or "").strip()
     if text.startswith("integration parked:"):
         text = text.removeprefix("integration parked:").strip()
+
+    if "TRANSIENT_GIT_TIMEOUT:" in text:
+        return "transient"
 
     transient_prefixes = (
         "live checkout has an operation in progress (",
@@ -885,7 +889,10 @@ def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[
 
 
 def _changed_files_between(repo: Path, left: str, right: str) -> list[str]:
-    return _shared_changed_paths(repo, left, right)
+    try:
+        return _shared_changed_paths(repo, left, right)
+    except AffectedTestGitTimeout as exc:
+        raise WorktreeTimeout(str(exc)) from exc
 
 
 def dirty_files(repo: Path) -> list[str]:
@@ -4816,11 +4823,14 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
 
 def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[str]:
     """Compatibility wrapper around the shared integration classifier."""
-    return _shared_affected_pytest_modules(
-        repo_root,
-        changed_files,
-        mode="integration",
-    )
+    try:
+        return _shared_affected_pytest_modules(
+            repo_root,
+            changed_files,
+            mode="integration",
+        )
+    except AffectedTestGitTimeout as exc:
+        raise WorktreeTimeout(str(exc)) from exc
 
 
 def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
@@ -5484,6 +5494,8 @@ def _run_gate_in_validation_worktree(
         return gate(worktree, diff_files)
     except DiskSpaceError as exc:
         return False, str(exc)
+    except WorktreeTimeout as exc:
+        return False, f"TRANSIENT_GIT_TIMEOUT: {exc}"
     except OSError as exc:
         # S6: ENOSPC/EDQUOT aus git worktree add → lesbare Preflight-Meldung.
         if getattr(exc, "errno", None) in {errno.ENOSPC, getattr(errno, "EDQUOT", 122)}:
@@ -5602,6 +5614,8 @@ def _default_quick_gate_pytest(
     """Affected-pytest modules via isolated parallel runner; error or None."""
     try:
         modules = _affected_pytest_modules(repo_root, changed_files)
+    except WorktreeTimeout:
+        raise
     except AffectedTestMappingError as exc:
         if str(exc).startswith("unmapped production paths:"):
             return f"pytest {exc}"
@@ -6191,10 +6205,15 @@ def integrate_chain(
 
             ahead = _git(repo_root, "rev-list", "--count", f"{cur}..{branch}")
             if ahead == "0":
-                result = _integrate_empty_or_already_merged(
-                    repo_root, wt_path, branch, cur, gate_runner,
-                    artifact_receipt, cleanup=cleanup,
-                )
+                try:
+                    result = _integrate_empty_or_already_merged(
+                        repo_root, wt_path, branch, cur, gate_runner,
+                        artifact_receipt, cleanup=cleanup,
+                    )
+                except WorktreeTimeout as exc:
+                    return _integrate_parked(
+                        branch, f"TRANSIENT_GIT_TIMEOUT: {exc}",
+                    )
                 if cleanup and result.get("action") in {"merged", "clean"}:
                     _drop_writer_lease_for_removed_worktree(conn, wt_path)
                 return result
@@ -6215,9 +6234,14 @@ def integrate_chain(
                     + ", ".join(overlap[:10]),
                 )
 
-            early, diff_files = _integrate_rebase_branch(
-                repo_root, wt_path, branch, cur,
-            )
+            try:
+                early, diff_files = _integrate_rebase_branch(
+                    repo_root, wt_path, branch, cur,
+                )
+            except WorktreeTimeout as exc:
+                return _integrate_parked(
+                    branch, f"TRANSIENT_GIT_TIMEOUT: {exc}",
+                )
             if early is not None:
                 return early
 

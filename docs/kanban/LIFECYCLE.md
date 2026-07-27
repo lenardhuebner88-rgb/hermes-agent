@@ -217,29 +217,29 @@ single write. The order matters and is load-bearing:
 
 ### The serialized integrator
 
-[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6236) is *the* single
+[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6153) is *the* single
 merge point and it never pushes. It holds a file lock in the repo's `.git` dir
 (invisible to `git status`), then runs these stages, each of which can park:
 
 | # | stage | anchored | parks when |
 |---|---|---|---|
-| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5904) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
-| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5941) | chain worktree dirty with non-preservable files |
-| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5994) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
+| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5821) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
+| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5858) | chain worktree dirty with non-preservable files |
+| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5911) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
 | 3 | dirty overlap | inline in `integrate_chain` | a foreign dirty file in the live checkout overlaps the branch diff |
-| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6122) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
-| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6172) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
+| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6039) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
+| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6089) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
 
 The post-merge gate runs at the exact merge commit inside a detached validation
-worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5556)
+worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5462)
 — never in the possibly-dirty live checkout. Every exception path there returns
 `(False, …)` — it fails **closed**.
 
 Gate selection is
-[`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L308):
+[`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L309):
 a per-repo command list from `kanban.integration_gate.repos` if configured, else
-[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5838) for the FO
-repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5811).
+[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5755) for the FO
+repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5728).
 **This repo is not in `integration_gate.repos`, so it uses `default_quick_gate`.**
 
 `default_quick_gate` = ruff over the changed `.py` files, then the *affected*
@@ -386,11 +386,11 @@ post-merge gate classify every changed path as `selected`, `not_applicable`,
 `allowlisted`, or `unmapped`. `scripts/run-affected.sh` may skip pytest only
 when every changed path is explicitly not applicable or allowlisted; an
 in-scope production Python path with no test selection exits 4 before pytest.
-The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5700)
+The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5728)
 enforces the same hold. Its compatibility mapper,
-[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4803), and
+[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4824), and
 the standalone script both delegate to the shared
-[`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L658).
+[`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L655).
 The repository census is contract-tested at zero unmapped production paths in
 both modes; a synthetic new production path must still become `unmapped`.
 The compatibility mappers also throw on `unmapped`; they never collapse that
@@ -401,24 +401,30 @@ become `not_applicable`; deletion never silently removes a still-importing test
 from the gate.
 
 **The two fallback caps differ on purpose, but live in one classifier.**
-[`WORKER_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L20)
+[`WORKER_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L21)
 is 200 for the interactive worker gate, while
-[`INTEGRATION_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L21)
+[`INTEGRATION_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L22)
 is 800 for the post-merge integration gate. The selected mode applies its cap
 before assigning the path state. An oversized fallback without a focused test
 is therefore `unmapped`, not a successful mapping whose test directory is
 silently removed afterward. Do not move the cap back into a shell post-filter
 or duplicate the mapping tables across consumers. The limits cap package and
-test-support fallbacks only; direct, explicit, and import-index evidence is not
-truncated. Stress-registry scenarios are excluded from that pytest import
-evidence. Shared Python helpers under `tests/` select their importers, while an
-oversized conftest/helper scope holds as `unmapped` instead of skipping pytest.
+fallbacks only; direct, explicit, and import-index evidence is not truncated.
+Stress-registry scenarios are excluded from that pytest import evidence.
+Non-`test_*.py` support files under `tests/` are intentionally
+`not_applicable` in both modes. This accepted boundary means a support-only
+diff can skip pytest; the rejected directory fallback had no legal escape,
+classified the two modes differently, and falsely selected test-free
+directories. The nightly full suite is its backstop; see ADR 0003.
 
 Both the worker and post-merge integrator obtain commit-diff paths from the
-same classifier helper, including deletions. Repository census and import
-inventory use tracked production files only, so unrelated untracked slice work
-cannot turn the global census red. Existing untracked tests may still supply
-path-local evidence while a slice is being built.
+same classifier helper, including deletions and typechanges. Its git subprocesses
+honor `HERMES_WORKTREE_GIT_TIMEOUT`; under the serialized integrator a timeout
+parks as transient instead of becoming a mapping error or holding the lock
+indefinitely. Repository census and import inventory use tracked production
+files only, so unrelated untracked slice work cannot turn the global census red.
+Existing untracked tests may still supply path-local evidence while a slice is
+being built.
 
 An active audited exception is evaluated before the package fallback so its
 meaning does not change between worker and integration mode. Explicit, direct,

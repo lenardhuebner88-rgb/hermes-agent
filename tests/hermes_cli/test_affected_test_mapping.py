@@ -349,6 +349,39 @@ def test_deleted_production_selects_surviving_importer(tmp_path: Path) -> None:
     assert record.tests == ("tests/test_surviving_importer.py",)
 
 
+def test_changed_paths_includes_typechange_without_treating_it_as_deletion(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "runtime.py").write_text("VALUE = 1\n")
+    (package / "target.py").write_text("VALUE = 2\n")
+    tests = tmp_path / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    (tests / "test_runtime.py").write_text(
+        "def test_runtime():\n"
+        "    assert True\n"
+    )
+    _init_repo(tmp_path)
+
+    (package / "runtime.py").unlink()
+    (package / "runtime.py").symlink_to("target.py")
+
+    changed = changed_paths(tmp_path, "HEAD")
+    record = classify_changed_paths(
+        tmp_path,
+        changed,
+        mode="worker",
+    ).records[0]
+
+    assert " T\tpkg/runtime.py" in _git(tmp_path, "diff", "--raw", "HEAD").stdout
+    assert changed == ["pkg/runtime.py"]
+    assert record.state == "selected"
+    assert record.scope == "production_python"
+    assert record.strategies == ("direct",)
+    assert record.tests == ("tests/pkg/test_runtime.py",)
+
+
 def test_changed_paths_without_main_falls_back_to_head(tmp_path: Path) -> None:
     (tmp_path / "tracked.py").write_text("VALUE = 1\n")
     _git(tmp_path, "init", "-q", "-b", "master")
@@ -442,45 +475,31 @@ def test_stress_registry_files_are_not_pytest_import_evidence() -> None:
     assert "tests/stress/test_kanban_worktree_concurrency.py" not in record.tests
 
 
-def test_real_shared_test_helper_selects_its_importers() -> None:
+@pytest.mark.parametrize("mode", ["worker", "integration"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/conftest.py",
+        "tests/hermes_cli/conftest.py",
+        "tests/fakes/__init__.py",
+        "tests/hermes_cli/__init__.py",
+    ],
+)
+def test_python_test_support_is_documented_not_applicable(
+    path: str,
+    mode: str,
+) -> None:
     record = classify_changed_paths(
         REPO_ROOT,
-        ["tests/hermes_cli/_kanban_test_helpers.py"],
-        mode="worker",
+        [path],
+        mode=mode,
     ).records[0]
 
-    assert record.state == "selected"
+    assert (REPO_ROOT / path).is_file()
+    assert record.state == "not_applicable"
     assert record.scope == "test_support"
-    assert record.strategies == ("test_support_import",)
-    assert "tests/hermes_cli/test_kanban_db_chain_cost.py" in record.tests
-    assert "tests/hermes_cli/test_kanban_worktrees_integrator.py" in record.tests
-
-
-def test_real_conftest_scope_selects_or_holds_instead_of_skipping() -> None:
-    worker = classify_changed_paths(
-        REPO_ROOT,
-        ["tests/hermes_cli/conftest.py"],
-        mode="worker",
-    ).records[0]
-    integration = classify_changed_paths(
-        REPO_ROOT,
-        ["tests/hermes_cli/conftest.py"],
-        mode="integration",
-    ).records[0]
-    root = classify_changed_paths(
-        REPO_ROOT,
-        ["tests/conftest.py"],
-        mode="integration",
-    ).records[0]
-
-    assert worker.state == "unmapped"
-    assert worker.scope == "test_support"
-    assert any("mode limit is 200" in warning for warning in worker.warnings)
-    assert integration.state == "selected"
-    assert integration.strategies == ("test_support_scope",)
-    assert integration.tests == ("tests/hermes_cli/",)
-    assert root.state == "unmapped"
-    assert root.tests == ()
+    assert record.strategies == ()
+    assert record.tests == ()
 
 
 def test_real_fixture_string_import_is_not_indexed() -> None:

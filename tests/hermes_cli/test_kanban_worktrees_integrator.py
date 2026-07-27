@@ -8,6 +8,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +74,48 @@ def test_changed_files_between_uses_shared_changed_path_set(repo):
 
     assert standalone == ["a.txt", "added.py"]
     assert integration == standalone
+
+
+def test_affected_git_timeout_parks_integration_as_transient(
+    repo,
+    tmp_path,
+    monkeypatch,
+):
+    base = _git(repo, "rev-parse", "HEAD")
+    info = _provisioned_chain(repo, "t_affected_timeout")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    shim_dir = tmp_path / "git-shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "git"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "for arg in \"$@\"; do\n"
+        "  case \"$arg\" in\n"
+        "    --diff-filter=ACDMRT) sleep 2 ;;\n"
+        "  esac\n"
+        "done\n"
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("HERMES_WORKTREE_GIT_TIMEOUT", "1")
+
+    outcome = kwt.integrate_chain(
+        repo,
+        info["path"],
+        info["branch"],
+        "main",
+        gate_runner=_ok_gate,
+        cleanup=False,
+    )
+
+    assert outcome["action"] == "parked"
+    assert outcome["reason"].startswith("TRANSIENT_GIT_TIMEOUT:")
+    assert "timed out after 1s" in outcome["reason"]
+    assert kwt._integration_park_class(outcome["reason"]) == "transient"
+    assert _git(repo, "rev-parse", "HEAD") == base
 
 
 def _red_gate_web(_repo, _files):

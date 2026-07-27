@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import subprocess
 import warnings
 from dataclasses import asdict, dataclass
@@ -202,6 +203,10 @@ class MappingError(RuntimeError):
     """Git, configuration or classification failure."""
 
 
+class GitTimeoutError(MappingError):
+    """A git invocation exceeded the shared worktree timeout."""
+
+
 @dataclass(frozen=True)
 class ExceptionEntry:
     path: str
@@ -282,14 +287,21 @@ def _normalize_path(raw: str) -> str:
 
 
 def _run_git(repo_root: Path, *args: str) -> str:
-    completed = subprocess.run(
-        ["git", "-C", str(repo_root), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    timeout = int(os.environ.get("HERMES_WORKTREE_GIT_TIMEOUT", "120"))
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError(
+            f"git {' '.join(args[:3])}… timed out after {timeout}s in {repo_root}"
+        ) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         raise MappingError(
@@ -343,7 +355,7 @@ def changed_paths(
             for line in _run_git(
                 repo_root,
                 "diff",
-                "--diff-filter=ACDMR",
+                "--diff-filter=ACDMRT",
                 "--name-only",
                 ref or "HEAD",
                 right,
@@ -356,7 +368,7 @@ def changed_paths(
             for line in _run_git(
                 repo_root,
                 "diff",
-                "--diff-filter=ACDMR",
+                "--diff-filter=ACDMRT",
                 "--name-only",
                 ref,
             ).splitlines()
@@ -365,6 +377,8 @@ def changed_paths(
     else:
         try:
             base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
+        except GitTimeoutError:
+            raise
         except MappingError:
             base = ""
         base_ref = base or "HEAD"
@@ -373,7 +387,7 @@ def changed_paths(
             for line in _run_git(
                 repo_root,
                 "diff",
-                "--diff-filter=ACDMR",
+                "--diff-filter=ACDMRT",
                 "--name-only",
                 base_ref,
             ).splitlines()
@@ -524,23 +538,6 @@ def _nearest_package_fallback(
             )
         parent = parent.parent
     return None, None
-
-
-def _test_support_fallback(
-    source_path: str,
-    test_index: TestIndex,
-    *,
-    max_test_files: int,
-) -> tuple[str | None, str | None]:
-    parent = PurePosixPath(source_path).parent
-    prefix = "" if parent == PurePosixPath(".") else parent.as_posix() + "/"
-    count = sum(1 for path in test_index.paths if path.startswith(prefix))
-    if count <= max_test_files:
-        return prefix or "tests/", None
-    return None, (
-        f"test support scope {prefix or 'tests/'} has {count} test files; "
-        f"mode limit is {max_test_files}"
-    )
 
 
 def _is_code_free_package_marker(repo_root: Path, source_path: str) -> bool:
@@ -744,62 +741,16 @@ def classify_changed_paths(
             continue
 
         if _is_under_tests(source_path):
-            if source_path.startswith("tests/stress/"):
-                records.append(
-                    PathClassification(
-                        path=source_path,
-                        state="not_applicable",
-                        scope="stress_scenario",
-                        warnings=(rejected_warning,) if rejected_warning else (),
-                        reason="stress scenarios use their own registry, not pytest",
-                    )
-                )
-                continue
-            if test_index is None:
-                test_index = build_test_index(repo_root)
-            module_import = source_path[:-3].replace("/", ".")
-            imported = test_index.imports.get(module_import, ())
-            if imported:
-                records.append(
-                    PathClassification(
-                        path=source_path,
-                        state="selected",
-                        scope="test_support",
-                        strategies=("test_support_import",),
-                        tests=tuple(imported),
-                        warnings=(rejected_warning,) if rejected_warning else (),
-                    )
-                )
-                continue
-            fallback, fallback_warning = _test_support_fallback(
-                source_path,
-                test_index,
-                max_test_files=fallback_limit,
-            )
-            if fallback:
-                records.append(
-                    PathClassification(
-                        path=source_path,
-                        state="selected",
-                        scope="test_support",
-                        strategies=("test_support_scope",),
-                        tests=(fallback,),
-                        warnings=(rejected_warning,) if rejected_warning else (),
-                    )
-                )
-                continue
-            warnings = tuple(
-                warning
-                for warning in (fallback_warning, rejected_warning)
-                if warning
-            )
             records.append(
                 PathClassification(
                     path=source_path,
-                    state="unmapped",
+                    state="not_applicable",
                     scope="test_support",
-                    warnings=warnings,
-                    reason="pytest support code has no bounded affected-test scope",
+                    warnings=(rejected_warning,) if rejected_warning else (),
+                    reason=(
+                        "Python support files under tests are outside the "
+                        "affected production-path contract"
+                    ),
                 )
             )
             continue

@@ -10,7 +10,8 @@ empty list as sufficient evidence. Its path states are:
 
 - `selected`: at least one existing test target was selected;
 - `not_applicable`: the path is outside the core Python gate, is non-Python,
-  is a stress scenario, or is a code-free package marker;
+  is a stress scenario or Python test-support file, or is a code-free package
+  marker;
 - `allowlisted`: an exact, current, audited exception applies;
 - `unmapped`: in-scope production Python has no selected test and no exception.
 
@@ -36,10 +37,20 @@ production paths still select surviving direct or importing tests, but become
 `not_applicable` rather than `unmapped` when no such test survives.
 
 Stress-registry scenarios are excluded from the normal pytest import index in
-both directions. Python support files under `tests/` select test files that
-import them; otherwise their containing test scope is selected only when it
-fits the active 200/800 cap. An oversized shared-support scope is `unmapped`,
-never an empty successful selection.
+both directions. Python support files under `tests/` that are not themselves
+`test_*.py` are deliberately `not_applicable` in both modes. This is a named
+boundary of the affected gate: a diff containing only `tests/conftest.py` or a
+shared test helper can therefore exit 0 without running pytest.
+
+A fail-closed test-support fallback was tried and rejected. The global
+`tests/conftest.py` scope exceeded both caps with no legal exception path;
+package-level support scopes produced different worker and integration states;
+and test-free support directories selected a directory that the parallel runner
+reported as "No test files to run" with exit 1. Those outcomes made ordinary
+test-infrastructure changes permanently unlandable or falsely red. The nightly
+full suite is the explicit backstop for this accepted limitation. A future
+replacement needs its own escape and execution contract; it must not be
+reintroduced as another directory fallback inside this classifier.
 
 The accepted repository census covers tracked Hermes core/runtime, plugins,
 gateways, tools, loops, operational scripts and nested test files. Untracked
