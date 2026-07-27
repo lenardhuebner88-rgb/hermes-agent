@@ -2220,3 +2220,62 @@ def test_lane_scope_allowlist_without_resume_still_rearms_on_new_commits(
         )
         assert "lane-scope" in (out2.get("reason") or "").lower()
         assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2
+
+
+def test_retrigger_skips_done_children_without_workspace(repo, kanban_home, monkeypatch):
+    """Opus R3-1 regression: the latest-done driver may be a reviewer child
+    with workspace_kind='scratch' and workspace_path NULL. The driver query
+    must skip workspace-less done children, otherwise the whole retrigger
+    silently aborts and the root stays stranded (root='ready').
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        a, r, c = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "A code", "assignee": "coder", "parents": []},
+                {"title": "R review", "assignee": "reviewer", "parents": []},
+                {"title": "C code", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        wt = info["path"]
+        now = int(__import__("time").time())
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='ready', workspace_path=?, "
+                "workspace_kind='dir', started_at=NULL WHERE id=?",
+                (str(wt), root),
+            )
+            for cid in (a, c):
+                conn.execute(
+                    "UPDATE tasks SET status='running', workspace_path=?, "
+                    "workspace_kind='dir' WHERE id=?",
+                    (str(wt), cid),
+                )
+        _commit_in(wt, "feature_a.py", "A = 1\n", msg=f"kanban({a}): work")
+        out = kwt.maybe_integrate_on_complete(conn, a, gate_runner=_ok_gate)
+        assert out is not None and out.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                (now - 300, a),
+            )
+            # Reviewer finished LAST with no workspace of its own (live shape).
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=?, "
+                "workspace_path=NULL, workspace_kind='scratch' WHERE id=?",
+                (now - 5, r),
+            )
+        assert kb.archive_task(conn, c, retrigger_integration=True)
+        root_after = kb.get_task(conn, root)
+
+    assert root_after.status == "done", (
+        "retrigger aborted on workspace-less latest-done child "
+        f"(root still {root_after.status!r})"
+    )
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"

@@ -7740,26 +7740,26 @@ def maybe_retrigger_integration_after_archive(
         # so decompose/never-ran auto-complete sees the freshest real completion
         # evidence. Skip the pre-done lane-scope check: the driver is already
         # done, and re-running that gate mis-attributes later sibling commits
-        # and spawns phantom fixers on done tasks (Opus R2-1).
+        # and spawns phantom fixers on done tasks (Opus R2-1). The driver must
+        # carry the shared chain workspace — reviewer/verifier children run
+        # workspace_kind='scratch' with workspace_path NULL and finish last,
+        # which would silently abort the whole retrigger (Opus R3-1).
         driver_row = conn.execute(
             f"SELECT id, workspace_path FROM tasks "
             f"WHERE id IN ({placeholders}) AND id != ? AND status = 'done' "
+            f"AND workspace_path IS NOT NULL AND workspace_path != '' "
             f"ORDER BY completed_at DESC, id DESC LIMIT 1",
             (*tuple(members), root_id),
         ).fetchone()
         if driver_row is None:
-            # No done child → nothing to integrate; never-ran/decompose
-            # guards will refuse to ship on failed/cancelled-only chains.
+            # No done child with a workspace → nothing to integrate; never-ran/
+            # decompose guards will refuse to ship on failed/cancelled-only chains.
             return None
         driver_id = driver_row["id"]
 
-        # Workspace path of the driver must still resolve (shared chain wt).
+        # Belt: the query already excludes workspace-less drivers.
         if not driver_row["workspace_path"]:
             return None
-        if split_provisioned_path(driver_row["workspace_path"]) is None:
-            # Fall back to the archived task's provisioned path for the driver
-            # attribution by temporarily using the shared wt identity.
-            pass
 
         outcome = maybe_integrate_on_complete(
             conn,

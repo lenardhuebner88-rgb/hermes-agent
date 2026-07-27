@@ -70,7 +70,7 @@ archived parent is deliberately not treated as done.
 | running\|ready\|blocked → ready | [`reclaim_task`](../../hermes_cli/kanban_db.py#L12723) | CLI | a worker process group that survives termination | `reclaim_deferred`; claim stays owned |
 | blocked\|scheduled → todo\|ready | [`unblock_task`](../../hermes_cli/kanban_db.py#L18967) | CLI / automation | typed wait unless audited override; unfinished parents route to `todo` | unblock returns false or succeeds into `todo` |
 | todo\|ready\|running\|blocked → scheduled | [`schedule_task`](../../hermes_cli/kanban_db.py#L20973) | CLI / cron / worker | active typed wait, stale expected run ID | schedule returns false; previous status remains |
-| any non-archived → archived | [`archive_task`](../../hermes_cli/kanban_db.py#L20163) | CLI / sweep | dependent wait, changed ownership generation, surviving worker | archive refuses; wait conflict or `reclaim_deferred` is visible |
+| any non-archived → archived | [`archive_task`](../../hermes_cli/kanban_db.py#L20163) | CLI / sweep | dependent wait, changed ownership generation, surviving worker | archive refuses; wait conflict or `reclaim_deferred` is visible. Operator archives (CLI + dashboard, `retrigger_integration=True`) also re-run chain integration after a successful archive — synchronous gate+merge in the caller, see `maybe_retrigger_integration_after_archive` |
 
 ## Dispatch path: tick to worker process
 
