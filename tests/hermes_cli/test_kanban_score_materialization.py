@@ -249,7 +249,7 @@ def test_backfill_metrics_uses_fact_layer_without_score_materialization(
         "run_cost_usd",
         "run_duration_seconds",
     }
-    assert synthetic_attempts == 0
+    assert synthetic_attempts == len(SYNTHETIC_RETRY_HEAVY_TASK_IDS)
     assert materialized_rows == 0
     assert second == (
         "Backfilled run-metric scores for 0 row(s).\n"

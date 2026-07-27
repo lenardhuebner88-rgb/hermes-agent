@@ -4,24 +4,20 @@ from pathlib import Path
 
 import hermes_cli.kanban_db as kb
 from hermes_cli.kanban_score_hygiene import (
+    RUN_CLASS_FIXTURE,
+    RUN_CLASS_NEVER_RAN,
+    RUN_CLASS_PRODUCTIVE,
+    RUN_CLASSES,
     SYNTHETIC_RETRY_HEAVY_TASK_IDS,
-    backfill_run_metric_scores_without_retry_fixtures,
-    is_metric_test_fixture,
+    backfill_run_metric_scores_with_classification,
+    classify_metric_run,
+    metric_run_class_counts,
+    metric_run_classification_relation,
     metric_scores_relation,
 )
 
 
-def test_metric_fixture_predicate_is_named_and_specific():
-    assert is_metric_test_fixture("t_bbb65f0e", "coder", "production")
-    assert is_metric_test_fixture("copied-id", "w", "time-travel")
-    assert is_metric_test_fixture("copied-id", "w", "retry-heavy")
-    assert not is_metric_test_fixture("real-task", "w", "production")
-    assert not is_metric_test_fixture("real-task", "coder", "retry-heavy")
-
-
-def test_backfill_quarantines_retry_fixtures_and_preserves_existing_scores(
-    tmp_path, monkeypatch
-):
+def _init_board(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -29,131 +25,231 @@ def test_backfill_quarantines_retry_fixtures_and_preserves_existing_scores(
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
 
+
+def test_metric_run_classification_is_ordered_and_profile_null_is_neutral():
+    assert (
+        classify_metric_run("t_bbb65f0e", profile="coder")
+        == RUN_CLASS_FIXTURE
+    )
+    assert (
+        classify_metric_run("any-task", profile="w")
+        == RUN_CLASS_FIXTURE
+    )
+    assert (
+        classify_metric_run(
+            "never-ran",
+            profile="coder",
+            started_at=2,
+            ended_at=2,
+        )
+        == RUN_CLASS_NEVER_RAN
+    )
+    assert (
+        classify_metric_run(
+            "profileless-real-run",
+            profile=None,
+            input_tokens=10,
+            output_tokens=2,
+            started_at=1,
+            ended_at=2,
+        )
+        == RUN_CLASS_PRODUCTIVE
+    )
+    assert (
+        classify_metric_run(
+            "title-only",
+            profile="coder",
+            active_model="test-model",
+            started_at=1,
+            ended_at=2,
+        )
+        == RUN_CLASS_PRODUCTIVE
+    )
+
+
+def test_backfill_measures_fixture_and_productive_runs_without_deleting_scores(
+    tmp_path,
+    monkeypatch,
+):
+    _init_board(tmp_path, monkeypatch)
+
     with kb.connect_closing() as conn:
-        for task_id in (
+        task_ids = (
             *SYNTHETIC_RETRY_HEAVY_TASK_IDS,
-            "copied-time-travel",
+            "profile-fixture",
             "real-task",
-        ):
-            title = "time-travel" if task_id == "copied-time-travel" else task_id
-            assignee = "w" if task_id == "copied-time-travel" else None
+        )
+        for task_id in task_ids:
             conn.execute(
                 "INSERT INTO tasks (id, title, assignee, status, created_at) "
                 "VALUES (?, ?, ?, 'done', 900)",
-                (task_id, title, assignee),
+                (
+                    task_id,
+                    task_id,
+                    "w" if task_id == "profile-fixture" else "coder",
+                ),
             )
-        run_ids: dict[str, int] = {}
-        for task_id in (
-            *SYNTHETIC_RETRY_HEAVY_TASK_IDS,
-            "copied-time-travel",
-            "real-task",
-        ):
-            run_ids[task_id] = int(
-                conn.execute(
-                    "INSERT INTO task_runs "
-                    "(task_id, profile, status, started_at, ended_at, "
-                    " input_tokens, output_tokens, cost_usd) "
-                    "VALUES (?, ?, 'done', 1000, 1100, 10, 5, 1.25)",
-                    (
-                        task_id,
-                        "w" if task_id == "copied-time-travel" else "coder",
-                    ),
-                ).lastrowid
+            conn.execute(
+                "INSERT INTO task_runs "
+                "(task_id, profile, status, started_at, ended_at, "
+                " input_tokens, output_tokens, cost_usd) "
+                "VALUES (?, ?, 'done', 1000, 1100, 10, 5, 1.25)",
+                (
+                    task_id,
+                    "w" if task_id == "profile-fixture" else "coder",
+                ),
             )
-        conn.executemany(
-            "INSERT INTO scores "
-            "(run_id, task_id, name, value, value_type, source, created_at) "
-            "VALUES (?, ?, 'run_duration_seconds', 100, "
-            "        'numeric', 'board-metrics', 1100)",
-            [
-                (run_ids[task_id], task_id)
-                for task_id in SYNTHETIC_RETRY_HEAVY_TASK_IDS
-            ],
-        )
 
-        first = backfill_run_metric_scores_without_retry_fixtures(conn)
-        second = backfill_run_metric_scores_without_retry_fixtures(conn)
-        quarantined = conn.execute(
-            "SELECT task_id, name FROM scores "
-            "WHERE task_id IN (?, ?) ORDER BY task_id, name",
-            SYNTHETIC_RETRY_HEAVY_TASK_IDS,
-        ).fetchall()
-        real_names = {
-            str(row["name"])
+        first = backfill_run_metric_scores_with_classification(conn)
+        second = backfill_run_metric_scores_with_classification(conn)
+        by_task = {
+            str(row["task_id"]): int(row["count"])
             for row in conn.execute(
-                "SELECT name FROM scores WHERE task_id = 'real-task'"
+                "SELECT task_id, COUNT(*) AS count FROM scores "
+                "GROUP BY task_id"
             )
         }
-        copied_fixture_scores = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM scores "
-                "WHERE task_id = 'copied-time-travel'"
-            ).fetchone()[0]
-        )
 
-    assert first == 4
+    assert first == 16
     assert second == 0
-    assert [tuple(row) for row in quarantined] == [
-        ("t_8ec520d3", "run_duration_seconds"),
-        ("t_bbb65f0e", "run_duration_seconds"),
-    ]
-    assert real_names == {
-        "run_attempt_index",
-        "run_cost_usd",
-        "run_duration_seconds",
-        "run_tokens_total",
-    }
-    assert copied_fixture_scores == 0
+    assert by_task == {task_id: 4 for task_id in task_ids}
 
 
-def test_metric_scores_relation_excludes_fixtures_without_deleting_them(
-    tmp_path, monkeypatch
+def test_run_classes_are_exhaustive_and_special_classes_have_no_telemetry(
+    tmp_path,
+    monkeypatch,
 ):
-    home = tmp_path / ".hermes"
-    home.mkdir()
-    monkeypatch.setenv("HERMES_HOME", str(home))
-    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    kb.init_db()
+    _init_board(tmp_path, monkeypatch)
 
     with kb.connect_closing() as conn:
-        fixture_id = SYNTHETIC_RETRY_HEAVY_TASK_IDS[0]
-        conn.execute(
-            "INSERT INTO tasks (id, title, assignee, status, created_at) "
-            "VALUES (?, 'retry-heavy', 'w', 'done', 1)",
-            (fixture_id,),
+        task_rows = (
+            ("t_bbb65f0e", "fixture-id", "coder"),
+            ("fixture-profile", "fixture-profile", "w"),
+            ("never-ran", "never-ran", "coder"),
+            ("profileless-real", "profileless-real", None),
         )
-        conn.execute(
+        conn.executemany(
             "INSERT INTO tasks (id, title, assignee, status, created_at) "
-            "VALUES ('real-task', 'production', 'coder', 'done', 1)"
+            "VALUES (?, ?, ?, 'done', 1)",
+            task_rows,
         )
+        run_ids = {}
+        run_ids["fixture-id"] = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, ended_at) "
+            "VALUES ('t_bbb65f0e', 'coder', 'done', 1, 1)"
+        ).lastrowid
+        run_ids["fixture-profile"] = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, ended_at) "
+            "VALUES ('fixture-profile', 'w', 'reclaimed', 1, 1)"
+        ).lastrowid
+        run_ids["never-ran"] = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, ended_at) "
+            "VALUES ('never-ran', 'coder', 'done', 2, 2)"
+        ).lastrowid
+        run_ids["profileless-real"] = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, ended_at, "
+            " input_tokens, output_tokens, cost_usd) "
+            "VALUES ('profileless-real', NULL, 'done', 1, 2, 10, 5, 0.25)"
+        ).lastrowid
+
+        relation = metric_run_classification_relation(conn)
+        classes = {
+            int(row["id"]): str(row["run_class"])
+            for row in conn.execute(
+                f"SELECT id, run_class FROM {relation}"
+            )
+        }
+        counts = metric_run_class_counts(conn)
+        telemetry = {
+            str(row["run_class"]): (
+                int(row["models"]),
+                int(row["tokens"]),
+                float(row["cost"]),
+            )
+            for row in conn.execute(
+                "SELECT run_class, COUNT(active_model) AS models, "
+                "COALESCE(SUM(COALESCE(input_tokens, 0) + "
+                "COALESCE(output_tokens, 0)), 0) AS tokens, "
+                "COALESCE(SUM(COALESCE(cost_usd, 0)), 0) AS cost "
+                f"FROM {relation} GROUP BY run_class"
+            )
+        }
+
+    assert classes == {
+        int(run_ids["fixture-id"]): RUN_CLASS_FIXTURE,
+        int(run_ids["fixture-profile"]): RUN_CLASS_FIXTURE,
+        int(run_ids["never-ran"]): RUN_CLASS_NEVER_RAN,
+        int(run_ids["profileless-real"]): RUN_CLASS_PRODUCTIVE,
+    }
+    assert counts == {
+        RUN_CLASS_PRODUCTIVE: 1,
+        RUN_CLASS_FIXTURE: 2,
+        RUN_CLASS_NEVER_RAN: 1,
+    }
+    assert set(counts) == set(RUN_CLASSES)
+    assert sum(counts.values()) == 4
+    assert telemetry[RUN_CLASS_FIXTURE] == (0, 0, 0.0)
+    assert telemetry[RUN_CLASS_NEVER_RAN] == (0, 0, 0.0)
+
+
+def test_metric_scores_relation_keeps_all_rows_and_exposes_class_counts(
+    tmp_path,
+    monkeypatch,
+):
+    _init_board(tmp_path, monkeypatch)
+
+    with kb.connect_closing() as conn:
+        for task_id, profile in (
+            ("real-task", "coder"),
+            ("fixture-task", "w"),
+        ):
+            conn.execute(
+                "INSERT INTO tasks (id, title, assignee, status, created_at) "
+                "VALUES (?, ?, ?, 'done', 1)",
+                (task_id, task_id, profile),
+            )
+        real_run = conn.execute(
+            "INSERT INTO task_runs "
+            "(task_id, profile, status, started_at, ended_at, active_model) "
+            "VALUES ('real-task', 'coder', 'done', 1, 2, 'model')"
+        ).lastrowid
         fixture_run = conn.execute(
             "INSERT INTO task_runs "
             "(task_id, profile, status, started_at, ended_at) "
-            "VALUES (?, 'w', 'done', 1, 2)",
-            (fixture_id,),
-        ).lastrowid
-        real_run = conn.execute(
-            "INSERT INTO task_runs "
-            "(task_id, profile, status, started_at, ended_at) "
-            "VALUES ('real-task', 'coder', 'done', 1, 223)"
+            "VALUES ('fixture-task', 'w', 'done', 1, 2)"
         ).lastrowid
         conn.executemany(
             "INSERT INTO scores "
             "(run_id, task_id, name, value, value_type, source, created_at) "
-            "VALUES (?, ?, 'run_duration_seconds', ?, 'numeric', 'test', 2)",
+            "VALUES (?, ?, 'run_duration_seconds', ?, "
+            "        'numeric', 'test', 2)",
             [
-                (fixture_run, fixture_id, 0.0),
                 (real_run, "real-task", 222.0),
+                (fixture_run, "fixture-task", 0.0),
             ],
         )
 
         relation = metric_scores_relation(conn)
-        filtered = conn.execute(
-            f"SELECT COUNT(*), AVG(CAST(value AS REAL)) FROM {relation} "
-            "WHERE name = 'run_duration_seconds'"
+        aggregate = conn.execute(
+            f"SELECT COUNT(*) AS count, AVG(CAST(value AS REAL)) AS average "
+            f"FROM {relation} WHERE name = 'run_duration_seconds'"
         ).fetchone()
+        by_class = {
+            str(row["run_class"]): int(row["count"])
+            for row in conn.execute(
+                f"SELECT run_class, COUNT(*) AS count FROM {relation} "
+                "GROUP BY run_class"
+            )
+        }
         persisted = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
 
-    assert tuple(filtered) == (1, 222.0)
-    assert persisted == 2
+    assert tuple(aggregate) == (2, 111.0)
+    assert by_class == {
+        RUN_CLASS_PRODUCTIVE: 1,
+        RUN_CLASS_FIXTURE: 1,
+    }
+    assert sum(by_class.values()) == persisted == 2

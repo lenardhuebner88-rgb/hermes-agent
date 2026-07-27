@@ -10,7 +10,10 @@ import sqlite3
 import time
 from typing import Any, Optional
 
-from hermes_cli.kanban_score_hygiene import metric_scores_relation
+from hermes_cli.kanban_score_hygiene import (
+    metric_run_class_counts,
+    metric_scores_relation,
+)
 
 
 _EUR_PER_USD = 0.92
@@ -212,6 +215,7 @@ def scores_digest(
         _dt.datetime.combine(current_monday, _dt.time.min, tzinfo=_dt.timezone.utc).timestamp()
     )
     score_relation = metric_scores_relation(conn)
+    run_classes = metric_run_class_counts(conn)
 
     overall = conn.execute(
         "SELECT COUNT(*) AS rows_total, "
@@ -330,6 +334,7 @@ def scores_digest(
         "approval_rate": approval_rate,
         "approved_rows": approved_rows,
         "rows_total": rows_total,
+        "run_classes": run_classes,
         "wow_delta": wow_delta,
         "weekly": weekly,
         "by_profile": by_profile,

@@ -80,7 +80,7 @@ def test_digest_approval_rate_matches_scores_report(tmp_path, monkeypatch):
         assert dw["approved_rows"] == rw["approved_rows"]
 
 
-def test_digest_excludes_named_metric_fixtures_without_deleting_them(
+def test_digest_keeps_fixture_metrics_and_reports_run_classes(
     tmp_path, monkeypatch
 ):
     now = _seed_db(tmp_path, monkeypatch)
@@ -135,9 +135,14 @@ def test_digest_excludes_named_metric_fixtures_without_deleting_them(
         digest = kb.scores_digest(conn, weeks=2, now=now)
         persisted = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
 
-    assert digest["rows_total"] == 1
+    assert digest["rows_total"] == 2
     assert digest["approved_rows"] == 1
-    assert digest["approval_rate"] == 1.0
+    assert digest["approval_rate"] == 0.5
+    assert digest["run_classes"] == {
+        "produktiv": 1,
+        "fixture": 1,
+        "nie_gelaufen": 0,
+    }
     assert digest["cost_duration_per_approved_run"] == [
         {
             "run_id": real_run,

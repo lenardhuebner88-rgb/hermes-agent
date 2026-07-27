@@ -112,7 +112,7 @@ def test_scorecard_returns_explicit_empty_materialized_score_entries(client):
     }
 
 
-def test_scorecard_excludes_named_fixtures_without_deleting_scores(client):
+def test_scorecard_keeps_fixture_metrics_and_reports_run_classes(client):
     with kb.connect_closing() as conn:
         real_task, real_run = _make_run(conn)
         fixture_task, fixture_run = _make_run(
@@ -156,16 +156,21 @@ def test_scorecard_excludes_named_fixtures_without_deleting_scores(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["overall"] == {
-        "runs": 1,
+        "runs": 2,
         "approved": 1,
-        "approval_rate": 1.0,
+        "approval_rate": 0.5,
+    }
+    assert payload["run_classes"] == {
+        "produktiv": 1,
+        "fixture": 1,
+        "nie_gelaufen": 0,
     }
     assert payload["materialized_scores"]["run_duration_seconds"] == {
-        "value": 222.0,
-        "min": 222.0,
+        "value": 111.0,
+        "min": 0.0,
         "max": 222.0,
         "sum": 222.0,
-        "count": 1,
+        "count": 2,
     }
     with kb.connect_closing() as conn:
         assert conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0] == 4

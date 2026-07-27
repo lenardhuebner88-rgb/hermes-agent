@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import datetime as dt
 
-from hermes_cli.kanban_score_hygiene import metric_scores_relation
+from hermes_cli.kanban_score_hygiene import (
+    metric_run_class_counts,
+    metric_scores_relation,
+)
 
 
 _NUMERIC_MATERIALIZED_SCORE_NAMES = (
@@ -118,6 +121,7 @@ def get_scorecard(board: Optional[str] = Query(None, description="Kanban board s
     try:
         rows = _score_rows(conn)
         materialized_scores = _materialized_scores(conn)
+        run_classes = metric_run_class_counts(conn)
     finally:
         conn.close()
     by_profile: dict[str, list[sqlite3.Row]] = {}
@@ -134,6 +138,7 @@ def get_scorecard(board: Optional[str] = Query(None, description="Kanban board s
     group = lambda data: [dict(name=name, **_rate(items)) for name, items in sorted(data.items())]
     return {
         "overall": _rate(rows),
+        "run_classes": run_classes,
         "verdicts": by_verdict,
         "profiles": group(by_profile),
         "models": group(by_model),
