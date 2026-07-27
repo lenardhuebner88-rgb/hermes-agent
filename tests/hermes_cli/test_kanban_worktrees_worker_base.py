@@ -3,8 +3,9 @@
 Covers the guard extension in ``prepare_worker_base``/
 ``prepare_reused_task_worktree`` that adopts uncommitted worker edits as a
 commit instead of parking the chain, when (and only when) the caller has
-verified the dirt belongs to a resumable (``blocked``) prior run of the
-SAME task.
+verified the dirt belongs to a resumable prior run of the SAME task
+(``blocked``, ``transient_retry``, ``iteration_budget_exhausted``,
+``crashed``, or ``timed_out``).
 """
 
 from __future__ import annotations
@@ -375,10 +376,119 @@ def test_prepare_reused_task_worktree_budget_wip_skips_outside_scope(
     assert _git(workspace, "show", "--name-only", "--format=", "HEAD") == "src/task.py"
 
 
-@pytest.mark.parametrize("outcome", ["crashed", "completed"])
+def _end_worker_run_ready(conn, tid: str, run_id: int, outcome: str) -> None:
+    """Close *run_id* with *outcome* and re-queue the task for claim."""
+    with kb.write_txn(conn):
+        assert kb._end_run(
+            conn,
+            tid,
+            outcome=outcome,
+            status=outcome,
+            summary=f"worker ended as {outcome}",
+        ) == run_id
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+            "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+            (tid,),
+        )
+
+
+@pytest.mark.parametrize("outcome", ["crashed", "timed_out"])
+def test_prepare_reused_task_worktree_adopts_crashed_or_timed_out_wip(
+    kanban_home, tmp_path, outcome,
+):
+    """A dead/timed-out predecessor left real scoped WIP: adopt, do not park.
+
+    Live incident class (kanban.db last_failure_error, 30d): every retry hit
+    ``worktree is dirty before worker edits; refusing automatic base update``
+    because crashed/timed_out were not treated as resumable adoption evidence.
+    """
+    repo = tmp_path / outcome
+    _init_git_repo(repo)
+
+    with kb.connect_closing() as conn:
+        tid, first, workspace = _start_provisioned_worker_run(
+            conn, repo, f"{outcome} predecessor adoption",
+        )
+        first_run_id = first.current_run_id
+        assert first_run_id is not None
+        (workspace / "src").mkdir()
+        (workspace / "src" / "task.py").write_text(
+            "partial work from crashed worker\n", encoding="utf-8",
+        )
+        _end_worker_run_ready(conn, tid, first_run_id, outcome)
+
+        retry = kb.claim_task(conn, tid)
+        assert retry is not None
+        result = kwt.prepare_reused_task_worktree(conn, retry, workspace)
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert result is not None
+    assert result["adopted_wip_files"] == ["src/task.py"]
+    assert result["skipped_wip_files"] == []
+    assert kwt.dirty_files(workspace) == []
+    adopted = [
+        json.loads(event["payload"])
+        for event in events
+        if event["kind"] == "wip_adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0]["run_id"] == first_run_id
+    assert adopted[0]["files"] == ["src/task.py"]
+    assert _git(workspace, "show", "--name-only", "--format=", "HEAD") == "src/task.py"
+
+
+@pytest.mark.parametrize("outcome", ["crashed", "timed_out"])
+def test_prepare_reused_task_worktree_crash_wip_skips_foreign_dirt(
+    kanban_home, tmp_path, outcome,
+):
+    """Crash-recovery adoption must not silently commit non-card dirt.
+
+    In-scope worker WIP is adopted; untracked paths outside scope stay out of
+    the adoption commit (same selection rule as blocked/budget paths).
+    """
+    repo = tmp_path / f"{outcome}-foreign"
+    _init_git_repo(repo)
+
+    with kb.connect_closing() as conn:
+        tid, first, workspace = _start_provisioned_worker_run(
+            conn, repo, f"{outcome} foreign-dirt guard",
+        )
+        first_run_id = first.current_run_id
+        assert first_run_id is not None
+        (workspace / "src").mkdir()
+        (workspace / "src" / "task.py").write_text(
+            "partial implementation\n", encoding="utf-8",
+        )
+        (workspace / "foreign.py").write_text("unrelated dirt\n", encoding="utf-8")
+        _end_worker_run_ready(conn, tid, first_run_id, outcome)
+
+        retry = kb.claim_task(conn, tid)
+        assert retry is not None
+        result = kwt.prepare_reused_task_worktree(conn, retry, workspace)
+
+    assert result is not None
+    assert result["adopted_wip_files"] == ["src/task.py"]
+    assert result["skipped_wip_files"] == ["foreign.py"]
+    assert kwt.dirty_files(workspace) == ["foreign.py"]
+    assert _git(workspace, "show", "--name-only", "--format=", "HEAD") == "src/task.py"
+    assert "foreign.py" not in _git(
+        workspace, "show", "--name-only", "--format=", "HEAD",
+    )
+
+
+@pytest.mark.parametrize("outcome", ["completed"])
 def test_prepare_reused_task_worktree_rejects_non_resumable_worker_wip(
     kanban_home, tmp_path, outcome,
 ):
+    """Dirt after a non-resumable worker outcome (e.g. completed) stays parked.
+
+    ``completed`` is not mid-edit continuation state: leftover dirt is not
+    trusted as this card's WIP. (``crashed``/``timed_out`` adopt instead.)
+    """
     repo = tmp_path / outcome
     _init_git_repo(repo)
 
@@ -392,19 +502,7 @@ def test_prepare_reused_task_worktree_rejects_non_resumable_worker_wip(
         (workspace / "src" / "task.py").write_text(
             "untrusted leftover\n", encoding="utf-8",
         )
-        with kb.write_txn(conn):
-            assert kb._end_run(
-                conn,
-                tid,
-                outcome=outcome,
-                status=outcome,
-                summary=f"worker ended as {outcome}",
-            ) == first_run_id
-            conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
-                (tid,),
-            )
+        _end_worker_run_ready(conn, tid, first_run_id, outcome)
 
         retry = kb.claim_task(conn, tid)
         assert retry is not None
@@ -624,11 +722,16 @@ def test_select_wip_paths_without_declared_scope_skips_untracked(tmp_path):
     assert skipped == [".claude/skills/foreign/SKILL.md"]
 
 
-def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
+def test_dispatch_adopts_dirt_left_by_crashed_predecessor(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):
-    """Gegenprobe: dirt left after a NON-blocked prior run (e.g. crashed) is
-    still refused -- adoption never fires without resumable evidence."""
+    """A crashed predecessor's mid-edit WIP is resumable evidence: adopt + spawn.
+
+    Previously this path refused forever (auto-retry re-hit the dirty base-prep
+    gate). ``crashed`` is mid-edit leftover by the same reasoning as
+    ``transient_retry``; untracked paths still need scope/branch affinity to
+    enter the adoption commit.
+    """
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
@@ -642,6 +745,7 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
         tid = kb.create_task(
             conn,
             title="crash-then-retry",
+            body="Scope files (allowed edit paths):\nleftover.py\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
@@ -651,9 +755,8 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
         assert first.spawned == [(tid, "sentinel", str(expected))]
         run1_id = kb.get_task(conn, tid).current_run_id
 
-        # Simulate a crash: end the run as 'crashed' (not 'blocked'), then
-        # put the task back into a dispatchable state directly, mirroring
-        # what the crash-recovery path leaves behind for the dispatcher.
+        # Simulate a crash: end the run as 'crashed', then put the task back
+        # into a dispatchable state, mirroring crash-recovery for the dispatcher.
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE task_runs SET status='crashed', outcome='crashed', "
@@ -665,9 +768,7 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
                 "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
                 (tid,),
             )
-        # A crashed predecessor's uncommitted leftovers land in the shared
-        # worktree -- garbage from an unrelated run, not this run's own WIP.
-        (expected / "leftover.py").write_text("half-written garbage\n")
+        (expected / "leftover.py").write_text("partial work from crashed worker\n")
 
         second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
         events = conn.execute(
@@ -675,11 +776,72 @@ def test_dispatch_still_rejects_dirt_without_blocked_predecessor(
             (tid,),
         ).fetchall()
 
+    assert second.spawned == [(tid, "sentinel", str(expected))]
+    assert not any(e["kind"] == "worker_base_rejected" for e in events)
+    adopted = [
+        json.loads(e["payload"])
+        for e in events
+        if e["kind"] == "wip_adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0]["run_id"] == run1_id
+    assert adopted[0]["files"] == ["leftover.py"]
+    assert kwt.dirty_files(expected) == []
+    assert (expected / "leftover.py").read_text() == "partial work from crashed worker\n"
+
+
+def test_dispatch_still_rejects_dirt_after_completed_predecessor(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """Gegenprobe: dirt after a completed run is not adoption evidence."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawns: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawns.append((task.id, workspace))
+        return None
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="completed-then-retry-with-dirt",
+            body="Scope files (allowed edit paths):\nleftover.py\n",
+            assignee="sentinel",
+            workspace_kind="worktree",
+            workspace_path=str(repo),
+        )
+        first = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        expected = repo / ".worktrees" / "kanban" / tid
+        assert first.spawned == [(tid, "sentinel", str(expected))]
+        run1_id = kb.get_task(conn, tid).current_run_id
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE task_runs SET status='completed', outcome='completed', "
+                "ended_at=strftime('%s','now') WHERE id=?",
+                (run1_id,),
+            )
+            conn.execute(
+                "UPDATE tasks SET status='ready', current_run_id=NULL, "
+                "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
+                (tid,),
+            )
+        (expected / "leftover.py").write_text("unexpected leftover after complete\n")
+
+        second = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    # Must not spawn on completed-predecessor dirt (fail-closed). Exact event
+    # kind may be worker_base_rejected or an earlier recovery path; the
+    # invariant is no adoption and the leftover file untouched.
     assert second.spawned == []
-    reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
-    assert len(reject_events) == 1
     assert not any(e["kind"] == "wip_adopted" for e in events)
-    assert (expected / "leftover.py").read_text() == "half-written garbage\n"
+    assert (expected / "leftover.py").read_text() == "unexpected leftover after complete\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1002,12 +1164,11 @@ def test_dispatch_base_prep_conflict_fixer_not_stacked_while_open(
     assert task.status == "blocked"
 
 
-def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
+def test_dispatch_adopts_when_walk_lands_on_crashed_behind_failed_spawns(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):
-    """Gegenprobe: the skip-list only skips spawn_failed/gave_up. A crashed
-    run BEHIND those rows is still not resumable evidence -- the walk must
-    land on it (not fall through to None by accident) and still refuse."""
+    """Skip-list only skips spawn_failed/gave_up; crashed behind them is
+    now resumable evidence — the walk lands on it and adopts WIP."""
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
@@ -1021,6 +1182,7 @@ def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
         tid = kb.create_task(
             conn,
             title="crash-then-two-failed-spawns",
+            body="Scope files (allowed edit paths):\nleftover.py\n",
             assignee="sentinel",
             workspace_kind="worktree",
             workspace_path=str(repo),
@@ -1030,8 +1192,6 @@ def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
         assert first.spawned == [(tid, "sentinel", str(expected))]
         run1_id = kb.get_task(conn, tid).current_run_id
 
-        # run1 crashes (not blocked) -- dispatchable again, no worker touched
-        # the tree since.
         with kb.write_txn(conn):
             conn.execute(
                 "UPDATE task_runs SET status='crashed', outcome='crashed', "
@@ -1043,9 +1203,7 @@ def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
                 "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL WHERE id=?",
                 (tid,),
             )
-        # A crashed predecessor's uncommitted leftovers land in the shared
-        # worktree.
-        (expected / "leftover.py").write_text("half-written garbage\n")
+        (expected / "leftover.py").write_text("partial work from crashed worker\n")
 
         real_prepare_worker_base = kwt.prepare_worker_base
 
@@ -1080,11 +1238,18 @@ def test_dispatch_rejects_when_walk_lands_on_crashed_behind_failed_spawns(
             (tid, watermark),
         ).fetchall()
 
-    assert third.spawned == []
-    reject_events = [e for e in events if e["kind"] == "worker_base_rejected"]
-    assert len(reject_events) == 1
-    assert not any(e["kind"] == "wip_adopted" for e in events)
-    assert (expected / "leftover.py").read_text() == "half-written garbage\n"
+    assert third.spawned == [(tid, "sentinel", str(expected))]
+    assert not any(e["kind"] == "worker_base_rejected" for e in events)
+    adopted = [
+        json.loads(e["payload"])
+        for e in events
+        if e["kind"] == "wip_adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0]["run_id"] == run1_id
+    assert adopted[0]["files"] == ["leftover.py"]
+    assert kwt.dirty_files(expected) == []
+    assert (expected / "leftover.py").read_text() == "partial work from crashed worker\n"
 
 
 # ---------------------------------------------------------------------------

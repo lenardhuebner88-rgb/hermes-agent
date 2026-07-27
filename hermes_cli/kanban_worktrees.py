@@ -1335,7 +1335,10 @@ def prepare_worker_base(
     (caller-verified, e.g. that run ended ``blocked``), in which case the
     remaining non-artifact dirt is committed as adopted WIP instead of
     parking. This is intentionally narrow: it never fires for a fresh task or
-    for dirt left by an unrelated predecessor.
+    for dirt left by an unrelated predecessor. Resumable prior outcomes
+    include mid-edit pauses (``blocked``), external kills
+    (``transient_retry`` / ``crashed`` / ``timed_out``), and explicit
+    budget handoff (``iteration_budget_exhausted``); ``completed`` does not.
 
     ``skip_stale_rebase`` exempts a bounded conflict-park fixer (S10b) from
     the stale-base rebase step: a fixer's job IS to resolve an already-
@@ -1615,19 +1618,30 @@ def prepare_reused_task_worktree(
     # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
     # cycle after a worktree-prep rejection, not a worker attempt). The
     # first non-skipped run is the actual last worker attempt; only when
-    # THAT ended resumably (``blocked``, e.g. needs_input,
-    # ``transient_retry`` — a worker externally terminated mid-edit, e.g. a
-    # gateway restart, whose WIP is legitimate continuation state by the
-    # same reasoning as ``blocked``, S8c, OR ``iteration_budget_exhausted`` —
-    # the worker ran through its budget and explicitly handed its partial work
-    # to a continuation) is leftover dirt "our own WIP" rather than garbage
-    # from some other predecessor — a crashed/timed-out/completed run (or
-    # exhausting the bounded window without finding one) stays fail-closed.
+    # THAT ended resumably is leftover dirt "our own WIP" rather than
+    # garbage from some other predecessor. Resumable outcomes:
+    #   * ``blocked`` (e.g. needs_input) — intentional mid-edit pause
+    #   * ``transient_retry`` — worker externally terminated mid-edit
+    #     (e.g. gateway restart); same continuation reasoning as blocked
+    #   * ``iteration_budget_exhausted`` — worker handed partial work to
+    #     a continuation explicitly
+    #   * ``crashed`` / ``timed_out`` — dead-PID / max-runtime kill mid-
+    #     edit. Structurally the same mid-edit leftover as
+    #     ``transient_retry``; without adoption every auto-retry re-hits
+    #     the dirty base-prep gate and the card dies after the breaker
+    #     (live class: "worktree is dirty before worker edits…"). Scope
+    #     selection in ``_select_wip_paths`` still keeps untracked paths
+    #     outside the card out of the adoption commit.
+    # A ``completed`` run (or exhausting the bounded window without
+    # finding a resumable one) stays fail-closed: leftover dirt after a
+    # successful terminal outcome is not trusted continuation state.
     _NON_WORKER_RETRY_OUTCOMES = ("spawn_failed", "gave_up")
     _RESUMABLE_WIP_OUTCOMES = (
         "blocked",
         "transient_retry",
         "iteration_budget_exhausted",
+        "crashed",
+        "timed_out",
     )
     candidate_runs = conn.execute(
         "SELECT id, outcome FROM task_runs "
