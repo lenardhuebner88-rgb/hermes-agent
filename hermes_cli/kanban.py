@@ -3364,9 +3364,7 @@ def _complete_one_task(
         task_for_gate = kb.get_task(conn, tid)
         if task_for_gate and task_for_gate.goal_mode:
             rejection = check_goal_mode_completion(
-                task_id=tid,
-                task_title=task_for_gate.title,
-                task_body=task_for_gate.body,
+                task=task_for_gate,
                 handoff_text=(summary or result or ""),
             )
             if rejection:
