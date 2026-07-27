@@ -1361,6 +1361,26 @@ def _make_blocked_chain_with_finished_sibling(
     return blocked, sibling, task, events, runs, blocked_at, now
 
 
+def _compute_chain_diagnostics(
+    task,
+    events,
+    runs,
+    *,
+    now: int,
+    config: dict | None = None,
+):
+    """Evaluate connection-aware chain rules on the isolated default board."""
+    with kb.connect_closing(board="default") as conn:
+        diag_config = kd.config_for_board_connection(config, conn)
+        return kd.compute_task_diagnostics(
+            task,
+            events,
+            runs,
+            now=now,
+            config=diag_config,
+        )
+
+
 def test_blocked_task_holds_finished_chain_work_hostage(kanban_home, tmp_path):
     repo, _head_sha = _init_repo_with_stranded_root_branch(tmp_path)
     blocked, sibling, task, events, runs, blocked_at, now = (
@@ -1370,7 +1390,12 @@ def test_blocked_task_holds_finished_chain_work_hostage(kanban_home, tmp_path):
         )
     )
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
     assert diag.severity == "warning"
@@ -1414,7 +1439,12 @@ def test_blocked_task_hostage_detects_shared_worktree_sibling(
         events = kb.list_events(conn, blocked)
         runs = kb.list_runs(conn, blocked)
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
     assert diag.data["held_task_ids"] == [sibling]
@@ -1448,7 +1478,12 @@ def test_blocked_task_chain_hostage_silent_without_unmerged_finished_work(
         )
     )
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     assert all(d.kind != "blocked_task_holds_chain" for d in diags)
 
@@ -1464,12 +1499,14 @@ def test_blocked_task_chain_hostage_escalates_after_configured_age(
         )
     )
 
-    diags = kd.compute_task_diagnostics(
+    diags = _compute_chain_diagnostics(
         task,
         events,
         runs,
         now=now,
-        config={"blocked_chain_hostage_error_hours": 24},
+        config={
+            "blocked_chain_hostage_error_hours": 24,
+        },
     )
 
     diag = next(d for d in diags if d.kind == "blocked_task_holds_chain")
@@ -1513,7 +1550,12 @@ def test_chain_root_pending_integration_fires_for_ran_root(kanban_home):
         child_status="done",
     )
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     diag = next(d for d in diags if d.kind == "chain_root_pending_integration")
     assert diag.severity == "warning"
@@ -1532,7 +1574,12 @@ def test_chain_root_pending_integration_silent_for_never_ran_root(kanban_home):
         child_status="done",
     )
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     assert all(d.kind != "chain_root_pending_integration" for d in diags)
 
@@ -1543,9 +1590,127 @@ def test_chain_root_pending_integration_silent_while_child_open(kanban_home):
         child_status="todo",
     )
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     assert all(d.kind != "chain_root_pending_integration" for d in diags)
+
+
+def test_chain_root_pending_integration_uses_non_default_board_connection(
+    kanban_home,
+):
+    kb.create_board("project-board")
+    now = int(time.time())
+    with kb.connect_closing(board="project-board") as conn:
+        root = kb.create_task(conn, title="project root", assignee="coder")
+        child = kb.create_task(
+            conn,
+            title="project child",
+            assignee="coder",
+            parents=[root],
+        )
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?",
+            (now - 600, root),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (now - 60, child),
+        )
+        conn.commit()
+        board_slug = kb.board_slug_for_conn(conn)
+        assert board_slug == "project-board"
+        diags = kd.compute_task_diagnostics(
+            kb.get_task(conn, root),
+            kb.list_events(conn, root),
+            kb.list_runs(conn, root),
+            now=now,
+            config={
+                "board_slug": board_slug,
+                "_board_connection": conn,
+                "_diagnostic_cache": {},
+            },
+        )
+
+    diag = next(d for d in diags if d.kind == "chain_root_pending_integration")
+    assert diag.data["root_task_id"] == root
+    assert diag.data["terminal_child_count"] == 1
+
+
+def test_chain_root_pending_integration_recognizes_decompose_direction(
+    kanban_home,
+):
+    now = int(time.time())
+    with kb.connect_closing() as conn:
+        root = kb.create_task(conn, title="decompose root", assignee="coder")
+        child = kb.create_task(conn, title="decompose slice", assignee="coder")
+        kb.link_tasks(conn, child, root)
+        kb._append_event(
+            conn,
+            root,
+            "decomposed",
+            {"child_ids": [child]},
+        )
+        conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE id = ?",
+            (now - 600, root),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+            (now - 60, child),
+        )
+        conn.commit()
+        diags = kd.compute_task_diagnostics(
+            kb.get_task(conn, root),
+            kb.list_events(conn, root),
+            kb.list_runs(conn, root),
+            now=now,
+            config={
+                "board_slug": kb.board_slug_for_conn(conn),
+                "_board_connection": conn,
+                "_diagnostic_cache": {},
+            },
+        )
+
+    diag = next(d for d in diags if d.kind == "chain_root_pending_integration")
+    assert diag.data["root_task_id"] == root
+    assert diag.data["terminal_child_count"] == 1
+
+
+def test_chain_root_pending_integration_skips_git_probe_with_run_history(
+    kanban_home,
+    monkeypatch,
+):
+    root, _child, task, events, runs, now = _make_pending_chain_root(
+        root_has_run=True,
+        child_status="done",
+    )
+    calls = 0
+
+    def count_probe(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return False
+
+    monkeypatch.setattr(kd, "_branch_has_unmerged_commits", count_probe)
+
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
+
+    assert any(
+        d.kind == "chain_root_pending_integration"
+        and d.data["root_task_id"] == root
+        for d in diags
+    )
+    assert calls == 0
 
 
 def test_shared_worktree_non_root_does_not_masquerade_as_chain_root(
@@ -1571,6 +1736,11 @@ def test_shared_worktree_non_root_does_not_masquerade_as_chain_root(
         events = kb.list_events(conn, child)
         runs = kb.list_runs(conn, child)
 
-    diags = kd.compute_task_diagnostics(task, events, runs, now=now)
+    diags = _compute_chain_diagnostics(
+        task,
+        events,
+        runs,
+        now=now,
+    )
 
     assert all(d.kind != "chain_root_pending_integration" for d in diags)

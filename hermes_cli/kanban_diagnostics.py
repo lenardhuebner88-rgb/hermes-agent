@@ -29,7 +29,6 @@ Design goals:
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1545,27 +1544,9 @@ def _rule_orphaned_worktree(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
-@contextmanager
-def _readonly_board_connection():
-    """Open the active board without schema initialization or write access."""
-    from hermes_cli import kanban_db as _kb  # lazy: kanban_db imports us
-
-    db_path = _kb.kanban_db_path()
-    if not db_path.is_file():
-        yield None
-        return
-    conn = sqlite3.connect(
-        f"{db_path.resolve().as_uri()}?mode=ro",
-        uri=True,
-        timeout=1.0,
-    )
-    try:
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("PRAGMA busy_timeout = 1000")
-        yield conn
-    finally:
-        conn.close()
+def _board_connection_from_config(cfg: dict):
+    """Return the caller-owned board connection carried through config."""
+    return cfg.get("_board_connection")
 
 
 def _provisioned_workspace_parts(
@@ -1585,8 +1566,81 @@ def _provisioned_workspace_parts(
     return None
 
 
+def _is_decompose_root(conn, task_id: str) -> bool:
+    """Cycle-free copy of the integrator's decompose-root test."""
+    return conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'decomposed' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
+
+
+def _direct_decompose_root_for_child(
+    conn,
+    task_id: str,
+) -> Optional[str]:
+    """Copy the integrator's reverse decompose-link lookup.
+
+    Decompose links point from a slice to the root, opposite to ordinary
+    parent-to-child dependency links. Keep this small copy here instead of
+    importing ``kanban_worktrees`` into the diagnostics/kanban_db cycle.
+    """
+    row = conn.execute(
+        "SELECT l.child_id FROM task_links l "
+        "WHERE l.parent_id = ? "
+        "AND EXISTS ("
+        "  SELECT 1 FROM task_events e "
+        "  WHERE e.task_id = l.child_id AND e.kind = 'decomposed'"
+        ") "
+        "ORDER BY l.child_id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["child_id"] if row is not None else None
+
+
+def _decompose_event_child_ids(conn, root_id: str) -> set[str]:
+    """Read canonical child membership from the latest decompose event."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'decomposed' ORDER BY id DESC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        return set()
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set()
+    raw_ids = payload.get("child_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw_ids, list):
+        return set()
+    return {
+        str(child_id).strip()
+        for child_id in raw_ids
+        if str(child_id).strip()
+    }
+
+
 def _linked_chain_member_ids(conn, task_id: str) -> tuple[str, set[str]]:
-    """Mirror the integrator's ordinary link-root + descendant membership."""
+    """Mirror ordinary and reverse decompose chain membership."""
+    decompose_root = (
+        task_id
+        if _is_decompose_root(conn, task_id)
+        else _direct_decompose_root_for_child(conn, task_id)
+    )
+    if decompose_root is not None:
+        members = {decompose_root}
+        queue = [decompose_root]
+        while queue:
+            current = queue.pop()
+            for child_id in _decompose_event_child_ids(conn, current):
+                if child_id in members:
+                    continue
+                members.add(child_id)
+                if _is_decompose_root(conn, child_id):
+                    queue.append(child_id)
+        return decompose_root, members
+
     current = task_id
     seen = {current}
     while True:
@@ -1620,7 +1674,11 @@ def _linked_chain_member_ids(conn, task_id: str) -> tuple[str, set[str]]:
     return root_id, members
 
 
-def _chain_member_rows(conn, task) -> tuple[str, Optional[str], dict[str, Any]]:
+def _chain_member_rows(
+    conn,
+    task,
+    cfg: dict,
+) -> tuple[str, Optional[str], dict[str, Any]]:
     """Resolve task-link and shared-worktree membership, conservatively OR-ed.
 
     This duplicates the integrator's minimal queries rather than importing
@@ -1636,17 +1694,17 @@ def _chain_member_rows(conn, task) -> tuple[str, Optional[str], dict[str, Any]]:
     shared_root_id: Optional[str] = None
     if provisioned is not None:
         _repo_root, shared_root_id, worktree_root = provisioned
-        prefix = str(worktree_root)
-        escaped = (
-            prefix.replace("\\", "\\\\")
-            .replace("%", r"\%")
-            .replace("_", r"\_")
-        )
-        for row in conn.execute(
-            "SELECT id, workspace_path FROM tasks "
-            "WHERE workspace_path LIKE ? ESCAPE '\\'",
-            (escaped + "%",),
-        ):
+        cache = cfg.get("_diagnostic_cache")
+        cache_key = ("workspace_rows", id(conn))
+        workspace_rows = cache.get(cache_key) if isinstance(cache, dict) else None
+        if workspace_rows is None:
+            workspace_rows = conn.execute(
+                "SELECT id, workspace_path FROM tasks "
+                "WHERE workspace_path IS NOT NULL"
+            ).fetchall()
+            if isinstance(cache, dict):
+                cache[cache_key] = workspace_rows
+        for row in workspace_rows:
             row_parts = _provisioned_workspace_parts(row["workspace_path"])
             if row_parts is not None and row_parts[2] == worktree_root:
                 member_ids.add(row["id"])
@@ -1681,10 +1739,20 @@ def _branch_has_unmerged_commits(task, cfg: dict) -> bool:
     if not branch_name or repo_root is None:
         return False
     main_ref = str(cfg.get("chain_main_ref") or "main").strip() or "main"
+    cache = cfg.get("_diagnostic_cache")
+    cache_key = (
+        "branch_has_unmerged_commits",
+        str(repo_root),
+        main_ref,
+        branch_name,
+    )
+    if isinstance(cache, dict) and cache_key in cache:
+        return bool(cache[cache_key])
     timeout = max(
         0.1,
         min(float(cfg.get("diagnostic_git_timeout_seconds", 3)), 10.0),
     )
+    result = False
     try:
         proc = subprocess.run(
             [
@@ -1700,17 +1768,24 @@ def _branch_has_unmerged_commits(task, cfg: dict) -> bool:
             timeout=timeout,
             check=False,
         )
-        if proc.returncode != 0:
-            return False
-        return int(proc.stdout.strip() or "0") > 0
+        if proc.returncode == 0:
+            result = int(proc.stdout.strip() or "0") > 0
     except (OSError, subprocess.SubprocessError, TypeError, ValueError):
-        return False
+        result = False
+    if isinstance(cache, dict):
+        cache[cache_key] = result
+    return result
 
 
 def _rule_blocked_task_holds_chain(
     task, events, runs, now, cfg
 ) -> list[Diagnostic]:
-    """A blocked member holds already-finished, unmerged chain slices."""
+    """A blocked member holds already-finished, unmerged chain slices.
+
+    Cost: shared-worktree membership needs one unindexed ``tasks`` scan, cached
+    once per caller-connection diagnostics batch. Each distinct finished branch
+    then incurs at most one bounded ``git rev-list`` probe in that same batch.
+    """
     if _task_field(task, "status") != "blocked":
         return []
     blocked_at = max(
@@ -1723,21 +1798,25 @@ def _rule_blocked_task_holds_chain(
     )
     if not blocked_at:
         return []
+    conn = _board_connection_from_config(cfg)
+    if conn is None:
+        return []
     try:
-        with _readonly_board_connection() as conn:
-            if conn is None:
-                return []
-            _link_root, _shared_root, members = _chain_member_rows(conn, task)
-            if not members:
-                return []
-            task_id = str(_task_field(task, "id") or "")
-            held_ids = sorted(
-                member_id
-                for member_id, member in members.items()
-                if member_id != task_id
-                and member["status"] == "done"
-                and _branch_has_unmerged_commits(member, cfg)
-            )
+        _link_root, _shared_root, members = _chain_member_rows(
+            conn,
+            task,
+            cfg,
+        )
+        if not members:
+            return []
+        task_id = str(_task_field(task, "id") or "")
+        held_ids = sorted(
+            member_id
+            for member_id, member in members.items()
+            if member_id != task_id
+            and member["status"] == "done"
+            and _branch_has_unmerged_commits(member, cfg)
+        )
     except (OSError, sqlite3.Error):
         return []
     if not held_ids:
@@ -1800,26 +1879,41 @@ def _rule_chain_root_pending_integration(
     if _task_field(task, "status") not in {"ready", "todo", "triage"}:
         return []
     has_run_history = bool(runs) or bool(_task_field(task, "started_at"))
-    has_own_commits = _branch_has_unmerged_commits(task, cfg)
+    has_own_commits = (
+        False
+        if has_run_history
+        else _branch_has_unmerged_commits(task, cfg)
+    )
     if not (has_run_history or has_own_commits):
         return []
 
+    conn = _board_connection_from_config(cfg)
+    if conn is None:
+        return []
     try:
-        with _readonly_board_connection() as conn:
-            if conn is None:
-                return []
-            link_root, shared_root, members = _chain_member_rows(conn, task)
-            has_direct_link_children = conn.execute(
-                "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1",
-                (str(_task_field(task, "id") or ""),),
-            ).fetchone() is not None
+        link_root, shared_root, members = _chain_member_rows(
+            conn,
+            task,
+            cfg,
+        )
+        is_decompose_root = _is_decompose_root(
+            conn,
+            str(_task_field(task, "id") or ""),
+        )
+        has_direct_link_children = conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1",
+            (str(_task_field(task, "id") or ""),),
+        ).fetchone() is not None
     except (OSError, sqlite3.Error):
         return []
     if not members:
         return []
     task_id = str(_task_field(task, "id") or "")
     is_root = (
-        (link_root == task_id and has_direct_link_children)
+        (
+            link_root == task_id
+            and (has_direct_link_children or is_decompose_root)
+        )
         or shared_root == task_id
     )
     if not is_root:
@@ -2229,6 +2323,25 @@ def config_from_runtime_config(raw_config: Optional[dict]) -> dict:
     return cfg
 
 
+def config_for_board_connection(
+    config: Optional[dict],
+    conn,
+) -> dict:
+    """Bind diagnostics config to the caller's already-open board connection.
+
+    The board slug is kept in config for explicit provenance. CLI/dashboard
+    batches reuse ``conn`` directly and share one short-lived cache for board
+    scans and Git probes; the rule engine never resolves board state from env.
+    """
+    from hermes_cli import kanban_db as _kb  # lazy: avoid import cycle
+
+    cfg = dict(config or {})
+    cfg["board_slug"] = _kb.board_slug_for_conn(conn)
+    cfg["_board_connection"] = conn
+    cfg["_diagnostic_cache"] = {}
+    return cfg
+
+
 def compute_task_diagnostics(
     task,
     events: list,
@@ -2246,6 +2359,8 @@ def compute_task_diagnostics(
     now_ts = int(now if now is not None else time.time())
     config = config or {}
     cfg = {**DEFAULT_CONFIG, **config}
+    cache = config.get("_diagnostic_cache")
+    cfg["_diagnostic_cache"] = cache if isinstance(cache, dict) else {}
     if (
         "failure_threshold" not in config
         and "spawn_failure_threshold" not in config
