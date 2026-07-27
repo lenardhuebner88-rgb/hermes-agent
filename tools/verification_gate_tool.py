@@ -360,8 +360,25 @@ def run_verification_gate(
     else:
         results = _run_commands(_command_specs(action, root), root)
         artifacts = []
-        status = "passed" if results and all(item["exit_code"] == 0 and not item["timed_out"]
-                                              for item in results) else "failed"
+        affected_preflight_aborted = (
+            action == "affected"
+            and any(
+                item["command_id"] == "run_affected" and item["exit_code"] == 3
+                for item in results
+            )
+        )
+        other_gate_failed = any(
+            item["timed_out"]
+            or (
+                item["exit_code"] != 0
+                and not (item["command_id"] == "run_affected" and item["exit_code"] == 3)
+            )
+            for item in results
+        )
+        if affected_preflight_aborted and not other_gate_failed:
+            status = "not_run"
+        else:
+            status = "passed" if results and not other_gate_failed else "failed"
     finished = datetime.now(timezone.utc)
     evidence = GateEvidence(
         fingerprint=fingerprint.digest, gate_id=action,
