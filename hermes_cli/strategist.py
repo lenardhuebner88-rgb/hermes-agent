@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli import kanban_db, planspecs, strategist_surface
+from hermes_cli import strategist_specs
 from hermes_cli import outcome_verification as outcomes
 from hermes_cli import vision_metrics
 
@@ -1663,6 +1664,11 @@ def propose_gate_fix(
         "key": lever.key,
     }
 
+    if strategist_specs.has_terminal_decision_for_lever(out_dir, lever.key):
+        summary["ingested"] = None
+        summary["skipped_terminal_decision"] = True
+        return summary
+
     if not do_ingest:
         summary["ingested"] = {"key": lever.key, "title": lever.title, "dry_run": True}
         return summary
@@ -1755,6 +1761,11 @@ def propose_persistent_red_triage(
         "key": lever.key,
     }
 
+    if strategist_specs.has_terminal_decision_for_lever(out_dir, lever.key):
+        summary["ingested"] = None
+        summary["skipped_terminal_decision"] = True
+        return summary
+
     if not do_ingest:
         summary["ingested"] = {"key": lever.key, "title": lever.title, "dry_run": True}
         return summary
@@ -1831,12 +1842,16 @@ def propose_deflake(
 
     filed: list[dict[str, Any]] = []
     skipped_existing: list[str] = []
+    skipped_terminal_decision: list[str] = []
     ingest_errors: list[dict[str, Any]] = []
     newly_filed: set[str] = set()
     for cand in candidates:
         lever = _deflake_lever(cand)
         if lever.key in already_filed:
             skipped_existing.append(cand["file"])
+            continue
+        if strategist_specs.has_terminal_decision_for_lever(out_dir, lever.key):
+            skipped_terminal_decision.append(cand["file"])
             continue
         if not do_ingest:
             filed.append(
@@ -1889,6 +1904,7 @@ def propose_deflake(
         ],
         "filed": filed,
         "skipped_existing": skipped_existing,
+        "skipped_terminal_decision": skipped_terminal_decision,
         "recurring": recurring_files,
         "ingest_errors": ingest_errors,
     }
