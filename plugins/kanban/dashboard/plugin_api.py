@@ -1785,6 +1785,37 @@ class UpdateTaskBody(BaseModel):
     clear_model_override: bool = False
 
 
+def _operator_held_chain_root_id(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[str]:
+    """Return the still-held operator-release root reachable from *task_id*.
+
+    PlanSpec build chains point from each build task to the held root through
+    ``child_ids``.  Preserve the kernel's release semantics by consulting its
+    active-hold predicate instead of inferring release state from the retained
+    ``freigabe`` column.
+    """
+    seen: set[str] = set()
+    frontier = [task_id]
+    while frontier:
+        candidate_id = frontier.pop()
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        row = conn.execute(
+            "SELECT status, freigabe FROM tasks WHERE id = ?", (candidate_id,),
+        ).fetchone()
+        if (
+            row is not None
+            and row["status"] == "scheduled"
+            and str(row["freigabe"] or "").strip().lower() == "operator"
+            and kanban_db._freigabe_operator_hold_still_active(conn, candidate_id)
+        ):
+            return candidate_id
+        frontier.extend(kanban_db.child_ids(conn, candidate_id))
+    return None
+
+
 @core_routes.patch("/tasks/{task_id}")
 def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Query(None)):
     board = _resolve_board(board)
@@ -1874,6 +1905,18 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 # Re-open a blocked/scheduled task, or just an explicit status set.
                 current = kanban_db.get_task(conn, task_id)
                 if current and current.status in ("blocked", "scheduled"):
+                    if current.status == "scheduled":
+                        chain_root_id = _operator_held_chain_root_id(conn, task_id)
+                        if chain_root_id is not None:
+                            raise HTTPException(
+                                status_code=409,
+                                detail=(
+                                    f"Task {task_id} gehört zur gehaltenen Kette "
+                                    f"{chain_root_id}. Einzelstart ist nicht zulässig; "
+                                    "bitte die Freigabe der ganzen Kette ausführen "
+                                    "(release_freigabe_hold)."
+                                ),
+                            )
                     ok = kanban_db.unblock_task(conn, task_id)
                 else:
                     # Direct status write for drag-drop (todo -> ready etc).
