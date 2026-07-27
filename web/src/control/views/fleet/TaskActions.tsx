@@ -35,6 +35,17 @@ export interface FleetTaskActionsProps {
   status: TaskStatus | string;
   /** Root der Kette (min-level Node bzw. Board-root_id). null ⇒ kein Ketten-Abbruch. */
   chainRootId?: string | null;
+  /** Gehaltene Operator-Kette (Root-ID + Gliederzahl). Wenn gesetzt, wird der
+   * Starten-Stage-Übergang durch die Kettenfreigabe ersetzt (KF-2): Einzelstarts
+   * aus gehaltenen Ketten lehnt das Backend mit 409 ab — der ehrliche Weg ist
+   * die Freigabe der ganzen Kette über POST /tasks/{root}/flow-release. */
+  heldChain?: { rootId: string; memberCount: number } | null;
+  /** Führt die Kettenfreigabe aus (useFlowRelease.release). Pflicht bei heldChain. */
+  onReleaseChain?: ((rootId: string) => Promise<{ ok: boolean; released?: number; detail?: string }>) | null;
+  /** Fehlergrund der letzten Freigabe (useFlowRelease.errorById) — verbatim, nie verschluckt. */
+  releaseChainError?: string | null;
+  /** Freigabe läuft gerade (useFlowRelease.busyId). */
+  releaseBusy?: boolean;
   /** Board nach erfolgreicher Aktion neu laden. */
   onChanged?: () => void | Promise<void>;
   /** Nach erfolgreichem Abbrechen/Ketten-Abbruch aufgerufen (z. B. Drawer schließen). */
@@ -44,26 +55,46 @@ export interface FleetTaskActionsProps {
   stageBlockReason?: string | null;
 }
 
-export function FleetTaskActions({ taskId, status, chainRootId, onChanged, onCancelled, stageBlockReason }: FleetTaskActionsProps) {
+export function FleetTaskActions({ taskId, status, chainRootId, heldChain, onReleaseChain, releaseChainError, releaseBusy, onChanged, onCancelled, stageBlockReason }: FleetTaskActionsProps) {
   const [armed, setArmed] = useState<string | null>(null);
   const [chainNote, setChainNote] = useState<string>("");
   const task = useTaskAction(onChanged);
   const redispatch = useFixRedispatch();
   const chain = useChainActions();
 
-  const busy = task.busyId === taskId || redispatch.busyId === taskId || chain.busy != null;
+  const busy = task.busyId === taskId || redispatch.busyId === taskId || chain.busy != null || Boolean(releaseBusy);
   const st = status as TaskStatus;
+  // KF-2: Bei einer gehaltenen Kette ersetzt die Freigabe den Einzelstart.
+  const releaseMode = Boolean(heldChain && onReleaseChain);
 
-  // 409/Guard-Fehler aus den drei Hooks — verbatim, nie verschluckt (AC-2).
-  const errorText = task.errorById[taskId] || redispatch.errorById[taskId] || chain.error || "";
+  // 409/Guard-Fehler aus den Hooks — verbatim, nie verschluckt (AC-2/AC-4).
+  const errorText = task.errorById[taskId] || redispatch.errorById[taskId] || chain.error || releaseChainError || "";
   const retryDone = Boolean(redispatch.doneIds[taskId]);
 
   const actions: UiAction[] = [];
+  // (0) Kettenfreigabe — steht an Stelle des Starten-Übergangs (AC-1/AC-2):
+  // benennt Kette + Gliederzahl und gibt die GANZE Kette frei, nicht die Karte.
+  if (releaseMode && heldChain && onReleaseChain) {
+    actions.push({
+      key: "releaseChain",
+      label: de.fleet.actionReleaseChain(heldChain.rootId, heldChain.memberCount),
+      confirm: de.fleet.actionReleaseChainConfirm(heldChain.rootId, heldChain.memberCount),
+      danger: false,
+      run: async () => {
+        const res = await onReleaseChain(heldChain.rootId);
+        if (res.ok) setChainNote(de.fleet.actionChainReleased(res.released ?? 0));
+        return { ok: res.ok, detail: res.ok ? undefined : res.detail };
+      },
+    });
+  }
   // (1) Stage-Übergänge — stageActions wiederverwenden (Reopen = Unblock/PATCH
   // ready). Review bleibt absichtlich ohne manuellen Status-Button: das Backend
   // akzeptiert weder review→done noch review→blocked über diesen PATCH-Pfad.
   const stage = stageBlockReason && (st === "todo" || st === "scheduled") ? [] : stageActions(st);
   for (const a of stage) {
+    // Einzelstart (PATCH ready) entfällt bei gehaltener Kette — das Backend
+    // lehnt ihn mit 409 ab; die Freigabe oben ist der einzige ehrliche Weg.
+    if (releaseMode && a.key === "dispatch") continue;
     actions.push({
       key: `stage:${a.key}`,
       label: a.label,

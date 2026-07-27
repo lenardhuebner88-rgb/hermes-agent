@@ -4,7 +4,7 @@
 // backend deliberately rejects direct PATCH review→done and review→blocked;
 // no UI context may opt back into those deterministic 409 actions.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const { fetchJSONMock } = vi.hoisted(() => ({ fetchJSONMock: vi.fn() }));
 
@@ -51,5 +51,75 @@ describe("FleetTaskActions — review-status stage buttons (default vs. allowRev
     expect(screen.queryByRole("button", { name: "Starten" })).toBeNull();
     expect(screen.getByText(/Blocking parent.*running/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Abbrechen" })).toBeTruthy();
+  });
+});
+
+// KF-2: Start-Aktion am Kettenglied gibt sichtbar die ganze Kette frei.
+const HELD_CHAIN = { rootId: "t_root9", memberCount: 3 };
+
+describe("FleetTaskActions — gehaltene Kette (KF-2)", () => {
+  it("AC-1+AC-2: Start-Aktion wird zur Kettenfreigabe (Root-ID + Gliederzahl), kein Einzelstart", async () => {
+    const onReleaseChain = vi.fn().mockResolvedValue({ ok: true, released: 3 });
+    render(
+      <FleetTaskActions
+        taskId="t_child2"
+        status="scheduled"
+        heldChain={HELD_CHAIN}
+        onReleaseChain={onReleaseChain}
+      />,
+    );
+
+    // Benennt Kette + Gliederzahl statt nur "Starten" (AC-1).
+    const releaseBtn = screen.getByRole("button", { name: "Kette t_root9 freigeben (3 Glieder)" });
+    expect(screen.queryByRole("button", { name: "Starten" })).toBeNull();
+
+    // Zwei-Klick-Scharfstellung: erst Bestätigen, dann Freigabe der Root-ID (AC-2).
+    fireEvent.click(releaseBtn);
+    expect(onReleaseChain).not.toHaveBeenCalled();
+    expect(screen.getByText(/Kette t_root9 mit 3 Gliedern freigeben/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Bestätigen" }));
+    await waitFor(() => expect(onReleaseChain).toHaveBeenCalledWith("t_root9"));
+
+    // Erfolg wird quittiert; der Status der einzelnen Karte wird nicht angefasst.
+    await screen.findByText(/Kette freigegeben — 3 Glieder startbereit/);
+    expect(fetchJSONMock).not.toHaveBeenCalled();
+  });
+
+  it("AC-3: Karte ohne Kettenzugehörigkeit behält Starten unverändert", () => {
+    render(<FleetTaskActions taskId="t_free" status="scheduled" />);
+
+    expect(screen.getByRole("button", { name: "Starten" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /freigeben/ })).toBeNull();
+  });
+
+  it("AC-4: abgelehnte Freigabe zeigt den Grund, kein stiller Fehlschlag", () => {
+    render(
+      <FleetTaskActions
+        taskId="t_child2"
+        status="scheduled"
+        heldChain={HELD_CHAIN}
+        onReleaseChain={vi.fn()}
+        releaseChainError="404: chain root t_root9 is not operator-held (nothing to release)"
+      />,
+    );
+
+    expect(screen.getByText(/not operator-held/)).toBeTruthy();
+    // Die Aktion bleibt für einen erneuten Versuch sichtbar.
+    expect(screen.getByRole("button", { name: "Kette t_root9 freigeben (3 Glieder)" })).toBeTruthy();
+  });
+
+  it("AC-5: Vorgänger-Hinweis erscheint weiterhin und verdeckt die Freigabe-Aktion nicht", () => {
+    render(
+      <FleetTaskActions
+        taskId="t_child2"
+        status="scheduled"
+        heldChain={HELD_CHAIN}
+        onReleaseChain={vi.fn()}
+        stageBlockReason="Starten nicht verfügbar — Vorgänger Parent A (scheduled) ist nicht fertig."
+      />,
+    );
+
+    expect(screen.getByText(/Parent A.*scheduled/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Kette t_root9 freigeben (3 Glieder)" })).toBeTruthy();
   });
 });
