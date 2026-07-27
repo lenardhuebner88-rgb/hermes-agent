@@ -25,7 +25,10 @@ from hermes_cli.usage_facts_db import (
 
 # Bump when the transcript shape we accept changes in a way that would make
 # golden fixtures silently wrong.  Tests pin this value.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 1
+#
+# v2 adds explicit billing-mode facts, so existing HWM snapshots re-harvest
+# their already captured files and backfill the non-null field.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 2
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -40,6 +43,9 @@ _USAGE_TOKEN_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+
+UNKNOWN_BILLING_MODE = "unknown"
+_EXPLICIT_BILLING_MODE_KEYS = ("billing_mode", "billingMode")
 
 
 @dataclass
@@ -68,6 +74,7 @@ class _CallDraft:
     model: Optional[str] = None
     stop_reason: Optional[str] = None
     service_tier: Optional[str] = None
+    billing_mode: str = UNKNOWN_BILLING_MODE
     effort: Optional[str] = None
     timestamp: Optional[str] = None
     input_tokens: Optional[int] = None
@@ -124,6 +131,25 @@ def _int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _billing_mode_from_raw(
+    record: Mapping[str, Any], message: Mapping[str, Any]
+) -> str:
+    """Return only explicit transcript billing metadata, never an inference.
+
+    The currently measured transcript shape has ``userType`` and usage
+    ``service_tier`` but neither identifies how a request was billed. Those
+    fields therefore must not be mapped to a billing mode. If a transcript
+    supplies one of the direct billing-mode fields, preserve its non-blank
+    value; otherwise make the unknown observation explicit.
+    """
+    for source in (record, message):
+        for key in _EXPLICIT_BILLING_MODE_KEYS:
+            mode = _text(source.get(key))
+            if mode is not None:
+                return mode
+    return UNKNOWN_BILLING_MODE
 
 
 def _content_parts(message: Mapping[str, Any]) -> list[Any]:
@@ -216,6 +242,11 @@ def merge_assistant_fragment(
     draft.effort = _text(record.get("effort")) or draft.effort
     draft.model = _text(message.get("model")) or draft.model
     draft.stop_reason = _text(message.get("stop_reason")) or draft.stop_reason
+    billing_mode = _billing_mode_from_raw(record, message)
+    if billing_mode != UNKNOWN_BILLING_MODE:
+        # Streaming fragments may only disclose this field once; preserve the
+        # last explicit source value instead of overwriting it with unknown.
+        draft.billing_mode = billing_mode
     draft.source_path = source_path or draft.source_path
     draft.call_kind = call_kind or draft.call_kind
     draft.profile = profile if profile is not None else draft.profile
@@ -459,6 +490,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "call_kind": draft.call_kind,
         "serving_tier": draft.service_tier,
         "reasoning_effort": draft.effort,
+        "billing_mode": draft.billing_mode,
         "source": "measured",
         "captured_at": draft.timestamp,
     }
@@ -592,17 +624,33 @@ def write_calls_batch(
     *,
     db_path: Path,
     dry_run: bool = False,
+    update_existing_only: bool = False,
 ) -> int:
-    """Persist many calls in one SQLite transaction. Returns write count."""
+    """Persist many calls in one SQLite transaction. Returns write count.
+
+    ``update_existing_only`` is an explicit backfill mode: it can update only
+    Claude fact identities already present in the target DB snapshot. It never
+    creates rows for newly discovered raw transcript records.
+    """
     items = list(drafts)
     if not items:
         return 0
     if dry_run:
         return len(items)
     with usage_facts_db_mod._connection(db_path) as conn:
+        written = 0
         for draft in items:
+            if update_existing_only:
+                existing = conn.execute(
+                    "SELECT 1 FROM run_usage_facts "
+                    "WHERE run_id=? AND origin=?",
+                    (draft.run_id, ORIGIN),
+                ).fetchone()
+                if existing is None:
+                    continue
             _record_llm_call_on_conn(conn, draft)
-    return len(items)
+            written += 1
+    return written
 
 
 def harvest(
@@ -611,6 +659,7 @@ def harvest(
     db_path: Path | str | None = None,
     state_path: Path | str | None = None,
     dry_run: bool = False,
+    update_existing_only: bool = False,
     progress_every: int = 200,
     log: Optional[TextIO] = None,
 ) -> HarvestStats:
@@ -618,8 +667,10 @@ def harvest(
 
     Files are streamed one-by-one.  Each file's drafts are written in a single
     transaction (not held for the whole tree), so a 1.9 GB corpus does not
-    accumulate in RAM.  Cross-file ``--resume`` duplicates collapse via the
-    global ``(message.id, requestId)`` run_id upsert.
+    accumulate in RAM. Cross-file ``--resume`` duplicates collapse via the
+    global ``(message.id, requestId)`` run_id upsert. In explicit
+    ``update_existing_only`` mode, raw calls with an absent Claude fact
+    identity are skipped rather than inserted.
     """
     root = Path(projects_root)
     resolved_db = usage_facts_db_path(db_path)
@@ -662,6 +713,7 @@ def harvest(
             drafts.values(),
             db_path=resolved_db,
             dry_run=dry_run,
+            update_existing_only=update_existing_only,
         )
         stats.calls_written += written
 
@@ -723,6 +775,14 @@ def build_arg_parser():
         help="Parse and merge only; do not write the DB or update HWM",
     )
     parser.add_argument(
+        "--update-existing-only",
+        action="store_true",
+        help=(
+            "Backfill only existing Claude fact identities; skip newly "
+            "discovered transcript records"
+        ),
+    )
+    parser.add_argument(
         "--progress-every",
         type=int,
         default=200,
@@ -739,6 +799,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         db_path=args.db,
         state_path=args.state,
         dry_run=args.dry_run,
+        update_existing_only=args.update_existing_only,
         progress_every=args.progress_every,
     )
     print(
