@@ -352,10 +352,29 @@ def _upsert_run_facts(
 
     columns = ["run_id", *values, "source"]
     params = [run_id, *values.values(), incoming_source]
-    updates = [
-        f"{column}=COALESCE(excluded.{column}, run_usage_facts.{column})"
-        for column in values
-    ]
+    updates = []
+    for column in values:
+        if column == "origin":
+            updates.append(
+                "origin=CASE "
+                "WHEN run_usage_facts.origin='hermes_aux' "
+                "AND excluded.origin<>'hermes_aux' THEN excluded.origin "
+                "WHEN excluded.origin='hermes_aux' "
+                "AND run_usage_facts.origin<>'hermes_aux' "
+                "THEN run_usage_facts.origin "
+                "ELSE COALESCE(excluded.origin, run_usage_facts.origin) END"
+            )
+        elif column == "call_kind":
+            updates.append(
+                "call_kind=CASE "
+                "WHEN excluded.call_kind='main_loop' THEN 'main_loop' "
+                "WHEN run_usage_facts.call_kind='main_loop' THEN 'main_loop' "
+                "ELSE COALESCE(excluded.call_kind, run_usage_facts.call_kind) END"
+            )
+        else:
+            updates.append(
+                f"{column}=COALESCE(excluded.{column}, run_usage_facts.{column})"
+            )
     updates.append(
         "source=CASE "
         "WHEN excluded.source='measured' THEN 'measured' "
