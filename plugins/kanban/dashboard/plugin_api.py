@@ -82,6 +82,7 @@ scorecard_routes = route_contract.namespace("scorecard")
 _SHORT_TEXT_MAX_LENGTH = 512
 _FREE_TEXT_MAX_LENGTH = 20_000
 _LIST_MAX_LENGTH = 1_000
+_CHAIN_SUMMARY_STATION_LIMIT = 12
 _PUSH_HOOKS_REGISTERED = False
 _PUSH_DISABLED_REASONS_LOGGED: set[str] = set()
 _PUSH_OPERATOR_EVENT_IDS: OrderedDict[int, None] = OrderedDict()
@@ -90,6 +91,48 @@ _PUSH_OPERATOR_EVENT_IDS_MAX = 2_000
 
 ShortText = Annotated[str, Field(max_length=_SHORT_TEXT_MAX_LENGTH)]
 FreeText = Annotated[str, Field(max_length=_FREE_TEXT_MAX_LENGTH)]
+
+
+def _ordered_chain_stations(
+    members: list[Any],
+    predecessors: dict[str, set[str]],
+) -> list[Any]:
+    """Order chain members by dependency, with stable branch tie-breaking.
+
+    A station only follows its in-chain predecessors.  Independent branches
+    are ordered by ``created_at, id`` so repeated board reads remain stable;
+    malformed cyclic links fall back to that same order after their acyclic
+    prefix rather than making the compact summary non-deterministic.
+    """
+    member_by_id = {member.id: member for member in members}
+    member_ids = set(member_by_id)
+    pending = {
+        member.id: set(predecessors.get(member.id, set())) & member_ids
+        for member in members
+    }
+    ordered: list[Any] = []
+    ready = [member for member in members if not pending[member.id]]
+    key = lambda member: (member.created_at, member.id)
+
+    while ready:
+        member = min(ready, key=key)
+        ready.remove(member)
+        ordered.append(member)
+        for candidate in members:
+            if member.id not in pending[candidate.id]:
+                continue
+            pending[candidate.id].remove(member.id)
+            if not pending[candidate.id] and candidate not in ordered:
+                ready.append(candidate)
+
+    if len(ordered) != len(members):
+        ordered.extend(
+            sorted(
+                (member for member in members if member not in ordered),
+                key=key,
+            )
+        )
+    return ordered
 
 
 # ---------------------------------------------------------------------------
@@ -949,11 +992,36 @@ def get_board(
                     if state_since is not None
                     else None
                 )
+                ordered_members = _ordered_chain_stations(members, predecessors)
+                stations = [
+                    {
+                        "id": member.id,
+                        "title": member.title,
+                        "status": member.status,
+                        "lane": member.assignee,
+                        "runtime_seconds": (
+                            max(
+                                0,
+                                int((member.completed_at or time.time()) - member.started_at),
+                            )
+                            if member.started_at is not None
+                            else None
+                        ),
+                        "cost_usd": float(
+                            cost_map.get(member.id, {}).get("cost_usd") or 0
+                        ),
+                        "started_at": member.started_at,
+                        "completed_at": member.completed_at,
+                    }
+                    for member in ordered_members[:_CHAIN_SUMMARY_STATION_LIMIT]
+                ]
                 chain_summaries.append(
                     {
                         "root_id": root_id,
                         "root_title": root.title,
                         "total": len(members),
+                        "station_limit": _CHAIN_SUMMARY_STATION_LIMIT,
+                        "stations": stations,
                         "done": sum(
                             member.status in {"done", "archived"} for member in members
                         ),

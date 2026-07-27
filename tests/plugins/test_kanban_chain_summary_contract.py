@@ -167,3 +167,108 @@ def test_chain_summaries_publish_state_identity_age_and_aggregate_costs(
         "state_age_seconds": 300,
         "cost_usd": 0.5,
     } == summaries[finished[1]]
+
+
+def test_chain_summary_stations_are_topological_capped_and_card_ready(
+    client, monkeypatch
+):
+    """A branched five-plus-node chain stays linear, stable, and compact."""
+    tasks = [
+        ("t_station_source", "Source", "done", "researcher", 1_000, 1_010, 1_020),
+        ("t_station_alpha", "Alpha", "running", "coder", 1_001, 1_011, None),
+        ("t_station_beta", "Beta", "todo", "writer", 1_001, None, None),
+        ("t_station_merge", "Merge", "reviewer", "verifier", 1_002, None, None),
+        ("t_station_sink", "Sink", "scheduled", "operator", 1_003, None, None),
+    ]
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO tasks "
+                "(id, title, status, assignee, created_at, started_at, completed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                tasks,
+            )
+            conn.executemany(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                [
+                    ("t_station_source", "t_station_alpha"),
+                    ("t_station_source", "t_station_beta"),
+                    ("t_station_alpha", "t_station_merge"),
+                    ("t_station_beta", "t_station_merge"),
+                    ("t_station_merge", "t_station_sink"),
+                ],
+            )
+
+    module = client.app.state.kanban_plugin_module
+    monkeypatch.setattr(module, "_CHAIN_SUMMARY_STATION_LIMIT", 4)
+    monkeypatch.setattr(module, "_compute_task_diagnostics", lambda *args, **kwargs: {})
+    monkeypatch.setattr(kb, "latest_summaries", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        kb,
+        "batch_task_costs",
+        lambda _conn, task_ids: {
+            task_id: {
+                "cost_usd": 0.5,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd_equivalent": 0.5,
+                "cost_effective_usd": 0.5,
+            }
+            for task_id in task_ids
+        },
+    )
+    monkeypatch.setattr(kb, "batch_active_review_stages", lambda *args, **kwargs: {})
+    monkeypatch.setattr(kb, "vault_memory_links_for_task", lambda *args, **kwargs: [])
+    monkeypatch.setattr(module.time, "time", lambda: 1_030)
+
+    response = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 20, "card_diagnostics": "summary", "card_body": "none"},
+    )
+
+    assert response.status_code == 200, response.text
+    summary = next(
+        row
+        for row in response.json()["chain_summaries"]
+        if row["root_id"] == "t_station_sink"
+    )
+    assert summary["total"] == 5
+    assert summary["station_limit"] == 4
+    assert [station["id"] for station in summary["stations"]] == [
+        "t_station_source",
+        "t_station_alpha",
+        "t_station_beta",
+        "t_station_merge",
+    ]
+    second_summary = next(
+        row
+        for row in client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 20, "card_diagnostics": "summary", "card_body": "none"},
+        ).json()["chain_summaries"]
+        if row["root_id"] == "t_station_sink"
+    )
+    assert summary["stations"] == second_summary["stations"]
+    assert all(
+        set(station) == {
+            "id",
+            "title",
+            "status",
+            "lane",
+            "runtime_seconds",
+            "cost_usd",
+            "started_at",
+            "completed_at",
+        }
+        for station in summary["stations"]
+    )
+    assert summary["stations"][0] == {
+        "id": "t_station_source",
+        "title": "Source",
+        "status": "done",
+        "lane": "researcher",
+        "runtime_seconds": 10,
+        "cost_usd": 0.5,
+        "started_at": 1_010,
+        "completed_at": 1_020,
+    }
