@@ -1131,6 +1131,62 @@ def test_dispatch_reused_worktree_no_reject_when_recorded_path_matches(
     assert not any(e["kind"] == "worker_base_rejected" for e in events)
 
 
+def test_dispatch_project_worktree_materializes_before_first_spawn(
+    kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
+):
+    """A project placeholder path is an anchor, not an existing workspace.
+
+    Project-linked tasks persist ``<repo>/.worktrees/<task-id>`` at creation.
+    Under managed worktree isolation that target does not exist yet, so the
+    dispatcher must recover the project repo before provisioning its canonical
+    chain worktree.  The worker must never observe the unmaterialized path.
+    """
+    from hermes_cli import kanban_worktrees as kwt
+    from hermes_cli import projects_db as pdb
+
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
+    spawned: list[tuple[str, str]] = []
+
+    def fake_spawn(task, workspace, board=None):
+        assert Path(workspace).is_dir()
+        assert (Path(workspace) / ".git").exists()
+        spawned.append((task.id, workspace))
+        return None
+
+    with pdb.connect_closing() as project_conn:
+        project_id = pdb.create_project(
+            project_conn,
+            name="Dispatch fixture",
+            primary_path=str(repo),
+        )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn,
+            title="project first dispatch",
+            assignee="sentinel",
+            project_id=project_id,
+        )
+        recorded = kb.get_task(conn, tid)
+        assert recorded is not None
+        recorded_workspace = recorded.workspace_path
+        assert recorded_workspace is not None
+        assert recorded_workspace == str(repo / ".worktrees" / tid)
+        assert not Path(recorded_workspace).exists()
+
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn, board="default")
+        dispatched = kb.get_task(conn, tid)
+
+    expected = repo / ".worktrees" / "kanban" / tid
+    assert result.spawned == [(tid, "sentinel", str(expected))]
+    assert spawned == [(tid, str(expected))]
+    assert dispatched is not None
+    assert dispatched.workspace_path == str(expected)
+    assert dispatched.branch_name == f"kanban/{tid}"
+
+
 # ---------------------------------------------------------------------------
 # Scratch cleanup containment (#28818)
 # ---------------------------------------------------------------------------

@@ -20850,6 +20850,17 @@ def _resolve_managed_workspace_base(
                 f"task {task.id} has non-absolute worktree path "
                 f"{task.workspace_path!r}; use an absolute path"
             )
+        if not base.exists():
+            # A project-linked task persists its future linked-worktree path
+            # at creation (``<repo>/.worktrees/<task-id>``).  In managed
+            # isolation that path is only an anchor: it cannot identify a git
+            # checkout until we recover its existing parent repository.  If
+            # passed through unchanged, ``provision_for_task`` treats it as a
+            # non-repository ``dir`` and returns it to the first worker
+            # unmaterialized.
+            for parent in base.parents:
+                if _git_common_dir(parent) is not None:
+                    return parent
         return base
     board_slug = board if board else get_current_board()
     board_default = (
