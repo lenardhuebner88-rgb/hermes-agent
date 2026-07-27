@@ -1,0 +1,1018 @@
+"""Read-only aggregate projection over the unified usage-facts database.
+
+The persisted ``input_tokens`` bucket is intentionally source-native.  Some
+origins store cache tokens beside it while others store cache reads inside it.
+This module is the single read-time boundary that converts both shapes into
+comparable context/new/uncached input totals before pricing.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import time
+from collections import Counter
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
+from urllib.parse import quote
+
+from agent.usage_pricing import (
+    CanonicalUsage,
+    CostResult,
+    estimate_equivalent_cost,
+    estimate_usage_cost,
+)
+from hermes_cli.active_provider_facts import (
+    classification_counts,
+    reconstruction_source_counts,
+    resolve_active_provider_facts,
+)
+
+CONTRACT_VERSION = "usage-facts.v1"
+NORMALIZATION_VERSION = "origin-input.v1"
+
+INPUT_CACHE_EXCLUSIVE = "cache_exclusive"
+INPUT_CACHE_INCLUSIVE = "cache_inclusive"
+INPUT_NOT_DERIVABLE = "not_derivable"
+
+STATUS_EXACT = "exact"
+STATUS_LOWER_BOUND = "lower_bound"
+STATUS_UNAVAILABLE = "unavailable"
+
+BILLING_METERED = "metered"
+BILLING_QUOTA = "quota"
+BILLING_UNCLASSIFIED = "unclassified"
+
+UNATTRIBUTED_MODEL_LABEL = "nicht_zuordenbar"
+
+_CACHE_EXCLUSIVE_ORIGINS = frozenset(
+    {"claude_code", "hermes_agent", "hermes_aux"}
+)
+_CACHE_INCLUSIVE_ORIGINS = frozenset(
+    {"codex_cli", "kimi_cli", "grok_cli", "qwen_cli"}
+)
+_SUBSCRIPTION_BILLING_MODE = "subscription_included"
+_UNKNOWN_BILLING_MODES = frozenset({"", "unknown"})
+_ONE_MILLION = Decimal("1000000")
+
+_TOKEN_COLUMNS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
+_PRICE_COMPONENTS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PriceVector:
+    rates_per_million: Mapping[str, Decimal | None]
+    request_rate: Decimal | None
+    status: str
+    source: str
+    fetched_at: str | None
+    pricing_version: str | None
+    notes: tuple[str, ...]
+
+
+def input_semantics(origin: str) -> str:
+    """Return the documented persisted-input contract for one origin."""
+
+    if origin in _CACHE_EXCLUSIVE_ORIGINS:
+        return INPUT_CACHE_EXCLUSIVE
+    if origin in _CACHE_INCLUSIVE_ORIGINS:
+        return INPUT_CACHE_INCLUSIVE
+    return INPUT_NOT_DERIVABLE
+
+
+def normalization_contract() -> dict[str, Any]:
+    """Stable, machine-readable derivation table shipped with every payload."""
+
+    return {
+        "version": NORMALIZATION_VERSION,
+        "fields": {
+            "context_input": (
+                "all tokens presented as prompt context; a lower_bound is "
+                "returned when an exclusive source omitted a cache bucket"
+            ),
+            "new_input": (
+                "context input excluding cache reads; for metered routes this "
+                "contains standard input plus cache writes"
+            ),
+            "uncached_input": (
+                "standard-rate input excluding cache reads and cache writes"
+            ),
+        },
+        "origins": {
+            origin: {
+                "input_semantics": input_semantics(origin),
+                "context_input": (
+                    "input_tokens + cache_read_tokens + cache_write_tokens"
+                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                    else "input_tokens"
+                ),
+                "new_input": (
+                    "input_tokens + cache_write_tokens"
+                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                    else "input_tokens - cache_read_tokens"
+                ),
+                "uncached_input": (
+                    "input_tokens"
+                    if input_semantics(origin) == INPUT_CACHE_EXCLUSIVE
+                    else (
+                        "input_tokens - cache_read_tokens - "
+                        "cache_write_tokens"
+                    )
+                ),
+            }
+            for origin in sorted(
+                _CACHE_EXCLUSIVE_ORIGINS | _CACHE_INCLUSIVE_ORIGINS
+            )
+        },
+    }
+
+
+def normalize_token_totals(
+    origin: str,
+    *,
+    token_rows: int,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    reasoning_tokens: int | None,
+    input_observed_rows: int,
+    output_observed_rows: int,
+    cache_read_observed_rows: int,
+    cache_write_observed_rows: int,
+    reasoning_observed_rows: int,
+) -> dict[str, Any]:
+    """Normalize one aggregate without filling unknown buckets with zero."""
+
+    semantics = input_semantics(origin)
+    input_known = int(input_tokens or 0)
+    cache_read_known = int(cache_read_tokens or 0)
+    cache_write_known = int(cache_write_tokens or 0)
+    all_input = token_rows > 0 and input_observed_rows == token_rows
+    all_cache_read = (
+        token_rows > 0 and cache_read_observed_rows == token_rows
+    )
+    all_cache_write = (
+        token_rows > 0 and cache_write_observed_rows == token_rows
+    )
+
+    if semantics == INPUT_CACHE_EXCLUSIVE:
+        context_tokens = input_known + cache_read_known + cache_write_known
+        context_status = (
+            STATUS_EXACT
+            if all_input and all_cache_read and all_cache_write
+            else STATUS_LOWER_BOUND
+            if token_rows > 0
+            else STATUS_UNAVAILABLE
+        )
+        new_tokens = input_known + cache_write_known
+        new_status = (
+            STATUS_EXACT
+            if all_input and all_cache_write
+            else STATUS_LOWER_BOUND
+            if token_rows > 0
+            else STATUS_UNAVAILABLE
+        )
+        uncached_tokens: int | None = input_known if all_input else None
+        uncached_status = (
+            STATUS_EXACT if all_input else STATUS_UNAVAILABLE
+        )
+    elif semantics == INPUT_CACHE_INCLUSIVE:
+        context_tokens = input_known if all_input else None
+        context_status = (
+            STATUS_EXACT if all_input else STATUS_UNAVAILABLE
+        )
+        new_tokens = (
+            max(0, input_known - cache_read_known)
+            if all_input and all_cache_read
+            else None
+        )
+        new_status = (
+            STATUS_EXACT
+            if new_tokens is not None
+            else STATUS_UNAVAILABLE
+        )
+        uncached_tokens = (
+            max(
+                0,
+                input_known - cache_read_known - cache_write_known,
+            )
+            if all_input and all_cache_read and all_cache_write
+            else None
+        )
+        uncached_status = (
+            STATUS_EXACT
+            if uncached_tokens is not None
+            else STATUS_UNAVAILABLE
+        )
+    else:
+        context_tokens = None
+        context_status = STATUS_UNAVAILABLE
+        new_tokens = None
+        new_status = STATUS_UNAVAILABLE
+        uncached_tokens = None
+        uncached_status = STATUS_UNAVAILABLE
+
+    return {
+        "input_semantics": semantics,
+        "raw_input_tokens": input_tokens,
+        "context_input": {
+            "tokens": context_tokens,
+            "status": context_status,
+        },
+        "new_input": {"tokens": new_tokens, "status": new_status},
+        "uncached_input": {
+            "tokens": uncached_tokens,
+            "status": uncached_status,
+        },
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "observed_rows": {
+            "token_rows": token_rows,
+            "input": input_observed_rows,
+            "cache_read": cache_read_observed_rows,
+            "cache_write": cache_write_observed_rows,
+            "output": output_observed_rows,
+            "reasoning": reasoning_observed_rows,
+        },
+    }
+
+
+def build_usage_facts_payload(
+    usage_facts_path: str | Path,
+    *,
+    kanban_path: str | Path | None = None,
+    profiles_root: str | Path | None = None,
+    origins: Sequence[str] | None = None,
+    captured_from: str | None = None,
+    captured_to: str | None = None,
+    generated_at: str | None = None,
+    immutable_evidence: bool = False,
+) -> dict[str, Any]:
+    """Build the complete S7 payload from read-only SQLite inputs."""
+
+    started = time.perf_counter()
+    usage_path = Path(usage_facts_path)
+    where_sql, params = _usage_filters(
+        origins=origins,
+        captured_from=captured_from,
+        captured_to=captured_to,
+    )
+
+    query_started = time.perf_counter()
+    with _read_only_connection(usage_path) as connection:
+        database_counts = _database_counts(connection, where_sql, params)
+        rows = connection.execute(
+            _aggregate_sql(where_sql),
+            params,
+        ).fetchall()
+    query_ms = (time.perf_counter() - query_started) * 1000
+
+    pricing_cache: dict[tuple[str, str, str], _PriceVector] = {}
+    group_builders: dict[
+        tuple[str, str | None, str | None, str | None],
+        dict[str, Any],
+    ] = {}
+
+    for row in rows:
+        raw = _row_metrics(row)
+        origin = str(row["origin"])
+        key = (origin, row["profile"], row["lane"], row["model"])
+        group = group_builders.setdefault(
+            key,
+            {
+                "raw": _empty_metrics(),
+                "breakdowns": [],
+            },
+        )
+        _add_metrics(group["raw"], raw)
+        normalized = _normalize_metrics(origin, raw)
+        billing_category = _billing_category(row["billing_mode"])
+        charge = _charge_for_breakdown(
+            billing_category,
+            provider=row["provider"],
+            model=row["model"],
+            normalized=normalized,
+            raw=raw,
+            pricing_cache=pricing_cache,
+        )
+        group["breakdowns"].append(
+            {
+                "provider": row["provider"],
+                "billing_mode": row["billing_mode"],
+                "category": billing_category,
+                "fact_rows": raw["fact_rows"],
+                "tokens": normalized,
+                "charge": charge,
+            }
+        )
+
+    groups: list[dict[str, Any]] = []
+    for key in sorted(group_builders, key=_sort_group_key):
+        origin, profile, lane, model = key
+        builder = group_builders[key]
+        normalized = _normalize_metrics(origin, builder["raw"])
+        groups.append(
+            {
+                "key": {
+                    "origin": origin,
+                    "profile": profile,
+                    "lane": lane,
+                    "model": model,
+                    "model_label": model or UNATTRIBUTED_MODEL_LABEL,
+                },
+                "fact_rows": builder["raw"]["fact_rows"],
+                "tokens": normalized,
+                "billing": _billing_rollup(
+                    builder["breakdowns"],
+                    include_empty=False,
+                ),
+                "_billing_breakdown": builder["breakdowns"],
+            }
+        )
+
+    summary = _payload_summary(groups)
+    for group in groups:
+        group.pop("_billing_breakdown", None)
+    kanban_started = time.perf_counter()
+    kanban = _kanban_projection(
+        kanban_path=Path(kanban_path) if kanban_path is not None else None,
+        usage_facts_path=usage_path,
+        profiles_root=(
+            Path(profiles_root) if profiles_root is not None else None
+        ),
+        immutable_evidence=immutable_evidence,
+    )
+    kanban_ms = (time.perf_counter() - kanban_started) * 1000
+
+    finished = time.perf_counter()
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "generated_at": generated_at or _utc_now_iso(),
+        "scope": {
+            "origins": sorted(set(origins)) if origins else None,
+            "captured_from": captured_from,
+            "captured_to": captured_to,
+        },
+        "normalization": normalization_contract(),
+        "summary": summary,
+        "groups": groups,
+        "unattributed": _unattributed_payload(groups),
+        "kanban": kanban,
+        "database": database_counts,
+        "timing_ms": {
+            "facts_query": round(query_ms, 3),
+            "kanban_projection": round(kanban_ms, 3),
+            "total": round((finished - started) * 1000, 3),
+        },
+    }
+
+
+def _usage_filters(
+    *,
+    origins: Sequence[str] | None,
+    captured_from: str | None,
+    captured_to: str | None,
+) -> tuple[str, tuple[Any, ...]]:
+    conditions = [
+        "("
+        + " OR ".join(f"{column} IS NOT NULL" for column in _TOKEN_COLUMNS)
+        + ")"
+    ]
+    params: list[Any] = []
+    normalized_origins = sorted(
+        {str(origin).strip() for origin in origins or () if str(origin).strip()}
+    )
+    if normalized_origins:
+        placeholders = ", ".join("?" for _ in normalized_origins)
+        conditions.append(f"origin IN ({placeholders})")
+        params.extend(normalized_origins)
+    if captured_from:
+        conditions.append("captured_at >= ?")
+        params.append(captured_from)
+    if captured_to:
+        conditions.append("captured_at < ?")
+        params.append(captured_to)
+    return " WHERE " + " AND ".join(conditions), tuple(params)
+
+
+def _aggregate_sql(where_sql: str) -> str:
+    observed = ",\n       ".join(
+        item
+        for pair in (
+            (
+                f"SUM({column}) AS {column}",
+                f"COUNT({column}) AS {column}_observed_rows",
+            )
+            for column in _TOKEN_COLUMNS
+        )
+        for item in pair
+    )
+    return f"""
+        SELECT origin, profile, lane, model, provider, billing_mode,
+               COUNT(*) AS fact_rows,
+               COUNT(*) AS token_rows,
+               {observed},
+               SUM(COALESCE(llm_call_count, 1)) AS request_count
+          FROM run_usage_facts
+          {where_sql}
+         GROUP BY origin, profile, lane, model, provider, billing_mode
+         ORDER BY origin, profile, lane, model, provider, billing_mode
+    """
+
+
+def _database_counts(
+    connection: sqlite3.Connection,
+    where_sql: str,
+    params: Sequence[Any],
+) -> dict[str, int]:
+    total_rows = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM run_usage_facts"
+        ).fetchone()[0]
+    )
+    token_rows = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM run_usage_facts" + where_sql,
+            params,
+        ).fetchone()[0]
+    )
+    return {
+        "run_usage_facts_rows": total_rows,
+        "selected_token_rows": token_rows,
+        "rows_without_tokens": total_rows
+        - int(
+            connection.execute(
+                "SELECT COUNT(*) FROM run_usage_facts WHERE "
+                + "("
+                + " OR ".join(
+                    f"{column} IS NOT NULL" for column in _TOKEN_COLUMNS
+                )
+                + ")"
+            ).fetchone()[0]
+        ),
+    }
+
+
+def _row_metrics(row: sqlite3.Row) -> dict[str, Any]:
+    metrics = _empty_metrics()
+    metrics["fact_rows"] = int(row["fact_rows"])
+    metrics["token_rows"] = int(row["token_rows"])
+    metrics["request_count"] = int(row["request_count"] or 0)
+    for column in _TOKEN_COLUMNS:
+        metrics[column] = (
+            int(row[column]) if row[column] is not None else None
+        )
+        metrics[f"{column}_observed_rows"] = int(
+            row[f"{column}_observed_rows"]
+        )
+    return metrics
+
+
+def _empty_metrics() -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "fact_rows": 0,
+        "token_rows": 0,
+        "request_count": 0,
+    }
+    for column in _TOKEN_COLUMNS:
+        metrics[column] = None
+        metrics[f"{column}_observed_rows"] = 0
+    return metrics
+
+
+def _add_metrics(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    for key in ("fact_rows", "token_rows", "request_count"):
+        target[key] += int(source.get(key) or 0)
+    for column in _TOKEN_COLUMNS:
+        value = source.get(column)
+        if value is not None:
+            target[column] = int(target[column] or 0) + int(value)
+        target[f"{column}_observed_rows"] += int(
+            source.get(f"{column}_observed_rows") or 0
+        )
+
+
+def _normalize_metrics(
+    origin: str, metrics: Mapping[str, Any]
+) -> dict[str, Any]:
+    return normalize_token_totals(
+        origin,
+        token_rows=int(metrics["token_rows"]),
+        input_tokens=metrics["input_tokens"],
+        output_tokens=metrics["output_tokens"],
+        cache_read_tokens=metrics["cache_read_tokens"],
+        cache_write_tokens=metrics["cache_write_tokens"],
+        reasoning_tokens=metrics["reasoning_tokens"],
+        input_observed_rows=int(metrics["input_tokens_observed_rows"]),
+        output_observed_rows=int(metrics["output_tokens_observed_rows"]),
+        cache_read_observed_rows=int(
+            metrics["cache_read_tokens_observed_rows"]
+        ),
+        cache_write_observed_rows=int(
+            metrics["cache_write_tokens_observed_rows"]
+        ),
+        reasoning_observed_rows=int(
+            metrics["reasoning_tokens_observed_rows"]
+        ),
+    )
+
+
+def _billing_category(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized == _SUBSCRIPTION_BILLING_MODE:
+        return BILLING_QUOTA
+    if normalized in _UNKNOWN_BILLING_MODES:
+        return BILLING_UNCLASSIFIED
+    return BILLING_METERED
+
+
+def _charge_for_breakdown(
+    category: str,
+    *,
+    provider: str | None,
+    model: str | None,
+    normalized: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    pricing_cache: dict[tuple[str, str, str], _PriceVector],
+) -> dict[str, Any]:
+    if category == BILLING_UNCLASSIFIED:
+        return {
+            "kind": "unclassified",
+            "amount_usd": None,
+            "status": "billing_mode_unknown",
+        }
+    if category == BILLING_QUOTA:
+        equivalent = _price_normalized_usage(
+            "equivalent",
+            provider=provider,
+            model=model,
+            normalized=normalized,
+            raw=raw,
+            pricing_cache=pricing_cache,
+        )
+        return {
+            "kind": "quota",
+            "marginal_usd": "0",
+            "list_equivalent_usd": equivalent,
+        }
+    return {
+        "kind": "metered",
+        "metered_usd": _price_normalized_usage(
+            "metered",
+            provider=provider,
+            model=model,
+            normalized=normalized,
+            raw=raw,
+            pricing_cache=pricing_cache,
+        ),
+    }
+
+
+def _price_normalized_usage(
+    kind: str,
+    *,
+    provider: str | None,
+    model: str | None,
+    normalized: Mapping[str, Any],
+    raw: Mapping[str, Any],
+    pricing_cache: dict[tuple[str, str, str], _PriceVector],
+) -> dict[str, Any]:
+    if not model:
+        return _unknown_price("model_missing")
+    if not provider:
+        return _unknown_price("provider_missing")
+
+    uncached = normalized["uncached_input"]
+    if uncached["status"] != STATUS_EXACT:
+        return _unknown_price("input_cache_split_unavailable")
+
+    cache_key = (kind, provider, model)
+    vector = pricing_cache.get(cache_key)
+    if vector is None:
+        estimator = (
+            estimate_equivalent_cost
+            if kind == "equivalent"
+            else estimate_usage_cost
+        )
+        vector = _pricing_vector(estimator, provider=provider, model=model)
+        pricing_cache[cache_key] = vector
+
+    token_values = {
+        "input_tokens": int(uncached["tokens"] or 0),
+        "output_tokens": int(normalized["output_tokens"] or 0),
+        "cache_read_tokens": int(normalized["cache_read_tokens"] or 0),
+        "cache_write_tokens": int(normalized["cache_write_tokens"] or 0),
+        "reasoning_tokens": int(normalized["reasoning_tokens"] or 0),
+    }
+    amount = Decimal("0")
+    missing: list[str] = []
+    for component, tokens in token_values.items():
+        rate = vector.rates_per_million[component]
+        if tokens and rate is None:
+            missing.append(component)
+        elif rate is not None:
+            amount += Decimal(tokens) * rate / _ONE_MILLION
+    if raw["request_count"] and vector.request_rate is None:
+        missing.append("request_count")
+    elif vector.request_rate is not None:
+        amount += Decimal(raw["request_count"]) * vector.request_rate
+
+    if missing:
+        return {
+            **_price_metadata(vector),
+            "amount_usd": None,
+            "status": "unknown",
+            "token_coverage": _price_token_coverage(normalized),
+            "reason": "pricing_component_unavailable",
+            "unpriced_components": sorted(set(missing)),
+        }
+    return {
+        **_price_metadata(vector),
+        "amount_usd": _decimal_string(amount),
+        "status": vector.status,
+        "token_coverage": _price_token_coverage(normalized),
+        "reason": None,
+        "unpriced_components": [],
+    }
+
+
+def _pricing_vector(
+    estimator: Callable[..., CostResult],
+    *,
+    provider: str,
+    model: str,
+) -> _PriceVector:
+    rates: dict[str, Decimal | None] = {}
+    results: list[CostResult] = []
+    for component in _PRICE_COMPONENTS:
+        usage_kwargs = {name: 0 for name in _PRICE_COMPONENTS}
+        usage_kwargs[component] = int(_ONE_MILLION)
+        result = estimator(
+            model,
+            CanonicalUsage(**usage_kwargs, request_count=0),
+            provider=provider,
+        )
+        results.append(result)
+        rates[component] = result.amount_usd
+
+    request_result = estimator(
+        model,
+        CanonicalUsage(request_count=1),
+        provider=provider,
+    )
+    results.append(request_result)
+    representative = next(
+        (result for result in results if result.source != "none"),
+        results[0],
+    )
+    statuses = {
+        result.status for result in results if result.status != "unknown"
+    }
+    if not statuses:
+        status = "unknown"
+    elif "equivalent" in statuses:
+        status = "equivalent"
+    elif "estimated" in statuses:
+        status = "estimated"
+    elif statuses == {"included"}:
+        status = "included"
+    else:
+        status = sorted(statuses)[0]
+    return _PriceVector(
+        rates_per_million=rates,
+        request_rate=request_result.amount_usd,
+        status=status,
+        source=representative.source,
+        fetched_at=(
+            representative.fetched_at.isoformat()
+            if representative.fetched_at is not None
+            else None
+        ),
+        pricing_version=representative.pricing_version,
+        notes=tuple(
+            dict.fromkeys(
+                note for result in results for note in result.notes
+            )
+        ),
+    )
+
+
+def _unknown_price(reason: str) -> dict[str, Any]:
+    return {
+        "amount_usd": None,
+        "status": "unknown",
+        "token_coverage": "unavailable",
+        "source": "none",
+        "fetched_at": None,
+        "pricing_version": None,
+        "notes": [],
+        "reason": reason,
+        "unpriced_components": [],
+    }
+
+
+def _price_metadata(vector: _PriceVector) -> dict[str, Any]:
+    return {
+        "source": vector.source,
+        "fetched_at": vector.fetched_at,
+        "pricing_version": vector.pricing_version,
+        "notes": list(vector.notes),
+    }
+
+
+def _price_token_coverage(normalized: Mapping[str, Any]) -> str:
+    return (
+        "complete"
+        if normalized["context_input"]["status"] == STATUS_EXACT
+        and normalized["new_input"]["status"] == STATUS_EXACT
+        else "lower_bound"
+    )
+
+
+def _billing_rollup(
+    breakdowns: Iterable[Mapping[str, Any]],
+    *,
+    include_empty: bool = True,
+) -> dict[str, Any]:
+    items = list(breakdowns)
+    return {
+        category: _billing_category_rollup(
+            category,
+            [item for item in items if item["category"] == category],
+        )
+        for category in (
+            BILLING_METERED,
+            BILLING_QUOTA,
+            BILLING_UNCLASSIFIED,
+        )
+        if include_empty
+        or any(item["category"] == category for item in items)
+    }
+
+
+def _billing_category_rollup(
+    category: str,
+    items: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    tokens = _sum_normalized_tokens(item["tokens"] for item in items)
+    result: dict[str, Any] = {
+        "fact_rows": sum(int(item["fact_rows"]) for item in items),
+        "tokens": tokens,
+    }
+    if category == BILLING_QUOTA:
+        prices = [
+            item["charge"]["list_equivalent_usd"] for item in items
+        ]
+        result["marginal_usd"] = "0"
+        result["list_equivalent_usd"] = _sum_prices(prices)
+    elif category == BILLING_METERED:
+        prices = [item["charge"]["metered_usd"] for item in items]
+        result["metered_usd"] = _sum_prices(prices)
+    else:
+        result["reason"] = "billing_mode_unknown"
+    return result
+
+
+def _sum_prices(prices: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    items = list(prices)
+    known = [
+        Decimal(str(item["amount_usd"]))
+        for item in items
+        if item.get("amount_usd") is not None
+    ]
+    unknown_count = sum(
+        1 for item in items if item.get("amount_usd") is None
+    )
+    lower_bound_count = sum(
+        1
+        for item in items
+        if item.get("amount_usd") is not None
+        and item.get("token_coverage") != "complete"
+    )
+    return {
+        "known_amount_usd": _decimal_string(sum(known, Decimal("0"))),
+        "status": (
+            "unknown"
+            if items and not known
+            else "partial"
+            if unknown_count or lower_bound_count
+            else "complete"
+        ),
+        "priced_breakdowns": len(known),
+        "unpriced_breakdowns": unknown_count,
+        "lower_bound_breakdowns": lower_bound_count,
+    }
+
+
+def _sum_normalized_tokens(
+    normalized_items: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    items = list(normalized_items)
+    return {
+        "context_input_tokens": sum(
+            int(item["context_input"]["tokens"] or 0) for item in items
+        ),
+        "new_input_tokens": sum(
+            int(item["new_input"]["tokens"] or 0) for item in items
+        ),
+        "cache_read_tokens": sum(
+            int(item["cache_read_tokens"] or 0) for item in items
+        ),
+        "cache_write_tokens": sum(
+            int(item["cache_write_tokens"] or 0) for item in items
+        ),
+        "output_tokens": sum(
+            int(item["output_tokens"] or 0) for item in items
+        ),
+        "has_lower_bounds": any(
+            item["context_input"]["status"] != STATUS_EXACT
+            or item["new_input"]["status"] != STATUS_EXACT
+            for item in items
+        ),
+    }
+
+
+def _payload_summary(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    tokens = _sum_normalized_tokens(group["tokens"] for group in groups)
+    raw_input = sum(
+        int(group["tokens"]["raw_input_tokens"] or 0) for group in groups
+    )
+    all_breakdowns = [
+        breakdown
+        for group in groups
+        for breakdown in group["_billing_breakdown"]
+    ]
+    return {
+        "group_count": len(groups),
+        "fact_rows": sum(int(group["fact_rows"]) for group in groups),
+        "raw_input_tokens": raw_input,
+        "tokens": tokens,
+        "billing": _billing_rollup(all_breakdowns),
+    }
+
+
+def _unattributed_payload(
+    groups: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    unattributed = [group for group in groups if group["key"]["model"] is None]
+    by_origin: list[dict[str, Any]] = []
+    for origin in sorted({group["key"]["origin"] for group in unattributed}):
+        selected = [
+            group for group in unattributed if group["key"]["origin"] == origin
+        ]
+        by_origin.append(
+            {
+                "origin": origin,
+                "fact_rows": sum(int(group["fact_rows"]) for group in selected),
+                "tokens": _sum_normalized_tokens(
+                    group["tokens"] for group in selected
+                ),
+            }
+        )
+    return {
+        "label": UNATTRIBUTED_MODEL_LABEL,
+        "reason": "model_missing",
+        "fact_rows": sum(int(group["fact_rows"]) for group in unattributed),
+        "tokens": _sum_normalized_tokens(
+            group["tokens"] for group in unattributed
+        ),
+        "by_origin": by_origin,
+    }
+
+
+def _kanban_projection(
+    *,
+    kanban_path: Path | None,
+    usage_facts_path: Path,
+    profiles_root: Path | None,
+    immutable_evidence: bool,
+) -> dict[str, Any]:
+    if kanban_path is None or not kanban_path.is_file():
+        return {
+            "available": False,
+            "reason": "kanban_database_unavailable",
+        }
+    facts = resolve_active_provider_facts(
+        kanban_path,
+        usage_facts_path=usage_facts_path,
+        profiles_root=profiles_root,
+        immutable_kanban=immutable_evidence,
+        immutable_state=immutable_evidence,
+        immutable_usage_facts=immutable_evidence,
+    )
+    run_ids = [str(fact.run_id) for fact in facts]
+    fact_rows, token_rows = _usage_coverage_by_run(
+        usage_facts_path, run_ids
+    )
+    attribution = Counter(
+        (fact.classification, fact.provider) for fact in facts
+    )
+    return {
+        "available": True,
+        "scope": "all_board_runs",
+        "total_runs": len(facts),
+        "provider_classification": classification_counts(facts),
+        "reconstruction_sources": reconstruction_source_counts(facts),
+        "by_classification_and_provider": [
+            {
+                "classification": classification,
+                "provider": provider,
+                "provider_label": provider or UNATTRIBUTED_MODEL_LABEL,
+                "runs": count,
+            }
+            for (classification, provider), count in sorted(
+                attribution.items(),
+                key=lambda item: (item[0][0], item[0][1] or ""),
+            )
+        ],
+        "usage_coverage": {
+            "token_bearing_runs": len(token_rows),
+            "provider_only_fact_runs": len(fact_rows - token_rows),
+            "runs_without_fact": len(facts) - len(fact_rows),
+            "state": (
+                "thin"
+                if len(token_rows) < max(1, len(facts) // 2)
+                else "covered"
+            ),
+        },
+    }
+
+
+def _usage_coverage_by_run(
+    usage_facts_path: Path,
+    run_ids: Sequence[str],
+) -> tuple[set[str], set[str]]:
+    fact_rows: set[str] = set()
+    token_rows: set[str] = set()
+    if not run_ids:
+        return fact_rows, token_rows
+    with _read_only_connection(usage_facts_path) as connection:
+        for start in range(0, len(run_ids), 500):
+            chunk = run_ids[start : start + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = connection.execute(
+                f"""
+                SELECT run_id,
+                       CASE WHEN {
+                           " OR ".join(
+                               f"{column} IS NOT NULL"
+                               for column in _TOKEN_COLUMNS
+                           )
+                       } THEN 1 ELSE 0 END AS has_tokens
+                  FROM run_usage_facts
+                 WHERE run_id IN ({placeholders})
+                """,
+                chunk,
+            )
+            for row in rows:
+                run_id = str(row["run_id"])
+                fact_rows.add(run_id)
+                if row["has_tokens"]:
+                    token_rows.add(run_id)
+    return fact_rows, token_rows
+
+
+@contextmanager
+def _read_only_connection(path: Path) -> Iterator[sqlite3.Connection]:
+    absolute = path.expanduser().resolve()
+    uri = f"file:{quote(str(absolute), safe='/')}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        yield connection
+    finally:
+        connection.close()
+
+
+def _sort_group_key(
+    key: tuple[str, str | None, str | None, str | None],
+) -> tuple[str, str, str, str]:
+    return tuple(part or "" for part in key)
+
+
+def _decimal_string(value: Decimal) -> str:
+    return format(value.quantize(Decimal("0.000001")), "f")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()

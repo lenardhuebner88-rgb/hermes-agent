@@ -1,0 +1,226 @@
+{
+  "contract_version": "usage-facts.v1",
+  "generated_at": "2026-07-27T15:36:00+00:00",
+  "scope": {
+    "origins": null,
+    "captured_from": null,
+    "captured_to": null
+  },
+  "normalization": {
+    "version": "origin-input.v1",
+    "fields": {
+      "context_input": "all tokens presented as prompt context; a lower_bound is returned when an exclusive source omitted a cache bucket",
+      "new_input": "context input excluding cache reads; for metered routes this contains standard input plus cache writes",
+      "uncached_input": "standard-rate input excluding cache reads and cache writes"
+    },
+    "origins": {
+      "claude_code": {
+        "input_semantics": "cache_exclusive",
+        "context_input": "input_tokens + cache_read_tokens + cache_write_tokens",
+        "new_input": "input_tokens + cache_write_tokens",
+        "uncached_input": "input_tokens"
+      },
+      "codex_cli": {
+        "input_semantics": "cache_inclusive",
+        "context_input": "input_tokens",
+        "new_input": "input_tokens - cache_read_tokens",
+        "uncached_input": "input_tokens - cache_read_tokens - cache_write_tokens"
+      },
+      "grok_cli": {
+        "input_semantics": "cache_inclusive",
+        "context_input": "input_tokens",
+        "new_input": "input_tokens - cache_read_tokens",
+        "uncached_input": "input_tokens - cache_read_tokens - cache_write_tokens"
+      },
+      "hermes_agent": {
+        "input_semantics": "cache_exclusive",
+        "context_input": "input_tokens + cache_read_tokens + cache_write_tokens",
+        "new_input": "input_tokens + cache_write_tokens",
+        "uncached_input": "input_tokens"
+      },
+      "hermes_aux": {
+        "input_semantics": "cache_exclusive",
+        "context_input": "input_tokens + cache_read_tokens + cache_write_tokens",
+        "new_input": "input_tokens + cache_write_tokens",
+        "uncached_input": "input_tokens"
+      },
+      "kimi_cli": {
+        "input_semantics": "cache_inclusive",
+        "context_input": "input_tokens",
+        "new_input": "input_tokens - cache_read_tokens",
+        "uncached_input": "input_tokens - cache_read_tokens - cache_write_tokens"
+      },
+      "qwen_cli": {
+        "input_semantics": "cache_inclusive",
+        "context_input": "input_tokens",
+        "new_input": "input_tokens - cache_read_tokens",
+        "uncached_input": "input_tokens - cache_read_tokens - cache_write_tokens"
+      }
+    }
+  },
+  "summary": {
+    "group_count": 1,
+    "fact_rows": 1,
+    "raw_input_tokens": 6,
+    "tokens": {
+      "context_input_tokens": 104682,
+      "new_input_tokens": 3815,
+      "cache_read_tokens": 100867,
+      "cache_write_tokens": 3809,
+      "output_tokens": 409,
+      "has_lower_bounds": false
+    },
+    "billing": {
+      "metered": {
+        "fact_rows": 0,
+        "tokens": {
+          "context_input_tokens": 0,
+          "new_input_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0,
+          "has_lower_bounds": false
+        },
+        "metered_usd": {
+          "known_amount_usd": "0.000000",
+          "status": "complete",
+          "priced_breakdowns": 0,
+          "unpriced_breakdowns": 0,
+          "lower_bound_breakdowns": 0
+        }
+      },
+      "quota": {
+        "fact_rows": 0,
+        "tokens": {
+          "context_input_tokens": 0,
+          "new_input_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "output_tokens": 0,
+          "has_lower_bounds": false
+        },
+        "marginal_usd": "0",
+        "list_equivalent_usd": {
+          "known_amount_usd": "0.000000",
+          "status": "complete",
+          "priced_breakdowns": 0,
+          "unpriced_breakdowns": 0,
+          "lower_bound_breakdowns": 0
+        }
+      },
+      "unclassified": {
+        "fact_rows": 1,
+        "tokens": {
+          "context_input_tokens": 104682,
+          "new_input_tokens": 3815,
+          "cache_read_tokens": 100867,
+          "cache_write_tokens": 3809,
+          "output_tokens": 409,
+          "has_lower_bounds": false
+        },
+        "reason": "billing_mode_unknown"
+      }
+    }
+  },
+  "groups": [
+    {
+      "key": {
+        "origin": "claude_code",
+        "profile": null,
+        "lane": "redacted-claude-session",
+        "model": "qwen3.8-max-preview",
+        "model_label": "qwen3.8-max-preview"
+      },
+      "fact_rows": 1,
+      "tokens": {
+        "input_semantics": "cache_exclusive",
+        "raw_input_tokens": 6,
+        "context_input": {
+          "tokens": 104682,
+          "status": "exact"
+        },
+        "new_input": {
+          "tokens": 3815,
+          "status": "exact"
+        },
+        "uncached_input": {
+          "tokens": 6,
+          "status": "exact"
+        },
+        "cache_read_tokens": 100867,
+        "cache_write_tokens": 3809,
+        "output_tokens": 409,
+        "reasoning_tokens": null,
+        "observed_rows": {
+          "token_rows": 1,
+          "input": 1,
+          "cache_read": 1,
+          "cache_write": 1,
+          "output": 1,
+          "reasoning": 0
+        }
+      },
+      "billing": {
+        "unclassified": {
+          "fact_rows": 1,
+          "tokens": {
+            "context_input_tokens": 104682,
+            "new_input_tokens": 3815,
+            "cache_read_tokens": 100867,
+            "cache_write_tokens": 3809,
+            "output_tokens": 409,
+            "has_lower_bounds": false
+          },
+          "reason": "billing_mode_unknown"
+        }
+      }
+    }
+  ],
+  "unattributed": {
+    "label": "nicht_zuordenbar",
+    "reason": "model_missing",
+    "fact_rows": 0,
+    "tokens": {
+      "context_input_tokens": 0,
+      "new_input_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "output_tokens": 0,
+      "has_lower_bounds": false
+    },
+    "by_origin": []
+  },
+  "kanban": {
+    "available": true,
+    "scope": "all_board_runs",
+    "total_runs": 8284,
+    "provider_classification": {
+      "nie_gelaufen": 2592,
+      "unbekannt": 3750,
+      "rekonstruiert": 638,
+      "gestempelt": 1304
+    },
+    "reconstruction_sources": {
+      "cli_raw": 3,
+      "metadata.model": 595,
+      "profile_state_db": 40
+    },
+    "by_classification_and_provider": [],
+    "usage_coverage": {
+      "token_bearing_runs": 3,
+      "provider_only_fact_runs": 638,
+      "runs_without_fact": 7643,
+      "state": "thin"
+    }
+  },
+  "database": {
+    "run_usage_facts_rows": 96026,
+    "selected_token_rows": 95388,
+    "rows_without_tokens": 638
+  },
+  "timing_ms": {
+    "facts_query": 0,
+    "kanban_projection": 0,
+    "total": 0
+  }
+}

@@ -184,6 +184,27 @@ CREATE INDEX IF NOT EXISTS idx_run_traces_run_call
     ON run_traces(run_id, call_index);
 """
 
+_FACT_INDEXES = (
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_rollup
+        ON run_usage_facts(
+            origin, profile, lane, model, provider, billing_mode
+        )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_origin_model
+        ON run_usage_facts(origin, model)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_usage_facts_captured_at
+        ON run_usage_facts(captured_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_run_llm_calls_origin_model
+        ON run_llm_calls(origin, model)
+    """,
+)
+
 _SCHEMA_LOCK = threading.Lock()
 _SCHEMA_IDENTITIES: dict[Path, tuple[int, int]] = {}
 
@@ -285,6 +306,8 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                     "ON run_traces(run_id, message_fingerprint) "
                     "WHERE message_fingerprint IS NOT NULL"
                 )
+                for statement in _FACT_INDEXES:
+                    conn.execute(statement)
                 conn.commit()
                 _SCHEMA_IDENTITIES[schema_key] = schema_identity
         return conn

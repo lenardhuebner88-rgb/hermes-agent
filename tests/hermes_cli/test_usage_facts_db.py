@@ -49,6 +49,68 @@ def test_schema_contains_complete_contract(tmp_path):
     }
 
 
+def test_large_fact_tables_have_additive_read_path_indexes(tmp_path):
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+    initialize_usage_facts_db(path)
+
+    with sqlite3.connect(path) as conn:
+        run_indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(run_usage_facts)")
+        }
+        call_indexes = {
+            row[1]
+            for row in conn.execute("PRAGMA index_list(run_llm_calls)")
+        }
+
+    assert {
+        "idx_run_usage_facts_rollup",
+        "idx_run_usage_facts_origin_model",
+        "idx_run_usage_facts_captured_at",
+    } <= run_indexes
+    assert "idx_run_llm_calls_origin_model" in call_indexes
+
+
+def test_usage_rollup_query_plan_uses_dimension_index(tmp_path):
+    path = tmp_path / "facts.db"
+    for index in range(20):
+        upsert_run_facts(
+            f"run-index-{index}",
+            {
+                "origin": "claude_code",
+                "profile": f"profile-{index % 2}",
+                "lane": f"lane-{index % 3}",
+                "model": f"fixture-model-{index % 4}",
+                "provider": "fixture-provider",
+                "billing_mode": "fixture-metered",
+                "input_tokens": index,
+                "captured_at": "2026-07-27T00:00:00+00:00",
+                "source": "measured",
+            },
+            path=path,
+        )
+
+    with sqlite3.connect(path) as conn:
+        plan = [
+            row[3]
+            for row in conn.execute(
+                """
+                EXPLAIN QUERY PLAN
+                SELECT origin, profile, lane, model, provider, billing_mode,
+                       SUM(input_tokens)
+                  FROM run_usage_facts
+                 WHERE origin = ?
+                   AND input_tokens IS NOT NULL
+                 GROUP BY origin, profile, lane, model, provider, billing_mode
+                """,
+                ("claude_code",),
+            )
+        ]
+
+    assert any("idx_run_usage_facts_rollup" in detail for detail in plan)
+
+
 def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
     path = tmp_path / "facts.db"
 
