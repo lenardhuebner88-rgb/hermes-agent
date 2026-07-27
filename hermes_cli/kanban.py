@@ -3864,7 +3864,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                     print(f"Deleted {tid}")
             return 0 if not failed else 1
         for tid in ids:
-            if not kb.archive_task(conn, tid):
+            if not kb.archive_task(conn, tid, retrigger_integration=True):
                 failed.append(tid)
                 print(f"cannot archive {tid}", file=sys.stderr)
             else:

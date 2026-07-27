@@ -1964,10 +1964,9 @@ def test_archive_retrigger_runs_integration_when_chain_becomes_terminal(
     → deferred; later archives make the chain terminal → the archive_task wire
     re-fires integration and can auto-complete the decompose root.
 
-    Covers the production wire: ``kb.archive_task`` calls the fork-owned
-    ``maybe_retrigger_integration_after_archive`` after ``recompute_ready``.
-    Without that one-line wire in ``kanban_db.archive_task`` the root stays
-    ``ready`` here (red).
+    Covers the operator wire: ``kb.archive_task(..., retrigger_integration=True)``
+    calls the fork-owned ``maybe_retrigger_integration_after_archive`` after
+    ``recompute_ready``. Without that flag/wire the root stays ``ready`` here.
     """
     monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
     with kb.connect() as conn:
@@ -2024,14 +2023,13 @@ def test_archive_retrigger_runs_integration_when_chain_becomes_terminal(
                 (int(__import__("time").time()), child_a),
             )
 
-        # B and C archived ~later (incident: ~3 minutes). The archive_task
-        # wire must re-fire integration once the LAST sibling goes terminal —
-        # no explicit helper call here, the wire alone has to do it.
-        assert kb.archive_task(conn, child_b)
+        # B and C archived ~later (incident: ~3 minutes). Operator archive
+        # wire must re-fire integration once the LAST sibling goes terminal.
+        assert kb.archive_task(conn, child_b, retrigger_integration=True)
         assert kb.get_task(conn, root).status == "ready", (
             "chain not terminal yet (child_c open) — wire must not fire"
         )
-        assert kb.archive_task(conn, child_c)
+        assert kb.archive_task(conn, child_c, retrigger_integration=True)
         assert kb.get_task(conn, child_b).status == "archived"
         assert kb.get_task(conn, child_c).status == "archived"
         root_after = kb.get_task(conn, root)
@@ -2042,3 +2040,69 @@ def test_archive_retrigger_runs_integration_when_chain_becomes_terminal(
         f"{root_after.status!r})"
     )
     assert (repo / "feature_a.py").read_text() == "A = 1\n"
+
+
+def test_archive_without_retrigger_flag_does_not_integrate(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-3: default archive_task must NOT run the integration retrigger wire
+    (SUPERSEDED / funnel / planspec paths leave the flag False)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="decompose root no operator flag",
+            triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "code A", "assignee": "coder", "parents": []},
+                {"title": "code B archive default", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        shared_wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+                "workspace_path = ?, workspace_kind = 'dir', started_at = NULL "
+                "WHERE id = ?",
+                (str(shared_wt), root),
+            )
+            for cid in (child_a, child_b):
+                conn.execute(
+                    "UPDATE tasks SET status = 'running', workspace_path = ?, "
+                    "workspace_kind = 'dir' WHERE id = ?",
+                    (str(shared_wt), cid),
+                )
+        _commit_in(
+            shared_wt,
+            "feature_a.py",
+            "A = 1\n",
+            msg=f"kanban({child_a}): work",
+        )
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1 is not None and out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+                (int(__import__("time").time()), child_a),
+            )
+
+        # Default flag False — archive succeeds but does not integrate.
+        assert kb.archive_task(conn, child_b)
+        root_after = kb.get_task(conn, root)
+
+    assert root_after.status == "ready", (
+        f"default archive must not retrigger; root became {root_after.status!r}"
+    )
+    assert not (repo / "feature_a.py").exists()
+
+

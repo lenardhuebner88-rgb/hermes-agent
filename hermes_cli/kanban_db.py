@@ -20166,6 +20166,7 @@ def archive_task(
     *,
     signal_fn=None,
     probe_fn=None,
+    retrigger_integration: bool = False,
 ) -> bool:
     """Archive a task, fencing any still-running worker process group first.
 
@@ -20189,6 +20190,14 @@ def archive_task(
     archive still refuses with :class:`WaitMutationConflict`, but the fenced
     ownership generation is reconciled (claim cleared, run reclaimed) so the
     board does not stay ``running`` with a dead pid until stale reclaim.
+
+    ``retrigger_integration`` (default False): when True, after a successful
+    archive re-run chain integration if the archive made the chain fully
+    terminal (fork-owned ``maybe_retrigger_integration_after_archive``). Only
+    operator paths should set this (CLI ``hermes kanban archive``, dashboard
+    single/bulk archive). SUPERSEDED auto-archive and sweep callers leave it
+    False so they never pull synchronous gates+merge into non-operator flows
+    (Opus R2-3).
     """
     fence_row = conn.execute(
         "SELECT status, claim_lock, worker_pid, current_run_id "
@@ -20351,16 +20360,21 @@ def archive_task(
     recompute_ready(conn)
     # Fork-owned archive re-trigger (2026-07-26 incident): an archive that makes
     # a chain fully terminal must re-run the integration check, otherwise the
-    # stranded chain stays invisible. One-line wire; logic lives in
-    # kanban_worktrees, fail-soft so an archive can never crash here.
-    try:
-        from hermes_cli.kanban_worktrees import (
-            maybe_retrigger_integration_after_archive,
-        )
+    # stranded chain stays invisible. Operator-only (retrigger_integration=True);
+    # logic lives in kanban_worktrees, fail-soft so an archive can never crash.
+    if retrigger_integration:
+        try:
+            from hermes_cli.kanban_worktrees import (
+                maybe_retrigger_integration_after_archive,
+            )
 
-        maybe_retrigger_integration_after_archive(conn, task_id)
-    except Exception:  # noqa: BLE001 - fail-soft by design
-        _log.debug("archive integration re-trigger failed for %s", task_id, exc_info=True)
+            maybe_retrigger_integration_after_archive(conn, task_id)
+        except Exception:  # noqa: BLE001 - fail-soft by design
+            _log.debug(
+                "archive integration re-trigger failed for %s",
+                task_id,
+                exc_info=True,
+            )
     return True
 
 
