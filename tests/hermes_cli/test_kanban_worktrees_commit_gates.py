@@ -1589,3 +1589,693 @@ def test_lane_scope_most_recent_review_snapshot_wins(repo, kanban_home):
         # and the shared branch tip, which still contains the later commit.
         assert out is not None and out["action"] == "merged"
         assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+# ---------------------------------------------------------------------------
+# V3 — auto-close never-ran ordinary chain roots so auto-land can fire
+# ---------------------------------------------------------------------------
+
+
+def test_never_ran_ordinary_root_auto_closes_when_children_terminal(
+    repo, kanban_home, monkeypatch,
+):
+    """Bookkeeping root (never assigned/ran) must auto-close after last child.
+
+    Without the never-ran finalizer, maybe_integrate_on_complete returns
+    deferred (open sibling = root) and the chain never lands.
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="bookkeeping chain root",
+            assignee=None,
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="real work child",
+            assignee="coder",
+            created_by="tester",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        # Mirror complete_task mid-flight status (hook runs before done write).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running' WHERE id = ?", (child_id,),
+            )
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 1\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        # Precondition: root never ran.
+        runs = conn.execute(
+            "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1", (root_id,),
+        ).fetchone()
+        assert runs is None
+        assert kb.get_task(conn, root_id).started_at is None
+        assert kb.get_task(conn, root_id).status == "ready"
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out["action"] == "merged"
+    assert root.status == "done"
+    assert len(auto) == 1
+    assert auto[0]["completed_by"] == child_id
+    assert (repo / "feature.py").read_text() == "VALUE = 1\n"
+
+
+def test_never_ran_root_not_auto_closed_when_it_has_task_runs(
+    repo, kanban_home, monkeypatch,
+):
+    """Guard 2: a root that has a task_runs row stays open (deferred)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn, title="ran root", assignee="coder", kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ? WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        # Simulate a prior run without going through claim (started_at/run).
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_runs (task_id, started_at, status, profile) "
+                "VALUES (?, ?, 'running', 'coder')",
+                (root_id, int(__import__("time").time())),
+            )
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?",
+                (int(__import__("time").time()), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="child",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        _commit_in(
+            info["path"], "feature.py", "VALUE = 2\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out.get("action") == "deferred"
+    assert root.status == "ready"
+    assert auto == []
+
+
+def test_lane_scope_allowlist_prevents_repark_after_fixer(
+    repo, kanban_home, monkeypatch,
+):
+    """V7 loop trap: after fixer is done, parent re-check must not re-park
+    solely for the fixer's allowlisted paths."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    from hermes_cli import kanban_lane_fixer as lane_fixer
+
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_repark",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        fixer_events = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        assert len(fixer_events) == 1
+        child_id = fixer_events[0]["child_id"]
+
+        # Mark fixer done (successful corrective handoff).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        allow = lane_fixer.allowlisted_paths_for_parent(
+            conn,
+            task_id,
+            violating_paths=["web/src/control/Foo.tsx"],
+            expected_lane="coder-frontend",
+        )
+        assert "web/src/control/Foo.tsx" in allow
+
+        # Re-run lane enforcement: same attributed paths, but allowlisted.
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked")  # original park only
+        # No second park payload beyond the first.
+        assert len(_events(conn, task_id, "worker_gate_blocked")) == 1
+
+
+def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
+    repo, kanban_home, monkeypatch,
+):
+    """B5: after a successful fixer resume, NEW parent commits on a formerly
+    allowlisted path must re-arm the lane gate (not permanently disable it)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    from hermes_cli import kanban_lane_fixer as lane_fixer
+
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_retouch",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        fixer_events = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        child_id = fixer_events[0]["child_id"]
+        tip_before = _git(info["path"], "rev-parse", "HEAD").strip()
+
+        # Force a blocked park + structured lane-scope event (no claim_task —
+        # that would insert non-materialized pre_run stamps and skip the gate).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+                "WHERE id = ?",
+                (task_id,),
+            )
+            kb._append_event(
+                conn,
+                task_id,
+                "blocked",
+                {
+                    "reason": (
+                        "integration parked: lane-scope violation: assignee "
+                        "'coder' changed paths outside its lane: "
+                        "web/src/control/Foo.tsx — this task should have been "
+                        "assigned to lane 'coder-frontend'."
+                    ),
+                    "kind": "integration",
+                },
+            )
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id) is True
+        tip_events = _events(conn, task_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT)
+        assert tip_events
+        assert tip_events[0].get("resume_branch_tip")
+
+        # Parent makes NEW work on the formerly allowlisted path after resume.
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({task_id}): new work after fixer",
+        )
+        assert _git(info["path"], "rev-parse", "HEAD").strip() != tip_before
+
+        # Ensure no poisoned task_runs stamps skip the gate (legacy path uses
+        # cumulative branch diff, which still sees Foo.tsx).
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "parked", out2
+        assert "lane-scope" in (out2.get("reason") or "").lower()
+        # Second park recorded (original + re-arm).
+        assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2
+
+
+def test_never_ran_root_not_auto_closed_when_it_has_assignee(
+    repo, kanban_home, monkeypatch,
+):
+    """B1: a ready root WITH assignee is real work, not bookkeeping — even if
+    it never ran and all children are terminal."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="assigned chain root still waiting to run",
+            assignee="coder",
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="real work child",
+            assignee="coder",
+            created_by="tester",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 1\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out.get("action") == "deferred"
+    assert root.status == "ready"
+    assert auto == []
+
+
+def test_never_ran_root_parks_when_children_only_failed(
+    repo, kanban_home, monkeypatch,
+):
+    """M2: failed/cancelled children must not green-close the root or stamp
+    strategist shipped — park like the decompose twin."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="bookkeeping root over failed children",
+            assignee=None,
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="failed child",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        # Put a real commit on the chain so integrate can merge; the completing
+        # "driver" below will be treated as done evidence separately.
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 9\n",
+            msg=f"kanban({child_id}): work before fail",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'failed' WHERE id = ?", (child_id,),
+            )
+
+        # Drive auto-complete path as if a terminal sibling finished the chain.
+        # Eligibility treats failed as terminal; auto-complete must then refuse
+        # because completed_task_id is the failed child (not a real done).
+        assert kwt._never_ran_root_eligible(
+            conn, root_id, repo_root=repo, completing_task_id=child_id,
+        )
+        kwt._auto_complete_never_ran_chain_root(
+            conn,
+            root_id=root_id,
+            completed_task_id=child_id,
+            outcome={
+                "action": "merged",
+                "branch": kwt.chain_branch(root_id),
+                "merge_commit": "a" * 40,
+            },
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+        blocked = _events(conn, root_id, "blocked")
+
+    assert root.status == "blocked"
+    assert auto == []
+    assert blocked
+    assert "kein Kind erfolgreich" in (blocked[-1].get("reason") or "")
+
+
+def test_archive_retrigger_runs_integration_when_chain_becomes_terminal(
+    repo, kanban_home, monkeypatch,
+):
+    """F3 / M1 incident replay: last code child completes while siblings open
+    → deferred; later archives make the chain terminal → the archive_task wire
+    re-fires integration and can auto-complete the decompose root.
+
+    Covers the operator wire: ``kb.archive_task(..., retrigger_integration=True)``
+    calls the fork-owned ``maybe_retrigger_integration_after_archive`` after
+    ``recompute_ready``. Without that flag/wire the root stays ``ready`` here.
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="decompose root stranded by late archive",
+            triage=True,
+        )
+        # Mark as decompose root (inverted links + durable decomposed event).
+        child_a, child_b, child_c = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "code A", "assignee": "coder", "parents": []},
+                {"title": "code B open then archive", "assignee": "coder", "parents": []},
+                {"title": "code C open then archive", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        # Provision via ensure_worktree (root may not claim cleanly after decompose).
+        info = kwt.ensure_worktree(repo, root)
+        shared_wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+                "workspace_path = ?, workspace_kind = 'dir', started_at = NULL "
+                "WHERE id = ?",
+                (str(shared_wt), root),
+            )
+            for cid in (child_a, child_b, child_c):
+                conn.execute(
+                    "UPDATE tasks SET status = 'running', workspace_path = ?, "
+                    "workspace_kind = 'dir' WHERE id = ?",
+                    (str(shared_wt), cid),
+                )
+
+        _commit_in(
+            shared_wt,
+            "feature_a.py",
+            "A = 1\n",
+            msg=f"kanban({child_a}): work",
+        )
+        # Child A completes → siblings B/C still open → deferred.
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1 is not None
+        assert out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+                (int(__import__("time").time()), child_a),
+            )
+
+        # B and C archived ~later (incident: ~3 minutes). Operator archive
+        # wire must re-fire integration once the LAST sibling goes terminal.
+        assert kb.archive_task(conn, child_b, retrigger_integration=True)
+        assert kb.get_task(conn, root).status == "ready", (
+            "chain not terminal yet (child_c open) — wire must not fire"
+        )
+        assert kb.archive_task(conn, child_c, retrigger_integration=True)
+        assert kb.get_task(conn, child_b).status == "archived"
+        assert kb.get_task(conn, child_c).status == "archived"
+        root_after = kb.get_task(conn, root)
+
+    # Wire-driven integration landed the chain and auto-completed the root.
+    assert root_after.status == "done", (
+        "archive_task wire did not re-trigger integration (root still "
+        f"{root_after.status!r})"
+    )
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"
+
+
+def test_archive_without_retrigger_flag_does_not_integrate(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-3: default archive_task must NOT run the integration retrigger wire
+    (SUPERSEDED / funnel / planspec paths leave the flag False)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(
+            conn,
+            title="decompose root no operator flag",
+            triage=True,
+        )
+        child_a, child_b = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "code A", "assignee": "coder", "parents": []},
+                {"title": "code B archive default", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        shared_wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL, "
+                "workspace_path = ?, workspace_kind = 'dir', started_at = NULL "
+                "WHERE id = ?",
+                (str(shared_wt), root),
+            )
+            for cid in (child_a, child_b):
+                conn.execute(
+                    "UPDATE tasks SET status = 'running', workspace_path = ?, "
+                    "workspace_kind = 'dir' WHERE id = ?",
+                    (str(shared_wt), cid),
+                )
+        _commit_in(
+            shared_wt,
+            "feature_a.py",
+            "A = 1\n",
+            msg=f"kanban({child_a}): work",
+        )
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1 is not None and out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
+                (int(__import__("time").time()), child_a),
+            )
+
+        # Default flag False — archive succeeds but does not integrate.
+        assert kb.archive_task(conn, child_b)
+        root_after = kb.get_task(conn, root)
+
+    assert root_after.status == "ready", (
+        f"default archive must not retrigger; root became {root_after.status!r}"
+    )
+    assert not (repo / "feature_a.py").exists()
+
+
+def test_retrigger_driver_skips_lane_scope_on_done_child(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-1: archive retrigger must not re-apply lane-scope to a done driver
+    when a later sibling committed foreign-lane paths before archiving."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        child_a, child_b = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "A", "assignee": "coder", "parents": []},
+                {"title": "B frontend", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='ready', workspace_path=?, "
+                "workspace_kind='dir', started_at=NULL WHERE id=?",
+                (str(wt), root),
+            )
+            for cid in (child_a, child_b):
+                conn.execute(
+                    "UPDATE tasks SET status='running', workspace_path=?, "
+                    "workspace_kind='dir' WHERE id=?",
+                    (str(wt), cid),
+                )
+        _commit_in(wt, "feature_a.py", "A = 1\n", msg=f"kanban({child_a}): work")
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                (int(__import__("time").time()), child_a),
+            )
+        # Sibling B commits a FRONTEND path, then is archived without completing.
+        _commit_in(
+            wt,
+            "web/src/control/Panel.tsx",
+            "export const P = 1\n",
+            msg=f"kanban({child_b}): frontend work",
+        )
+        assert kb.archive_task(conn, child_b, retrigger_integration=True)
+        root_after = kb.get_task(conn, root)
+        fixers = _events(conn, child_a, "lane_scope_fixer_dispatched")
+        parks = _events(conn, child_a, "worker_gate_blocked")
+
+    assert root_after.status == "done", (
+        f"retrigger did NOT integrate (root={root_after.status!r})"
+    )
+    assert not fixers, "spurious lane fixer created for an already-done task"
+    assert not parks, "lane-scope park written on already-done driver"
+    assert (repo / "web/src/control/Panel.tsx").exists()
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"
+
+
+def test_lane_scope_allowlist_without_resume_still_rearms_on_new_commits(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-2 residual B5: operator unblock (no resume event) must not leave a
+    permanent allowlist — brand-new foreign-lane work after the park tip
+    re-arms the gate via park_branch_tip."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_resid",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        park_payloads = _events(conn, task_id, "worker_gate_blocked")
+        assert park_payloads
+        assert park_payloads[0].get("park_branch_tip"), (
+            "park payload must carry park_branch_tip for residual B5 retouch"
+        )
+        child_id = _events(conn, task_id, "lane_scope_fixer_dispatched")[0][
+            "child_id"
+        ]
+
+        # Fixer finishes. Operator used `unblock` instead of the resume hook →
+        # NO lane_scope_fixer_parent_resumed event exists.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done' WHERE id=?", (child_id,),
+            )
+        assert _events(conn, task_id, "lane_scope_fixer_parent_resumed") == []
+
+        # Parent commits BRAND NEW work on the same foreign-lane path.
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 999\n",
+            msg=f"kanban({task_id}): brand new frontend work",
+        )
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "parked", (
+            f"GATE SUPPRESSED: new foreign-lane work merged, action={out2.get('action')}"
+        )
+        assert "lane-scope" in (out2.get("reason") or "").lower()
+        assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2
+
+
+def test_retrigger_skips_done_children_without_workspace(repo, kanban_home, monkeypatch):
+    """Opus R3-1 regression: the latest-done driver may be a reviewer child
+    with workspace_kind='scratch' and workspace_path NULL. The driver query
+    must skip workspace-less done children, otherwise the whole retrigger
+    silently aborts and the root stays stranded (root='ready').
+    """
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        a, r, c = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "A code", "assignee": "coder", "parents": []},
+                {"title": "R review", "assignee": "reviewer", "parents": []},
+                {"title": "C code", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        wt = info["path"]
+        now = int(__import__("time").time())
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='ready', workspace_path=?, "
+                "workspace_kind='dir', started_at=NULL WHERE id=?",
+                (str(wt), root),
+            )
+            for cid in (a, c):
+                conn.execute(
+                    "UPDATE tasks SET status='running', workspace_path=?, "
+                    "workspace_kind='dir' WHERE id=?",
+                    (str(wt), cid),
+                )
+        _commit_in(wt, "feature_a.py", "A = 1\n", msg=f"kanban({a}): work")
+        out = kwt.maybe_integrate_on_complete(conn, a, gate_runner=_ok_gate)
+        assert out is not None and out.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                (now - 300, a),
+            )
+            # Reviewer finished LAST with no workspace of its own (live shape).
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=?, "
+                "workspace_path=NULL, workspace_kind='scratch' WHERE id=?",
+                (now - 5, r),
+            )
+        assert kb.archive_task(conn, c, retrigger_integration=True)
+        root_after = kb.get_task(conn, root)
+
+    assert root_after.status == "done", (
+        "retrigger aborted on workspace-less latest-done child "
+        f"(root still {root_after.status!r})"
+    )
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"
