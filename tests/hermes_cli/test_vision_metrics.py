@@ -139,6 +139,279 @@ def test_autonomy_percent_null_when_no_done(conn):
 
 
 # ---------------------------------------------------------------------------
+# CONFLICT-FIXER-OUTCOME-HONESTY-S1: conflict-park outcome grading
+# ---------------------------------------------------------------------------
+
+PARK_REASON = "integration parked: post-merge gate failed: pytest[1]: exit 1"
+OTHER_PARK_REASON = "integration parked: could not rebase onto main"
+
+
+def _park_reason_fingerprint(reason=PARK_REASON):
+    return kb._conflict_fingerprint(reason)
+
+
+def _dispatch_fixer(conn, parent, child, *, root=None, attempt=1, limit=2,
+                    reason=PARK_REASON, created_at=1_000):
+    """The parent-side ``conflict_fixer_dispatched`` event, payload-identical to
+    ``kanban_db._create_conflict_park_fixer_subtask``."""
+    _add_event(
+        conn, parent, kb.CONFLICT_FIXER_DISPATCHED_EVENT,
+        payload={
+            "child_id": child,
+            "root_id": root or parent,
+            "branch": f"kanban/{root or parent}",
+            "attempt": attempt,
+            "limit": limit,
+            "reason": reason,
+            "conflict_fingerprint": kb._conflict_fingerprint(reason),
+        },
+        created_at=created_at,
+    )
+
+
+def _resume_parent_via_real_emitter(conn, parent, child, *, reason=PARK_REASON):
+    """Drive ``kanban_db._resume_parent_for_completed_conflict_fixer`` — the ONE
+    producer of the resume proof this metric reads.
+
+    Deliberately NOT a hand-written ``conflict_fixer_parent_resumed`` row: if the
+    event name or payload shape is ever renamed in kanban_db, this test fails
+    instead of the metric silently reading 0 resolved episodes forever.
+    """
+    _add_event(
+        conn, child, "conflict_fixer_for",
+        payload={
+            "parent_id": parent,
+            "conflict_fingerprint": kb._conflict_fingerprint(reason),
+        },
+    )
+    _add_event(conn, parent, "blocked", payload={"reason": reason})
+    conn.execute("UPDATE tasks SET status = 'blocked' WHERE id = ?", (parent,))
+    conn.commit()
+    assert kb._resume_parent_for_completed_conflict_fixer(conn, child) is True
+    conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+    conn.commit()
+
+
+def _conflict_done_task(conn, tid, *, now):
+    """A done task the Heiler classified ``conflict`` and nobody escalated."""
+    _add_task(conn, tid, completed_at=now - DAY)
+    _add_event(conn, tid, kb.HEILER_CLASSIFICATION_EVENT,
+               payload={"class": kb.HEILER_CLASS_CONFLICT}, created_at=now - DAY)
+
+
+def test_conflict_closed_by_fixer_stays_autonomous(conn):
+    """AC-1: the fixer resumed the parked parent → real autonomy, no counter."""
+    now = 100 * DAY
+    _conflict_done_task(conn, "P", now=now)
+    _add_task(conn, "F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F")
+    _resume_parent_via_real_emitter(conn, "P", "F")
+
+    a = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["autonomy"]
+    assert a["autonomous_done"] == 2  # P (fixer-resolved) + the fixer card F
+    assert a["counter"]["value"] == 0
+    assert a["conflict_fixer_resolved"] == 1
+    assert a["conflict_escalations"] == 0
+
+
+def test_conflict_never_closed_by_fixer_counts_as_escalation(conn):
+    """AC-1: the fixer card finished but never resumed the park → a human closed
+    it, so the task is NOT autonomous (and does not hide in the counter)."""
+    now = 100 * DAY
+    _conflict_done_task(conn, "P", now=now)
+    _add_task(conn, "F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F")
+
+    a = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["autonomy"]
+    assert a["autonomous_done"] == 1  # only the fixer card F
+    assert a["counter"]["value"] == 0
+    assert a["conflict_escalations"] == 1
+    assert a["conflict_fixer_resolved"] == 0
+
+
+def test_conflict_without_any_fixer_counts_as_escalation(conn):
+    """A conflict-class done task the fixer never even got → manual resolution."""
+    now = 100 * DAY
+    _conflict_done_task(conn, "P", now=now)
+
+    a = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["autonomy"]
+    assert a["autonomous_done"] == 0
+    assert a["conflict_escalations"] == 1
+    assert a["counter"]["value"] == 0
+
+
+def test_conflict_fixer_exhausted_counts_as_escalation(conn):
+    """Budget spent (2/2 cards, no resume) → escalation, never autonomy."""
+    now = 100 * DAY
+    _conflict_done_task(conn, "P", now=now)
+    for i, child in enumerate(("F1", "F2"), start=1):
+        _add_task(conn, child, status="done", completed_at=now - DAY)
+        _dispatch_fixer(conn, "P", child, attempt=i, created_at=1_000 + i)
+
+    snap = vm.compute_metrics_snapshot(conn, now=now)
+    a = snap["metrics"]["autonomy"]
+    assert a["conflict_escalations"] == 1
+    assert a["counter"]["value"] == 0
+    cf = snap["metrics"]["conflict_fixer"]
+    assert cf["exhausted"] == 1
+    assert cf["success_rate_pct"] == 0.0
+
+
+def test_real_bug_alongside_resolved_conflict_still_hits_the_counter(conn):
+    """Only the conflict class is graded away — a real-bug on the same task
+    still fires the counter, so the fix cannot launder other defect classes."""
+    now = 100 * DAY
+    _conflict_done_task(conn, "P", now=now)
+    _add_event(conn, "P", kb.HEILER_CLASSIFICATION_EVENT,
+               payload={"class": kb.HEILER_CLASS_REAL_BUG}, created_at=now - DAY)
+    _add_task(conn, "F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F")
+    _resume_parent_via_real_emitter(conn, "P", "F")
+
+    a = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["autonomy"]
+    assert a["autonomous_done"] == 2
+    assert a["counter"]["value"] == 1  # P still owes a real-bug escalation
+
+
+def test_conflict_fixer_success_rate_and_counter(conn):
+    """AC-1 by-product: resolved / (resolved + exhausted) over the SAME events
+    the fixer's own budget is keyed on."""
+    now = 100 * DAY
+    # root A: resolved on attempt 1
+    _add_task(conn, "PA", status="done", completed_at=now - DAY)
+    _add_task(conn, "FA", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "PA", "FA", root="RA")
+    _resume_parent_via_real_emitter(conn, "PA", "FA")
+    # root B: budget spent, never resumed
+    _add_task(conn, "PB", status="done", completed_at=now - DAY)
+    for i, child in enumerate(("FB1", "FB2"), start=1):
+        _add_task(conn, child, status="done", completed_at=now - DAY)
+        _dispatch_fixer(conn, "PB", child, root="RB", attempt=i,
+                        created_at=1_000 + i)
+    # root C: fixer card finished without resuming → neither side of the rate
+    _add_task(conn, "PC", status="done", completed_at=now - DAY)
+    _add_task(conn, "FC", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "PC", "FC", root="RC")
+
+    cf = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["conflict_fixer"]
+    assert cf["episodes"] == 3
+    assert cf["resolved"] == 1
+    assert cf["exhausted"] == 1
+    assert cf["unresolved_by_fixer"] == 1
+    assert cf["success_rate_pct"] == 50.0
+    assert cf["counter"]["name"] == "conflict_parks_closed_by_hand"
+    assert cf["counter"]["value"] == 1
+
+
+def test_conflict_fixer_in_flight_episode_is_undecided(conn):
+    """A fixer still working is neither a win nor a loss: excluded from the rate
+    AND from the closed-by-hand counter."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="blocked")
+    _add_task(conn, "F", status="running")
+    _dispatch_fixer(conn, "P", "F")
+
+    cf = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["conflict_fixer"]
+    assert cf["in_flight"] == 1
+    assert cf["unresolved_by_fixer"] == 0
+    assert cf["success_rate_pct"] is None  # no decided episode → never a fake 0
+
+
+def test_conflict_fixer_metric_empty_without_any_dispatch(conn):
+    cf = vm.compute_metrics_snapshot(conn, now=100 * DAY)["metrics"]["conflict_fixer"]
+    assert cf["episodes"] == 0
+    assert cf["success_rate_pct"] is None
+    assert cf["counter"]["value"] == 0
+
+
+def test_conflict_fixer_exhaustion_via_escalation_evidence(conn):
+    """The budget is ROOT-keyed, so a cascade can spend it while one parent shows
+    a single card. The fixer's own ``fixer_exhausted`` escalation evidence is
+    what settles that case."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="done", completed_at=now - DAY)
+    _add_task(conn, "F", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F")
+    _add_event(conn, "P", kb.OPERATOR_ESCALATION_EVENT,
+               payload={"evidence": {"attempts": 2, "fixer_exhausted": True}},
+               created_at=now - DAY)
+
+    cf = vm.compute_metrics_snapshot(conn, now=now)["metrics"]["conflict_fixer"]
+    assert cf["exhausted"] == 1
+    assert cf["unresolved_by_fixer"] == 0
+
+
+def test_conflict_fixer_exhaustion_evidence_cannot_overwrite_a_win(conn):
+    """A parent with one resolved and one open episode: the exhaustion evidence
+    lands on the UNRESOLVED episode, never on the one the fixer demonstrably
+    closed."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="done", completed_at=now - DAY)
+    _add_task(conn, "F1", status="done", completed_at=now - DAY)
+    _add_task(conn, "F2", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F1", reason=PARK_REASON, created_at=1_000)
+    _resume_parent_via_real_emitter(conn, "P", "F1", reason=PARK_REASON)
+    _dispatch_fixer(conn, "P", "F2", reason=OTHER_PARK_REASON, created_at=2_000)
+    _add_event(conn, "P", kb.OPERATOR_ESCALATION_EVENT,
+               payload={"evidence": {"fixer_exhausted": True}},
+               created_at=now - DAY)
+
+    episodes = vm._conflict_fixer_episodes(conn)
+    by_fp = {e["fingerprint"]: e["outcome"] for e in episodes}
+    assert by_fp[_park_reason_fingerprint(PARK_REASON)] == "fixer_resolved"
+    assert by_fp[_park_reason_fingerprint(OTHER_PARK_REASON)] == "fixer_exhausted"
+
+
+def test_conflict_episodes_split_by_fingerprint_on_one_root(conn):
+    """Two different conflicts on the same chain are two budgets, so they are
+    two episodes — the same key ``_maybe_route_conflict_park_fixer`` counts on."""
+    now = 100 * DAY
+    _add_task(conn, "P", status="done", completed_at=now - DAY)
+    _add_task(conn, "F1", status="done", completed_at=now - DAY)
+    _add_task(conn, "F2", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P", "F1", root="R", reason=PARK_REASON)
+    _dispatch_fixer(conn, "P", "F2", root="R", reason=OTHER_PARK_REASON,
+                    created_at=2_000)
+
+    episodes = vm._conflict_fixer_episodes(conn)
+    assert len(episodes) == 2
+    assert {e["attempts"] for e in episodes} == {1}
+    assert all(e["outcome"] == "unresolved_by_fixer" for e in episodes)
+
+
+def test_conflict_grading_leaves_operator_corrected_pct_untouched(conn):
+    """AC-2 guardrail: the conflict re-grading must not move the
+    classification_coverage counter (no over-escalation of fixer wins)."""
+    now = 100 * DAY
+    esc_at = now - 2 * DAY
+    _add_task(conn, "E", status="done", completed_at=now - DAY)
+    eid = conn.execute(
+        "INSERT INTO task_events (task_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        ("E", kb.OPERATOR_ESCALATION_EVENT, json.dumps({}), esc_at),
+    ).lastrowid
+    _add_event(conn, "E", kb.HEILER_CLASSIFICATION_EVENT,
+               payload={"class": kb.HEILER_CLASS_CONFLICT,
+                        "escalation_event_id": eid},
+               created_at=esc_at + 60)
+    baseline = vm.compute_metrics_snapshot(conn, now=now)
+    before = baseline["metrics"]["classification_coverage"]["counter"]["value"]
+
+    # Add both a fixer-resolved and a hand-closed conflict park on top.
+    _conflict_done_task(conn, "P1", now=now)
+    _add_task(conn, "F1", status="done", completed_at=now - DAY)
+    _dispatch_fixer(conn, "P1", "F1")
+    _resume_parent_via_real_emitter(conn, "P1", "F1")
+    _conflict_done_task(conn, "P2", now=now)
+
+    after = vm.compute_metrics_snapshot(conn, now=now)
+    cc = after["metrics"]["classification_coverage"]
+    assert cc["counter"]["name"] == "operator_corrected_pct"
+    assert cc["counter"]["value"] == before  # guardrail held
+    assert after["metrics"]["autonomy"]["counter"]["value"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Escalation-rate metric + paired counter
 # ---------------------------------------------------------------------------
 
@@ -1068,8 +1341,9 @@ def test_write_metrics_snapshot_produces_valid_file_with_all_fields(
     assert "generated_at" in snap
     metrics = snap["metrics"]
     # all headline metrics present
-    for key in ("autonomy", "cost_per_task", "escalation_rate",
-                "green_gate_streak", "classification_coverage"):
+    for key in ("autonomy", "conflict_fixer", "cost_per_task",
+                "escalation_rate", "green_gate_streak",
+                "classification_coverage"):
         assert key in metrics, key
         # each headline metric carries a paired counter metric
         assert "counter" in metrics[key], key

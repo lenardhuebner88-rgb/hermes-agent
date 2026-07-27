@@ -1364,6 +1364,54 @@ def test_direction_map_covers_every_real_vision_metrics_key():
     assert unresolved == []
 
 
+# Keys already unmapped when this ratchet was added (2026-07-27, all from the
+# green-gate leaker/flake-debt slices, harvested AFTER the frozen fixture below).
+# They are a pre-existing audit gap, deliberately NOT classified here — that call
+# belongs to whoever owns those metrics. The list may only ever SHRINK: any new
+# unmapped key fails the assertion below.
+_KNOWN_UNMAPPED_METRIC_KEYS = frozenset({
+    "green_gate_streak.neutral_nights",
+    "green_gate_streak.leaker_debt_nights",
+    "green_gate_streak.leaker_debt.value",
+    "green_gate_streak.flake_debt.flaky_files_total",
+    "green_gate_streak.flake_debt.recurring_flakes",
+})
+
+
+def test_direction_map_covers_every_key_of_a_freshly_computed_snapshot(board_home):
+    """Same Vollständigkeits-Assertion, but over a snapshot computed by the
+    CURRENT ``vision_metrics`` code instead of the frozen 2026-07-06 fixture.
+
+    The fixture is a historical artefact and can never grow a key, so it cannot
+    catch a metric added after it was harvested — which is exactly how an
+    unmapped key reaches the live strategist as verdict="unmeasurable".
+    A ratchet, not a snapshot: only :data:`_KNOWN_UNMAPPED_METRIC_KEYS` is
+    tolerated, and shrinking that set is the only allowed direction.
+    """
+    from hermes_cli import vision_metrics as vm
+
+    with kb.connect() as conn:
+        snapshot = vm.compute_metrics_snapshot(conn, now=1_783_362_600)
+    flat = strategist._flatten_numeric(strategist._metrics_payload(snapshot))
+    assert flat, "computed snapshot flattened to nothing — writer broken?"
+    unresolved = {
+        key for key in flat
+        if strategist._resolve_verdict_direction(key) is None
+        and not _is_directionless(key)
+    }
+    assert unresolved - _KNOWN_UNMAPPED_METRIC_KEYS == set()
+    # Ratchet: a key that got classified must leave the tolerated set.
+    assert _KNOWN_UNMAPPED_METRIC_KEYS - unresolved == set()
+
+
+def test_conflict_fixer_success_rate_direction_is_higher_is_better():
+    """CONFLICT-FIXER-OUTCOME-HONESTY-S1: the new trust metric must be a usable
+    lever target, not silently 'unmeasurable'."""
+    assert strategist._resolve_verdict_direction(
+        "conflict_fixer.success_rate_pct"
+    ) == 1
+
+
 def test_direction_map_required_keys_mapped_minus_one():
     """The two keys the slice calls out explicitly are mapped -1 (lower is better)."""
     assert strategist._resolve_verdict_direction("classification_coverage.unclassified_share") == -1

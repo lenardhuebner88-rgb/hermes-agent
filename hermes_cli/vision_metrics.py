@@ -41,7 +41,11 @@ from hermes_cli import kanban_db as kb
 DAY_SECONDS = 86_400
 # v2: cost_per_task averages metered (>0) tasks only + explicit `coverage`
 # breakdown (subscription-$0 no longer pollutes the average or the counter).
-SCHEMA_VERSION = 2
+# v3 (CONFLICT-FIXER-OUTCOME-HONESTY-S1): new `conflict_fixer` headline metric,
+# and `autonomy` now grades a conflict-class done task by whether the conflict
+# fixer actually CLOSED the park (see ``_conflict_fixer_episodes``) instead of
+# counting every unescalated conflict as a missed escalation.
+SCHEMA_VERSION = 3
 METRICS_FILENAME = "vision-metrics.json"
 GATE_LEDGER_FILENAME = "green-gate-ledger.jsonl"
 
@@ -1214,6 +1218,15 @@ _FAILED_RUN_OUTCOMES = frozenset(
 )
 
 
+def _event_payload(raw: object) -> dict:
+    """Parse a ``task_events.payload`` blob; ``{}`` on anything unusable."""
+    try:
+        payload = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _tasks_with_operator_escalation(conn: sqlite3.Connection) -> set[str]:
     rows = conn.execute(
         "SELECT DISTINCT task_id FROM task_events WHERE kind = ?",
@@ -1222,19 +1235,25 @@ def _tasks_with_operator_escalation(conn: sqlite3.Connection) -> set[str]:
     return {r["task_id"] for r in rows}
 
 
-def _tasks_with_nontransient_heiler(conn: sqlite3.Connection) -> set[str]:
+def _tasks_with_nontransient_heiler(
+    conn: sqlite3.Connection,
+) -> dict[str, set[str]]:
+    """task_id → the non-transient Heiler classes it carries.
+
+    Returns the classes (not just the ids) so a caller can grade them
+    individually — the conflict class has its own resolution evidence
+    (CONFLICT-FIXER-OUTCOME-HONESTY-S1) while real-bug/bad-spec do not.
+    """
     rows = conn.execute(
         "SELECT task_id, payload FROM task_events WHERE kind = ?",
         (kb.HEILER_CLASSIFICATION_EVENT,),
     ).fetchall()
-    out: set[str] = set()
+    out: dict[str, set[str]] = {}
     for r in rows:
-        try:
-            payload = json.loads(r["payload"] or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if isinstance(payload, dict) and payload.get("class") in _NON_TRANSIENT_HEILER_CLASSES:
-            out.add(r["task_id"])
+        payload = _event_payload(r["payload"])
+        cls = payload.get("class")
+        if cls in _NON_TRANSIENT_HEILER_CLASSES:
+            out.setdefault(r["task_id"], set()).add(cls)
     return out
 
 
@@ -1247,7 +1266,265 @@ def _tasks_with_failed_run(conn: sqlite3.Connection) -> set[str]:
     return {r["task_id"] for r in rows}
 
 
-def _autonomy_metric(conn: sqlite3.Connection) -> dict:
+# ---------------------------------------------------------------------------
+# CONFLICT-FIXER-OUTCOME-HONESTY-S1 — did the fixer actually CLOSE the park?
+# ---------------------------------------------------------------------------
+#
+# ``kanban_db._maybe_route_conflict_park_fixer`` hands a non-transient
+# integration park to a BOUNDED fixer card instead of escalating it straight to
+# the operator. Its *outcome* was unmeasurable: a fixer card reaching ``done``
+# proves nothing about the park it was created for. The one deterministic proof
+# that the park re-opened is the ``conflict_fixer_parent_resumed`` event, which
+# ``kanban_db._resume_parent_for_completed_conflict_fixer`` appends ONLY after
+# the CAS flipping the parked parent back to ready/todo succeeds.
+#
+# Without that distinction the autonomy counter read every conflict-class done
+# task as "should have escalated but didn't" — masking two different things at
+# once: fixer wins were slandered as missed escalations, and parks a human had
+# to close by hand were laundered into the autonomous bucket.
+
+# Emitted by ``_resume_parent_for_completed_conflict_fixer`` (fork-owned
+# lifecycle event, no constant upstream). ``test_conflict_fixer_*`` drives that
+# real emitter instead of hand-writing the row, so a rename breaks the test
+# rather than silently zeroing this metric.
+CONFLICT_FIXER_RESUMED_EVENT = "conflict_fixer_parent_resumed"
+
+# One *episode* = one bounded fixer budget. Keyed EXACTLY like the budget in
+# ``_maybe_route_conflict_park_fixer`` (root_id + conflict_fingerprint) so the
+# measurement and the mechanism cannot drift apart.
+CONFLICT_EPISODE_RESOLVED = "fixer_resolved"
+CONFLICT_EPISODE_EXHAUSTED = "fixer_exhausted"
+CONFLICT_EPISODE_UNRESOLVED = "unresolved_by_fixer"
+CONFLICT_EPISODE_IN_FLIGHT = "in_flight"
+
+# Per-task verdict derived from a task's episodes (used by the autonomy metric).
+CONFLICT_TASK_FIXER_RESOLVED = "fixer_resolved"
+CONFLICT_TASK_FIXER_EXHAUSTED = "fixer_exhausted"
+CONFLICT_TASK_MANUAL = "manually_resolved"
+
+# A fixer child in one of these statuses is finished — the episode is decided.
+_FIXER_CHILD_TERMINAL_STATUSES = frozenset(
+    {"done", "archived", "failed", "cancelled"}
+)
+
+
+def _tasks_with_fixer_exhausted_escalation(conn: sqlite3.Connection) -> set[str]:
+    """Tasks whose operator escalation carries the fixer's own budget-spent
+    evidence (``_maybe_route_conflict_park_fixer`` → ``_escalate({..
+    "fixer_exhausted": True})``).
+
+    Needed alongside the structural attempt count because the budget is
+    ROOT-keyed: a cascade can spend the budget across several parents, so a
+    single parent may show one dispatch and still be the one that escalated.
+    """
+    out: set[str] = set()
+    for r in conn.execute(
+        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        (kb.OPERATOR_ESCALATION_EVENT,),
+    ).fetchall():
+        evidence = _event_payload(r["payload"]).get("evidence")
+        if isinstance(evidence, dict) and evidence.get("fixer_exhausted"):
+            out.add(r["task_id"])
+    return out
+
+
+def _conflict_fixer_episodes(conn: sqlite3.Connection) -> list[dict]:
+    """Grade every dispatched conflict-fixer budget by its real outcome.
+
+    Returns one dict per episode, in dispatch order, with ``outcome``:
+
+    * ``fixer_resolved``    — a ``conflict_fixer_parent_resumed`` with this
+      episode's fingerprint landed on one of its parents: the park re-opened
+      through the automation. This is legitimate autonomy.
+    * ``fixer_exhausted``   — no resume, and the budget is provably spent
+      (distinct fixer cards ≥ the episode's own ``limit``, or a parent carries
+      the fixer's ``fixer_exhausted`` escalation evidence).
+    * ``in_flight``         — no resume yet, budget left, and a fixer card is
+      still open. Undecided: it belongs in NEITHER side of the success rate.
+    * ``unresolved_by_fixer`` — every fixer card is finished, the budget was
+      never formally spent, and the parent was never resumed: the automation
+      stopped without closing the park (a human or another lane did).
+    """
+    dispatched = conn.execute(
+        "SELECT id, task_id, payload FROM task_events WHERE kind = ? ORDER BY id",
+        (kb.CONFLICT_FIXER_DISPATCHED_EVENT,),
+    ).fetchall()
+    if not dispatched:
+        return []
+
+    episodes: dict[tuple[str, str], dict] = {}
+    for row in dispatched:
+        payload = _event_payload(row["payload"])
+        parent_id = str(row["task_id"])
+        root_id = str(payload.get("root_id") or "").strip() or parent_id
+        fingerprint = kb._conflict_event_fingerprint(payload)
+        ep = episodes.get((root_id, fingerprint))
+        if ep is None:
+            ep = episodes[(root_id, fingerprint)] = {
+                "root_id": root_id,
+                "fingerprint": fingerprint,
+                "parents": set(),
+                "children": set(),
+                "limit": kb.CONFLICT_FIXER_MAX_ATTEMPTS,
+                "last_dispatch_id": 0,
+            }
+        ep["parents"].add(parent_id)
+        child_id = str(payload.get("child_id") or "").strip()
+        if child_id:
+            ep["children"].add(child_id)
+        try:
+            ep["limit"] = max(int(ep["limit"]), int(payload.get("limit") or 0))
+        except (TypeError, ValueError):
+            pass
+        ep["last_dispatch_id"] = int(row["id"])
+
+    # Resume proof, per (parent, fingerprint).
+    resumed: set[tuple[str, str]] = set()
+    for r in conn.execute(
+        "SELECT task_id, payload FROM task_events WHERE kind = ?",
+        (CONFLICT_FIXER_RESUMED_EVENT,),
+    ).fetchall():
+        payload = _event_payload(r["payload"])
+        resumed.add(
+            (str(r["task_id"]), str(payload.get("conflict_fingerprint") or "").strip())
+        )
+    for (_root, fingerprint), ep in episodes.items():
+        ep["resolved"] = any(
+            (parent, fingerprint) in resumed for parent in ep["parents"]
+        )
+
+    # The ``fixer_exhausted`` escalation carries no fingerprint, so attribute it
+    # to that task's LATEST still-unresolved episode — bounded and never able to
+    # overwrite an episode the fixer demonstrably closed.
+    unresolved_by_parent: dict[str, list[tuple[str, str]]] = {}
+    for key, ep in episodes.items():
+        if ep["resolved"]:
+            continue
+        for parent in ep["parents"]:
+            unresolved_by_parent.setdefault(parent, []).append(key)
+    exhausted_keys: set[tuple[str, str]] = set()
+    for parent in _tasks_with_fixer_exhausted_escalation(conn):
+        keys = unresolved_by_parent.get(parent)
+        if keys:
+            exhausted_keys.add(
+                max(keys, key=lambda k: episodes[k]["last_dispatch_id"])
+            )
+
+    all_children = sorted(
+        {child for ep in episodes.values() for child in ep["children"]}
+    )
+    child_status: dict[str, str] = {}
+    for start in range(0, len(all_children), 500):
+        chunk = all_children[start:start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        child_status.update({
+            r["id"]: r["status"]
+            for r in conn.execute(
+                f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        })
+
+    out: list[dict] = []
+    for key, ep in sorted(episodes.items(), key=lambda kv: kv[1]["last_dispatch_id"]):
+        attempts = len(ep["children"])
+        if ep["resolved"]:
+            outcome = CONFLICT_EPISODE_RESOLVED
+        elif attempts >= int(ep["limit"]) or key in exhausted_keys:
+            outcome = CONFLICT_EPISODE_EXHAUSTED
+        elif any(
+            child_status.get(child) not in _FIXER_CHILD_TERMINAL_STATUSES
+            for child in ep["children"]
+        ):
+            outcome = CONFLICT_EPISODE_IN_FLIGHT
+        else:
+            outcome = CONFLICT_EPISODE_UNRESOLVED
+        out.append({
+            "root_id": ep["root_id"],
+            "fingerprint": ep["fingerprint"],
+            "parents": sorted(ep["parents"]),
+            "attempts": attempts,
+            "limit": int(ep["limit"]),
+            "outcome": outcome,
+        })
+    return out
+
+
+def _conflict_outcome_by_task(episodes: list[dict]) -> dict[str, str]:
+    """Collapse episodes into ONE verdict per parked parent task.
+
+    Exhaustion dominates (the budget was spent on that task's chain); otherwise
+    a task counts ``fixer_resolved`` only when the fixer closed every episode it
+    was given. Anything else is ``manually_resolved`` — the fixer did not close
+    the park, so whoever did was outside the automation.
+    """
+    per_task: dict[str, set[str]] = {}
+    for ep in episodes:
+        for parent in ep["parents"]:
+            per_task.setdefault(parent, set()).add(ep["outcome"])
+    verdicts: dict[str, str] = {}
+    for tid, outcomes in per_task.items():
+        if CONFLICT_EPISODE_EXHAUSTED in outcomes:
+            verdicts[tid] = CONFLICT_TASK_FIXER_EXHAUSTED
+        elif (
+            CONFLICT_EPISODE_RESOLVED in outcomes
+            and CONFLICT_EPISODE_UNRESOLVED not in outcomes
+            and CONFLICT_EPISODE_IN_FLIGHT not in outcomes
+        ):
+            verdicts[tid] = CONFLICT_TASK_FIXER_RESOLVED
+        else:
+            verdicts[tid] = CONFLICT_TASK_MANUAL
+    return verdicts
+
+
+def _conflict_fixer_metric(episodes: list[dict]) -> dict:
+    """Konflikt-Fixer-Erfolgsquote ↔ counter 'conflict_parks_closed_by_hand'.
+
+    Headline = ``resolved / (resolved + exhausted)`` over decided episodes.
+    ``in_flight`` episodes are excluded (not yet decided — counting them would
+    slander a fixer that is still working), and so are ``unresolved_by_fixer``
+    ones: those are not a fixer *failure* against its budget, they are parks the
+    automation never finished, which is exactly what the counter reports. With
+    no decided episode the rate is ``None``, never a flattering 0 or 100.
+    """
+    by_outcome = {
+        CONFLICT_EPISODE_RESOLVED: 0,
+        CONFLICT_EPISODE_EXHAUSTED: 0,
+        CONFLICT_EPISODE_UNRESOLVED: 0,
+        CONFLICT_EPISODE_IN_FLIGHT: 0,
+    }
+    for ep in episodes:
+        by_outcome[ep["outcome"]] = by_outcome.get(ep["outcome"], 0) + 1
+    resolved = by_outcome[CONFLICT_EPISODE_RESOLVED]
+    exhausted = by_outcome[CONFLICT_EPISODE_EXHAUSTED]
+    decided = resolved + exhausted
+    return {
+        "success_rate_pct": (
+            round(100.0 * resolved / decided, 1) if decided else None
+        ),
+        "episodes": len(episodes),
+        "resolved": resolved,
+        "exhausted": exhausted,
+        "unresolved_by_fixer": by_outcome[CONFLICT_EPISODE_UNRESOLVED],
+        "in_flight": by_outcome[CONFLICT_EPISODE_IN_FLIGHT],
+        "counter": {
+            "name": "conflict_parks_closed_by_hand",
+            "value": by_outcome[CONFLICT_EPISODE_UNRESOLVED],
+            "description": (
+                "conflict-fixer episodes whose fixer cards all finished without "
+                "ever resuming the parked parent (no conflict_fixer_parent_resumed) "
+                "and without spending the attempt budget — the park was closed "
+                "outside the automation"
+            ),
+        },
+    }
+
+
+def _autonomy_metric(
+    conn: sqlite3.Connection,
+    *,
+    conflict_episodes: Optional[list[dict]] = None,
+) -> dict:
     """Autonomie-% ↔ counter 'should_have_escalated_but_didnt'.
 
     Autonomous = a done task that never raised an ``operator_escalation`` event
@@ -1255,32 +1532,72 @@ def _autonomy_metric(conn: sqlite3.Connection) -> dict:
     those "autonomous" tasks that nonetheless carry a non-transient
     ``heiler_classification`` (real-bug / bad-spec / conflict): the system saw
     a real problem and still didn't escalate.
+
+    CONFLICT-FIXER-OUTCOME-HONESTY-S1 — the ``conflict`` class is graded by the
+    fixer's REAL outcome (:func:`_conflict_fixer_episodes`) rather than lumped in
+    wholesale, because "conflict + no escalation" hid two opposite facts:
+
+    * the conflict fixer closed the park (``conflict_fixer_parent_resumed``) →
+      the system handled a real problem on its own. That is what autonomy MEANS,
+      so the class is cleared and the counter does not fire.
+    * the fixer exhausted its budget, or never closed the park at all → a human
+      or another lane finished it. The task is NOT autonomous: it drops out of
+      the autonomous bucket entirely (counted in ``conflict_escalations``), so
+      the counter does not fire for it either — the honesty now lives in the
+      headline instead of in a counter nobody could act on.
+
+    A task carrying real-bug/bad-spec ALONGSIDE conflict keeps its counter hit:
+    only the conflict class is graded away, never the rest.
+
+    ``conflict_episodes`` lets the snapshot writer reuse the episode grading it
+    already needs for the ``conflict_fixer`` metric; ``None`` derives it here so
+    the function stays callable on its own.
     """
     escalated = _tasks_with_operator_escalation(conn)
     flagged = _tasks_with_nontransient_heiler(conn)
     failed = _tasks_with_failed_run(conn)
+    if conflict_episodes is None:
+        conflict_episodes = _conflict_fixer_episodes(conn)
+    conflict_outcomes = _conflict_outcome_by_task(conflict_episodes)
     rows = conn.execute("SELECT id FROM tasks WHERE status = 'done'").fetchall()
     total_done = len(rows)
     autonomous = 0
     should_have = 0
+    fixer_resolved = 0
+    conflict_escalations = 0
     for r in rows:
         tid = r["id"]
-        if tid not in escalated and tid not in failed:
-            autonomous += 1
-            if tid in flagged:
-                should_have += 1
+        if tid in escalated or tid in failed:
+            continue
+        classes = set(flagged.get(tid, ()))
+        if kb.HEILER_CLASS_CONFLICT in classes:
+            # No fixer trail at all ⇒ the fixer never closed this park either.
+            outcome = conflict_outcomes.get(tid, CONFLICT_TASK_MANUAL)
+            if outcome == CONFLICT_TASK_FIXER_RESOLVED:
+                classes.discard(kb.HEILER_CLASS_CONFLICT)
+                fixer_resolved += 1
+            else:
+                conflict_escalations += 1
+                continue
+        autonomous += 1
+        if classes:
+            should_have += 1
     pct = round(100.0 * autonomous / total_done, 1) if total_done else None
     return {
         "autonomy_pct": pct,
         "autonomous_done": autonomous,
         "total_done": total_done,
+        "conflict_fixer_resolved": fixer_resolved,
+        "conflict_escalations": conflict_escalations,
         "counter": {
             "name": "should_have_escalated_but_didnt",
             "value": should_have,
             "description": (
                 "done tasks counted autonomous that carry a non-transient "
-                "heiler_classification (real-bug/bad-spec/conflict) yet never "
-                "raised operator_escalation"
+                "heiler_classification (real-bug/bad-spec) yet never raised "
+                "operator_escalation; a conflict counts only when the conflict "
+                "fixer did not close the park, and then it is booked as an "
+                "escalation (conflict_escalations) instead of autonomy"
             ),
         },
     }
@@ -1837,13 +2154,19 @@ def compute_metrics_snapshot(
     if gate_records is None:
         gate_records = read_gate_records()
     generated = _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc)
+    # Graded once: the autonomy counter and the conflict_fixer headline are two
+    # readings of the SAME episodes, so they can never disagree.
+    conflict_episodes = _conflict_fixer_episodes(conn)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated.isoformat(),
         "generated_epoch": ts,
         "window_days": window_days,
         "metrics": {
-            "autonomy": _autonomy_metric(conn),
+            "autonomy": _autonomy_metric(
+                conn, conflict_episodes=conflict_episodes
+            ),
+            "conflict_fixer": _conflict_fixer_metric(conflict_episodes),
             "cost_per_task": _cost_per_task_metric(
                 conn, now=ts, window_days=window_days
             ),
@@ -1899,6 +2222,7 @@ def render_snapshot_summary(snapshot: dict) -> str:
     """One-screen human summary of a snapshot (for the CLI's stdout)."""
     m = snapshot.get("metrics", {})
     a = m.get("autonomy", {})
+    cf = m.get("conflict_fixer", {})
     c = m.get("cost_per_task", {})
     e = m.get("escalation_rate", {})
     cc = m.get("classification_coverage", {})
@@ -1911,6 +2235,14 @@ def render_snapshot_summary(snapshot: dict) -> str:
             f"({a.get('autonomous_done')}/{a.get('total_done')} done)  "
             f"↔ {a.get('counter', {}).get('name')}="
             f"{a.get('counter', {}).get('value')}"
+        ),
+        (
+            f"  conflict fixer:  {cf.get('success_rate_pct')}%  "
+            f"(resolved={cf.get('resolved')}, "
+            f"exhausted={cf.get('exhausted')}, "
+            f"in-flight={cf.get('in_flight')})  "
+            f"↔ {cf.get('counter', {}).get('name')}="
+            f"{cf.get('counter', {}).get('value')}"
         ),
         (
             f"  cost/task:       total ${c.get('cost_usd_total')}  "
