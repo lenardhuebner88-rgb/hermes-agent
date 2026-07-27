@@ -1630,6 +1630,11 @@ def test_never_ran_ordinary_root_auto_closes_when_children_terminal(
             kind="code",
         )
         kb.link_tasks(conn, root_id, child_id)
+        # Mirror complete_task mid-flight status (hook runs before done write).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'running' WHERE id = ?", (child_id,),
+            )
         _commit_in(
             info["path"],
             "feature.py",
@@ -1831,5 +1836,124 @@ def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
         assert "lane-scope" in (out2.get("reason") or "").lower()
         # Second park recorded (original + re-arm).
         assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2
+
+
+def test_never_ran_root_not_auto_closed_when_it_has_assignee(
+    repo, kanban_home, monkeypatch,
+):
+    """B1: a ready root WITH assignee is real work, not bookkeeping — even if
+    it never ran and all children are terminal."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="assigned chain root still waiting to run",
+            assignee="coder",
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="real work child",
+            assignee="coder",
+            created_by="tester",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 1\n",
+            msg=f"kanban({child_id}): work",
+        )
+
+        out = kwt.maybe_integrate_on_complete(
+            conn, child_id, gate_runner=_ok_gate,
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+
+    assert out is not None
+    assert out.get("action") == "deferred"
+    assert root.status == "ready"
+    assert auto == []
+
+
+def test_never_ran_root_parks_when_children_only_failed(
+    repo, kanban_home, monkeypatch,
+):
+    """M2: failed/cancelled children must not green-close the root or stamp
+    strategist shipped — park like the decompose twin."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="bookkeeping root over failed children",
+            assignee=None,
+            created_by="tester",
+            kind="code",
+        )
+        info = kwt.ensure_worktree(repo, root_id)
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', workspace_kind = 'dir', "
+                "workspace_path = ?, started_at = NULL WHERE id = ?",
+                (str(info["path"]), root_id),
+            )
+        child_id = kb.create_task(
+            conn,
+            title="failed child",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+            kind="code",
+        )
+        kb.link_tasks(conn, root_id, child_id)
+        # Put a real commit on the chain so integrate can merge; the completing
+        # "driver" below will be treated as done evidence separately.
+        _commit_in(
+            info["path"],
+            "feature.py",
+            "VALUE = 9\n",
+            msg=f"kanban({child_id}): work before fail",
+        )
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'failed' WHERE id = ?", (child_id,),
+            )
+
+        # Drive auto-complete path as if a terminal sibling finished the chain.
+        # Eligibility treats failed as terminal; auto-complete must then refuse
+        # because completed_task_id is the failed child (not a real done).
+        assert kwt._never_ran_root_eligible(
+            conn, root_id, repo_root=repo, completing_task_id=child_id,
+        )
+        kwt._auto_complete_never_ran_chain_root(
+            conn,
+            root_id=root_id,
+            completed_task_id=child_id,
+            outcome={
+                "action": "merged",
+                "branch": kwt.chain_branch(root_id),
+                "merge_commit": "a" * 40,
+            },
+        )
+        root = kb.get_task(conn, root_id)
+        auto = _events(conn, root_id, "never_ran_root_auto_completed")
+        blocked = _events(conn, root_id, "blocked")
+
+    assert root.status == "blocked"
+    assert auto == []
+    assert blocked
+    assert "kein Kind erfolgreich" in (blocked[-1].get("reason") or "")
 
 

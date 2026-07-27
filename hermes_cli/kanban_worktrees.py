@@ -6761,6 +6761,41 @@ def _find_open_chain_sibling(
     return open_sibling
 
 
+def _never_ran_root_is_bookkeeping(row: sqlite3.Row) -> bool:
+    """True when the root is pure chain bookkeeping, not an unclaimed work order.
+
+    Criteria (all must hold) — chosen to match the 2026-07-26 incident root
+    ("ohne Zuweisung") while refusing a ready work card that simply has not
+    been claimed yet (Opus review B1):
+
+    * ``assignee`` empty/NULL — a real assigned work order must never be
+      auto-closed just because it never ran.
+    * no ``acceptance_criteria`` — ACs mark an explicit deliverable contract.
+    * no non-empty ``body`` — a real work brief in the body means a human or
+      planner intended the root itself to do work; we stay conservative and
+      refuse auto-close rather than guess from free text.
+
+    ``kind`` is intentionally NOT used: ordinary chain roots are often minted
+    with ``kind='code'`` even when they are only the dependency hub, so a
+    kind-based veto would either false-positive bookkeeping or false-negative
+    real work. Decompose/PlanSpec roots are already excluded by
+    :func:`_is_decompose_root` before this helper runs.
+    """
+    assignee = str(row["assignee"] or "").strip()
+    if assignee:
+        return False
+    # acceptance_criteria column is additive; older fixtures may omit it.
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    if "acceptance_criteria" in keys:
+        ac = row["acceptance_criteria"]
+        if ac is not None and str(ac).strip() != "":
+            return False
+    body = row["body"] if "body" in keys else None
+    if body is not None and str(body).strip() != "":
+        return False
+    return True
+
+
 def _never_ran_root_eligible(
     conn: sqlite3.Connection,
     root_id: str,
@@ -6771,6 +6806,7 @@ def _never_ran_root_eligible(
     """True when an ordinary chain root is pure bookkeeping and safe to auto-close.
 
     All of these must hold (never-ran guard for auto-land):
+    0. root is bookkeeping (no assignee, no acceptance_criteria, no body)
     1. every non-archived chain child is terminal (done/failed/cancelled),
        treating *completing_task_id* as already terminal (this runs inside
        ``complete_task`` before the child row flips to done)
@@ -6780,10 +6816,15 @@ def _never_ran_root_eligible(
     if _is_decompose_root(conn, root_id):
         return False
     row = conn.execute(
-        "SELECT started_at, branch_name FROM tasks WHERE id = ?",
+        "SELECT started_at, branch_name, assignee, body, acceptance_criteria "
+        "FROM tasks WHERE id = ?",
         (root_id,),
     ).fetchone()
     if row is None:
+        return False
+
+    # Guard 0 — bookkeeping only (never auto-close an unclaimed work order).
+    if not _never_ran_root_is_bookkeeping(row):
         return False
 
     # Guard 1 — all non-archived chain children terminal (the completing
@@ -6831,6 +6872,47 @@ def _never_ran_root_eligible(
     return True
 
 
+def _block_never_ran_root_no_real_completion(
+    conn: sqlite3.Connection, *, root_id: str,
+) -> None:
+    """Park a never-ran root when children are only failed/cancelled/archived.
+
+    Mirrors :func:`_block_decompose_root_no_real_completion` so summary text
+    and the strategist shipped stamp cannot claim a green chain after zero
+    real child completions (Opus review M2).
+    """
+    from hermes_cli import kanban_db as kb
+
+    reason = (
+        "auto-complete verweigert: kein Kind erfolgreich (alle archived/failed) "
+        "— Operator pruefen"
+    )
+    try:
+        with kb.write_txn(conn):
+            changed = kb._system_park_set_blocked(
+                conn,
+                root_id,
+                kind="needs_input",
+                where_sql="status IN ('todo', 'ready', 'running', 'blocked')",
+            )
+            if changed == 1:
+                kb._append_event(
+                    conn,
+                    root_id,
+                    "blocked",
+                    kb._system_blocked_event_payload(
+                        reason,
+                        "needs_input",
+                        source="never_ran_root_finalizer",
+                    ),
+                )
+    except Exception:
+        _log.warning(
+            "could not block never-ran root %s after no-real-completion guard",
+            root_id, exc_info=True,
+        )
+
+
 def _auto_complete_never_ran_chain_root(
     conn: sqlite3.Connection,
     *,
@@ -6845,6 +6927,15 @@ def _auto_complete_never_ran_chain_root(
     through the existing integration path.
     """
     from hermes_cli import kanban_db as kb
+
+    # Guard (M2): only ship when at least one child really completed. Guard 1
+    # of eligibility accepts failed/cancelled as terminal, so without this the
+    # root would claim "all children completed" and stamp strategist shipped.
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, completed_task_id=completed_task_id,
+    ):
+        _block_never_ran_root_no_real_completion(conn, root_id=root_id)
+        return
 
     now = int(time.time())
     summary = (
