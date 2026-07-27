@@ -549,6 +549,16 @@ def test_get_lanes_model_sinnvoll_rule(
                     "configured": True,
                 },
                 {
+                    # SuperGrok OAuth is a subscription credential, not an
+                    # XAI_API_KEY-backed config entry.  The canonical catalog
+                    # must still offer Grok 4.5 when this provider reports it
+                    # as authenticated.
+                    "slug": "xai-oauth",
+                    "models": ["grok-4.5"],
+                    "authenticated": True,
+                    "configured": False,
+                },
+                {
                     "slug": "openrouter",
                     "models": ["unadmitted/openrouter-model"],
                     "authenticated": True,
@@ -594,6 +604,18 @@ def test_get_lanes_model_sinnvoll_rule(
     assert neuralwatt["used_in_profiles"] is False
     assert neuralwatt["admitted"] is True
     assert neuralwatt["sinnvoll"] is True
+
+    grok_rows = [
+        row
+        for row in models
+        if row["provider"] == "xai-oauth" and row["id"] == "grok-4.5"
+    ]
+    assert len(grok_rows) == 1
+    grok = grok_rows[0]
+    assert grok["runtime"] == "hermes"
+    assert grok["authenticated"] is True
+    assert grok["configured"] is False
+    assert grok["sinnvoll"] is True
 
     claude = model(None, "claude-fable-5")
     assert claude["used_in_profiles"] is False
