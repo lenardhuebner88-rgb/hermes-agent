@@ -224,6 +224,130 @@ def test_payload_separates_metered_quota_unattributed_and_kanban(
     assert calls
 
 
+def test_payload_calibrates_route_changes_from_board_events(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    board_path = tmp_path / "kanban.db"
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    _seed_usage_fixture(usage_path)
+    _seed_board_fixture(board_path)
+
+    calibration = readmodel.build_usage_facts_payload(
+        usage_path,
+        kanban_path=board_path,
+        profiles_root=profiles_root,
+    )["kanban"]["route_change_calibration"]
+
+    assert calibration == {
+        "source": "task_events.kind=model_route_changed",
+        "scope": "all events with complete old and new provider/model routes",
+        "observed_events": 3,
+        "route_changed_events": 2,
+        "route_unchanged_events": 1,
+        "route_change_rate": pytest.approx(2 / 3),
+    }
+
+
+def test_payload_omits_route_change_calibration_without_board_database(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    _seed_usage_fixture(usage_path)
+
+    kanban = readmodel.build_usage_facts_payload(usage_path)["kanban"]
+
+    assert kanban == {
+        "available": False,
+        "reason": "kanban_database_unavailable",
+    }
+    assert "route_change_calibration" not in kanban
+
+
+def test_payload_uses_latest_rate_limit_snapshot_per_origin_and_marks_stale(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    sidecar_path = tmp_path / "foreign_rate_limit_snapshots.jsonl"
+    _seed_usage_fixture(usage_path)
+    sidecar_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {
+                    "captured_at": "2026-07-27T14:00:00+00:00",
+                    "origin": "codex_cli",
+                    "run_id": "old-run",
+                    "context_window": 42,
+                    "rate_limits": {"primary": {"used_percent": 10}},
+                },
+                {
+                    "captured_at": "2026-07-27T15:59:00+00:00",
+                    "origin": "codex_cli",
+                    "run_id": "new-run",
+                    "context_window": 84,
+                    "rate_limits": {"primary": {"used_percent": 25}},
+                },
+                {
+                    "captured_at": "2026-07-26T15:00:00+00:00",
+                    "origin": "kimi_cli",
+                    "run_id": "stale-run",
+                    "context_window": 21,
+                    "rate_limits": {"primary": {"used_percent": 90}},
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path,
+        rate_limit_path=sidecar_path,
+        generated_at="2026-07-27T16:00:00+00:00",
+    )
+
+    snapshots = payload["rate_limits"]
+    assert snapshots["available"] is True
+    assert snapshots["snapshots"] == {
+        "codex_cli": {
+            "captured_at": "2026-07-27T15:59:00+00:00",
+            "age_seconds": 60,
+            "freshness": "fresh",
+            "rate_limits": {"primary": {"used_percent": 25}},
+        },
+        "kimi_cli": {
+            "captured_at": "2026-07-26T15:00:00+00:00",
+            "age_seconds": 90_000,
+            "freshness": "stale",
+            "rate_limits": {"primary": {"used_percent": 90}},
+        },
+    }
+    assert "grok_cli" not in snapshots["snapshots"]
+    assert "run_id" not in json.dumps(snapshots)
+    assert "context_window" not in json.dumps(snapshots)
+
+
+def test_payload_keeps_usage_facts_usable_when_rate_limit_sidecar_is_missing(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    _seed_usage_fixture(usage_path)
+
+    payload = readmodel.build_usage_facts_payload(
+        usage_path,
+        rate_limit_path=tmp_path / "missing.jsonl",
+    )
+
+    assert payload["summary"]["fact_rows"] > 0
+    assert payload["rate_limits"] == {
+        "available": False,
+        "reason": "sidecar_unavailable",
+        "snapshots": {},
+    }
+
+
 def test_s7_example_fixture_matches_contract_version() -> None:
     example = json.loads(
         (FIXTURE_ROOT / "s7_payload_example.json").read_text(encoding="utf-8")
@@ -244,6 +368,64 @@ def test_s7_example_fixture_matches_contract_version() -> None:
         readmodel.BILLING_METERED,
         readmodel.BILLING_QUOTA,
         readmodel.BILLING_UNCLASSIFIED,
+    }
+
+
+def test_workload_split_uses_discovered_subagent_profiles_and_keeps_unknown(
+    tmp_path: Path,
+) -> None:
+    """Real Claude transcript forms have both canonical and legacy call kinds."""
+
+    usage_path = tmp_path / "usage_facts.db"
+    rows = (
+        ("main", None, 10),
+        ("subagent", "general-purpose", 20),
+        ("general-purpose", None, 30),
+        ("subagent", "Explore", 40),
+        ("Explore", None, 50),
+        ("foreign_cli", None, 60),
+        (None, None, 70),
+    )
+    for index, (call_kind, profile, input_tokens) in enumerate(rows, start=1):
+        upsert_run_facts(
+            f"call-kind-{index}",
+            {
+                "origin": "claude_code",
+                "call_kind": call_kind,
+                "profile": profile,
+                "input_tokens": input_tokens,
+                "cache_read_tokens": input_tokens * 9,
+                "cache_write_tokens": 0,
+                "output_tokens": 1,
+                "captured_at": "2026-07-27T15:36:00+00:00",
+                "source": "measured",
+            },
+            path=usage_path,
+        )
+
+    workload = readmodel.build_usage_facts_payload(usage_path)["summary"][
+        "workload"
+    ]
+
+    assert workload["main"] == {
+        "fact_rows": 1,
+        "context_input_tokens": 100,
+    }
+    assert workload["subagent"] == {
+        "fact_rows": 4,
+        "context_input_tokens": 1_400,
+    }
+    assert workload["unknown"] == {
+        "fact_rows": 2,
+        "context_input_tokens": 1_300,
+    }
+    assert workload["subagent_share"] == {
+        "context_input_tokens": 1_400,
+        "all_context_input_tokens": 2_800,
+        "of_all_context": 0.5,
+        "classified_context_input_tokens": 1_500,
+        "of_classified_context": pytest.approx(14 / 15),
+        "classification_status": "partial",
     }
 
 
@@ -354,6 +536,18 @@ def _seed_board_fixture(path: Path) -> None:
         )
         connection.execute("CREATE TABLE lanes (profiles TEXT)")
         connection.execute("INSERT INTO lanes VALUES ('{}')")
+        connection.execute(
+            """
+            CREATE TABLE task_events (
+                id INTEGER PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id INTEGER,
+                kind TEXT NOT NULL,
+                payload TEXT,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
         connection.executemany(
             """
             INSERT INTO task_runs (
@@ -361,4 +555,60 @@ def _seed_board_fixture(path: Path) -> None:
             ) VALUES (?, ?, ?, ?, ?)
             """,
             rows,
+        )
+        connection.executemany(
+            """
+            INSERT INTO task_events (task_id, kind, payload, created_at)
+            VALUES (?, 'model_route_changed', ?, ?)
+            """,
+            [
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                            "new": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                        }
+                    ),
+                    1,
+                ),
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                            "new": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-b",
+                            },
+                        }
+                    ),
+                    2,
+                ),
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-b",
+                            },
+                            "new": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-c",
+                            },
+                        }
+                    ),
+                    3,
+                ),
+            ],
         )

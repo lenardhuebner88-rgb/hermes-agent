@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,9 +27,9 @@ from hermes_cli.usage_facts_db import (
 # Bump when the transcript shape we accept changes in a way that would make
 # golden fixtures silently wrong.  Tests pin this value.
 #
-# v2 adds explicit billing-mode facts, so existing HWM snapshots re-harvest
-# their already captured files and backfill the non-null field.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 2
+# v3 adds access-configuration-derived billing provenance, so existing HWM
+# snapshots re-harvest their captured files and backfill the new fields.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 3
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -46,6 +47,8 @@ _USAGE_TOKEN_KEYS = (
 
 UNKNOWN_BILLING_MODE = "unknown"
 _EXPLICIT_BILLING_MODE_KEYS = ("billing_mode", "billingMode")
+_BILLING_MODE_SOURCE_TRANSCRIPT = "transcript"
+_BILLING_MODE_SOURCE_ACCESS_CONFIGURATION = "access_configuration"
 
 
 @dataclass
@@ -75,6 +78,7 @@ class _CallDraft:
     stop_reason: Optional[str] = None
     service_tier: Optional[str] = None
     billing_mode: str = UNKNOWN_BILLING_MODE
+    billing_mode_source: Optional[str] = None
     effort: Optional[str] = None
     timestamp: Optional[str] = None
     input_tokens: Optional[int] = None
@@ -135,7 +139,7 @@ def _int(value: Any) -> Optional[int]:
 
 def _billing_mode_from_raw(
     record: Mapping[str, Any], message: Mapping[str, Any]
-) -> str:
+) -> tuple[str, bool]:
     """Return only explicit transcript billing metadata, never an inference.
 
     The currently measured transcript shape has ``userType`` and usage
@@ -148,8 +152,68 @@ def _billing_mode_from_raw(
         for key in _EXPLICIT_BILLING_MODE_KEYS:
             mode = _text(source.get(key))
             if mode is not None:
-                return mode
-    return UNKNOWN_BILLING_MODE
+                return mode, True
+    return UNKNOWN_BILLING_MODE, False
+
+
+def _subscription_plan_label() -> Optional[str]:
+    """Resolve the safe plan label without exposing OAuth credential fields."""
+    try:
+        from agent.account_usage import _resolve_anthropic_plan_label
+
+        return _resolve_anthropic_plan_label()
+    except Exception:
+        return None
+
+
+def _configuration_mentions_key(path: Path, keys: set[str]) -> bool:
+    """Check only configuration key names; never parse or retain their values."""
+    key_pattern = re.compile(
+        r"(?<![A-Za-z0-9_])(?:"
+        + "|".join(map(re.escape, keys))
+        + r")(?![A-Za-z0-9_])\s*[:=]",
+        re.IGNORECASE,
+    )
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if key_pattern.search(line):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _has_configured_metered_access(
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    config_paths: Optional[Iterable[Path]] = None,
+) -> bool:
+    """Return whether a metered API-key route is configured, without reading it.
+
+    An OAuth subscription is not enough to classify transcript rows when a
+    metered route is also configured.  Presence checks deliberately use mapping
+    membership and configuration key names, never credential values.
+    """
+    key_names = {f"{PROVIDER.upper()}_API_KEY"}
+    environment = os.environ if environ is None else environ
+    if any(key in environment for key in key_names):
+        return True
+    paths = config_paths
+    if paths is None:
+        home = Path.home()
+        paths = (
+            home / ".hermes" / "config.yaml",
+            home / ".claude" / "settings.json",
+        )
+    return any(_configuration_mentions_key(Path(path), key_names) for path in paths)
+
+
+def _billing_mode_from_access_configuration() -> tuple[str, Optional[str]]:
+    """Infer billing only when subscription and exclusive access are proven."""
+    if _subscription_plan_label() is None or _has_configured_metered_access():
+        return UNKNOWN_BILLING_MODE, None
+    return "subscription_included", _BILLING_MODE_SOURCE_ACCESS_CONFIGURATION
 
 
 def _content_parts(message: Mapping[str, Any]) -> list[Any]:
@@ -242,11 +306,12 @@ def merge_assistant_fragment(
     draft.effort = _text(record.get("effort")) or draft.effort
     draft.model = _text(message.get("model")) or draft.model
     draft.stop_reason = _text(message.get("stop_reason")) or draft.stop_reason
-    billing_mode = _billing_mode_from_raw(record, message)
-    if billing_mode != UNKNOWN_BILLING_MODE:
+    billing_mode, billing_mode_explicit = _billing_mode_from_raw(record, message)
+    if billing_mode_explicit:
         # Streaming fragments may only disclose this field once; preserve the
-        # last explicit source value instead of overwriting it with unknown.
+        # last explicit source value instead of overwriting it with an absence.
         draft.billing_mode = billing_mode
+        draft.billing_mode_source = _BILLING_MODE_SOURCE_TRANSCRIPT
     draft.source_path = source_path or draft.source_path
     draft.call_kind = call_kind or draft.call_kind
     draft.profile = profile if profile is not None else draft.profile
@@ -491,6 +556,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "serving_tier": draft.service_tier,
         "reasoning_effort": draft.effort,
         "billing_mode": draft.billing_mode,
+        "billing_mode_source": draft.billing_mode_source,
         "source": "measured",
         "captured_at": draft.timestamp,
     }
@@ -690,6 +756,9 @@ def harvest(
     stats = HarvestStats()
     out = log or sys.stderr
     files = discover_jsonl_files(root)
+    derived_billing_mode, derived_billing_mode_source = (
+        _billing_mode_from_access_configuration()
+    )
 
     for index, path in enumerate(files, 1):
         stats.files_seen += 1
@@ -708,6 +777,12 @@ def harvest(
         stats.lines_skipped += file_stats.lines_skipped
         stats.calls_merged += file_stats.calls_merged
         stats.parse_errors += file_stats.parse_errors
+
+        if derived_billing_mode_source is not None:
+            for draft in drafts.values():
+                if draft.billing_mode_source is None:
+                    draft.billing_mode = derived_billing_mode
+                    draft.billing_mode_source = derived_billing_mode_source
 
         written = write_calls_batch(
             drafts.values(),

@@ -39,6 +39,10 @@ _BUDGET_EXHAUSTED_ERROR = (
     "Iteration budget exhausted (6/6) — task could not complete "
     "within the allowed iterations"
 )
+_DIRTY_WORKTREE_ERROR = (
+    "worker base preparation: worktree is dirty before worker edits; refusing "
+    "automatic base update (hermes_cli/control_loops.py)"
+)
 
 
 @pytest.fixture
@@ -46,6 +50,7 @@ def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     db_path = kb.kanban_db_path(board="default")
     kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
@@ -59,13 +64,19 @@ def _ready_task(conn):
         title="breaker-honest-error",
         assignee="coder",
         max_iterations=6,
+        max_continuations=1,
     )
 
 
 def _claim(conn, tid):
-    claimed = kb.claim_task(conn, tid, claimer="test-host:worker")
+    claimed = kb.claim_task(conn, tid, claimer=kb._claimer_id())
     assert claimed is not None
     assert claimed.current_run_id is not None
+    # Test-owned synthetic PGID. It is deliberately absent, so the production
+    # continuation reaper can confirm ESRCH without signalling a real process.
+    assert kb._set_worker_pid(conn, tid, 987654321)
+    claimed = kb.get_task(conn, tid)
+    assert claimed is not None
     return claimed
 
 
@@ -182,3 +193,94 @@ def test_non_tripping_failure_run_error_unchanged(kanban_home):
         assert len(timed) == 1
         assert timed[0].error == _BUDGET_EXHAUSTED_ERROR
         assert "circuit breaker tripped" not in (timed[0].error or "")
+
+
+def test_breaker_trip_gave_up_run_error_names_mixed_failure_kinds(kanban_home):
+    """A mixed live streak must not project the trigger kind onto every run."""
+    with kb.connect() as conn:
+        tid = _ready_task(conn)
+        limit = 2
+
+        first = _claim(conn, tid)
+        assert first.current_run_id is not None
+        assert not kb._record_spawn_failure(
+            conn,
+            tid,
+            "worker executable unavailable",
+            failure_limit=limit,
+        )
+
+        budget_run = _claim(conn, tid)
+        assert budget_run.current_run_id is not None
+        assert kb.record_iteration_budget_exhausted(
+            conn,
+            tid,
+            summary="Continue after the worker iteration budget.",
+            metadata={"budget_used": 40, "budget_max": 40},
+            expected_run_id=budget_run.current_run_id,
+        )
+        assert kb.reap_pending_continuations(conn) == [tid]
+
+        trigger = _claim(conn, tid)
+        assert trigger.current_run_id is not None
+        assert kb._record_spawn_failure(
+            conn,
+            tid,
+            _DIRTY_WORKTREE_ERROR,
+            failure_limit=limit,
+        )
+
+        runs = kb.list_runs(conn, tid)
+        assert [run.outcome for run in runs] == [
+            "spawn_failed",
+            "iteration_budget_exhausted",
+            "gave_up",
+        ]
+        terminal = runs[-1]
+        err = terminal.error or ""
+
+        assert "2 failures" in err
+        assert "triggered by spawn_failed" in err
+        assert "iteration_budget_exhausted" in err
+        assert "spawn_failed" in err
+        assert "2 consecutive spawn_failed failures" not in err
+        assert _DIRTY_WORKTREE_ERROR in err
+
+        meta = terminal.metadata or {}
+        assert meta.get("failures") == limit
+        assert meta.get("trigger_outcome") == "spawn_failed"
+        assert meta.get("effective_limit") == limit
+        assert meta.get("limit_source") == "dispatcher"
+        assert meta.get("worker_failure_fingerprint") == kb._error_fingerprint(
+            _DIRTY_WORKTREE_ERROR
+        )
+
+
+def test_breaker_trip_gave_up_run_error_stays_bounded_and_fingerprints_raw_error(
+    kanban_home,
+):
+    """The operator prefix is bounded; the fingerprint still sees raw input."""
+    long_error = f"{_DIRTY_WORKTREE_ERROR}: {'x' * 600}"
+    with kb.connect() as conn:
+        tid = _ready_task(conn)
+        _claim(conn, tid)
+        assert kb._record_spawn_failure(
+            conn,
+            tid,
+            long_error,
+            failure_limit=1,
+        )
+
+        terminal = kb.list_runs(conn, tid)[-1]
+        err = terminal.error or ""
+        meta = terminal.metadata or {}
+
+        assert len(err) == 500
+        assert err.startswith(
+            "circuit breaker tripped after 1 consecutive spawn_failed "
+            "failures (limit 1): "
+        )
+        assert meta.get("worker_failure_fingerprint") == kb._error_fingerprint(
+            long_error
+        )
+        assert meta.get("worker_failure_fingerprint") != kb._error_fingerprint(err)
