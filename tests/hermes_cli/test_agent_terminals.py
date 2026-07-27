@@ -496,14 +496,14 @@ def _fake_agent_cli(home: Path, name: str) -> Path:
         "claude": "2.1.217 (Claude Code)",
         "codex": "codex-cli 0.145.0",
         "grok": "grok 0.2.106 (fake) [stable]",
-        "qwen": "0.20.0",
+        "qwen": "2.1.217 (Claude Code)",
         "kimi": "0.29.0",
     }.get(name, "0.0.0")
     help_text = {
         "claude": "  -r, --resume [value]\\n  --fork-session",
         "codex": "  resume          Resume a previous session\\n  fork            Fork a previous session",
         "grok": "  -r, --resume [<SESSION_ID>]\\n      --fork-session",
-        "qwen": "  -r, --resume              Resume a specific session",
+        "qwen": "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
         "kimi": "  fresh only",
     }.get(name, "")
     path.write_text(
@@ -581,32 +581,58 @@ def test_grok_uses_subscription_cli_and_grok_build_model(
     assert service.capabilities().to_dict()["agents"]["grok"]["available"] is True
 
 
-def test_qwen_uses_qwen_code_cli(
+def test_qwen_uses_claude_harness_wrapper(
     tmp_path: Path, tmux_service: TmuxAgentSessionService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The qwen seat runs Claude Code through ~/.claude/tools/qwen-claude.sh.
+
+    The wrapper passes every arg through to claude, so qwen mirrors the Claude
+    capability matrix: a fresh start mints a --session-id UUID and resume uses
+    --resume <sid>. Probed against the real wrapper output, not a mock dict.
+    """
     home = Path.home()
     monkeypatch.setattr(shutil, "which", lambda name: None)
-    qwen = home / ".npm-global" / "bin" / "qwen"
-    qwen.parent.mkdir(parents=True)
-    qwen.write_text(
+    wrapper = home / ".claude" / "tools" / "qwen-claude.sh"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(
         "#!/bin/sh\n"
-        'if [ "$1" = "--version" ]; then echo "0.20.0"; exit 0; fi\n'
-        'if [ "$1" = "--help" ]; then printf "  -r, --resume Resume\\n"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then echo "2.1.217 (Claude Code)"; exit 0; fi\n'
+        'if [ "$1" = "--help" ]; then printf "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>\\n"; exit 0; fi\n'
         "printf 'fake qwen args: %s\\n' \"$*\"\n"
         "sleep 60\n",
         encoding="utf-8",
     )
-    qwen.chmod(qwen.stat().st_mode | stat.S_IXUSR)
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
     service = TmuxAgentSessionService(socket_path=tmux_service.socket_path, hermes_home=tmp_path)
-    definition = service.definition_for("qwen")
 
-    # Qwen Code reads model + auth from ~/.qwen/settings.json, so the terminal
-    # launches the bare CLI (generic branch — no server-side argv flags).
-    assert definition.argv == (str(qwen.resolve()),)
+    # The qwen kind resolves to the wrapper, not the native qwen CLI.
+    assert service.resolve_agent_binary("qwen") == wrapper.resolve()
+
+    # Real capability probe against the wrapper returns Claude semantics.
+    probed = agent_terminals.probe_agent_cli_actions("qwen", wrapper.resolve())
+    assert probed["fresh"] is True
+    assert probed["resume"] is True
+    assert probed["session_id"] is True
+
+    # Fresh mints a server-stamped --session-id UUID (Claude semantics).
+    definition = service.definition_for("qwen")
+    assert definition.argv[0] == str(wrapper.resolve())
+    assert definition.argv[1] == "--session-id"
+    uuid.UUID(definition.argv[2])
+
+    # build_agent_argv: fresh with a stamped UUID and resume against the wrapper.
+    sid = str(uuid.uuid4())
+    assert service.build_agent_argv(
+        "qwen", binary=wrapper.resolve(), action="fresh", native_session_id=sid
+    ) == (str(wrapper.resolve()), "--session-id", sid)
+    assert service.build_agent_argv(
+        "qwen", binary=wrapper.resolve(), action="resume", native_session_id="sess-q1"
+    ) == (str(wrapper.resolve()), "--resume", "sess-q1")
+
     created = service.ensure("qwen")
     assert created.window == "qwen"
-    assert "fake qwen args:" in service.capture("work", "qwen")
+    assert "fake qwen args: --session-id" in service.capture("work", "qwen")
     assert service.identity_for("work", "qwen") == ("qwen", "home")
     assert service.capabilities().to_dict()["agents"]["qwen"]["available"] is True
 
@@ -2293,7 +2319,11 @@ def test_capabilities_include_closed_actions(tmp_path: Path, monkeypatch: pytest
 
 def _argv_logging_cli(home: Path, name: str) -> tuple[Path, Path]:
     """Fake agent CLI that logs argv and stays alive for tmux capture."""
-    path = home / ".local" / "bin" / name
+    if name == "qwen":
+        # The qwen seat resolves to the Claude-harness wrapper, not ~/.local/bin.
+        path = home / ".claude" / "tools" / "qwen-claude.sh"
+    else:
+        path = home / ".local" / "bin" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     log = home / f"{name}-argv.log"
     if log.exists():
@@ -2302,14 +2332,14 @@ def _argv_logging_cli(home: Path, name: str) -> tuple[Path, Path]:
         "claude": "2.1.217 (Claude Code)",
         "codex": "codex-cli 0.145.0",
         "grok": "grok 0.2.106 (fake) [stable]",
-        "qwen": "0.20.0",
+        "qwen": "2.1.217 (Claude Code)",
         "kimi": "0.29.0",
     }.get(name, "0.0.0")
     help_text = {
         "claude": "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
         "codex": "  resume          Resume a previous session\\n  fork            Fork a previous session",
         "grok": "  -r, --resume [<SESSION_ID>]\\n      --fork-session\\n  -s, --session-id <SESSION_ID>",
-        "qwen": "  -r, --resume              Resume a specific session",
+        "qwen": "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
         "kimi": "  fresh only",
     }.get(name, "")
     path.write_text(
@@ -2740,9 +2770,9 @@ def test_cli_probe_fail_closed_incompatible_major_and_missing_help(tmp_path: Pat
         ),
         (
             "qwen",
-            "0.99.0",
-            "  -r, --resume              Resume a specific session",
-            {"resume": True, "fork": False, "session_id": False},
+            "2.9.0 (Claude Code)",
+            "  -r, --resume [value]\\n  --fork-session\\n  --session-id <uuid>",
+            {"resume": True, "fork": True, "session_id": True},
         ),
         (
             "kimi",

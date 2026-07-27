@@ -120,9 +120,12 @@ _AGENT_CONTEXT_ACTIONS: dict[str, dict[str, bool]] = {
         "compact": False,
     },
     "qwen": {
+        # The qwen seat runs the Claude Code harness, so it shares the Claude
+        # capability matrix.
         "fresh": True,
         "resume": True,
-        "fork": False,
+        # Fork is only proven as resume+session-id + --fork-session.
+        "fork": True,
         "lean": False,
         "compact": False,
     },
@@ -180,11 +183,21 @@ _CLI_CAPABILITY_POLICIES: dict[str, dict[str, object]] = {
         },
     },
     "qwen": {
-        "version_re": re.compile(r"^\s*(?P<version>\d+\.\d+\.\d+)\s*$"),
-        "min_version": (0, 20, 0),
-        "compatible_major": 0,
+        # The qwen seat runs the Claude Code harness via qwen-claude.sh, so the
+        # probe contract (version banner + help signatures) mirrors "claude".
+        "version_re": re.compile(
+            r"^\s*(?P<version>\d+\.\d+\.\d+)\s+\(Claude Code\)\s*$",
+            re.IGNORECASE,
+        ),
+        "min_version": (2, 1, 217),
+        "compatible_major": 2,
         "help_patterns": {
-            "resume": re.compile(r"^\s*-r,\s*--resume\b", re.MULTILINE),
+            "resume": re.compile(r"^\s*-r,\s*--resume(?:\s|\[|<)", re.MULTILINE),
+            "fork": re.compile(r"^\s*--fork-session\b", re.MULTILINE),
+            "session_id": re.compile(
+                r"^\s*--session-id\s+<uuid>(?:\s|$)",
+                re.MULTILINE,
+            ),
         },
     },
     "kimi": {
@@ -1015,10 +1028,9 @@ class TmuxAgentSessionService:
                 home / ".local" / "bin" / "grok",
             )
         if kind == "qwen":
-            return ("qwen",), (
-                home / ".npm-global" / "bin" / "qwen",
-                home / ".local" / "bin" / "qwen",
-            )
+            # Claude Code on the Token Plan seat: the wrapper injects the
+            # ANTHROPIC_* env at runtime, so no secret lands in the tmux env.
+            return ("qwen-claude.sh",), (home / ".claude" / "tools" / "qwen-claude.sh",)
         raise InvalidTarget(f"unknown agent kind: {kind}")
 
     def resolve_agent_binary(self, kind: str) -> Path:
@@ -1473,13 +1485,13 @@ class TmuxAgentSessionService:
                     raise CapabilityError(
                         f"{kind} fresh start requires a valid server-stamped UUID"
                     ) from exc
-                if not probed.get("session_id") or kind not in {"claude", "grok"}:
+                if not probed.get("session_id") or kind not in {"claude", "grok", "qwen"}:
                     raise CapabilityError(
                         f"fresh native_session_id is not available for agent {kind!r}"
                     )
             if kind == "hermes":
                 return (str(binary), "--tui")
-            if kind == "claude" and sid:
+            if kind in {"claude", "qwen"} and sid:
                 return (str(binary), "--session-id", sid)
             if kind == "grok":
                 argv = (str(binary), "--model", "grok-4.5")
@@ -1493,14 +1505,12 @@ class TmuxAgentSessionService:
                 raise CapabilityError(
                     f"{kind} resume requires an unambiguous stamped native_session_id"
                 )
-            if kind == "claude":
+            if kind in {"claude", "qwen"}:
                 return (str(binary), "--resume", sid)
             if kind == "codex":
                 return (str(binary), "resume", sid)
             if kind == "grok":
                 return (str(binary), "--model", "grok-4.5", "--resume", sid)
-            if kind == "qwen":
-                return (str(binary), "--resume", sid)
             raise CapabilityError(f"resume is not available for agent {kind!r}")
         if effective_action == _ACTION_FORK:
             if not actions.get("fork"):
@@ -1511,7 +1521,7 @@ class TmuxAgentSessionService:
                 raise CapabilityError(
                     f"{kind} fork requires an unambiguous stamped native_session_id"
                 )
-            if kind == "claude":
+            if kind in {"claude", "qwen"}:
                 # Claude fork is only proven together with resume + session id.
                 return (str(binary), "--resume", sid, "--fork-session")
             if kind == "codex":
@@ -1698,7 +1708,7 @@ class TmuxAgentSessionService:
             action == _ACTION_FRESH
             and native_session_id is None
             and probed_actions.get("session_id")
-            and kind in {"claude", "grok"}
+            and kind in {"claude", "grok", "qwen"}
         ):
             native_session_id = str(uuid.uuid4())
         argv = self.build_agent_argv(
@@ -2630,7 +2640,7 @@ class TmuxAgentSessionService:
             if action == _ACTION_FRESH:
                 binary = self.resolve_agent_binary(kind)
                 probed_actions = probe_agent_cli_actions(kind, binary)
-                if probed_actions.get("session_id") and kind in {"claude", "grok"}:
+                if probed_actions.get("session_id") and kind in {"claude", "grok", "qwen"}:
                     argv_native_session_id = str(uuid.uuid4())
                     manifest_native_session_id = argv_native_session_id
                 else:

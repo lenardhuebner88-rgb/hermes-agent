@@ -19,7 +19,7 @@ export const AGENTS: Array<{ kind: AgentTerminalKind; label: string; hint: strin
   { kind: "codex", label: "Codex", hint: "codex-cli" },
   { kind: "kimi", label: "Kimi", hint: "kimi-cli" },
   { kind: "grok", label: "Grok", hint: "grok-build / Grok 4.5" },
-  { kind: "qwen", label: "Qwen", hint: "Qwen Code / qwen3.8-max-preview" },
+  { kind: "qwen", label: "Qwen", hint: "Claude Code / qwen3.8-max-preview" },
 ];
 
 export const AGENT_LABELS: Record<AgentTerminalKind, string> = Object.fromEntries(AGENTS.map((agent) => [agent.kind, agent.label])) as Record<AgentTerminalKind, string>;
