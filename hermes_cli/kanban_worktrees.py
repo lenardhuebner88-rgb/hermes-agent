@@ -6653,6 +6653,32 @@ def _enforce_lane_scope_on_complete(
         )
         return None
     violating, expected_lane = _lane_scope_violations(assignee, changed_files)
+    if violating:
+        # After a successful lane-scope fixer, the shared chain branch still
+        # contains the fixer's paths in this task's attributed range. Subtract
+        # paths already owned by a completed fixer child so re-complete does
+        # not re-park → re-fix → resume forever.
+        try:
+            from hermes_cli.kanban_lane_fixer import (
+                allowlisted_paths_for_parent,
+            )
+
+            allow = allowlisted_paths_for_parent(
+                conn,
+                task_id,
+                violating_paths=violating,
+                expected_lane=expected_lane,
+                repo_root=repo_root,
+                branch=branch,
+            )
+            if allow:
+                violating = [path for path in violating if path not in allow]
+        except Exception:
+            _log.debug(
+                "lane-scope fixer allowlist lookup failed for %s",
+                task_id,
+                exc_info=True,
+            )
     if not violating:
         return None
     reason = (
@@ -6660,6 +6686,16 @@ def _enforce_lane_scope_on_complete(
         f"its lane: {', '.join(violating)} — this task should have been "
         f"assigned to lane '{expected_lane}'."
     )
+    # Capture branch tip at park time so the allowlist path without a resume
+    # event (operator unblock) can still retouch-check later parent commits
+    # (Opus R2-2 residual B5).
+    park_branch_tip: Optional[str] = None
+    try:
+        park_branch_tip = _git(repo_root, "rev-parse", branch) or None
+        if park_branch_tip:
+            park_branch_tip = str(park_branch_tip).strip() or None
+    except Exception:
+        park_branch_tip = None
     payload = {
         "gate": "lane_scope",
         "command": "lane-scope-check",
@@ -6671,6 +6707,7 @@ def _enforce_lane_scope_on_complete(
         "changed_files": changed_files,
         "branch": branch,
         "merge_target": base,
+        "park_branch_tip": park_branch_tip,
     }
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
@@ -6735,6 +6772,250 @@ def _find_open_chain_sibling(
     return open_sibling
 
 
+def _never_ran_root_is_bookkeeping(row: sqlite3.Row) -> bool:
+    """True when the root is pure chain bookkeeping, not an unclaimed work order.
+
+    Criteria (all must hold) — chosen to match the 2026-07-26 incident root
+    ("ohne Zuweisung") while refusing a ready work card that simply has not
+    been claimed yet (Opus review B1):
+
+    * ``assignee`` empty/NULL — a real assigned work order must never be
+      auto-closed just because it never ran.
+    * no ``acceptance_criteria`` — ACs mark an explicit deliverable contract.
+    * no non-empty ``body`` — a real work brief in the body means a human or
+      planner intended the root itself to do work; we stay conservative and
+      refuse auto-close rather than guess from free text.
+
+    ``kind`` is intentionally NOT used: ordinary chain roots are often minted
+    with ``kind='code'`` even when they are only the dependency hub, so a
+    kind-based veto would either false-positive bookkeeping or false-negative
+    real work. Decompose/PlanSpec roots are already excluded by
+    :func:`_is_decompose_root` before this helper runs.
+    """
+    assignee = str(row["assignee"] or "").strip()
+    if assignee:
+        return False
+    # acceptance_criteria column is additive; older fixtures may omit it.
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
+    if "acceptance_criteria" in keys:
+        ac = row["acceptance_criteria"]
+        if ac is not None and str(ac).strip() != "":
+            return False
+    body = row["body"] if "body" in keys else None
+    if body is not None and str(body).strip() != "":
+        return False
+    return True
+
+
+def _never_ran_root_eligible(
+    conn: sqlite3.Connection,
+    root_id: str,
+    *,
+    repo_root: Path,
+    completing_task_id: Optional[str] = None,
+) -> bool:
+    """True when an ordinary chain root is pure bookkeeping and safe to auto-close.
+
+    All of these must hold (never-ran guard for auto-land):
+    0. root is bookkeeping (no assignee, no acceptance_criteria, no body)
+    1. every non-archived chain child is terminal (done/failed/cancelled),
+       treating *completing_task_id* as already terminal (this runs inside
+       ``complete_task`` before the child row flips to done)
+    2. the root never ran (no ``task_runs`` row AND ``started_at`` empty)
+    3. no own ``branch_name`` with unmerged commits vs ``main``
+    """
+    if _is_decompose_root(conn, root_id):
+        return False
+    row = conn.execute(
+        "SELECT started_at, branch_name, assignee, body, acceptance_criteria "
+        "FROM tasks WHERE id = ?",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        return False
+
+    # Guard 0 — bookkeeping only (never auto-close an unclaimed work order).
+    if not _never_ran_root_is_bookkeeping(row):
+        return False
+
+    # Guard 1 — all non-archived chain children terminal (the completing
+    # child is still open at this hook point; treat it as terminal).
+    for child_id in _chain_member_ids(conn, root_id):
+        if child_id == root_id:
+            continue
+        if completing_task_id is not None and child_id == completing_task_id:
+            continue
+        crow = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?",
+            (child_id,),
+        ).fetchone()
+        if crow is None:
+            continue
+        status = crow["status"]
+        if status == "archived":
+            continue
+        if status not in {"done", "failed", "cancelled"}:
+            return False
+
+    # Guard 2 — never ran.
+    has_run = conn.execute(
+        "SELECT 1 FROM task_runs WHERE task_id = ? LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if has_run is not None:
+        return False
+    started = row["started_at"]
+    if started is not None and str(started).strip() != "":
+        return False
+
+    # Guard 3 — no unmerged own branch tip.
+    branch_name = str(row["branch_name"] or "").strip()
+    if branch_name and _branch_exists(repo_root, branch_name):
+        try:
+            count_raw = _git(
+                repo_root, "rev-list", "--count", f"main..{branch_name}",
+            )
+            if int(count_raw or "0") > 0:
+                return False
+        except (WorktreeError, ValueError, TypeError):
+            # Fail closed: unknown git state must not auto-close.
+            return False
+    return True
+
+
+def _block_never_ran_root_no_real_completion(
+    conn: sqlite3.Connection, *, root_id: str,
+) -> None:
+    """Park a never-ran root when children are only failed/cancelled/archived.
+
+    Mirrors :func:`_block_decompose_root_no_real_completion` so summary text
+    and the strategist shipped stamp cannot claim a green chain after zero
+    real child completions (Opus review M2).
+    """
+    from hermes_cli import kanban_db as kb
+
+    reason = (
+        "auto-complete verweigert: kein Kind erfolgreich (alle archived/failed) "
+        "— Operator pruefen"
+    )
+    try:
+        with kb.write_txn(conn):
+            changed = kb._system_park_set_blocked(
+                conn,
+                root_id,
+                kind="needs_input",
+                where_sql="status IN ('todo', 'ready', 'running', 'blocked')",
+            )
+            if changed == 1:
+                kb._append_event(
+                    conn,
+                    root_id,
+                    "blocked",
+                    kb._system_blocked_event_payload(
+                        reason,
+                        "needs_input",
+                        source="never_ran_root_finalizer",
+                    ),
+                )
+    except Exception:
+        _log.warning(
+            "could not block never-ran root %s after no-real-completion guard",
+            root_id, exc_info=True,
+        )
+
+
+def _auto_complete_never_ran_chain_root(
+    conn: sqlite3.Connection,
+    *,
+    root_id: str,
+    completed_task_id: str,
+    outcome: dict,
+) -> None:
+    """Auto-close a never-ran ordinary chain root after children integrated.
+
+    Mirrors :func:`_auto_complete_decompose_root` event/completion shape so the
+    post-merge gate, revert+park, and already-merged recovery paths keep working
+    through the existing integration path.
+    """
+    from hermes_cli import kanban_db as kb
+
+    # Guard (M2): only ship when at least one child really completed. Guard 1
+    # of eligibility accepts failed/cancelled as terminal, so without this the
+    # root would claim "all children completed" and stamp strategist shipped.
+    if not _decompose_root_has_real_child_completion(
+        conn, root_id, completed_task_id=completed_task_id,
+    ):
+        _block_never_ran_root_no_real_completion(conn, root_id=root_id)
+        return
+
+    now = int(time.time())
+    summary = (
+        "auto-completed never-ran chain root after all children completed and "
+        f"`{outcome.get('branch', chain_branch(root_id))}` integrated"
+    )
+    stamp_after_commit = False
+    with kb.write_txn(conn):
+        cur = conn.execute(
+            "UPDATE tasks "
+            "SET status = 'done', result = ?, completed_at = ?, "
+            "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
+            "WHERE id = ? AND status IN ('todo', 'ready', 'running', 'blocked')",
+            (summary, now, root_id),
+        )
+        if cur.rowcount != 1:
+            return
+        stamp_after_commit = True
+        run_id = kb._end_run(
+            conn,
+            root_id,
+            outcome="completed",
+            status="done",
+            summary=summary,
+            metadata={
+                "auto_completed_by": "never_ran_root_finalizer",
+                "completed_by": completed_task_id,
+                "integration_action": outcome.get("action"),
+                "merge_commit": outcome.get("merge_commit"),
+            },
+        )
+        merge_commit = str(outcome.get("merge_commit") or "").strip()
+        if (
+            outcome.get("action") == "merged"
+            and re.fullmatch(r"[0-9a-fA-F]{40}", merge_commit) is not None
+        ):
+            kb._append_event(conn, root_id, "integration_merged", outcome)
+            kb._append_event(
+                conn,
+                root_id,
+                "INTEGRATOR_VERIFIED",
+                {
+                    "merge_commit": outcome.get("merge_commit"),
+                    "gate": outcome.get("gate"),
+                    "state": outcome.get("state"),
+                },
+            )
+        payload = {
+            "completed_by": completed_task_id,
+            "integration_action": outcome.get("action"),
+            "branch": outcome.get("branch"),
+            "merge_commit": outcome.get("merge_commit"),
+            "reason": (
+                "never-ran ordinary chain root; all non-archived children "
+                "terminal; no own unmerged branch"
+            ),
+        }
+        kb._append_event(conn, root_id, "never_ran_root_auto_completed", payload)
+        kb._append_event(
+            conn,
+            root_id,
+            "completed",
+            {"result_len": len(summary), "summary": summary},
+            run_id=run_id,
+        )
+    if stamp_after_commit:
+        kb._stamp_strategist_lever_outcome_shipped(root_id, shipped_at=now)
+
+
 def _resolve_open_sibling_finalizer(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6742,6 +7023,8 @@ def _resolve_open_sibling_finalizer(
     wt: Path,
     members: set[str],
     open_sibling,
+    *,
+    repo_root: Optional[Path] = None,
 ) -> tuple[Optional[dict], Optional[str]]:
     """If open siblings remain, decide deferred vs auto-complete root.
 
@@ -6754,6 +7037,20 @@ def _resolve_open_sibling_finalizer(
         conn, task_id=task_id, root_id=root_id, wt=wt, members=members,
     )
     if pending_root_id is not None and _is_decompose_root(conn, pending_root_id):
+        auto_complete_root_id = pending_root_id
+    elif (
+        pending_root_id is not None
+        and pending_root_id == root_id
+        and repo_root is not None
+        and _never_ran_root_eligible(
+            conn,
+            pending_root_id,
+            repo_root=repo_root,
+            completing_task_id=task_id,
+        )
+    ):
+        # Ordinary bookkeeping root that never ran — auto-close so integration
+        # can land (incident 2026-07-26: ready root stranded after children done).
         auto_complete_root_id = pending_root_id
     elif pending_root_id is not None:
         try:
@@ -6910,20 +7207,29 @@ def _maybe_auto_complete_after_integration(
     task_id: str,
     outcome: dict,
 ) -> None:
-    if auto_complete_root_id is not None:
-        try:
+    if auto_complete_root_id is None:
+        return
+    try:
+        if _is_decompose_root(conn, auto_complete_root_id):
             _auto_complete_decompose_root(
                 conn,
                 root_id=auto_complete_root_id,
                 completed_task_id=task_id,
                 outcome=outcome,
             )
-        except Exception:
-            _log.warning(
-                "could not auto-complete decompose root %s",
-                auto_complete_root_id,
-                exc_info=True,
+        else:
+            _auto_complete_never_ran_chain_root(
+                conn,
+                root_id=auto_complete_root_id,
+                completed_task_id=task_id,
+                outcome=outcome,
             )
+    except Exception:
+        _log.warning(
+            "could not auto-complete chain root %s",
+            auto_complete_root_id,
+            exc_info=True,
+        )
 
 
 def _record_integration_events_and_receipts(
@@ -7220,6 +7526,7 @@ def maybe_integrate_on_complete(
     *,
     completion_metadata: Optional[dict[str, Any]] = None,
     gate_runner=None,
+    skip_lane_scope: bool = False,
 ) -> Optional[dict]:
     """Completion hook (called by ``complete_task`` on the direct done
     path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
@@ -7229,6 +7536,11 @@ def maybe_integrate_on_complete(
     ``{"action": "deferred"}`` while chain siblings are still open, or the
     ``integrate_chain`` outcome (events + receipt comment already written).
     A ``parked`` outcome means the caller must NOT move the task to done.
+
+    ``skip_lane_scope`` (default False): skip the pre-done lane-scope check.
+    Used by archive retrigger, which drives integration from an already-done
+    child — re-applying the pre-done boundary check would mis-attribute later
+    sibling commits and spawn phantom fixers (Opus R2-1).
     """
     row = conn.execute(
         "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
@@ -7242,21 +7554,32 @@ def maybe_integrate_on_complete(
 
     from hermes_cli import kanban_db as kb
 
+    # Ensure lane-scope fixer lifecycle consumer is registered (no kanban_db
+    # edit — self-register via the public hook API whenever a provisioned
+    # completion runs).
+    try:
+        from hermes_cli.kanban_lane_fixer import ensure_lifecycle_hooks_registered
+
+        ensure_lifecycle_hooks_registered()
+    except Exception:
+        _log.debug("lane-scope fixer hook registration failed", exc_info=True)
+
     # Lane-scope enforcement (coder <-> coder-frontend): reject the completion
     # HERE — at the worker-commit boundary, before any sibling/integration
     # logic — when the branch diff crosses the mechanical lane split. Runs for
     # EVERY completion of a lane-bound task (not just the chain tip), so a
     # violation is attributed to the task whose lane it breaks.
-    lane_block = _enforce_lane_scope_on_complete(
-        conn,
-        task_id,
-        repo_root,
-        chain_branch(root_id),
-        frozen_merge_target(conn, root_id),
-        kb,
-    )
-    if lane_block is not None:
-        return lane_block
+    if not skip_lane_scope:
+        lane_block = _enforce_lane_scope_on_complete(
+            conn,
+            task_id,
+            repo_root,
+            chain_branch(root_id),
+            frozen_merge_target(conn, root_id),
+            kb,
+        )
+        if lane_block is not None:
+            return lane_block
 
     # Chain-complete check via BOTH signals, conservatively OR-ed:
     # (a) task_links membership from the chain root — covers unclaimed
@@ -7268,6 +7591,7 @@ def maybe_integrate_on_complete(
     open_sibling = _find_open_chain_sibling(conn, task_id, members, wt)
     deferred, auto_complete_root_id = _resolve_open_sibling_finalizer(
         conn, task_id, root_id, wt, members, open_sibling,
+        repo_root=repo_root,
     )
     if deferred is not None:
         return deferred
@@ -7340,3 +7664,114 @@ def maybe_integrate_on_complete(
         remove_worktree(repo_root, wt, branch)
         _drop_writer_lease_for_removed_worktree(conn, wt)
     return outcome
+
+
+def maybe_retrigger_integration_after_archive(
+    conn: sqlite3.Connection,
+    archived_task_id: str,
+    *,
+    gate_runner=None,
+) -> Optional[dict]:
+    """Re-run chain integration after an archive made the chain fully terminal.
+
+    Incident 2026-07-26 (Opus M1 / operator decision): the last *code* child
+    completed while siblings were still open → integration deferred; siblings
+    were archived ~3 minutes later and nothing re-fired the integrator, so the
+    decompose root stayed stranded. Completion fires
+    ``maybe_integrate_on_complete``; archive historically did not.
+
+    This helper is the fork-owned logic half. It is **idempotent** and
+    **fail-soft** (never raises into the archive path). Callers must invoke it
+    *after* a successful archive commits.
+
+    Production wire (operator path only, Opus R2-3): ``kanban_db.archive_task``
+    accepts ``retrigger_integration=True`` and then calls this helper after
+    ``recompute_ready``. Default is False so SUPERSEDED auto-archive,
+    planspec/funnel sweeps, and other non-operator callers do not run
+    synchronous gates+merge. CLI archive and dashboard archive endpoints set
+    the flag; bulk archive runs one retrigger per successfully archived id
+    in the same request.
+    """
+    try:
+        row = conn.execute(
+            "SELECT id, status, workspace_path FROM tasks WHERE id = ?",
+            (archived_task_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        # Prefer the post-archive row; also accept a just-archived id even if
+        # the caller passes the id before refresh — status must be terminal.
+        if str(row["status"] or "") != "archived":
+            return None
+        ws = row["workspace_path"]
+        if not ws:
+            return None
+        provisioned = split_provisioned_path(ws)
+        if provisioned is None:
+            return None
+        _repo_root, root_id, wt = provisioned
+
+        members = _chain_member_ids(conn, root_id)
+        members.add(archived_task_id)
+        members.add(root_id)
+        placeholders = ",".join("?" for _ in members)
+        if not placeholders:
+            return None
+        rows = conn.execute(
+            f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+            tuple(members),
+        ).fetchall()
+        if not rows:
+            return None
+        open_ids = [
+            r["id"] for r in rows if not _terminal_status(r["status"])
+        ]
+        # Ready for retrigger when every *non-root* member is terminal and at
+        # most the root (finalizer) remains open — the exact stranded shape
+        # of the 2026-07-26 incident (children done/archived, root ready).
+        non_root_open = [oid for oid in open_ids if oid != root_id]
+        if non_root_open:
+            return None
+        if not open_ids:
+            # Fully terminal including root — nothing left to finalize.
+            return None
+
+        # Drive integration from the *latest* done member (completed_at DESC)
+        # so decompose/never-ran auto-complete sees the freshest real completion
+        # evidence. Skip the pre-done lane-scope check: the driver is already
+        # done, and re-running that gate mis-attributes later sibling commits
+        # and spawns phantom fixers on done tasks (Opus R2-1). The driver must
+        # carry the shared chain workspace — reviewer/verifier children run
+        # workspace_kind='scratch' with workspace_path NULL and finish last,
+        # which would silently abort the whole retrigger (Opus R3-1).
+        driver_row = conn.execute(
+            f"SELECT id, workspace_path FROM tasks "
+            f"WHERE id IN ({placeholders}) AND id != ? AND status = 'done' "
+            f"AND workspace_path IS NOT NULL AND workspace_path != '' "
+            f"ORDER BY completed_at DESC, id DESC LIMIT 1",
+            (*tuple(members), root_id),
+        ).fetchone()
+        if driver_row is None:
+            # No done child with a workspace → nothing to integrate; never-ran/
+            # decompose guards will refuse to ship on failed/cancelled-only chains.
+            return None
+        driver_id = driver_row["id"]
+
+        # Belt: the query already excludes workspace-less drivers.
+        if not driver_row["workspace_path"]:
+            return None
+
+        outcome = maybe_integrate_on_complete(
+            conn,
+            driver_id,
+            gate_runner=gate_runner,
+            skip_lane_scope=True,
+        )
+        return outcome
+    except Exception:
+        _log.warning(
+            "archive integration retrigger failed for %s",
+            archived_task_id,
+            exc_info=True,
+        )
+        return None

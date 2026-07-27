@@ -102,6 +102,17 @@ def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
         assert not any(s.endswith("/") for s in selected), selected
 
 
+def test_kanban_worktrees_selects_lifecycle_anchor_checker():
+    """Both lifecycle-map source files must select the anchor checker."""
+    mod = _load_module()
+
+    selected = mod.affected_pytest_modules(
+        REPO_ROOT, ["hermes_cli/kanban_worktrees.py"]
+    )
+
+    assert "tests/scripts/test_check_kanban_lifecycle_anchors.py" in selected
+
+
 def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
     """When the package test directory exceeds _FALLBACK_MAX_TEST_FILES,
     the fallback downgrades to no selection — the nightly full suite
