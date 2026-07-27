@@ -2414,8 +2414,15 @@ def _reexec_into_own_scope() -> None:
         if os.environ.get("XDG_RUNTIME_DIR") != os.path.dirname(bus_socket):
             os.environ["XDG_RUNTIME_DIR"] = os.path.dirname(bus_socket)
         address = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
-        if address and f"unix:path={bus_socket}" not in address:
-            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+        if address:
+            # Exakter Pfadvergleich statt Substring: eine Adresse wie
+            # unix:path=/run/user/1000/bus_1234 enthält die verifizierte
+            # Socket als Präfix und würde sonst fälschlich behalten.
+            env_socket = user_bus_socket_path(
+                {"DBUS_SESSION_BUS_ADDRESS": address}, euid=os.geteuid()
+            )
+            if env_socket != bus_socket:
+                os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
     cmd = build_scope_command(systemd_run, sys.orig_argv)
     os.execvp(cmd[0], cmd)
 

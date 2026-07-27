@@ -3130,6 +3130,29 @@ def test_reexec_falls_back_to_default_bus_when_env_address_stale(monkeypatch):
     assert fake_env["XDG_RUNTIME_DIR"] == f"/run/user/{euid}"
 
 
+def test_reexec_pops_dbus_address_with_verified_socket_as_prefix(monkeypatch):
+    """Substring-Falle (Opus-Review): unix:path=…/bus_1234 enthält die
+    verifizierte Socket …/bus als Präfix — die stale Adresse muss trotzdem
+    entfernt werden, sonst exec't systemd-run gegen den toten Privat-Bus."""
+    calls: list = []
+    euid = os.geteuid()
+    default_socket = f"/run/user/{euid}/bus"
+    fake_env = _foreign_service_env()
+    fake_env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={default_socket}_1234"
+    monkeypatch.setattr(os, "execvp", lambda *a: calls.append(list(a)))
+    monkeypatch.setattr(os, "environ", fake_env)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _n: "/usr/bin/systemd-run")
+    monkeypatch.setattr(
+        runner_module.os.path, "exists", lambda p: p == default_socket
+    )
+    monkeypatch.setattr(runner_module, "Path", _FakeProcPath)
+
+    runner_module._reexec_into_own_scope()
+
+    assert len(calls) == 1
+    assert "DBUS_SESSION_BUS_ADDRESS" not in fake_env
+
+
 def test_reexec_repairs_bus_env_before_exec(monkeypatch):
     """Socket existiert unter dem systemd-Default, aber der Service gab keine
     Bus-Umgebung mit → XDG_RUNTIME_DIR wird vor dem exec gesetzt, damit
