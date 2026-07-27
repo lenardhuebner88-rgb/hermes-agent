@@ -135,6 +135,109 @@ def _ordered_chain_stations(
     return ordered
 
 
+def _task_chain_context(conn: sqlite3.Connection, task: Any) -> Optional[dict[str, Any]]:
+    """Return additive navigation context when a task is linked into a chain."""
+    tasks = kanban_db.list_tasks(conn, include_archived=True)
+    task_by_id = {candidate.id: candidate for candidate in tasks}
+    if task.id not in task_by_id:
+        return None
+
+    link_rows = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
+    if not any(task.id in {row["parent_id"], row["child_id"]} for row in link_rows):
+        return None
+
+    dependents: dict[str, list[str]] = {}
+    predecessors: dict[str, set[str]] = {}
+    for row in link_rows:
+        parent_id = row["parent_id"]
+        child_id = row["child_id"]
+        if parent_id not in task_by_id or child_id not in task_by_id:
+            continue
+        dependents.setdefault(parent_id, []).append(child_id)
+        predecessors.setdefault(child_id, set()).add(parent_id)
+
+    root_cache: dict[str, str] = {}
+
+    def resolve_root(task_id: str) -> str:
+        visited: list[str] = []
+        current = task_id
+        while current not in root_cache:
+            if current in visited:
+                break
+            visited.append(current)
+            next_ids = dependents.get(current)
+            if not next_ids:
+                break
+            current = min(next_ids)
+        root_id = root_cache.get(current, current)
+        for visited_id in visited:
+            root_cache[visited_id] = root_id
+        return root_id
+
+    root_id = resolve_root(task.id)
+    members = [candidate for candidate in tasks if resolve_root(candidate.id) == root_id]
+    ordered_members = _ordered_chain_stations(members, predecessors)
+    position = next(
+        (index for index, member in enumerate(ordered_members) if member.id == task.id),
+        None,
+    )
+    if position is None:
+        return None
+
+    member_ids = {member.id for member in members}
+    first_members = [
+        member
+        for member in members
+        if not (predecessors.get(member.id, set()) & member_ids)
+    ]
+    first_member = min(
+        first_members or members,
+        key=lambda member: (member.created_at, member.id),
+    )
+    planspec_sources = {
+        row["id"]: row["planspec_source"]
+        for row in conn.execute(
+            "SELECT id, planspec_source FROM tasks "
+            "WHERE planspec_source IS NOT NULL"
+        ).fetchall()
+    }
+    planspec_source = next(
+        (
+            planspec_sources[member.id]
+            for member in sorted(members, key=lambda member: (member.created_at, member.id))
+            if member.id in planspec_sources
+        ),
+        None,
+    )
+    statuses = {member.status for member in members}
+    done_statuses = {"done", "archived"}
+    if statuses <= done_statuses:
+        chain_state = "fertig"
+    elif statuses & done_statuses and "scheduled" in statuses:
+        chain_state = "angebrochen"
+    elif statuses == {"scheduled"}:
+        chain_state = "gehalten"
+    else:
+        chain_state = "laeuft"
+
+    def station(member: Any) -> dict[str, str]:
+        return {"id": member.id, "title": member.title}
+
+    return {
+        "root_id": root_id,
+        "chain_identifier": Path(planspec_source).stem if planspec_source else first_member.title,
+        "chain_state": chain_state,
+        "position": position + 1,
+        "total": len(ordered_members),
+        "previous_station": station(ordered_members[position - 1]) if position else None,
+        "next_station": (
+            station(ordered_members[position + 1])
+            if position + 1 < len(ordered_members)
+            else None
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auth helper — WebSocket only (HTTP routes live behind the dashboard's
 # existing plugin-bypass; this is documented above).
@@ -1289,6 +1392,9 @@ def get_task(
         full_summary = kanban_db.latest_summary(conn, task_id)
         task_d = _task_dict(task, latest_summary=full_summary)
         task_d["block_reason"] = full_summary if task.status == "blocked" else None
+        chain_context = _task_chain_context(conn, task)
+        if chain_context is not None:
+            task_d["chain_context"] = chain_context
         links = _links_for(conn, task_id)
         child_results = []
         if detail_view == "full":
