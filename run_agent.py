@@ -2643,6 +2643,7 @@ class AIAgent:
         tool_calls = getattr(assistant_message, "tool_calls", None) or []
         return self._sanitize_hook_payload(
             {
+                "id": getattr(response, "id", None),
                 "model": getattr(response, "model", None),
                 "finish_reason": finish_reason,
                 "assistant_message": {

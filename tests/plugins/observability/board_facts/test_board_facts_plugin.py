@@ -175,6 +175,7 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     assert fact["temperature"] == 0.25
     assert fact["top_p"] == 0.8
     assert fact["source"] == "measured"
+    assert fact["first_token_ms"] == 87
     assert call["response_id"] == "response-42"
     assert call["input_tokens"] == 101
     assert call["output_tokens"] == 22
@@ -183,6 +184,170 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
         row["role"] for row in traces
     }
     assert secret not in "\n".join(row["content"] for row in traces)
+
+
+def test_request_trace_persists_each_growing_message_once(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    messages = [
+        {
+            "role": "system" if index == 0 else "user",
+            "content": f"trace-message-{index}",
+        }
+        for index in range(7)
+    ]
+
+    for call_index, message_count in enumerate((3, 5, 7), start=1):
+        plugin.on_pre_llm_request(
+            task_run_id="run-growing-trace",
+            turn_id="turn-growing-trace",
+            api_request_id=f"request-{call_index}",
+            session_id="session-growing-trace",
+            api_call_count=call_index,
+            provider="test",
+            model="test-model",
+            request_messages=messages[:message_count],
+        )
+
+    with sqlite3.connect(path) as conn:
+        trace_count = conn.execute(
+            "SELECT COUNT(*) FROM run_traces "
+            "WHERE run_id='run-growing-trace'"
+        ).fetchone()[0]
+
+    assert trace_count == 7
+
+
+def test_request_trace_records_changed_content_at_an_old_position(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    initial = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "original"},
+        {"role": "assistant", "content": "answer"},
+    ]
+    changed = [dict(message) for message in initial]
+    changed[1]["content"] = "compressed replacement"
+
+    for call_index, messages in enumerate((initial, changed), start=1):
+        plugin.on_pre_llm_request(
+            task_run_id="run-changed-trace",
+            turn_id="turn-changed-trace",
+            api_request_id=f"request-{call_index}",
+            session_id="session-changed-trace",
+            api_call_count=call_index,
+            provider="test",
+            model="test-model",
+            request_messages=messages,
+        )
+
+    with sqlite3.connect(path) as conn:
+        contents = [
+            row[0]
+            for row in conn.execute(
+                "SELECT content FROM run_traces "
+                "WHERE run_id='run-changed-trace'"
+            )
+        ]
+
+    assert len(contents) == 4
+    assert any("original" in content for content in contents)
+    assert any("compressed replacement" in content for content in contents)
+
+
+def test_request_trace_restart_does_not_replay_persisted_messages(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    common = {
+        "task_run_id": "run-restarted-trace",
+        "turn_id": "turn-restarted-trace",
+        "session_id": "session-restarted-trace",
+        "provider": "test",
+        "model": "test-model",
+        "request_messages": messages,
+    }
+
+    plugin.on_pre_llm_request(
+        **common,
+        api_request_id="request-before-restart",
+        api_call_count=1,
+    )
+    plugin = importlib.reload(board_facts)
+    plugin.on_pre_llm_request(
+        **common,
+        api_request_id="request-after-restart",
+        api_call_count=2,
+    )
+
+    with sqlite3.connect(path) as conn:
+        trace_count = conn.execute(
+            "SELECT COUNT(*) FROM run_traces "
+            "WHERE run_id='run-restarted-trace'"
+        ).fetchone()[0]
+
+    assert trace_count == 3
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    (
+        ("gpt-5.6-terra", 1_050_000),
+        ("gpt-5.6-sol", 1_050_000),
+        ("gpt-5.6-luna", 1_050_000),
+        ("claude-opus-4-8", 1_000_000),
+        ("claude-fable-5", 1_000_000),
+        ("grok-4.5", 500_000),
+        ("kimi-k2.7-code", None),
+        ("qwen3.8-max-preview", None),
+        ("k3", None),
+    ),
+)
+def test_context_window_limit_uses_only_exact_static_model_keys(
+    monkeypatch,
+    tmp_path,
+    model,
+    expected,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+
+    plugin.on_pre_llm_request(
+        task_run_id=f"run-{model}",
+        turn_id=f"turn-{model}",
+        api_request_id=f"request-{model}",
+        session_id=f"session-{model}",
+        api_call_count=1,
+        provider="test",
+        model=model,
+        request={"body": {"model": model}},
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT context_window_limit, context_window_limit_source "
+            "FROM run_usage_facts WHERE run_id=?",
+            (f"run-{model}",),
+        ).fetchone()
+
+    assert fact["context_window_limit"] == expected
+    assert fact["context_window_limit_source"] == (
+        "derived" if expected is not None else None
+    )
 
 
 def test_post_tool_call_uses_exact_live_kwargs_and_derives_output_chars(

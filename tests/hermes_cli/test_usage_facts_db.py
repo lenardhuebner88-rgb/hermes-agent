@@ -41,8 +41,27 @@ def test_schema_contains_complete_contract(tmp_path):
         "call_index",
         "role",
         "content",
+        "message_fingerprint",
         "captured_at",
     }
+
+
+def test_trace_message_fingerprint_is_idempotent_per_run(tmp_path):
+    path = tmp_path / "facts.db"
+
+    for call_index in (1, 2):
+        record_trace(
+            "run-deduplicated",
+            call_index,
+            "user",
+            "same request message",
+            message_fingerprint="stable-message-fingerprint",
+            path=path,
+        )
+
+    assert _row(path, "SELECT COUNT(*) AS count FROM run_traces")[
+        "count"
+    ] == 1
 
 
 def test_unknown_observations_remain_null(tmp_path):

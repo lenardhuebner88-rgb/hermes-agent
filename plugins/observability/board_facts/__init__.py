@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import threading
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any, Mapping, Optional
 
+from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
 from agent.usage_pricing import resolve_billing_route
 from hermes_cli.usage_facts_db import (
     increment_tool_call,
@@ -24,6 +26,7 @@ from hermes_cli.usage_facts_db import (
 logger = logging.getLogger(__name__)
 
 _MAX_CORRELATIONS = 4096
+_MAX_MESSAGE_FINGERPRINTS_PER_RUN = 4096
 _STATE_LOCK = threading.RLock()
 _CONTEXTS: OrderedDict[str, "_RunContext"] = OrderedDict()
 _PENDING_TOOLS: dict[tuple[str, int, str], int] = defaultdict(int)
@@ -38,6 +41,9 @@ class _RunContext:
     requested_model: Optional[str] = None
     lane: Optional[str] = None
     last_call_index: Optional[int] = None
+    message_fingerprints: OrderedDict[str, None] = field(
+        default_factory=OrderedDict
+    )
 
 
 def _fail_soft_hook(function):
@@ -137,6 +143,29 @@ def _tool_output_chars(result: Any) -> int:
         default=str,
     )
     return len(rendered)
+
+
+def _static_context_window_limit(model: Any) -> Optional[int]:
+    """Resolve only an exact static model key, never a family catch-all."""
+    normalized = _text(model)
+    if normalized is None:
+        return None
+    candidates = (
+        normalized.lower(),
+        normalized.rsplit("/", 1)[-1].lower(),
+    )
+    exact_lengths = {
+        str(key).lower(): int(value)
+        for key, value in DEFAULT_CONTEXT_LENGTHS.items()
+    }
+    return next(
+        (
+            exact_lengths[candidate]
+            for candidate in candidates
+            if candidate in exact_lengths
+        ),
+        None,
+    )
 
 
 def _purge_expired_traces_once() -> None:
@@ -385,6 +414,10 @@ def _actual_route_fields(
         "billing_mode": billing_mode,
         **_sampling_fields(kwargs),
     }
+    context_window_limit = _static_context_window_limit(actual_model)
+    if context_window_limit is not None:
+        run_fields["context_window_limit"] = context_window_limit
+        run_fields["context_window_limit_source"] = "derived"
     return call_fields, run_fields
 
 
@@ -407,20 +440,52 @@ def _fact_source(kwargs: Mapping[str, Any]) -> str:
     return "unknown"
 
 
+def _message_fingerprint(message: Any) -> str:
+    mapped = _mapping(message)
+    payload = mapped or message
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _record_messages(
-    run_id: str,
+    ctx: _RunContext,
     call_index: int,
     messages: Any,
 ) -> None:
     if not isinstance(messages, list):
         return
     for message in messages:
+        fingerprint = _message_fingerprint(message)
+        with _STATE_LOCK:
+            if fingerprint in ctx.message_fingerprints:
+                ctx.message_fingerprints.move_to_end(fingerprint)
+                continue
+            ctx.message_fingerprints[fingerprint] = None
+            while (
+                len(ctx.message_fingerprints)
+                > _MAX_MESSAGE_FINGERPRINTS_PER_RUN
+            ):
+                ctx.message_fingerprints.popitem(last=False)
         mapped = _mapping(message)
-        if mapped:
-            role = _text(mapped.get("role")) or "message"
-            record_trace(run_id, call_index, role, mapped)
-        else:
-            record_trace(run_id, call_index, "message", message)
+        role = _text(mapped.get("role")) or "message"
+        try:
+            record_trace(
+                ctx.run_id,
+                call_index,
+                role,
+                mapped or message,
+                message_fingerprint=fingerprint,
+            )
+        except Exception:
+            with _STATE_LOCK:
+                ctx.message_fingerprints.pop(fingerprint, None)
+            raise
 
 
 def _request_messages(kwargs: Mapping[str, Any]) -> Any:
@@ -467,7 +532,7 @@ def on_pre_llm_request(**kwargs: Any) -> None:
         call_fields,
         run_fields=run_fields,
     )
-    _record_messages(ctx.run_id, call_index, _request_messages(kwargs))
+    _record_messages(ctx, call_index, _request_messages(kwargs))
     _purge_expired_traces_once()
 
 
@@ -516,9 +581,6 @@ def on_post_llm_call(**kwargs: Any) -> None:
                 "context_window_used",
             }
         }
-    )
-    run_fields["context_window_limit"] = _integer(
-        kwargs.get("context_window_limit")
     )
     run_fields["source"] = _fact_source(kwargs)
     record_llm_call(

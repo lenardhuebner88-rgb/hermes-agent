@@ -35,6 +35,18 @@ token count or tokenizer estimate. Trace retention is purged at most once per
 plugin process, while the SQLite schema is initialized once per database file
 identity and every short-lived connection is explicitly closed.
 
+Request messages are content-fingerprinted per run. Replayed history is
+discarded before repeated redaction and SQLite writes; a bounded in-process
+cache handles the hot path and a nullable unique database fingerprint keeps a
+process restart from duplicating already persisted request messages.
+
+`response_id` and `first_token_ms` are measured provider/stream observations.
+The first-token field stays `NULL` when the request produces no streaming
+delta. `context_window_limit` is different: it is resolved only from an exact
+key in `agent.model_metadata.DEFAULT_CONTEXT_LENGTHS`, never via live probes,
+configuration lookups, or generic family fallbacks. Its field-specific
+`context_window_limit_source` is therefore always `derived`.
+
 Reasoning effort sources
 ------------------------
 
@@ -60,13 +72,6 @@ does not turn these unknown individual fields into measured facts.
   model names was rejected because providers commonly append a version suffix.
   Supplying the position would require a later, fork-owned measurement point;
   the upstream hook emitters are deliberately unchanged.
-- `first_token_ms`: no real hook emission exists. It would require a timestamp
-  in the `on_first_delta` callback of
-  `interruptible_streaming_api_call`.
-- `context_window_limit`: no real hook emission exists. A later slice can look
-  up the static model limit from the `hermes_cli/models.py` catalogue.
-- `response_id`: `_api_response_payload_for_hook` does not include
-  `response.id`; a later upstream-compatible slice would need to add it there.
 - `top_p`: the main conversation loop has no call site that sets it. Only
   explicit request overrides can currently populate it, so it is normally
   `NULL`.

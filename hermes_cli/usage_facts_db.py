@@ -43,6 +43,7 @@ RUN_FACT_COLUMNS = (
     "first_token_ms",
     "duration_ms",
     "context_window_limit",
+    "context_window_limit_source",
     "context_window_used",
     "llm_call_count",
     "temperature",
@@ -104,6 +105,8 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     first_token_ms REAL,
     duration_ms REAL,
     context_window_limit INTEGER,
+    context_window_limit_source TEXT
+        CHECK (context_window_limit_source IN ('derived')),
     context_window_used INTEGER,
     llm_call_count INTEGER,
     temperature REAL,
@@ -146,6 +149,7 @@ CREATE TABLE IF NOT EXISTS run_traces (
     call_index INTEGER,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    message_fingerprint TEXT,
     captured_at TEXT NOT NULL
 );
 
@@ -197,6 +201,33 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                             f"ALTER TABLE {table} "
                             "ADD COLUMN tool_output_chars INTEGER"
                         )
+                run_fact_columns = {
+                    row[1]
+                    for row in conn.execute(
+                        "PRAGMA table_info(run_usage_facts)"
+                    )
+                }
+                if "context_window_limit_source" not in run_fact_columns:
+                    conn.execute(
+                        "ALTER TABLE run_usage_facts "
+                        "ADD COLUMN context_window_limit_source TEXT "
+                        "CHECK (context_window_limit_source IN ('derived'))"
+                    )
+                trace_columns = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(run_traces)")
+                }
+                if "message_fingerprint" not in trace_columns:
+                    conn.execute(
+                        "ALTER TABLE run_traces "
+                        "ADD COLUMN message_fingerprint TEXT"
+                    )
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "idx_run_traces_message_fingerprint "
+                    "ON run_traces(run_id, message_fingerprint) "
+                    "WHERE message_fingerprint IS NOT NULL"
+                )
                 conn.commit()
                 _SCHEMA_IDENTITIES[schema_key] = schema_identity
         return conn
@@ -489,6 +520,7 @@ def record_trace(
     role: str,
     content: Any,
     *,
+    message_fingerprint: Optional[str] = None,
     captured_at: Optional[str] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
@@ -502,14 +534,21 @@ def record_trace(
         conn.execute(
             """
             INSERT INTO run_traces (
-                run_id, call_index, role, content, captured_at
-            ) VALUES (?, ?, ?, ?, ?)
+                run_id, call_index, role, content, message_fingerprint,
+                captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, message_fingerprint)
+                WHERE message_fingerprint IS NOT NULL
+                DO NOTHING
             """,
             (
                 str(run_id),
                 int(call_index) if call_index is not None else None,
                 str(role),
                 redacted,
+                str(message_fingerprint)
+                if message_fingerprint is not None
+                else None,
                 captured_at or utc_now_iso(),
             ),
         )
