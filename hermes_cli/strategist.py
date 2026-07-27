@@ -167,6 +167,11 @@ MATURITY_DAYS: int = 3
 #   green_gate_streak.flake_debt.value -1 fewer unfiled neutralized flakes is
 #                                        better; filing a held de-flake PlanSpec
 #                                        consumes this debt
+#   conflict_fixer.success_rate_pct  +1  share of DECIDED conflict-fixer episodes
+#                                        the fixer actually closed (resumed the
+#                                        parked parent) — higher means more real
+#                                        autonomy on merge conflicts
+#                                        (CONFLICT-FIXER-OUTCOME-HONESTY-S1)
 _VERDICT_DIRECTION: dict[str, int] = {
     "autonomy_pct": 1,
     "escalations_per_week": -1,
@@ -178,6 +183,7 @@ _VERDICT_DIRECTION: dict[str, int] = {
     "touches_per_week": -1,
     "decision_latency_days_median": -1,
     "green_gate_streak.flake_debt.value": -1,
+    "conflict_fixer.success_rate_pct": 1,
 }
 
 # Keys with no defensible ROI direction: raw counts, denominators, coverage/
@@ -245,6 +251,21 @@ _DIRECTIONLESS: frozenset[str] = frozenset({
     "operator_comments",
     "held_open",
     "operator_load.counter.value",
+    # conflict_fixer (CONFLICT-FIXER-OUTCOME-HONESTY-S1): raw episode buckets
+    # behind success_rate_pct, which alone carries the direction. `episodes` is
+    # the denominator; `in_flight` is undecided work (it shrinks by finishing
+    # EITHER way, so no direction is defensible); `resolved`/`exhausted`/
+    # `unresolved_by_fixer` are cumulative Bestandszähler over all history.
+    # Fully qualified — bare "resolved"/"episodes" would be over-broad basenames.
+    "conflict_fixer.episodes",
+    "conflict_fixer.resolved",
+    "conflict_fixer.exhausted",
+    "conflict_fixer.unresolved_by_fixer",
+    "conflict_fixer.in_flight",
+    "conflict_fixer.counter.value",
+    # autonomy's conflict split: raw counts behind autonomy_pct / its counter.
+    "autonomy.conflict_fixer_resolved",
+    "autonomy.conflict_escalations",
 })
 
 
