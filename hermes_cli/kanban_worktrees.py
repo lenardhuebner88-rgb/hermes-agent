@@ -7515,6 +7515,7 @@ def maybe_integrate_on_complete(
     *,
     completion_metadata: Optional[dict[str, Any]] = None,
     gate_runner=None,
+    skip_lane_scope: bool = False,
 ) -> Optional[dict]:
     """Completion hook (called by ``complete_task`` on the direct done
     path, i.e. after Verifier-APPROVED routing): when *task_id* is the last
@@ -7524,6 +7525,11 @@ def maybe_integrate_on_complete(
     ``{"action": "deferred"}`` while chain siblings are still open, or the
     ``integrate_chain`` outcome (events + receipt comment already written).
     A ``parked`` outcome means the caller must NOT move the task to done.
+
+    ``skip_lane_scope`` (default False): skip the pre-done lane-scope check.
+    Used by archive retrigger, which drives integration from an already-done
+    child — re-applying the pre-done boundary check would mis-attribute later
+    sibling commits and spawn phantom fixers (Opus R2-1).
     """
     row = conn.execute(
         "SELECT workspace_path FROM tasks WHERE id = ?", (task_id,)
@@ -7552,16 +7558,17 @@ def maybe_integrate_on_complete(
     # logic — when the branch diff crosses the mechanical lane split. Runs for
     # EVERY completion of a lane-bound task (not just the chain tip), so a
     # violation is attributed to the task whose lane it breaks.
-    lane_block = _enforce_lane_scope_on_complete(
-        conn,
-        task_id,
-        repo_root,
-        chain_branch(root_id),
-        frozen_merge_target(conn, root_id),
-        kb,
-    )
-    if lane_block is not None:
-        return lane_block
+    if not skip_lane_scope:
+        lane_block = _enforce_lane_scope_on_complete(
+            conn,
+            task_id,
+            repo_root,
+            chain_branch(root_id),
+            frozen_merge_target(conn, root_id),
+            kb,
+        )
+        if lane_block is not None:
+            return lane_block
 
     # Chain-complete check via BOTH signals, conservatively OR-ed:
     # (a) task_links membership from the chain root — covers unclaimed
@@ -7666,10 +7673,13 @@ def maybe_retrigger_integration_after_archive(
     **fail-soft** (never raises into the archive path). Callers must invoke it
     *after* a successful archive commits.
 
-    Wiring note (F3 seam search, 2026-07-27): ``kanban_db.archive_task`` ends
-    with ``recompute_ready`` only — no lifecycle hook, no fork wrapper. Adding
-    the one-line call requires a ``kanban_db.py`` edit (forbidden in this
-    brief). Until that wire lands, tests exercise this helper directly.
+    Production wire (operator path only, Opus R2-3): ``kanban_db.archive_task``
+    accepts ``retrigger_integration=True`` and then calls this helper after
+    ``recompute_ready``. Default is False so SUPERSEDED auto-archive,
+    planspec/funnel sweeps, and other non-operator callers do not run
+    synchronous gates+merge. CLI archive and dashboard archive endpoints set
+    the flag; bulk archive runs one retrigger per successfully archived id
+    in the same request.
     """
     try:
         row = conn.execute(
@@ -7715,34 +7725,36 @@ def maybe_retrigger_integration_after_archive(
             # Fully terminal including root — nothing left to finalize.
             return None
 
-        # Drive integration from a real done member so decompose/never-ran
-        # auto-complete sees real completion evidence (not the archived id).
-        driver_id = None
-        for r in rows:
-            if r["id"] == root_id:
-                continue
-            if r["status"] == "done":
-                driver_id = r["id"]
-                break
-        if driver_id is None:
+        # Drive integration from the *latest* done member (completed_at DESC)
+        # so decompose/never-ran auto-complete sees the freshest real completion
+        # evidence. Skip the pre-done lane-scope check: the driver is already
+        # done, and re-running that gate mis-attributes later sibling commits
+        # and spawns phantom fixers on done tasks (Opus R2-1).
+        driver_row = conn.execute(
+            f"SELECT id, workspace_path FROM tasks "
+            f"WHERE id IN ({placeholders}) AND id != ? AND status = 'done' "
+            f"ORDER BY completed_at DESC, id DESC LIMIT 1",
+            (*tuple(members), root_id),
+        ).fetchone()
+        if driver_row is None:
             # No done child → nothing to integrate; never-ran/decompose
             # guards will refuse to ship on failed/cancelled-only chains.
             return None
+        driver_id = driver_row["id"]
 
         # Workspace path of the driver must still resolve (shared chain wt).
-        driver = conn.execute(
-            "SELECT workspace_path FROM tasks WHERE id = ?",
-            (driver_id,),
-        ).fetchone()
-        if driver is None or not driver["workspace_path"]:
+        if not driver_row["workspace_path"]:
             return None
-        if split_provisioned_path(driver["workspace_path"]) is None:
+        if split_provisioned_path(driver_row["workspace_path"]) is None:
             # Fall back to the archived task's provisioned path for the driver
             # attribution by temporarily using the shared wt identity.
             pass
 
         outcome = maybe_integrate_on_complete(
-            conn, driver_id, gate_runner=gate_runner,
+            conn,
+            driver_id,
+            gate_runner=gate_runner,
+            skip_lane_scope=True,
         )
         return outcome
     except Exception:

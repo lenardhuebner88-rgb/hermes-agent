@@ -2106,3 +2106,66 @@ def test_archive_without_retrigger_flag_does_not_integrate(
     assert not (repo / "feature_a.py").exists()
 
 
+def test_retrigger_driver_skips_lane_scope_on_done_child(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-1: archive retrigger must not re-apply lane-scope to a done driver
+    when a later sibling committed foreign-lane paths before archiving."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        root = kb.create_task(conn, title="decompose root", triage=True)
+        child_a, child_b = kb.decompose_triage_task(
+            conn,
+            root,
+            root_assignee=None,
+            children=[
+                {"title": "A", "assignee": "coder", "parents": []},
+                {"title": "B frontend", "assignee": "coder", "parents": []},
+            ],
+            author="decomposer",
+        )
+        info = kwt.ensure_worktree(repo, root)
+        wt = info["path"]
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='ready', workspace_path=?, "
+                "workspace_kind='dir', started_at=NULL WHERE id=?",
+                (str(wt), root),
+            )
+            for cid in (child_a, child_b):
+                conn.execute(
+                    "UPDATE tasks SET status='running', workspace_path=?, "
+                    "workspace_kind='dir' WHERE id=?",
+                    (str(wt), cid),
+                )
+        _commit_in(wt, "feature_a.py", "A = 1\n", msg=f"kanban({child_a}): work")
+        out1 = kwt.maybe_integrate_on_complete(
+            conn, child_a, gate_runner=_ok_gate,
+        )
+        assert out1.get("action") == "deferred"
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done', completed_at=? WHERE id=?",
+                (int(__import__("time").time()), child_a),
+            )
+        # Sibling B commits a FRONTEND path, then is archived without completing.
+        _commit_in(
+            wt,
+            "web/src/control/Panel.tsx",
+            "export const P = 1\n",
+            msg=f"kanban({child_b}): frontend work",
+        )
+        assert kb.archive_task(conn, child_b, retrigger_integration=True)
+        root_after = kb.get_task(conn, root)
+        fixers = _events(conn, child_a, "lane_scope_fixer_dispatched")
+        parks = _events(conn, child_a, "worker_gate_blocked")
+
+    assert root_after.status == "done", (
+        f"retrigger did NOT integrate (root={root_after.status!r})"
+    )
+    assert not fixers, "spurious lane fixer created for an already-done task"
+    assert not parks, "lane-scope park written on already-done driver"
+    assert (repo / "web/src/control/Panel.tsx").exists()
+    assert (repo / "feature_a.py").read_text() == "A = 1\n"
+
+
