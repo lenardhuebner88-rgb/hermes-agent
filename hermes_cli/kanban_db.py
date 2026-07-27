@@ -21227,12 +21227,12 @@ def _reap_worktree_writer_leases(conn: sqlite3.Connection) -> list[str]:
                     lease["task_id"], exc,
                 )
         if not clean:
-            _append_event(conn, lease["task_id"], "worktree_writer_release_deferred", {
-                "reason_class": "worktree_state_unverified",
-                "worktree_key": lease["worktree_key"],
-                "candidate_sha": lease["candidate_sha"],
-                "observed_sha": observed_head,
-            })
+            from hermes_cli.kanban_writer_leases import should_log_release_deferred as _should_log
+            if _should_log(conn, lease["task_id"], lease["worktree_key"], lease["candidate_sha"], observed_head):
+                _append_event(conn, lease["task_id"], "worktree_writer_release_deferred", {
+                    "reason_class": "worktree_state_unverified", "worktree_key": lease["worktree_key"],
+                    "candidate_sha": lease["candidate_sha"], "observed_sha": observed_head,
+                })
             conn.commit()
             continue
         deleted = conn.execute(
