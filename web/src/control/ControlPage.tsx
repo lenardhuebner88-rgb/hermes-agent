@@ -91,6 +91,10 @@ const StrategistView = lazy(() =>
 const DiktatView = lazy(() =>
   import("./views/DiktatView").then((m) => ({ default: m.DiktatView })),
 );
+// Hebel (S7): Kosten-SSOT-Tab gegen den usage-facts.v1 Read-Pfad (S6).
+const HebelView = lazy(() =>
+  import("./views/HebelView").then((m) => ({ default: m.HebelView })),
+);
 const SystemView = lazy(() =>
   import("./views/system/SystemView").then((m) => ({ default: m.SystemView })),
 );
@@ -130,6 +134,7 @@ function activeFromPath(pathname: string): ControlTab {
   if (pathname.includes("/control/schmiede")) return "schmiede";
   if (pathname.includes("/control/stratege")) return "stratege";
   if (pathname.includes("/control/diktat")) return "diktat";
+  if (pathname.includes("/control/hebel")) return "hebel";
   // Run-Timeline (F3) ist eine Detail-Seite der Runs-Liste in Workstreams —
   // Rail-Highlight bleibt dort, eigener Tab existiert bewusst nicht.
   if (pathname.includes("/control/runs/")) return "workstreams";
@@ -162,6 +167,7 @@ const viewImporters: Partial<Record<ControlTab, () => Promise<unknown>>> = {
   schmiede: () => import("./views/SchmiedeView"),
   stratege: () => import("./views/StrategistView"),
   diktat: () => import("./views/DiktatView"),
+  hebel: () => import("./views/HebelView"),
 };
 
 function prefetchControlView(tab: ControlTab): void {
@@ -197,6 +203,7 @@ const tabPath: Record<ControlTab, string> = {
   schmiede: "/control/schmiede",
   stratege: "/control/stratege",
   diktat: "/control/diktat",
+  hebel: "/control/hebel",
 };
 
 // Shown briefly while a lazy-loaded control view chunk downloads (first visit
@@ -322,6 +329,7 @@ export default function ControlPage() {
         <Route path="schmiede" element={<SchmiedeView density={density.density} />} />
         <Route path="stratege" element={<StrategistView density={density.density} />} />
         <Route path="diktat" element={<DiktatView />} />
+        <Route path="hebel" element={<HebelView />} />
         <Route path="*" element={<Navigate to="/control" replace />} />
       </Routes>
       </Suspense>
