@@ -33,6 +33,7 @@ RUN_FACT_COLUMNS = (
     "wall_ms",
     "call_kind",
     "billing_mode",
+    "billing_mode_source",
     "serving_tier",
     "reasoning_effort",
     "input_tokens",
@@ -113,6 +114,7 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     wall_ms INTEGER,
     call_kind TEXT,
     billing_mode TEXT,
+    billing_mode_source TEXT CHECK (billing_mode_source IN ('transcript', 'access_configuration')),
     serving_tier TEXT,
     reasoning_effort TEXT,
     input_tokens INTEGER,
@@ -268,6 +270,10 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                         ("profile", "TEXT"),
                         ("wall_ms", "INTEGER"),
                         ("call_kind", "TEXT"),
+                        (
+                            "billing_mode_source",
+                            "TEXT CHECK (billing_mode_source IN ('transcript', 'access_configuration'))",
+                        ),
                         ("tool_duration_ms", "INTEGER"),
                     ),
                     "run_llm_calls": (

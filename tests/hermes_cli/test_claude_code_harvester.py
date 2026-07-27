@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_cli.claude_code_harvester as harvester_mod
 from hermes_cli.claude_code_harvester import (
     CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION,
     NO_REQUEST_ID,
@@ -36,6 +37,12 @@ def db_path(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _no_host_access_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep transcript fixtures independent from the host's access settings."""
+    monkeypatch.setattr(harvester_mod, "_subscription_plan_label", lambda: None)
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
@@ -44,7 +51,7 @@ def _connect(path: Path) -> sqlite3.Connection:
 
 def test_format_version_pinned_to_golden_fixture() -> None:
     assert GOLDEN["format_version"] == CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION
-    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 2
+    assert CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION == 3
 
 
 def test_request_id_fallback_is_stable() -> None:
@@ -117,8 +124,10 @@ def test_golden_file_harvest_writes_expected_measured_fields(db_path: Path, tmp_
     assert call["context_window_used"] is None
     assert run["source"] == "measured"
     # Current transcripts carry no explicit billing metadata.  Inference from
-    # userType or service_tier would be a guess, so the absence is explicit.
+    # userType or service_tier would be a guess.  The test's access config is
+    # deliberately absent, so the unknown is explicit.
     assert run["billing_mode"] == "unknown"
+    assert run["billing_mode_source"] is None
 
 
 def test_explicit_raw_billing_mode_is_preserved() -> None:
@@ -142,6 +151,69 @@ def test_explicit_raw_billing_mode_is_preserved() -> None:
     assert draft is not None
     _, run_fields = draft_to_fields(draft)
     assert run_fields["billing_mode"] == "raw-direct-mode"
+    assert run_fields["billing_mode_source"] == "transcript"
+
+
+def test_billing_mode_requires_subscription_and_no_metered_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configuration inference must not inspect or retain any credential value."""
+    monkeypatch.setattr(harvester_mod, "_subscription_plan_label", lambda: "plan")
+    monkeypatch.setattr(harvester_mod, "_has_configured_metered_access", lambda: False)
+
+    assert harvester_mod._billing_mode_from_access_configuration() == (
+        "subscription_included",
+        "access_configuration",
+    )
+
+    monkeypatch.setattr(harvester_mod, "_has_configured_metered_access", lambda: True)
+    assert harvester_mod._billing_mode_from_access_configuration() == ("unknown", None)
+
+    monkeypatch.setattr(harvester_mod, "_subscription_plan_label", lambda: None)
+    monkeypatch.setattr(harvester_mod, "_has_configured_metered_access", lambda: False)
+    assert harvester_mod._billing_mode_from_access_configuration() == ("unknown", None)
+
+
+def test_harvest_persists_access_configuration_billing_provenance(
+    db_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(harvester_mod, "_subscription_plan_label", lambda: "plan")
+    monkeypatch.setattr(harvester_mod, "_has_configured_metered_access", lambda: False)
+
+    harvest(projects_root=PROJECTS, db_path=db_path)
+
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT billing_mode, billing_mode_source
+            FROM run_usage_facts
+            WHERE origin = ?
+            LIMIT 1
+            """,
+            ("claude_code",),
+        ).fetchone()
+
+    assert tuple(row) == ("subscription_included", "access_configuration")
+
+
+def test_metered_access_detection_uses_configuration_keys_not_values(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.yaml"
+    api_key_name = f"{harvester_mod.PROVIDER.upper()}_API_KEY"
+    config.write_text(f"{api_key_name}: configured\n", encoding="utf-8")
+
+    class PresenceOnlyEnv(dict[str, str]):
+        def __getitem__(self, key: str) -> str:
+            raise AssertionError(f"credential value read for {key}")
+
+    assert harvester_mod._has_configured_metered_access(
+        environ=PresenceOnlyEnv({api_key_name: "configured"}), config_paths=()
+    )
+    assert harvester_mod._has_configured_metered_access(
+        environ=PresenceOnlyEnv(), config_paths=(config,)
+    )
 
 
 def test_reharvest_backfills_billing_mode_without_changing_tokens(
