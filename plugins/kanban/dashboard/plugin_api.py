@@ -1095,6 +1095,9 @@ def get_board(
                     if state_since is not None
                     else None
                 )
+                station_limit = (
+                    0 if chain_state == "fertig" else _CHAIN_SUMMARY_STATION_LIMIT
+                )
                 ordered_members = _ordered_chain_stations(members, predecessors)
                 stations = [
                     {
@@ -1116,14 +1119,14 @@ def get_board(
                         "started_at": member.started_at,
                         "completed_at": member.completed_at,
                     }
-                    for member in ordered_members[:_CHAIN_SUMMARY_STATION_LIMIT]
+                    for member in ordered_members[:station_limit]
                 ]
                 chain_summaries.append(
                     {
                         "root_id": root_id,
                         "root_title": root.title,
                         "total": len(members),
-                        "station_limit": _CHAIN_SUMMARY_STATION_LIMIT,
+                        "station_limit": station_limit,
                         "stations": stations,
                         "done": sum(
                             member.status in {"done", "archived"} for member in members
