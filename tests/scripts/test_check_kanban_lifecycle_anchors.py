@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+from scripts import check_kanban_lifecycle_anchors
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_kanban_lifecycle_anchors.py"
 DOCUMENT = REPO_ROOT / "docs" / "kanban" / "LIFECYCLE.md"
+ANCHOR_LINE_RE = re.compile(
+    r"(?P<prefix>\]\((?P<target>[^)\n#]+)#L)(?P<line>\d+)(?P<suffix>\))"
+)
 
 
 def _run(document: Path = DOCUMENT, *args: str) -> subprocess.CompletedProcess[str]:
@@ -102,3 +108,46 @@ def test_fix_reports_vanished_symbol_without_guessing(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "no longer exists; refusing to guess" in result.stderr
     assert document.read_text(encoding="utf-8") == before
+
+
+def test_fix_converges_for_uniform_drift_in_real_lifecycle_map(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "repo" / "docs" / "kanban" / "LIFECYCLE.md"
+    document.parent.mkdir(parents=True)
+    shutil.copyfile(DOCUMENT, document)
+    original = document.read_text(encoding="utf-8")
+    original_anchors = list(ANCHOR_LINE_RE.finditer(original))
+
+    for target in {match.group("target") for match in original_anchors}:
+        source = (DOCUMENT.parent / target).resolve()
+        copied_source = (document.parent / target).resolve()
+        copied_source.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, copied_source)
+
+    drifted = ANCHOR_LINE_RE.sub(
+        lambda match: (
+            f"{match.group('prefix')}{int(match.group('line')) + 7}"
+            f"{match.group('suffix')}"
+        ),
+        original,
+    )
+    drifted_anchors = list(ANCHOR_LINE_RE.finditer(drifted))
+    assert len(original_anchors) == len(drifted_anchors)
+    assert all(
+        int(after.group("line")) - int(before.group("line")) == 7
+        for before, after in zip(original_anchors, drifted_anchors, strict=True)
+    )
+    document.write_text(drifted, encoding="utf-8")
+    argv = ["--document", str(document)]
+
+    assert check_kanban_lifecycle_anchors.main(argv) == 1
+    assert check_kanban_lifecycle_anchors.main([*argv, "--fix"]) == 0
+    fixed = document.read_text(encoding="utf-8")
+    assert check_kanban_lifecycle_anchors.main(argv) == 0
+
+    fixed_anchors = list(ANCHOR_LINE_RE.finditer(fixed))
+    assert len(drifted_anchors) == len(fixed_anchors)
+    assert ANCHOR_LINE_RE.sub(r"\g<prefix><LINE>\g<suffix>", drifted) == (
+        ANCHOR_LINE_RE.sub(r"\g<prefix><LINE>\g<suffix>", fixed)
+    )

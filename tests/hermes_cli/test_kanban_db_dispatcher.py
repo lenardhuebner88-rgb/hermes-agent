@@ -1354,3 +1354,112 @@ def test_worktree_writer_lease_kept_when_workspace_removed_but_task_blocked(
         assert len(deferred) == 1
         assert deferred[0].payload["reason_class"] == "worktree_state_unverified"
         assert not any(e.kind == "worktree_writer_released" for e in events)
+
+
+def test_worktree_writer_deferred_event_dedupes_until_state_changes(
+    kanban_home, tmp_path, monkeypatch,
+):
+    from hermes_cli import kanban_worktrees as kwt
+
+    workspace = tmp_path / "dirty-worktree"
+    workspace.mkdir()
+    state = {"observed_sha": "a" * 40, "clean": False}
+
+    monkeypatch.setattr(
+        kb,
+        "_workspace_release_state",
+        lambda _path: (state["observed_sha"], state["clean"]),
+    )
+    monkeypatch.setattr(
+        kwt, "prepare_reused_task_worktree", lambda *_args, **_kwargs: None
+    )
+
+    with kb.connect_closing() as conn:
+        tid = kb.create_task(
+            conn, title="dirty writer", assignee="coder", kind="code",
+        )
+        run_id = _insert_ended_run(conn, tid, profile="coder", metadata=None)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET status='blocked' WHERE id=?", (tid,))
+            conn.execute(
+                "INSERT INTO worktree_writer_leases "
+                "(worktree_key, root_task_id, task_id, run_id, claim_lock, "
+                " worker_pid, workspace_path, candidate_sha, acquired_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"chain:{tid}", tid, tid, run_id, "test-host:1", None,
+                    str(workspace), None, 1, 1,
+                ),
+            )
+
+        assert kb._reap_worktree_writer_leases(conn) == []
+        deferred = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "worktree_writer_release_deferred"
+        ]
+        assert [event.payload for event in deferred] == [
+            {
+                "reason_class": "worktree_state_unverified",
+                "worktree_key": f"chain:{tid}",
+                "candidate_sha": None,
+                "observed_sha": "a" * 40,
+            }
+        ]
+        lease_before = dict(
+            conn.execute(
+                "SELECT * FROM worktree_writer_leases WHERE task_id = ?", (tid,)
+            ).fetchone()
+        )
+
+        for _ in range(5):
+            assert kb._reap_worktree_writer_leases(conn) == []
+
+        lease_after = dict(
+            conn.execute(
+                "SELECT * FROM worktree_writer_leases WHERE task_id = ?", (tid,)
+            ).fetchone()
+        )
+        assert lease_after == lease_before
+        events = kb.list_events(conn, tid)
+        assert sum(
+            event.kind == "worktree_writer_release_deferred" for event in events
+        ) == 1
+        assert not any(event.kind == "worktree_writer_released" for event in events)
+
+        state["observed_sha"] = "b" * 40
+        assert kb._reap_worktree_writer_leases(conn) == []
+        conn.execute(
+            "UPDATE worktree_writer_leases SET candidate_sha = ? WHERE task_id = ?",
+            ("c" * 40, tid),
+        )
+        assert kb._reap_worktree_writer_leases(conn) == []
+        deferred = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "worktree_writer_release_deferred"
+        ]
+        assert [
+            (
+                event.payload["candidate_sha"],
+                event.payload["observed_sha"],
+            )
+            for event in deferred
+        ] == [
+            (None, "a" * 40),
+            (None, "b" * 40),
+            ("c" * 40, "b" * 40),
+        ]
+
+        state["clean"] = True
+        assert kb._reap_worktree_writer_leases(conn) == [tid]
+        assert conn.execute(
+            "SELECT count(*) FROM worktree_writer_leases WHERE task_id = ?", (tid,)
+        ).fetchone()[0] == 0
+        released = [
+            event
+            for event in kb.list_events(conn, tid)
+            if event.kind == "worktree_writer_released"
+        ]
+        assert len(released) == 1
+        assert released[0].payload["reason_class"] == "process_group_ended"

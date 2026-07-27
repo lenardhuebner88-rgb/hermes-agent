@@ -242,6 +242,186 @@ def _init_git_repo(repo: Path) -> None:
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "init"], check=True, capture_output=True, text=True)
 
 
+def _start_provisioned_worker_run(conn, repo: Path, title: str):
+    tid = kb.create_task(
+        conn,
+        title=title,
+        body="Scope files (allowed edit paths):\nsrc/task.py\n",
+        assignee="sentinel",
+        workspace_kind="worktree",
+        workspace_path=str(repo),
+        max_continuations=2,
+    )
+    claimed = kb.claim_task(conn, tid)
+    assert claimed is not None
+    workspace = kwt.provision_for_task(conn, claimed, repo)
+    assert kwt.prepare_reused_task_worktree(conn, claimed, workspace) is None
+    return tid, claimed, workspace
+
+
+def _publish_budget_exhausted_continuation(conn, tid: str, run_id: int) -> None:
+    assert kb._set_worker_pid(
+        conn,
+        tid,
+        987654321,
+        expected_run_id=run_id,
+    )
+    assert kb.record_iteration_budget_exhausted(
+        conn,
+        tid,
+        summary="Implemented the scoped slice; continue with verification.",
+        metadata={"phase": "implementation"},
+        expected_run_id=run_id,
+    )
+    assert kb.reap_pending_continuations(conn) == [tid]
+
+
+def test_prepare_reused_task_worktree_adopts_budget_exhausted_wip_after_failed_spawns(
+    kanban_home, tmp_path,
+):
+    """The live budget-exhausted → spawn_failed → gave_up sequence resumes WIP."""
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    with kb.connect_closing() as conn:
+        tid, first, workspace = _start_provisioned_worker_run(
+            conn, repo, "budget-exhausted adoption",
+        )
+        first_run_id = first.current_run_id
+        assert first_run_id is not None
+        (workspace / "src").mkdir()
+        (workspace / "src" / "task.py").write_text(
+            "partial implementation\n", encoding="utf-8",
+        )
+        _publish_budget_exhausted_continuation(conn, tid, first_run_id)
+
+        failed = kb.claim_task(conn, tid)
+        assert failed is not None
+        assert not kb._record_spawn_failure(
+            conn,
+            tid,
+            "worker base preparation: worktree is dirty before worker edits",
+            failure_limit=2,
+        )
+        gave_up = kb.claim_task(conn, tid)
+        assert gave_up is not None
+        assert kb._record_spawn_failure(
+            conn,
+            tid,
+            "worker base preparation: worktree is dirty before worker edits",
+            failure_limit=2,
+        )
+        assert kb.unblock_task(conn, tid)
+
+        retry = kb.claim_task(conn, tid)
+        assert retry is not None
+        result = kwt.prepare_reused_task_worktree(conn, retry, workspace)
+        runs = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+        events = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert [run["outcome"] for run in runs] == [
+        "iteration_budget_exhausted",
+        "spawn_failed",
+        "gave_up",
+        None,
+    ]
+    assert result is not None
+    assert result["adopted_wip_files"] == ["src/task.py"]
+    assert result["skipped_wip_files"] == []
+    assert kwt.dirty_files(workspace) == []
+    adopted = [
+        json.loads(event["payload"])
+        for event in events
+        if event["kind"] == "wip_adopted"
+    ]
+    assert len(adopted) == 1
+    assert adopted[0]["run_id"] == first_run_id
+    assert adopted[0]["files"] == ["src/task.py"]
+
+
+def test_prepare_reused_task_worktree_budget_wip_skips_outside_scope(
+    kanban_home, tmp_path,
+):
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    with kb.connect_closing() as conn:
+        tid, first, workspace = _start_provisioned_worker_run(
+            conn, repo, "scoped budget-exhausted adoption",
+        )
+        first_run_id = first.current_run_id
+        assert first_run_id is not None
+        (workspace / "src").mkdir()
+        (workspace / "src" / "task.py").write_text(
+            "partial implementation\n", encoding="utf-8",
+        )
+        (workspace / "foreign.py").write_text("unrelated dirt\n", encoding="utf-8")
+        _publish_budget_exhausted_continuation(conn, tid, first_run_id)
+
+        retry = kb.claim_task(conn, tid)
+        assert retry is not None
+        result = kwt.prepare_reused_task_worktree(conn, retry, workspace)
+
+    assert result is not None
+    assert result["adopted_wip_files"] == ["src/task.py"]
+    assert result["skipped_wip_files"] == ["foreign.py"]
+    assert kwt.dirty_files(workspace) == ["foreign.py"]
+    assert _git(workspace, "show", "--name-only", "--format=", "HEAD") == "src/task.py"
+
+
+@pytest.mark.parametrize("outcome", ["crashed", "completed"])
+def test_prepare_reused_task_worktree_rejects_non_resumable_worker_wip(
+    kanban_home, tmp_path, outcome,
+):
+    repo = tmp_path / outcome
+    _init_git_repo(repo)
+
+    with kb.connect_closing() as conn:
+        tid, first, workspace = _start_provisioned_worker_run(
+            conn, repo, f"{outcome} predecessor",
+        )
+        first_run_id = first.current_run_id
+        assert first_run_id is not None
+        (workspace / "src").mkdir()
+        (workspace / "src" / "task.py").write_text(
+            "untrusted leftover\n", encoding="utf-8",
+        )
+        with kb.write_txn(conn):
+            assert kb._end_run(
+                conn,
+                tid,
+                outcome=outcome,
+                status=outcome,
+                summary=f"worker ended as {outcome}",
+            ) == first_run_id
+            conn.execute(
+                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL WHERE id = ?",
+                (tid,),
+            )
+
+        retry = kb.claim_task(conn, tid)
+        assert retry is not None
+        with pytest.raises(kwt.WorktreeError) as exc_info:
+            kwt.prepare_reused_task_worktree(conn, retry, workspace)
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id",
+            (tid,),
+        ).fetchall()
+
+    assert str(exc_info.value).startswith(
+        "worktree is dirty before worker edits; refusing automatic base update",
+    )
+    assert kwt.dirty_files(workspace) == ["src/task.py"]
+    assert not any(event["kind"] == "wip_adopted" for event in events)
+
+
 def test_dispatch_adopts_wip_left_by_own_blocked_run(
     kanban_home, tmp_path, monkeypatch, all_assignees_spawnable,
 ):

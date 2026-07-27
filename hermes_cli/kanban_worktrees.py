@@ -1615,15 +1615,20 @@ def prepare_reused_task_worktree(
     # tree (spawn_failed / gave_up — the dispatcher's own re-claim/breaker
     # cycle after a worktree-prep rejection, not a worker attempt). The
     # first non-skipped run is the actual last worker attempt; only when
-    # THAT ended resumably (``blocked``, e.g. needs_input, OR
+    # THAT ended resumably (``blocked``, e.g. needs_input,
     # ``transient_retry`` — a worker externally terminated mid-edit, e.g. a
     # gateway restart, whose WIP is legitimate continuation state by the
-    # same reasoning as ``blocked``, S8c) is leftover dirt "our own WIP"
-    # rather than garbage from some other predecessor — a crashed/timed-out/
-    # completed run (or exhausting the bounded window without finding one)
-    # stays fail-closed.
+    # same reasoning as ``blocked``, S8c, OR ``iteration_budget_exhausted`` —
+    # the worker ran through its budget and explicitly handed its partial work
+    # to a continuation) is leftover dirt "our own WIP" rather than garbage
+    # from some other predecessor — a crashed/timed-out/completed run (or
+    # exhausting the bounded window without finding one) stays fail-closed.
     _NON_WORKER_RETRY_OUTCOMES = ("spawn_failed", "gave_up")
-    _RESUMABLE_WIP_OUTCOMES = ("blocked", "transient_retry")
+    _RESUMABLE_WIP_OUTCOMES = (
+        "blocked",
+        "transient_retry",
+        "iteration_budget_exhausted",
+    )
     candidate_runs = conn.execute(
         "SELECT id, outcome FROM task_runs "
         "WHERE task_id = ? AND id < ? "
