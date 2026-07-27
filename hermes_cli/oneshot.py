@@ -30,6 +30,10 @@ from typing import Optional
 
 from gateway.session_context import declare_stateless_channel
 from hermes_cli.fallback_config import get_fallback_chain
+from hermes_cli.oneshot_service_tier import (
+    apply_oneshot_service_tier_audit,
+    resolve_oneshot_service_tier_kwargs,
+)
 
 
 def _normalize_toolsets(toolsets: object = None) -> list[str] | None:
@@ -425,6 +429,8 @@ def _run_agent(
             session_db=session_db,
             credential_pool=runtime.get("credential_pool"),
             fallback_model=_fb or None,
+            # Fork hook: profile agent.service_tier → service_tier/request_overrides.
+            **resolve_oneshot_service_tier_kwargs(cfg, effective_model),
             # Interactive callbacks are intentionally NOT wired beyond this
             # one.  In oneshot mode there's no user sitting at a terminal:
             #   - clarify  → returns a synthetic "pick a default" instruction
@@ -446,6 +452,7 @@ def _run_agent(
         agent.tool_gen_callback = None
 
         result = agent.run_conversation(prompt)
+        result = apply_oneshot_service_tier_audit(result, agent)
         return (result.get("final_response") or "", result)
     finally:
         # Ordering deliberately mirrors gateway/run.py:_cleanup_agent_resources,
