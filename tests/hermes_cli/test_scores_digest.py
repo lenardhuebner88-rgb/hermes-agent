@@ -80,6 +80,75 @@ def test_digest_approval_rate_matches_scores_report(tmp_path, monkeypatch):
         assert dw["approved_rows"] == rw["approved_rows"]
 
 
+def test_digest_excludes_named_metric_fixtures_without_deleting_them(
+    tmp_path, monkeypatch
+):
+    now = _seed_db(tmp_path, monkeypatch)
+    created_at = int(datetime(2026, 7, 20, tzinfo=timezone.utc).timestamp())
+
+    with kb.connect_closing() as conn:
+        real_task = kb.create_task(conn, title="production", assignee="coder")
+        fixture_task = kb.create_task(conn, title="time-travel", assignee="w")
+        real_run = _create_run(
+            conn,
+            task_id=real_task,
+            profile="coder",
+            model="real-model",
+        )
+        fixture_run = _create_run(
+            conn,
+            task_id=fixture_task,
+            profile="w",
+            model="fixture-model",
+        )
+        _insert_verdict(
+            conn,
+            task_id=real_task,
+            run_id=real_run,
+            value=1.0,
+            created_at=created_at,
+        )
+        _insert_metric(
+            conn,
+            run_id=real_run,
+            task_id=real_task,
+            name="run_duration_seconds",
+            value=222.0,
+            created_at=created_at,
+        )
+        _insert_verdict(
+            conn,
+            task_id=fixture_task,
+            run_id=fixture_run,
+            value=0.0,
+            created_at=created_at,
+        )
+        _insert_metric(
+            conn,
+            run_id=fixture_run,
+            task_id=fixture_task,
+            name="run_duration_seconds",
+            value=0.0,
+            created_at=created_at,
+        )
+
+        digest = kb.scores_digest(conn, weeks=2, now=now)
+        persisted = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+
+    assert digest["rows_total"] == 1
+    assert digest["approved_rows"] == 1
+    assert digest["approval_rate"] == 1.0
+    assert digest["cost_duration_per_approved_run"] == [
+        {
+            "run_id": real_run,
+            "task_id": real_task,
+            "cost_usd": None,
+            "duration_seconds": 222.0,
+        }
+    ]
+    assert persisted == 4
+
+
 # ── AC-1: Markdown digest output ──────────────────────────────────────
 
 

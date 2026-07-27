@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+from hermes_cli.kanban_score_hygiene import metric_scores_relation
+
 
 _NUMERIC_MATERIALIZED_SCORE_NAMES = (
     "run_cost_effective_usd",
@@ -32,10 +34,11 @@ _RUN_OUTCOME_KIND_LABELS = {
 
 
 def _score_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    scores = metric_scores_relation(conn)
     return conn.execute(
         "SELECT s.name, s.value, s.created_at, COALESCE(r.profile, 'unknown') AS profile, "
         "COALESCE(r.active_model, r.requested_model, 'unknown') AS model "
-        "FROM scores s LEFT JOIN task_runs r ON r.id = s.run_id "
+        f"FROM {scores} s LEFT JOIN task_runs r ON r.id = s.run_id "
         "WHERE s.name = 'review_verdict' ORDER BY s.created_at"
     ).fetchall()
 
@@ -69,12 +72,13 @@ def _materialized_scores(conn: sqlite3.Connection) -> dict[str, dict[str, object
         for name in _NUMERIC_MATERIALIZED_SCORE_NAMES
     }
     scores.update({name: {"value": None, "count": 0} for name in _CATEGORICAL_MATERIALIZED_SCORE_NAMES})
+    score_relation = metric_scores_relation(conn)
     numeric_placeholders = ", ".join("?" for _ in _NUMERIC_MATERIALIZED_SCORE_NAMES)
     numeric_rows = conn.execute(
         f"SELECT name, AVG(CAST(value AS REAL)) AS value, "
         f"MIN(CAST(value AS REAL)) AS minimum, MAX(CAST(value AS REAL)) AS maximum, "
         f"SUM(CAST(value AS REAL)) AS total, COUNT(*) AS count "
-        f"FROM scores WHERE name IN ({numeric_placeholders}) GROUP BY name",
+        f"FROM {score_relation} WHERE name IN ({numeric_placeholders}) GROUP BY name",
         _NUMERIC_MATERIALIZED_SCORE_NAMES,
     ).fetchall()
     for row in numeric_rows:
@@ -88,8 +92,9 @@ def _materialized_scores(conn: sqlite3.Connection) -> dict[str, dict[str, object
 
     categorical_placeholders = ", ".join("?" for _ in _CATEGORICAL_MATERIALIZED_SCORE_NAMES)
     categorical_rows = conn.execute(
-        f"SELECT name, value, COUNT(*) AS count FROM scores "
-        f"WHERE name IN ({categorical_placeholders}) GROUP BY name, value ORDER BY name, value",
+        f"SELECT name, value, COUNT(*) AS count FROM {score_relation} "
+        f"WHERE name IN ({categorical_placeholders}) "
+        f"GROUP BY name, value ORDER BY name, value",
         _CATEGORICAL_MATERIALIZED_SCORE_NAMES,
     ).fetchall()
     for row in categorical_rows:

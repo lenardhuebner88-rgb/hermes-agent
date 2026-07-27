@@ -10,6 +10,8 @@ import sqlite3
 import time
 from typing import Any, Optional
 
+from hermes_cli.kanban_score_hygiene import metric_scores_relation
+
 
 _EUR_PER_USD = 0.92
 _FINDING_SOURCE = "kanban.db/scores"
@@ -33,11 +35,15 @@ def _impact_eur(cost_usd: float, multiplier: float = 1.0) -> float:
     return round(max(0.0, cost_usd * multiplier * _EUR_PER_USD), 2)
 
 
-def _window_costs(conn: sqlite3.Connection, start_epoch: int) -> dict[int, float]:
+def _window_costs(
+    conn: sqlite3.Connection,
+    start_epoch: int,
+    score_relation: str,
+) -> dict[int, float]:
     return {
         int(row["run_id"]): float(row["cost"] or 0.0)
         for row in conn.execute(
-            "SELECT run_id, MAX(CAST(value AS REAL)) AS cost FROM scores "
+            f"SELECT run_id, MAX(CAST(value AS REAL)) AS cost FROM {score_relation} "
             "WHERE name = 'run_cost_effective_usd' "
             "AND run_id IS NOT NULL AND created_at >= ? "
             "GROUP BY run_id",
@@ -51,6 +57,7 @@ def _top_findings(
     *,
     start_epoch: int,
     current_week_epoch: int,
+    score_relation: str,
 ) -> list[dict[str, Any]]:
     """Return at most five local, stable, cost-basis findings.
 
@@ -59,12 +66,12 @@ def _top_findings(
     conversion. For cache and queue findings it is a cost-at-risk estimate,
     not a claim of causal loss.
     """
-    costs = _window_costs(conn, start_epoch)
+    costs = _window_costs(conn, start_epoch, score_relation)
     findings: list[dict[str, Any]] = []
 
     for row in conn.execute(
         "SELECT task_id, run_id, MAX(CAST(value AS REAL)) AS attempts "
-        "FROM scores WHERE name = 'task_runs_to_done' AND created_at >= ? "
+        f"FROM {score_relation} WHERE name = 'task_runs_to_done' AND created_at >= ? "
         "GROUP BY task_id, run_id HAVING attempts > 1 "
         "ORDER BY attempts DESC, task_id ASC, run_id ASC",
         (start_epoch,),
@@ -87,13 +94,14 @@ def _top_findings(
 
     total_tasks = int(
         conn.execute(
-            "SELECT COUNT(DISTINCT task_id) AS n FROM scores WHERE created_at >= ?",
+            f"SELECT COUNT(DISTINCT task_id) AS n FROM {score_relation} "
+            "WHERE created_at >= ?",
             (start_epoch,),
         ).fetchone()["n"]
         or 0
     )
     veto_rows = conn.execute(
-        "SELECT task_id, run_id FROM scores "
+        f"SELECT task_id, run_id FROM {score_relation} "
         "WHERE name = 'operator_veto' AND CAST(value AS REAL) > 0 AND created_at >= ? "
         "ORDER BY task_id ASC, run_id ASC",
         (start_epoch,),
@@ -118,12 +126,12 @@ def _top_findings(
         )
 
     prior_cache = conn.execute(
-        "SELECT AVG(CAST(value AS REAL)) AS ratio FROM scores "
+        f"SELECT AVG(CAST(value AS REAL)) AS ratio FROM {score_relation} "
         "WHERE name = 'cache_hit_ratio' AND created_at >= ? AND created_at < ?",
         (start_epoch, current_week_epoch),
     ).fetchone()["ratio"]
     current_cache = conn.execute(
-        "SELECT AVG(CAST(value AS REAL)) AS ratio FROM scores "
+        f"SELECT AVG(CAST(value AS REAL)) AS ratio FROM {score_relation} "
         "WHERE name = 'cache_hit_ratio' AND created_at >= ?",
         (current_week_epoch,),
     ).fetchone()["ratio"]
@@ -133,7 +141,7 @@ def _top_findings(
             current_cache_cost = sum(
                 costs.get(int(row["run_id"]), 0.0)
                 for row in conn.execute(
-                    "SELECT DISTINCT run_id FROM scores "
+                    f"SELECT DISTINCT run_id FROM {score_relation} "
                     "WHERE name = 'cache_hit_ratio' AND run_id IS NOT NULL AND created_at >= ?",
                     (current_week_epoch,),
                 )
@@ -151,7 +159,7 @@ def _top_findings(
             )
 
     queue_rows = conn.execute(
-        "SELECT run_id, CAST(value AS REAL) AS seconds FROM scores "
+        f"SELECT run_id, CAST(value AS REAL) AS seconds FROM {score_relation} "
         "WHERE name = 'queue_latency_seconds' AND created_at >= ? AND value IS NOT NULL "
         "ORDER BY seconds ASC, run_id ASC",
         (start_epoch,),
@@ -203,11 +211,12 @@ def scores_digest(
     current_week_epoch = int(
         _dt.datetime.combine(current_monday, _dt.time.min, tzinfo=_dt.timezone.utc).timestamp()
     )
+    score_relation = metric_scores_relation(conn)
 
     overall = conn.execute(
         "SELECT COUNT(*) AS rows_total, "
         "COALESCE(SUM(CASE WHEN value = 1.0 THEN 1 ELSE 0 END), 0) AS approved_rows "
-        "FROM scores WHERE name = 'review_verdict'"
+        f"FROM {score_relation} WHERE name = 'review_verdict'"
     ).fetchone()
     rows_total = int(overall["rows_total"])
     approved_rows = int(overall["approved_rows"])
@@ -215,7 +224,7 @@ def scores_digest(
 
     weekly_counts: dict[_dt.date, tuple[int, int]] = {}
     for row in conn.execute(
-        "SELECT created_at, value FROM scores "
+        f"SELECT created_at, value FROM {score_relation} "
         "WHERE name = 'review_verdict' AND created_at >= ? ORDER BY created_at",
         (start_epoch,),
     ):
@@ -250,7 +259,7 @@ def scores_digest(
     for row in conn.execute(
         "SELECT COALESCE(tr.profile, '?') AS profile, COUNT(*) AS total, "
         "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
-        "FROM scores s JOIN task_runs tr ON s.run_id = tr.id "
+        f"FROM {score_relation} s JOIN task_runs tr ON s.run_id = tr.id "
         "WHERE s.name = 'review_verdict' GROUP BY tr.profile ORDER BY total DESC"
     ):
         total = int(row["total"])
@@ -265,7 +274,7 @@ def scores_digest(
     for row in conn.execute(
         "SELECT COALESCE(tr.active_model, '?') AS model, COUNT(*) AS total, "
         "COALESCE(SUM(CASE WHEN s.value = 1.0 THEN 1 ELSE 0 END), 0) AS approved "
-        "FROM scores s JOIN task_runs tr ON s.run_id = tr.id "
+        f"FROM {score_relation} s JOIN task_runs tr ON s.run_id = tr.id "
         "WHERE s.name = 'review_verdict' GROUP BY tr.active_model ORDER BY total DESC"
     ):
         total = int(row["total"])
@@ -281,8 +290,9 @@ def scores_digest(
         "SELECT s.run_id, tr.task_id, "
         "MAX(CASE WHEN s.name = 'run_cost_effective_usd' THEN s.value END) AS cost, "
         "MAX(CASE WHEN s.name = 'run_duration_seconds' THEN s.value END) AS duration "
-        "FROM scores s JOIN task_runs tr ON tr.id = s.run_id "
-        "WHERE s.run_id IN (SELECT run_id FROM scores WHERE name = 'review_verdict' AND value = 1.0) "
+        f"FROM {score_relation} s JOIN task_runs tr ON tr.id = s.run_id "
+        f"WHERE s.run_id IN (SELECT run_id FROM {score_relation} "
+        "WHERE name = 'review_verdict' AND value = 1.0) "
         "AND s.name IN ('run_cost_effective_usd', 'run_duration_seconds') "
         "GROUP BY s.run_id ORDER BY cost DESC, s.run_id DESC LIMIT 20"
     ):
@@ -296,7 +306,7 @@ def scores_digest(
         )
 
     has_metrics = conn.execute(
-        "SELECT 1 FROM scores "
+        f"SELECT 1 FROM {score_relation} "
         "WHERE name IN ('run_cost_effective_usd', 'run_duration_seconds') LIMIT 1"
     ).fetchone() is not None
     approved_run_metric_coverage = any(
@@ -307,7 +317,7 @@ def scores_digest(
     retry_hotspots = [
         {"task_id": str(row["task_id"]), "rejections": int(row["rejections"])}
         for row in conn.execute(
-            "SELECT task_id, COUNT(*) AS rejections FROM scores "
+            f"SELECT task_id, COUNT(*) AS rejections FROM {score_relation} "
             "WHERE name = 'review_verdict' AND value = 0.0 AND created_at >= ? "
             "GROUP BY task_id ORDER BY rejections DESC LIMIT 3",
             (start_epoch,),
@@ -329,6 +339,9 @@ def scores_digest(
         "approved_run_metric_coverage": approved_run_metric_coverage,
         "retry_hotspots": retry_hotspots,
         "top_findings": _top_findings(
-            conn, start_epoch=start_epoch, current_week_epoch=current_week_epoch
+            conn,
+            start_epoch=start_epoch,
+            current_week_epoch=current_week_epoch,
+            score_relation=score_relation,
         ),
     }

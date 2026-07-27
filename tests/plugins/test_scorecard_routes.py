@@ -49,8 +49,8 @@ def _insert_score(conn, *, task_id, run_id, name, value, value_type="numeric"):
     )
 
 
-def _make_run(conn, *, profile="coder", model="test-model"):
-    task_id = kb.create_task(conn, title="scorecard test", assignee=profile)
+def _make_run(conn, *, profile="coder", model="test-model", title="scorecard test"):
+    task_id = kb.create_task(conn, title=title, assignee=profile)
     run_id = conn.execute(
         "INSERT INTO task_runs (task_id, profile, status, started_at, active_model) "
         "VALUES (?, ?, 'done', 1, ?)",
@@ -110,6 +110,65 @@ def test_scorecard_returns_explicit_empty_materialized_score_entries(client):
         "review_iterations_to_approval": {"value": None, "min": None, "max": None, "sum": None, "count": 0},
         "run_outcome_kind": {"value": None, "count": 0},
     }
+
+
+def test_scorecard_excludes_named_fixtures_without_deleting_scores(client):
+    with kb.connect_closing() as conn:
+        real_task, real_run = _make_run(conn)
+        fixture_task, fixture_run = _make_run(
+            conn,
+            profile="w",
+            title="time-travel",
+        )
+        _insert_score(
+            conn,
+            task_id=real_task,
+            run_id=real_run,
+            name="review_verdict",
+            value=1.0,
+            value_type="binary",
+        )
+        _insert_score(
+            conn,
+            task_id=real_task,
+            run_id=real_run,
+            name="run_duration_seconds",
+            value=222.0,
+        )
+        _insert_score(
+            conn,
+            task_id=fixture_task,
+            run_id=fixture_run,
+            name="review_verdict",
+            value=0.0,
+            value_type="binary",
+        )
+        _insert_score(
+            conn,
+            task_id=fixture_task,
+            run_id=fixture_run,
+            name="run_duration_seconds",
+            value=0.0,
+        )
+
+    response = client.get("/api/plugins/kanban/scorecard")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall"] == {
+        "runs": 1,
+        "approved": 1,
+        "approval_rate": 1.0,
+    }
+    assert payload["materialized_scores"]["run_duration_seconds"] == {
+        "value": 222.0,
+        "min": 222.0,
+        "max": 222.0,
+        "sum": 222.0,
+        "count": 1,
+    }
+    with kb.connect_closing() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0] == 4
 
 
 def test_scorecard_merges_numeric_and_text_run_outcome_kinds(client):

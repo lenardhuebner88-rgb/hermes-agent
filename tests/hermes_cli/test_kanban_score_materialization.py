@@ -165,11 +165,14 @@ def test_materialize_scores_uses_real_metadata_json_for_effective_cost(
     assert second["inserted"] == 0
 
 
-def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeypatch):
+def test_backfill_metrics_uses_fact_layer_without_score_materialization(
+    tmp_path, monkeypatch
+):
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.delenv("HERMES_USAGE_FACTS_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     kb.init_db()
     state_db = home / "state.db"
@@ -231,21 +234,28 @@ def test_backfill_metrics_runs_both_materializers_idempotently(tmp_path, monkeyp
                 SYNTHETIC_RETRY_HEAVY_TASK_IDS,
             ).fetchone()[0]
         )
+        materialized_rows = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM scores "
+                "WHERE source = 'score_materialization'"
+            ).fetchone()[0]
+        )
     second = run_slash("backfill-metrics")
 
     assert "Backfilled run-metric scores for " in first
-    assert "Materialized analytics scores for " in first
-    assert {
-        "operator_veto",
-        "queue_latency_seconds",
-        "review_submissions_to_approval",
-        "cache_hit_ratio",
-        "run_cost_effective_usd",
-    } <= names
+    assert "usage facts remain authoritative" in first.lower()
+    assert names == {
+        "run_attempt_index",
+        "run_cost_usd",
+        "run_duration_seconds",
+    }
     assert synthetic_attempts == 0
+    assert materialized_rows == 0
     assert second == (
         "Backfilled run-metric scores for 0 row(s).\n"
-        "Materialized analytics scores for 0 row(s)."
+        "Agent usage facts remain authoritative in "
+        "/mnt/data/hermes-observability/usage_facts.db; "
+        "no analytics scores were materialized."
     )
 
 
