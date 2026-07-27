@@ -3849,7 +3849,9 @@ def test_board_without_done_limit_adds_only_the_fleet_summary(client, monkeypatc
         "assignees",
         "latest_event_id",
         "now",
+        "chain_identities",
     }
+    assert data["chain_identities"]
     assert "chain_summaries" not in data
     assert "done_page" not in data
 

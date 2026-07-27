@@ -1208,6 +1208,40 @@ def get_board(
         if blocked_ids:
             block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
             operator_question_map = kanban_db.blocked_task_operator_questions(conn, tasks)
+        # Chain labels live once at the payload top level. Cards carry only a
+        # stable reference plus their position, so a long PlanSpec filename is
+        # not repeated for every member of the chain. ``planspec_source_map``
+        # is already built above over the full board.
+        identity_groups: dict[str, list[Any]] = {}
+        for task in tasks:
+            identity_groups.setdefault(_resolve_root(task.id), []).append(task)
+        chain_context_by_task: dict[str, dict[str, Any]] = {}
+        chain_identities: dict[str, str] = {}
+        for root_id, members in identity_groups.items():
+            if len(members) < 2:
+                continue
+            # Reuse the chain summary's station order so a card's
+            # "position/total" can never disagree with the drawer's station
+            # list for the same chain in the same payload.
+            ordered = _ordered_chain_stations(members, predecessors)
+            source_value = next(
+                (
+                    planspec_source_map[member.id]
+                    for member in ordered
+                    if planspec_source_map.get(member.id)
+                ),
+                None,
+            )
+            source = str(source_value) if source_value else None
+            label = Path(source).stem if source else ordered[0].title
+            chain_identities[root_id] = label
+            for position, member in enumerate(ordered, start=1):
+                chain_context_by_task[member.id] = {
+                    "identity_id": root_id,
+                    "position": position,
+                    "total": len(ordered),
+                }
+
         for t in tasks:
             full = summary_map.get(t.id)
             preview = (
@@ -1238,6 +1272,8 @@ def get_board(
             # Chain key for the /control Flow board: equals the task's own id
             # for standalone tasks and chain roots, the sink's id for members.
             d["root_id"] = _resolve_root(t.id)
+            if chain := chain_context_by_task.get(t.id):
+                d["chain"] = chain
             d["vault_memory_links"] = _with_vault_memory_file_urls(
                 kanban_db.vault_memory_links_for_task(
                     t,
@@ -1303,6 +1339,8 @@ def get_board(
             "assignees": assignees,
             "latest_event_id": int(latest_event_id),
         }
+        if chain_identities:
+            payload["chain_identities"] = chain_identities
         if done_page is not None:
             payload["done_page"] = done_page
             payload["chain_summaries"] = chain_summaries
