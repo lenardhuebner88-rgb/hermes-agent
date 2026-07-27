@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Mapping
 
 import yaml
 
@@ -2277,18 +2277,50 @@ def _cgroup_leaf(cgroup_text: str) -> str:
     return ""
 
 
+def user_bus_socket_path(environ: Mapping[str, str], *, euid: int) -> str | None:
+    """Socket-Pfad des User-Bus, den `systemd-run --user` zum Re-Exec braucht.
+
+    Reihenfolge: `DBUS_SESSION_BUS_ADDRESS` (`unix:path=…`), dann
+    `$XDG_RUNTIME_DIR/bus`, dann der systemd-Default `/run/user/<euid>/bus`
+    (genau der Fall, wenn ein fremder Service ohne Bus-Umgebung startet).
+    `unix:abstract=` ist auf dem Dateisystem nicht prüfbar und liefert
+    bewusst None — der Caller bleibt dann lieber inline, statt blind zu
+    exec'en (Vorfall 2026-07-27: land unter hermes-dashboard.service starb
+    mit `Failed to connect to bus: No medium found`, weil os.execvp den
+    Prozess bereits ersetzt hatte).
+    """
+    address = environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+    for part in address.split(";"):
+        if part.startswith("unix:path="):
+            return part[len("unix:path="):]
+    if address:
+        # Adresse gesetzt, aber ohne prüfbaren unix:path (z. B. abstract) —
+        # nicht verifizierbar, Caller bleibt konservativ inline.
+        return None
+    runtime_dir = environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return os.path.join(runtime_dir, "bus")
+    return os.path.join("/run/user", str(euid), "bus")
+
+
 def should_reexec_into_scope(
-    cgroup_text: str, *, marker_set: bool, systemd_run_available: bool
+    cgroup_text: str,
+    *,
+    marker_set: bool,
+    systemd_run_available: bool,
+    bus_socket_available: bool,
 ) -> bool:
     """Reine Entscheidung — kein systemd-Aufruf, kein echtes /proc, testbar.
 
     Inline (False) bleibt es bei: Marker schon gesetzt (Rekursionsschutz),
     kein `systemd-run` auf dem PATH, Cgroup-Blatt ist ein `.scope`
-    (Terminal/tmux) oder die Slice-Wurzel, oder das Blatt IST bereits
-    `hermes-loop@*.service`. Nur ein FREMDES `*.service`-Blatt löst den
+    (Terminal/tmux) oder die Slice-Wurzel, das Blatt IST bereits
+    `hermes-loop@*.service`, oder die User-Bus-Socket ist nicht verifizierbar
+    (systemd-run würde nach dem unumkehrbaren os.execvp erst scheitern).
+    Nur ein FREMDES `*.service`-Blatt mit erreichbarem Bus löst den
     Re-Exec aus.
     """
-    if marker_set or not systemd_run_available:
+    if marker_set or not systemd_run_available or not bus_socket_available:
         return False
     leaf = _cgroup_leaf(cgroup_text)
     if not leaf.endswith(".service"):
@@ -2322,7 +2354,11 @@ def _reexec_into_own_scope() -> None:
 
     Escaped ein fremdes Service-Cgroup via `systemd-run --user --scope`
     (Umgebung + Exitcode + stdout/stderr bleiben erhalten, os.execvp ersetzt
-    den aktuellen Prozess); sonst No-Op.
+    den aktuellen Prozess); sonst No-Op. Ohne verifizierbare User-Bus-Socket
+    bleibt der Lauf bewusst INLINE mit Warnung: nach dem unumkehrbaren
+    os.execvp würde ein bus-loses `systemd-run` erst scheitern und den
+    gesamten Loop-Aufruf mitnehmen (land-Vorfall 2026-07-27 unter
+    hermes-dashboard.service: `Failed to connect to bus: No medium found`).
     """
     if os.environ.get(LOOP_SCOPE_OPT_OUT_ENV):
         return
@@ -2332,15 +2368,43 @@ def _reexec_into_own_scope() -> None:
         cgroup_text = Path("/proc/self/cgroup").read_text(encoding="utf-8")
     except OSError:
         return
+    bus_socket = user_bus_socket_path(os.environ, euid=os.geteuid())
+    bus_socket_available = bus_socket is not None and os.path.exists(bus_socket)
     if not should_reexec_into_scope(
-        cgroup_text, marker_set=marker_set, systemd_run_available=bool(systemd_run)
+        cgroup_text,
+        marker_set=marker_set,
+        systemd_run_available=bool(systemd_run),
+        bus_socket_available=bus_socket_available,
     ):
+        if should_reexec_into_scope(
+            cgroup_text,
+            marker_set=marker_set,
+            systemd_run_available=bool(systemd_run),
+            bus_socket_available=True,
+        ):
+            logger.warning(
+                "[loops] foreign service cgroup %s, aber keine User-Bus-Socket "
+                "(socket=%s) — bleibe inline statt fehlgeschlagenem "
+                "systemd-run-Re-Exec; Task-/Memory-Caps des fremden Services "
+                "gelten weiter (HERMES_LOOP_NO_SCOPE=1 zum Quittieren)",
+                _cgroup_leaf(cgroup_text),
+                bus_socket,
+            )
         return
     leaf = _cgroup_leaf(cgroup_text)
     logger.warning(
         "[loops] re-exec into own systemd scope (escaping %s cgroup: TasksMax/Memory-Cap)",
         leaf,
     )
+    # Bus-Umgebung für den Child-Prozess reparieren: fremde Services starten
+    # oft ohne DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR; die Socket existiert
+    # aber unter dem systemd-Default-Pfad /run/user/<euid>/bus.
+    if (
+        bus_socket is not None
+        and "DBUS_SESSION_BUS_ADDRESS" not in os.environ
+        and "XDG_RUNTIME_DIR" not in os.environ
+    ):
+        os.environ["XDG_RUNTIME_DIR"] = os.path.dirname(bus_socket)
     cmd = build_scope_command(systemd_run, sys.orig_argv)
     os.execvp(cmd[0], cmd)
 

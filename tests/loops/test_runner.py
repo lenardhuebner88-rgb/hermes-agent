@@ -8,6 +8,7 @@ eine Fake-Engine (keine CLI-Prozesse in Tests).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -37,6 +38,7 @@ from loops.runner import (
     resolve_packs_dir,
     build_scope_command,
     should_reexec_into_scope,
+    user_bus_socket_path,
 )
 
 # ── Helfer ───────────────────────────────────────────────────────────────────
@@ -2969,19 +2971,28 @@ CGROUP_UNDER_TERMINAL_SCOPE = (
 
 def test_reexec_true_for_foreign_service_cgroup():
     assert should_reexec_into_scope(
-        CGROUP_UNDER_CODEX_REMOTE, marker_set=False, systemd_run_available=True
+        CGROUP_UNDER_CODEX_REMOTE,
+        marker_set=False,
+        systemd_run_available=True,
+        bus_socket_available=True,
     )
 
 
 def test_reexec_false_for_own_hermes_loop_unit():
     assert not should_reexec_into_scope(
-        CGROUP_UNDER_OWN_LOOP_UNIT, marker_set=False, systemd_run_available=True
+        CGROUP_UNDER_OWN_LOOP_UNIT,
+        marker_set=False,
+        systemd_run_available=True,
+        bus_socket_available=True,
     )
 
 
 def test_reexec_false_for_terminal_scope():
     assert not should_reexec_into_scope(
-        CGROUP_UNDER_TERMINAL_SCOPE, marker_set=False, systemd_run_available=True
+        CGROUP_UNDER_TERMINAL_SCOPE,
+        marker_set=False,
+        systemd_run_available=True,
+        bus_socket_available=True,
     )
 
 
@@ -2989,14 +3000,119 @@ def test_reexec_false_when_marker_already_set():
     """Rekursionsschutz: egal wie fremd das Cgroup, ein gesetzter Marker
     (zweiter, bereits re-execter Lauf) heißt immer inline weiterlaufen."""
     assert not should_reexec_into_scope(
-        CGROUP_UNDER_CODEX_REMOTE, marker_set=True, systemd_run_available=True
+        CGROUP_UNDER_CODEX_REMOTE,
+        marker_set=True,
+        systemd_run_available=True,
+        bus_socket_available=True,
     )
 
 
 def test_reexec_false_when_systemd_run_missing():
     assert not should_reexec_into_scope(
-        CGROUP_UNDER_CODEX_REMOTE, marker_set=False, systemd_run_available=False
+        CGROUP_UNDER_CODEX_REMOTE,
+        marker_set=False,
+        systemd_run_available=False,
+        bus_socket_available=True,
     )
+
+
+def test_reexec_false_when_bus_socket_unavailable():
+    """Land-Vorfall 2026-07-27: land unter hermes-dashboard.service exec'te
+    blind in `systemd-run --user`, das ohne User-Bus erst NACH dem
+    unumkehrbaren os.execvp mit `Failed to connect to bus: No medium found`
+    starb — der gesamte Land-Vorgang lief nie. Ohne verifizierbare Socket
+    MUSS die Entscheidung inline bleiben."""
+    assert not should_reexec_into_scope(
+        CGROUP_UNDER_CODEX_REMOTE,
+        marker_set=False,
+        systemd_run_available=True,
+        bus_socket_available=False,
+    )
+
+
+def test_user_bus_socket_path_prefers_dbus_session_address():
+    assert user_bus_socket_path(
+        {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}, euid=1000
+    ) == "/run/user/1000/bus"
+
+
+def test_user_bus_socket_path_falls_back_to_xdg_runtime_dir():
+    assert user_bus_socket_path(
+        {"XDG_RUNTIME_DIR": "/run/user/1000"}, euid=1000
+    ) == "/run/user/1000/bus"
+
+
+def test_user_bus_socket_path_falls_back_to_systemd_default():
+    """Genau der Fall des Vorfalls: fremder Service ohne jede Bus-Umgebung —
+    die Socket liegt trotzdem unter /run/user/<euid>/bus."""
+    assert user_bus_socket_path({}, euid=1000) == "/run/user/1000/bus"
+
+
+def test_user_bus_socket_path_abstract_address_not_verifiable():
+    """`unix:abstract=` ist auf dem Dateisystem nicht prüfbar → None, der
+    Caller bleibt konservativ inline statt blind zu exec'en."""
+    assert (
+        user_bus_socket_path(
+            {"DBUS_SESSION_BUS_ADDRESS": "unix:abstract=/tmp/dbus-xyz"}, euid=1000
+        )
+        is None
+    )
+
+
+_BUS_ENV_VARS = (
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    runner_module.LOOP_SCOPE_MARKER_ENV,
+    runner_module.LOOP_SCOPE_OPT_OUT_ENV,
+)
+
+
+def _foreign_service_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in _BUS_ENV_VARS}
+
+
+class _FakeProcPath:
+    def __init__(self, _path):
+        pass
+
+    def read_text(self, encoding="utf-8"):
+        return CGROUP_UNDER_CODEX_REMOTE
+
+
+def test_reexec_stays_inline_when_bus_missing(monkeypatch, caplog):
+    """End-to-end über den Hook (Repro des land-Vorfalls): fremdes
+    Service-Cgroup + keine prüfbare Bus-Socket → KEIN os.execvp, sondern
+    Warnung und inline weiterlaufen."""
+    calls: list = []
+    monkeypatch.setattr(os, "execvp", lambda *a: calls.append(list(a)))
+    monkeypatch.setattr(os, "environ", _foreign_service_env())
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _n: "/usr/bin/systemd-run")
+    monkeypatch.setattr(runner_module.os.path, "exists", lambda _p: False)
+    monkeypatch.setattr(runner_module, "Path", _FakeProcPath)
+
+    with caplog.at_level(logging.WARNING):
+        runner_module._reexec_into_own_scope()
+
+    assert calls == []
+    assert any("bleibe inline" in record.message for record in caplog.records)
+
+
+def test_reexec_repairs_bus_env_before_exec(monkeypatch):
+    """Socket existiert unter dem systemd-Default, aber der Service gab keine
+    Bus-Umgebung mit → XDG_RUNTIME_DIR wird vor dem exec gesetzt, damit
+    `systemd-run --user` den Bus findet."""
+    calls: list = []
+    fake_env = _foreign_service_env()
+    monkeypatch.setattr(os, "execvp", lambda *a: calls.append(list(a)))
+    monkeypatch.setattr(os, "environ", fake_env)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _n: "/usr/bin/systemd-run")
+    monkeypatch.setattr(runner_module.os.path, "exists", lambda _p: True)
+    monkeypatch.setattr(runner_module, "Path", _FakeProcPath)
+
+    runner_module._reexec_into_own_scope()
+
+    assert len(calls) == 1 and calls[0][0] == "/usr/bin/systemd-run"
+    assert fake_env["XDG_RUNTIME_DIR"] == f"/run/user/{os.geteuid()}"
 
 
 def test_scope_command_preserves_module_invocation():
