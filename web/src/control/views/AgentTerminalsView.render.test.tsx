@@ -1617,16 +1617,23 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(screen.getByText(/unterstützten Mindestversion.*Major-Version.*Hilfe-Signatur/)).toBeTruthy();
   });
 
-  it("opens the create-session modal and resets a disappeared worktree localStorage key to home after capability load", async () => {
-    // Legacy global key still migrates for the default create kind (hermes); disappeared → home + note.
+  it("resets a disappeared worktree localStorage key to a git repo workdir, not to ~, after capability load", async () => {
+    // Realer Auslöser: der nächtliche Pruner räumt Terminal-Worktrees ab, danach ist ein
+    // gemerkter `dir:`-Key tot und dieser Zweig greift. Das Reset-Ziel MUSS ein Git-Repo
+    // sein — der Create-Default ist isolated_write, und in `~` scheitert der Spawn hart
+    // mit "requires a git repository". Deshalb hermes-agent statt home.
     window.localStorage.setItem("hermes-terminals-workdir", "dir:/tmp/verschwundener-worktree");
     await renderView();
 
-    await waitFor(() => expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("home"));
+    await waitFor(() =>
+      expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("hermes-agent"),
+    );
     // Legacy key is left intact (migration read only; anti-scope: no removal).
     expect(window.localStorage.getItem("hermes-terminals-workdir")).toBe("dir:/tmp/verschwundener-worktree");
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
-    expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe("home");
+    expect((screen.getByLabelText("Arbeitsverzeichnis für neue Terminals") as HTMLSelectElement).value).toBe(
+      "hermes-agent",
+    );
     expect(screen.getByText(/Gespeichertes Arbeitsverzeichnis nicht verfügbar/)).toBeTruthy();
   });
 
@@ -1641,11 +1648,11 @@ describe("AgentTerminalsView desktop rendering", () => {
     expect(workdirSelect().value).toBe("family-organizer");
     expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("family-organizer");
 
-    // Kind B (claude): shows its own remembered/default value, not hermes' choice.
+    // Kind B (claude): shows its own remembered/default value (hermes-agent repo), not hermes' choice.
     fireEvent.click(screen.getByRole("button", { name: /Claude/ }));
-    await waitFor(() => expect(workdirSelect().value).toBe("home"));
-    fireEvent.change(workdirSelect(), { target: { value: "hermes-agent" } });
-    expect(window.localStorage.getItem("hermes-terminals-workdir:claude")).toBe("hermes-agent");
+    await waitFor(() => expect(workdirSelect().value).toBe("hermes-agent"));
+    fireEvent.change(workdirSelect(), { target: { value: "family-organizer" } });
+    expect(window.localStorage.getItem("hermes-terminals-workdir:claude")).toBe("family-organizer");
     // hermes key untouched while editing claude
     expect(window.localStorage.getItem("hermes-terminals-workdir:hermes")).toBe("family-organizer");
 
@@ -1679,8 +1686,8 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
     await waitFor(() =>
-      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "home", {
-        start_mode: "free",
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("grok", "hermes-agent", {
+        start_mode: "isolated_write",
         context_profile: "full",
       }),
     );
@@ -1694,11 +1701,20 @@ describe("AgentTerminalsView desktop rendering", () => {
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
     await waitFor(() =>
-      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("qwen", "home", {
-        start_mode: "free",
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("qwen", "hermes-agent", {
+        start_mode: "isolated_write",
         context_profile: "full",
       }),
     );
+  });
+
+  it("defaults the create sheet start mode to isolated_write", async () => {
+    await renderView();
+    fireEvent.click(await screen.findByRole("button", { name: "Neue Session" }));
+    const startMode = screen.getByLabelText("Terminal-Startmodus") as HTMLSelectElement;
+    expect(startMode.value).toBe("isolated_write");
+    // free remains selectable.
+    expect(Array.from(startMode.options).map((o) => o.value)).toEqual(["free", "isolated_write"]);
   });
 
   it("renders empty and error states", async () => {
@@ -1727,7 +1743,21 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     const { buildWsUrl } = await import("@/lib/api");
     await waitFor(() => {
       const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
-      expect(primaryCalls.at(-1)?.[1]?.isolated).toBeUndefined();
+      // Compact/mobile also attaches isolated so parallel desktop/SSH clients
+      // cannot force a wide window size onto the phone viewport.
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBe("1");
+    });
+  });
+
+  it("attaches with isolated=1 in compact layout", async () => {
+    installDom(true);
+    await renderView();
+    await screen.findByTestId("terminal-pane-host-0");
+    const { buildWsUrl } = await import("@/lib/api");
+    await waitFor(() => {
+      const primaryCalls = vi.mocked(buildWsUrl).mock.calls.filter(([, params]) => params?.client_id === "agent-terminals-ui-pane-0");
+      expect(primaryCalls.length).toBeGreaterThan(0);
+      expect(primaryCalls.at(-1)?.[1]?.isolated).toBe("1");
     });
   });
 
@@ -1836,17 +1866,48 @@ describe("AgentTerminalsView mobile rendering (compactLayout)", () => {
     expect(screen.queryByRole("button", { name: "Send Esc" })).toBeNull();
   });
 
+  it("arms sticky Strg, maps the next bar key to a control sequence, then auto-disarms", async () => {
+    installDom(true);
+    await renderView();
+
+    fireEvent.click(screen.getByRole("button", { name: "Tastenleiste einblenden" }));
+    const strg = await screen.findByRole("button", { name: "Strg-Modifier" });
+    expect(strg.className).toContain("min-h-[44px]");
+    // Wait until the attach socket is open — bar buttons stay disabled until then.
+    await waitFor(() => expect((strg as HTMLButtonElement).disabled).toBe(false));
+    expect(strg.getAttribute("aria-pressed")).toBe("false");
+
+    fireEvent.click(strg);
+    expect(strg.getAttribute("aria-pressed")).toBe("true");
+    // Active visual state (not just hover).
+    expect(strg.className).toMatch(/bg-live\/15/);
+
+    const before = websocketSends.length;
+    // Esc is a non-letter single char — sticky still consumes and disarms, sequence unchanged.
+    fireEvent.click(screen.getByRole("button", { name: "Send Esc" }));
+    expect(websocketSends.slice(before)).toContain("\x1b");
+    expect(strg.getAttribute("aria-pressed")).toBe("false");
+
+    // Toggle off without consuming a keystroke (second tap on Strg).
+    fireEvent.click(strg);
+    expect(strg.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(strg);
+    expect(strg.getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("creates a new session via the mobile create sheet", async () => {
     installDom(true);
     await renderView();
 
     fireEvent.click(await screen.findByRole("button", { name: "Neue Session starten" }));
+    // Default start mode is isolated_write; free remains available.
+    expect((screen.getByLabelText("Terminal-Startmodus") as HTMLSelectElement).value).toBe("isolated_write");
     fireEvent.click(screen.getByRole("button", { name: /Codex/ }));
     fireEvent.click(screen.getByRole("button", { name: "Session starten" }));
 
     await waitFor(() =>
-      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "home", {
-        start_mode: "free",
+      expect(apiMock.createAgentTerminalWindow).toHaveBeenCalledWith("codex", "hermes-agent", {
+        start_mode: "isolated_write",
         context_profile: "full",
       }),
     );

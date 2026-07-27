@@ -43,8 +43,14 @@ const WORKDIR_STORAGE_KEY = "hermes-terminals-workdir";
 export function workdirStorageKeyForKind(kind: AgentTerminalKind): string {
   return `${WORKDIR_STORAGE_KEY}:${kind}`;
 }
+/** Reset-/Fallback-Ziel für den Workdir. Muss ein Git-Repo sein: der Create-Default
+ *  `isolated_write` legt einen Worktree an und scheitert in einem Nicht-Repo (z. B. `~`)
+ *  hart mit "requires a git repository". Beide Pfade — kein gespeicherter Wert
+ *  (readStoredWorkdir) und toter gespeicherter Wert (Reset nach Capability-Load) —
+ *  müssen hier landen, sonst ist der Schutz nur halb da. */
+export const WORKDIR_RESET_KEY = "hermes-agent";
 export const WORKDIR_RESET_NOTE =
-  "Gespeichertes Arbeitsverzeichnis nicht verfügbar — auf Zuhause zurückgesetzt.";
+  "Gespeichertes Arbeitsverzeichnis nicht verfügbar — auf Hermes-Agent zurückgesetzt.";
 export const FONT_STORAGE_KEY = "hermes-terminals-fontsize";
 export const KEYS_STORAGE_KEY = "hermes-terminals-keysopen";
 export const TARGET_STORAGE_KEY = "hermes-terminals-last-target";
@@ -215,7 +221,9 @@ export function formatCwdShort(cwd: string | null | undefined): string {
   return segs.slice(-2).join("/");
 }
 
-/** Read last workdir for a kind: per-kind key → legacy global (migration) → home. */
+/** Read last workdir for a kind: per-kind key → legacy global (migration) → hermes-agent.
+ *  Fallback is a git repo key so the default create start_mode isolated_write can succeed
+ *  without forcing the operator into ~ (not a repo). Stored values still win. */
 export function readStoredWorkdir(kind: AgentTerminalKind): string {
   try {
     const perKind = window.localStorage.getItem(workdirStorageKeyForKind(kind));
@@ -226,7 +234,32 @@ export function readStoredWorkdir(kind: AgentTerminalKind): string {
   } catch {
     /* storage optional */
   }
-  return "home";
+  return WORKDIR_RESET_KEY;
+}
+
+/**
+ * Map a keystroke to its ASCII control code when it is a single A–Z letter
+ * (case-insensitive). Multi-character payloads and non-letters pass through unchanged.
+ * Ctrl+J → `\x0a`, Ctrl+C → `\x03`.
+ */
+export function toControlSequence(input: string): string {
+  if (input.length !== 1) return input;
+  const upper = input.toUpperCase();
+  const code = upper.charCodeAt(0);
+  if (code < 65 || code > 90) return input; // A–Z only
+  return String.fromCharCode(code - 64);
+}
+
+/**
+ * Sticky Ctrl consume: if armed, map the next input via toControlSequence and disarm;
+ * if not armed, pass the input through. Pure — UI owns the arm/disarm toggle for Strg.
+ */
+export function consumeStickyControl(
+  armed: boolean,
+  input: string,
+): { sequence: string; armed: boolean } {
+  if (!armed) return { sequence: input, armed: false };
+  return { sequence: toControlSequence(input), armed: false };
 }
 
 export function reconnectDelayMs(attempt: number): number {

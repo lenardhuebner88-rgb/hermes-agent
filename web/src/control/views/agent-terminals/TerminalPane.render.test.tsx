@@ -1,0 +1,122 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, waitFor } from "@testing-library/react";
+
+import { formatPtyResize } from "./terminalHelpers";
+
+const fitFitMock = vi.fn();
+let websocketSends: string[] = [];
+
+vi.mock("@/lib/api", () => ({
+  buildWsUrl: vi.fn().mockResolvedValue("ws://example.test/attach"),
+}));
+
+vi.mock("@xterm/xterm", () => ({ Terminal: class Terminal {} }));
+
+vi.mock("@/lib/xtermSurface", () => ({
+  TERMINAL_THEME_STATIC: {},
+  // Non-hex placeholder — design-token ratchet counts raw hex in web/src/control.
+  TERMINAL_PANE_BACKGROUND: "transparent",
+  createHermesXtermSurface: vi.fn(({ host }: { host: HTMLElement }) => {
+    host.dataset.terminalSurface = "1";
+    return {
+      term: {
+        cols: 80,
+        rows: 24,
+        write: vi.fn(),
+        writeln: vi.fn(),
+        reset: vi.fn(),
+        clear: vi.fn(),
+        focus: vi.fn(),
+        dispose: vi.fn(),
+        onData: vi.fn(() => ({ dispose: vi.fn() })),
+        options: {},
+        scrollLines: vi.fn(),
+        scrollPages: vi.fn(),
+        scrollToBottom: vi.fn(),
+        getSelection: () => "",
+        buffer: {
+          active: {
+            type: "normal",
+            length: 0,
+            getLine: () => undefined,
+          },
+        },
+      },
+      fit: { fit: fitFitMock },
+    };
+  }),
+}));
+
+class FakeWebSocket {
+  static OPEN = 1;
+  readyState = FakeWebSocket.OPEN;
+  binaryType = "";
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  constructor() {
+    setTimeout(() => this.onopen?.(), 0);
+  }
+  send = vi.fn((data: string) => {
+    websocketSends.push(data);
+  });
+  close = vi.fn(() => this.onclose?.());
+}
+
+describe("TerminalPane resize wire format", () => {
+  beforeEach(() => {
+    websocketSends = [];
+    fitFitMock.mockReset();
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get() {
+        return 360;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        return 480;
+      },
+    });
+    global.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    global.ResizeObserver = class ResizeObserver {
+      observe = vi.fn();
+      unobserve = vi.fn();
+      disconnect = vi.fn();
+    } as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("sends the shared CSI formatPtyResize sequence on attach open", async () => {
+    const { TerminalPane } = await import("./TerminalPane");
+    render(
+      <TerminalPane
+        target={{ session: "work", window: "claude" }}
+        paneOrder={1}
+        fontSize={12}
+        isolated
+      />,
+    );
+
+    await waitFor(() => {
+      expect(websocketSends.length).toBeGreaterThan(0);
+    });
+
+    // Assert against the imported helper — not a hand-written literal — so the
+    // pane stays locked to the same wire format the backend parser accepts.
+    const expected = formatPtyResize(80, 24);
+    expect(websocketSends).toContain(expected);
+    // CSI shape: ESC [ RESIZE:cols;rows ]
+    expect(expected.startsWith("\u001b[RESIZE:")).toBe(true);
+    expect(expected.endsWith("]")).toBe(true);
+    expect(expected).toContain("80;24");
+    // Must not use the old OSC 777 format that never matched the backend parser.
+    expect(websocketSends.some((s) => s.includes("777;RESIZE"))).toBe(false);
+  });
+});

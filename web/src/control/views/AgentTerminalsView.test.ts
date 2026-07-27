@@ -4,6 +4,7 @@ import {
   buildComposerPayload,
   chipLabel,
   classifyTerminalState,
+  consumeStickyControl,
   formatActivityAge,
   formatCwdShort,
   formatPtyResize,
@@ -17,6 +18,7 @@ import {
   readStoredWorkdir,
   reconnectDelayMs,
   terminalSurfaceOrder,
+  toControlSequence,
 } from "./AgentTerminalsView";
 import { extractTerminalBufferText } from "./agent-terminals/TerminalSelectOverlay";
 
@@ -493,7 +495,7 @@ describe("formatCwdShort", () => {
 });
 
 describe("readStoredWorkdir", () => {
-  it("prefers the per-kind key, then migrates from the legacy global key, then home", () => {
+  it("prefers the per-kind key, then migrates from the legacy global key, then hermes-agent", () => {
     const store = new Map<string, string>();
     const original = globalThis.window;
     // Minimal localStorage stand-in for the pure helper (no jsdom in this file).
@@ -507,15 +509,52 @@ describe("readStoredWorkdir", () => {
       },
     };
     try {
-      expect(readStoredWorkdir("claude")).toBe("home");
+      // Default create start_mode is isolated_write → fallback must be a git repo key.
+      expect(readStoredWorkdir("claude")).toBe("hermes-agent");
       store.set("hermes-terminals-workdir", "family-organizer");
       expect(readStoredWorkdir("claude")).toBe("family-organizer");
-      store.set("hermes-terminals-workdir:claude", "hermes-agent");
-      expect(readStoredWorkdir("claude")).toBe("hermes-agent");
+      store.set("hermes-terminals-workdir:claude", "home");
+      expect(readStoredWorkdir("claude")).toBe("home");
       expect(readStoredWorkdir("codex")).toBe("family-organizer");
     } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (globalThis as any).window = original;
     }
+  });
+});
+
+describe("toControlSequence", () => {
+  it("maps single letters to ASCII control codes (case-insensitive)", () => {
+    expect(toControlSequence("J")).toBe("\x0a");
+    expect(toControlSequence("j")).toBe("\x0a");
+    expect(toControlSequence("C")).toBe("\x03");
+    expect(toControlSequence("c")).toBe("\x03");
+    expect(toControlSequence("A")).toBe("\x01");
+    expect(toControlSequence("Z")).toBe("\x1a");
+  });
+
+  it("passes non-letters and multi-character input through unchanged", () => {
+    expect(toControlSequence("1")).toBe("1");
+    expect(toControlSequence("\t")).toBe("\t");
+    expect(toControlSequence("\x1b")).toBe("\x1b");
+    expect(toControlSequence("ab")).toBe("ab");
+    expect(toControlSequence("")).toBe("");
+    expect(toControlSequence(" ")).toBe(" ");
+  });
+});
+
+describe("consumeStickyControl", () => {
+  it("passes through when not armed and leaves disarmed", () => {
+    expect(consumeStickyControl(false, "j")).toEqual({ sequence: "j", armed: false });
+  });
+
+  it("maps one keystroke when armed, then auto-disarms", () => {
+    expect(consumeStickyControl(true, "j")).toEqual({ sequence: "\x0a", armed: false });
+    expect(consumeStickyControl(true, "C")).toEqual({ sequence: "\x03", armed: false });
+  });
+
+  it("disarms even when the keystroke is not a letter (still sent as-is)", () => {
+    expect(consumeStickyControl(true, "\t")).toEqual({ sequence: "\t", armed: false });
+    expect(consumeStickyControl(true, "xy")).toEqual({ sequence: "xy", armed: false });
   });
 });

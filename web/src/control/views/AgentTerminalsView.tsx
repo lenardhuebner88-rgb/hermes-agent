@@ -115,6 +115,7 @@ import {
   TMUX_LINE_STEP,
   TMUX_PAGE_UP,
   WINDOW_INVENTORY_POLL_MS,
+  WORKDIR_RESET_KEY,
   WORKDIR_RESET_NOTE,
   activeBoardTasks,
   blockedBoardTasks,
@@ -122,6 +123,7 @@ import {
   capabilityState,
   chipLabel,
   classifyTerminalState,
+  consumeStickyControl,
   formatActivityAge,
   formatCwdShort,
   formatPtyResize,
@@ -160,6 +162,7 @@ export {
   buildComposerPayload,
   chipLabel,
   classifyTerminalState,
+  consumeStickyControl,
   formatActivityAge,
   formatCwdShort,
   formatPtyResize,
@@ -172,6 +175,7 @@ export {
   readStoredWorkdir,
   reconnectDelayMs,
   terminalSurfaceOrder,
+  toControlSequence,
 } from "./agent-terminals/terminalHelpers";
 export type { TerminalUiState } from "./agent-terminals/terminalHelpers";
 
@@ -290,11 +294,11 @@ export function AgentTerminalsView() {
     }
   });
   const [activePane, setActivePane] = useState(0);
-  // Isolation is a property of the layout, not of history: every desktop attach
-  // gets its own tmux client so the browser never forces its window size onto the
-  // other clients of that session. Compact/mobile keeps the single direct attach
-  // (its viewport IS the intended size) — that contract is unchanged.
-  const primaryIsolated = !compactLayout;
+  // Always attach isolated: the operator often has desktop browser + SSH tmux on
+  // the same session (e.g. work). A non-isolated mobile attach would share and
+  // inherit the last wide client size (live: 135×19 on a 64×32 phone viewport).
+  // isolated=1 gives each attach its own tmux client sized to this viewport.
+  const primaryIsolated = true;
   const [paneConnections, setPaneConnections] = useState<Record<number, TerminalPaneConnectionState>>({});
   const [rightRail, setRightRail] = useState<"usage" | "tools" | null>(() => !compactLayout && desktopLayout === 4 ? null : "usage");
   const [loading, setLoading] = useState(true);
@@ -307,7 +311,9 @@ export function AgentTerminalsView() {
   const [createSheetOpen, setCreateSheetOpen] = useState(false);
   const [createKind, setCreateKind] = useState<AgentTerminalKind>("hermes");
   const [createBusy, setCreateBusy] = useState(false);
-  const [createStartMode, setCreateStartMode] = useState<AgentTerminalStartMode>("free");
+  // Default isolated_write so new sessions land in a worktree, not the live checkout.
+  // free remains selectable in the create sheet.
+  const [createStartMode, setCreateStartMode] = useState<AgentTerminalStartMode>("isolated_write");
   const [createContextProfile, setCreateContextProfile] = useState<AgentTerminalContextProfile>("full");
   // Dead-window controls offer only server-supported Fresh/Resume/Fork.
   // Resume/Fork stay disabled unless an unambiguous stamped native_session_id exists.
@@ -345,8 +351,12 @@ export function AgentTerminalsView() {
       return false;
     }
   });
+  // Sticky Ctrl modifier for the mobile key bar — armed until the next keystroke
+  // (soft keyboard or bar button), then auto-disarms. Toggle again to cancel.
+  const [ctrlArmed, setCtrlArmed] = useState(false);
+  const ctrlArmedRef = useRef(false);
   const [workdir, setWorkdir] = useState<string>(() => readStoredWorkdir("hermes"));
-  /** Visible note when a stored workdir key was invalid and we fell back to home. */
+  /** Visible note when a stored workdir key was invalid and we fell back to a repo workdir. */
   const [workdirResetNote, setWorkdirResetNote] = useState<string | null>(null);
   const [fontSize, setFontSize] = useState<number | null>(() => {
     try {
@@ -921,7 +931,16 @@ export function AgentTerminalsView() {
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
         dataDisposable = term.onData((data) => {
-          if (ws.readyState === WebSocket.OPEN) ws.send(data);
+          if (ws.readyState !== WebSocket.OPEN) return;
+          // Soft-keyboard keystrokes also honor sticky Ctrl (not only bar buttons).
+          if (ctrlArmedRef.current) {
+            const next = consumeStickyControl(true, data);
+            ctrlArmedRef.current = next.armed;
+            setCtrlArmed(next.armed);
+            ws.send(next.sequence);
+            return;
+          }
+          ws.send(data);
         });
         ws.onopen = () => {
           if (disposed) return;
@@ -1507,8 +1526,16 @@ export function AgentTerminalsView() {
     if (!capability) return;
     const options = capability.workdirs?.length ? capability.workdirs : FALLBACK_WORKDIRS;
     if (!options.some((option) => option.key === workdir)) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- korrigiert Stale-Key nach Capability-Load, "home" ist immer gültig
-      selectWorkdir("home");
+      // Reset-Ziel muss ein Git-Repo sein, sonst scheitert der isolated_write-Default
+      // hart ("requires a git repository"). Das trifft real: der nächtliche Pruner
+      // räumt Terminal-Worktrees ab, danach ist ein gemerkter Worktree-Key tot und
+      // dieser Zweig greift. "home" (~) ist kein Repo — nur noch letzter Notnagel,
+      // falls das Backend den Repo-Key nicht anbietet.
+      const resetKey = options.some((option) => option.key === WORKDIR_RESET_KEY)
+        ? WORKDIR_RESET_KEY
+        : "home";
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- korrigiert Stale-Key nach Capability-Load
+      selectWorkdir(resetKey);
       setWorkdirResetNote(WORKDIR_RESET_NOTE);
     }
   }, [capability, workdir, selectWorkdir]);
@@ -1549,10 +1576,25 @@ export function AgentTerminalsView() {
         tmuxCopyModeRef.current = false;
         termRef.current?.scrollToBottom();
       }
+      if (ctrlArmedRef.current) {
+        const next = consumeStickyControl(true, sequence);
+        ctrlArmedRef.current = next.armed;
+        setCtrlArmed(next.armed);
+        sendRaw(next.sequence);
+        return;
+      }
       sendRaw(sequence);
     },
     [sendRaw],
   );
+
+  const toggleStickyCtrl = useCallback(() => {
+    setCtrlArmed((current) => {
+      const next = !current;
+      ctrlArmedRef.current = next;
+      return next;
+    });
+  }, []);
 
   const sendComposer = useCallback(
     (submit: boolean) => {
@@ -2244,7 +2286,26 @@ export function AgentTerminalsView() {
             </TerminalControlButton>
           </div>
         </div>
-        <div className="grid grid-cols-5 gap-1" role="group" aria-label="Terminal special keys">
+        <div className="grid grid-cols-6 gap-1" role="group" aria-label="Terminal special keys">
+          <button
+            type="button"
+            aria-label="Strg-Modifier"
+            aria-pressed={ctrlArmed}
+            title={ctrlArmed ? "Strg scharf — nächster Tastendruck wird Control-Sequenz" : "Strg kleben"}
+            disabled={!activeSocketReady}
+            onPointerDown={(event) => event.preventDefault()}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={toggleStickyCtrl}
+            className={cn(
+              "grid min-h-[44px] w-full min-w-0 place-items-center rounded-card border font-mono text-[11px] transition",
+              ctrlArmed
+                ? "border-live/50 bg-live/15 text-live"
+                : "border-line bg-surface-2 text-ink-2 hover:border-live/40 hover:bg-live/10 hover:text-live active:bg-live/15",
+              !activeSocketReady && "cursor-not-allowed opacity-35",
+            )}
+          >
+            Strg
+          </button>
           {QUICK_KEYS.map((key) => (
             <TerminalControlButton key={key.label} label={`Send ${key.label}`} disabled={!activeSocketReady} onClick={() => sendKey(key.sequence)}>
               <span className="font-mono text-[11px]">{key.label}</span>
