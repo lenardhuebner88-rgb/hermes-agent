@@ -3973,3 +3973,238 @@ def test_verify_pass_direct_unchanged_no_retry(tmp_path, fake_engine):
     log = g(runner.wt, "log", "--oneline", f"main..{runner.pack.branch}").stdout
     assert "Revert" not in log
     assert "verified" in ledger
+
+
+# ── DRY-Streak-Eskalation (Pipeline-Nächte, Incident dashboard-polish 2026-07-23+) ─
+
+def _dry_plan_behavior(status: str = "DRY web fehlt"):
+    """Fake planner: 0 Pläne + last-status DRY (echter Kontrakt)."""
+
+    def plan_phase(kv, cwd):
+        (Path(kv["STATE"]) / "last-status").write_text(status + "\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    return plan_phase
+
+
+def _planned_plan_behavior():
+    """Fake planner: 1 Plan + PLANNED — Nicht-DRY-Ende zum Streak-Reset."""
+
+    def plan_phase(kv, cwd):
+        state = Path(kv["STATE"])
+        (state / "queue" / "00-planned" / "P1-beispiel.md").write_text(
+            PLAN_BODY, encoding="utf-8"
+        )
+        (state / "last-status").write_text("PLANNED 1\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    return plan_phase
+
+
+def _dry_streak_runner(tmp_path, fake_engine, monkeypatch, name: str, **pack_overrides):
+    """Pipeline-Pack + Runner mit abgefangenen notifies, ohne echten Planner."""
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", name, "pipeline", repo, **pack_overrides)
+    pack = load_pack(tmp_path / "packs", name)
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+    behaviors["plan"] = _dry_plan_behavior()
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("Build darf bei reinem DRY-Streak-Test nicht starten")
+    )
+    return behaviors, calls, runner, notifies
+
+
+def test_shipped_dashboard_polish_dry_streak_alert_default():
+    """Echtes pack.yaml (dashboard-polish) lädt Default dry_streak_alert=3.
+
+    Kein handgemaltes stop-Dict — realer Loader + reale Manifest-Struktur.
+    """
+    pack = load_pack(PACKS_DIR, "dashboard-polish")
+    assert pack.name == "dashboard-polish"
+    assert pack.type == "pipeline"
+    # pack.yaml listet dry_streak_alert nicht → DEFAULT_STOP-Merge
+    assert "dry_streak_alert" not in (
+        yaml.safe_load(
+            (PACKS_DIR / "dashboard-polish" / "pack.yaml").read_text(encoding="utf-8")
+        ).get("stop")
+        or {}
+    )
+    assert pack.stop["dry_streak_alert"] == 3
+    assert runner_module.DEFAULT_STOP["dry_streak_alert"] == 3
+
+
+def test_dry_streak_escalates_from_third_night(tmp_path, fake_engine, monkeypatch):
+    """Drei DRY-Enden hintereinander: Ledger+Notify genau ab dem dritten."""
+    behaviors, calls, runner, notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-streak-3"
+    )
+    status = "DRY web fehlt"
+    behaviors["plan"] = _dry_plan_behavior(status)
+
+    assert runner.cmd_night() is True
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 2
+    assert not any("DRY-Streak" in m for m in notifies)
+    ledger_mid = (
+        runner.ledger_path.read_text(encoding="utf-8")
+        if runner.ledger_path.is_file()
+        else ""
+    )
+    assert "DRY-STREAK" not in ledger_mid
+
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 3
+    streak_notifies = [m for m in notifies if "DRY-Streak" in m]
+    assert len(streak_notifies) == 1, f"genau 1 Notify ab 3., got {notifies!r}"
+    assert "dry-streak-3" in streak_notifies[0]
+    assert "3 Nächte" in streak_notifies[0]
+    assert status in streak_notifies[0]
+    assert "prüfen" in streak_notifies[0] or "stilllegen" in streak_notifies[0]
+    ledger = runner.ledger_path.read_text(encoding="utf-8")
+    assert ledger.count("DRY-STREAK:") == 1
+    assert "3 Nächte" in ledger
+    assert status in ledger
+    # ledger.jsonl strukturierte Zeile
+    events = (runner.state / "ledger.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    dry_events = [json.loads(line) for line in events if "dry_streak" in line]
+    assert len(dry_events) == 1
+    assert dry_events[0]["verdict"] == "dry_streak"
+    assert dry_events[0]["streak"] == 3
+    assert dry_events[0]["reason"] == status
+
+    # Jedes weitere DRY eskaliert erneut
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 4
+    assert len([m for m in notifies if "DRY-Streak" in m]) == 2
+    assert runner.ledger_path.read_text(encoding="utf-8").count("DRY-STREAK:") == 2
+    assert calls.count("plan") == 4
+    assert "build" not in calls
+
+
+def test_dry_streak_resets_on_non_dry_end(tmp_path, fake_engine, monkeypatch):
+    """Nicht-DRY-Ende (Pläne) dazwischen setzt den Zähler auf 0."""
+    behaviors, calls, runner, notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-reset"
+    )
+    behaviors["plan"] = _dry_plan_behavior("DRY web fehlt")
+    assert runner.cmd_night() is True
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 2
+
+    def build_phase(kv, cwd):
+        commit_in(cwd, "after-dry")
+        (Path(kv["STATE"]) / "last-status").write_text(
+            "BUILT fl-20260702-beispiel\n", encoding="utf-8"
+        )
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = _planned_plan_behavior()
+    behaviors["build"] = build_phase
+    behaviors["verify"] = ok("PASS fl-20260702-beispiel")
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 0
+    assert "build" in calls
+
+    # Nach Reset muss die Eskalation wieder 3 DRY brauchen
+    behaviors["plan"] = _dry_plan_behavior("DRY web fehlt")
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("kein Build nach erneutem DRY")
+    )
+    assert runner.cmd_night() is True
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 2
+    assert not any("DRY-Streak" in m for m in notifies)
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 3
+    assert any("DRY-Streak" in m and "3 Nächte" in m for m in notifies)
+
+
+def test_dry_streak_alert_zero_disables(tmp_path, fake_engine, monkeypatch):
+    """dry_streak_alert: 0 schaltet die Eskalation ab (Loader erlaubt 0)."""
+    # Reale pack.yaml-Struktur (dashboard-polish-Vorlage) + dry_streak_alert: 0
+    real_raw = yaml.safe_load(
+        (PACKS_DIR / "dashboard-polish" / "pack.yaml").read_text(encoding="utf-8")
+    )
+    assert isinstance(real_raw, dict)
+    assert "stop" in real_raw and "phases" in real_raw
+
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    packs_dir = tmp_path / "packs"
+    # write_pack liefert fake-Prompts; stop aus realer Struktur + Alert 0
+    stop = dict(real_raw.get("stop") or {})
+    stop["dry_streak_alert"] = 0
+    write_pack(packs_dir, "dash-off", "pipeline", repo, stop=stop)
+    pack = load_pack(packs_dir, "dash-off")
+    assert pack.stop["dry_streak_alert"] == 0
+
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+    notifies: list[str] = []
+    monkeypatch.setattr(runner, "notify", lambda msg: notifies.append(msg))
+    behaviors["plan"] = _dry_plan_behavior("DRY web fehlt")
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("kein Build")
+    )
+
+    for _ in range(5):
+        assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 5  # Zähler läuft, aber keine Eskalation
+    assert not any("DRY-Streak" in m for m in notifies)
+    ledger = (
+        runner.ledger_path.read_text(encoding="utf-8")
+        if runner.ledger_path.is_file()
+        else ""
+    )
+    assert "DRY-STREAK" not in ledger
+    assert calls.count("plan") == 5
+
+
+def test_dry_streak_corrupt_file_does_not_abort(tmp_path, fake_engine, monkeypatch):
+    """Kaputte/unlesbare dry-streak.json → wie Zähler 0, Lauf bricht nicht ab."""
+    behaviors, calls, runner, notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-corrupt"
+    )
+    runner.ensure_dirs()
+    # Müll statt JSON
+    runner.dry_streak_path.write_text("{not-json!!!", encoding="utf-8")
+    behaviors["plan"] = _dry_plan_behavior("DRY web fehlt")
+
+    assert runner.cmd_night() is True
+    assert runner._read_dry_streak() == 1  # neu geschrieben nach corrupt→0→+1
+    data = json.loads(runner.dry_streak_path.read_text(encoding="utf-8"))
+    assert data["streak"] == 1
+    assert "build" not in calls
+    assert not any("DRY-Streak" in m for m in notifies)  # unter Schwelle
+
+    # Unlesbar: Datei als Verzeichnis (read_text bricht)
+    runner.dry_streak_path.unlink()
+    runner.dry_streak_path.mkdir()
+    assert runner.cmd_night() is True  # darf nicht crashen
+    # write kann fehlschlagen (path is dir) — Read bleibt 0; wichtiger: True + kein Crash
+    assert isinstance(runner._read_dry_streak(), int)
+
+
+def test_dry_streak_also_counts_retry_dry_exit(tmp_path, fake_engine, monkeypatch):
+    """Plan-Retry-DRY-Ausgang (zweiter DRY-Exit in cmd_night) zählt ebenfalls."""
+    behaviors, calls, runner, notifies = _dry_streak_runner(
+        tmp_path, fake_engine, monkeypatch, "dry-retry-exit"
+    )
+    plan_n = {"n": 0}
+
+    def plan_phase(kv, cwd):
+        plan_n["n"] += 1
+        state = Path(kv["STATE"])
+        # Erster Call: Anomalie (leer), zweiter: DRY — der Retry-DRY-Zweig
+        if plan_n["n"] == 1:
+            return engines.EngineResult(rc=0, output="", usage_limit=False)
+        (state / "last-status").write_text("DRY via retry\n", encoding="utf-8")
+        return engines.EngineResult(rc=0, output="", usage_limit=False)
+
+    behaviors["plan"] = plan_phase
+    assert runner.cmd_night() is True
+    assert calls.count("plan") == 2
+    assert runner._read_dry_streak() == 1
+    assert "build" not in calls
