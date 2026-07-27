@@ -2169,3 +2169,54 @@ def test_retrigger_driver_skips_lane_scope_on_done_child(
     assert (repo / "feature_a.py").read_text() == "A = 1\n"
 
 
+def test_lane_scope_allowlist_without_resume_still_rearms_on_new_commits(
+    repo, kanban_home, monkeypatch,
+):
+    """R2-2 residual B5: operator unblock (no resume event) must not leave a
+    permanent allowlist — brand-new foreign-lane work after the park tip
+    re-arms the gate via park_branch_tip."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_resid",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        park_payloads = _events(conn, task_id, "worker_gate_blocked")
+        assert park_payloads
+        assert park_payloads[0].get("park_branch_tip"), (
+            "park payload must carry park_branch_tip for residual B5 retouch"
+        )
+        child_id = _events(conn, task_id, "lane_scope_fixer_dispatched")[0][
+            "child_id"
+        ]
+
+        # Fixer finishes. Operator used `unblock` instead of the resume hook →
+        # NO lane_scope_fixer_parent_resumed event exists.
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status='done' WHERE id=?", (child_id,),
+            )
+        assert _events(conn, task_id, "lane_scope_fixer_parent_resumed") == []
+
+        # Parent commits BRAND NEW work on the same foreign-lane path.
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 999\n",
+            msg=f"kanban({task_id}): brand new frontend work",
+        )
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "parked", (
+            f"GATE SUPPRESSED: new foreign-lane work merged, action={out2.get('action')}"
+        )
+        assert "lane-scope" in (out2.get("reason") or "").lower()
+        assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2

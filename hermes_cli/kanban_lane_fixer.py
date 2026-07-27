@@ -157,7 +157,10 @@ def _paths_changed_since(
     if not tip or not branch or not paths:
         return set()
     try:
-        # TWO dots: commits reachable from branch but not tip.
+        # ``git diff A..B`` with *diff* is an endpoint comparison (same as
+        # ``git diff A B``), not a commit-range walk. Net tree delta between
+        # tip and branch tip — paths changed-and-reverted to identical content
+        # do not appear.
         changed = {
             line.strip()
             for line in kwt._git(
@@ -207,7 +210,6 @@ def allowlisted_paths_for_parent(
         (parent_id, LANE_FIXER_DISPATCHED_EVENT),
     ).fetchall()
     allow: set[str] = set()
-    matched_fp = ""
     for row in rows:
         payload = _payload_dict(row["payload"])
         child_id = str(payload.get("child_id") or "").strip()
@@ -225,8 +227,6 @@ def allowlisted_paths_for_parent(
             text = str(path).strip()
             if text:
                 allow.add(text)
-        if fingerprint:
-            matched_fp = fingerprint
     if not allow:
         return set()
 
@@ -235,7 +235,7 @@ def allowlisted_paths_for_parent(
     if not want_fp:
         return set(allow)
 
-    tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp or matched_fp)
+    tip = _resume_tip_for_fingerprint(conn, parent_id, want_fp)
     if tip and repo_root is not None and branch:
         retouched = _paths_changed_since(repo_root, tip, branch, allow)
         if retouched:
@@ -247,12 +247,13 @@ def allowlisted_paths_for_parent(
         # Resume recorded but no git context — keep allowlist for this fp only.
         return allow
 
-    # No resume tip yet: allow only while the *latest* lane-scope park
-    # fingerprint still matches this violation. That covers re-complete of the
-    # same park (parent still blocked, or test path without complete_task
-    # applying blocked status) without permanently disabling the gate for a
-    # later, different park fingerprint.
+    # No resume tip (operator unblock path): allow only while the *latest*
+    # lane-scope park fingerprint still matches this violation, and use the
+    # park-time branch tip as retouch basis so brand-new parent commits on the
+    # same paths re-arm the gate (Opus R2-2 residual B5). Re-complete of the
+    # same park without new commits stays allowed.
     latest_fp = ""
+    park_tip = ""
     park_rows = conn.execute(
         """
         SELECT payload FROM task_events
@@ -267,13 +268,20 @@ def allowlisted_paths_for_parent(
             continue
         latest_fp = _lane_fingerprint_from_scope_payload(park_payload)
         if latest_fp:
+            park_tip = str(park_payload.get("park_branch_tip") or "").strip()
             break
-    if latest_fp == want_fp:
+    if latest_fp != want_fp:
+        # Done fixer for this fp but no matching current park and no resume:
+        # refuse permanent allowlist (Opus B5).
+        return set()
+    if park_tip and repo_root is not None and branch:
+        retouched = _paths_changed_since(repo_root, park_tip, branch, allow)
+        if retouched:
+            return set()
         return allow
-
-    # Done fixer for this fp but no matching current park and no resume:
-    # refuse permanent allowlist (Opus B5).
-    return set()
+    # Matching park without a tip (legacy events) — keep allowlist for this
+    # fingerprint only so re-complete of the original park still works.
+    return allow
 
 
 def _branch_tip_for_parent(conn: sqlite3.Connection, parent_id: str) -> str:
@@ -319,68 +327,62 @@ def resume_parent_for_completed_lane_fixer(
     if not parent_id or not expected_fingerprint:
         return False
 
-    parent = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?",
-        (parent_id,),
-    ).fetchone()
-    blocked = conn.execute(
-        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
-        "ORDER BY id DESC LIMIT 1",
-        (parent_id,),
-    ).fetchone()
-    current_reason = ""
-    if blocked is not None:
-        current_reason = str(
-            _payload_dict(blocked["payload"]).get("reason") or ""
-        )
-    if (
-        parent is None
-        or parent["status"] != "blocked"
-        or not current_reason.startswith("integration parked:")
-        or "lane-scope" not in current_reason.lower()
-    ):
-        return False
-
-    # Bind to the CURRENT park fingerprint (same contract as conflict fixer).
-    current_fp = current_lane_scope_park_fingerprint(
-        conn, parent_id, current_reason,
-    )
-    if not current_fp or current_fp != expected_fingerprint:
-        return False
-
-    # Dispatch event must still name this child for the same fingerprint.
-    dispatched = conn.execute(
-        """
-        SELECT payload FROM task_events
-        WHERE task_id = ? AND kind = ?
-        ORDER BY id DESC
-        """,
-        (parent_id, LANE_FIXER_DISPATCHED_EVENT),
-    ).fetchall()
-    fingerprint_ok = False
-    for row in dispatched:
-        d_payload = _payload_dict(row["payload"])
-        if (
-            str(d_payload.get("child_id") or "") == child_id
-            and str(d_payload.get("fingerprint") or "")
-            == expected_fingerprint
-        ):
-            fingerprint_ok = True
-            break
-    if not fingerprint_ok:
-        return False
-
-    # Resolve tip before the write txn so git never holds the board lock.
+    # Resolve tip before the write txn so git never holds the board lock
+    # (Opus R2-6: only the git probe stays outside; fingerprint checks move in).
     resume_tip = _branch_tip_for_parent(conn, parent_id)
 
     with kb.write_txn(conn):
-        # Re-check CAS predicates inside the txn.
         parent = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
             (parent_id,),
         ).fetchone()
-        if parent is None or parent["status"] != "blocked":
+        blocked = conn.execute(
+            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        current_reason = ""
+        if blocked is not None:
+            current_reason = str(
+                _payload_dict(blocked["payload"]).get("reason") or ""
+            )
+        if (
+            parent is None
+            or parent["status"] != "blocked"
+            or not current_reason.startswith("integration parked:")
+            or "lane-scope" not in current_reason.lower()
+        ):
             return False
+
+        # Bind to the CURRENT park fingerprint (same contract as conflict fixer).
+        current_fp = current_lane_scope_park_fingerprint(
+            conn, parent_id, current_reason,
+        )
+        if not current_fp or current_fp != expected_fingerprint:
+            return False
+
+        # Dispatch event must still name this child for the same fingerprint.
+        dispatched = conn.execute(
+            """
+            SELECT payload FROM task_events
+            WHERE task_id = ? AND kind = ?
+            ORDER BY id DESC
+            """,
+            (parent_id, LANE_FIXER_DISPATCHED_EVENT),
+        ).fetchall()
+        fingerprint_ok = False
+        for row in dispatched:
+            d_payload = _payload_dict(row["payload"])
+            if (
+                str(d_payload.get("child_id") or "") == child_id
+                and str(d_payload.get("fingerprint") or "")
+                == expected_fingerprint
+            ):
+                fingerprint_ok = True
+                break
+        if not fingerprint_ok:
+            return False
+
         undone_parent = conn.execute(
             "SELECT 1 FROM task_links l JOIN tasks p ON p.id = l.parent_id "
             "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",

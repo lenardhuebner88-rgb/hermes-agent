@@ -6686,6 +6686,16 @@ def _enforce_lane_scope_on_complete(
         f"its lane: {', '.join(violating)} — this task should have been "
         f"assigned to lane '{expected_lane}'."
     )
+    # Capture branch tip at park time so the allowlist path without a resume
+    # event (operator unblock) can still retouch-check later parent commits
+    # (Opus R2-2 residual B5).
+    park_branch_tip: Optional[str] = None
+    try:
+        park_branch_tip = _git(repo_root, "rev-parse", branch) or None
+        if park_branch_tip:
+            park_branch_tip = str(park_branch_tip).strip() or None
+    except Exception:
+        park_branch_tip = None
     payload = {
         "gate": "lane_scope",
         "command": "lane-scope-check",
@@ -6697,6 +6707,7 @@ def _enforce_lane_scope_on_complete(
         "changed_files": changed_files,
         "branch": branch,
         "merge_target": base,
+        "park_branch_tip": park_branch_tip,
     }
     with kb.write_txn(conn):
         kb._append_event(conn, task_id, LANE_SCOPE_BLOCKED_EVENT, payload)
