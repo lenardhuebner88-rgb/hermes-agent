@@ -3089,6 +3089,8 @@ DEFAULT_CONFIG = {
     # each claimable ready task. One dispatcher per profile is sufficient;
     # running more than one on the same kanban.db will race for claims.
     "kanban": {
+        # Verify stamped test evidence before paying for a worker run.
+        "evidence_freshness_preflight": True,
         # Explicitly opt-in: isolated-write commits enter only through the
         # held candidate adapter, and only from a canonical allowlisted repo.
         "candidate_submit": {

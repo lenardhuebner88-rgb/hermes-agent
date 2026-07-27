@@ -1532,6 +1532,21 @@ def _handle_create(args: dict, **kw) -> str:
     provider_override = args.get("provider")
     if provider_override and not model_override:
         return tool_error("'provider' requires 'model' to be set as well")
+    evidence_commit = args.get("evidence_commit")
+    evidence_recorded_at = args.get("evidence_recorded_at")
+    evidence_test_files = args.get("evidence_test_files") or []
+    if evidence_commit or evidence_recorded_at or evidence_test_files:
+        if not evidence_commit or not evidence_recorded_at:
+            return tool_error("evidence_commit and evidence_recorded_at must be supplied together")
+        if not isinstance(evidence_test_files, list) or not all(isinstance(path, str) for path in evidence_test_files):
+            return tool_error("evidence_test_files must be a list of strings")
+        scope_contract = {"evidence_freshness": {
+            "commit": evidence_commit,
+            "recorded_at": evidence_recorded_at,
+            "test_files": evidence_test_files,
+        }}
+    else:
+        scope_contract = None
     if isinstance(parents, str):
         parents = [parents]
     if not isinstance(parents, (list, tuple)):
@@ -1641,6 +1656,7 @@ def _handle_create(args: dict, **kw) -> str:
                 skills=skills,
                 model_override=model_override,
                 provider_override=provider_override,
+                scope_contract=scope_contract,
                 project_source_task_id=project_source_task_id,
                 goal_mode=goal_mode,
                 goal_max_turns=(

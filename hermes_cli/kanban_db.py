@@ -31870,6 +31870,10 @@ def _resolve_worker_cli_toolsets(
             # critic -> worker_runtime hermes) cannot lose its cage.
             return ["kanban", "review-read-only"]
         scope_contract = task.scope_contract if task else None
+        # Evidence provenance is deliberately orthogonal to worker capability
+        # contracts.  A stamp alone must preserve the legacy tool surface.
+        if isinstance(scope_contract, dict) and set(scope_contract) == {"evidence_freshness"}:
+            scope_contract = None
         denied_toolsets = [_WORKER_SCOPE_DENIED_TOOLSET]
         if scope_contract is not None and not isinstance(scope_contract, dict):
             return denied_toolsets

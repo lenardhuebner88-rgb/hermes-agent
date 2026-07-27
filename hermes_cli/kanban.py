@@ -368,6 +368,12 @@ def _register_create_parser(sub: argparse._SubParsersAction) -> None:
     p_create = sub.add_parser("create", help="Create a new task")
     p_create.add_argument("title", help="Task title")
     p_create.add_argument("--body", default=None, help="Optional opening post")
+    p_create.add_argument("--evidence-commit", default=None,
+                          help="Commit SHA at which the task evidence was measured")
+    p_create.add_argument("--evidence-recorded-at", default=None,
+                          help="ISO-8601 timestamp at which the evidence was recorded")
+    p_create.add_argument("--evidence-test-file", action="append", default=[],
+                          help="Test file that reproduces the evidence (repeatable)")
     p_create.add_argument("--assignee", default=None, help="Profile name to assign")
     p_create.add_argument("--parent", action="append", default=[],
                           help="Parent task id (repeatable)")
@@ -2422,6 +2428,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
             # The upstream create invariant accepts branch metadata only for
             # a newly provisioned worktree, not a shared directory path.
             branch_name = None
+        scope_contract = None
+        if args.evidence_commit or args.evidence_recorded_at or args.evidence_test_file:
+            if not args.evidence_commit or not args.evidence_recorded_at:
+                print("--evidence-commit and --evidence-recorded-at must be supplied together", file=sys.stderr)
+                return 2
+            scope_contract = {"evidence_freshness": {
+                "commit": args.evidence_commit,
+                "recorded_at": args.evidence_recorded_at,
+                "test_files": args.evidence_test_file,
+            }}
         task_id = kb.create_task(
             conn,
             title=args.title,
@@ -2449,6 +2465,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             epic_id=getattr(args, "epic_id", None),
             kind=getattr(args, "kind", None),
             ui_impact=getattr(args, "ui_impact", None),
+            scope_contract=scope_contract,
             # P1-S3: a standalone `kanban create` couples a scout to a resolved-critical
             # task (flag/tier-gated, idempotent; held/triage statuses defer inside).
             # Live smoke tasks and other no-file/non-code cards can opt out so they
