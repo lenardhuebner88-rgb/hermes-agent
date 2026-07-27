@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import importlib
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
+from agent.usage_pricing import normalize_usage
 import plugins.observability.board_facts as board_facts
+import pytest
 import yaml
 
 
@@ -18,10 +22,11 @@ class _PluginContext:
 
 def _reload(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_USAGE_FACTS_DB", str(tmp_path / "facts.db"))
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
     return importlib.reload(board_facts)
 
 
-def test_registers_five_handlers_on_six_existing_hooks(monkeypatch, tmp_path):
+def test_registers_handlers_including_api_request_error(monkeypatch, tmp_path):
     plugin = _reload(monkeypatch, tmp_path)
     ctx = _PluginContext()
 
@@ -30,6 +35,7 @@ def test_registers_five_handlers_on_six_existing_hooks(monkeypatch, tmp_path):
     assert set(ctx.hooks) == {
         "pre_api_request",
         "post_api_request",
+        "api_request_error",
         "pre_llm_call",
         "post_llm_call",
         "pre_tool_call",
@@ -37,6 +43,7 @@ def test_registers_five_handlers_on_six_existing_hooks(monkeypatch, tmp_path):
     }
     assert ctx.hooks["pre_api_request"] is plugin.on_pre_llm_request
     assert ctx.hooks["post_api_request"] is plugin.on_post_llm_call
+    assert ctx.hooks["api_request_error"] is plugin.on_api_request_error
     assert ctx.hooks["post_llm_call"] is plugin.on_post_llm_call
 
 
@@ -57,6 +64,7 @@ def test_manifest_is_discovered_as_switchable_opt_in(monkeypatch, tmp_path):
     assert set(manifest["hooks"]) == {
         "pre_api_request",
         "post_api_request",
+        "api_request_error",
         "pre_llm_call",
         "post_llm_call",
         "pre_tool_call",
@@ -142,24 +150,6 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
             }
         },
     )
-    plugin.on_pre_tool_call(
-        **common,
-        tool_name="terminal",
-        tool_call_id="tool-42",
-        args={"command": f"echo {secret}"},
-    )
-    plugin.on_post_tool_call(
-        **common,
-        tool_name="terminal",
-        tool_call_id="tool-42",
-        args={"command": f"echo {secret}"},
-        result=f"failed with {secret}",
-        status="error",
-        error_type="tool_error",
-        error_message=f"provider echoed {secret}",
-        tool_output_tokens=5,
-    )
-
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
         fact = conn.execute(
@@ -176,26 +166,302 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     assert fact["model"] == "grok-4.20"
     assert fact["requested_provider"] == "xai-oauth"
     assert fact["requested_model"] == "requested-grok"
-    assert fact["fallback_depth"] > 0
+    assert fact["fallback_depth"] is None
     assert fact["lane"] == "implementation"
     assert fact["billing_mode"] == "subscription_included"
     assert fact["serving_tier"] == "priority"
     assert fact["reasoning_effort"] == "high"
     assert fact["finish_reason"] == "tool_calls"
-    assert fact["error_type"] == "tool_error"
     assert fact["temperature"] == 0.25
     assert fact["top_p"] == 0.8
     assert fact["source"] == "measured"
     assert call["response_id"] == "response-42"
     assert call["input_tokens"] == 101
     assert call["output_tokens"] == 22
-    assert call["tool_call_count"] == 1
-    assert call["tool_output_tokens"] == 5
     assert call["duration_ms"] == 1500
-    assert {"system", "user", "assistant", "tool_args", "tool_result"} <= {
+    assert {"system", "user", "assistant"} <= {
         row["role"] for row in traces
     }
     assert secret not in "\n".join(row["content"] for row in traces)
+
+
+def test_post_tool_call_uses_exact_live_kwargs_and_derives_output_chars(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+
+    plugin.on_post_tool_call(
+        tool_name="terminal",
+        args={"command": "printf four"},
+        result="four",
+        task_id="task-tool",
+        session_id="session-tool",
+        tool_call_id="tool-call-1",
+        turn_id="turn-tool",
+        api_request_id="request-tool",
+        duration_ms=12,
+        status="ok",
+        error_type=None,
+        error_message=None,
+        middleware_trace=[],
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id='turn-tool'"
+        ).fetchone()
+        call = conn.execute(
+            "SELECT * FROM run_llm_calls WHERE run_id='turn-tool'"
+        ).fetchone()
+
+    assert fact["tool_call_count"] == 1
+    assert fact["tool_output_chars"] == 4
+    assert call["tool_call_count"] == 1
+    assert call["tool_output_chars"] == 4
+
+
+def test_versioned_response_model_does_not_invent_fallback_depth(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    request = {"body": {"model": "claude-opus-4-8"}}
+
+    plugin.on_pre_llm_request(
+        turn_id="turn-versioned",
+        api_request_id="request-versioned",
+        session_id="session-versioned",
+        api_call_count=1,
+        provider="anthropic",
+        model="claude-opus-4-8",
+        request=request,
+    )
+    plugin.on_post_llm_call(
+        turn_id="turn-versioned",
+        api_request_id="request-versioned",
+        session_id="session-versioned",
+        api_call_count=1,
+        provider="anthropic",
+        model="claude-opus-4-8",
+        response={
+            "model": "claude-opus-4-8-20260115",
+            "usage": {"input_tokens": 10, "output_tokens": 2},
+        },
+        request=request,
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id='turn-versioned'"
+        ).fetchone()
+
+    assert fact["requested_model"] == "claude-opus-4-8"
+    assert fact["model"] == "claude-opus-4-8-20260115"
+    assert fact["fallback_depth"] is None
+
+
+def test_api_request_error_preserves_previous_successful_call(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+
+    plugin.on_post_llm_call(
+        task_id="task-error",
+        turn_id="turn-error",
+        api_request_id="request-success",
+        session_id="session-error",
+        provider="anthropic",
+        model="claude-opus-4-8",
+        api_call_count=1,
+        api_duration=0.5,
+        response={
+            "model": "claude-opus-4-8-20260115",
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 7,
+                "cache_read_tokens": 0,
+                "cache_read_tokens_observed": True,
+                "cache_write_tokens": 0,
+                "cache_write_tokens_observed": True,
+                "reasoning_tokens": 0,
+                "reasoning_tokens_observed": True,
+            },
+        },
+        request={"body": {"model": "claude-opus-4-8"}},
+    )
+    plugin.on_api_request_error(
+        task_id="task-error",
+        turn_id="turn-error",
+        api_request_id="request-failed",
+        session_id="session-error",
+        platform="cli",
+        model="claude-opus-4-8",
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        api_mode="anthropic_messages",
+        api_call_count=2,
+        api_duration=1.25,
+        started_at=100.0,
+        ended_at=101.25,
+        status_code=429,
+        retry_count=1,
+        max_retries=3,
+        retryable=True,
+        reason="rate_limit",
+        error={
+            "type": "RateLimitError",
+            "message": "request rate limited",
+        },
+        request={"method": "POST", "body": {"model": "claude-opus-4-8"}},
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id='turn-error'"
+        ).fetchone()
+        calls = conn.execute(
+            "SELECT * FROM run_llm_calls WHERE run_id='turn-error'"
+        ).fetchall()
+
+    assert fact["error_type"] == "RateLimitError"
+    assert fact["provider"] == "anthropic"
+    assert fact["requested_model"] == "claude-opus-4-8"
+    assert fact["input_tokens"] == 12
+    assert fact["output_tokens"] == 7
+    assert fact["llm_call_count"] == 1
+    assert len(calls) == 1
+    assert calls[0]["input_tokens"] == 12
+    assert calls[0]["error_type"] is None
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    (
+        ({"reasoning": {"effort": "high"}}, "high"),
+        ({"extra_body": {"reasoning": {"effort": "low"}}}, "low"),
+        (
+            {"thinking": {"type": "enabled", "budget_tokens": 16_000}},
+            "high",
+        ),
+        (
+            {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "max"},
+            },
+            "max",
+        ),
+    ),
+)
+def test_sampling_fields_reads_real_reasoning_transport_shapes(
+    monkeypatch,
+    tmp_path,
+    body,
+    expected,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+
+    fields = plugin._sampling_fields({"request": {"body": body}})
+
+    assert fields["reasoning_effort"] == expected
+
+
+def test_optional_usage_buckets_distinguish_missing_from_explicit_zero(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    missing = asdict(
+        normalize_usage(
+            SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+            provider="openai",
+            api_mode="chat_completions",
+        )
+    )
+    explicit_zero = asdict(
+        normalize_usage(
+            SimpleNamespace(
+                prompt_tokens=10,
+                completion_tokens=2,
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=0,
+                    cache_write_tokens=0,
+                ),
+                completion_tokens_details=SimpleNamespace(
+                    reasoning_tokens=0,
+                ),
+            ),
+            provider="openai",
+            api_mode="chat_completions",
+        )
+    )
+
+    for run_id, usage in (
+        ("turn-missing", missing),
+        ("turn-explicit-zero", explicit_zero),
+    ):
+        plugin.on_post_llm_call(
+            turn_id=run_id,
+            api_request_id=f"request-{run_id}",
+            session_id=f"session-{run_id}",
+            api_call_count=1,
+            provider="openai",
+            model="gpt-test",
+            response={"model": "gpt-test", "usage": usage},
+            request={"body": {"model": "gpt-test"}},
+        )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        missing_fact = conn.execute(
+            "SELECT * FROM run_usage_facts WHERE run_id='turn-missing'"
+        ).fetchone()
+        zero_fact = conn.execute(
+            "SELECT * FROM run_usage_facts "
+            "WHERE run_id='turn-explicit-zero'"
+        ).fetchone()
+
+    for field in (
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    ):
+        assert missing_fact[field] is None
+        assert zero_fact[field] == 0
+
+
+def test_trace_purge_runs_at_most_once_per_plugin_process(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    purge_calls = []
+    monkeypatch.setattr(
+        plugin,
+        "purge_expired_traces",
+        lambda: purge_calls.append(True),
+    )
+
+    for suffix in ("one", "two"):
+        plugin.on_pre_llm_request(
+            turn_id=f"turn-{suffix}",
+            api_request_id=f"request-{suffix}",
+            session_id=f"session-{suffix}",
+            api_call_count=1,
+            provider="anthropic",
+            model="claude-opus-4-8",
+            request={"body": {"model": "claude-opus-4-8"}},
+        )
+
+    assert purge_calls == [True]
 
 
 def test_hooks_are_fail_soft_when_database_path_is_unusable(monkeypatch, tmp_path):

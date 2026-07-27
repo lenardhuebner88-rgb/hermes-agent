@@ -75,7 +75,7 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
         "cache_write_tokens": 3,
         "reasoning_tokens": 4,
         "tool_call_count": 1,
-        "tool_output_tokens": 5,
+        "tool_output_chars": 5,
         "duration_ms": 20,
         "first_token_ms": 8,
         "context_window_used": 100,
@@ -109,10 +109,87 @@ def test_call_facts_aggregate_without_partial_zero_fill(tmp_path):
     assert fact["cache_write_tokens"] == 6
     assert fact["reasoning_tokens"] == 8
     assert fact["tool_call_count"] == 2
-    assert fact["tool_output_tokens"] == 10
+    assert fact["tool_output_chars"] == 10
     assert fact["duration_ms"] == 40
     assert fact["first_token_ms"] == 5
     assert fact["context_window_used"] == 120
+
+
+def test_tool_aggregates_sum_known_rows_while_token_aggregates_stay_strict(
+    tmp_path,
+):
+    path = tmp_path / "facts.db"
+    calls = (
+        {
+            "input_tokens": 10,
+            "output_tokens": 4,
+            "cache_read_tokens": 2,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "tool_call_count": 1,
+            "tool_output_chars": 4,
+        },
+        {
+            "input_tokens": 20,
+            "output_tokens": 5,
+            "cache_read_tokens": 3,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "tool_call_count": 1,
+            "tool_output_chars": 6,
+        },
+        {
+            "input_tokens": 30,
+            "output_tokens": 6,
+        },
+    )
+    for call_index, fields in enumerate(calls, start=1):
+        record_llm_call(
+            "run-three-calls",
+            call_index,
+            fields,
+            run_fields={"source": "measured"},
+            path=path,
+        )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-three-calls'",
+    )
+    assert fact["llm_call_count"] == 3
+    assert fact["tool_call_count"] == 2
+    assert fact["tool_output_chars"] == 10
+    assert fact["input_tokens"] == 60
+    assert fact["output_tokens"] == 15
+    assert fact["cache_read_tokens"] is None
+    assert fact["cache_write_tokens"] is None
+    assert fact["reasoning_tokens"] is None
+
+
+def test_schema_initialization_is_cached_per_database_file(
+    monkeypatch,
+    tmp_path,
+):
+    import hermes_cli.usage_facts_db as usage_facts_db
+
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+    monkeypatch.setattr(
+        usage_facts_db,
+        "_SCHEMA",
+        "THIS WOULD FAIL IF EXECUTED AGAIN",
+    )
+
+    record_llm_call(
+        "run-cached-schema",
+        1,
+        {"input_tokens": 1},
+        path=path,
+    )
+
+    assert _row(path, "SELECT COUNT(*) AS count FROM run_llm_calls")[
+        "count"
+    ] == 1
 
 
 def test_trace_redaction_happens_before_sqlite_write(monkeypatch, tmp_path):
@@ -173,4 +250,3 @@ def test_retention_deletes_only_expired_trace_rows(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM run_traces").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM run_llm_calls").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM run_usage_facts").fetchone()[0] == 1
-

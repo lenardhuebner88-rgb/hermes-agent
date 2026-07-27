@@ -27,6 +27,8 @@ _MAX_CORRELATIONS = 4096
 _STATE_LOCK = threading.RLock()
 _CONTEXTS: OrderedDict[str, "_RunContext"] = OrderedDict()
 _PENDING_TOOLS: dict[tuple[str, int, str], int] = defaultdict(int)
+_PURGE_LOCK = threading.Lock()
+_PURGE_ATTEMPTED = False
 
 
 @dataclass
@@ -103,6 +105,47 @@ def _request_body(kwargs: Mapping[str, Any]) -> dict[str, Any]:
 
 def _first(*values: Any) -> Any:
     return next((value for value in values if value is not None), None)
+
+
+def _usage_bucket(usage: Mapping[str, Any], name: str) -> Optional[int]:
+    """Keep an explicit provider zero but suppress a normalizer default zero."""
+    if usage.get(f"{name}_observed") is False:
+        return None
+    return _integer(usage.get(name))
+
+
+def _legacy_thinking_effort(thinking: Mapping[str, Any]) -> Optional[str]:
+    budget = _integer(thinking.get("budget_tokens"))
+    return {
+        4_000: "low",
+        8_000: "medium",
+        16_000: "high",
+        32_000: "xhigh",
+    }.get(budget)
+
+
+def _tool_output_chars(result: Any) -> int:
+    """Count Unicode characters in the actual post_tool_call result payload."""
+    if result is None:
+        return 0
+    if isinstance(result, str):
+        return len(result)
+    rendered = json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return len(rendered)
+
+
+def _purge_expired_traces_once() -> None:
+    global _PURGE_ATTEMPTED
+    with _PURGE_LOCK:
+        if _PURGE_ATTEMPTED:
+            return
+        _PURGE_ATTEMPTED = True
+    purge_expired_traces()
 
 
 def _correlation_keys(kwargs: Mapping[str, Any]) -> list[str]:
@@ -208,8 +251,11 @@ def _call_index(kwargs: Mapping[str, Any], ctx: _RunContext) -> int:
 
 def _sampling_fields(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     body = _request_body(kwargs)
-    reasoning = body.get("reasoning")
-    reasoning_map = dict(reasoning) if isinstance(reasoning, Mapping) else {}
+    reasoning_map = _mapping(body.get("reasoning"))
+    extra_body = _mapping(body.get("extra_body"))
+    extra_reasoning_map = _mapping(extra_body.get("reasoning"))
+    thinking_map = _mapping(body.get("thinking"))
+    output_config = _mapping(body.get("output_config"))
     return {
         "serving_tier": _first(
             _text(kwargs.get("serving_tier")),
@@ -221,6 +267,10 @@ def _sampling_fields(kwargs: Mapping[str, Any]) -> dict[str, Any]:
             _text(kwargs.get("reasoning_effort")),
             _text(body.get("reasoning_effort")),
             _text(reasoning_map.get("effort")),
+            _text(extra_reasoning_map.get("effort")),
+            _text(output_config.get("effort")),
+            _text(thinking_map.get("effort")),
+            _legacy_thinking_effort(thinking_map),
         ),
         "temperature": _first(
             _number(kwargs.get("temperature")),
@@ -248,9 +298,15 @@ def _usage_fields(kwargs: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "input_tokens": _integer(merged_usage.get("input_tokens")),
         "output_tokens": _integer(merged_usage.get("output_tokens")),
-        "cache_read_tokens": _integer(merged_usage.get("cache_read_tokens")),
-        "cache_write_tokens": _integer(merged_usage.get("cache_write_tokens")),
-        "reasoning_tokens": _integer(merged_usage.get("reasoning_tokens")),
+        "cache_read_tokens": _usage_bucket(
+            merged_usage, "cache_read_tokens"
+        ),
+        "cache_write_tokens": _usage_bucket(
+            merged_usage, "cache_write_tokens"
+        ),
+        "reasoning_tokens": _usage_bucket(
+            merged_usage, "reasoning_tokens"
+        ),
         "total_tokens": _integer(merged_usage.get("total_tokens")),
         "finish_reason": _first(
             _text(kwargs.get("finish_reason")),
@@ -263,10 +319,6 @@ def _usage_fields(kwargs: Mapping[str, Any]) -> dict[str, Any]:
             _integer(kwargs.get("context_window_used")),
             prompt_tokens,
         ),
-        # Execution is counted by pre_tool_call.  The assistant's requested
-        # tool-call count describes the same calls and must not be added again.
-        "tool_call_count": _integer(kwargs.get("tool_call_count")),
-        "tool_output_tokens": _integer(kwargs.get("tool_output_tokens")),
     }
 
 
@@ -294,16 +346,10 @@ def _actual_route_fields(
         actual_provider,
     )
 
-    fallback_depth = _integer(kwargs.get("fallback_depth"))
-    if fallback_depth is None and requested_model is not None and actual_model is not None:
-        fallback_depth = 0 if requested_model == actual_model else 1
-    if (
-        fallback_depth == 0
-        and requested_provider is not None
-        and actual_provider is not None
-        and requested_provider != actual_provider
-    ):
-        fallback_depth = 1
+    # The hook payload does not expose AIAgent._fallback_chain/_fallback_index.
+    # Model-name differences are not a valid proxy (providers often version
+    # response.model), so this stays unknown until a real chain position exists.
+    fallback_depth = None
 
     billing_mode = None
     if actual_model is not None or requested_model is not None:
@@ -422,7 +468,7 @@ def on_pre_llm_request(**kwargs: Any) -> None:
         run_fields=run_fields,
     )
     _record_messages(ctx.run_id, call_index, _request_messages(kwargs))
-    purge_expired_traces()
+    _purge_expired_traces_once()
 
 
 @_fail_soft_hook
@@ -468,8 +514,6 @@ def on_post_llm_call(**kwargs: Any) -> None:
                 "first_token_ms",
                 "duration_ms",
                 "context_window_used",
-                "tool_call_count",
-                "tool_output_tokens",
             }
         }
     )
@@ -486,6 +530,37 @@ def on_post_llm_call(**kwargs: Any) -> None:
     assistant = _assistant_trace(kwargs)
     if assistant is not None:
         record_trace(ctx.run_id, call_index, "assistant", assistant)
+
+
+@_fail_soft_hook
+def on_api_request_error(**kwargs: Any) -> None:
+    """Capture the already-emitted API error without inventing missing usage."""
+    error = _mapping(kwargs.get("error"))
+    enriched = dict(kwargs)
+    enriched["error_type"] = _text(error.get("type"))
+    ctx = _resolve_context(enriched)
+    if ctx is None:
+        return
+    call_index = _call_index(enriched, ctx)
+    _, run_fields = _actual_route_fields(enriched, ctx)
+    run_fields.update(
+        {
+            "error_type": _text(error.get("type")),
+            "source": _fact_source(enriched),
+        }
+    )
+    upsert_run_facts(ctx.run_id, run_fields)
+    record_trace(
+        ctx.run_id,
+        call_index,
+        "api_error",
+        {
+            "type": _text(error.get("type")),
+            "message": error.get("message"),
+            "status_code": kwargs.get("status_code"),
+            "reason": kwargs.get("reason"),
+        },
+    )
 
 
 def _tool_key(
@@ -541,20 +616,25 @@ def on_post_tool_call(**kwargs: Any) -> None:
         elif pending == 1:
             _PENDING_TOOLS.pop(key, None)
     error_type = _text(kwargs.get("error_type"))
+    output_chars = (
+        _tool_output_chars(kwargs.get("result"))
+        if "result" in kwargs
+        else None
+    )
     if pending == 0:
         increment_tool_call(
             ctx.run_id,
             call_index,
             error_type=error_type,
-            tool_output_tokens=_integer(kwargs.get("tool_output_tokens")),
+            tool_output_chars=output_chars,
             run_fields={"lane": ctx.lane, "source": "measured"},
         )
-    elif error_type is not None or kwargs.get("tool_output_tokens") is not None:
+    elif error_type is not None or output_chars is not None:
         record_tool_result(
             ctx.run_id,
             call_index,
             error_type=error_type,
-            tool_output_tokens=_integer(kwargs.get("tool_output_tokens")),
+            tool_output_chars=output_chars,
             run_fields={
                 "lane": ctx.lane,
                 "error_type": error_type,
@@ -577,9 +657,10 @@ def on_post_tool_call(**kwargs: Any) -> None:
 
 
 def register(ctx: Any) -> None:
-    """Register the five handlers on Hermes' six existing observer hooks."""
+    """Register handlers on Hermes' existing request, error, and tool hooks."""
     ctx.register_hook("pre_api_request", on_pre_llm_request)
     ctx.register_hook("post_api_request", on_post_llm_call)
+    ctx.register_hook("api_request_error", on_api_request_error)
     ctx.register_hook("pre_llm_call", on_pre_llm_call)
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)

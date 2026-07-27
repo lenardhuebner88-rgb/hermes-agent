@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterator, Mapping, Optional
 
 from agent.redact import redact_sensitive_text
 
@@ -35,7 +37,7 @@ RUN_FACT_COLUMNS = (
     "cache_write_tokens",
     "reasoning_tokens",
     "tool_call_count",
-    "tool_output_tokens",
+    "tool_output_chars",
     "finish_reason",
     "error_type",
     "first_token_ms",
@@ -69,7 +71,7 @@ LLM_CALL_COLUMNS = (
     "duration_ms",
     "context_window_used",
     "tool_call_count",
-    "tool_output_tokens",
+    "tool_output_chars",
     "temperature",
     "top_p",
 )
@@ -96,7 +98,7 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     cache_write_tokens INTEGER,
     reasoning_tokens INTEGER,
     tool_call_count INTEGER,
-    tool_output_tokens INTEGER,
+    tool_output_chars INTEGER,
     finish_reason TEXT,
     error_type TEXT,
     first_token_ms REAL,
@@ -133,7 +135,7 @@ CREATE TABLE IF NOT EXISTS run_llm_calls (
     duration_ms REAL,
     context_window_used INTEGER,
     tool_call_count INTEGER,
-    tool_output_tokens INTEGER,
+    tool_output_chars INTEGER,
     temperature REAL,
     top_p REAL,
     PRIMARY KEY (run_id, call_index)
@@ -153,6 +155,9 @@ CREATE INDEX IF NOT EXISTS idx_run_traces_run_call
     ON run_traces(run_id, call_index);
 """
 
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_IDENTITIES: dict[Path, tuple[int, int]] = {}
+
 
 def utc_now_iso() -> str:
     """Return a sortable UTC timestamp."""
@@ -171,19 +176,53 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
     resolved = usage_facts_db_path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(resolved, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    conn.executescript(_SCHEMA)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        identity = resolved.stat()
+        schema_key = resolved.resolve()
+        schema_identity = (identity.st_dev, identity.st_ino)
+        with _SCHEMA_LOCK:
+            if _SCHEMA_IDENTITIES.get(schema_key) != schema_identity:
+                conn.executescript(_SCHEMA)
+                for table in ("run_usage_facts", "run_llm_calls"):
+                    columns = {
+                        row[1]
+                        for row in conn.execute(f"PRAGMA table_info({table})")
+                    }
+                    if "tool_output_chars" not in columns:
+                        conn.execute(
+                            f"ALTER TABLE {table} "
+                            "ADD COLUMN tool_output_chars INTEGER"
+                        )
+                conn.commit()
+                _SCHEMA_IDENTITIES[schema_key] = schema_identity
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+@contextmanager
+def _connection(
+    path: Optional[os.PathLike[str] | str] = None,
+) -> Iterator[sqlite3.Connection]:
+    """Commit or roll back and always close one short-lived connection."""
+    conn = _connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def initialize_usage_facts_db(
     path: Optional[os.PathLike[str] | str] = None,
 ) -> Path:
     """Create the database and schema, returning the resolved path."""
-    with _connect(path):
+    with _connection(path):
         pass
     return usage_facts_db_path(path)
 
@@ -246,7 +285,7 @@ def upsert_run_facts(
     """Upsert nullable run metadata without replacing observations with NULL."""
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), fields)
 
 
@@ -265,10 +304,10 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS cache_write_tokens,
             CASE WHEN COUNT(reasoning_tokens)=COUNT(*) THEN SUM(reasoning_tokens) END
                 AS reasoning_tokens,
-            CASE WHEN COUNT(tool_call_count)=COUNT(*) THEN SUM(tool_call_count) END
+            CASE WHEN COUNT(tool_call_count)>0 THEN SUM(tool_call_count) END
                 AS tool_call_count,
-            CASE WHEN COUNT(tool_output_tokens)=COUNT(*) THEN SUM(tool_output_tokens) END
-                AS tool_output_tokens,
+            CASE WHEN COUNT(tool_output_chars)>0 THEN SUM(tool_output_chars) END
+                AS tool_output_chars,
             CASE WHEN COUNT(duration_ms)=COUNT(*) THEN SUM(duration_ms) END
                 AS duration_ms,
             CASE WHEN COUNT(first_token_ms)=COUNT(*) THEN MIN(first_token_ms) END
@@ -319,7 +358,7 @@ def record_llm_call(
         else "DO NOTHING"
     )
 
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), run_fields)
         conn.execute(
             f"""
@@ -337,37 +376,37 @@ def increment_tool_call(
     call_index: int,
     *,
     error_type: Optional[str] = None,
-    tool_output_tokens: Optional[int] = None,
+    tool_output_chars: Optional[int] = None,
     run_fields: Optional[Mapping[str, Any]] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
-    """Count a tool execution exactly once and preserve unknown token counts."""
+    """Count a tool execution exactly once and preserve unknown output size."""
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
     call_index = int(call_index)
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), run_fields)
         conn.execute(
             """
             INSERT INTO run_llm_calls (
-                run_id, call_index, tool_call_count, tool_output_tokens, error_type
+                run_id, call_index, tool_call_count, tool_output_chars, error_type
             ) VALUES (?, ?, 1, ?, ?)
             ON CONFLICT(run_id, call_index) DO UPDATE SET
                 tool_call_count=CASE
                     WHEN run_llm_calls.tool_call_count IS NULL THEN 1
                     ELSE run_llm_calls.tool_call_count + 1
                 END,
-                tool_output_tokens=CASE
-                    WHEN excluded.tool_output_tokens IS NULL
-                        THEN run_llm_calls.tool_output_tokens
-                    WHEN run_llm_calls.tool_output_tokens IS NULL
-                        THEN excluded.tool_output_tokens
-                    ELSE run_llm_calls.tool_output_tokens
-                        + excluded.tool_output_tokens
+                tool_output_chars=CASE
+                    WHEN excluded.tool_output_chars IS NULL
+                        THEN run_llm_calls.tool_output_chars
+                    WHEN run_llm_calls.tool_output_chars IS NULL
+                        THEN excluded.tool_output_chars
+                    ELSE run_llm_calls.tool_output_chars
+                        + excluded.tool_output_chars
                 END,
                 error_type=COALESCE(excluded.error_type, run_llm_calls.error_type)
             """,
-            (str(run_id), call_index, tool_output_tokens, error_type),
+            (str(run_id), call_index, tool_output_chars, error_type),
         )
         _refresh_run_aggregates(conn, str(run_id))
 
@@ -377,7 +416,7 @@ def record_tool_result(
     call_index: int,
     *,
     error_type: Optional[str] = None,
-    tool_output_tokens: Optional[int] = None,
+    tool_output_chars: Optional[int] = None,
     run_fields: Optional[Mapping[str, Any]] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
@@ -385,25 +424,25 @@ def record_tool_result(
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
     call_index = int(call_index)
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), run_fields)
         conn.execute(
             """
             INSERT INTO run_llm_calls (
-                run_id, call_index, tool_output_tokens, error_type
+                run_id, call_index, tool_output_chars, error_type
             ) VALUES (?, ?, ?, ?)
             ON CONFLICT(run_id, call_index) DO UPDATE SET
-                tool_output_tokens=CASE
-                    WHEN excluded.tool_output_tokens IS NULL
-                        THEN run_llm_calls.tool_output_tokens
-                    WHEN run_llm_calls.tool_output_tokens IS NULL
-                        THEN excluded.tool_output_tokens
-                    ELSE run_llm_calls.tool_output_tokens
-                        + excluded.tool_output_tokens
+                tool_output_chars=CASE
+                    WHEN excluded.tool_output_chars IS NULL
+                        THEN run_llm_calls.tool_output_chars
+                    WHEN run_llm_calls.tool_output_chars IS NULL
+                        THEN excluded.tool_output_chars
+                    ELSE run_llm_calls.tool_output_chars
+                        + excluded.tool_output_chars
                 END,
                 error_type=COALESCE(excluded.error_type, run_llm_calls.error_type)
             """,
-            (str(run_id), call_index, tool_output_tokens, error_type),
+            (str(run_id), call_index, tool_output_chars, error_type),
         )
         _refresh_run_aggregates(conn, str(run_id))
 
@@ -459,7 +498,7 @@ def record_trace(
     if not str(role).strip():
         raise ValueError("role must be non-empty")
     redacted = redact_trace_content(content)
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         conn.execute(
             """
             INSERT INTO run_traces (
@@ -497,7 +536,7 @@ def purge_expired_traces(
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     cutoff = (current.astimezone(timezone.utc) - timedelta(days=retention_days)).isoformat()
-    with _connect(path) as conn:
+    with _connection(path) as conn:
         cursor = conn.execute(
             "DELETE FROM run_traces WHERE captured_at < ?",
             (cutoff,),

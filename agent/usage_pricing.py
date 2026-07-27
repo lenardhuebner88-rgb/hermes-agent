@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Mapping, Optional
 
 from agent.model_metadata import fetch_endpoint_model_metadata, fetch_model_metadata
 from utils import base_url_host_matches
@@ -37,6 +37,9 @@ class CanonicalUsage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
+    cache_read_tokens_observed: bool = False
+    cache_write_tokens_observed: bool = False
+    reasoning_tokens_observed: bool = False
     request_count: int = 1
     raw_usage: Optional[dict[str, Any]] = None
 
@@ -63,6 +66,18 @@ class CanonicalUsage:
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
+            cache_read_tokens_observed=(
+                self.cache_read_tokens_observed
+                and other.cache_read_tokens_observed
+            ),
+            cache_write_tokens_observed=(
+                self.cache_write_tokens_observed
+                and other.cache_write_tokens_observed
+            ),
+            reasoning_tokens_observed=(
+                self.reasoning_tokens_observed
+                and other.reasoning_tokens_observed
+            ),
             request_count=self.request_count + other.request_count,
             raw_usage=None,
         )
@@ -197,6 +212,30 @@ _OFFICIAL_DOCS_PRICING: Dict[tuple[str, str], PricingEntry] = {
         source="official_docs_snapshot",
         source_url="https://platform.kimi.ai/docs/pricing/chat-k3",
         pricing_version="moonshot-k3-2026-07",
+    ),
+    (
+        "moonshot",
+        "kimi-k2.7-code",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("0.95"),
+        output_cost_per_million=Decimal("4.00"),
+        cache_read_cost_per_million=Decimal("0.19"),
+        source="official_docs_snapshot",
+        source_url="https://platform.kimi.ai/docs/pricing/chat",
+        pricing_version="moonshot-kimi-k2.7-code-2026-06",
+    ),
+    # LiteLLM's direct Z.AI family currently stops at GLM-5.1. Keep GLM-5.2
+    # as an official-doc snapshot until the direct zai/glm-5.2 row appears.
+    (
+        "zai",
+        "glm-5.2",
+    ): PricingEntry(
+        input_cost_per_million=Decimal("1.40"),
+        output_cost_per_million=Decimal("4.40"),
+        cache_read_cost_per_million=Decimal("0.26"),
+        source="official_docs_snapshot",
+        source_url="https://docs.z.ai/guides/overview/pricing",
+        pricing_version="zai-glm-5.2-2026-06",
     ),
     # Qwen3.8-Max-Preview is Token-Plan-exclusive and has no published PAYG
     # price.  Its list-equivalent row is deliberately versioned as a proxy
@@ -928,6 +967,20 @@ def _to_int(value: Any) -> int:
         return 0
 
 
+def _usage_field_observed(container: Any, name: str) -> bool:
+    """Whether a provider payload actually carried a nullable usage field."""
+    if container is None:
+        return False
+    if isinstance(container, Mapping):
+        return name in container and container.get(name) is not None
+    fields_set = getattr(container, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(container, "__fields_set__", None)
+    if isinstance(fields_set, (set, frozenset)):
+        return name in fields_set and getattr(container, name, None) is not None
+    return hasattr(container, name) and getattr(container, name, None) is not None
+
+
 def resolve_billing_route(
     model_name: str,
     provider: Optional[str] = None,
@@ -941,6 +994,17 @@ def resolve_billing_route(
         if inferred_provider in {"anthropic", "openai", "google"}:
             provider_name = inferred_provider
             model = bare_model
+
+    if model.lower() == "glm-5.2" and provider_name in {
+        "custom",
+        "alibaba-token-plan",
+    }:
+        return BillingRoute(
+            provider="zai",
+            model="glm-5.2",
+            base_url=base_url or "",
+            billing_mode="subscription_included",
+        )
 
     subscription_aliases = {
         "claude-cli": "anthropic",
@@ -1212,6 +1276,12 @@ def normalize_usage(
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
         cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
         cache_write_tokens = _to_int(getattr(response_usage, "cache_creation_input_tokens", 0))
+        cache_read_tokens_observed = _usage_field_observed(
+            response_usage, "cache_read_input_tokens"
+        )
+        cache_write_tokens_observed = _usage_field_observed(
+            response_usage, "cache_creation_input_tokens"
+        )
     elif mode == "codex_responses":
         input_total = _to_int(getattr(response_usage, "input_tokens", 0))
         output_tokens = _to_int(getattr(response_usage, "output_tokens", 0))
@@ -1219,6 +1289,12 @@ def normalize_usage(
         cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
         cache_write_tokens = _to_int(
             getattr(details, "cache_creation_tokens", 0) if details else 0
+        )
+        cache_read_tokens_observed = _usage_field_observed(
+            details, "cached_tokens"
+        )
+        cache_write_tokens_observed = _usage_field_observed(
+            details, "cache_creation_tokens"
         )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
     else:
@@ -1231,10 +1307,11 @@ def normalize_usage(
         # fallback, cache writes are undercounted as 0 and cache reads can be
         # missed when the proxy only surfaces them at the top level.
         # Port of cline/cline#10266.
-        cache_read_tokens = _to_int(getattr(details, "cached_tokens", 0) if details else 0)
-        if not cache_read_tokens:
+        if _usage_field_observed(details, "cached_tokens"):
+            cache_read_tokens = _to_int(getattr(details, "cached_tokens"))
+        elif _usage_field_observed(response_usage, "cache_read_input_tokens"):
             cache_read_tokens = _to_int(getattr(response_usage, "cache_read_input_tokens", 0))
-        if not cache_read_tokens:
+        elif _usage_field_observed(response_usage, "prompt_cache_hit_tokens"):
             # DeepSeek's native API (api.deepseek.com) reports context-cache
             # hits as top-level prompt_cache_hit_tokens (+ the complementary
             # prompt_cache_miss_tokens; prompt_tokens = hit + miss), not the
@@ -1243,16 +1320,43 @@ def normalize_usage(
             cache_read_tokens = _to_int(
                 getattr(response_usage, "prompt_cache_hit_tokens", 0)
             )
-        cache_write_tokens = _to_int(
-            getattr(details, "cache_write_tokens", 0) if details else 0
+        else:
+            cache_read_tokens = 0
+        cache_read_tokens_observed = any(
+            (
+                _usage_field_observed(details, "cached_tokens"),
+                _usage_field_observed(
+                    response_usage, "cache_read_input_tokens"
+                ),
+                _usage_field_observed(
+                    response_usage, "prompt_cache_hit_tokens"
+                ),
+            )
         )
-        if not cache_write_tokens:
+        if _usage_field_observed(details, "cache_write_tokens"):
+            cache_write_tokens = _to_int(
+                getattr(details, "cache_write_tokens")
+            )
+        elif _usage_field_observed(
+            response_usage, "cache_creation_input_tokens"
+        ):
             cache_write_tokens = _to_int(
                 getattr(response_usage, "cache_creation_input_tokens", 0)
             )
+        else:
+            cache_write_tokens = 0
+        cache_write_tokens_observed = any(
+            (
+                _usage_field_observed(details, "cache_write_tokens"),
+                _usage_field_observed(
+                    response_usage, "cache_creation_input_tokens"
+                ),
+            )
+        )
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
     reasoning_tokens = 0
+    reasoning_tokens_observed = False
     # Responses API shape: output_tokens_details.reasoning_tokens.
     # Chat Completions shape (OpenAI, OpenRouter, DeepSeek, etc.):
     # completion_tokens_details.reasoning_tokens. Reading only the former
@@ -1261,14 +1365,19 @@ def normalize_usage(
     # dominates output spend on models like deepseek-v4-flash (measured:
     # single calls burning 21K reasoning tokens to emit 500 visible tokens).
     output_details = getattr(response_usage, "output_tokens_details", None)
-    if output_details:
-        reasoning_tokens = _to_int(getattr(output_details, "reasoning_tokens", 0))
-    if not reasoning_tokens:
-        completion_details = getattr(response_usage, "completion_tokens_details", None)
-        if completion_details:
-            reasoning_tokens = _to_int(
-                getattr(completion_details, "reasoning_tokens", 0)
-            )
+    completion_details = getattr(
+        response_usage, "completion_tokens_details", None
+    )
+    if _usage_field_observed(output_details, "reasoning_tokens"):
+        reasoning_tokens = _to_int(
+            getattr(output_details, "reasoning_tokens", 0)
+        )
+        reasoning_tokens_observed = True
+    elif _usage_field_observed(completion_details, "reasoning_tokens"):
+        reasoning_tokens = _to_int(
+            getattr(completion_details, "reasoning_tokens", 0)
+        )
+        reasoning_tokens_observed = True
 
     return CanonicalUsage(
         input_tokens=input_tokens,
@@ -1276,6 +1385,9 @@ def normalize_usage(
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
+        cache_read_tokens_observed=cache_read_tokens_observed,
+        cache_write_tokens_observed=cache_write_tokens_observed,
+        reasoning_tokens_observed=reasoning_tokens_observed,
     )
 
 

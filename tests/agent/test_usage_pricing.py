@@ -11,6 +11,40 @@ from agent.usage_pricing import (
 )
 
 
+def test_normalize_usage_tracks_missing_and_explicit_zero_optional_buckets():
+    missing = normalize_usage(
+        SimpleNamespace(prompt_tokens=10, completion_tokens=2),
+        provider="openai",
+        api_mode="chat_completions",
+    )
+    explicit_zero = normalize_usage(
+        SimpleNamespace(
+            prompt_tokens=10,
+            completion_tokens=2,
+            prompt_tokens_details=SimpleNamespace(
+                cached_tokens=0,
+                cache_write_tokens=0,
+            ),
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+        provider="openai",
+        api_mode="chat_completions",
+    )
+
+    assert missing.cache_read_tokens == 0
+    assert missing.cache_write_tokens == 0
+    assert missing.reasoning_tokens == 0
+    assert missing.cache_read_tokens_observed is False
+    assert missing.cache_write_tokens_observed is False
+    assert missing.reasoning_tokens_observed is False
+    assert explicit_zero.cache_read_tokens == 0
+    assert explicit_zero.cache_write_tokens == 0
+    assert explicit_zero.reasoning_tokens == 0
+    assert explicit_zero.cache_read_tokens_observed is True
+    assert explicit_zero.cache_write_tokens_observed is True
+    assert explicit_zero.reasoning_tokens_observed is True
+
+
 def test_normalize_usage_anthropic_keeps_cache_buckets_separate():
     usage = SimpleNamespace(
         input_tokens=1000,
@@ -250,6 +284,28 @@ def test_real_runtime_provider_model_pairs_all_resolve_pricing():
         assert entry is not None, f"{provider}/{model}"
         assert entry.input_cost_per_million is not None, f"{provider}/{model}"
         assert entry.output_cost_per_million is not None, f"{provider}/{model}"
+
+
+def test_review_gap_provider_model_pairs_all_resolve_pricing():
+    pairs = (
+        ("custom", "glm-5.2"),
+        ("alibaba-token-plan", "glm-5.2"),
+        ("kimi-coding", "kimi-k2.7-code"),
+    )
+
+    for provider, model in pairs:
+        entry = get_pricing_entry(model, provider=provider)
+        assert entry is not None, f"{provider}/{model}"
+        assert entry.input_cost_per_million is not None, f"{provider}/{model}"
+        assert entry.output_cost_per_million is not None, f"{provider}/{model}"
+
+
+def test_glm_5_2_subscription_routes_use_zai_pricing():
+    for provider in ("custom", "alibaba-token-plan"):
+        route = resolve_billing_route("glm-5.2", provider=provider)
+        assert route.provider == "zai"
+        assert route.model == "glm-5.2"
+        assert route.billing_mode == "subscription_included"
 
 
 def test_official_docs_pricing_overrides_litellm_feed():
