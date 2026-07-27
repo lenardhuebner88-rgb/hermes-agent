@@ -2292,7 +2292,8 @@ def user_bus_socket_path(environ: Mapping[str, str], *, euid: int) -> str | None
     address = environ.get("DBUS_SESSION_BUS_ADDRESS", "")
     for part in address.split(";"):
         if part.startswith("unix:path="):
-            return part[len("unix:path="):]
+            # Key/Value-Paare einer Adresse sind kommagetrennt (`…,guid=…`).
+            return part[len("unix:path="):].split(",", 1)[0]
     if address:
         # Adresse gesetzt, aber ohne prüfbaren unix:path (z. B. abstract) —
         # nicht verifizierbar, Caller bleibt konservativ inline.
@@ -2369,6 +2370,13 @@ def _reexec_into_own_scope() -> None:
     except OSError:
         return
     bus_socket = user_bus_socket_path(os.environ, euid=os.geteuid())
+    if bus_socket is not None and not os.path.exists(bus_socket):
+        # Gesetzte, aber tote Bus-Adresse (stale env, z. B. alter
+        # DBUS_SESSION_BUS_ADDRESS aus einem Vorgänger-Service): auf den
+        # systemd-Default durchfallen, wenn dessen Socket lebt.
+        default_socket = os.path.join("/run/user", str(os.geteuid()), "bus")
+        if bus_socket != default_socket and os.path.exists(default_socket):
+            bus_socket = default_socket
     bus_socket_available = bus_socket is not None and os.path.exists(bus_socket)
     if not should_reexec_into_scope(
         cgroup_text,
@@ -2397,14 +2405,17 @@ def _reexec_into_own_scope() -> None:
         leaf,
     )
     # Bus-Umgebung für den Child-Prozess reparieren: fremde Services starten
-    # oft ohne DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR; die Socket existiert
-    # aber unter dem systemd-Default-Pfad /run/user/<euid>/bus.
-    if (
-        bus_socket is not None
-        and "DBUS_SESSION_BUS_ADDRESS" not in os.environ
-        and "XDG_RUNTIME_DIR" not in os.environ
-    ):
-        os.environ["XDG_RUNTIME_DIR"] = os.path.dirname(bus_socket)
+    # oft ohne DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR, oder mit einer
+    # STALEN Adresse, die nicht auf die verifizierte Socket zeigt. Der Child
+    # erbt os.environ — XDG_RUNTIME_DIR auf das Socket-Verzeichnis setzen
+    # und eine nicht passende DBUS-Adresse entfernen, damit `systemd-run
+    # --user` die verifizierte Socket benutzt.
+    if bus_socket is not None:
+        if os.environ.get("XDG_RUNTIME_DIR") != os.path.dirname(bus_socket):
+            os.environ["XDG_RUNTIME_DIR"] = os.path.dirname(bus_socket)
+        address = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if address and f"unix:path={bus_socket}" not in address:
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
     cmd = build_scope_command(systemd_run, sys.orig_argv)
     os.execvp(cmd[0], cmd)
 

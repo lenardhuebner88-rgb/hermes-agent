@@ -3048,6 +3048,15 @@ def test_user_bus_socket_path_falls_back_to_systemd_default():
     assert user_bus_socket_path({}, euid=1000) == "/run/user/1000/bus"
 
 
+def test_user_bus_socket_path_strips_guid_suffix():
+    """D-Bus trennt Key/Value einer Adresse per Komma: der guid-Anhang darf
+    nicht im Pfad landen (sonst scheitert os.path.exists trotz lebendem Bus)."""
+    assert user_bus_socket_path(
+        {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus,guid=abc123"},
+        euid=1000,
+    ) == "/run/user/1000/bus"
+
+
 def test_user_bus_socket_path_abstract_address_not_verifiable():
     """`unix:abstract=` ist auf dem Dateisystem nicht prüfbar → None, der
     Caller bleibt konservativ inline statt blind zu exec'en."""
@@ -3095,6 +3104,30 @@ def test_reexec_stays_inline_when_bus_missing(monkeypatch, caplog):
 
     assert calls == []
     assert any("bleibe inline" in record.message for record in caplog.records)
+
+
+def test_reexec_falls_back_to_default_bus_when_env_address_stale(monkeypatch):
+    """Stale DBUS_SESSION_BUS_ADDRESS (toter Pfad) darf den Re-Exec nicht
+    verhindern, wenn die Default-Socket /run/user/<euid>/bus lebt: der Hook
+    fällt durch, entfernt die stale Adresse und setzt XDG_RUNTIME_DIR."""
+    calls: list = []
+    euid = os.geteuid()
+    default_socket = f"/run/user/{euid}/bus"
+    fake_env = _foreign_service_env()
+    fake_env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/tot/bus"
+    monkeypatch.setattr(os, "execvp", lambda *a: calls.append(list(a)))
+    monkeypatch.setattr(os, "environ", fake_env)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda _n: "/usr/bin/systemd-run")
+    monkeypatch.setattr(
+        runner_module.os.path, "exists", lambda p: p == default_socket
+    )
+    monkeypatch.setattr(runner_module, "Path", _FakeProcPath)
+
+    runner_module._reexec_into_own_scope()
+
+    assert len(calls) == 1 and calls[0][0] == "/usr/bin/systemd-run"
+    assert "DBUS_SESSION_BUS_ADDRESS" not in fake_env
+    assert fake_env["XDG_RUNTIME_DIR"] == f"/run/user/{euid}"
 
 
 def test_reexec_repairs_bus_env_before_exec(monkeypatch):
