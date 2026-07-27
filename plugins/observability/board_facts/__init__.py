@@ -22,6 +22,7 @@ from hermes_cli.usage_facts_db import (
     record_trace,
     upsert_run_facts,
 )
+from .auxiliary_wrapper import install_auxiliary_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -731,6 +732,12 @@ def on_api_request_error(**kwargs: Any) -> None:
     _finish_aux_call(enriched, ctx)
 
 
+def _on_auxiliary_error(**kwargs: Any) -> None:
+    """Persist bounded error facts without letting instrumentation escape."""
+    on_post_llm_call(**kwargs)
+    on_api_request_error(**kwargs)
+
+
 def _tool_key(
     ctx: _RunContext,
     call_index: int,
@@ -842,3 +849,8 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_llm_call", on_post_llm_call)
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
+    install_auxiliary_wrappers(
+        pre_callback=on_pre_llm_request,
+        post_callback=on_post_llm_call,
+        error_callback=_on_auxiliary_error,
+    )
