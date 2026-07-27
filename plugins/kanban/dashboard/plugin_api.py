@@ -818,6 +818,7 @@ def get_board(
         # resolve each card's chain root below.
         link_counts: dict[str, dict[str, int]] = {}
         dependents: dict[str, list[str]] = {}
+        predecessors: dict[str, set[str]] = {}
         for row in conn.execute(
             "SELECT parent_id, child_id FROM task_links"
         ).fetchall():
@@ -828,6 +829,7 @@ def get_board(
                 "parents"
             ] += 1
             dependents.setdefault(row["parent_id"], []).append(row["child_id"])
+            predecessors.setdefault(row["child_id"], set()).add(row["parent_id"])
 
         from plugins.kanban.dashboard.fleet_board_readmodel import (
             build_board_summary,
@@ -862,6 +864,22 @@ def get_board(
                 root_cache[v] = sink
             return sink
 
+        # Keep summary costs and PlanSpec labels on the same constant-query
+        # footing as card enrichment below. Both maps deliberately cover the
+        # full board, because chain summaries are computed before done paging.
+        all_task_ids = [task.id for task in tasks]
+        cost_map = kanban_db.batch_task_costs(conn, all_task_ids)
+        planspec_source_map: dict[str, str] = {}
+        if all_task_ids:
+            placeholders = ",".join("?" for _ in all_task_ids)
+            planspec_source_map = {
+                row["id"]: row["planspec_source"]
+                for row in conn.execute(
+                    f"SELECT id, planspec_source FROM tasks WHERE id IN ({placeholders}) AND planspec_source IS NOT NULL",
+                    all_task_ids,
+                ).fetchall()
+            }
+
         chain_summaries: Optional[list[dict[str, Any]]] = None
         if done_limit is not None:
             # Authoritative roll-up over the FULL board, before the done page is
@@ -888,6 +906,49 @@ def get_board(
                     for member in members
                     if member.completed_at is not None
                 ]
+                member_ids = {member.id for member in members}
+                first_members = [
+                    member
+                    for member in members
+                    if not (predecessors.get(member.id, set()) & member_ids)
+                ]
+                first_member = min(
+                    first_members or members,
+                    key=lambda member: (member.created_at, member.id),
+                )
+                planspec_source = next(
+                    (
+                        planspec_source_map[member.id]
+                        for member in sorted(
+                            members,
+                            key=lambda member: (member.created_at, member.id),
+                        )
+                        if member.id in planspec_source_map
+                    ),
+                    None,
+                )
+                chain_identifier = (
+                    Path(planspec_source).stem if planspec_source else first_member.title
+                )
+                statuses = {member.status for member in members}
+                done_statuses = {"done", "archived"}
+                if statuses <= done_statuses:
+                    chain_state = "fertig"
+                    state_since = max(completed_values) if completed_values else None
+                elif statuses & done_statuses and "scheduled" in statuses:
+                    chain_state = "angebrochen"
+                    state_since = min(completed_values) if completed_values else None
+                elif statuses == {"scheduled"}:
+                    chain_state = "gehalten"
+                    state_since = min(member.created_at for member in members)
+                else:
+                    chain_state = "laeuft"
+                    state_since = min(member.created_at for member in members)
+                state_age_seconds = (
+                    max(0, int(time.time() - state_since))
+                    if state_since is not None
+                    else None
+                )
                 chain_summaries.append(
                     {
                         "root_id": root_id,
@@ -899,6 +960,13 @@ def get_board(
                         "status_counts": status_counts,
                         "latest_completed_at": (
                             max(completed_values) if completed_values else None
+                        ),
+                        "state": chain_state,
+                        "chain_identifier": chain_identifier,
+                        "state_age_seconds": state_age_seconds,
+                        "cost_usd": sum(
+                            float(cost_map.get(member.id, {}).get("cost_usd") or 0)
+                            for member in members
                         ),
                     }
                 )
@@ -950,10 +1018,7 @@ def get_board(
         # for boards with hundreds of tasks). Truncated to a card-size
         # preview here — the full text is available via /tasks/:id.
         summary_map = kanban_db.latest_summaries(conn, [t.id for t in tasks])
-        # Per-task cost/token rollup for the Flow-board card footer — one batch
-        # query (mirrors the chain-graph per-node aggregate). Tasks with no runs
-        # are omitted, so their cards render no cost footer.
-        cost_map = kanban_db.batch_task_costs(conn, [t.id for t in tasks])
+
         # Slice b: the live review stage (verifier→reviewer→critic) currently
         # targeted, for the chain card's stage pill. One batch query; only surfaced
         # for tasks actually in ``review`` (below), so a done task that was once
@@ -969,17 +1034,6 @@ def get_board(
         if blocked_ids:
             block_reason_map = kanban_db.latest_summaries(conn, blocked_ids)
             operator_question_map = kanban_db.blocked_task_operator_questions(conn, tasks)
-        planspec_source_map: dict[str, str] = {}
-        if tasks:
-            placeholders = ",".join("?" for _ in tasks)
-            planspec_source_map = {
-                row["id"]: row["planspec_source"]
-                for row in conn.execute(
-                    f"SELECT id, planspec_source FROM tasks WHERE id IN ({placeholders}) AND planspec_source IS NOT NULL",
-                    [t.id for t in tasks],
-                ).fetchall()
-            }
-
         for t in tasks:
             full = summary_map.get(t.id)
             preview = (
