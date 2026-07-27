@@ -21,6 +21,7 @@ DEFAULT_USAGE_FACTS_DB = Path("/mnt/data/hermes-observability/usage_facts.db")
 DEFAULT_TRACE_RETENTION_DAYS = 180
 
 RUN_FACT_COLUMNS = (
+    "origin",
     "provider",
     "model",
     "requested_provider",
@@ -28,6 +29,9 @@ RUN_FACT_COLUMNS = (
     "model_source",
     "fallback_depth",
     "lane",
+    "profile",
+    "wall_ms",
+    "call_kind",
     "billing_mode",
     "serving_tier",
     "reasoning_effort",
@@ -42,6 +46,7 @@ RUN_FACT_COLUMNS = (
     "error_type",
     "first_token_ms",
     "duration_ms",
+    "tool_duration_ms",
     "context_window_limit",
     "context_window_limit_source",
     "context_window_used",
@@ -53,6 +58,7 @@ RUN_FACT_COLUMNS = (
 )
 
 LLM_CALL_COLUMNS = (
+    "origin",
     "provider",
     "model",
     "requested_model",
@@ -70,6 +76,7 @@ LLM_CALL_COLUMNS = (
     "error_type",
     "first_token_ms",
     "duration_ms",
+    "tool_duration_ms",
     "context_window_used",
     "tool_call_count",
     "tool_output_chars",
@@ -78,11 +85,23 @@ LLM_CALL_COLUMNS = (
 )
 
 _SOURCE_RANK = {"unknown": 0, "derived": 1, "measured": 2}
+_VALID_ORIGINS = frozenset(
+    {
+        "hermes_agent",
+        "hermes_aux",
+        "claude_code",
+        "codex_cli",
+        "kimi_cli",
+        "grok_cli",
+        "qwen_cli",
+    }
+)
 _SECRET_ENV_MARKERS = ("SECRET", "TOKEN", "KEY", "PASSWORD", "CREDENTIAL")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_usage_facts (
     run_id TEXT PRIMARY KEY,
+    origin TEXT NOT NULL DEFAULT 'hermes_agent',
     provider TEXT,
     model TEXT,
     requested_provider TEXT,
@@ -90,6 +109,9 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     model_source TEXT,
     fallback_depth INTEGER,
     lane TEXT,
+    profile TEXT,
+    wall_ms INTEGER,
+    call_kind TEXT,
     billing_mode TEXT,
     serving_tier TEXT,
     reasoning_effort TEXT,
@@ -104,6 +126,7 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
     error_type TEXT,
     first_token_ms REAL,
     duration_ms REAL,
+    tool_duration_ms INTEGER,
     context_window_limit INTEGER,
     context_window_limit_source TEXT
         CHECK (context_window_limit_source IN ('derived')),
@@ -119,6 +142,7 @@ CREATE TABLE IF NOT EXISTS run_usage_facts (
 CREATE TABLE IF NOT EXISTS run_llm_calls (
     run_id TEXT NOT NULL,
     call_index INTEGER NOT NULL,
+    origin TEXT NOT NULL DEFAULT 'hermes_agent',
     provider TEXT,
     model TEXT,
     requested_model TEXT,
@@ -136,6 +160,7 @@ CREATE TABLE IF NOT EXISTS run_llm_calls (
     error_type TEXT,
     first_token_ms REAL,
     duration_ms REAL,
+    tool_duration_ms INTEGER,
     context_window_used INTEGER,
     tool_call_count INTEGER,
     tool_output_chars INTEGER,
@@ -213,6 +238,38 @@ def _connect(path: Optional[os.PathLike[str] | str] = None) -> sqlite3.Connectio
                         "ADD COLUMN context_window_limit_source TEXT "
                         "CHECK (context_window_limit_source IN ('derived'))"
                     )
+                additions = {
+                    "run_usage_facts": (
+                        (
+                            "origin",
+                            "TEXT NOT NULL DEFAULT 'hermes_agent'",
+                        ),
+                        ("profile", "TEXT"),
+                        ("wall_ms", "INTEGER"),
+                        ("call_kind", "TEXT"),
+                        ("tool_duration_ms", "INTEGER"),
+                    ),
+                    "run_llm_calls": (
+                        (
+                            "origin",
+                            "TEXT NOT NULL DEFAULT 'hermes_agent'",
+                        ),
+                        ("tool_duration_ms", "INTEGER"),
+                    ),
+                }
+                for table, table_additions in additions.items():
+                    columns = {
+                        row[1]
+                        for row in conn.execute(
+                            f"PRAGMA table_info({table})"
+                        )
+                    }
+                    for column, declaration in table_additions:
+                        if column not in columns:
+                            conn.execute(
+                                f"ALTER TABLE {table} ADD COLUMN "
+                                f"{column} {declaration}"
+                            )
                 trace_columns = {
                     row[1]
                     for row in conn.execute("PRAGMA table_info(run_traces)")
@@ -275,12 +332,21 @@ def _source(value: Any) -> str:
     return value if value in _SOURCE_RANK else "unknown"
 
 
+def _origin(value: Any) -> str:
+    normalized = str(value).strip()
+    if normalized not in _VALID_ORIGINS:
+        raise ValueError(f"unsupported usage fact origin: {normalized!r}")
+    return normalized
+
+
 def _upsert_run_facts(
     conn: sqlite3.Connection,
     run_id: str,
     fields: Optional[Mapping[str, Any]] = None,
 ) -> None:
     values = _clean_fields(fields, RUN_FACT_COLUMNS)
+    if "origin" in values:
+        values["origin"] = _origin(values["origin"])
     incoming_source = _source(values.pop("source", None))
     values.setdefault("captured_at", utc_now_iso())
 
@@ -341,6 +407,8 @@ def _refresh_run_aggregates(conn: sqlite3.Connection, run_id: str) -> None:
                 AS tool_call_count,
             CASE WHEN COUNT(tool_output_chars)>0 THEN SUM(tool_output_chars) END
                 AS tool_output_chars,
+            CASE WHEN COUNT(tool_duration_ms)>0 THEN SUM(tool_duration_ms) END
+                AS tool_duration_ms,
             -- Duration is additive, but a partial sum would understate the run.
             CASE WHEN COUNT(duration_ms)=COUNT(*) THEN SUM(duration_ms) END
                 AS duration_ms,
@@ -382,6 +450,8 @@ def record_llm_call(
         raise ValueError("call_index must be non-negative")
 
     values = _clean_fields(fields, LLM_CALL_COLUMNS)
+    if "origin" in values:
+        values["origin"] = _origin(values["origin"])
     columns = ["run_id", "call_index", *values]
     params = [str(run_id), call_index, *values.values()]
     updates = [
@@ -414,6 +484,7 @@ def increment_tool_call(
     *,
     error_type: Optional[str] = None,
     tool_output_chars: Optional[int] = None,
+    tool_duration_ms: Optional[int] = None,
     run_fields: Optional[Mapping[str, Any]] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
@@ -421,13 +492,18 @@ def increment_tool_call(
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
     call_index = int(call_index)
+    if tool_duration_ms is not None:
+        tool_duration_ms = int(tool_duration_ms)
+        if tool_duration_ms < 0:
+            raise ValueError("tool_duration_ms must be non-negative")
     with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), run_fields)
         conn.execute(
             """
             INSERT INTO run_llm_calls (
-                run_id, call_index, tool_call_count, tool_output_chars, error_type
-            ) VALUES (?, ?, 1, ?, ?)
+                run_id, call_index, tool_call_count, tool_output_chars,
+                tool_duration_ms, error_type
+            ) VALUES (?, ?, 1, ?, ?, ?)
             ON CONFLICT(run_id, call_index) DO UPDATE SET
                 tool_call_count=CASE
                     WHEN run_llm_calls.tool_call_count IS NULL THEN 1
@@ -441,9 +517,23 @@ def increment_tool_call(
                     ELSE run_llm_calls.tool_output_chars
                         + excluded.tool_output_chars
                 END,
+                tool_duration_ms=CASE
+                    WHEN excluded.tool_duration_ms IS NULL
+                        THEN run_llm_calls.tool_duration_ms
+                    WHEN run_llm_calls.tool_duration_ms IS NULL
+                        THEN excluded.tool_duration_ms
+                    ELSE run_llm_calls.tool_duration_ms
+                        + excluded.tool_duration_ms
+                END,
                 error_type=COALESCE(excluded.error_type, run_llm_calls.error_type)
             """,
-            (str(run_id), call_index, tool_output_chars, error_type),
+            (
+                str(run_id),
+                call_index,
+                tool_output_chars,
+                tool_duration_ms,
+                error_type,
+            ),
         )
         _refresh_run_aggregates(conn, str(run_id))
 
@@ -454,6 +544,7 @@ def record_tool_result(
     *,
     error_type: Optional[str] = None,
     tool_output_chars: Optional[int] = None,
+    tool_duration_ms: Optional[int] = None,
     run_fields: Optional[Mapping[str, Any]] = None,
     path: Optional[os.PathLike[str] | str] = None,
 ) -> None:
@@ -461,13 +552,18 @@ def record_tool_result(
     if not str(run_id).strip():
         raise ValueError("run_id must be non-empty")
     call_index = int(call_index)
+    if tool_duration_ms is not None:
+        tool_duration_ms = int(tool_duration_ms)
+        if tool_duration_ms < 0:
+            raise ValueError("tool_duration_ms must be non-negative")
     with _connection(path) as conn:
         _upsert_run_facts(conn, str(run_id), run_fields)
         conn.execute(
             """
             INSERT INTO run_llm_calls (
-                run_id, call_index, tool_output_chars, error_type
-            ) VALUES (?, ?, ?, ?)
+                run_id, call_index, tool_output_chars, tool_duration_ms,
+                error_type
+            ) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(run_id, call_index) DO UPDATE SET
                 tool_output_chars=CASE
                     WHEN excluded.tool_output_chars IS NULL
@@ -477,9 +573,23 @@ def record_tool_result(
                     ELSE run_llm_calls.tool_output_chars
                         + excluded.tool_output_chars
                 END,
+                tool_duration_ms=CASE
+                    WHEN excluded.tool_duration_ms IS NULL
+                        THEN run_llm_calls.tool_duration_ms
+                    WHEN run_llm_calls.tool_duration_ms IS NULL
+                        THEN excluded.tool_duration_ms
+                    ELSE run_llm_calls.tool_duration_ms
+                        + excluded.tool_duration_ms
+                END,
                 error_type=COALESCE(excluded.error_type, run_llm_calls.error_type)
             """,
-            (str(run_id), call_index, tool_output_chars, error_type),
+            (
+                str(run_id),
+                call_index,
+                tool_output_chars,
+                tool_duration_ms,
+                error_type,
+            ),
         )
         _refresh_run_aggregates(conn, str(run_id))
 

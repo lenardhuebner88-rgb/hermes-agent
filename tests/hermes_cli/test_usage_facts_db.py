@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 from hermes_cli.usage_facts_db import (
     LLM_CALL_COLUMNS,
     RUN_FACT_COLUMNS,
@@ -45,6 +47,76 @@ def test_schema_contains_complete_contract(tmp_path):
         "message_fingerprint",
         "captured_at",
     }
+
+
+def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
+    path = tmp_path / "facts.db"
+
+    record_llm_call(
+        "run-new-dimensions",
+        7,
+        {
+            "origin": "claude_code",
+            "tool_duration_ms": 17,
+        },
+        run_fields={
+            "origin": "claude_code",
+            "profile": "reviewer",
+            "wall_ms": 1234,
+            "call_kind": "main_loop",
+            "tool_duration_ms": 17,
+            "source": "measured",
+        },
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT * FROM run_usage_facts WHERE run_id='run-new-dimensions'",
+    )
+    call = _row(
+        path,
+        "SELECT * FROM run_llm_calls WHERE run_id='run-new-dimensions'",
+    )
+
+    assert fact["origin"] == "claude_code"
+    assert fact["profile"] == "reviewer"
+    assert fact["wall_ms"] == 1234
+    assert fact["call_kind"] == "main_loop"
+    assert fact["tool_duration_ms"] == 17
+    assert call["origin"] == "claude_code"
+    assert call["tool_duration_ms"] == 17
+
+
+def test_origin_is_write_validated_without_changing_source_check(tmp_path):
+    path = tmp_path / "facts.db"
+    initialize_usage_facts_db(path)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT INTO run_usage_facts (run_id, origin, source) "
+            "VALUES ('run-claude', 'claude_code', 'measured')"
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO run_usage_facts (run_id, origin, source) "
+                "VALUES ('run-invalid-source', 'claude_code', 'claude_code')"
+            )
+
+    with pytest.raises(ValueError, match="unsupported usage fact origin"):
+        upsert_run_facts(
+            "run-invalid-origin",
+            {"origin": "other_cli"},
+            path=path,
+        )
+    with pytest.raises(ValueError, match="unsupported usage fact origin"):
+        record_llm_call(
+            "run-invalid-call-origin",
+            1,
+            {"origin": "other_cli"},
+            path=path,
+        )
 
 
 def test_trace_message_fingerprint_is_idempotent_per_run(tmp_path):
