@@ -34,7 +34,14 @@ def _sha256(data: bytes) -> str:
 
 
 def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", *args], cwd=repo, text=True, capture_output=True, check=False)
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        check=False,
+    )
     if result.returncode:
         raise ValueError(f"not a readable git workspace: git {' '.join(args)} failed")
     return result.stdout.strip()
@@ -80,8 +87,15 @@ def default_runtime_fingerprint(repo: str | Path) -> dict[str, str]:
 
 def _version(argv: Sequence[str], cwd: Path) -> str:
     try:
-        result = subprocess.run(list(argv), cwd=cwd, text=True, capture_output=True,
-                                check=False, timeout=10)
+        result = subprocess.run(
+            list(argv),
+            cwd=cwd,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return "unavailable"
     value = (result.stdout or result.stderr).strip().splitlines()

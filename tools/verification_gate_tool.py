@@ -125,9 +125,18 @@ def _run_commands(specs: Sequence[tuple[str, list[str]]], root: Path) -> list[di
     for command_id, argv in specs:
         started = time.monotonic()
         try:
-            completed = subprocess.run(argv, cwd=root, env=_safe_env(), text=True,
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, check=False, timeout=3600)
+            completed = subprocess.run(
+                argv,
+                cwd=root,
+                env=_safe_env(),
+                text=True,
+                encoding="utf-8",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3600,
+            )
             exit_code: int | None = completed.returncode
             timed_out = False
         except subprocess.TimeoutExpired:
@@ -230,7 +239,10 @@ def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> d
         launch = subprocess.run(
             [str(root / "scripts/preview-realdata.sh"), "--scenario", scenario,
              "--route", route, "--home", str(home), "--port", str(preview_port), "--keep"],
-            cwd=root, env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)}, text=True,
+            cwd=root,
+            env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)},
+            text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=240,
         )
         if launch.returncode == 75 or "ui_preview_busy" in launch.stdout:
@@ -246,14 +258,21 @@ def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> d
         runner_dir = home / "visual-evidence"
         runner_dir.mkdir(mode=0o700)
         head_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            encoding="utf-8",
         ).strip()
         runner = subprocess.run(
             ["node", str(root / "scripts/visual_verify_runner.mjs"),
              "--base-url", url, "--output-dir", str(runner_dir), "--git-head", head_sha,
              "--viewports", "1280x900=1280x900,768x1024=768x1024,390x844=390x844",
              "--scenario", "terminal_bridge", "/control/agent-terminals"],
-            cwd=root, env=_safe_env(), text=True, stdout=subprocess.PIPE,
+            cwd=root,
+            env=_safe_env(),
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=180,
         )
         parsed = _parse_ui_summary(runner_dir / "summary.json", artifact_dir)
