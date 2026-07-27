@@ -95,7 +95,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 from toolsets import get_toolset_names
-from hermes_cli import disposition as _disposition_mod
+from hermes_cli import disposition as _disposition_mod, kanban_breaker_message as _breaker_message
 from hermes_cli import kanban_context as _kanban_context
 from hermes_cli import kanban_dispatch_policy as _dispatch_policy
 from hermes_cli import kanban_escalation_class as _escalation_class
@@ -24074,9 +24074,9 @@ def _record_task_failure(
                 # error arg), so we close with the raw error then rewrite only
                 # the error column for the operator-facing terminal line.
                 _orig = (error or "")[:500]
-                _prefix = (
-                    f"circuit breaker tripped after {failures} consecutive "
-                    f"{outcome} failures (limit {effective_limit}): "
+                _prefix = _breaker_message.breaker_trip_prefix(
+                    conn, task_id, failures=failures, trigger_outcome=outcome,
+                    effective_limit=effective_limit,
                 )
                 _room = 500 - len(_prefix)
                 if _room <= 0:
