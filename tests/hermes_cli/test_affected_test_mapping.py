@@ -308,7 +308,9 @@ def test_changed_paths_excludes_untracked_files_with_explicit_ref(
     assert changed_paths(tmp_path, "HEAD") == []
 
 
-def test_changed_paths_excludes_deleted_production_file(tmp_path: Path) -> None:
+def test_deleted_production_without_surviving_test_is_not_applicable(
+    tmp_path: Path,
+) -> None:
     (tmp_path / "obsolete.py").write_text("VALUE = 1\n")
     _init_repo(tmp_path)
     (tmp_path / "obsolete.py").unlink()
@@ -316,8 +318,35 @@ def test_changed_paths_excludes_deleted_production_file(tmp_path: Path) -> None:
     changed = changed_paths(tmp_path, "HEAD")
     plan = classify_changed_paths(tmp_path, changed, mode="worker")
 
-    assert changed == []
+    assert changed == ["obsolete.py"]
     assert plan.unmapped_paths == []
+    assert plan.records[0].state == "not_applicable"
+    assert plan.records[0].scope == "deleted_production"
+
+
+def test_deleted_production_selects_surviving_importer(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "foo.py").write_text("VALUE = 1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_surviving_importer.py").write_text(
+        "from pkg import foo\n\n"
+        "def test_import():\n"
+        "    assert foo.VALUE == 1\n"
+    )
+    _init_repo(tmp_path)
+    (tmp_path / "pkg" / "foo.py").unlink()
+
+    changed = changed_paths(tmp_path, "HEAD")
+    record = classify_changed_paths(
+        tmp_path,
+        changed,
+        mode="worker",
+    ).records[0]
+
+    assert changed == ["pkg/foo.py"]
+    assert record.state == "selected"
+    assert record.strategies == ("import",)
+    assert record.tests == ("tests/test_surviving_importer.py",)
 
 
 def test_changed_paths_without_main_falls_back_to_head(tmp_path: Path) -> None:
@@ -385,6 +414,75 @@ def test_explicit_direct_and_import_strategies_are_unioned(tmp_path: Path) -> No
     }
 
 
+def test_real_package_init_import_scope_is_not_package_fallback_capped() -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/__init__.py"],
+        mode="worker",
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.strategies == ("explicit", "import")
+    assert len(record.tests) > WORKER_FALLBACK_MAX_TEST_FILES
+    assert "package_fallback" not in record.strategies
+
+
+def test_stress_registry_files_are_not_pytest_import_evidence() -> None:
+    index = build_test_index(REPO_ROOT)
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/kanban_db.py"],
+        mode="worker",
+        index=index,
+    ).records[0]
+
+    assert "tests/stress/test_atypical_scenarios.py" not in index.paths
+    assert "tests/stress/test_kanban_worktree_concurrency.py" not in index.paths
+    assert "tests/stress/test_atypical_scenarios.py" not in record.tests
+    assert "tests/stress/test_kanban_worktree_concurrency.py" not in record.tests
+
+
+def test_real_shared_test_helper_selects_its_importers() -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["tests/hermes_cli/_kanban_test_helpers.py"],
+        mode="worker",
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.scope == "test_support"
+    assert record.strategies == ("test_support_import",)
+    assert "tests/hermes_cli/test_kanban_db_chain_cost.py" in record.tests
+    assert "tests/hermes_cli/test_kanban_worktrees_integrator.py" in record.tests
+
+
+def test_real_conftest_scope_selects_or_holds_instead_of_skipping() -> None:
+    worker = classify_changed_paths(
+        REPO_ROOT,
+        ["tests/hermes_cli/conftest.py"],
+        mode="worker",
+    ).records[0]
+    integration = classify_changed_paths(
+        REPO_ROOT,
+        ["tests/hermes_cli/conftest.py"],
+        mode="integration",
+    ).records[0]
+    root = classify_changed_paths(
+        REPO_ROOT,
+        ["tests/conftest.py"],
+        mode="integration",
+    ).records[0]
+
+    assert worker.state == "unmapped"
+    assert worker.scope == "test_support"
+    assert any("mode limit is 200" in warning for warning in worker.warnings)
+    assert integration.state == "selected"
+    assert integration.strategies == ("test_support_scope",)
+    assert integration.tests == ("tests/hermes_cli/",)
+    assert root.state == "unmapped"
+    assert root.tests == ()
+
+
 def test_real_fixture_string_import_is_not_indexed() -> None:
     index = build_test_index(REPO_ROOT)
 
@@ -431,6 +529,25 @@ def test_census_ignores_tracked_file_deleted_from_worktree(tmp_path: Path) -> No
     plan = census_repository(tmp_path, mode="worker")
 
     assert plan.records == ()
+    assert plan.unmapped_paths == []
+
+
+def test_census_ignores_untracked_production_work_in_progress(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "covered.py").write_text("VALUE = 1\n")
+    (tmp_path / "tests" / "pkg").mkdir(parents=True)
+    (tmp_path / "tests" / "pkg" / "test_covered.py").write_text(
+        "def test_covered():\n"
+        "    assert True\n"
+    )
+    _init_repo(tmp_path)
+    (tmp_path / "untracked_slice.py").write_text("VALUE = 2\n")
+
+    plan = census_repository(tmp_path, mode="worker")
+
+    assert {record.path for record in plan.records} == {"pkg/covered.py"}
     assert plan.unmapped_paths == []
 
 

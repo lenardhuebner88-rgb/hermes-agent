@@ -67,7 +67,11 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     (repo / "pkg" / "foo.py").write_text("VALUE = 1\n")
     (repo / "obsolete.py").write_text("VALUE = 1\n")
     (repo / "tests" / "pkg").mkdir(parents=True)
-    (repo / "tests" / "pkg" / "test_foo.py").write_text("def test_foo():\n    assert True\n")
+    (repo / "tests" / "pkg" / "test_foo.py").write_text(
+        "from pkg import foo\n\n"
+        "def test_foo():\n"
+        "    assert foo.VALUE == 1\n"
+    )
     (repo / "docs").mkdir()
     (repo / "docs" / "keep.md").write_text("# keep\n")
 
@@ -158,11 +162,28 @@ def test_unmapped_production_change_exits_four_without_running_pytest(
     assert not sentinel.exists()
 
 
-def test_deleted_production_file_does_not_block_gate(tmp_path: Path) -> None:
+def test_deleted_production_file_selects_surviving_importer(
+    tmp_path: Path,
+) -> None:
     repo, sentinel = _make_repo(tmp_path)
-    (repo / "obsolete.py").unlink()
+    (repo / "pkg" / "foo.py").unlink()
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "delete obsolete source")
+    _git(repo, "commit", "-q", "-m", "delete source only")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 0, proc.stderr
+    assert sentinel.read_text().split() == ["tests/pkg/test_foo.py"]
+
+
+def test_deleted_production_and_its_test_do_not_block_gate(
+    tmp_path: Path,
+) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "pkg" / "foo.py").unlink()
+    (repo / "tests" / "pkg" / "test_foo.py").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "delete source and test")
 
     proc = _run_affected(repo, "HEAD~1")
 

@@ -298,6 +298,22 @@ def _run_git(repo_root: Path, *args: str) -> str:
     return completed.stdout
 
 
+def tracked_python_paths(repo_root: Path) -> list[str]:
+    return sorted(
+        {
+            _normalize_path(line)
+            for line in _run_git(
+                repo_root,
+                "ls-files",
+                "--cached",
+                "--",
+                "*.py",
+            ).splitlines()
+            if line
+        }
+    )
+
+
 def tracked_and_untracked_python_paths(repo_root: Path) -> list[str]:
     return sorted(
         {
@@ -316,14 +332,31 @@ def tracked_and_untracked_python_paths(repo_root: Path) -> list[str]:
     )
 
 
-def changed_paths(repo_root: Path, ref: str | None) -> list[str]:
-    if ref:
+def changed_paths(
+    repo_root: Path,
+    ref: str | None,
+    right: str | None = None,
+) -> list[str]:
+    if right is not None:
         changed = {
             _normalize_path(line)
             for line in _run_git(
                 repo_root,
                 "diff",
-                "--diff-filter=ACMR",
+                "--diff-filter=ACDMR",
+                "--name-only",
+                ref or "HEAD",
+                right,
+            ).splitlines()
+            if line
+        }
+    elif ref:
+        changed = {
+            _normalize_path(line)
+            for line in _run_git(
+                repo_root,
+                "diff",
+                "--diff-filter=ACDMR",
                 "--name-only",
                 ref,
             ).splitlines()
@@ -340,7 +373,7 @@ def changed_paths(repo_root: Path, ref: str | None) -> list[str]:
             for line in _run_git(
                 repo_root,
                 "diff",
-                "--diff-filter=ACMR",
+                "--diff-filter=ACDMR",
                 "--name-only",
                 base_ref,
             ).splitlines()
@@ -420,7 +453,9 @@ def build_test_index(repo_root: Path) -> TestIndex:
     test_paths = [
         path
         for path in tracked_and_untracked_python_paths(repo_root)
-        if _is_test_path(path) and (repo_root / path).is_file()
+        if _is_test_path(path)
+        and not path.startswith("tests/stress/")
+        and (repo_root / path).is_file()
     ]
     by_import: dict[str, set[str]] = {}
     for relative in test_paths:
@@ -491,6 +526,23 @@ def _nearest_package_fallback(
     return None, None
 
 
+def _test_support_fallback(
+    source_path: str,
+    test_index: TestIndex,
+    *,
+    max_test_files: int,
+) -> tuple[str | None, str | None]:
+    parent = PurePosixPath(source_path).parent
+    prefix = "" if parent == PurePosixPath(".") else parent.as_posix() + "/"
+    count = sum(1 for path in test_index.paths if path.startswith(prefix))
+    if count <= max_test_files:
+        return prefix or "tests/", None
+    return None, (
+        f"test support scope {prefix or 'tests/'} has {count} test files; "
+        f"mode limit is {max_test_files}"
+    )
+
+
 def _is_code_free_package_marker(repo_root: Path, source_path: str) -> bool:
     if not source_path.endswith("/__init__.py"):
         return False
@@ -506,6 +558,21 @@ def _is_code_free_package_marker(repo_root: Path, source_path: str) -> bool:
         and isinstance(body[0], ast.Expr)
         and isinstance(body[0].value, ast.Constant)
         and isinstance(body[0].value.value, str)
+    )
+
+
+def _is_deleted_production_path(repo_root: Path, source_path: str) -> bool:
+    if (repo_root / source_path).is_file():
+        return False
+    return bool(
+        _run_git(
+            repo_root,
+            "log",
+            "-1",
+            "--format=%H",
+            "--",
+            source_path,
+        ).strip()
     )
 
 
@@ -677,17 +744,67 @@ def classify_changed_paths(
             continue
 
         if _is_under_tests(source_path):
+            if source_path.startswith("tests/stress/"):
+                records.append(
+                    PathClassification(
+                        path=source_path,
+                        state="not_applicable",
+                        scope="stress_scenario",
+                        warnings=(rejected_warning,) if rejected_warning else (),
+                        reason="stress scenarios use their own registry, not pytest",
+                    )
+                )
+                continue
+            if test_index is None:
+                test_index = build_test_index(repo_root)
+            module_import = source_path[:-3].replace("/", ".")
+            imported = test_index.imports.get(module_import, ())
+            if imported:
+                records.append(
+                    PathClassification(
+                        path=source_path,
+                        state="selected",
+                        scope="test_support",
+                        strategies=("test_support_import",),
+                        tests=tuple(imported),
+                        warnings=(rejected_warning,) if rejected_warning else (),
+                    )
+                )
+                continue
+            fallback, fallback_warning = _test_support_fallback(
+                source_path,
+                test_index,
+                max_test_files=fallback_limit,
+            )
+            if fallback:
+                records.append(
+                    PathClassification(
+                        path=source_path,
+                        state="selected",
+                        scope="test_support",
+                        strategies=("test_support_scope",),
+                        tests=(fallback,),
+                        warnings=(rejected_warning,) if rejected_warning else (),
+                    )
+                )
+                continue
+            warnings = tuple(
+                warning
+                for warning in (fallback_warning, rejected_warning)
+                if warning
+            )
             records.append(
                 PathClassification(
                     path=source_path,
-                    state="not_applicable",
+                    state="unmapped",
                     scope="test_support",
-                    warnings=(rejected_warning,) if rejected_warning else (),
-                    reason="pytest support code is exercised through selected tests",
+                    warnings=warnings,
+                    reason="pytest support code has no bounded affected-test scope",
                 )
             )
             continue
 
+        source_deleted = _is_deleted_production_path(repo_root, source_path)
         source = PurePosixPath(source_path)
         if source.name == "__init__.py":
             module_import = source.parent.as_posix().replace("/", ".")
@@ -719,6 +836,18 @@ def classify_changed_paths(
                     strategies=tuple(strategies),
                     tests=tuple(sorted(tests)),
                     warnings=(rejected_warning,) if rejected_warning else (),
+                )
+            )
+            continue
+
+        if source_deleted:
+            records.append(
+                PathClassification(
+                    path=source_path,
+                    state="not_applicable",
+                    scope="deleted_production",
+                    warnings=(rejected_warning,) if rejected_warning else (),
+                    reason="deleted production path has no surviving direct or importing test",
                 )
             )
             continue
@@ -823,7 +952,7 @@ def census_repository(
 ) -> AffectedTestPlan:
     sources = [
         path
-        for path in tracked_and_untracked_python_paths(repo_root)
+        for path in tracked_python_paths(repo_root)
         if not _is_under_tests(path) and (repo_root / path).is_file()
     ]
     return classify_changed_paths(

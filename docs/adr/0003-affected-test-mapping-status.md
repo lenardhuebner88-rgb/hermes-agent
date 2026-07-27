@@ -24,15 +24,29 @@ One pure-stdlib classifier is shared by the standalone script and the
 post-merge integrator. The interactive worker mode applies a package-fallback
 cap of 200; integration applies 800. The cap is part of classification, so an
 oversized fallback that leaves no focused test is `unmapped` instead of being
-discarded after a successful classification.
+discarded after a successful classification. These are deliberately fallback
+caps, not caps on direct, explicit, or import-index evidence; truncating real
+evidence would recreate a false-green coverage filter.
 
 Explicit patterns are additive precision hints, not coverage filters. For a
 production Python path their existing targets are unioned with mirrored direct
 tests and imports discovered from the test suite's Python AST. Imports written
-only inside docstrings or fixture strings are not test evidence.
+only inside docstrings or fixture strings are not test evidence. Deleted
+production paths still select surviving direct or importing tests, but become
+`not_applicable` rather than `unmapped` when no such test survives.
 
-The accepted repository census covers Hermes core/runtime, plugins, gateways,
-tools, loops, operational scripts and nested test files. Procedural skill
+Stress-registry scenarios are excluded from the normal pytest import index in
+both directions. Python support files under `tests/` select test files that
+import them; otherwise their containing test scope is selected only when it
+fits the active 200/800 cap. An oversized shared-support scope is `unmapped`,
+never an empty successful selection.
+
+The accepted repository census covers tracked Hermes core/runtime, plugins,
+gateways, tools, loops, operational scripts and nested test files. Untracked
+slice work is classified when it is part of the current ref-less diff, but is
+not allowed to leak into the repository-wide census. Existing untracked tests
+may still provide path-local evidence for the slice that is actively creating
+them. Procedural skill
 catalog payloads (`skills/`, `optional-skills/`), documentation render helpers
 and website-generation helpers are `not_applicable` to this core pytest gate;
 their own workflows remain separate. Empty or docstring-only `__init__.py`

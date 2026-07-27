@@ -61,6 +61,7 @@ from hermes_cli.affected_test_mapping import (
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError as AffectedTestMappingError,
     affected_pytest_modules as _shared_affected_pytest_modules,
+    changed_paths as _shared_changed_paths,
 )
 
 # Compatibility aliases for existing callers/tests.  The implementation and
@@ -884,11 +885,7 @@ def _reverted_merged_ancestor(repo: Path, branch: str, target: str) -> Optional[
 
 
 def _changed_files_between(repo: Path, left: str, right: str) -> list[str]:
-    return [
-        f
-        for f in _git(repo, "diff", "--name-only", left, right).splitlines()
-        if f
-    ]
+    return _shared_changed_paths(repo, left, right)
 
 
 def dirty_files(repo: Path) -> list[str]:

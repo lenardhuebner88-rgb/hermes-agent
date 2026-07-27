@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
+from hermes_cli.affected_test_mapping import changed_paths
 
 from tests.hermes_cli._kanban_test_helpers import (
     _git,
@@ -58,6 +59,20 @@ def repo(tmp_path):
     _git(r, "add", "-A")
     _git(r, "commit", "-m", "base")
     return r
+
+
+def test_changed_files_between_uses_shared_changed_path_set(repo):
+    base = _git(repo, "rev-parse", "HEAD")
+    (repo / "a.txt").unlink()
+    (repo / "added.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "mixed diff")
+
+    standalone = changed_paths(repo, base, "HEAD")
+    integration = kwt._changed_files_between(repo, base, "HEAD")
+
+    assert standalone == ["a.txt", "added.py"]
+    assert integration == standalone
 
 
 def _red_gate_web(_repo, _files):
