@@ -8,6 +8,7 @@ comparable context/new/uncached input totals before pricing.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections import Counter
@@ -57,6 +58,13 @@ _CACHE_INCLUSIVE_ORIGINS = frozenset(
 _SUBSCRIPTION_BILLING_MODE = "subscription_included"
 _UNKNOWN_BILLING_MODES = frozenset({"", "unknown"})
 _ONE_MILLION = Decimal("1000000")
+_MAIN_CALL_KINDS = frozenset({"main", "main_loop"})
+_SUBAGENT_CALL_KIND = "subagent"
+_WORKLOAD_ROLES = ("main", "subagent", "unknown")
+DEFAULT_RATE_LIMIT_SIDECAR_PATH = Path(
+    "/mnt/data/hermes-observability/foreign_rate_limit_snapshots.jsonl"
+)
+RATE_LIMIT_STALE_AFTER_SECONDS = 60 * 60
 
 _TOKEN_COLUMNS = (
     "input_tokens",
@@ -260,6 +268,7 @@ def build_usage_facts_payload(
     *,
     kanban_path: str | Path | None = None,
     profiles_root: str | Path | None = None,
+    rate_limit_path: str | Path | None = None,
     origins: Sequence[str] | None = None,
     captured_from: str | None = None,
     captured_to: str | None = None,
@@ -269,6 +278,7 @@ def build_usage_facts_payload(
     """Build the complete S7 payload from read-only SQLite inputs."""
 
     started = time.perf_counter()
+    payload_generated_at = generated_at or _utc_now_iso()
     usage_path = Path(usage_facts_path)
     where_sql, params = _usage_filters(
         origins=origins,
@@ -284,6 +294,7 @@ def build_usage_facts_payload(
             params,
         ).fetchall()
     query_ms = (time.perf_counter() - query_started) * 1000
+    workload = _workload_rollup(rows)
 
     pricing_cache: dict[tuple[str, str, str], _PriceVector] = {}
     group_builders: dict[
@@ -349,6 +360,7 @@ def build_usage_facts_payload(
         )
 
     summary = _payload_summary(groups)
+    summary["workload"] = workload
     for group in groups:
         group.pop("_billing_breakdown", None)
     kanban_started = time.perf_counter()
@@ -361,11 +373,20 @@ def build_usage_facts_payload(
         immutable_evidence=immutable_evidence,
     )
     kanban_ms = (time.perf_counter() - kanban_started) * 1000
+    rate_limits = _rate_limit_projection(
+        (
+            Path(rate_limit_path)
+            if rate_limit_path is not None
+            else DEFAULT_RATE_LIMIT_SIDECAR_PATH
+        ),
+        observed_at=_parse_utc_datetime(payload_generated_at)
+        or datetime.now(timezone.utc),
+    )
 
     finished = time.perf_counter()
     return {
         "contract_version": CONTRACT_VERSION,
-        "generated_at": generated_at or _utc_now_iso(),
+        "generated_at": payload_generated_at,
         "scope": {
             "origins": sorted(set(origins)) if origins else None,
             "captured_from": captured_from,
@@ -376,6 +397,7 @@ def build_usage_facts_payload(
         "groups": groups,
         "unattributed": _unattributed_payload(groups),
         "kanban": kanban,
+        "rate_limits": rate_limits,
         "database": database_counts,
         "timing_ms": {
             "facts_query": round(query_ms, 3),
@@ -426,15 +448,15 @@ def _aggregate_sql(where_sql: str) -> str:
         for item in pair
     )
     return f"""
-        SELECT origin, profile, lane, model, provider, billing_mode,
+        SELECT origin, call_kind, profile, lane, model, provider, billing_mode,
                COUNT(*) AS fact_rows,
                COUNT(*) AS token_rows,
                {observed},
                SUM(COALESCE(llm_call_count, 1)) AS request_count
           FROM run_usage_facts
           {where_sql}
-         GROUP BY origin, profile, lane, model, provider, billing_mode
-         ORDER BY origin, profile, lane, model, provider, billing_mode
+         GROUP BY origin, call_kind, profile, lane, model, provider, billing_mode
+         ORDER BY origin, call_kind, profile, lane, model, provider, billing_mode
     """
 
 
@@ -484,6 +506,86 @@ def _row_metrics(row: sqlite3.Row) -> dict[str, Any]:
             row[f"{column}_observed_rows"]
         )
     return metrics
+
+
+def _workload_rollup(rows: Sequence[sqlite3.Row]) -> dict[str, Any]:
+    """Partition normalized context by main, discovered subagent, and unknown."""
+
+    registered_subagent_types = {
+        profile
+        for row in rows
+        if _normalized_call_value(row["call_kind"]) == _SUBAGENT_CALL_KIND
+        if (profile := _normalized_call_value(row["profile"])) is not None
+    }
+    normalized_by_role: dict[str, list[dict[str, Any]]] = {
+        role: [] for role in _WORKLOAD_ROLES
+    }
+    fact_rows_by_role = {role: 0 for role in _WORKLOAD_ROLES}
+    for row in rows:
+        role = _workload_role(
+            row["call_kind"], registered_subagent_types
+        )
+        raw = _row_metrics(row)
+        fact_rows_by_role[role] += raw["fact_rows"]
+        normalized_by_role[role].append(
+            _normalize_metrics(str(row["origin"]), raw)
+        )
+
+    role_totals = {
+        role: _sum_normalized_tokens(normalized_by_role[role])
+        for role in _WORKLOAD_ROLES
+    }
+    result = {
+        role: {
+            "fact_rows": fact_rows_by_role[role],
+            "context_input_tokens": role_totals[role]["context_input_tokens"],
+        }
+        for role in _WORKLOAD_ROLES
+    }
+    all_context = sum(
+        result[role]["context_input_tokens"] for role in _WORKLOAD_ROLES
+    )
+    classified_context = (
+        result["main"]["context_input_tokens"]
+        + result["subagent"]["context_input_tokens"]
+    )
+    subagent_context = result["subagent"]["context_input_tokens"]
+    result["subagent_share"] = {
+        "context_input_tokens": subagent_context,
+        "all_context_input_tokens": all_context,
+        "of_all_context": (
+            subagent_context / all_context if all_context else None
+        ),
+        "classified_context_input_tokens": classified_context,
+        "of_classified_context": (
+            subagent_context / classified_context
+            if classified_context
+            else None
+        ),
+        "classification_status": (
+            "partial" if fact_rows_by_role["unknown"] else "complete"
+        ),
+    }
+    return result
+
+
+def _normalized_call_value(value: Any) -> str | None:
+    text = str(value or "").strip().casefold()
+    return text or None
+
+
+def _workload_role(
+    call_kind: Any, registered_subagent_types: set[str]
+) -> str:
+    normalized = _normalized_call_value(call_kind)
+    if normalized in _MAIN_CALL_KINDS:
+        return "main"
+    if (
+        normalized == _SUBAGENT_CALL_KIND
+        or normalized in registered_subagent_types
+    ):
+        return "subagent"
+    return "unknown"
 
 
 def _empty_metrics() -> dict[str, Any]:
@@ -925,7 +1027,7 @@ def _kanban_projection(
     attribution = Counter(
         (fact.classification, fact.provider) for fact in facts
     )
-    return {
+    projection = {
         "available": True,
         "scope": "all_board_runs",
         "total_runs": len(facts),
@@ -954,6 +1056,79 @@ def _kanban_projection(
             ),
         },
     }
+    calibration = _route_change_calibration(kanban_path)
+    if calibration is not None:
+        projection["route_change_calibration"] = calibration
+    return projection
+
+
+def _route_change_calibration(kanban_path: Path) -> dict[str, Any] | None:
+    """Measure model/provider route changes from their authoritative events."""
+
+    try:
+        with _read_only_connection(kanban_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload
+                  FROM task_events
+                 WHERE kind = 'model_route_changed'
+                """
+            ).fetchall()
+    except sqlite3.OperationalError:
+        # Older/incomplete board snapshots cannot establish this calibration.
+        return None
+
+    observed_events = 0
+    route_changed_events = 0
+    for row in rows:
+        routes = _event_routes(row["payload"])
+        if routes is None:
+            continue
+        old_route, new_route = routes
+        observed_events += 1
+        if old_route != new_route:
+            route_changed_events += 1
+
+    return {
+        "source": "task_events.kind=model_route_changed",
+        "scope": "all events with complete old and new provider/model routes",
+        "observed_events": observed_events,
+        "route_changed_events": route_changed_events,
+        "route_unchanged_events": observed_events - route_changed_events,
+        "route_change_rate": (
+            route_changed_events / observed_events
+            if observed_events
+            else None
+        ),
+    }
+
+
+def _event_routes(
+    payload: Any,
+) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    try:
+        event = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(event, Mapping):
+        return None
+    old_route = _complete_route(event.get("old"))
+    new_route = _complete_route(event.get("new"))
+    if old_route is None or new_route is None:
+        return None
+    return old_route, new_route
+
+
+def _complete_route(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    provider = value.get("provider")
+    model = value.get("model")
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None
+    provider = provider.strip()
+    model = model.strip()
+    return (provider, model) if provider and model else None
 
 
 def _usage_coverage_by_run(
@@ -988,6 +1163,73 @@ def _usage_coverage_by_run(
                 if row["has_tokens"]:
                     token_rows.add(run_id)
     return fact_rows, token_rows
+
+
+def _rate_limit_projection(
+    path: Path,
+    *,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Stream the sidecar and retain only the newest valid snapshot per origin."""
+
+    latest: dict[str, tuple[datetime, str, Mapping[str, Any]]] = {}
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, Mapping):
+                    continue
+                origin = record.get("origin")
+                captured_at = record.get("captured_at")
+                rate_limits = record.get("rate_limits")
+                if (
+                    not isinstance(origin, str)
+                    or not isinstance(captured_at, str)
+                    or not isinstance(rate_limits, Mapping)
+                ):
+                    continue
+                origin = origin.strip()
+                captured = _parse_utc_datetime(captured_at)
+                if not origin or captured is None:
+                    continue
+                current = latest.get(origin)
+                if current is None or captured > current[0]:
+                    latest[origin] = (captured, captured_at, rate_limits)
+    except OSError:
+        return {
+            "available": False,
+            "reason": "sidecar_unavailable",
+            "snapshots": {},
+        }
+
+    snapshots: dict[str, dict[str, Any]] = {}
+    for origin in sorted(latest):
+        captured, captured_at, rate_limits = latest[origin]
+        age_seconds = max(0, int((observed_at - captured).total_seconds()))
+        snapshots[origin] = {
+            "captured_at": captured_at,
+            "age_seconds": age_seconds,
+            "freshness": (
+                "stale"
+                if age_seconds >= RATE_LIMIT_STALE_AFTER_SECONDS
+                else "fresh"
+            ),
+            "rate_limits": dict(rate_limits),
+        }
+    return {"available": True, "snapshots": snapshots}
+
+
+def _parse_utc_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 @contextmanager

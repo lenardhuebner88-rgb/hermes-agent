@@ -64,6 +64,43 @@ Each derived field carries a status:
 called “billable”: on subscription routes the same tokens consume quota but
 have zero marginal dollar cost.
 
+## Workload attribution
+
+`summary.workload` is a single aggregate view of normalized `context_input`:
+`main`, `subagent`, and `unknown` each expose `fact_rows` and
+`context_input_tokens`. It is not repeated in `groups[]`.
+
+`main` is limited to the canonical `main`/`main_loop` protocol values.
+`subagent` accepts the canonical `subagent` value plus agent type names learned
+from selected facts where `call_kind == "subagent"` and `profile` records the
+agent type. This data-derived registration deliberately avoids a stale,
+hard-coded catalog of agent names. Any other (including blank) `call_kind`
+remains `unknown`, rather than being attributed to main work.
+
+`subagent_share.of_all_context` is the subagent normalized-context share over
+all normalized context. `of_classified_context` excludes the separately
+reported unknown bucket. `classification_status` is `partial` whenever unknown
+facts are present, so consumers cannot mistake either ratio for a complete
+attribution.
+
+## Subscription rate-limit snapshots
+
+`rate_limits` is a read-only projection of
+`/mnt/data/hermes-observability/foreign_rate_limit_snapshots.jsonl`, which is
+sidecar state rather than a usage fact. The projection streams the JSONL file
+and retains only the latest valid observation per `origin`; it never returns
+raw `run_id`, `context_window`, or historical records.
+
+`rate_limits.snapshots` is keyed only by worlds with a sidecar observation. A
+snapshot includes the source `captured_at`, `age_seconds`, `freshness`, and its
+provider-supplied `rate_limits` values. `freshness` becomes `stale` at one hour
+or older, so consumers must not present yesterday's window as current. Worlds
+without sidecar data are absent rather than represented with null values.
+
+If the sidecar file cannot be read, the regular usage-facts payload remains
+available and `rate_limits` is `{ "available": false, "reason":
+"sidecar_unavailable", "snapshots": {} }`.
+
 ## Billing contract
 
 Dollar and quota values are structurally separate:
@@ -93,3 +130,19 @@ partition over all board runs; unknown runs are counted, never filtered.
 `kanban.usage_coverage.state == "thin"` means the board has materially fewer
 token-bearing facts than runs. This distinguishes historical hook absence from
 zero consumption.
+
+`kanban.route_change_calibration` measures actual model-routing changes from
+the Board's `task_events` rows where `kind == "model_route_changed"`. Its
+`source` identifies that table and event kind; `scope` is limited to events
+whose `old` and `new` blocks each contain non-empty `provider` and `model`.
+`observed_events` is the denominator, while `route_changed_events` and
+`route_unchanged_events` partition it. `route_change_rate` is
+`route_changed_events / observed_events` and is `null` only when that selected
+event population is empty. It is an event rate, not a rate over board runs or
+usage-fact rows.
+
+This calibration must not compare `run_usage_facts.requested_model` with
+`run_usage_facts.model`: the current ETL harvesters copy the same source value
+into both fields, so that comparison is structurally incapable of detecting a
+lane switch. If no Board database is supplied, `kanban.available` is false and
+`route_change_calibration` is omitted rather than represented as a zero rate.
