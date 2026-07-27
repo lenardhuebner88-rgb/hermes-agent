@@ -1,0 +1,104 @@
+{
+  "provenance": {
+    "captured_at": "2026-07-27",
+    "source": "read-only live kanban.db, profile state.db, and copied usage_facts.db",
+    "redactions": "All run, task, session, commit, path, and artifact identifiers were replaced."
+  },
+  "lane_profiles": {
+    "premium": {
+      "fallback_providers": [],
+      "model": "gpt-5.6-sol",
+      "provider": "openai-codex",
+      "worker_runtime": "hermes"
+    }
+  },
+  "runs": [
+    {
+      "id": "run-metadata-redacted",
+      "status": "done",
+      "active_provider": null,
+      "profile": "reviewer",
+      "started_at": 1782209627,
+      "ended_at": 1782209655,
+      "last_heartbeat_at": 1782209634,
+      "metadata": {
+        "model": "gpt-5.4-mini",
+        "provider": "openai-codex",
+        "cost_equivalent_provider": "openai-codex",
+        "worker_session_id": "metadata-session-redacted"
+      }
+    },
+    {
+      "id": "run-state-redacted",
+      "status": "review",
+      "active_provider": null,
+      "profile": "verifier",
+      "started_at": 1783822349,
+      "ended_at": 1783822412,
+      "last_heartbeat_at": 1783822353,
+      "metadata": {
+        "worker_session_id": "state-session-redacted"
+      }
+    },
+    {
+      "id": "run-cli-redacted",
+      "status": "review",
+      "active_provider": null,
+      "profile": "premium",
+      "started_at": 1783718270,
+      "ended_at": 1783719044,
+      "last_heartbeat_at": 1783718932,
+      "metadata": {}
+    },
+    {
+      "id": "run-never-null-redacted",
+      "status": "scheduled",
+      "active_provider": null,
+      "profile": "premium",
+      "started_at": null,
+      "ended_at": null,
+      "last_heartbeat_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "run-never-seeded-redacted",
+      "status": "reclaimed",
+      "active_provider": "openai-codex",
+      "profile": "premium",
+      "started_at": null,
+      "ended_at": null,
+      "last_heartbeat_at": null,
+      "metadata": {}
+    },
+    {
+      "id": "run-unknown-redacted",
+      "status": "done",
+      "active_provider": null,
+      "profile": "profile-redacted",
+      "started_at": 1782209627,
+      "ended_at": 1782209655,
+      "last_heartbeat_at": 1782209634,
+      "metadata": {}
+    }
+  ],
+  "state_session": {
+    "profile": "verifier",
+    "id": "state-session-redacted",
+    "billing_provider": "openai-codex",
+    "model": "gpt-5.6-terra"
+  },
+  "embedded_state_run": {
+    "status": "blocked",
+    "profile": "verifier",
+    "state_profile": "verifier"
+  },
+  "cli_fact": {
+    "run_id": "codex_cli:session-redacted",
+    "provider": "openai",
+    "model": "gpt-5.6-sol",
+    "lane": "codex",
+    "profile": null,
+    "captured_at": "2026-07-10T21:21:12.674Z",
+    "origin": "codex_cli"
+  }
+}

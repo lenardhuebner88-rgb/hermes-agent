@@ -1,0 +1,23 @@
+{
+  "captured_at": "2026-07-27",
+  "total_runs": 8284,
+  "null_active_provider": 6928,
+  "null_provider_never_ran": 2540,
+  "classification_counts": {
+    "nie_gelaufen": 2592,
+    "unbekannt": 3750,
+    "rekonstruiert": 638,
+    "gestempelt": 1304
+  },
+  "reconstruction_source_counts": {
+    "metadata.model": 595,
+    "profile_state_db": 40,
+    "cli_raw": 3
+  },
+  "metadata_model_audit": {
+    "top_level_runs": 1587,
+    "any_level_runs": 1587,
+    "nested_runs": 4,
+    "nested_only_runs": 0
+  }
+}
