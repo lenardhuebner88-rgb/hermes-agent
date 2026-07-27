@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_CORRELATIONS = 4096
 _MAX_MESSAGE_FINGERPRINTS_PER_RUN = 4096
+_MAX_AUX_CALL_INDICES_PER_RUN = 4096
+_AUX_CALL_INDEX_START = 1_000_000_000
 _STATE_LOCK = threading.RLock()
 _CONTEXTS: OrderedDict[str, "_RunContext"] = OrderedDict()
 _PENDING_TOOLS: dict[tuple[str, int, str], int] = defaultdict(int)
@@ -40,7 +42,12 @@ class _RunContext:
     requested_provider: Optional[str] = None
     requested_model: Optional[str] = None
     lane: Optional[str] = None
+    profile: Optional[str] = None
+    origin: str = "hermes_agent"
     last_call_index: Optional[int] = None
+    last_aux_call_index: Optional[int] = None
+    active_unkeyed_aux_call_index: Optional[int] = None
+    aux_call_indices: OrderedDict[str, int] = field(default_factory=OrderedDict)
     message_fingerprints: OrderedDict[str, None] = field(
         default_factory=OrderedDict
     )
@@ -252,30 +259,126 @@ def _resolve_context(kwargs: Mapping[str, Any]) -> Optional[_RunContext]:
         _text(body.get("model")),
         _text(kwargs.get("model")),
     )
+    environment_profile = _text(os.environ.get("HERMES_PROFILE"))
     lane = _first(
         _text(kwargs.get("lane")),
         existing.lane if reuse_existing else None,
-        _text(os.environ.get("HERMES_PROFILE")),
+        environment_profile,
     )
-    ctx = existing if reuse_existing else _RunContext(run_id=run_id)
+    profile = _first(
+        _text(kwargs.get("profile")),
+        existing.profile if reuse_existing else None,
+        environment_profile,
+    )
+    event_origin = _text(kwargs.get("origin")) or "hermes_agent"
+    ctx = (
+        existing
+        if reuse_existing
+        else _RunContext(run_id=run_id, origin=event_origin)
+    )
     ctx.run_id = run_id
     ctx.requested_provider = requested_provider
     ctx.requested_model = requested_model
     ctx.lane = lane
+    ctx.profile = profile
+    if ctx.origin == "hermes_aux" and event_origin == "hermes_agent":
+        # A mixed Hermes run is owned by its main loop; aux remains visible on
+        # the individual call row without relabeling the aggregate run.
+        ctx.origin = event_origin
     _remember_context(ctx, kwargs)
     return ctx
 
 
-def _call_index(kwargs: Mapping[str, Any], ctx: _RunContext) -> int:
+def _event_origin(kwargs: Mapping[str, Any]) -> str:
+    return _text(kwargs.get("origin")) or "hermes_agent"
+
+
+def _is_aux_call(kwargs: Mapping[str, Any]) -> bool:
+    return _event_origin(kwargs) == "hermes_aux" or _text(
+        kwargs.get("call_kind")
+    ) == "aux"
+
+
+def _next_aux_call_index(ctx: _RunContext) -> int:
+    next_index = (
+        _AUX_CALL_INDEX_START
+        if ctx.last_aux_call_index is None
+        else ctx.last_aux_call_index + 1
+    )
+    ctx.last_aux_call_index = next_index
+    return next_index
+
+
+def _call_index(
+    kwargs: Mapping[str, Any],
+    ctx: _RunContext,
+    *,
+    start_call: bool = False,
+) -> int:
     explicit = _integer(kwargs.get("call_index"))
     if explicit is None:
         explicit = _integer(kwargs.get("api_call_count"))
     with _STATE_LOCK:
         if explicit is not None and explicit >= 0:
             ctx.last_call_index = explicit
-        elif ctx.last_call_index is None:
-            ctx.last_call_index = 1
-        return ctx.last_call_index
+            return explicit
+        if not _is_aux_call(kwargs):
+            if ctx.last_call_index is None:
+                ctx.last_call_index = 1
+            return ctx.last_call_index
+
+        api_request_id = _text(kwargs.get("api_request_id"))
+        if api_request_id is not None:
+            existing = ctx.aux_call_indices.get(api_request_id)
+            if existing is not None:
+                ctx.aux_call_indices.move_to_end(api_request_id)
+                return existing
+            aux_index = _next_aux_call_index(ctx)
+            ctx.aux_call_indices[api_request_id] = aux_index
+            while (
+                len(ctx.aux_call_indices) > _MAX_AUX_CALL_INDICES_PER_RUN
+            ):
+                ctx.aux_call_indices.popitem(last=False)
+            return aux_index
+
+        if start_call or ctx.active_unkeyed_aux_call_index is None:
+            ctx.active_unkeyed_aux_call_index = _next_aux_call_index(ctx)
+        return ctx.active_unkeyed_aux_call_index
+
+
+def _finish_aux_call(kwargs: Mapping[str, Any], ctx: _RunContext) -> None:
+    if not _is_aux_call(kwargs) or _text(kwargs.get("api_request_id")):
+        return
+    with _STATE_LOCK:
+        ctx.active_unkeyed_aux_call_index = None
+
+
+def _run_context_fields(
+    kwargs: Mapping[str, Any],
+    ctx: _RunContext,
+) -> dict[str, Any]:
+    return {
+        "origin": ctx.origin,
+        "lane": ctx.lane,
+        "profile": ctx.profile,
+        "wall_ms": _integer(kwargs.get("wall_ms")),
+        "call_kind": _text(kwargs.get("call_kind")),
+    }
+
+
+def _tool_duration_ms(kwargs: Mapping[str, Any]) -> Optional[int]:
+    duration_ms = _integer(kwargs.get("duration_ms"))
+    if duration_ms is None or duration_ms < 0:
+        return None
+    if (
+        duration_ms == 0
+        and _text(kwargs.get("status")) == "blocked"
+        and _text(kwargs.get("error_type")) == "plugin_block"
+    ):
+        # The plugin-block path never starts dispatch timing. Its signature
+        # default is an unknown value, not a measured zero.
+        return None
+    return duration_ms
 
 
 def _sampling_fields(kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -397,6 +500,7 @@ def _actual_route_fields(
             model_source = "request"
 
     call_fields = {
+        "origin": _event_origin(kwargs),
         "provider": actual_provider,
         "model": actual_model,
         "requested_model": requested_model,
@@ -404,13 +508,13 @@ def _actual_route_fields(
         **_sampling_fields(kwargs),
     }
     run_fields = {
+        **_run_context_fields(kwargs, ctx),
         "provider": actual_provider,
         "model": actual_model,
         "requested_provider": requested_provider,
         "requested_model": requested_model,
         "model_source": model_source,
         "fallback_depth": fallback_depth,
-        "lane": ctx.lane,
         "billing_mode": billing_mode,
         **_sampling_fields(kwargs),
     }
@@ -523,7 +627,7 @@ def on_pre_llm_request(**kwargs: Any) -> None:
     ctx = _resolve_context(kwargs)
     if ctx is None:
         return
-    call_index = _call_index(kwargs, ctx)
+    call_index = _call_index(kwargs, ctx, start_call=True)
     call_fields, run_fields = _actual_route_fields(kwargs, ctx)
     run_fields["source"] = _fact_source(kwargs)
     record_llm_call(
@@ -592,6 +696,7 @@ def on_post_llm_call(**kwargs: Any) -> None:
     assistant = _assistant_trace(kwargs)
     if assistant is not None:
         record_trace(ctx.run_id, call_index, "assistant", assistant)
+    _finish_aux_call(kwargs, ctx)
 
 
 @_fail_soft_hook
@@ -623,6 +728,7 @@ def on_api_request_error(**kwargs: Any) -> None:
             "reason": kwargs.get("reason"),
         },
     )
+    _finish_aux_call(enriched, ctx)
 
 
 def _tool_key(
@@ -650,7 +756,10 @@ def on_pre_tool_call(**kwargs: Any) -> None:
     increment_tool_call(
         ctx.run_id,
         call_index,
-        run_fields={"lane": ctx.lane, "source": "measured"},
+        run_fields={
+            **_run_context_fields(kwargs, ctx),
+            "source": "measured",
+        },
     )
     record_trace(
         ctx.run_id,
@@ -678,6 +787,7 @@ def on_post_tool_call(**kwargs: Any) -> None:
         elif pending == 1:
             _PENDING_TOOLS.pop(key, None)
     error_type = _text(kwargs.get("error_type"))
+    tool_duration_ms = _tool_duration_ms(kwargs)
     output_chars = (
         _tool_output_chars(kwargs.get("result"))
         if "result" in kwargs
@@ -689,7 +799,11 @@ def on_post_tool_call(**kwargs: Any) -> None:
             call_index,
             error_type=error_type,
             tool_output_chars=output_chars,
-            run_fields={"lane": ctx.lane, "source": "measured"},
+            tool_duration_ms=tool_duration_ms,
+            run_fields={
+                **_run_context_fields(kwargs, ctx),
+                "source": "measured",
+            },
         )
     elif error_type is not None or output_chars is not None:
         record_tool_result(
@@ -697,8 +811,9 @@ def on_post_tool_call(**kwargs: Any) -> None:
             call_index,
             error_type=error_type,
             tool_output_chars=output_chars,
+            tool_duration_ms=tool_duration_ms,
             run_fields={
-                "lane": ctx.lane,
+                **_run_context_fields(kwargs, ctx),
                 "error_type": error_type,
                 "source": "measured",
             },

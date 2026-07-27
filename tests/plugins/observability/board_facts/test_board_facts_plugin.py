@@ -88,6 +88,7 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     path = tmp_path / "facts.db"
     secret = "langfuse-secret-in-a-trace"
     monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", secret)
+    monkeypatch.setenv("HERMES_PROFILE", "implementation-profile")
     common = {
         "task_run_id": "run-42",
         "task_id": "task-42",
@@ -100,6 +101,9 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
         "requested_provider": "xai-oauth",
         "requested_model": "requested-grok",
         "lane": "implementation",
+        "origin": "hermes_agent",
+        "wall_ms": 1650,
+        "call_kind": "main_loop",
     }
 
     plugin.on_pre_llm_request(
@@ -168,6 +172,10 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     assert fact["requested_model"] == "requested-grok"
     assert fact["fallback_depth"] is None
     assert fact["lane"] == "implementation"
+    assert fact["profile"] == "implementation-profile"
+    assert fact["origin"] == "hermes_agent"
+    assert fact["wall_ms"] == 1650
+    assert fact["call_kind"] == "main_loop"
     assert fact["billing_mode"] == "subscription_included"
     assert fact["serving_tier"] == "priority"
     assert fact["reasoning_effort"] == "high"
@@ -177,6 +185,7 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
     assert fact["source"] == "measured"
     assert fact["first_token_ms"] == 87
     assert call["response_id"] == "response-42"
+    assert call["origin"] == "hermes_agent"
     assert call["input_tokens"] == 101
     assert call["output_tokens"] == 22
     assert call["duration_ms"] == 1500
@@ -184,6 +193,65 @@ def test_hooks_capture_routing_usage_and_redacted_traces(monkeypatch, tmp_path):
         row["role"] for row in traces
     }
     assert secret not in "\n".join(row["content"] for row in traces)
+
+
+def test_main_and_aux_calls_use_disjoint_indices_for_the_same_run(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+    common = {
+        "task_run_id": "run-mixed",
+        "task_id": "task-mixed",
+        "turn_id": "turn-mixed",
+        "session_id": "session-mixed",
+        "provider": "test",
+        "model": "test-model",
+    }
+
+    plugin.on_post_llm_call(
+        **common,
+        api_request_id="request-main",
+        api_call_count=1,
+        origin="hermes_agent",
+        call_kind="main_loop",
+        duration_ms=25,
+        usage={"input_tokens": 10, "output_tokens": 2},
+    )
+    plugin.on_pre_llm_request(
+        **common,
+        api_request_id="request-aux",
+        origin="hermes_aux",
+        call_kind="aux",
+    )
+    plugin.on_post_llm_call(
+        **common,
+        api_request_id="request-aux",
+        origin="hermes_aux",
+        call_kind="aux",
+        duration_ms=5,
+        usage={"input_tokens": 3, "output_tokens": 1},
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        calls = conn.execute(
+            "SELECT call_index, origin, input_tokens "
+            "FROM run_llm_calls WHERE run_id='run-mixed' "
+            "ORDER BY call_index"
+        ).fetchall()
+        fact = conn.execute(
+            "SELECT origin, llm_call_count FROM run_usage_facts "
+            "WHERE run_id='run-mixed'"
+        ).fetchone()
+
+    assert [tuple(row) for row in calls] == [
+        (1, "hermes_agent", 10),
+        (plugin._AUX_CALL_INDEX_START, "hermes_aux", 3),
+    ]
+    assert fact["origin"] == "hermes_agent"
+    assert fact["llm_call_count"] == 2
 
 
 def test_request_trace_persists_each_growing_message_once(
@@ -357,21 +425,47 @@ def test_post_tool_call_uses_exact_live_kwargs_and_derives_output_chars(
     plugin = _reload(monkeypatch, tmp_path)
     path = tmp_path / "facts.db"
 
-    plugin.on_post_tool_call(
-        tool_name="terminal",
-        args={"command": "printf four"},
-        result="four",
-        task_id="task-tool",
-        session_id="session-tool",
-        tool_call_id="tool-call-1",
+    plugin.on_post_llm_call(
         turn_id="turn-tool",
         api_request_id="request-tool",
-        duration_ms=12,
-        status="ok",
-        error_type=None,
-        error_message=None,
-        middleware_trace=[],
+        session_id="session-tool",
+        api_call_count=1,
+        provider="test",
+        model="test-model",
+        duration_ms=321,
+        usage={"input_tokens": 1, "output_tokens": 1},
     )
+    payload = {
+        "tool_name": "terminal",
+        "args": {"command": "printf four"},
+        "result": "four",
+        "task_id": "task-tool",
+        "session_id": "session-tool",
+        "tool_call_id": "tool-call-1",
+        "turn_id": "turn-tool",
+        "api_request_id": "request-tool",
+        "duration_ms": 12,
+        "status": "ok",
+        "error_type": None,
+        "error_message": None,
+        "middleware_trace": [],
+    }
+    assert set(payload) == {
+        "tool_name",
+        "args",
+        "result",
+        "task_id",
+        "session_id",
+        "tool_call_id",
+        "turn_id",
+        "api_request_id",
+        "duration_ms",
+        "status",
+        "error_type",
+        "error_message",
+        "middleware_trace",
+    }
+    plugin.on_post_tool_call(**payload)
 
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
@@ -384,8 +478,61 @@ def test_post_tool_call_uses_exact_live_kwargs_and_derives_output_chars(
 
     assert fact["tool_call_count"] == 1
     assert fact["tool_output_chars"] == 4
+    assert fact["tool_duration_ms"] == 12
     assert call["tool_call_count"] == 1
     assert call["tool_output_chars"] == 4
+    assert call["tool_duration_ms"] == 12
+    assert call["duration_ms"] == 321
+
+
+def test_blocked_tool_default_zero_is_not_a_measured_duration(
+    monkeypatch,
+    tmp_path,
+):
+    plugin = _reload(monkeypatch, tmp_path)
+    path = tmp_path / "facts.db"
+
+    plugin.on_post_llm_call(
+        turn_id="turn-blocked-tool",
+        api_request_id="request-blocked-tool",
+        session_id="session-blocked-tool",
+        api_call_count=1,
+        provider="test",
+        model="test-model",
+        duration_ms=88,
+        usage={"input_tokens": 1, "output_tokens": 1},
+    )
+    payload = {
+        "tool_name": "terminal",
+        "args": {"command": "unsafe"},
+        "result": {"blocked": True},
+        "task_id": "task-blocked-tool",
+        "session_id": "session-blocked-tool",
+        "tool_call_id": "tool-call-blocked",
+        "turn_id": "turn-blocked-tool",
+        "api_request_id": "request-blocked-tool",
+        "duration_ms": 0,
+        "status": "blocked",
+        "error_type": "plugin_block",
+        "error_message": "blocked before dispatch",
+        "middleware_trace": [],
+    }
+    plugin.on_post_tool_call(**payload)
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        fact = conn.execute(
+            "SELECT * FROM run_usage_facts "
+            "WHERE run_id='turn-blocked-tool'"
+        ).fetchone()
+        call = conn.execute(
+            "SELECT * FROM run_llm_calls "
+            "WHERE run_id='turn-blocked-tool'"
+        ).fetchone()
+
+    assert fact["tool_duration_ms"] is None
+    assert call["tool_duration_ms"] is None
+    assert call["duration_ms"] == 88
 
 
 def test_versioned_response_model_does_not_invent_fallback_depth(
