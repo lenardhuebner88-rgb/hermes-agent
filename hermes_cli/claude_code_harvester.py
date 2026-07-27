@@ -25,7 +25,10 @@ from hermes_cli.usage_facts_db import (
 
 # Bump when the transcript shape we accept changes in a way that would make
 # golden fixtures silently wrong.  Tests pin this value.
-CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 1
+#
+# v2 adds explicit billing-mode facts, so existing HWM snapshots re-harvest
+# their already captured files and backfill the non-null field.
+CLAUDE_CODE_TRANSCRIPT_FORMAT_VERSION = 2
 
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 ORIGIN = "claude_code"
@@ -40,6 +43,9 @@ _USAGE_TOKEN_KEYS = (
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
 )
+
+UNKNOWN_BILLING_MODE = "unknown"
+_EXPLICIT_BILLING_MODE_KEYS = ("billing_mode", "billingMode")
 
 
 @dataclass
@@ -68,6 +74,7 @@ class _CallDraft:
     model: Optional[str] = None
     stop_reason: Optional[str] = None
     service_tier: Optional[str] = None
+    billing_mode: str = UNKNOWN_BILLING_MODE
     effort: Optional[str] = None
     timestamp: Optional[str] = None
     input_tokens: Optional[int] = None
@@ -124,6 +131,25 @@ def _int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _billing_mode_from_raw(
+    record: Mapping[str, Any], message: Mapping[str, Any]
+) -> str:
+    """Return only explicit transcript billing metadata, never an inference.
+
+    The currently measured transcript shape has ``userType`` and usage
+    ``service_tier`` but neither identifies how a request was billed. Those
+    fields therefore must not be mapped to a billing mode. If a transcript
+    supplies one of the direct billing-mode fields, preserve its non-blank
+    value; otherwise make the unknown observation explicit.
+    """
+    for source in (record, message):
+        for key in _EXPLICIT_BILLING_MODE_KEYS:
+            mode = _text(source.get(key))
+            if mode is not None:
+                return mode
+    return UNKNOWN_BILLING_MODE
 
 
 def _content_parts(message: Mapping[str, Any]) -> list[Any]:
@@ -216,6 +242,11 @@ def merge_assistant_fragment(
     draft.effort = _text(record.get("effort")) or draft.effort
     draft.model = _text(message.get("model")) or draft.model
     draft.stop_reason = _text(message.get("stop_reason")) or draft.stop_reason
+    billing_mode = _billing_mode_from_raw(record, message)
+    if billing_mode != UNKNOWN_BILLING_MODE:
+        # Streaming fragments may only disclose this field once; preserve the
+        # last explicit source value instead of overwriting it with unknown.
+        draft.billing_mode = billing_mode
     draft.source_path = source_path or draft.source_path
     draft.call_kind = call_kind or draft.call_kind
     draft.profile = profile if profile is not None else draft.profile
@@ -459,6 +490,7 @@ def draft_to_fields(draft: _CallDraft) -> tuple[dict[str, Any], dict[str, Any]]:
         "call_kind": draft.call_kind,
         "serving_tier": draft.service_tier,
         "reasoning_effort": draft.effort,
+        "billing_mode": draft.billing_mode,
         "source": "measured",
         "captured_at": draft.timestamp,
     }
