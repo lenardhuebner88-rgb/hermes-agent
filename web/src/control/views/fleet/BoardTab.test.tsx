@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BoardArchiveResponse, BoardResponse, BoardTask } from "../../lib/types";
+import { BoardSwitcher } from "../../components/fleet/BoardIdentity";
 import { BoardTab } from "./BoardTab";
 
 afterEach(cleanup);
@@ -45,6 +46,85 @@ function board(tasks: BoardTask[]): BoardResponse {
 }
 
 describe("BoardTab operator information", () => {
+  it("keeps every board control reachable while the control bar is reordered", async () => {
+    const openTask = task({ id: "t_open01", title: "Open task", status: "ready", assignee: null });
+    const reviewTask = task({ id: "t_review1", title: "Review task", status: "review", assignee: "coder-frontend" });
+    const boardData: BoardResponse = {
+      ...board([openTask, reviewTask]),
+      summary: {
+        total_count: 6,
+        open_count: 2,
+        status_counts: { ready: 1, running: 1, blocked: 1, review: 1, done: 1, archived: 3 },
+        quick_counts: { unassigned_open: 1, review: 1, standalone_open: 1, with_result: 1 },
+        observed_at: 1_783_800_300,
+      },
+    };
+    const archivedTask = task({ id: "t_archive1", title: "Archived card", status: "archived" });
+    const archivePage: BoardArchiveResponse = {
+      tasks: [archivedTask],
+      total_count: 3,
+      filtered_count: 3,
+      loaded_count: 1,
+      limit: 50,
+      has_more: true,
+      next_cursor: "1783900002:t_archive1",
+      query: "",
+      assignee: null,
+      assignees: ["coder-frontend"],
+      latest_event_id: 4,
+      now: 1_783_900_004,
+    };
+    const loadArchivePage = vi.fn().mockResolvedValue(archivePage);
+
+    render(
+      <>
+        <BoardSwitcher
+          boards={[
+            { slug: "mission-control", name: "Mission Control", archived: false },
+            { slug: "default", name: "Default", archived: false },
+          ]}
+          current="mission-control"
+          selected="default"
+          onSelect={() => undefined}
+        />
+        <BoardTab
+          board={boardData}
+          boardSlug="default"
+          loadArchivePage={loadArchivePage}
+          readOnly
+          onOpenNodeDetail={vi.fn()}
+        />
+      </>,
+    );
+
+    const expectedControls: Array<[string, () => unknown]> = [
+      ["Board-Auswahl", () => screen.getByRole("combobox", { name: "Board auswählen" })],
+      ["Suchfeld", () => screen.getByLabelText("Tasks durchsuchen")],
+      ["Statusfilter", () => screen.getByLabelText("Nach Status filtern")],
+      ["Zuweisungsfilter", () => screen.getByLabelText("Nach Assignee filtern")],
+      ["Schnellansicht: alle", () => screen.getByRole("button", { name: /^Alle\s+2$/ })],
+      ["Schnellansicht: ohne Zuweisung", () => screen.getByRole("button", { name: /^Ohne Zuweisung\s+1$/ })],
+      ["Schnellansicht: Review", () => screen.getByRole("button", { name: /^Review\s+1$/ })],
+      ["Schnellansicht: Archiv", () => screen.getByRole("button", { name: /^Archiv\s+3$/ })],
+      ["Read-only-Hinweis", () => screen.getByText("nur lesen")],
+    ];
+    expectedControls.forEach(([label, findControl]) => {
+      expect(findControl(), label).toBeTruthy();
+    });
+    expect(screen.getByLabelText("Nach Assignee filtern").closest("details")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Tasks durchsuchen"), { target: { value: "review" } });
+    fireEvent.change(screen.getByLabelText("Nach Status filtern"), { target: { value: "review" } });
+    const activeFilters = screen.getByRole("status", { name: "Aktive Board-Filter" });
+    expect(activeFilters).toBeTruthy();
+    expect(within(activeFilters).getByRole("button", { name: "Alle Filter zurücksetzen" })).toBeTruthy();
+    fireEvent.click(within(activeFilters).getByRole("button", { name: "Alle Filter zurücksetzen" }));
+
+    fireEvent.click(screen.getByRole("button", { name: /^Archiv\s+3$/ }));
+    expect(await screen.findByText("Archived card")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Weitere Archivkarten laden" })).toBeTruthy();
+  });
+
   it("shows every active filter in a resettable chip even when no tasks match", () => {
     render(<BoardTab board={board([task()])} onOpenNodeDetail={vi.fn()} />);
 

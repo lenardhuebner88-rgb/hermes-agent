@@ -2429,7 +2429,7 @@ body:has([data-fleet-theme]) [data-control] {
 
 .fleet-boardtab-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--fleet-space-2);
   /* Desktop-Breitenkappe (L3-Spec 3.3): Signalabstand bleibt lesbar statt
    * Kante-zu-Kante-Leere; unter 960px ohne Effekt. */
@@ -2469,6 +2469,7 @@ body:has([data-fleet-theme]) [data-control] {
   margin-top: 4px;
   color: var(--fleet-t1);
   font: 600 18px/1 var(--hc-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .fleet-boardtab-metrics small {
@@ -2490,7 +2491,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-views::-webkit-scrollbar { display: none; }
 
 .fleet-boardtab-register {
-  border-bottom: 1px solid var(--fleet-linie);
+  border-bottom: 0;
   /* Scroll-Affordanz wie .fleet-subtabs (L3-Spec, Befund 8): der rechte Rand
    * fadet aus statt das letzte Register mobil hart abzuschneiden. */
   mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
@@ -2556,46 +2557,27 @@ body:has([data-fleet-theme]) [data-control] {
   color: var(--fleet-t1);
 }
 
-.fleet-boardtab-filter {
-  display: flex;
+.fleet-boardtab-controls {
+  display: grid;
   gap: var(--fleet-space-2);
-  flex-wrap: wrap;
   position: sticky;
   top: 0;
   z-index: 2;
-  /* L3-Spec 3.3 (Befund 1): --fleet-bg war undefiniert → die Leiste war
-   * transparent und Listeninhalt schimmerte durch. Jetzt opaker Surface +
-   * Blur + Bottom-Hairline (transluzente Toolbar nach Vercel-Muster). */
   background: var(--fleet-bg);
   backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--fleet-linie);
   padding-bottom: var(--fleet-space-2);
 }
 
-.fleet-boardtab-more {
-  position: relative;
+.fleet-boardtab-filter {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--fleet-space-2);
 }
-
-.fleet-boardtab-more summary {
-  display: flex;
-  min-height: 32px;
-  align-items: center;
-  gap: 5px;
-  border: 1px solid var(--fleet-linie-stark);
-  border-radius: var(--radius-card);
-  background: var(--fleet-karte-hi);
-  padding: 0 9px;
-  color: var(--fleet-t2);
-  cursor: pointer;
-  font: 600 var(--text-micro)/1.3 var(--hc-font-sans);
-  list-style: none;
-}
-
-.fleet-boardtab-more summary::-webkit-details-marker { display: none; }
-.fleet-boardtab-more[open] .fleet-boardtab-select { margin-top: 5px; }
 
 .fleet-boardtab-suche {
-  flex: 1 1 140px;
+  width: 100%;
+  min-height: 38px;
   min-width: 0;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
@@ -2618,8 +2600,9 @@ body:has([data-fleet-theme]) [data-control] {
 }
 
 .fleet-boardtab-select {
-  flex: 0 1 auto;
+  width: 100%;
   min-width: 0;
+  min-height: 38px;
   background: var(--fleet-karte-hi);
   border: 1px solid var(--fleet-linie-stark);
   border-radius: var(--radius-card);
@@ -3430,12 +3413,20 @@ body:has([data-fleet-theme]) [data-control] {
 /* Mobile: kein horizontaler Overflow bei 390px */
 @media (max-width: 640px) {
   .fleet-boardtab-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+  .fleet-boardtab-controls,
   .fleet-boardtab-filter {
     gap: 6px;
   }
-  .fleet-boardtab-suche { flex-basis: calc(100% - 88px); }
+  .fleet-boardtab-controls { position: static; }
+  .fleet-boardtab-views {
+    flex-wrap: wrap;
+    mask-image: none;
+    -webkit-mask-image: none;
+    overflow-x: visible;
+  }
+  .fleet-boardtab-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fleet-boardtab-select { font-size: var(--text-micro); }
   .fleet-boardtab-row { padding: 8px 42px 8px 10px; gap: 7px; }
   .fleet-boardtab-meta { gap: 6px; }
@@ -3470,7 +3461,7 @@ body:has([data-fleet-theme]) [data-control] {
 }
 .fleet-skel-kpis {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--fleet-space-2);
 }
 .fleet-skel-kpi {
@@ -3501,7 +3492,7 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-skel-bar { height: 10px; }
 .fleet-skel-bar-short { width: 55%; }
 @media (max-width: 640px) {
-  .fleet-skel-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .fleet-skel-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 /* Listen-Einstieg (M8): gestaffelter Rise nur für die ersten 6 Rows, nur bei
@@ -3668,6 +3659,7 @@ body:has([data-fleet-theme]) [data-control] {
   .fleet-detail-tab,
   .fleet-copy-id,
   .fleet-boardtab-copy,
+  .fleet-boardtab-views button,
   .fleet-boardtab-select,
   .fleet-boardtab-suche {
     min-height: 44px;

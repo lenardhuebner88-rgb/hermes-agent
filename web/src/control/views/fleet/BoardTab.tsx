@@ -8,7 +8,7 @@
  * Bewusst KEINE Task-Erstellung (Anti-Scope).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Copy, Link2, SlidersHorizontal } from "lucide-react";
+import { Copy, Link2 } from "lucide-react";
 import { fetchJSON } from "@/lib/api";
 import { profileInitial, profileColorClass, premiumLaneMarker, fmtUsd } from "../../lib/fleetHub";
 import { BoardArchiveResponseSchema, parseOrThrow } from "../../lib/schemas";
@@ -76,7 +76,7 @@ const STATUS_ORDER: TaskStatus[] = [
 ];
 
 type BoardRegister = "open" | "done" | "archive";
-type BoardQuickView = "all" | "unassigned" | "review" | "standalone" | "result";
+type BoardQuickView = "all" | "unassigned" | "review" | "archive" | "standalone" | "result";
 
 function copyTaskId(taskId: string): void {
   if (typeof navigator === "undefined" || !navigator.clipboard) return;
@@ -94,7 +94,7 @@ function BoardSkeleton({ label }: { label: string }) {
     <div className="fleet-skel" aria-live="polite" aria-busy="true">
       <span className="sr-only">{label} …</span>
       <div className="fleet-skel-kpis" aria-hidden>
-        {Array.from({ length: 4 }).map((_, i) => (
+        {Array.from({ length: 3 }).map((_, i) => (
           <div key={i} className="hc-skeleton fleet-skel-kpi" />
         ))}
       </div>
@@ -134,6 +134,9 @@ export function BoardTab({
   const [register, setRegister] = useState<BoardRegister>(() =>
     initialStatusFilter === "done" ? "done" : initialStatusFilter === "archived" ? "archive" : "open",
   );
+  const [quickView, setQuickView] = useState<BoardQuickView>(() =>
+    initialStatusFilter === "archived" ? "archive" : "all",
+  );
   // One-shot apply if the deep-link status arrives after first mount (e.g. catalog race).
   const initialStatusAppliedRef = useRef(
     initialStatusFilter != null && STATUS_ORDER.includes(initialStatusFilter),
@@ -143,11 +146,13 @@ export function BoardTab({
     if (initialStatusFilter == null || !STATUS_ORDER.includes(initialStatusFilter)) return;
     initialStatusAppliedRef.current = true;
     if (initialStatusFilter === "done") setRegister("done");
-    if (initialStatusFilter === "archived") setRegister("archive");
+    if (initialStatusFilter === "archived") {
+      setRegister("archive");
+      setQuickView("archive");
+    }
     setStatusFilter(initialStatusFilter);
   }, [initialStatusFilter]);
   const [assigneeFilter, setAssigneeFilter] = useState<string>("all");
-  const [quickView, setQuickView] = useState<BoardQuickView>("all");
   const [archiveTasks, setArchiveTasks] = useState<BoardTask[]>([]);
   const [archivePage, setArchivePage] = useState<BoardArchiveResponse | null>(null);
   const [archiveLoading, setArchiveLoading] = useState(false);
@@ -302,10 +307,11 @@ export function BoardTab({
     assigneeFilter !== "all" ? `Assignee: ${assigneeFilter}` : null,
     q.trim() ? `Suche: ${q.trim()}` : null,
     quickView !== "all" ? `Ansicht: ${
-      quickView === "unassigned" ? "Ohne Assignee"
-        : quickView === "review" ? "In Review"
-          : quickView === "standalone" ? "Standalone"
-            : "Mit Ergebnis · alle Status"
+      quickView === "unassigned" ? "Ohne Zuweisung"
+        : quickView === "review" ? "Review"
+          : quickView === "archive" ? "Archiv"
+            : quickView === "standalone" ? "Standalone"
+              : "Mit Ergebnis · alle Status"
     }` : null,
   ].filter((label): label is string => label != null);
 
@@ -314,6 +320,7 @@ export function BoardTab({
     setStatusFilter("all");
     setAssigneeFilter("all");
     setQuickView("all");
+    if (register === "archive") setRegister("open");
   };
 
   // Filtergebnis nach Status gruppieren (nur Status mit sichtbaren Tasks).
@@ -352,7 +359,6 @@ export function BoardTab({
   return (
     <div className="fleet-boardtab">
       <div className="fleet-boardtab-metrics" aria-label="Board-Kennzahlen">
-        <div><span>Offen</span><strong>{metricOpen}</strong></div>
         {/* data-tone nur bei Wert > 0 (L3-Spec 3.3): 0 bleibt neutral. */}
         <div data-tone={metricRunning > 0 ? "running" : undefined}><span>Laufend</span><strong>{metricRunning}</strong></div>
         <div data-tone={metricBlocked > 0 ? "blocked" : undefined}><span>Blockiert</span><strong>{metricBlocked}</strong></div>
@@ -362,54 +368,7 @@ export function BoardTab({
         </div>
       </div>
 
-      <div className="fleet-boardtab-register" role="tablist" aria-label="Board-Register">
-        {([
-          ["open", "Offen", metricOpen],
-          ["done", "Fertig", metricDone],
-          ["archive", "Archiv", summary?.status_counts.archived ?? 0],
-        ] as const).map(([id, label, count]) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={register === id}
-            className={register === id ? "is-active" : ""}
-            onClick={() => {
-              setRegister(id);
-              setStatusFilter("all");
-              setQuickView("all");
-            }}
-          >
-            {label}<span>{count}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="fleet-boardtab-views" aria-label="Gespeicherte Board-Ansichten">
-        {([
-          ["all", "Alle", null],
-          ["unassigned", "Ohne Assignee", summary?.quick_counts.unassigned_open],
-          ["review", "In Review", summary?.quick_counts.review],
-          ["standalone", "Standalone", summary?.quick_counts.standalone_open],
-          ["result", "Mit Ergebnis", summary?.quick_counts.with_result],
-        ] as const).map(([id, label, count]) => (
-          <button
-            key={id}
-            type="button"
-            aria-pressed={quickView === id}
-            onClick={() => {
-              setQuickView(id);
-              if (id === "review") setRegister("open");
-            }}
-            title={id === "result" ? "Alle Status" : undefined}
-          >
-            {label}{count != null ? <span>{count}</span> : null}
-          </button>
-        ))}
-      </div>
-
-      {/* Filter-Leiste */}
-      <div className="fleet-boardtab-filter">
+      <div className="fleet-boardtab-controls" aria-label="Board-Steuerung">
         <input
           className="fleet-boardtab-suche"
           type="text"
@@ -418,31 +377,83 @@ export function BoardTab({
           onChange={(e) => setQ(e.target.value)}
           aria-label="Tasks durchsuchen"
         />
-        {register === "open" ? <select
-          className="fleet-boardtab-select"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as TaskStatus | "all")}
-          aria-label="Nach Status filtern"
-        >
-          <option value="all">Alle Status</option>
-          {STATUS_ORDER.filter((status) => status !== "done" && status !== "archived").map((s) => (
-            <option key={s} value={s}>{taskStatusLabel[s] ?? s}</option>
+
+        <div className="fleet-boardtab-views" aria-label="Gespeicherte Board-Ansichten">
+          {([
+            ["all", "Alle", metricOpen],
+            ["unassigned", "Ohne Zuweisung", summary?.quick_counts.unassigned_open],
+            ["review", "Review", summary?.quick_counts.review],
+            ["archive", "Archiv", summary?.status_counts.archived ?? archivePage?.total_count ?? 0],
+            ["standalone", "Standalone", summary?.quick_counts.standalone_open],
+            ["result", "Mit Ergebnis", summary?.quick_counts.with_result],
+          ] as const).map(([id, label, count]) => (
+            <button
+              key={id}
+              type="button"
+              aria-pressed={quickView === id}
+              onClick={() => {
+                setQuickView(id);
+                if (id === "archive") {
+                  setRegister("archive");
+                  setStatusFilter("all");
+                } else if (register === "archive" || id === "review") {
+                  setRegister("open");
+                }
+              }}
+              title={id === "result" ? "Alle Status" : undefined}
+            >
+              {label}{count != null ? <>{" "}<span>{count}</span></> : null}
+            </button>
           ))}
-        </select> : null}
-        <details className="fleet-boardtab-more">
-          <summary aria-label="Weitere Filter"><SlidersHorizontal aria-hidden size={14} /> Filter</summary>
-        <select
-          className="fleet-boardtab-select"
-          value={assigneeFilter}
-          onChange={(e) => setAssigneeFilter(e.target.value)}
-          aria-label="Nach Assignee filtern"
-        >
-          <option value="all">Alle Assignees</option>
-          {allAssignees.map((a) => (
-            <option key={a} value={a}>{a}</option>
+        </div>
+
+        <div className="fleet-boardtab-register" role="tablist" aria-label="Board-Register">
+          {([
+            ["open", "Offen", metricOpen],
+            ["done", "Fertig", metricDone],
+            ["archive", "Archiv", summary?.status_counts.archived ?? archivePage?.total_count ?? 0],
+          ] as const).map(([id, label, count]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={register === id}
+              className={register === id ? "is-active" : ""}
+              onClick={() => {
+                setRegister(id);
+                setStatusFilter("all");
+                setQuickView(id === "archive" ? "archive" : "all");
+              }}
+            >
+              {label}{" "}<span>{count}</span>
+            </button>
           ))}
-        </select>
-        </details>
+        </div>
+
+        <div className="fleet-boardtab-filter">
+          {register === "open" ? <select
+            className="fleet-boardtab-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as TaskStatus | "all")}
+            aria-label="Nach Status filtern"
+          >
+            <option value="all">Alle Status</option>
+            {STATUS_ORDER.filter((status) => status !== "done" && status !== "archived").map((s) => (
+              <option key={s} value={s}>{taskStatusLabel[s] ?? s}</option>
+            ))}
+          </select> : null}
+          <select
+            className="fleet-boardtab-select"
+            value={assigneeFilter}
+            onChange={(e) => setAssigneeFilter(e.target.value)}
+            aria-label="Nach Assignee filtern"
+          >
+            <option value="all">Alle Assignees</option>
+            {allAssignees.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {filtersActive ? (
