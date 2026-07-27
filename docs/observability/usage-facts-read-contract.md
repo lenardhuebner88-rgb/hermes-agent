@@ -64,6 +64,25 @@ Each derived field carries a status:
 called “billable”: on subscription routes the same tokens consume quota but
 have zero marginal dollar cost.
 
+## Workload attribution
+
+`summary.workload` is a single aggregate view of normalized `context_input`:
+`main`, `subagent`, and `unknown` each expose `fact_rows` and
+`context_input_tokens`. It is not repeated in `groups[]`.
+
+`main` is limited to the canonical `main`/`main_loop` protocol values.
+`subagent` accepts the canonical `subagent` value plus agent type names learned
+from selected facts where `call_kind == "subagent"` and `profile` records the
+agent type. This data-derived registration deliberately avoids a stale,
+hard-coded catalog of agent names. Any other (including blank) `call_kind`
+remains `unknown`, rather than being attributed to main work.
+
+`subagent_share.of_all_context` is the subagent normalized-context share over
+all normalized context. `of_classified_context` excludes the separately
+reported unknown bucket. `classification_status` is `partial` whenever unknown
+facts are present, so consumers cannot mistake either ratio for a complete
+attribution.
+
 ## Billing contract
 
 Dollar and quota values are structurally separate:

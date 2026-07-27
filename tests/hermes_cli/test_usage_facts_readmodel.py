@@ -247,6 +247,64 @@ def test_s7_example_fixture_matches_contract_version() -> None:
     }
 
 
+def test_workload_split_uses_discovered_subagent_profiles_and_keeps_unknown(
+    tmp_path: Path,
+) -> None:
+    """Real Claude transcript forms have both canonical and legacy call kinds."""
+
+    usage_path = tmp_path / "usage_facts.db"
+    rows = (
+        ("main", None, 10),
+        ("subagent", "general-purpose", 20),
+        ("general-purpose", None, 30),
+        ("subagent", "Explore", 40),
+        ("Explore", None, 50),
+        ("foreign_cli", None, 60),
+        (None, None, 70),
+    )
+    for index, (call_kind, profile, input_tokens) in enumerate(rows, start=1):
+        upsert_run_facts(
+            f"call-kind-{index}",
+            {
+                "origin": "claude_code",
+                "call_kind": call_kind,
+                "profile": profile,
+                "input_tokens": input_tokens,
+                "cache_read_tokens": input_tokens * 9,
+                "cache_write_tokens": 0,
+                "output_tokens": 1,
+                "captured_at": "2026-07-27T15:36:00+00:00",
+                "source": "measured",
+            },
+            path=usage_path,
+        )
+
+    workload = readmodel.build_usage_facts_payload(usage_path)["summary"][
+        "workload"
+    ]
+
+    assert workload["main"] == {
+        "fact_rows": 1,
+        "context_input_tokens": 100,
+    }
+    assert workload["subagent"] == {
+        "fact_rows": 4,
+        "context_input_tokens": 1_400,
+    }
+    assert workload["unknown"] == {
+        "fact_rows": 2,
+        "context_input_tokens": 1_300,
+    }
+    assert workload["subagent_share"] == {
+        "context_input_tokens": 1_400,
+        "all_context_input_tokens": 2_800,
+        "of_all_context": 0.5,
+        "classified_context_input_tokens": 1_500,
+        "of_classified_context": pytest.approx(14 / 15),
+        "classification_status": "partial",
+    }
+
+
 def _seed_usage_fixture(path: Path) -> None:
     for index, row in enumerate(ORIGIN_FIXTURE["rows"], start=1):
         upsert_run_facts(
