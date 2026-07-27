@@ -103,6 +103,33 @@ def test_tool_legacy_completion_without_schema_version_is_exempt(worker_env):
     assert _status(worker_env) in {"done", "review"}
 
 
+def test_tool_completion_result_reports_actual_integration_park(
+    worker_env, monkeypatch
+):
+    from tools import kanban_tools as kt
+
+    def park_integration(conn, task_id, **_kwargs):
+        conn.execute(
+            "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+            "WHERE id = ?",
+            (task_id,),
+        )
+        conn.commit()
+        return True
+
+    monkeypatch.setattr(kb, "complete_task", park_integration)
+
+    payload = json.loads(kt._handle_complete({"summary": "slice finished"}))
+
+    assert payload["ok"] is True
+    assert payload["status"] == "blocked"
+    assert payload["status_reason"] == "integration parked"
+    assert (
+        f"{worker_env} accepted — status now 'blocked' (integration parked)"
+        == payload["message"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2. claude-CLI path (_cmd_complete)
 # ---------------------------------------------------------------------------

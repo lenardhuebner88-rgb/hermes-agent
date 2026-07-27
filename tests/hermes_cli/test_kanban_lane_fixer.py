@@ -172,3 +172,180 @@ def test_lane_fixer_never_routes_a_fixer_and_creation_failure_is_soft(
         ) is None
     assert not _events(conn, second_parent_id, lane_fixer.LANE_FIXER_DISPATCHED_EVENT)
     assert "lane-scope fixer creation failed" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# V7 — resume parked parent when lane-scope fixer completes
+# ---------------------------------------------------------------------------
+
+
+def test_successful_lane_fixer_resumes_parked_parent(lane_parent, monkeypatch):
+    """RED without resume helper: parent stays blocked after fixer done."""
+    conn, parent, _info = lane_parent
+    parent_id = parent["id"]
+    violating = ["web/src/control/Panel.tsx"]
+
+    # Park parent the same way production does (integration parked + blocked).
+    kb.claim_task(conn, parent_id)
+    reason = (
+        "integration parked: lane-scope violation: assignee 'coder' changed "
+        "paths outside its lane: web/src/control/Panel.tsx — this task should "
+        "have been assigned to lane 'coder-frontend'."
+    )
+    assert kb.block_task(conn, parent_id, reason=reason, kind="integration")
+    # Structured park event — same payload ``_enforce_lane_scope_on_complete``
+    # writes; resume binds to its fingerprint (B4).
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            "worker_gate_blocked",
+            {
+                "gate": "lane_scope",
+                "violating_paths": violating,
+                "expected_lane": "coder-frontend",
+            },
+        )
+
+    child_id = lane_fixer.maybe_route_lane_scope_fixer(
+        conn,
+        conn.execute("SELECT * FROM tasks WHERE id = ?", (parent_id,)).fetchone(),
+        violating_paths=violating,
+        expected_lane="coder-frontend",
+        now=int(time.time()),
+    )
+    assert child_id
+    assert kb.get_task(conn, parent_id).status == "blocked"
+
+    # Avoid re-entering the integrator (mirrors conflict-fixer resume tests).
+    monkeypatch.setattr(
+        kwt, "maybe_integrate_on_complete", lambda *a, **k: None,
+    )
+    lane_fixer.ensure_lifecycle_hooks_registered()
+
+    assert kb.complete_task(conn, child_id, summary="lane scope fixed")
+    parent_after = kb.get_task(conn, parent_id)
+    resumed = _events(conn, parent_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT)
+
+    assert parent_after.status == "ready"
+    assert len(resumed) == 1
+    payload = resumed[0].payload
+    if isinstance(payload, str):
+        import json as _json
+        payload = _json.loads(payload)
+    assert payload["child_id"] == child_id
+
+
+def test_lane_fixer_resume_skips_when_parent_context_changed(lane_parent):
+    conn, parent, _ = lane_parent
+    parent_id = parent["id"]
+    child_id = lane_fixer.maybe_route_lane_scope_fixer(
+        conn,
+        parent,
+        violating_paths=["web/src/control/Panel.tsx"],
+        expected_lane="coder-frontend",
+        now=100,
+    )
+    assert child_id
+    # Parent not in a matching lane-scope park → no-op.
+    assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id) is False
+    assert kb.get_task(conn, parent_id).status != "blocked"
+
+
+def test_lane_fixer_resume_skips_when_current_park_fingerprint_differs(lane_parent):
+    """B4: fixer F1 must not resume a later park for different paths (fp Y)."""
+    conn, parent, info = lane_parent
+    parent_id = parent["id"]
+    paths_x = ["web/src/control/Panel.tsx"]
+    child_x = lane_fixer.maybe_route_lane_scope_fixer(
+        conn,
+        parent,
+        violating_paths=paths_x,
+        expected_lane="coder-frontend",
+        now=100,
+    )
+    assert child_x
+
+    # Record the original park event for fingerprint X, then re-park for Y.
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            "worker_gate_blocked",
+            {
+                "gate": "lane_scope",
+                "violating_paths": paths_x,
+                "expected_lane": "coder-frontend",
+            },
+        )
+    kb.claim_task(conn, parent_id)
+    reason_y = (
+        "integration parked: lane-scope violation: assignee 'coder' changed "
+        "paths outside its lane: hermes_cli/cli.py — this task should "
+        "have been assigned to lane 'coder'."
+    )
+    assert kb.block_task(conn, parent_id, reason=reason_y, kind="integration")
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            "worker_gate_blocked",
+            {
+                "gate": "lane_scope",
+                "violating_paths": ["hermes_cli/cli.py"],
+                "expected_lane": "coder",
+            },
+        )
+
+    # F1 completes while parent is parked for Y → must not resume.
+    conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (child_x,))
+    assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_x) is False
+    assert kb.get_task(conn, parent_id).status == "blocked"
+    assert not _events(conn, parent_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT)
+
+
+def test_allowlisted_paths_for_parent_only_includes_done_fixer(lane_parent):
+    conn, parent, _ = lane_parent
+    parent_id = parent["id"]
+    paths = ["web/src/control/Panel.tsx", "web/src/control/App.tsx"]
+    child_id = lane_fixer.maybe_route_lane_scope_fixer(
+        conn,
+        parent,
+        violating_paths=paths,
+        expected_lane="coder-frontend",
+        now=200,
+    )
+    assert child_id
+    # Legacy call without current-violation binding: empty until done, then
+    # returns the done-fixer set (tests that do not pass violating_paths).
+    assert lane_fixer.allowlisted_paths_for_parent(conn, parent_id) == set()
+
+    conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,))
+    assert lane_fixer.allowlisted_paths_for_parent(conn, parent_id) == set(paths)
+
+    # Fingerprint-bound call without a matching current park → empty (B5).
+    assert lane_fixer.allowlisted_paths_for_parent(
+        conn,
+        parent_id,
+        violating_paths=paths,
+        expected_lane="coder-frontend",
+    ) == set()
+
+    # Matching park event unlocks the allowlist for that fingerprint only.
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            parent_id,
+            "worker_gate_blocked",
+            {
+                "gate": "lane_scope",
+                "violating_paths": paths,
+                "expected_lane": "coder-frontend",
+            },
+        )
+    assert lane_fixer.allowlisted_paths_for_parent(
+        conn,
+        parent_id,
+        violating_paths=paths,
+        expected_lane="coder-frontend",
+    ) == set(paths)
