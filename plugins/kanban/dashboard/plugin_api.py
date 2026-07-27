@@ -2251,6 +2251,8 @@ for _extension_name in _runtime_readmodel_routes_module.__all__:
         _runtime_readmodel_routes_module, _extension_name
     )
 
+load_api_extension(Path(__file__).with_name("usage_facts_routes.py"), globals(), extension_name="usage_facts_routes")
+
 def run_progress_value(run_row: sqlite3.Row, now_ts: int) -> Optional[float]:
     """S2: Honest additive 0..1 run progress from EXISTING persisted columns.
 

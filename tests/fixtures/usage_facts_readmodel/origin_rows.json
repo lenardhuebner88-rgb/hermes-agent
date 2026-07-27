@@ -1,0 +1,160 @@
+{
+  "source": "Redacted rows selected read-only from the live usage_facts.db snapshot on 2026-07-27 at 17:36 Europe/Berlin; identifiers were replaced, token/model/provider values were retained.",
+  "snapshot_run_usage_facts_rows": 96026,
+  "rows": [
+    {
+      "origin": "claude_code",
+      "profile": null,
+      "lane": "redacted-claude-session",
+      "model": "qwen3.8-max-preview",
+      "provider": "anthropic",
+      "billing_mode": null,
+      "input_tokens": 6,
+      "output_tokens": 409,
+      "cache_read_tokens": 100867,
+      "cache_write_tokens": 3809,
+      "reasoning_tokens": null,
+      "expected": {
+        "input_semantics": "cache_exclusive",
+        "context_input_tokens": 104682,
+        "context_input_status": "exact",
+        "new_input_tokens": 3815,
+        "new_input_status": "exact",
+        "uncached_input_tokens": 6,
+        "uncached_input_status": "exact"
+      }
+    },
+    {
+      "origin": "codex_cli",
+      "profile": null,
+      "lane": "codex",
+      "model": "gpt-5.5",
+      "provider": "openai",
+      "billing_mode": "subscription_included",
+      "input_tokens": 337569696,
+      "output_tokens": 686705,
+      "cache_read_tokens": 330395136,
+      "cache_write_tokens": null,
+      "reasoning_tokens": 116545,
+      "expected": {
+        "input_semantics": "cache_inclusive",
+        "context_input_tokens": 337569696,
+        "context_input_status": "exact",
+        "new_input_tokens": 7174560,
+        "new_input_status": "exact",
+        "uncached_input_tokens": null,
+        "uncached_input_status": "unavailable"
+      }
+    },
+    {
+      "origin": "grok_cli",
+      "profile": "redacted-grok-session",
+      "lane": "grok",
+      "model": null,
+      "provider": "xai",
+      "billing_mode": "subscription_included",
+      "input_tokens": 379963,
+      "output_tokens": 2275,
+      "cache_read_tokens": 312064,
+      "cache_write_tokens": null,
+      "reasoning_tokens": 2272,
+      "expected": {
+        "input_semantics": "cache_inclusive",
+        "context_input_tokens": 379963,
+        "context_input_status": "exact",
+        "new_input_tokens": 67899,
+        "new_input_status": "exact",
+        "uncached_input_tokens": null,
+        "uncached_input_status": "unavailable"
+      }
+    },
+    {
+      "origin": "hermes_agent",
+      "profile": null,
+      "lane": null,
+      "model": "gpt-5.6-sol",
+      "provider": "openai-codex",
+      "billing_mode": "subscription_included",
+      "input_tokens": 289917,
+      "output_tokens": 13429,
+      "cache_read_tokens": 1882624,
+      "cache_write_tokens": null,
+      "reasoning_tokens": 3508,
+      "expected": {
+        "input_semantics": "cache_exclusive",
+        "context_input_tokens": 2172541,
+        "context_input_status": "lower_bound",
+        "new_input_tokens": 289917,
+        "new_input_status": "lower_bound",
+        "uncached_input_tokens": 289917,
+        "uncached_input_status": "exact"
+      }
+    },
+    {
+      "origin": "hermes_aux",
+      "profile": null,
+      "lane": null,
+      "model": "gpt-5.4",
+      "provider": null,
+      "billing_mode": "unknown",
+      "input_tokens": 5259,
+      "output_tokens": 3376,
+      "cache_read_tokens": null,
+      "cache_write_tokens": null,
+      "reasoning_tokens": null,
+      "expected": {
+        "input_semantics": "cache_exclusive",
+        "context_input_tokens": 5259,
+        "context_input_status": "lower_bound",
+        "new_input_tokens": 5259,
+        "new_input_status": "lower_bound",
+        "uncached_input_tokens": 5259,
+        "uncached_input_status": "exact"
+      }
+    },
+    {
+      "origin": "kimi_cli",
+      "profile": null,
+      "lane": "kimi",
+      "model": "kimi-code/k3",
+      "provider": "kimi-code",
+      "billing_mode": "subscription_included",
+      "input_tokens": 77815495,
+      "output_tokens": 145446,
+      "cache_read_tokens": 77058657,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": null,
+      "expected": {
+        "input_semantics": "cache_inclusive",
+        "context_input_tokens": 77815495,
+        "context_input_status": "exact",
+        "new_input_tokens": 756838,
+        "new_input_status": "exact",
+        "uncached_input_tokens": 756838,
+        "uncached_input_status": "exact"
+      }
+    },
+    {
+      "origin": "qwen_cli",
+      "profile": "redacted-qwen-session",
+      "lane": "qwen",
+      "model": "qwen3.8-max-preview",
+      "provider": "qwen",
+      "billing_mode": "openai",
+      "input_tokens": 249224,
+      "output_tokens": 2110,
+      "cache_read_tokens": 248559,
+      "cache_write_tokens": null,
+      "reasoning_tokens": 1676,
+      "expected": {
+        "input_semantics": "cache_inclusive",
+        "context_input_tokens": 249224,
+        "context_input_status": "exact",
+        "new_input_tokens": 665,
+        "new_input_status": "exact",
+        "uncached_input_tokens": null,
+        "uncached_input_status": "unavailable"
+      }
+    }
+  ]
+}
