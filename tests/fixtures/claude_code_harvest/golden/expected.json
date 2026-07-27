@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "flat_streaming": {
+    "message_id": "msg_011CcwgUfWxuVDj8gZEYgCVA",
+    "request_id": "req_011CcwgUZxbdktdJH3Toy5T6",
+    "input_tokens": 2,
+    "output_tokens": 264,
+    "cache_read_input_tokens": 16728,
+    "cache_creation_input_tokens": 27000,
+    "model": "claude-opus-4-8",
+    "stop_reason": "tool_use",
+    "service_tier": "standard",
+    "fragments": 2
+  },
+  "resume_message_id": "msg_01WyKNYwA9qSegfJxQJUZ29X",
+  "missing_request_id_message_id": "5ffbc979-d4f5-4ad9-82ca-d42b02611623"
+}
