@@ -112,3 +112,19 @@ partition over all board runs; unknown runs are counted, never filtered.
 `kanban.usage_coverage.state == "thin"` means the board has materially fewer
 token-bearing facts than runs. This distinguishes historical hook absence from
 zero consumption.
+
+`kanban.route_change_calibration` measures actual model-routing changes from
+the Board's `task_events` rows where `kind == "model_route_changed"`. Its
+`source` identifies that table and event kind; `scope` is limited to events
+whose `old` and `new` blocks each contain non-empty `provider` and `model`.
+`observed_events` is the denominator, while `route_changed_events` and
+`route_unchanged_events` partition it. `route_change_rate` is
+`route_changed_events / observed_events` and is `null` only when that selected
+event population is empty. It is an event rate, not a rate over board runs or
+usage-fact rows.
+
+This calibration must not compare `run_usage_facts.requested_model` with
+`run_usage_facts.model`: the current ETL harvesters copy the same source value
+into both fields, so that comparison is structurally incapable of detecting a
+lane switch. If no Board database is supplied, `kanban.available` is false and
+`route_change_calibration` is omitted rather than represented as a zero rate.

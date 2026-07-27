@@ -8,6 +8,7 @@ comparable context/new/uncached input totals before pricing.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections import Counter
@@ -1010,7 +1011,7 @@ def _kanban_projection(
     attribution = Counter(
         (fact.classification, fact.provider) for fact in facts
     )
-    return {
+    projection = {
         "available": True,
         "scope": "all_board_runs",
         "total_runs": len(facts),
@@ -1039,6 +1040,79 @@ def _kanban_projection(
             ),
         },
     }
+    calibration = _route_change_calibration(kanban_path)
+    if calibration is not None:
+        projection["route_change_calibration"] = calibration
+    return projection
+
+
+def _route_change_calibration(kanban_path: Path) -> dict[str, Any] | None:
+    """Measure model/provider route changes from their authoritative events."""
+
+    try:
+        with _read_only_connection(kanban_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT payload
+                  FROM task_events
+                 WHERE kind = 'model_route_changed'
+                """
+            ).fetchall()
+    except sqlite3.OperationalError:
+        # Older/incomplete board snapshots cannot establish this calibration.
+        return None
+
+    observed_events = 0
+    route_changed_events = 0
+    for row in rows:
+        routes = _event_routes(row["payload"])
+        if routes is None:
+            continue
+        old_route, new_route = routes
+        observed_events += 1
+        if old_route != new_route:
+            route_changed_events += 1
+
+    return {
+        "source": "task_events.kind=model_route_changed",
+        "scope": "all events with complete old and new provider/model routes",
+        "observed_events": observed_events,
+        "route_changed_events": route_changed_events,
+        "route_unchanged_events": observed_events - route_changed_events,
+        "route_change_rate": (
+            route_changed_events / observed_events
+            if observed_events
+            else None
+        ),
+    }
+
+
+def _event_routes(
+    payload: Any,
+) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    try:
+        event = json.loads(payload)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(event, Mapping):
+        return None
+    old_route = _complete_route(event.get("old"))
+    new_route = _complete_route(event.get("new"))
+    if old_route is None or new_route is None:
+        return None
+    return old_route, new_route
+
+
+def _complete_route(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    provider = value.get("provider")
+    model = value.get("model")
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None
+    provider = provider.strip()
+    model = model.strip()
+    return (provider, model) if provider and model else None
 
 
 def _usage_coverage_by_run(

@@ -224,6 +224,47 @@ def test_payload_separates_metered_quota_unattributed_and_kanban(
     assert calls
 
 
+def test_payload_calibrates_route_changes_from_board_events(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    board_path = tmp_path / "kanban.db"
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    _seed_usage_fixture(usage_path)
+    _seed_board_fixture(board_path)
+
+    calibration = readmodel.build_usage_facts_payload(
+        usage_path,
+        kanban_path=board_path,
+        profiles_root=profiles_root,
+    )["kanban"]["route_change_calibration"]
+
+    assert calibration == {
+        "source": "task_events.kind=model_route_changed",
+        "scope": "all events with complete old and new provider/model routes",
+        "observed_events": 3,
+        "route_changed_events": 2,
+        "route_unchanged_events": 1,
+        "route_change_rate": pytest.approx(2 / 3),
+    }
+
+
+def test_payload_omits_route_change_calibration_without_board_database(
+    tmp_path: Path,
+) -> None:
+    usage_path = tmp_path / "usage_facts.db"
+    _seed_usage_fixture(usage_path)
+
+    kanban = readmodel.build_usage_facts_payload(usage_path)["kanban"]
+
+    assert kanban == {
+        "available": False,
+        "reason": "kanban_database_unavailable",
+    }
+    assert "route_change_calibration" not in kanban
+
+
 def test_s7_example_fixture_matches_contract_version() -> None:
     example = json.loads(
         (FIXTURE_ROOT / "s7_payload_example.json").read_text(encoding="utf-8")
@@ -412,6 +453,18 @@ def _seed_board_fixture(path: Path) -> None:
         )
         connection.execute("CREATE TABLE lanes (profiles TEXT)")
         connection.execute("INSERT INTO lanes VALUES ('{}')")
+        connection.execute(
+            """
+            CREATE TABLE task_events (
+                id INTEGER PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id INTEGER,
+                kind TEXT NOT NULL,
+                payload TEXT,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
         connection.executemany(
             """
             INSERT INTO task_runs (
@@ -419,4 +472,60 @@ def _seed_board_fixture(path: Path) -> None:
             ) VALUES (?, ?, ?, ?, ?)
             """,
             rows,
+        )
+        connection.executemany(
+            """
+            INSERT INTO task_events (task_id, kind, payload, created_at)
+            VALUES (?, 'model_route_changed', ?, ?)
+            """,
+            [
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                            "new": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                        }
+                    ),
+                    1,
+                ),
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-a",
+                                "model": "fixture-model-a",
+                            },
+                            "new": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-b",
+                            },
+                        }
+                    ),
+                    2,
+                ),
+                (
+                    "fixture-task",
+                    json.dumps(
+                        {
+                            "old": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-b",
+                            },
+                            "new": {
+                                "provider": "fixture-b",
+                                "model": "fixture-model-c",
+                            },
+                        }
+                    ),
+                    3,
+                ),
+            ],
         )
