@@ -1,0 +1,18 @@
+{
+  "sessionId": "session_c037ed4d-96de-48b7-acbf-b7bd21dbd928",
+  "model": "kimi-code/k3",
+  "scopes": {
+    "turn": 219
+  },
+  "turn_sums": {
+    "inputOther": 655255,
+    "output": 96328,
+    "inputCacheRead": 32616704,
+    "inputCacheCreation": 0,
+    "turn_count": 219
+  },
+  "total_input_tokens": 33271959,
+  "total_output_tokens": 96328,
+  "cache_read_tokens": 32616704,
+  "cache_write_tokens": 0
+}

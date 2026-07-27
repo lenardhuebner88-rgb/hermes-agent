@@ -30,10 +30,13 @@ Design goals:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 import json
 import re
+import sqlite3
+import subprocess
 import time
 
 
@@ -1541,6 +1544,432 @@ def _rule_orphaned_worktree(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _board_connection_from_config(cfg: dict):
+    """Return the caller-owned board connection carried through config."""
+    return cfg.get("_board_connection")
+
+
+def _provisioned_workspace_parts(
+    workspace_path: Any,
+) -> Optional[tuple[Path, str, Path]]:
+    """Minimal, cycle-free copy of the integrator's provisioned-path parser."""
+    if not workspace_path:
+        return None
+    parts = Path(str(workspace_path)).expanduser().parts
+    for index in range(len(parts) - 2):
+        if parts[index] == ".worktrees" and parts[index + 1] == "kanban":
+            return (
+                Path(*parts[:index]) if index else Path("."),
+                parts[index + 2],
+                Path(*parts[: index + 3]),
+            )
+    return None
+
+
+def _is_decompose_root(conn, task_id: str) -> bool:
+    """Cycle-free copy of the integrator's decompose-root test."""
+    return conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'decomposed' LIMIT 1",
+        (task_id,),
+    ).fetchone() is not None
+
+
+def _direct_decompose_root_for_child(
+    conn,
+    task_id: str,
+) -> Optional[str]:
+    """Copy the integrator's reverse decompose-link lookup.
+
+    Decompose links point from a slice to the root, opposite to ordinary
+    parent-to-child dependency links. Keep this small copy here instead of
+    importing ``kanban_worktrees`` into the diagnostics/kanban_db cycle.
+    """
+    row = conn.execute(
+        "SELECT l.child_id FROM task_links l "
+        "WHERE l.parent_id = ? "
+        "AND EXISTS ("
+        "  SELECT 1 FROM task_events e "
+        "  WHERE e.task_id = l.child_id AND e.kind = 'decomposed'"
+        ") "
+        "ORDER BY l.child_id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    return row["child_id"] if row is not None else None
+
+
+def _decompose_event_child_ids(conn, root_id: str) -> set[str]:
+    """Read canonical child membership from the latest decompose event."""
+    row = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? "
+        "AND kind = 'decomposed' ORDER BY id DESC LIMIT 1",
+        (root_id,),
+    ).fetchone()
+    if row is None:
+        return set()
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return set()
+    raw_ids = payload.get("child_ids") if isinstance(payload, dict) else None
+    if not isinstance(raw_ids, list):
+        return set()
+    return {
+        str(child_id).strip()
+        for child_id in raw_ids
+        if str(child_id).strip()
+    }
+
+
+def _linked_chain_member_ids(conn, task_id: str) -> tuple[str, set[str]]:
+    """Mirror ordinary and reverse decompose chain membership."""
+    decompose_root = (
+        task_id
+        if _is_decompose_root(conn, task_id)
+        else _direct_decompose_root_for_child(conn, task_id)
+    )
+    if decompose_root is not None:
+        members = {decompose_root}
+        queue = [decompose_root]
+        while queue:
+            current = queue.pop()
+            for child_id in _decompose_event_child_ids(conn, current):
+                if child_id in members:
+                    continue
+                members.add(child_id)
+                if _is_decompose_root(conn, child_id):
+                    queue.append(child_id)
+        return decompose_root, members
+
+    current = task_id
+    seen = {current}
+    while True:
+        parents = [
+            row["parent_id"]
+            for row in conn.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ? "
+                "ORDER BY parent_id",
+                (current,),
+            )
+            if row["parent_id"] not in seen
+        ]
+        if not parents:
+            break
+        current = parents[0]
+        seen.add(current)
+
+    root_id = current
+    members = {root_id}
+    queue = [root_id]
+    while queue:
+        parent_id = queue.pop()
+        for row in conn.execute(
+            "SELECT child_id FROM task_links WHERE parent_id = ?",
+            (parent_id,),
+        ):
+            child_id = row["child_id"]
+            if child_id not in members:
+                members.add(child_id)
+                queue.append(child_id)
+    return root_id, members
+
+
+def _chain_member_rows(
+    conn,
+    task,
+    cfg: dict,
+) -> tuple[str, Optional[str], dict[str, Any]]:
+    """Resolve task-link and shared-worktree membership, conservatively OR-ed.
+
+    This duplicates the integrator's minimal queries rather than importing
+    ``kanban_worktrees`` back into the diagnostics/kanban_db import cycle.
+    """
+    task_id = str(_task_field(task, "id") or "")
+    if not task_id:
+        return "", None, {}
+    link_root, member_ids = _linked_chain_member_ids(conn, task_id)
+    provisioned = _provisioned_workspace_parts(
+        _task_field(task, "workspace_path")
+    )
+    shared_root_id: Optional[str] = None
+    if provisioned is not None:
+        _repo_root, shared_root_id, worktree_root = provisioned
+        cache = cfg.get("_diagnostic_cache")
+        cache_key = ("workspace_rows", id(conn))
+        workspace_rows = cache.get(cache_key) if isinstance(cache, dict) else None
+        if workspace_rows is None:
+            workspace_rows = conn.execute(
+                "SELECT id, workspace_path FROM tasks "
+                "WHERE workspace_path IS NOT NULL"
+            ).fetchall()
+            if isinstance(cache, dict):
+                cache[cache_key] = workspace_rows
+        for row in workspace_rows:
+            row_parts = _provisioned_workspace_parts(row["workspace_path"])
+            if row_parts is not None and row_parts[2] == worktree_root:
+                member_ids.add(row["id"])
+    if len(member_ids) <= 1:
+        return link_root, shared_root_id, {}
+    placeholders = ",".join("?" for _ in member_ids)
+    rows = conn.execute(
+        "SELECT id, status, branch_name, workspace_path, started_at "
+        f"FROM tasks WHERE id IN ({placeholders})",
+        tuple(sorted(member_ids)),
+    ).fetchall()
+    return link_root, shared_root_id, {row["id"]: row for row in rows}
+
+
+def _git_repo_for_task(task) -> Optional[Path]:
+    provisioned = _provisioned_workspace_parts(
+        _task_field(task, "workspace_path")
+    )
+    if provisioned is not None:
+        return provisioned[0]
+    raw_path = _task_field(task, "workspace_path")
+    if not raw_path:
+        return None
+    path = Path(str(raw_path)).expanduser()
+    return path if path.is_dir() else None
+
+
+def _branch_has_unmerged_commits(task, cfg: dict) -> bool:
+    """Return a bounded, fail-soft ``main..<branch>`` commit-count signal."""
+    branch_name = str(_task_field(task, "branch_name") or "").strip()
+    repo_root = _git_repo_for_task(task)
+    if not branch_name or repo_root is None:
+        return False
+    main_ref = str(cfg.get("chain_main_ref") or "main").strip() or "main"
+    cache = cfg.get("_diagnostic_cache")
+    cache_key = (
+        "branch_has_unmerged_commits",
+        str(repo_root),
+        main_ref,
+        branch_name,
+    )
+    if isinstance(cache, dict) and cache_key in cache:
+        return bool(cache[cache_key])
+    timeout = max(
+        0.1,
+        min(float(cfg.get("diagnostic_git_timeout_seconds", 3)), 10.0),
+    )
+    result = False
+    try:
+        proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "rev-list",
+                "--count",
+                f"{main_ref}..{branch_name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if proc.returncode == 0:
+            result = int(proc.stdout.strip() or "0") > 0
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        result = False
+    if isinstance(cache, dict):
+        cache[cache_key] = result
+    return result
+
+
+def _rule_blocked_task_holds_chain(
+    task, events, runs, now, cfg
+) -> list[Diagnostic]:
+    """A blocked member holds already-finished, unmerged chain slices.
+
+    Cost: shared-worktree membership needs one unindexed ``tasks`` scan, cached
+    once per caller-connection diagnostics batch. Each distinct finished branch
+    then incurs at most one bounded ``git rev-list`` probe in that same batch.
+    """
+    if _task_field(task, "status") != "blocked":
+        return []
+    blocked_at = max(
+        (
+            _event_ts(event)
+            for event in events
+            if _event_kind(event) == "blocked"
+        ),
+        default=0,
+    )
+    if not blocked_at:
+        return []
+    conn = _board_connection_from_config(cfg)
+    if conn is None:
+        return []
+    try:
+        _link_root, _shared_root, members = _chain_member_rows(
+            conn,
+            task,
+            cfg,
+        )
+        if not members:
+            return []
+        task_id = str(_task_field(task, "id") or "")
+        held_ids = sorted(
+            member_id
+            for member_id, member in members.items()
+            if member_id != task_id
+            and member["status"] == "done"
+            and _branch_has_unmerged_commits(member, cfg)
+        )
+    except (OSError, sqlite3.Error):
+        return []
+    if not held_ids:
+        return []
+
+    age_hours = max(0.0, (now - blocked_at) / 3600.0)
+    error_hours = float(
+        cfg.get("blocked_chain_hostage_error_hours", 24)
+    )
+    severity = "error" if age_hours > error_hours else "warning"
+    blocked_since = datetime.fromtimestamp(
+        blocked_at, tz=timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+    task_id = str(_task_field(task, "id") or "<task_id>")
+    held_text = ", ".join(held_ids)
+    detail = (
+        f"Blocked since {blocked_since} — holds {len(held_ids)} finished "
+        f"slice(s) hostage: {held_text} (work not on main)."
+    )
+    return [
+        Diagnostic(
+            kind="blocked_task_holds_chain",
+            severity=severity,
+            title=(
+                f"Blocked task holds {len(held_ids)} finished chain "
+                f"slice(s)"
+            ),
+            detail=detail,
+            actions=[
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Inspect the blocked chain member",
+                    payload={"command": f"hermes kanban show {task_id}"},
+                    suggested=True,
+                ),
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Unblock after resolving the integration hold",
+                    payload={"command": f"hermes kanban unblock {task_id}"},
+                ),
+            ],
+            first_seen_at=blocked_at,
+            last_seen_at=now,
+            count=len(held_ids),
+            data={
+                "blocked_at": blocked_at,
+                "block_age_hours": round(age_hours, 1),
+                "held_task_ids": held_ids,
+                "held_count": len(held_ids),
+                "main_ref": str(cfg.get("chain_main_ref") or "main"),
+            },
+        )
+    ]
+
+
+def _rule_chain_root_pending_integration(
+    task, events, runs, now, cfg
+) -> list[Diagnostic]:
+    """An open ran root cannot take the never-ran auto-close path."""
+    if _task_field(task, "status") not in {"ready", "todo", "triage"}:
+        return []
+    has_run_history = bool(runs) or bool(_task_field(task, "started_at"))
+    has_own_commits = (
+        False
+        if has_run_history
+        else _branch_has_unmerged_commits(task, cfg)
+    )
+    if not (has_run_history or has_own_commits):
+        return []
+
+    conn = _board_connection_from_config(cfg)
+    if conn is None:
+        return []
+    try:
+        link_root, shared_root, members = _chain_member_rows(
+            conn,
+            task,
+            cfg,
+        )
+        is_decompose_root = _is_decompose_root(
+            conn,
+            str(_task_field(task, "id") or ""),
+        )
+        has_direct_link_children = conn.execute(
+            "SELECT 1 FROM task_links WHERE parent_id = ? LIMIT 1",
+            (str(_task_field(task, "id") or ""),),
+        ).fetchone() is not None
+    except (OSError, sqlite3.Error):
+        return []
+    if not members:
+        return []
+    task_id = str(_task_field(task, "id") or "")
+    is_root = (
+        (
+            link_root == task_id
+            and (has_direct_link_children or is_decompose_root)
+        )
+        or shared_root == task_id
+    )
+    if not is_root:
+        return []
+    children = [
+        member
+        for member_id, member in members.items()
+        if member_id != task_id and member["status"] != "archived"
+    ]
+    terminal_statuses = {"done", "failed", "cancelled", "canceled"}
+    if not children or any(
+        child["status"] not in terminal_statuses for child in children
+    ):
+        return []
+
+    reasons = []
+    if has_run_history:
+        reasons.append("run history")
+    if has_own_commits:
+        reasons.append("own commits")
+    return [
+        Diagnostic(
+            kind="chain_root_pending_integration",
+            severity="warning",
+            title="Chain root is still open after all children finished",
+            detail=(
+                f"Chain root waiting: all {len(children)} children terminal, "
+                "but root has run history / own commits — close manually to "
+                "land the chain."
+            ),
+            actions=[
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Inspect the chain root before closing",
+                    payload={"command": f"hermes kanban show {task_id}"},
+                    suggested=True,
+                ),
+                DiagnosticAction(
+                    kind="cli_hint",
+                    label="Close the root manually",
+                    payload={"command": f"hermes kanban complete {task_id}"},
+                ),
+            ],
+            first_seen_at=now,
+            last_seen_at=now,
+            data={
+                "root_task_id": task_id,
+                "terminal_child_count": len(children),
+                "has_run_history": has_run_history,
+                "has_own_commits": has_own_commits,
+                "guard_failure_reasons": reasons,
+            },
+        )
+    ]
+
+
 _RULES: list[RuleFn] = [
     _rule_hallucinated_cards,
     _rule_triage_aux_unavailable,
@@ -1554,6 +1983,8 @@ _RULES: list[RuleFn] = [
     _rule_stuck_in_blocked,
     _rule_block_unblock_cycling,
     _rule_stranded_in_ready,
+    _rule_blocked_task_holds_chain,
+    _rule_chain_root_pending_integration,
     _rule_orphaned_worktree,
 ]
 
@@ -1574,6 +2005,8 @@ DIAGNOSTIC_KINDS = (
     "stranded_in_ready",
     "descendants_blocked_by_stuck_parent",
     "stranded_decompose_root_branch",
+    "blocked_task_holds_chain",
+    "chain_root_pending_integration",
     "orphaned_worktree",
 )
 
@@ -1595,6 +2028,11 @@ DEFAULT_CONFIG = {
     # How long a parent must be sticky-blocked before its waiting ``todo``
     # descendants are flagged as stranded (K4). Mirrors blocked_stale_hours.
     "descendants_blocked_parent_hours": 24,
+    # A blocked chain starts as warning, then escalates one rung once finished
+    # unmerged siblings have been held beyond this age.
+    "blocked_chain_hostage_error_hours": 24,
+    # Every git probe is read-only and individually bounded.
+    "diagnostic_git_timeout_seconds": 3,
 }
 
 
@@ -1885,6 +2323,25 @@ def config_from_runtime_config(raw_config: Optional[dict]) -> dict:
     return cfg
 
 
+def config_for_board_connection(
+    config: Optional[dict],
+    conn,
+) -> dict:
+    """Bind diagnostics config to the caller's already-open board connection.
+
+    The board slug is kept in config for explicit provenance. CLI/dashboard
+    batches reuse ``conn`` directly and share one short-lived cache for board
+    scans and Git probes; the rule engine never resolves board state from env.
+    """
+    from hermes_cli import kanban_db as _kb  # lazy: avoid import cycle
+
+    cfg = dict(config or {})
+    cfg["board_slug"] = _kb.board_slug_for_conn(conn)
+    cfg["_board_connection"] = conn
+    cfg["_diagnostic_cache"] = {}
+    return cfg
+
+
 def compute_task_diagnostics(
     task,
     events: list,
@@ -1902,6 +2359,8 @@ def compute_task_diagnostics(
     now_ts = int(now if now is not None else time.time())
     config = config or {}
     cfg = {**DEFAULT_CONFIG, **config}
+    cache = config.get("_diagnostic_cache")
+    cfg["_diagnostic_cache"] = cache if isinstance(cache, dict) else {}
     if (
         "failure_threshold" not in config
         and "spawn_failure_threshold" not in config
