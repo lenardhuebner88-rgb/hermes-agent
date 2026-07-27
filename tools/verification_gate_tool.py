@@ -125,9 +125,18 @@ def _run_commands(specs: Sequence[tuple[str, list[str]]], root: Path) -> list[di
     for command_id, argv in specs:
         started = time.monotonic()
         try:
-            completed = subprocess.run(argv, cwd=root, env=_safe_env(), text=True,
-                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                       stderr=subprocess.PIPE, check=False, timeout=3600)
+            completed = subprocess.run(
+                argv,
+                cwd=root,
+                env=_safe_env(),
+                text=True,
+                encoding="utf-8",
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=3600,
+            )
             exit_code: int | None = completed.returncode
             timed_out = False
         except subprocess.TimeoutExpired:
@@ -230,7 +239,10 @@ def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> d
         launch = subprocess.run(
             [str(root / "scripts/preview-realdata.sh"), "--scenario", scenario,
              "--route", route, "--home", str(home), "--port", str(preview_port), "--keep"],
-            cwd=root, env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)}, text=True,
+            cwd=root,
+            env={**_safe_env(), "TMUX_TMPDIR": str(tmux_tmp)},
+            text=True,
+            encoding="utf-8",
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=240,
         )
         if launch.returncode == 75 or "ui_preview_busy" in launch.stdout:
@@ -246,14 +258,21 @@ def _run_ui_shot(root: Path, artifact_dir: Path, route: str, scenario: str) -> d
         runner_dir = home / "visual-evidence"
         runner_dir.mkdir(mode=0o700)
         head_sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True,
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            text=True,
+            encoding="utf-8",
         ).strip()
         runner = subprocess.run(
             ["node", str(root / "scripts/visual_verify_runner.mjs"),
              "--base-url", url, "--output-dir", str(runner_dir), "--git-head", head_sha,
              "--viewports", "1280x900=1280x900,768x1024=768x1024,390x844=390x844",
              "--scenario", "terminal_bridge", "/control/agent-terminals"],
-            cwd=root, env=_safe_env(), text=True, stdout=subprocess.PIPE,
+            cwd=root,
+            env=_safe_env(),
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=180,
         )
         parsed = _parse_ui_summary(runner_dir / "summary.json", artifact_dir)
@@ -341,8 +360,25 @@ def run_verification_gate(
     else:
         results = _run_commands(_command_specs(action, root), root)
         artifacts = []
-        status = "passed" if results and all(item["exit_code"] == 0 and not item["timed_out"]
-                                              for item in results) else "failed"
+        affected_preflight_aborted = (
+            action == "affected"
+            and any(
+                item["command_id"] == "run_affected" and item["exit_code"] == 3
+                for item in results
+            )
+        )
+        other_gate_failed = any(
+            item["timed_out"]
+            or (
+                item["exit_code"] != 0
+                and not (item["command_id"] == "run_affected" and item["exit_code"] == 3)
+            )
+            for item in results
+        )
+        if affected_preflight_aborted and not other_gate_failed:
+            status = "not_run"
+        else:
+            status = "passed" if results and not other_gate_failed else "failed"
     finished = datetime.now(timezone.utc)
     evidence = GateEvidence(
         fingerprint=fingerprint.digest, gate_id=action,

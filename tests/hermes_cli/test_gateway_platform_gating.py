@@ -58,3 +58,23 @@ class TestMatrixHiddenOnWindows:
                 f"{must_have} disappeared from Windows picker — gate is "
                 "over-filtering"
             )
+
+    def test_mattermost_uses_plugin_setup_and_connection_authority(self, monkeypatch):
+        """The stale built-in entry must not mask Mattermost's plugin hooks."""
+        import hermes_cli.gateway as gateway_mod
+
+        monkeypatch.setattr(gateway_mod.sys, "platform", "linux")
+        platforms = gateway_mod._all_platforms()
+        mattermost = next(p for p in platforms if p["key"] == "mattermost")
+
+        entry = mattermost.get("_registry_entry")
+        assert entry is not None
+        assert entry.setup_fn is not None
+        assert entry.is_connected is not None
+
+        monkeypatch.setattr(
+            gateway_mod,
+            "get_env_value",
+            lambda key: "token-only" if key == "MATTERMOST_TOKEN" else None,
+        )
+        assert gateway_mod._platform_status(mattermost) == "not configured"

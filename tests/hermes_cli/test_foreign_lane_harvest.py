@@ -286,6 +286,18 @@ def test_qwen_schema_version_and_fields():
     assert extracted.run_fields["cache_read_tokens"] == first["cachedTokens"]
     assert extracted.run_fields["reasoning_tokens"] == first["thoughtsTokens"]
     assert extracted.run_fields["duration_ms"] == float(first["apiDurationMs"])
+    # Fixture row is a captured Qwen rollout with authType="openai".  That
+    # identifies the access protocol, not its billing route.
+    billing_mode = extracted.run_fields["billing_mode"]
+    assert billing_mode in {
+        "subscription_included",
+        "metered",
+        "official_models_api",
+        "official_docs_snapshot",
+        "unknown",
+    }
+    assert billing_mode == "subscription_included"
+    assert billing_mode != first["authType"]
 
     bad = dict(first, schemaVersion=99)
     assert extract_qwen_row(bad) is None

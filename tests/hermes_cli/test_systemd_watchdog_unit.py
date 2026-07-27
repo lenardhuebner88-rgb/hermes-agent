@@ -2,8 +2,24 @@
 
 from __future__ import annotations
 
+import sys
+
+import pytest
+
 from gateway.config import GatewayConfig
 from hermes_cli import gateway as gateway_cli
+
+
+@pytest.fixture(autouse=True)
+def _use_synthetic_runtime_for_service_rendering(monkeypatch):
+    """Keep renderer tests independent of the shared worktree venv provenance."""
+    runtime = gateway_cli._GatewayPythonRuntime(sys.executable, None)
+    monkeypatch.setattr(
+        gateway_cli, "_resolve_gateway_python_runtime", lambda: runtime
+    )
+    monkeypatch.setattr(
+        gateway_cli, "_gateway_python_path_is_executable", lambda path: True
+    )
 
 
 def test_default_user_unit_keeps_simple_service_without_watchdog(monkeypatch):

@@ -74,6 +74,7 @@ class TestStdioCommandResolution:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
 
         with patch("tools.mcp_tool.shutil.which", return_value=None), \
+             patch("tools.mcp_tool.os.path.isfile", return_value=False), \
              pytest.raises(StdioCommandNotFoundError) as exc_info:
             _resolve_stdio_command("codegraph", {"PATH": "/missing"})
 

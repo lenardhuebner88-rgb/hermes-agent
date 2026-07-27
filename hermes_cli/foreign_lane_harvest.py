@@ -650,7 +650,7 @@ def extract_qwen_row(obj: Mapping[str, Any]) -> Optional[ExtractedRun]:
             "model": model,
             "requested_model": model,
             "model_source": "usage_log",
-            "billing_mode": obj.get("authType"),
+            "billing_mode": "subscription_included",
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cache_read_tokens": cached,

@@ -1130,6 +1130,37 @@ def test_land_gates_custom_all_green(tmp_path, fake_engine):
     assert ok is True
 
 
+@pytest.mark.parametrize(
+    ("affected_exit_code", "expected_phrase"),
+    [(1, "affected rot (rc=1)"), (3, "affected nicht gelaufen (rc=3)")],
+)
+def test_land_gates_distinguishes_affected_test_failure_from_preflight_abort(
+    tmp_path, fake_engine, monkeypatch, affected_exit_code, expected_phrase
+):
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "affected-abort", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "affected-abort")
+    runner = LoopRunner(pack, state_root=tmp_path / "state")
+
+    def fake_run(command, **kwargs):
+        if command[0] == "git":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if "run-affected.sh" in command[-2]:
+            return subprocess.CompletedProcess(
+                command, affected_exit_code, "branch age preflight\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    ok, report = runner._land_gates(repo, pack.base_branch)
+
+    assert ok is False
+    assert expected_phrase in report
+    if affected_exit_code == 3:
+        assert "rot" not in report
+
+
 def test_parse_worktree_paths():
     porcelain = (
         "worktree /home/x/repo\nHEAD abc\nbranch refs/heads/main\n\n"

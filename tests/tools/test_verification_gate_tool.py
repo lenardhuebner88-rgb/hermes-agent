@@ -122,6 +122,38 @@ def test_actions_are_closed_and_affected_has_separate_exit_codes(repo, monkeypat
         tool.run_verification_gate(action="shell", workspace=repo, artifact_dir=repo / ".evidence")
 
 
+def test_affected_preflight_abort_is_recorded_as_not_run(repo, monkeypatch):
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setattr(tool, "_run_commands", lambda specs, root: [
+        {"command_id": "run_affected", "exit_code": 3, "timed_out": False,
+         "duration_seconds": 0.1},
+        {"command_id": "worker_gate_ruff", "exit_code": 0, "timed_out": False,
+         "duration_seconds": 0.1},
+    ])
+
+    result = tool.run_verification_gate(action="affected", workspace=repo,
+                                        artifact_dir=repo / ".evidence", phase="review")
+
+    assert result["status"] == "not_run"
+
+
+def test_affected_test_failure_remains_failed(repo, monkeypatch):
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setattr(tool, "_run_commands", lambda specs, root: [
+        {"command_id": "run_affected", "exit_code": 1, "timed_out": False,
+         "duration_seconds": 0.1},
+        {"command_id": "worker_gate_ruff", "exit_code": 0, "timed_out": False,
+         "duration_seconds": 0.1},
+    ])
+
+    result = tool.run_verification_gate(action="affected", workspace=repo,
+                                        artifact_dir=repo / ".evidence", phase="review")
+
+    assert result["status"] == "failed"
+
+
 @pytest.mark.parametrize("ui_status", ["ui_preview_busy", "skipped"])
 def test_ui_shot_incomplete_states_are_red(repo, monkeypatch, ui_status):
     from tools import verification_gate_tool as tool
@@ -156,6 +188,7 @@ def test_record_only_executes_twice_and_opt_in_reuses(repo, monkeypatch):
     second = tool.run_verification_gate(action="affected", workspace=repo,
                                         artifact_dir=artifact_dir, phase="review")
     assert first["reused"] is False and second["reused"] is False
+    assert first["status"] == "passed" and second["status"] == "passed"
     assert len(calls) == 2 and len(list(artifact_dir.glob("*.json"))) == 2
     hit = tool.run_verification_gate(action="affected", workspace=repo,
                                      artifact_dir=artifact_dir, phase="review",

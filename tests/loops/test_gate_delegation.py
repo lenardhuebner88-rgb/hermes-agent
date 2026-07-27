@@ -103,18 +103,31 @@ def test_delegates_to_run_affected_and_passes(tmp_path):
     assert f"PYTHONPATH={repo}" in call_line
 
 
-# ── (b) roter Fall: run-affected.sh exit != 0 (nach seinem eigenen rerun-once)
+# ── (b) roter Fall: run-affected.sh exit 1 (nach seinem eigenen rerun-once)
 #        -> GATE_FAIL: pytest, exit 12 ──────────────────────────────────────
 
 def test_run_affected_failure_is_gate_fail(tmp_path):
+    repo, base_sha = _init_repo(tmp_path)
+    log = tmp_path / "call.log"
+    _write_fake_run_affected(repo, log, exit_code=1)
+
+    result = _run_gate(repo, base_sha)
+
+    assert result.returncode == 12, result.stdout + result.stderr
+    assert "GATE_FAIL: pytest" in result.stdout
+    assert log.exists()
+
+
+def test_run_affected_preflight_abort_is_not_a_gate_failure(tmp_path):
     repo, base_sha = _init_repo(tmp_path)
     log = tmp_path / "call.log"
     _write_fake_run_affected(repo, log, exit_code=3)
 
     result = _run_gate(repo, base_sha)
 
-    assert result.returncode == 12, result.stdout + result.stderr
-    assert "GATE_FAIL: pytest" in result.stdout
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "GATE_NOT_RUN: pytest" in result.stdout
+    assert "GATE_FAIL: pytest" not in result.stdout
     assert log.exists()
 
 

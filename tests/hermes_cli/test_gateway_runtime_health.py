@@ -8,6 +8,23 @@ def _iso_age(seconds_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
 
 
+def _runtime_status_record(token_usage: dict) -> dict:
+    """Runtime-status fixture matching the live gateway_state.json field set."""
+    return {
+        "pid": 4242,
+        "kind": "hermes-gateway",
+        "argv": ["/opt/hermes/hermes_cli/main.py", "gateway", "run"],
+        "start_time": 111,
+        "gateway_state": "running",
+        "exit_reason": None,
+        "restart_requested": False,
+        "active_agents": 1,
+        "platforms": {},
+        "updated_at": _iso_age(1),
+        "token_usage": token_usage,
+    }
+
+
 _STALE_LINE_PREFIX = "⚠ Stale gateway_state.json:"
 
 
@@ -90,19 +107,26 @@ def test_runtime_health_lines_no_warning_for_stale_running_but_live_pid(monkeypa
     assert _stale_lines(lines) == [], lines
 
 
-def test_runtime_health_lines_treats_missing_updated_at_as_stale(monkeypatch):
-    """Missing updated_at (degrade path) + dead PID + 'running' -> contradiction line."""
+def test_runtime_health_lines_stale_record_short_circuits_token_pressure(monkeypatch):
+    """A fresh token snapshot cannot override missing runtime-record freshness."""
     from gateway import status as status_mod
 
+    state = _runtime_status_record(
+        {
+            "last_prompt_tokens": 130_000,
+            "input_tokens": 135_000,
+            "output_tokens": 10_000,
+            "context_length": 200_000,
+            "model": "gpt-5.4",
+            "pressure_pct": 65,
+            "pressure_class": "watch",
+            "updated_at": _iso_age(1),
+        }
+    )
+    state.pop("updated_at")
     monkeypatch.setattr(
         "gateway.status.read_runtime_status",
-        lambda: {
-            "gateway_state": "running",
-            "pid": 4242,
-            "start_time": 111,
-            # no "updated_at" -> runtime_status_is_stale must treat as stale
-            "active_agents": 0,
-        },
+        lambda: state,
     )
     monkeypatch.setattr(status_mod, "_pid_exists", lambda pid: False)
     monkeypatch.setattr(status_mod, "_get_process_start_time", lambda pid: None)
@@ -112,6 +136,7 @@ def test_runtime_health_lines_treats_missing_updated_at_as_stale(monkeypatch):
     stale = _stale_lines(lines)
     assert len(stale) == 1, lines
     assert "recorded state 'running'" in stale[0]
+    assert all("Token pressure" not in line for line in lines), lines
 
 
 def test_runtime_health_lines_include_fatal_platform_and_startup_reason(monkeypatch):
@@ -207,17 +232,18 @@ def test_runtime_health_lines_emit_critical_when_offline(monkeypatch):
 def test_runtime_health_lines_include_token_pressure(monkeypatch):
     monkeypatch.setattr(
         "gateway.status.read_runtime_status",
-        lambda: {
-            "gateway_state": "running",
-            "token_usage": {
+        lambda: _runtime_status_record(
+            {
                 "last_prompt_tokens": 130_000,
+                "input_tokens": 135_000,
+                "output_tokens": 10_000,
                 "context_length": 200_000,
                 "pressure_pct": 65,
                 "pressure_class": "watch",
                 "model": "gpt-5.4",
-            },
-            "platforms": {},
-        },
+                "updated_at": _iso_age(1),
+            }
+        ),
     )
     lines = _runtime_health_lines()
     joined = "\n".join(lines)
@@ -242,17 +268,18 @@ def test_runtime_health_lines_render_unknown_pressure_class(monkeypatch):
     renders an explicit unknown line rather than silent 'ok'."""
     monkeypatch.setattr(
         "gateway.status.read_runtime_status",
-        lambda: {
-            "gateway_state": "running",
-            "token_usage": {
+        lambda: _runtime_status_record(
+            {
                 "last_prompt_tokens": 200_000,
+                "input_tokens": 205_000,
+                "output_tokens": 10_000,
                 "context_length": 0,
                 "pressure_pct": None,
                 "pressure_class": "unknown",
                 "model": "gpt-5.4",
-            },
-            "platforms": {},
-        },
+                "updated_at": _iso_age(1),
+            }
+        ),
     )
     lines = _runtime_health_lines()
     joined = "\n".join(lines)
@@ -282,20 +309,21 @@ def test_runtime_health_lines_mark_token_pressure_stale(monkeypatch):
     """Review-Finding #14: a token_usage snapshot older than 5min gains a
     '(stale Nm)' / '(stale Nh)' suffix so the operator can tell it's not
     live."""
-    from datetime import datetime, timezone, timedelta
-    stale_ts = (datetime.now(tz=timezone.utc) - timedelta(hours=8)).isoformat()
+    stale_ts = _iso_age(8 * 60 * 60)
     monkeypatch.setattr(
         "gateway.status.read_runtime_status",
-        lambda: {
-            "gateway_state": "running",
-            "token_usage": {
+        lambda: _runtime_status_record(
+            {
+                "last_prompt_tokens": 180_000,
+                "input_tokens": 185_000,
+                "output_tokens": 10_000,
+                "context_length": 200_000,
                 "pressure_pct": 90,
                 "pressure_class": "critical",
                 "model": "gpt-5.4",
                 "updated_at": stale_ts,
-            },
-            "platforms": {},
-        },
+            }
+        ),
     )
     lines = _runtime_health_lines()
     joined = "\n".join(lines)

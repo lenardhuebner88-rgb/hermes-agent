@@ -150,6 +150,43 @@ def test_origin_and_new_fact_dimensions_round_trip_through_allowlists(tmp_path):
     assert call["tool_duration_ms"] == 17
 
 
+def test_main_run_identity_wins_over_aux_regardless_of_write_order(tmp_path):
+    main = {"origin": "hermes_agent", "call_kind": "main_loop"}
+    auxiliary = {"origin": "hermes_aux", "call_kind": "aux"}
+
+    for run_id, first, second in (
+        ("run-aux-first", auxiliary, main),
+        ("run-main-first", main, auxiliary),
+    ):
+        path = tmp_path / f"{run_id}.db"
+        record_llm_call(run_id, 1, {}, run_fields=first, path=path)
+        record_llm_call(run_id, 2, {}, run_fields=second, path=path)
+
+        fact = _row(
+            path,
+            f"SELECT origin, call_kind FROM run_usage_facts WHERE run_id='{run_id}'",
+        )
+        assert tuple(fact) == ("hermes_agent", "main_loop")
+
+
+def test_standalone_aux_run_keeps_aux_identity(tmp_path):
+    path = tmp_path / "aux.db"
+
+    record_llm_call(
+        "aux-only",
+        1,
+        {},
+        run_fields={"origin": "hermes_aux", "call_kind": "aux"},
+        path=path,
+    )
+
+    fact = _row(
+        path,
+        "SELECT origin, call_kind FROM run_usage_facts WHERE run_id='aux-only'",
+    )
+    assert tuple(fact) == ("hermes_aux", "aux")
+
+
 def test_origin_is_write_validated_without_changing_source_check(tmp_path):
     path = tmp_path / "facts.db"
     initialize_usage_facts_db(path)

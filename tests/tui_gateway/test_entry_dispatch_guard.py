@@ -8,6 +8,7 @@ raising dispatch: it replies ``-32603`` for the bad request and keeps
 serving subsequent requests instead of exiting.
 """
 
+import io
 import json
 
 import tui_gateway.entry as entry
@@ -19,7 +20,7 @@ def test_dispatch_crash_returns_internal_error_and_continues(monkeypatch):
     req_ok = {"jsonrpc": "2.0", "id": 2, "method": "config.get"}
     lines = [json.dumps(req_crash) + "\n", json.dumps(req_ok) + "\n"]
 
-    monkeypatch.setattr(entry.sys, "stdin", lines)
+    monkeypatch.setattr(entry.sys, "stdin", io.StringIO("".join(lines)))
 
     # Strip startup side effects: no sidecar publisher, no MCP discovery
     # thread, no crash-log/stderr writes (keeps the test off real ~/.hermes).

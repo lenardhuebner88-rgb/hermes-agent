@@ -108,7 +108,13 @@ def _ref() -> str:
 
 
 def _git(root: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=5)
+    return subprocess.run(
+        ["git", "-C", root, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+    )
 
 
 def _read_sources_from_git(base: Path) -> list[tuple[str, str]] | None:

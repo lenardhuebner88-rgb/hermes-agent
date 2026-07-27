@@ -1985,6 +1985,8 @@ class LoopRunner:
                 return False, f"{label}: {exc}"
             if res.returncode != 0:
                 tail = "\n".join(((res.stdout or "") + (res.stderr or "")).splitlines()[-15:])
+                if label == "affected" and res.returncode == 3:
+                    return False, f"affected nicht gelaufen (rc=3):\n{tail}"
                 return False, f"{label} rot (rc={res.returncode}):\n{tail}"
         return True, "collection + affected" + (" + frontend" if touched_web else "") + " grün"
 
