@@ -104,6 +104,12 @@ const TaskDetailTaskSchema = z.object({
   closure: z.string().nullable().catch(null),
   block_reason: z.string().nullable().catch(null),
   operator_question: z.boolean().catch(false),
+  // Worker-Drawer V2: Worktree/Branch/Retry-/Tier-Kontext (asdict(task) liefert
+  // sie serverseitig bereits — das Schema stripte sie bisher still weg).
+  branch_name: z.string().nullable().catch(null),
+  workspace_path: z.string().nullable().catch(null),
+  auto_retry_count: z.coerce.number().catch(0),
+  review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),
   diagnostics: z.array(TaskDiagnosticSchema).catch([]),
   warnings: TaskDiagnosticWarningsSchema.nullable().catch(null),
   vault_memory_links: z.array(VaultMemoryLinkSchema).catch([]),

@@ -565,6 +565,15 @@ export function FleetView() {
                   now={now}
                   cap={workers.data?.cap ?? null}
                   doneToday={costs.data?.today.runs ?? null}
+                  tokensToday={
+                    costs.data?.today.input_tokens != null || costs.data?.today.output_tokens != null
+                      ? (costs.data.today.input_tokens ?? 0) + (costs.data.today.output_tokens ?? 0)
+                      : null
+                  }
+                  onWorkersChanged={() => {
+                    void fleetWorkers.reload();
+                    void workers.reload();
+                  }}
                   currentBoard={boardCatalog.data?.current ?? "default"}
                   eventBoards={(boardCatalog.data?.boards ?? [])
                     .filter((catalogBoard) => !catalogBoard.archived)

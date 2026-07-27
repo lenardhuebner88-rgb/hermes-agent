@@ -1,46 +1,85 @@
 /**
- * SlotLane — eine Swimlane des Puls-Leitstands: der Rollen-Avatar (getönt nach
- * laneTint) links, darüber der Task-Titel + Heartbeat-Alter, darunter das
- * WorkerBand gegen die Zeitachse. Tap öffnet den Fokus-Drawer.
+ * Slot-Lanes des Worker-Tabs (V2, 2026-07-27).
  *
- * FreeSlotLane rendert einen freien Slot (nummerierter Avatar + gestricheltes
- * „Slot frei"-Band) für den Leerzustand. MiniLane ist die kompakte Variante der
- * „Andere Lanes"-Leiste im Drawer.
+ * Die aktive Swimlane (SlotLane) ist durch die V2-Worker-Karte (WorkerCard.tsx,
+ * Elapsed-Ring + Sparkline) ersetzt. Übrig bleiben:
+ *
+ * - FreeSlotLane: freier Slot im Leerzustand. Zeigt statt nur „wartet auf
+ *   Dispatch" die nächsten 1–2 wartenden Tasks aus dem Board-Payload
+ *   (Queue-Vorschau), damit der Operator sieht, was als Nächstes startet.
+ * - MiniLane: die kompakte „Andere Lanes"-Variante im Fokus-Drawer.
  *
  * Rein präsentational; alle Farben aus fleet.css-Klassen.
  */
 import { WorkerBand } from "./WorkerBand";
-import { heartbeatAge, fmtSeconds, laneTint, profileInitial } from "../../lib/fleetHub";
-import type { Worker } from "../../lib/types";
+import { laneTint, profileInitial } from "../../lib/fleetHub";
+import type { BoardTask, Worker } from "../../lib/types";
+import { de } from "../../i18n/de";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
 
-export function SlotLane({ worker, now, onOpen }: { worker: Worker; now: number; onOpen: () => void }) {
-  const hbAge = heartbeatAge(worker.last_heartbeat_at, now);
-  const tint = laneTint(worker.profile);
+export interface QueuePreviewTask {
+  id: string;
+  title: string;
+  assignee: string | null;
+  priority: number;
+}
+
+export interface QueuePreview {
+  /** Dispatchen-bare Tasks (status=ready) — Sortierung wie der Dispatcher
+   *  (priority DESC, created_at ASC, kanban_db.py dispatch_once ready-pull). */
+  ready: QueuePreviewTask[];
+  /** Geparkte/terminierte Tasks (status=scheduled) — der Dispatcher zieht sie
+   *  NICHT (F2); sie werden separat beschriftet, nie als „Nächste in Queue". */
+  scheduled: QueuePreviewTask[];
+}
+
+function toPreviewTask(t: BoardTask): QueuePreviewTask {
+  return { id: t.id, title: t.title, assignee: t.assignee, priority: t.priority };
+}
+
+function byDispatcherOrder(a: BoardTask, b: BoardTask): number {
+  return b.priority - a.priority || a.created_at - b.created_at;
+}
+
+/**
+ * nextQueueTasks: Queue-Vorschau für freie Slots. Der Dispatcher zieht
+ * ausschließlich status='ready' — deshalb landet nur ready in der Hauptliste;
+ * scheduled kommt als separat beschriftete Zeile daneben.
+ */
+export function nextQueueTasks(columns: Array<{ name: string; tasks: BoardTask[] }>, limit = 2): QueuePreview {
+  const ready = (columns.find((c) => c.name === "ready")?.tasks ?? [])
+    .slice()
+    .sort(byDispatcherOrder)
+    .slice(0, Math.max(0, limit))
+    .map(toPreviewTask);
+  const scheduled = (columns.find((c) => c.name === "scheduled")?.tasks ?? [])
+    .slice()
+    .sort(byDispatcherOrder)
+    .slice(0, Math.max(0, limit))
+    .map(toPreviewTask);
+  return { ready, scheduled };
+}
+
+function QueueTaskRow({ t }: { t: QueuePreviewTask }) {
   return (
-    <button
-      type="button"
-      className="fleet-lane fleet-lane-btn"
-      onClick={onOpen}
-      aria-label={`Worker ${worker.profile} öffnen`}
-    >
-      <div className={`fleet-lav fleet-lav-${tint}`}>
-        <span className="fleet-lav-a">{profileInitial(worker.profile)}</span>
-        <span className="fleet-lav-n" title={worker.profile}>{worker.profile}</span>
-      </div>
-      <div className="fleet-lbody">
-        <div className="fleet-lhead">
-          <span className="fleet-lhead-t" title={worker.task_title}>{worker.task_title}</span>
-          <BoardBadge slug={worker.board_slug} />
-          {hbAge != null ? <span className="fleet-lhead-hb">♥ {fmtSeconds(hbAge)}</span> : null}
-        </div>
-        <WorkerBand worker={worker} now={now} size="lane" />
-      </div>
-    </button>
+    <span className="fleet-qnext-task" title={t.title}>
+      <span className="fleet-qnext-title">{t.title}</span>
+      {t.assignee ? <span className="fleet-wchip">{t.assignee}</span> : null}
+      {t.priority > 0 ? <span className="fleet-wchip fleet-wchip-mono">P{t.priority}</span> : null}
+    </span>
   );
 }
 
-export function FreeSlotLane({ index, label }: { index: number; label: string }) {
+export function FreeSlotLane({
+  index,
+  label,
+  queuePreview = { ready: [], scheduled: [] },
+}: {
+  index: number;
+  label: string;
+  /** Wartende Tasks (Queue-Vorschau) — ready = dispatchbar, scheduled separat. */
+  queuePreview?: QueuePreview;
+}) {
   return (
     <div className="fleet-lane">
       <div className="fleet-lav fleet-lav-free">
@@ -50,6 +89,22 @@ export function FreeSlotLane({ index, label }: { index: number; label: string })
         <div className="fleet-band fleet-band-free">
           <span className="fleet-band-free-label">{label}</span>
         </div>
+        {queuePreview.ready.length > 0 || queuePreview.scheduled.length > 0 ? (
+          <div className="fleet-qnext">
+            {queuePreview.ready.length > 0 ? (
+              <>
+                <span className="fleet-qnext-k">{de.fleet.queueNextLabel}</span>
+                {queuePreview.ready.map((t) => <QueueTaskRow key={t.id} t={t} />)}
+              </>
+            ) : null}
+            {queuePreview.scheduled.length > 0 ? (
+              <>
+                <span className="fleet-qnext-k">{de.fleet.queueScheduledLabel}</span>
+                {queuePreview.scheduled.map((t) => <QueueTaskRow key={t.id} t={t} />)}
+              </>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </div>
   );

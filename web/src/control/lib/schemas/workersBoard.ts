@@ -84,6 +84,10 @@ export const WorkerSchema = z.object({
   model_observed_at: nullableEpochSeconds,
   input_tokens: z.coerce.number().nullable().catch(null),
   output_tokens: z.coerce.number().nullable().catch(null),
+  // Ehrlicher Live-Token-Status: live/partial/no_live_sample (+ Grund). Fehlte
+  // bisher im Schema — zod stripte das Backend-Feld still weg.
+  token_status: z.enum(["live", "partial", "no_live_sample"]).nullable().optional().catch(null),
+  token_status_reason: z.string().nullable().optional().catch(null),
   // S2: additiver Run-Fortschritt 0..1 (elapsed/max_runtime_seconds).
   // null bei fehlendem Cap → UI nutzt etaFraction-Heuristik weiter.
   run_progress: z.coerce.number().min(0).max(1).nullable().catch(null),
@@ -142,6 +146,63 @@ export const WorkerActivityResponseSchema = z.object({
 
 export type WorkerActivityEvent = z.infer<typeof WorkerActivityEventSchema>;
 export type WorkerActivityResponse = z.infer<typeof WorkerActivityResponseSchema>;
+
+// ─── Run-Detail + Run-Timeline (Worker-Tab V2) ───────────────────────────────
+// GET /runs/{run_id} — dieselbe Serialisierung wie die Run-Historie in
+// GET /tasks/{id} (plugin_api._run_dict). Genutzt für den Outcome-Block im
+// Drawer, wenn der fokussierte Worker nicht mehr läuft.
+export const RunDetailSchema = z.object({
+  id: z.coerce.string(),
+  task_id: z.string().catch(""),
+  profile: z.string().nullable().catch(null),
+  status: z.string().catch(""),
+  outcome: z.string().nullable().catch(null),
+  summary: z.string().nullable().catch(null),
+  error: z.string().nullable().catch(null),
+  started_at: nullableEpochSeconds,
+  ended_at: nullableEpochSeconds,
+  input_tokens: z.coerce.number().nullable().catch(null),
+  output_tokens: z.coerce.number().nullable().catch(null),
+  cost_usd: z.coerce.number().nullable().catch(null),
+  // Verdict steckt (wenn überhaupt) in der freien metadata-Map — best-effort.
+  metadata: z.record(z.string(), z.unknown()).nullable().catch(null),
+});
+export const RunDetailResponseSchema = z.object({
+  run: RunDetailSchema,
+});
+export type RunDetail = z.infer<typeof RunDetailSchema>;
+export type RunDetailResponse = z.infer<typeof RunDetailResponseSchema>;
+
+// GET /runs/{run_id}/timeline — flache Ereignisliste mit offset/delta
+// (kanban_db.run_timeline). Tolerant: payload ist frei-form.
+export const RunTimelineItemSchema = z.object({
+  kind: z.string().catch("unknown"),
+  at: epochSeconds,
+  source: z.string().catch("event"),
+  payload: z.unknown().nullable().catch(null),
+  offset_seconds: z.coerce.number().nullable().catch(null),
+  delta_seconds: z.coerce.number().nullable().catch(null),
+});
+export const RunTimelineResponseSchema = z.object({
+  run: z.object({
+    id: z.coerce.string(),
+    task_id: z.string().catch(""),
+    profile: z.string().nullable().catch(null),
+    status: z.string().catch(""),
+    outcome: z.string().nullable().catch(null),
+    error: z.string().nullable().catch(null),
+    summary: z.string().nullable().catch(null),
+    started_at: nullableEpochSeconds,
+    ended_at: nullableEpochSeconds,
+    duration_seconds: z.coerce.number().nullable().catch(null),
+  }),
+  items: z.array(RunTimelineItemSchema).catch([]),
+  count: z.coerce.number().catch(0),
+  truncated: z.boolean().catch(false),
+});
+export type RunTimelineItem = z.infer<typeof RunTimelineItemSchema>;
+export type RunTimelineResponse = z.infer<typeof RunTimelineResponseSchema>;
+
 const BoardSourceErrorSchema = z.object({
   artifact: z.string().catch("kanban_board_fetch"),
   source: z.string().catch("unknown"),

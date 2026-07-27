@@ -6,9 +6,12 @@ import {
   LiveEventsResponseSchema,
   WorkerActivityResponseSchema,
   BoardResponseSchema,
+  RunDetailResponseSchema,
+  RunTimelineResponseSchema,
+  TaskDetailResponseSchema,
   parseOrThrow,
 } from "../lib/schemas";
-import type { WorkerActivityResponse } from "../lib/schemas";
+import type { WorkerActivityResponse, RunDetailResponse, RunTimelineResponse, TaskDetailResponse } from "../lib/schemas";
 import { nowSec } from "../lib/derive";
 import { mergeLiveEvents } from "../lib/fleetHub";
 import { mergeBoardWorkers, withBoardParam, type BoardsResponse } from "../lib/multiBoard";
@@ -316,4 +319,58 @@ export const boardLoader = async (board?: string | null | AbortSignal) => {
 export function useBoard(board: string | null = null) {
   const key = board ? `kanban/board:${board}` : "kanban/board";
   return usePolling<BoardResponse>(key, () => boardLoader(board), 8000);
+}
+
+
+// ─── Worker-Tab V2: Drawer-Nachladungen ──────────────────────────────────────
+// Drei on-demand Hooks fürs Drawer-Fenster: Task-Detail (Worktree/Branch/
+// Retries/Tier), Run-Detail (Outcome nach Run-Ende) und die Run-Timeline.
+// Alle pausieren über einen null-Key (gleiches Muster wie useWorkerActivity:
+// leerer Loader + sehr großes Intervall), damit der geschlossene Drawer keinen
+// Poll-Takt erzeugt.
+
+export function useWorkerTaskDetail(taskId: string | null, board: string | null = null) {
+  const key = taskId ? `worker-task-detail/${taskId}:${board ?? "current"}` : "worker-task-detail/__none__";
+  const loader = useCallback(async (): Promise<TaskDetailResponse | null> => {
+    if (!taskId) return null;
+    const url = withBoardParam(`/api/plugins/kanban/tasks/${encodeURIComponent(taskId)}`, board);
+    return parseOrThrow(TaskDetailResponseSchema, await fetchJSON<unknown>(url), `worker-task-detail/${taskId}`);
+  }, [taskId, board]);
+  // F14: 30 s — die schwerste Task-Payload (Body, Diagnostics, Run-Historie)
+  // für vier Skalare, die sich pro Run höchstens einmal ändern.
+  const result = usePolling<TaskDetailResponse | null>(key, loader, taskId ? 30_000 : 600_000);
+  if (!taskId) return { ...result, data: null };
+  return result;
+}
+
+export function useRunDetail(runId: string | null, board: string | null = null) {
+  const key = runId ? `runs/detail/${runId}:${board ?? "current"}` : "runs/detail/__none__";
+  // F14: ein terminaler Run (ended_at != null) ändert sich nie wieder — nach
+  // dem ersten erfolgreichen Fetch mit ended_at reicht ein sehr seltener Takt.
+  // Der Loader flipped das Flag (async Kontext, kein Render), das neue Intervall
+  // re-subscribed usePolling über dessen intervalMs-Dep.
+  const [terminal, setTerminal] = useState(false);
+  useEffect(() => { setTerminal(false); }, [runId, board]);
+  const loader = useCallback(async (): Promise<RunDetailResponse | null> => {
+    if (!runId) return null;
+    const url = withBoardParam(`/api/plugins/kanban/runs/${encodeURIComponent(runId)}`, board);
+    const parsed = parseOrThrow(RunDetailResponseSchema, await fetchJSON<unknown>(url), `runs/detail/${runId}`);
+    if (parsed.run.ended_at != null) setTerminal(true);
+    return parsed;
+  }, [runId, board]);
+  const result = usePolling<RunDetailResponse | null>(key, loader, runId ? (terminal ? 300_000 : 10_000) : 600_000);
+  if (!runId) return { ...result, data: null };
+  return result;
+}
+
+export function useRunTimeline(runId: string | null, board: string | null = null) {
+  const key = runId ? `runs/timeline/${runId}:${board ?? "current"}` : "runs/timeline/__none__";
+  const loader = useCallback(async (): Promise<RunTimelineResponse | null> => {
+    if (!runId) return null;
+    const url = withBoardParam(`/api/plugins/kanban/runs/${encodeURIComponent(runId)}/timeline`, board);
+    return parseOrThrow(RunTimelineResponseSchema, await fetchJSON<unknown>(url), `runs/timeline/${runId}`);
+  }, [runId, board]);
+  const result = usePolling<RunTimelineResponse | null>(key, loader, runId ? 15000 : 600_000);
+  if (!runId) return { ...result, data: null };
+  return result;
 }

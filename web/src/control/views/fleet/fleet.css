@@ -3404,15 +3404,8 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-ptile-v-live { color: var(--fleet-puls); }
 .fleet-ptile-v-ok { color: var(--fleet-gruen); }
 
-/* ── Swimlanes ───────────────────────────────────────────────────────────── */
+/* ── Swimlanes (freie Slots + Mini-Lanes im Drawer) ────────────────────────── */
 .fleet-laneswrap { margin: 0; }
-.fleet-axis {
-  display: flex;
-  justify-content: space-between;
-  font: 400 8.5px/1 var(--hc-font-mono);
-  color: var(--fleet-t3);
-  padding: 0 2px 6px 42px;
-}
 .fleet-lane {
   display: flex;
   gap: 9px;
@@ -3699,3 +3692,338 @@ body:has([data-fleet-theme]) [data-control] {
 @media (max-width: 400px) {
   .fleet-band-step { max-width: 46%; }
 }
+
+/* ── Worker-Tab V2 (Mockup 2026-07-27): Worker-Karten, Ring, Sparkline ──────
+ * Form folgt mockup-v2.html, Farben ausschließlich über die Fleet-Aliase der
+ * theme.css-Tokens (DESIGN.md Regel 9). Bronze (--fleet-puls) nur für Live-
+ * Elemente (Ring-Füllung, letzter Sparkline-Balken), Status-Trio nur für
+ * Liveness-Orb und über-p90-Warnung. */
+
+/* Puls-Kachel Sub-Zeile (z. B. Token-Tages-Summe) */
+.fleet-ptile-sub {
+  font: 400 9px/1.3 var(--hc-font-mono);
+  color: var(--fleet-t3);
+  margin-top: 3px;
+}
+
+/* Karten-Grid: Desktop mehrspaltig, mobil gestapelt (auto-fill bricht von
+ * selbst um — kein eigener Breakpoint nötig). */
+.fleet-wgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  margin: 2px 0 12px;
+}
+
+.fleet-wcard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  text-align: left;
+  cursor: pointer;
+  background: var(--fleet-tiefe);
+  border: 1px solid var(--fleet-linie);
+  border-radius: 10px;
+  padding: 14px 15px;
+  color: var(--fleet-t1);
+  font: inherit;
+}
+.fleet-wcard:hover { background: var(--fleet-karte); }
+.fleet-wcard:focus-visible { outline: 2px solid var(--fleet-puls); outline-offset: 1px; }
+
+.fleet-wcard-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+.fleet-wcard-title {
+  flex: 1;
+  min-width: 0;
+  font: 600 13px/1.35 var(--hc-font-sans);
+  color: var(--fleet-t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Liveness-Orb (Status-Trio, immer mit title/aria-Label — nie farb-only) */
+.fleet-orb {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-top: 4px;
+  flex: none;
+}
+.fleet-orb-ok { background: var(--fleet-gruen); }
+.fleet-orb-warn { background: var(--fleet-signal); }
+.fleet-orb-alert { background: var(--fleet-rot); }
+
+/* Chips (Mono = Daten: Run-Nr, Branch, Modell, Claim) */
+.fleet-wchips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  min-width: 0;
+}
+.fleet-wchip {
+  font: 400 9.5px/1 var(--hc-font-mono);
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--fleet-linie);
+  color: var(--fleet-t2);
+  background: var(--fleet-karte);
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fleet-wchip-run { color: var(--fleet-t3); }
+.fleet-wchip-mono { color: var(--fleet-t3); }
+.fleet-wchip-tint-coder { color: var(--fleet-puls); }
+.fleet-wchip-tint-reviewer { color: var(--fleet-signal); }
+.fleet-wchip-tint-verifier { color: var(--fleet-gruen); }
+.fleet-wchip-tint-neutral { color: var(--color-brand); }
+
+/* Körper: Ring links, Stat-Zeilen rechts */
+.fleet-wcard-body {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  min-width: 0;
+}
+.fleet-ring-box { position: relative; display: block; width: 88px; height: 88px; flex: none; }
+.fleet-ring-track { fill: none; stroke: var(--fleet-linie); stroke-width: 5; }
+.fleet-ring-fill {
+  fill: none;
+  stroke: var(--fleet-puls);
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+.fleet-ring-fill-over { stroke: var(--fleet-signal); }
+.fleet-ring-p50 { stroke: var(--fleet-t3); stroke-width: 1.2; }
+.fleet-ring-p90 { stroke: var(--fleet-signal); stroke-width: 1.4; }
+.fleet-ring-num {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+}
+.fleet-ring-el { font: 600 14px/1 var(--hc-font-mono); color: var(--fleet-t1); }
+.fleet-ring-cap {
+  font: 600 7.5px/1 var(--hc-font-sans);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+}
+
+.fleet-wstats {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.fleet-wstat {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font: 400 10.5px/1.4 var(--hc-font-sans);
+  color: var(--fleet-t2);
+}
+.fleet-wstat-k {
+  flex: none;
+  font: 500 8.5px/1.4 var(--hc-font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+}
+.fleet-wstat-v { font: 500 10.5px/1.4 var(--hc-font-mono); color: var(--fleet-t1); white-space: nowrap; }
+.fleet-wstat-dim { color: var(--fleet-t3); }
+.fleet-wstat-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 10px/1.4 var(--hc-font-mono);
+  color: var(--fleet-t2);
+}
+
+/* ×N-Dedupe-Badge (Ticker + Notiz-Historie) */
+.fleet-xbadge {
+  font: 500 8.5px/1 var(--hc-font-mono);
+  color: var(--color-bronze-hi);
+  border: 1px solid var(--fleet-linie);
+  background: var(--fleet-karte);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+/* Kind-Marker in der Notiz-Historie (Sonder-Kinds) */
+.fleet-kind {
+  font: 500 8.5px/1 var(--hc-font-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+  border: 1px solid var(--fleet-linie);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+/* Heartbeat-Sparkline */
+.fleet-hb-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 22px;
+}
+.fleet-hb-bar {
+  flex: 1;
+  min-width: 3px;
+  border-radius: 1.5px 1.5px 0 0;
+  background: var(--fleet-karte-hi);
+  border: 1px solid var(--fleet-linie);
+  border-bottom: none;
+}
+.fleet-hb-bar-last { background: var(--fleet-puls); border-color: var(--fleet-puls); }
+
+/* p50/p90-Skala */
+.fleet-pscale { position: relative; display: block; height: 14px; }
+.fleet-pscale-track {
+  position: absolute;
+  display: block;
+  left: 0;
+  right: 0;
+  top: 7px;
+  height: 2px;
+  background: var(--fleet-linie);
+}
+.fleet-pscale-fill {
+  position: absolute;
+  display: block;
+  left: 0;
+  top: 7px;
+  height: 2px;
+  background: var(--fleet-puls);
+}
+.fleet-pscale-fill-over { background: var(--fleet-signal); }
+.fleet-pscale-tick {
+  position: absolute;
+  display: block;
+  top: 4px;
+  width: 1px;
+  height: 8px;
+  background: var(--fleet-t3);
+}
+.fleet-pscale-tick-p90 { background: var(--fleet-signal); }
+.fleet-pscale-tlab {
+  position: absolute;
+  top: -6px;
+  font: 400 7.5px/1 var(--hc-font-mono);
+  color: var(--fleet-t3);
+  transform: translateX(-50%);
+}
+.fleet-pscale-pos {
+  position: absolute;
+  top: 4.5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--fleet-puls);
+  transform: translateX(-50%);
+}
+.fleet-pscale-pos-over { background: var(--fleet-signal); }
+
+/* Queue-Vorschau an freien Slots */
+.fleet-qnext {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--fleet-linie);
+  border-radius: 7px;
+}
+.fleet-qnext-k {
+  font: 500 8.5px/1 var(--hc-font-mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fleet-t3);
+}
+.fleet-qnext-task {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font: 400 11px/1.35 var(--hc-font-sans);
+  color: var(--fleet-t2);
+}
+.fleet-qnext-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Drawer: Copy-Button, Dim-Text, Run-Timeline, Outcome */
+.fleet-copy {
+  font: 500 9px/1 var(--hc-font-mono);
+  color: var(--fleet-t3);
+  background: var(--fleet-karte);
+  border: 1px solid var(--fleet-linie);
+  border-radius: 4px;
+  padding: 3px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fleet-copy:hover { color: var(--fleet-t1); background: var(--fleet-karte-hi); }
+.fleet-copy:focus-visible { outline: 2px solid var(--fleet-puls); outline-offset: 1px; }
+.fleet-dim { color: var(--fleet-t3); font-size: 9.5px; }
+.fleet-mono-wrap {
+  font-family: var(--hc-font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.fleet-tl2-wrap { border-top: 1px solid var(--fleet-linie); padding-top: 9px; }
+.fleet-tl2 {
+  position: relative;
+  padding-left: 14px;
+  border-left: 1px solid var(--fleet-linie);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font: 400 10px/1.6 var(--hc-font-mono);
+}
+.fleet-tl2-ev { display: flex; gap: 9px; min-width: 0; }
+.fleet-tl2-t { color: var(--fleet-t3); flex: none; }
+.fleet-tl2-l {
+  color: var(--fleet-t2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fleet-tl2-now .fleet-tl2-l { color: var(--fleet-puls); }
+.fleet-tl2-cap {
+  font: 400 9px/1.4 var(--hc-font-mono);
+  color: var(--fleet-t3);
+  margin-bottom: 2px;
+}
+
+.fleet-outcome { border-top: 1px solid var(--fleet-linie); padding-top: 9px; }
+.fleet-outcome .fleet-grid2 { margin-top: 6px; }
+.fleet-outcome-err { color: var(--fleet-rot); overflow-wrap: anywhere; }

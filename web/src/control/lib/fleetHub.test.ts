@@ -36,6 +36,14 @@ import {
   formatLiveEvent,
   mergeLiveEvents,
   clamp01,
+  dedupeLiveEvents,
+  dedupeConsecutive,
+  isPinnedEventKind,
+  workerLivenessTone,
+  elapsedRingGeometry,
+  heartbeatBars,
+  claimCountdownSeconds,
+  eventKindLabel,
   type ChainChipState,
 } from "./fleetHub";
 import type { Worker, ChainGraphResponse, ChainSummary } from "./types";
@@ -1177,17 +1185,17 @@ describe("clamp01", () => {
 
 describe("bandWindowSeconds", () => {
   const base = { started_at: NOW - 100 };
-  it("bevorzugt p90 (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, eta_p90_seconds: 840, eta_p50_seconds: 300 }, NOW)).toEqual({ seconds: 840, grounded: true });
+  it("bevorzugt p90 (geerdet, source p90)", () => {
+    expect(bandWindowSeconds({ ...base, eta_p90_seconds: 840, eta_p50_seconds: 300 }, NOW)).toEqual({ seconds: 840, grounded: true, source: "p90" });
   });
-  it("fällt auf max_runtime_seconds zurück (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, max_runtime_seconds: 1800 }, NOW)).toEqual({ seconds: 1800, grounded: true });
+  it("fällt auf max_runtime_seconds zurück (geerdet, source cap)", () => {
+    expect(bandWindowSeconds({ ...base, max_runtime_seconds: 1800 }, NOW)).toEqual({ seconds: 1800, grounded: true, source: "cap" });
   });
-  it("dann p50×1.6 (geerdet)", () => {
-    expect(bandWindowSeconds({ ...base, eta_p50_seconds: 100 }, NOW)).toEqual({ seconds: 160, grounded: true });
+  it("dann p50×1.6 (geerdet, source p50x1.6)", () => {
+    expect(bandWindowSeconds({ ...base, eta_p50_seconds: 100 }, NOW)).toEqual({ seconds: 160, grounded: true, source: "p50x1.6" });
   });
-  it("zuletzt elapsed×1.3 (nicht geerdet)", () => {
-    expect(bandWindowSeconds(base, NOW)).toEqual({ seconds: 130, grounded: false });
+  it("zuletzt elapsed×1.3 (nicht geerdet, source none)", () => {
+    expect(bandWindowSeconds(base, NOW)).toEqual({ seconds: 130, grounded: false, source: "none" });
   });
 });
 
@@ -1317,5 +1325,203 @@ describe("mergeLiveEvents", () => {
       ["health-track", 7],
       ["default", 7],
     ]);
+  });
+});
+
+describe("derivePulse — ehrliche Token-Kachel (V2)", () => {
+  it("tokenSum ist null, wenn kein aktiver Worker eine Live-Stichprobe liefert", () => {
+    const pulse = derivePulse({
+      activeWorkers: [
+        { input_tokens: null, output_tokens: null, token_status: "no_live_sample" },
+        { input_tokens: null, output_tokens: null, token_status: null },
+      ],
+      cap: 3,
+      queue: 0,
+      doneToday: null,
+      blocked: 0,
+    });
+    expect(pulse.tokenSum).toBeNull();
+  });
+
+  it("token_status=partial zählt als Stichprobe, fehlende Zähler als 0", () => {
+    const pulse = derivePulse({
+      activeWorkers: [
+        { input_tokens: null, output_tokens: null, token_status: "partial" },
+        { input_tokens: 500, output_tokens: null, token_status: "no_live_sample" },
+      ],
+      cap: 3,
+      queue: 0,
+      doneToday: null,
+      blocked: 0,
+    });
+    expect(pulse.tokenSum).toBe(500);
+  });
+});
+
+describe("dedupeConsecutive / dedupeLiveEvents (V2)", () => {
+  const hb = (id: number, note: string, run = 7) => ({
+    id,
+    board_slug: "default",
+    run_id: run,
+    task_id: "t_x",
+    kind: "heartbeat",
+    note,
+    at: id,
+  });
+
+  it("fasst aufeinanderfolgende identische Notizen desselben Runs mit ×N zusammen", () => {
+    const rows = dedupeLiveEvents([
+      hb(3, "receiving stream response"),
+      hb(2, "receiving stream response"),
+      hb(1, "receiving stream response"),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].count).toBe(3);
+    expect(rows[0].item.id).toBe(3); // neueste Zeile trägt die Gruppe
+  });
+
+  it("dedupliziert nicht über Worker-/Notiz-Grenzen hinweg", () => {
+    const rows = dedupeLiveEvents([
+      hb(4, "notiz a", 8),
+      hb(3, "notiz a", 7),
+      hb(2, "notiz b", 7),
+      hb(1, "notiz a", 7),
+    ]);
+    expect(rows.map((r) => [r.item.id, r.count])).toEqual([[4, 1], [3, 1], [2, 1], [1, 1]]);
+  });
+
+  it("Sonder-Kinds werden nie wegdedupliziert und brechen Wiederholungen auf", () => {
+    expect(isPinnedEventKind("claimed")).toBe(true);
+    expect(isPinnedEventKind("model_confirmed")).toBe(true);
+    expect(isPinnedEventKind("closeout_summary")).toBe(true);
+    expect(isPinnedEventKind("timed_out")).toBe(true);
+    expect(isPinnedEventKind("heartbeat")).toBe(false);
+    const rows = dedupeLiveEvents([
+      hb(4, "gleich"),
+      { ...hb(3, "gleich"), kind: "claimed", note: null },
+      hb(2, "gleich"),
+      hb(1, "gleich"),
+    ]);
+    expect(rows.map((r) => [r.item.kind, r.count])).toEqual([
+      ["heartbeat", 1],
+      ["claimed", 1],
+      ["heartbeat", 2],
+    ]);
+  });
+
+  it("Events ohne Notiz bleiben eigenständig", () => {
+    const rows = dedupeLiveEvents([hb(2, ""), hb(1, "")]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it("dedupeConsecutive ist generisch (Notiz-Historie: kind+note-Schlüssel)", () => {
+    const rows = dedupeConsecutive(
+      [
+        { kind: "heartbeat", note: "x" },
+        { kind: "heartbeat", note: "x" },
+        { kind: "blocked", note: "x" },
+      ],
+      (e) => `${e.kind}:${e.note}`,
+      (e) => e.kind !== "blocked",
+    );
+    expect(rows.map((r) => r.count)).toEqual([2, 1]);
+  });
+});
+
+describe("workerLivenessTone (V2)", () => {
+  const now = 1_782_500_000;
+  it("mappt das Backend-liveness_state aufs Status-Trio", () => {
+    expect(workerLivenessTone({ liveness_state: "running" }, now)).toBe("ok");
+    expect(workerLivenessTone({ liveness_state: "suspect" }, now)).toBe("warn");
+    expect(workerLivenessTone({ liveness_state: "failed" }, now)).toBe("alert");
+  });
+  it("fällt ohne liveness_state auf das Heartbeat-Alter zurück", () => {
+    expect(workerLivenessTone({ last_heartbeat_at: now - 30 }, now)).toBe("ok");
+    expect(workerLivenessTone({ last_heartbeat_at: now - 120 }, now)).toBe("warn");
+    expect(workerLivenessTone({ last_heartbeat_at: now - 600 }, now)).toBe("alert");
+    expect(workerLivenessTone({ last_heartbeat_at: null }, now)).toBeNull();
+  });
+});
+
+describe("elapsedRingGeometry (V2)", () => {
+  const now = 1_782_500_000;
+  it("Füllung + p50-Marke gegen das p90-Fenster (source p90)", () => {
+    const geo = elapsedRingGeometry(
+      { started_at: now - 500, eta_p50_seconds: 400, eta_p90_seconds: 1000 },
+      now,
+    );
+    expect(geo.fillFraction).toBeCloseTo(0.5);
+    expect(geo.p50Fraction).toBeCloseTo(0.4);
+    expect(geo.overP90).toBe(false);
+    expect(geo.grounded).toBe(true);
+    expect(geo.source).toBe("p90");
+  });
+  it("über p90 → overP90 bei voller Füllung", () => {
+    const geo = elapsedRingGeometry(
+      { started_at: now - 1500, eta_p50_seconds: 400, eta_p90_seconds: 1000 },
+      now,
+    );
+    expect(geo.fillFraction).toBe(1);
+    expect(geo.overP90).toBe(true);
+  });
+  it("Runtime-Cap-Fenster → source cap (kein p90-Label erlaubt, F3)", () => {
+    const geo = elapsedRingGeometry({ started_at: now - 500, max_runtime_seconds: 1800 }, now);
+    expect(geo.grounded).toBe(true);
+    expect(geo.source).toBe("cap");
+  });
+  it("p50×1.6-Hochrechnung → source p50x1.6 (nur ≈-Label erlaubt, F3)", () => {
+    const geo = elapsedRingGeometry({ started_at: now - 100, eta_p50_seconds: 1000 }, now);
+    expect(geo.grounded).toBe(true);
+    expect(geo.source).toBe("p50x1.6");
+  });
+  it("ohne ETA-Historie kein overP90 (Fenster geschätzt, source none)", () => {
+    const geo = elapsedRingGeometry({ started_at: now - 100 }, now);
+    expect(geo.grounded).toBe(false);
+    expect(geo.source).toBe("none");
+    expect(geo.overP90).toBe(false);
+    expect(geo.fillFraction).toBeGreaterThan(0);
+  });
+  it("F4-Regression: ohne Fenster ist die Füllung eine Konstante — grounded=false muss den Bogen unterdrücken", () => {
+    // elapsed/(elapsed·1.3) ≡ 1/1.3 ≈ 0.77 für JEDE Laufzeit: zwei Worker mit
+    // 40 s bzw. 40 min sähen mit Bogen identisch „fast fertig" aus. Der Vertrag
+    // ist deshalb: !grounded + source none → die Karte zeichnet nur Track+Zahl.
+    const kurz = elapsedRingGeometry({ started_at: now - 40 }, now);
+    const lang = elapsedRingGeometry({ started_at: now - 2400 }, now);
+    expect(kurz.grounded).toBe(false);
+    expect(lang.grounded).toBe(false);
+    expect(kurz.fillFraction).toBeCloseTo(lang.fillFraction, 5);
+  });
+});
+
+describe("heartbeatBars (V2)", () => {
+  it("dichte Ticks zeichnen hoch, Aussetzer flach; Werte in [0.2, 1]", () => {
+    const bars = heartbeatBars([0, 10, 20, 500]);
+    expect(bars).toHaveLength(4);
+    for (const b of bars) {
+      expect(b).toBeGreaterThanOrEqual(0.2);
+      expect(b).toBeLessThanOrEqual(1);
+    }
+    expect(bars[1]).toBeGreaterThan(bars[3]); // 10s-Lücke > 480s-Lücke
+  });
+  it("leere/fehlende Ticks → keine Balken", () => {
+    expect(heartbeatBars([])).toEqual([]);
+    expect(heartbeatBars(null)).toEqual([]);
+    expect(heartbeatBars(undefined)).toEqual([]);
+  });
+});
+
+describe("claimCountdownSeconds + eventKindLabel (V2)", () => {
+  it("Claim-Countdown: Differenz, null bei fehlendem/ungültigem Zeitstempel", () => {
+    expect(claimCountdownSeconds(1100, 1000)).toBe(100);
+    expect(claimCountdownSeconds(900, 1000)).toBe(-100);
+    expect(claimCountdownSeconds(null, 1000)).toBeNull();
+    expect(claimCountdownSeconds(0, 1000)).toBeNull();
+  });
+  it("eventKindLabel: Map-Treffer, model_/closeout_-Präfixe, Roh-Fallback", () => {
+    const labels = { claimed: "geclaimt" };
+    expect(eventKindLabel("claimed", labels)).toBe("geclaimt");
+    expect(eventKindLabel("model_confirmed", labels)).toBe("Modell");
+    expect(eventKindLabel("closeout_summary", labels)).toBe("Closeout");
+    expect(eventKindLabel("irgendwas_neues", labels)).toBe("irgendwas_neues");
   });
 });

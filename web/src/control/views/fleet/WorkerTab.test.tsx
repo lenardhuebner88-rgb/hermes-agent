@@ -27,16 +27,55 @@ import type { BoardResponse, BoardTask, Worker } from "../../lib/types";
 
 const EMPTY_LIVE_EVENTS = { events: [], count: 0, latest_id: null, checked_at: 0 };
 const EMPTY_ACTIVITY = { task_id: "t_abc123", events: [] };
+const EMPTY_TIMELINE = {
+  run: {
+    id: "482", task_id: "t_abc123", profile: "coder", status: "running",
+    outcome: null, error: null, summary: null,
+    started_at: 1782500000, ended_at: null, duration_seconds: 300,
+  },
+  items: [],
+  count: 0,
+  truncated: false,
+};
+const EMPTY_TASK_DETAIL = {
+  task: {},
+  comments: [],
+  runs: [],
+  events: [],
+  deliverables: [],
+  links: { parents: [], children: [], parent_states: [], child_states: [] },
+};
 
 type FetchOpts = { body?: string; method?: string };
 
-// Route fetchJSON by URL: the ticker + drawer activity poll always resolve
-// empty; only the worker action / terminate endpoint returns `actionImpl`.
-function routeFetch(actionImpl: (url: string, opts?: FetchOpts) => Promise<unknown>) {
+interface ExtraRoutes {
+  /** GET /tasks/{id} (Task-Detail fürs Drawer: Worktree/Branch/Retries/Tier). */
+  taskDetail?: (url: string) => Promise<unknown>;
+  /** GET /runs/{run_id} (Outcome nach Run-Ende). Default: 404. */
+  runDetail?: (url: string) => Promise<unknown>;
+  /** GET /runs/live-events (Ticker-Inhalt). */
+  liveEvents?: (url: string) => Promise<unknown>;
+}
+
+// Route fetchJSON by URL: Ticker/Activity/Timeline/Task-Detail liefern leere
+// Defaults; nur der Worker-Aktions-Endpunkt trägt das per-Test-Ergebnis.
+// Extras erlauben pro Test echte Payloads für Detail/Outcome/Ticker.
+function routeFetch(actionImpl: (url: string, opts?: FetchOpts) => Promise<unknown>, extras: ExtraRoutes = {}) {
   fetchJSONMock.mockImplementation((url: string, opts?: FetchOpts) => {
     if (typeof url === "string") {
-      if (url.includes("/runs/live-events")) return Promise.resolve(EMPTY_LIVE_EVENTS);
+      if (url.includes("/runs/live-events")) {
+        return extras.liveEvents ? extras.liveEvents(url) : Promise.resolve(EMPTY_LIVE_EVENTS);
+      }
       if (url.includes("/activity")) return Promise.resolve(EMPTY_ACTIVITY);
+      if (url.includes("/timeline")) return Promise.resolve(EMPTY_TIMELINE);
+      if (/\/tasks\/[^/?]+(\?|$)/.test(url)) {
+        return extras.taskDetail ? extras.taskDetail(url) : Promise.resolve(EMPTY_TASK_DETAIL);
+      }
+      if (/\/runs\/\d+(\?|$)/.test(url) && opts?.method !== "POST") {
+        return extras.runDetail
+          ? extras.runDetail(url)
+          : Promise.reject(new Error('404: {"detail":"run 482 not found"}'));
+      }
     }
     return actionImpl(url, opts);
   });
@@ -297,7 +336,7 @@ describe("Worker-Drawer-Steuerung (Gap 1)", () => {
       />,
     );
 
-    expect(screen.getByText("Worker beendet")).toBeTruthy();
+    expect(screen.getAllByText("Worker beendet").length).toBeGreaterThan(0);
     expect(screen.getByText(/nicht mehr in den aktiven Workern/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Anstoßen" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Entsperren" })).toBeNull();
@@ -400,5 +439,450 @@ describe("Worker-Drawer-Steuerung (Gap 1)", () => {
       expect(err).toBeTruthy();
       expect(err?.textContent).toContain("Kein aktiver Claim zum Lösen (Task nicht running).");
     });
+  });
+});
+
+// ─── Worker-Tab V2 (Mockup 2026-07-27) ──────────────────────────────────────
+
+describe("Worker-Tab V2 — Token-Kachel, Queue-Vorschau, Ticker-Dedupe", () => {
+  it("Token-Kachel zeigt ehrlich den Closeout-Hinweis statt 0, wenn keine Live-Stichprobe vorliegt", () => {
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+        cap={3}
+        doneToday={4}
+      />,
+    );
+    expect(screen.getByText("Token")).toBeTruthy();
+    expect(document.body.textContent).toContain("Werte beim Closeout");
+    expect(document.body.textContent).not.toContain("0 Token");
+  });
+
+  it("Token-Kachel trägt die Tages-Summe als Sub-Zeile, wenn sie aus dem costs-Hook kommt", () => {
+    const { container } = render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+        tokensToday={14_680_000}
+      />,
+    );
+    expect(container.textContent).toContain("heute 14,7M");
+  });
+
+  it("Queue trägt das ehrliche Scope-Suffix (Board), weil Slots/Tokens alle Boards aggregieren", () => {
+    const boardWithQueue: BoardResponse = {
+      ...BOARD_WITH_CHAIN,
+      columns: [
+        ...BOARD_WITH_CHAIN.columns,
+        { name: "ready", tasks: [{ ...BOARD_TASK, id: "t_q1", title: "Nächster Job", status: "ready", priority: 5 }] },
+      ],
+    };
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={boardWithQueue}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    expect(screen.getByText(/Queue \(Board\)/)).toBeTruthy();
+  });
+
+  it("Leerzustand zeigt die Queue-Vorschau (nächste wartende Tasks) am ersten freien Slot", () => {
+    const boardWithQueue: BoardResponse = {
+      ...BOARD_WITH_CHAIN,
+      columns: [
+        { name: "ready", tasks: [
+          { ...BOARD_TASK, id: "t_q1", title: "Nächster Job", status: "ready", priority: 5 },
+          { ...BOARD_TASK, id: "t_q2", title: "Zweiter Job", status: "ready", priority: 1 },
+        ] },
+      ],
+    };
+    render(
+      <WorkerTab
+        activeWorkers={[]}
+        board={boardWithQueue}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+        cap={2}
+      />,
+    );
+    expect(screen.getByText("Nächste in Queue")).toBeTruthy();
+    expect(screen.getByText("Nächster Job")).toBeTruthy();
+    expect(screen.getByText("Zweiter Job")).toBeTruthy();
+    expect(screen.getByText("P5")).toBeTruthy();
+  });
+
+  it("Live-Ticker dedupliziert identische Notizen zu einer Zeile mit ×N-Badge, Sonder-Kinds bleiben", async () => {
+    const hb = (id: number, at: number) => ({
+      id,
+      board_slug: null,
+      run_id: 482,
+      task_id: "t_abc123",
+      task_title: "Fix flaky test",
+      profile: "coder",
+      kind: "heartbeat",
+      note: "receiving stream response",
+      at,
+    });
+    const claimed = {
+      ...hb(4, 1782500295),
+      kind: "claimed",
+      note: null,
+    };
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      liveEvents: () =>
+        Promise.resolve({
+          events: [claimed, hb(3, 1782500290), hb(2, 1782500280), hb(1, 1782500270)],
+          count: 4,
+          latest_id: 4,
+          checked_at: 1782500300,
+        }),
+    });
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("×3")).toBeTruthy());
+    // Der claimed-Marker bleibt eigenständig (wird nie wegdedupliziert).
+    expect(screen.getByText(/Slot geclaimt/)).toBeTruthy();
+    // Genau EINE Heartbeat-Zeile statt dreier identischer.
+    expect(screen.getAllByText(/receiving stream response/)).toHaveLength(1);
+  });
+});
+
+describe("Worker-Tab V2 — Liveness, Drawer-Anreicherung, Outcome, Re-Poll", () => {
+  const LIVENESS_WORKER: Worker = {
+    ...FIXTURE_WORKER,
+    liveness_state: "suspect",
+    liveness_reason: "Heartbeat 4 min alt",
+    liveness_observed_at: 1782500290,
+  };
+
+  it("Liveness-Orb auf der Karte + Liveness-Zeile mit Grund im Drawer", () => {
+    render(
+      <WorkerTab
+        activeWorkers={[LIVENESS_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={LIVENESS_WORKER}
+        onOpenChain={() => {}}
+      />,
+    );
+    const orb = document.querySelector('[role="img"][aria-label^="Liveness:"]');
+    expect(orb).toBeTruthy();
+    expect(orb?.getAttribute("aria-label")).toContain("verdächtig");
+    expect(orb?.getAttribute("aria-label")).toContain("Heartbeat 4 min alt");
+    // Drawer-Zeile
+    expect(screen.getByText("Liveness")).toBeTruthy();
+    expect(document.body.textContent).toContain("Heartbeat 4 min alt");
+    expect(document.body.textContent).toContain("beobachtet");
+  });
+
+  it("Drawer zeigt Claim-Host, Expiry-Countdown, Worktree/Branch mit Copy, Retries und Review-Tier", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      taskDetail: () =>
+        Promise.resolve({
+          task: {
+            branch_name: "kanban/t_abc123",
+            workspace_path: "/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_abc123",
+            auto_retry_count: 2,
+            review_tier: "critical",
+          },
+          comments: [],
+          runs: [],
+          events: [],
+          deliverables: [],
+          links: { parents: [], children: [], parent_states: [], child_states: [] },
+        }),
+    });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+
+    renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+
+    // Claim aus dem Worker-Payload (sofort, ohne Nachladung).
+    expect(screen.getByText("Claim")).toBeTruthy();
+    expect(document.body.textContent).toContain("lock-482");
+    expect(screen.getByText("Claim läuft ab")).toBeTruthy();
+
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_abc123");
+    });
+    expect(document.body.textContent).toContain("kanban/t_abc123");
+    expect(screen.getByText("Auto-Retries")).toBeTruthy();
+    expect(screen.getByText("Review-Tier")).toBeTruthy();
+    expect(document.body.textContent).toContain("critical");
+
+    // Copy-Button mit Feedback.
+    const copyBtn = screen.getByRole("button", { name: "Worktree kopieren" });
+    fireEvent.click(copyBtn);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("/home/piet/.hermes/hermes-agent/.worktrees/kanban/t_abc123"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Worktree kopieren" }).textContent).toBe("kopiert"));
+  });
+
+  it("Outcome nach Run-Ende: lädt /runs/{run_id} und zeigt Ausgang, Verdict, Summary, Tokens", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }), {
+      runDetail: () =>
+        Promise.resolve({
+          run: {
+            id: 482,
+            task_id: "t_abc123",
+            profile: "coder",
+            status: "done",
+            outcome: "completed",
+            summary: "Alles erledigt und verifiziert.",
+            error: null,
+            started_at: 1782500000,
+            ended_at: 1782500350,
+            input_tokens: 5000,
+            output_tokens: 900,
+            cost_usd: 0.12,
+            metadata: { verdict: "APPROVED" },
+          },
+        }),
+    });
+
+    const { rerender } = renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    rerender(
+      <WorkerTab
+        activeWorkers={[]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500400}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={() => {}}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText("Run-Ausgang")).toBeTruthy());
+    expect(document.body.textContent).toContain("completed");
+    expect(document.body.textContent).toContain("APPROVED");
+    expect(document.body.textContent).toContain("Alles erledigt und verifiziert.");
+    expect(document.body.textContent).toContain("5,0k → 900");
+    expect(document.body.textContent).toContain("$0,12");
+    expect(document.body.textContent).toContain("beendet");
+  });
+
+  it("Nach Nudge wird der Worker-Poll sofort erneuert (onWorkersChanged), nicht erst nach 5 s", async () => {
+    routeFetch(() => Promise.resolve({ ok: true, action: "nudge", run_id: 482, task_id: "t_abc123", detail: "Nudge gesetzt." }));
+    const onWorkersChanged = vi.fn();
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={() => {}}
+        onWorkersChanged={onWorkersChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Anstoßen" }));
+    await waitFor(() => expect(onWorkersChanged).toHaveBeenCalled());
+  });
+
+  it("Nach Terminate wird ebenfalls sofort neu gepollt", async () => {
+    routeFetch(() => Promise.resolve({ ok: true, run_id: 482, task_id: "t_abc123" }));
+    const onWorkersChanged = vi.fn();
+    render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={() => {}}
+        onWorkersChanged={onWorkersChanged}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Beenden" }));
+    fireEvent.click(screen.getByRole("button", { name: "Bestätigen" }));
+    await waitFor(() => expect(onWorkersChanged).toHaveBeenCalled());
+  });
+
+  it("Run-Timeline im Drawer rendert Ereignisse aus /runs/{run_id}/timeline", async () => {
+    routeFetch(() => Promise.resolve({ ok: true }));
+    fetchJSONMock.mockImplementation((url: string) => {
+      if (typeof url === "string") {
+        if (url.includes("/runs/live-events")) return Promise.resolve(EMPTY_LIVE_EVENTS);
+        if (url.includes("/activity")) return Promise.resolve(EMPTY_ACTIVITY);
+        if (url.includes("/timeline")) {
+          return Promise.resolve({
+            ...EMPTY_TIMELINE,
+            items: [
+              { kind: "run_started", at: 1782500000, source: "run", payload: { profile: "coder" }, offset_seconds: 0, delta_seconds: 0 },
+              { kind: "heartbeat", at: 1782500100, source: "event", payload: { note: "receiving stream response" }, offset_seconds: 100, delta_seconds: 100 },
+              { kind: "model_confirmed", at: 1782500120, source: "event", payload: null, offset_seconds: 120, delta_seconds: 20 },
+            ],
+            count: 3,
+          });
+        }
+        if (/\/tasks\/[^/?]+(\?|$)/.test(url)) return Promise.resolve(EMPTY_TASK_DETAIL);
+      }
+      return Promise.resolve({ ok: true });
+    });
+    renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    await waitFor(() => expect(screen.getByText("Run-Timeline")).toBeTruthy());
+    await waitFor(() => expect(document.body.textContent).toContain("receiving stream response"));
+    expect(document.body.textContent).toContain("Run gestartet");
+    expect(document.body.textContent).toContain("Modell");
+    expect(document.body.textContent).toContain("jetzt");
+  });
+});
+
+// ─── Review-Fixes 2026-07-28: F1 (Drawer-Snapshot), F2 (Queue), F3 (Fenster) ──
+
+describe("Review-Fixes — F1: beendeter Worker zeigt keine Live-Werte mehr", () => {
+  it("Drawer im Snapshot-Modus: kein Läuft-seit, keine Liveness-/Heartbeat-/Laufzeit-Zeile, kein Orb", () => {
+    const { rerender } = renderDrawer([FIXTURE_WORKER], BOARD_WITH_CHAIN);
+    // Vor dem Umschlag: Live-Werte sichtbar.
+    expect(document.body.textContent).toContain("läuft seit");
+    expect(screen.getByText("Liveness")).toBeTruthy();
+
+    rerender(
+      <WorkerTab
+        activeWorkers={[]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500900}
+        initialOpen={FIXTURE_WORKER}
+        onOpenChain={() => {}}
+      />,
+    );
+
+    // Nach dem Umschlag: der eingefrorene Snapshot darf nicht weiter „leben".
+    expect(document.body.textContent).not.toContain("läuft seit");
+    expect(screen.queryByText("Liveness")).toBeNull();
+    expect(screen.queryByText("Heartbeat")).toBeNull();
+    expect(screen.queryByText("Laufzeit")).toBeNull();
+    expect(document.querySelector('[role="img"][aria-label^="Liveness:"]')).toBeNull();
+    // Der Beendet-Zustand ist sichtbar (Kopf + Outcome-Platzhalter), die
+    // Claim-/Task-Identität bleibt als Datenzeile stehen.
+    expect(screen.getAllByText("Worker beendet").length).toBeGreaterThan(0);
+    expect(document.body.textContent).toContain("lock-482");
+  });
+});
+
+describe("Review-Fixes — F2: Queue-Vorschau trennt ready von scheduled", () => {
+  const scheduledTask: BoardTask = {
+    ...BOARD_TASK,
+    id: "t_sched1",
+    title: "Geparkter Root",
+    status: "scheduled",
+    priority: 120,
+  };
+  const readyTask: BoardTask = {
+    ...BOARD_TASK,
+    id: "t_ready1",
+    title: "Echter Kandidat",
+    status: "ready",
+    priority: 1,
+  };
+
+  function renderEmpty(board: BoardResponse) {
+    return render(
+      <WorkerTab
+        activeWorkers={[]}
+        board={board}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+        cap={1}
+      />,
+    );
+  }
+
+  it("scheduled steht niemals in der ready-Hauptliste, sondern separat beschriftet", () => {
+    const board: BoardResponse = {
+      ...BOARD_WITH_CHAIN,
+      columns: [
+        { name: "scheduled", tasks: [scheduledTask] },
+        { name: "ready", tasks: [readyTask] },
+      ],
+    };
+    const { container } = renderEmpty(board);
+    const text = container.textContent ?? "";
+    expect(screen.getByText("Nächste in Queue")).toBeTruthy();
+    expect(screen.getByText("Echter Kandidat")).toBeTruthy();
+    expect(screen.getByText("wartet auf Freigabe/Termin")).toBeTruthy();
+    expect(screen.getByText("Geparkter Root")).toBeTruthy();
+    // Reihenfolge: ready-Block vor dem scheduled-Block, geparkter Root erst
+    // NACH seinem eigenen Label — nie als „Nächste".
+    expect(text.indexOf("Echter Kandidat")).toBeLessThan(text.indexOf("wartet auf Freigabe/Termin"));
+    expect(text.indexOf("Geparkter Root")).toBeGreaterThan(text.indexOf("wartet auf Freigabe/Termin"));
+  });
+
+  it("nur scheduled in der Queue → kein Queue-Block für den Dispatcher (zieht nur ready)", () => {
+    const board: BoardResponse = {
+      ...BOARD_WITH_CHAIN,
+      columns: [{ name: "scheduled", tasks: [scheduledTask] }],
+    };
+    renderEmpty(board);
+    expect(screen.queryByText("Nächste in Queue")).toBeNull();
+    expect(screen.getByText("wartet auf Freigabe/Termin")).toBeTruthy();
+    expect(screen.getByText("Geparkter Root")).toBeTruthy();
+  });
+});
+
+describe("Review-Fixes — F3/F4: Fenster-Beschriftung folgt der Herkunft", () => {
+  it("Runtime-Cap-Fenster wird als Cap beschriftet, nicht als p90", () => {
+    // FIXTURE_WORKER: eta_p50/p90 = null, max_runtime_seconds = 1800 → source cap.
+    const { container } = render(
+      <WorkerTab
+        activeWorkers={[FIXTURE_WORKER]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain("Cap");
+    expect(container.textContent).not.toContain("p90");
+    // F4: ohne echtes Perzentil zeichnet der Ring keinen Füllbogen für ein
+    // ungeerdetes Fenster — hier grounded via cap, Bogen erlaubt; der
+    // ungeerdete Fall (kein eta, kein cap) ist per fleetHub-Test gedeckt.
+  });
+
+  it("echtes eta_p90 darf p90 beschriften", () => {
+    const worker: Worker = {
+      ...FIXTURE_WORKER,
+      eta_p50_seconds: 400,
+      eta_p90_seconds: 1200,
+    };
+    const { container } = render(
+      <WorkerTab
+        activeWorkers={[worker]}
+        board={BOARD_WITH_CHAIN}
+        reliability={null}
+        now={1782500300}
+        initialOpen={null}
+        onOpenChain={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain("p90");
+    expect(container.textContent).not.toContain("Cap");
   });
 });

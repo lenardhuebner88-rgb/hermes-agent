@@ -1,35 +1,46 @@
 /**
- * Worker-Subtab — Puls-Leitstand (Variante B).
+ * Worker-Subtab — V2-Redesign (Mockup 2026-07-27, abgenommen).
  *
- * Der Tab ist ein Kontrollraum: eine Puls-Strip-Kopfzeile (Slots/Queue, heute
- * fertig, Live-Token-Summe), pro aktivem Slot eine Zeitachsen-Swimlane (Laufband
- * gegen das p90-Fenster, p50-Marke, Heartbeat-Ticks, step_key) und darunter ein
- * Live-Ereignis-Ticker. Ohne Worker: freie Slot-Lanes + der Ticker als
- * Verlaufsspur — nie ein schwarzes Loch. Tap auf eine Lane öffnet den Fokus-
- * Drawer (erweitert um das vergrößerte Band + Notiz-Historie + „Andere Lanes").
+ * Der Tab ist ein Kontrollraum: eine Puls-Strip-Kopfzeile (Slots/Queue,
+ * heute fertig, ehrliche Token-Kachel), darunter ein Grid von Worker-Karten
+ * (Elapsed-Ring gegen das p90-Fenster, p50-Marke, Heartbeat-Sparkline,
+ * Liveness-Orb, aktuelle Activity-Note) und ein deduplizierter Live-Ereignis-
+ * Ticker. Ohne Worker: freie Slot-Lanes mit Queue-Vorschau + der Ticker als
+ * Verlaufsspur — nie ein schwarzes Loch. Tap auf eine Karte öffnet den
+ * Fokus-Drawer (Band, Claim/Worktree/Branch/Retries/Tier, Run-Timeline,
+ * deduplizierte Notiz-Historie, Outcome nach Run-Ende, „Andere Lanes").
  *
- * Referenz: Design-Board-Karte c_97c25aca (operator-approved Variante B).
+ * Referenz: /home/piet/.hermes/briefs/2026-07-27-worker-tab-mockup/mockup-v2.html
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  heartbeatAge,
+  claimCountdownSeconds,
+  dedupeConsecutive,
+  derivePulse,
+  eventKindLabel,
+  fmtClockTime,
+  fmtDurationClock,
   fmtSeconds,
   fmtTokens,
-  fmtClockTime,
-  derivePulse,
-  profileInitial,
+  fmtUsd,
+  heartbeatAge,
+  isPinnedEventKind,
   profileColorClass,
+  profileInitial,
   premiumLaneMarker,
+  workerHasLiveTokenSample,
+  workerLivenessTone,
 } from "../../lib/fleetHub";
 import { de } from "../../i18n/de";
 import type { Worker, BoardResponse, BoardTask } from "../../lib/types";
-import type { ReliabilityResponse } from "../../lib/schemas";
+import type { ReliabilityResponse, RunTimelineItem } from "../../lib/schemas";
 import { Overlay } from "../../components/Overlay";
 import { WorkerLogTail } from "../../components/WorkerCard";
 import { useWorkerLifecycle } from "../../hooks/taskActions";
-import { useWorkerActivity, useRunLiveEvents } from "../../hooks/workersBoard";
+import { useWorkerActivity, useRunLiveEvents, useWorkerTaskDetail, useRunDetail, useRunTimeline } from "../../hooks/workersBoard";
 import { WorkerBand } from "./WorkerBand";
-import { SlotLane, FreeSlotLane, MiniLane } from "./SlotLane";
+import { WorkerCard, LivenessOrb, livenessLabel } from "./WorkerCard";
+import { FreeSlotLane, MiniLane, nextQueueTasks } from "./SlotLane";
 import { LiveTicker } from "./LiveTicker";
 import { PulseStrip } from "./PulseStrip";
 import { BoardBadge } from "../../components/fleet/BoardIdentity";
@@ -50,6 +61,12 @@ interface WorkerTabProps {
   cap?: number | null;
   /** Heute abgeschlossene Läufe (costs.today.runs) für den Pulse-Strip. */
   doneToday?: number | null;
+  /** Token-Summe (ein+aus) abgeschlossener Runs heute (costs.today) — Sub-Zeile
+   * der Token-Kachel, damit „0 live" nicht als „0 verbraucht" misverstanden wird. */
+  tokensToday?: number | null;
+  /** Nach einer Lifecycle-Aktion (Nudge/Hold/Restart/Terminate) sofort neu
+   * pollen statt bis zum nächsten 5-s-Takt zu warten. */
+  onWorkersChanged?: () => void;
   currentBoard?: string;
   eventBoards?: string[];
 }
@@ -79,6 +96,8 @@ export function WorkerTab({
   onOpenChain,
   cap = null,
   doneToday = null,
+  tokensToday = null,
+  onWorkersChanged,
   currentBoard = "default",
   eventBoards = [currentBoard],
 }: WorkerTabProps) {
@@ -98,6 +117,12 @@ export function WorkerTab({
   const blocked = (columns.find((c) => c.name === "blocked")?.tasks ?? []).length;
   const pulse = derivePulse({ activeWorkers, cap, queue, doneToday, blocked });
 
+  // Queue-Vorschau für freie Slots + Branch-Lookup für die Karten (aktuelles Board).
+  const queuePreview = nextQueueTasks(columns, 2);
+  const branchByTaskId = new Map<string, string>(
+    columns.flatMap((c) => c.tasks).flatMap((t) => (t.branch_name ? [[t.id, t.branch_name] as const] : [])),
+  );
+
   const otherWorkers = drawerWorker
     ? activeWorkers.filter((w) => workerIdentity(w) !== workerIdentity(drawerWorker))
     : [];
@@ -115,27 +140,27 @@ export function WorkerTab({
       onOpenWorker={select}
       onClose={() => setSelection(null)}
       onOpenChain={onOpenChain}
+      onWorkersChanged={onWorkersChanged}
       currentBoard={currentBoard}
     />
   ) : null;
 
   return (
     <div className="fleet-worker-tab">
-      <FleetSourceFreshness sources={[{ label: "Live-Ereignisse", ...liveEvents }]} />
-      <PulseStrip pulse={pulse} />
+      <FleetSourceFreshness sources={[{ label: de.fleet.liveEventsSource, ...liveEvents }]} />
+      <PulseStrip pulse={pulse} tokensToday={tokensToday} />
 
       {activeWorkers.length > 0 ? (
         <>
-          <div className="fleet-laneswrap">
-            <div className="fleet-axis" aria-hidden="true">
-              <span>0</span>
-              <span>25%</span>
-              <span>50%</span>
-              <span>75%</span>
-              <span>{de.fleet.pulseP90Window}</span>
-            </div>
+          <div className="fleet-wgrid">
             {activeWorkers.map((w) => (
-              <SlotLane key={workerIdentity(w)} worker={w} now={now} onOpen={() => select(w)} />
+              <WorkerCard
+                key={workerIdentity(w)}
+                worker={w}
+                now={now}
+                branchName={branchByTaskId.get(w.task_id) ?? null}
+                onOpen={() => select(w)}
+              />
             ))}
           </div>
           <LiveTicker
@@ -153,6 +178,7 @@ export function WorkerTab({
                 key={`free-${i}`}
                 index={i + 1}
                 label={i === 0 && queue > 0 ? de.fleet.slotFreeWaiting : de.fleet.slotFree}
+                queuePreview={i === 0 ? queuePreview : { ready: [], scheduled: [] }}
               />
             ))}
           </div>
@@ -176,7 +202,8 @@ export function WorkerTab({
 // laufen über reclaim_task bzw. hold_task) und sind deshalb zwei-Klick-scharf
 // wie FleetTaskActions (fleet-ta-btn-Hausmuster, TaskActions.tsx). Fehler
 // werden wörtlich gezeigt (AC-2 — nie verschlucken); Erfolg zeigt den deutschen
-// detail-Einzeiler des Backends.
+// detail-Einzeiler des Backends. Nach JEDER erfolgreichen Aktion wird der
+// Worker-Poll sofort erneuert (onActionDone), nicht erst beim nächsten Takt.
 
 type ArmableWorkerAction = "unlock" | "hold" | "restart" | "terminate";
 
@@ -187,7 +214,7 @@ const ARMED_META: Record<ArmableWorkerAction, { label: () => string; confirm: ()
   terminate: { label: () => de.fleet.workerTerminate, confirm: () => de.fleet.workerTerminateConfirm },
 };
 
-export function WorkerLifecycleActions({ runId }: { runId: string }) {
+export function WorkerLifecycleActions({ runId, onActionDone }: { runId: string; onActionDone?: () => void }) {
   const { busyId, errorById, run, terminate, clearError } = useWorkerLifecycle();
   const [armed, setArmed] = useState<ArmableWorkerAction | null>(null);
   const [note, setNote] = useState("");
@@ -199,7 +226,10 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
     clearError(runId);
     setNote("");
     const res = await run(runId, "nudge");
-    if (res.ok) setNote(res.detail || "");
+    if (res.ok) {
+      setNote(res.detail || "");
+      onActionDone?.();
+    }
   };
 
   const fireArmed = async () => {
@@ -208,7 +238,10 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
     if (!action) return;
     setNote("");
     const res = action === "terminate" ? await terminate(runId) : await run(runId, action);
-    if (res.ok) setNote(res.detail || "");
+    if (res.ok) {
+      if ("detail" in res && res.detail) setNote(res.detail);
+      onActionDone?.();
+    }
   };
 
   const arm = (action: ArmableWorkerAction) => {
@@ -270,34 +303,218 @@ export function WorkerLifecycleActions({ runId }: { runId: string }) {
   );
 }
 
-// ─── Notiz-Historie (AC-3) ────────────────────────────────────────────────────
-// Per-Lane Heartbeat-Notiz-Verlauf aus GET /tasks/{task_id}/activity — nur wenn
-// der Drawer offen und der Worker aktiv ist (der Hook pausiert bei null-taskId).
+// ─── Copy-Button (Branch/Worktree) ────────────────────────────────────────────
+// F6: navigator.clipboard fehlt auf non-secure Origins (http://<LAN-IP>:9119) —
+// dann execCommand-Fallback über ein temporäres textarea; schlägt auch der fehl,
+// sagt der Button es sichtbar statt stumm zu no-open.
+
+function legacyCopy(text: string): boolean {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+function CopyValueButton({ value, what }: { value: string; what: string }) {
+  // "idle" | "copied" | "unavailable"
+  const [state, setState] = useState<"idle" | "copied" | "unavailable">("idle");
+  useEffect(() => {
+    if (state === "idle") return;
+    const t = window.setTimeout(() => setState("idle"), 2000);
+    return () => window.clearTimeout(t);
+  }, [state]);
+  return (
+    <button
+      type="button"
+      className="fleet-copy"
+      aria-label={de.fleet.copyAriaLabel(what)}
+      title={state === "unavailable" ? de.fleet.copyUnavailable : undefined}
+      onClick={() => {
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(value).then(
+            () => setState("copied"),
+            () => setState(legacyCopy(value) ? "copied" : "unavailable"),
+          );
+        } else {
+          setState(legacyCopy(value) ? "copied" : "unavailable");
+        }
+      }}
+    >
+      {state === "copied" ? de.fleet.copiedValue : state === "unavailable" ? de.fleet.copyUnavailable : de.fleet.copyValue}
+    </button>
+  );
+}
+
+// ─── Notiz-Historie (V2: dedupliziert, Kinds sichtbar) ────────────────────────
+// Per-Worker Event-Verlauf aus GET /tasks/{task_id}/activity — nur wenn der
+// Drawer offen und der Worker aktiv ist (der Hook pausiert bei null-taskId).
+// Aufeinanderfolgende identische Notizen fallen zu einer Zeile mit ×N-Badge
+// zusammen; Sonder-Kinds (claimed, blocked, model_* …) bleiben mit Marker
+// eigenständig statt wie bisher clientseitig weggefiltert zu werden.
 
 function WorkerNotesHistory({ taskId, board }: { taskId: string; board: string | null }) {
   const activity = useWorkerActivity(taskId, board);
-  const notes = (activity.data?.events ?? []).filter((e) => e.note && e.note.trim());
+  const events = activity.data?.events ?? [];
+  const rows = dedupeConsecutive(
+    events,
+    (e) => `${e.kind}:${(e.note ?? "").trim()}`,
+    (e) => !isPinnedEventKind(e.kind) && (e.note ?? "").trim().length > 0,
+  );
 
   return (
     <div className="fleet-fx-notes-wrap">
       <div className="fleet-fx-notes-head">{de.fleet.drawerNotes}</div>
-      {notes.length === 0 ? (
+      {rows.length === 0 ? (
         <div className="fleet-fx-note fleet-fx-note-empty">
-          {activity.loading ? "Lädt Notizen …" : de.fleet.drawerNotesEmpty}
+          {activity.loading ? de.fleet.notesLoading : de.fleet.drawerNotesEmpty}
         </div>
       ) : (
         <div className="fleet-fx-notes">
-          {notes.map((e, i) => (
-            <div key={e.id} className="fleet-fx-note">
-              <span className="fleet-fx-note-ts">{fmtClockTime(e.at)}</span>{" "}
-              <span className={i === 0 ? "fleet-fx-note-cur" : undefined}>
-                {i === 0 ? "▸ " : ""}
-                {e.note}
-              </span>
-            </div>
-          ))}
+          {rows.map(({ item: e, count }, i) => {
+            const pinned = isPinnedEventKind(e.kind);
+            const text = (e.note ?? "").trim() || eventKindLabel(e.kind, de.fleet.eventKindLabels);
+            return (
+              <div key={e.id} className="fleet-fx-note">
+                <span className="fleet-fx-note-ts">{fmtClockTime(e.at)}</span>{" "}
+                {pinned ? <span className="fleet-kind">{eventKindLabel(e.kind, de.fleet.eventKindLabels)}</span> : null}
+                <span className={i === 0 ? "fleet-fx-note-cur" : undefined}>
+                  {i === 0 ? "▸ " : ""}
+                  {text}
+                </span>
+                {count > 1 ? <span className="fleet-xbadge">×{count}</span> : null}
+              </div>
+            );
+          })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Run-Timeline (Drawer) ────────────────────────────────────────────────────
+// GET /runs/{run_id}/timeline — flache, zeitsortierte Ereignisliste mit
+// offset/delta. Zeigt die jüngsten 12 Einträge chronologisch; bei laufendem
+// Run schließt eine „jetzt"-Marke ab.
+
+const TIMELINE_DISPLAY_LIMIT = 12;
+
+function timelineItemText(item: RunTimelineItem): string {
+  const label = eventKindLabel(item.kind, de.fleet.eventKindLabels);
+  const payload = item.payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const note = (payload as Record<string, unknown>).note;
+    if (typeof note === "string" && note.trim()) return `${label} — ${note.trim()}`;
+  }
+  return label;
+}
+
+function WorkerRunTimeline({ runId, board, active, now }: { runId: string; board: string | null; active: boolean; now: number }) {
+  const timeline = useRunTimeline(runId, board);
+  const data = timeline.data;
+  const items = data?.items ?? [];
+  const shown = items.slice(-TIMELINE_DISPLAY_LIMIT);
+  const hiddenCount = items.length - shown.length;
+
+  return (
+    <div className="fleet-tl2-wrap">
+      <div className="fleet-fx-notes-head">{de.fleet.timelineTitle}</div>
+      {items.length === 0 ? (
+        <div className="fleet-fx-note fleet-fx-note-empty">
+          {timeline.loading ? de.fleet.timelineLoading : de.fleet.timelineEmpty}
+        </div>
+      ) : (
+        <div className="fleet-tl2" role="list">
+          {hiddenCount > 0 || data?.truncated ? (
+            <div className="fleet-tl2-cap">{de.fleet.timelineTruncated(shown.length)}</div>
+          ) : null}
+          {shown.map((item, i) => (
+            <div key={`${item.at}-${i}`} className="fleet-tl2-ev" role="listitem">
+              <span className="fleet-tl2-t">{fmtClockTime(item.at)}</span>
+              <span className="fleet-tl2-l">{timelineItemText(item)}</span>
+            </div>
+          ))}
+          {active ? (
+            <div className="fleet-tl2-ev fleet-tl2-now" role="listitem">
+              <span className="fleet-tl2-t">{fmtClockTime(now)}</span>
+              <span className="fleet-tl2-l">{de.fleet.timelineNow}</span>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Run-Ausgang (Drawer, wenn der Worker nicht mehr läuft) ──────────────────
+// Statt nur „Worker beendet" wird GET /runs/{run_id} nachgeladen: outcome,
+// ended_at, error, summary, verdict (best-effort aus metadata), Tokens/Kosten.
+
+function WorkerOutcomeBlock({ runId, board }: { runId: string; board: string | null }) {
+  const detail = useRunDetail(runId, board);
+  const run = detail.data?.run ?? null;
+
+  if (!run) {
+    return (
+      <div className="fleet-kv" role="status">
+        <div className="fleet-kv-k">{de.fleet.workerEndedTitle}</div>
+        <div className="fleet-kv-v">
+          {de.fleet.workerEndedDesc}
+          {detail.loading ? <span className="fleet-dim"> · {de.fleet.outcomeLoading}</span> : null}
+        </div>
+      </div>
+    );
+  }
+
+  const verdict = run.metadata && typeof run.metadata.verdict === "string" ? run.metadata.verdict : null;
+  return (
+    <div className="fleet-outcome" role="status">
+      <div className="fleet-fx-notes-head">{de.fleet.outcomeTitle}</div>
+      <div className="fleet-grid2">
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.outcomeState}</div>
+          <div className="fleet-kv-v">
+            {run.outcome ?? run.status}
+            {run.ended_at ? <span className="fleet-dim"> · {de.fleet.outcomeEndedAt(fmtClockTime(run.ended_at))}</span> : null}
+          </div>
+        </div>
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.drawerTokens}</div>
+          <div className="fleet-kv-v">
+            {run.input_tokens != null || run.output_tokens != null
+              ? `${fmtTokens(run.input_tokens)} → ${fmtTokens(run.output_tokens)}`
+              : "—"}
+            {run.cost_usd != null && run.cost_usd > 0 ? ` · ${fmtUsd(run.cost_usd)}` : ""}
+          </div>
+        </div>
+        {verdict ? (
+          <div className="fleet-kv">
+            <div className="fleet-kv-k">{de.fleet.outcomeVerdict}</div>
+            <div className="fleet-kv-v">{verdict}</div>
+          </div>
+        ) : null}
+      </div>
+      {run.error ? (
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.outcomeError}</div>
+          <div className="fleet-kv-v fleet-outcome-err">{run.error}</div>
+        </div>
+      ) : null}
+      {run.summary ? (
+        <div className="fleet-kv">
+          <div className="fleet-kv-k">{de.fleet.outcomeSummary}</div>
+          <div className="fleet-kv-v">{run.summary}</div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -314,6 +531,7 @@ interface WorkerDrawerProps {
   onOpenWorker: (w: Worker) => void;
   onClose: () => void;
   onOpenChain: (rootId: string) => void;
+  onWorkersChanged?: () => void;
   currentBoard: string;
 }
 
@@ -327,14 +545,24 @@ function WorkerDrawer({
   onOpenWorker,
   onClose,
   onOpenChain,
+  onWorkersChanged,
   currentBoard,
 }: WorkerDrawerProps) {
-  const elapsedSec = elapsedSeconds(w.started_at, now) ?? Number.NaN;
-  const hbAge = heartbeatAge(w.last_heartbeat_at, now);
+  // F1: live-abgeleitete Werte (elapsed, Heartbeat-Alter, Liveness) rechnen
+  // gegen das tickende now — sie sind nur wahr, solange der Worker aktiv ist.
+  // Im Snapshot-Modus (!active) werden sie NICHT gerendert (Kopf, Orb, LED,
+  // KV-Zeilen), sonst „läuft" ein beendeter Worker im Drawer ewig weiter.
+  const elapsedSec = active ? elapsedSeconds(w.started_at, now) ?? Number.NaN : Number.NaN;
+  const hbAge = active ? heartbeatAge(w.last_heartbeat_at, now) : null;
   const initial = profileInitial(w.profile);
   const colorCls = profileColorClass(w.profile);
   const workerBoard = w.board_slug ?? currentBoard;
   const foreignBoard = workerBoard !== currentBoard;
+
+  // Drawer-Nachladungen (pausieren über null-Keys, solange der Drawer zu ist —
+  // die Komponente existiert nur bei offenem Drawer).
+  const taskDetail = useWorkerTaskDetail(w.task_id, workerBoard);
+  const detailTask = taskDetail.data?.task ?? null;
 
   // Profil-Verlässlichkeit aus Reliability-Daten (ReliabilityResponse aus lib/schemas)
   const relProfile = reliability?.profiles?.find((p) => p.profile === w.profile);
@@ -346,20 +574,27 @@ function WorkerDrawer({
   const [logOpen, setLogOpen] = useState(false);
   // root_id ist entweder der eigene Task (Root) oder der Parent-Root
   const chainRootId = boardTask?.root_id ?? null;
-  const branchName = boardTask?.branch_name ?? null;
+  const branchName = detailTask?.branch_name ?? boardTask?.branch_name ?? null;
+  const workspacePath = detailTask?.workspace_path ?? null;
+  const autoRetries = detailTask?.auto_retry_count ?? null;
+  const reviewTier = detailTask?.review_tier ?? boardTask?.review_tier ?? null;
   const chainMembers = chainRootId
     ? allBoardTasks.filter((t) => t.root_id === chainRootId || t.id === chainRootId)
     : [];
-  const hasTokenSample = w.token_status === "live" || w.token_status === "partial" || w.input_tokens != null || w.output_tokens != null;
+  const hasTokenSample = workerHasLiveTokenSample(w);
   const tokenDisplay = hasTokenSample
     ? `${fmtTokens(w.input_tokens)} → ${fmtTokens(w.output_tokens)}`
     : de.worker.tokenNoLiveSample;
+
+  const livenessTone = active ? workerLivenessTone(w, now) : null;
+  const claimIn = claimCountdownSeconds(w.claim_expires, now);
+  const inspect = active && w.inspect && w.inspect.alive ? w.inspect : null;
 
   // Drawer via shared Overlay: garantiert zentriert ab sm, Escape-Handling,
   // Scroll-Lock und Portal via document.body — kein eigener portal nötig.
   // data-fleet-theme wird auf das Overlay-Kind gesetzt damit das dark Theme greift.
   return (
-    <Overlay onClose={onClose} ariaLabel={`Worker ${w.profile} Details`} maxWidthClassName="max-w-lg">
+    <Overlay onClose={onClose} ariaLabel={de.fleet.drawerAriaLabel(w.profile)} maxWidthClassName="max-w-lg">
       <div data-fleet-theme className="fleet-drawer-inner">
         {/* Grab Handle */}
         <div className="fleet-grab" />
@@ -369,9 +604,10 @@ function WorkerDrawer({
           <div className={`fleet-avatar fleet-avatar-gross ${colorCls}`} {...premiumLaneMarker(w.profile)}>{initial}</div>
           <div className="fleet-dr-title">
             {w.profile}
-            <span>läuft seit {fmtSeconds(elapsedSec)} · {w.task_assignee}</span>
+            <span>{active ? de.fleet.drawerRunningSince(fmtSeconds(elapsedSec), w.task_assignee) : de.fleet.workerEndedTitle}</span>
           </div>
           <BoardBadge slug={w.board_slug} />
+          {active ? <LivenessOrb worker={w} now={now} /> : null}
           {hbAge != null ? (
             <div className="fleet-led" style={{ marginLeft: "auto" }}>
               <span className="fleet-led-dot" />
@@ -383,7 +619,7 @@ function WorkerDrawer({
         {/* Task: title + task_id + branch_name (Requirement: title + task_id + branch) */}
         <div className="fleet-dr-task">
           {w.task_title}
-          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{active ? ` · Run ${w.run_id}` : ""}</code>
+          <code>{w.task_id}{branchName ? ` · ${branchName}` : ""}{active ? de.fleet.drawerRunSuffix(w.run_id) : ""}</code>
         </div>
 
         {/* Vergrößertes Zeitachsen-Band (AC-3) — nur solange der Worker läuft. */}
@@ -405,19 +641,92 @@ function WorkerDrawer({
               />
             </div>
           </div>
-          <div className="fleet-kv">
-            <div className="fleet-kv-k">{de.fleet.drawerHeartbeat}</div>
-            <div className="fleet-kv-v">{hbAge != null ? fmtSeconds(hbAge) : "—"}</div>
-          </div>
+          {active ? (
+            <div className="fleet-kv">
+              <div className="fleet-kv-k">{de.fleet.drawerHeartbeat}</div>
+              <div className="fleet-kv-v">{hbAge != null ? fmtSeconds(hbAge) : "—"}</div>
+            </div>
+          ) : null}
           <div className="fleet-kv">
             <div className="fleet-kv-k">{de.fleet.drawerTokens}</div>
             <div className="fleet-kv-v">{tokenDisplay}</div>
           </div>
+          {active ? (
+            <div className="fleet-kv">
+              <div className="fleet-kv-k">{de.fleet.drawerLaufzeit}</div>
+              <div className="fleet-kv-v">{fmtSeconds(elapsedSec)}</div>
+            </div>
+          ) : null}
+          {active ? (
+            <div className="fleet-kv">
+              <div className="fleet-kv-k">{de.fleet.drawerLiveness}</div>
+              <div className="fleet-kv-v">
+                {livenessLabel(livenessTone)}
+                {w.liveness_reason ? <span className="fleet-dim"> · {w.liveness_reason}</span> : null}
+                {w.liveness_observed_at ? (
+                  <span className="fleet-dim"> · {de.fleet.livenessObserved(fmtClockTime(w.liveness_observed_at))}</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <div className="fleet-kv">
-            <div className="fleet-kv-k">{de.fleet.drawerLaufzeit}</div>
-            <div className="fleet-kv-v">{fmtSeconds(elapsedSec)}</div>
+            <div className="fleet-kv-k">{de.fleet.drawerClaim}</div>
+            <div className="fleet-kv-v">{w.claim_lock || "—"}</div>
           </div>
+          {claimIn != null ? (
+            <div className="fleet-kv">
+              <div className="fleet-kv-k">{de.fleet.drawerClaimExpires}</div>
+              <div className="fleet-kv-v">
+                {claimIn > 0 ? de.fleet.claimExpiresIn(fmtDurationClock(claimIn)) : de.fleet.claimExpired}
+                <span className="fleet-dim"> · {fmtClockTime(w.claim_expires)}</span>
+              </div>
+            </div>
+          ) : null}
+          {inspect ? (
+            <div className="fleet-kv">
+              <div className="fleet-kv-k">{de.fleet.drawerInspect}</div>
+              <div className="fleet-kv-v">
+                {Math.round(inspect.cpu_percent)} % · {Math.round(inspect.rss / 1_000_000)} MB
+              </div>
+            </div>
+          ) : null}
         </div>
+
+        {/* Worktree / Branch / Retries / Tier (Task-Detail-Nachladung) */}
+        {workspacePath || branchName || (autoRetries != null && autoRetries > 0) || reviewTier ? (
+          <div className="fleet-grid2">
+            {branchName ? (
+              <div className="fleet-kv">
+                <div className="fleet-kv-k">{de.fleet.drawerBranch}</div>
+                <div className="fleet-kv-v">
+                  <code className="fleet-mono-wrap">{branchName}</code>
+                  <CopyValueButton value={branchName} what={de.fleet.drawerBranch} />
+                </div>
+              </div>
+            ) : null}
+            {workspacePath ? (
+              <div className="fleet-kv">
+                <div className="fleet-kv-k">{de.fleet.drawerWorktree}</div>
+                <div className="fleet-kv-v">
+                  <code className="fleet-mono-wrap">{workspacePath}</code>
+                  <CopyValueButton value={workspacePath} what={de.fleet.drawerWorktree} />
+                </div>
+              </div>
+            ) : null}
+            {autoRetries != null && autoRetries > 0 ? (
+              <div className="fleet-kv">
+                <div className="fleet-kv-k">{de.fleet.drawerAutoRetries}</div>
+                <div className="fleet-kv-v">{autoRetries}</div>
+              </div>
+            ) : null}
+            {reviewTier ? (
+              <div className="fleet-kv">
+                <div className="fleet-kv-k">{de.fleet.drawerReviewTier}</div>
+                <div className="fleet-kv-v">{reviewTier}</div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {/* Verlässlichkeit */}
         {relProfile ? (
@@ -425,9 +734,9 @@ function WorkerDrawer({
             <div className="fleet-kv-k">{de.fleet.drawerReliability}</div>
             <div className="fleet-kv-v" style={{ fontFamily: "var(--hc-font-mono)", fontSize: 11.5 }}>
               {relProfile.completed_rate != null
-                ? `${Math.round(relProfile.completed_rate * 100)} % abgeschlossen`
+                ? de.fleet.reliabilityCompleted(Math.round(relProfile.completed_rate * 100))
                 : "—"}
-              {relProfile.retries > 0 ? ` · ${relProfile.retries} Retries` : ""}
+              {relProfile.retries > 0 ? de.fleet.reliabilityRetries(relProfile.retries) : ""}
             </div>
           </div>
         ) : null}
@@ -446,27 +755,26 @@ function WorkerDrawer({
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                     {t.title}
                   </span>
-                  <code>{isActive ? "läuft" : isDone ? "done" : "wartet"}</code>
+                  <code>{isActive ? de.fleet.chainStateRunning : isDone ? de.fleet.chainStateDone : de.fleet.chainStateWaiting}</code>
                 </div>
               );
             })}
           </div>
         ) : null}
 
-        {/* Notiz-Historie (AC-3) — nur bei laufendem Worker. */}
+        {/* Run-Timeline — solange der Run bekannt ist (aktiv oder beendet). */}
+        <WorkerRunTimeline runId={w.run_id} board={workerBoard} active={active} now={now} />
+
+        {/* Notiz-Historie (dedupliziert) — nur bei laufendem Worker. */}
         {active ? <WorkerNotesHistory taskId={w.task_id} board={workerBoard} /> : null}
 
-        {active ? null : (
-          <div className="fleet-kv" role="status">
-            <div className="fleet-kv-k">{de.fleet.workerEndedTitle}</div>
-            <div className="fleet-kv-v">{de.fleet.workerEndedDesc}</div>
-          </div>
-        )}
+        {/* Outcome nach Run-Ende statt bloßem „Worker beendet". */}
+        {active ? null : <WorkerOutcomeBlock runId={w.run_id} board={workerBoard} />}
 
         {/* Worker-Steuerung: Unlock/Nudge/Restart/Terminate (Gap 1) */}
-        {active && !foreignBoard ? <WorkerLifecycleActions runId={w.run_id} /> : null}
+        {active && !foreignBoard ? <WorkerLifecycleActions runId={w.run_id} onActionDone={onWorkersChanged} /> : null}
         {active && foreignBoard ? (
-          <p className="fleet-plan-hint">Fremd-Board · Worker nur beobachten. Keine Board-übergreifende Steuerung.</p>
+          <p className="fleet-plan-hint">{de.fleet.foreignBoardHint}</p>
         ) : null}
 
         {/* Action-Buttons */}

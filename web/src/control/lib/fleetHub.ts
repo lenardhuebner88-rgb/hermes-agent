@@ -2,7 +2,7 @@
  * Fleet-Hub — pure derivation helpers.
  * No React, no side-effects, no fetch — injizierbare `now` für Tests.
  */
-import type { Worker, ChainGraphResponse, ChainSummary } from "./types";
+import type { Worker, ChainGraphResponse, ChainSummary, WorkerLivenessState } from "./types";
 import type { RunsDailyResponse, RunsDailyPoint } from "./schemas";
 import { elapsedSeconds, inspectEpochSeconds } from "./derive";
 
@@ -791,19 +791,26 @@ export interface BandGeometry {
   grounded: boolean;
 }
 
+/** Herkunft des Zeitfensters: echtes p90-Perzentil, harter Runtime-Cap,
+ *  aus p50 hochgerechnet oder gar kein Fenster (F3 — Label muss das unterscheiden). */
+export type BandWindowSource = "p90" | "cap" | "p50x1.6" | "none";
+
 /**
  * bandWindowSeconds: die Zeitachse eines Swimlane-Bands in Sekunden.
  * Bevorzugt das ehrliche p90-Perzentil (Mockup-Achsenlabel „p90-Fenster"),
  * fällt auf den Runtime-Cap, dann p50×1.6, zuletzt elapsed×1.3 zurück — damit
  * auch eine frische Lane ohne Historie ein wachsendes Band zeigt.
+ * `source` sagt, woher das Fenster stammt: Nur bei "p90" darf die UI „p90"
+ * beschriften; "cap" ist ein hartes Limit, "p50x1.6" eine Hochrechnung, "none"
+ * ein reiner Platzhalter ohne jede Aussage (dann grounded: false).
  */
-export function bandWindowSeconds(w: BandWorker, now: number): { seconds: number; grounded: boolean } {
-  if (w.eta_p90_seconds && w.eta_p90_seconds > 0) return { seconds: w.eta_p90_seconds, grounded: true };
-  if (w.max_runtime_seconds && w.max_runtime_seconds > 0) return { seconds: w.max_runtime_seconds, grounded: true };
-  if (w.eta_p50_seconds && w.eta_p50_seconds > 0) return { seconds: w.eta_p50_seconds * 1.6, grounded: true };
+export function bandWindowSeconds(w: BandWorker, now: number): { seconds: number; grounded: boolean; source: BandWindowSource } {
+  if (w.eta_p90_seconds && w.eta_p90_seconds > 0) return { seconds: w.eta_p90_seconds, grounded: true, source: "p90" };
+  if (w.max_runtime_seconds && w.max_runtime_seconds > 0) return { seconds: w.max_runtime_seconds, grounded: true, source: "cap" };
+  if (w.eta_p50_seconds && w.eta_p50_seconds > 0) return { seconds: w.eta_p50_seconds * 1.6, grounded: true, source: "p50x1.6" };
   const elapsed = elapsedSeconds(w.started_at, now);
-  if (elapsed == null) return { seconds: 1, grounded: false };
-  return { seconds: elapsed * 1.3, grounded: false };
+  if (elapsed == null) return { seconds: 1, grounded: false, source: "none" };
+  return { seconds: elapsed * 1.3, grounded: false, source: "none" };
 }
 
 /**
@@ -897,26 +904,53 @@ export interface PulseSummary {
   queue: number;
   doneToday: number | null;
   blocked: number;
-  /** Live-Token-Summe (ein+aus) über alle aktiven Worker. */
-  tokenSum: number;
+  /** Live-Token-Summe (ein+aus) über alle aktiven Worker — null wenn KEIN
+   * aktiver Worker eine Live-Stichprobe liefert (ehrliches „—" statt 0). */
+  tokenSum: number | null;
+}
+
+/**
+ * workerHasLiveTokenSample: true wenn der Worker echte Live-Token-Zähler
+ * trägt (Hermes-Runtime-Lanes) — entweder explizit per token_status oder
+ * implizit über nicht-null Zähler (ältere Payloads ohne token_status).
+ */
+export function workerHasLiveTokenSample(w: {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  token_status?: "live" | "partial" | "no_live_sample" | null;
+}): boolean {
+  return (
+    w.token_status === "live" ||
+    w.token_status === "partial" ||
+    w.input_tokens != null ||
+    w.output_tokens != null
+  );
 }
 
 /**
  * derivePulse: reine Ableitung der drei Pulse-Kacheln. `queue` = Tasks in ready/
  * scheduled (warten auf einen Slot); `tokenSum` = Σ(input+output) der aktiven
- * Worker; `doneToday`/`blocked`/`cap` kommen aus den bereits geladenen Quellen.
+ * Worker mit Live-Stichprobe, null wenn keine einzige Stichprobe vorliegt;
+ * `doneToday`/`blocked`/`cap` kommen aus den bereits geladenen Quellen.
  */
 export function derivePulse(input: {
-  activeWorkers: Array<{ input_tokens?: number | null; output_tokens?: number | null }>;
+  activeWorkers: Array<{
+    input_tokens?: number | null;
+    output_tokens?: number | null;
+    token_status?: "live" | "partial" | "no_live_sample" | null;
+  }>;
   cap: number | null;
   queue: number;
   doneToday: number | null;
   blocked: number;
 }): PulseSummary {
-  const tokenSum = input.activeWorkers.reduce(
-    (sum, w) => sum + (w.input_tokens ?? 0) + (w.output_tokens ?? 0),
-    0,
-  );
+  const anySample = input.activeWorkers.some(workerHasLiveTokenSample);
+  const tokenSum = anySample
+    ? input.activeWorkers.reduce(
+        (sum, w) => sum + (w.input_tokens ?? 0) + (w.output_tokens ?? 0),
+        0,
+      )
+    : null;
   return {
     slotsUsed: input.activeWorkers.length,
     slotsCap: input.cap,
@@ -994,4 +1028,163 @@ export function mergeLiveEvents<T extends { id: number; at?: number; board_slug?
   return [...byBoardAndId.values()]
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0) || b.id - a.id)
     .slice(0, Math.max(0, cap));
+}
+
+// ─── Worker-Tab V2: Dedupe, Liveness, Ring, Sparkline ────────────────────────
+
+/**
+ * Kinds, die im Ticker / in der Notiz-Historie NIE wegdedupliziert werden:
+ * Zustandswechsel und Modell-/Closeout-Ereignisse tragen Information pro
+ * Auftreten (Sonder-Marker), identische Heartbeat-Notizen dagegen nicht.
+ */
+export function isPinnedEventKind(kind: string): boolean {
+  if (kind.startsWith("model_") || kind.startsWith("closeout_")) return true;
+  return (
+    kind === "claimed" ||
+    kind === "blocked" ||
+    kind === "completed" ||
+    kind === "timed_out" ||
+    kind === "crashed" ||
+    kind === "gave_up" ||
+    kind === "auto_retried" ||
+    kind === "unblocked" ||
+    kind === "submitted_for_review" ||
+    kind === "review_released" ||
+    kind === "integration_merged"
+  );
+}
+
+export interface DedupedRow<T> {
+  item: T;
+  /** Wie oft dieselbe Zeile hintereinander auftrat (>= 1). */
+  count: number;
+}
+
+/**
+ * dedupeConsecutive: fasst AUFEINANDERFOLGENDE Zeilen mit gleichem Schlüssel
+ * zu einer Zeile mit ×N-Badge zusammen (newest-first in, newest-first out).
+ * Zeilen, für die `dedupeable` false ist (Sonder-Kinds), bleiben immer
+ * eigenständig — sie brechen eine laufende Wiederholung auf.
+ */
+export function dedupeConsecutive<T>(
+  items: readonly T[],
+  key: (item: T) => string,
+  dedupeable: (item: T) => boolean,
+): DedupedRow<T>[] {
+  const rows: DedupedRow<T>[] = [];
+  for (const item of items) {
+    const last = rows[rows.length - 1];
+    if (last && dedupeable(item) && dedupeable(last.item) && key(item) === key(last.item)) {
+      last.count += 1;
+    } else {
+      rows.push({ item, count: 1 });
+    }
+  }
+  return rows;
+}
+
+/** Ticker-Dedupe: identische Notiz desselben Workers/Runs hintereinander. */
+export function dedupeLiveEvents<T extends {
+  board_slug?: string | null;
+  run_id?: number | null;
+  task_id?: string | null;
+  kind: string;
+  note?: string | null;
+}>(events: readonly T[]): DedupedRow<T>[] {
+  return dedupeConsecutive(
+    events,
+    (e) => `${e.board_slug ?? "current"}:${e.run_id ?? ""}:${e.task_id ?? ""}:${e.kind}:${(e.note ?? "").trim()}`,
+    (e) => !isPinnedEventKind(e.kind) && (e.note ?? "").trim().length > 0,
+  );
+}
+
+/**
+ * workerLivenessTone: Status-Trio-Ton eines Workers. Bevorzugt das
+ * backend-seitige liveness_state (fusioniert Run/Claim/Heartbeat/Host) —
+ * fällt auf die Heartbeat-Alter-Heuristik zurück, wenn das Feld fehlt
+ * (ältere Server). null wenn weder Liveness noch Heartbeat vorliegt.
+ */
+export function workerLivenessTone(
+  w: { liveness_state?: WorkerLivenessState; last_heartbeat_at?: number | null },
+  now: number,
+): "ok" | "warn" | "alert" | null {
+  if (w.liveness_state === "running") return "ok";
+  if (w.liveness_state === "suspect") return "warn";
+  if (w.liveness_state === "failed") return "alert";
+  const age = heartbeatAge(w.last_heartbeat_at, now);
+  if (age == null) return null;
+  if (age < 90) return "ok";
+  if (age < 300) return "warn";
+  return "alert";
+}
+
+export interface ElapsedRingGeometry {
+  /** Elapsed-Anteil am Fenster (0..1) — Ring-Füllung. Nur bei grounded
+   *  zeichnen: ohne Fenster wäre die Füllung eine konstante Fake-Position (F4). */
+  fillFraction: number;
+  /** Position der p50-Marke auf dem Ring (0..1) oder null ohne p50-ETA. */
+  p50Fraction: number | null;
+  /** true wenn elapsed über dem Fenster liegt (warn-Färbung). */
+  overP90: boolean;
+  /** true wenn das Fenster aus echten Perzentilen/Cap stammt. */
+  grounded: boolean;
+  /** Herkunft des Fensters — steuert die Beschriftung (F3: „p90" nur bei source "p90"). */
+  source: BandWindowSource;
+}
+
+/**
+ * elapsedRingGeometry: Geometrie des Elapsed-Rings der V2-Worker-Karte.
+ * Gleiche Fenster-Logik wie computeBandGeometry (p90-Fenster, Cap-Fallback),
+ * aber ohne Clamping des „drüber"-Zustands: overP90 wird separat gemeldet.
+ */
+export function elapsedRingGeometry(w: BandWorker, now: number): ElapsedRingGeometry {
+  const elapsed = elapsedSeconds(w.started_at, now);
+  if (elapsed == null) {
+    return { fillFraction: 0, p50Fraction: null, overP90: false, grounded: false, source: "none" };
+  }
+  const win = bandWindowSeconds(w, now);
+  const windowSec = win.seconds > 0 ? win.seconds : 1;
+  const p50Fraction =
+    w.eta_p50_seconds && w.eta_p50_seconds > 0 ? clamp01(w.eta_p50_seconds / windowSec) : null;
+  return {
+    fillFraction: clamp01(elapsed / windowSec),
+    p50Fraction,
+    overP90: win.grounded && elapsed > windowSec,
+    grounded: win.grounded,
+    source: win.source,
+  };
+}
+
+/**
+ * heartbeatBars: normierte Balkenhöhen (0.2..1) für die Heartbeat-Sparkline
+ * der V2-Worker-Karte. Höhe ∝ 1/Lücke zum Vorgänger-Tick — ein frischer,
+ * dichter Heartbeat-Rhythmus zeichnet hoch, Aussetzer flach. Erster Tick
+ * ohne Vorgänger bekommt eine neutrale Mittelhöhe.
+ */
+export function heartbeatBars(ticks: readonly number[] | null | undefined): number[] {
+  if (!ticks || ticks.length === 0) return [];
+  return ticks.map((t, i) => {
+    const gap = i > 0 ? t - ticks[i - 1] : 30;
+    const raw = 90 / Math.max(gap, 4) / 4;
+    return Math.min(1, Math.max(0.2, raw));
+  });
+}
+
+/** Sekunden bis zum Claim-Ablauf (<= 0 = abgelaufen). */
+export function claimCountdownSeconds(claimExpires: number | null | undefined, now: number): number | null {
+  if (claimExpires == null || !Number.isFinite(claimExpires) || claimExpires <= 0) return null;
+  return claimExpires - now;
+}
+
+/**
+ * eventKindLabel: deutsche Kurz-Labels für Event-Kinds (Sonder-Marker im
+ * Ticker/in der Notiz-Historie). Unbekannte Kinds bleiben lossless roh.
+ * Die label-Map kommt aus i18n (de.fleet.eventKindLabels).
+ */
+export function eventKindLabel(kind: string, labels: Record<string, string>): string {
+  const direct = labels[kind];
+  if (direct) return direct;
+  if (kind.startsWith("model_")) return "Modell";
+  if (kind.startsWith("closeout_")) return "Closeout";
+  return kind;
 }
