@@ -20859,8 +20859,8 @@ def _resolve_managed_workspace_base(
             # non-repository ``dir`` and returns it to the first worker
             # unmaterialized.
             for parent in base.parents:
-                if _git_common_dir(parent) is not None:
-                    return parent
+                if (repo_root := _git_toplevel(parent)) is not None:
+                    return repo_root
         return base
     board_slug = board if board else get_current_board()
     board_default = (

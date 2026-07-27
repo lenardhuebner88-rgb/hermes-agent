@@ -1146,6 +1146,10 @@ def test_dispatch_project_worktree_materializes_before_first_spawn(
 
     repo = tmp_path / "repo"
     _init_git_repo(repo)
+    # Match the steady live state after an earlier worktree dispatch: git
+    # accepts ``-C <repo>/.worktrees`` by discovering the parent checkout.
+    # The future project placeholder must still resolve to that checkout root.
+    (repo / ".worktrees" / "kanban" / "existing").mkdir(parents=True)
     monkeypatch.setattr(kwt, "isolation_mode", lambda: "worktree")
     spawned: list[tuple[str, str]] = []
 
