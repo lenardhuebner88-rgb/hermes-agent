@@ -13,7 +13,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
 
 
-def test_core_edit_bounds_package_fallback_and_reports_nightly_coverage(tmp_path: Path) -> None:
+def test_core_edit_selects_focused_import_test_before_fallback_cap(tmp_path: Path) -> None:
     source = tmp_path / "hermes_cli" / "kanban_db.py"
     source.parent.mkdir()
     source.write_text("VALUE = 1\n", encoding="utf-8")
@@ -43,7 +43,7 @@ def test_core_edit_bounds_package_fallback_and_reports_nightly_coverage(tmp_path
         capture_output=True,
         text=True,
     )
-    assert "tests/hermes_cli/" in raw.stdout.split()
+    assert raw.stdout.split() == ["tests/hermes_cli/test_core_contract.py"]
 
     bounded = subprocess.run(
         [str(AFFECTED_TESTS_SH), "HEAD"],
@@ -54,5 +54,4 @@ def test_core_edit_bounds_package_fallback_and_reports_nightly_coverage(tmp_path
     )
 
     assert bounded.stdout.split() == ["tests/hermes_cli/test_core_contract.py"]
-    assert "omitted package fallback tests/hermes_cli/ (201 test files; limit 200)" in bounded.stderr
-    assert "nightly full suite remains authoritative" in bounded.stderr
+    assert bounded.stderr == ""

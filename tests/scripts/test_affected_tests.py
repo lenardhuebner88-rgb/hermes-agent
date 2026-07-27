@@ -1,18 +1,11 @@
-"""Unit tests for scripts/affected_tests.py — the targeted-test-scope helper.
-
-Covers the diff -> pytest-module mapping (the one piece of real logic). The
-mapping mirrors hermes_cli.kanban_worktrees._affected_pytest_modules; this also
-guards against the two drifting apart.
-"""
+"""Unit tests for scripts/affected_tests.py — the targeted-test-scope helper."""
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
-import re
 import subprocess
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_MAX_UNMAPPED_TRACKED_PYTHON_SOURCES = 349
 
 
 def _load_module():
@@ -40,13 +33,22 @@ def test_changed_test_file_runs_itself():
     assert out == ["tests/hermes_cli/test_commands.py"]
 
 
-def test_non_python_and_unmapped_yield_nothing():
+def test_non_python_paths_yield_nothing():
     mod = _load_module()
     out = mod.affected_pytest_modules(
         REPO_ROOT,
-        ["README.md", "web/src/control/views/CommandHome.tsx", "scripts/affected-tests.sh"],
+        ["README.md", "web/src/control/views/CommandHome.tsx"],
     )
     assert out == []
+
+
+def test_gate_control_script_selects_its_contract_tests():
+    mod = _load_module()
+
+    out = mod.affected_pytest_modules(REPO_ROOT, ["scripts/affected-tests.sh"])
+
+    assert "tests/scripts/test_affected_mapper_equivalence.py" in out
+    assert "tests/scripts/test_run_affected.py" in out
 
 
 def test_stress_scripts_are_skipped():
@@ -55,25 +57,26 @@ def test_stress_scripts_are_skipped():
     assert out == []
 
 
-def test_monolith_source_falls_back_to_package_dir():
-    """When a source file has no 1:1 test_<name>.py (e.g. gateway/run.py),
-    the entire tests/<pkg>/ directory is selected so feature-named tests
-    still run at the merge gate."""
+def test_monolith_source_selects_focused_import_tests():
     mod = _load_module()
-    # gateway/run.py has no tests/gateway/test_run.py but tests/gateway/ exists.
+
     out = mod.affected_pytest_modules(REPO_ROOT, ["gateway/run.py"])
-    assert "tests/gateway/" in out
+
+    assert out
+    assert "tests/gateway/" not in out
 
 
-def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
-    """Known monoliths select their maintained feature tests, not the package.
+def test_known_hermes_cli_monoliths_include_explicit_test_mappings():
+    """Known monoliths retain every maintained feature test without a package fallback.
 
     Reads the mapping from the module instead of restating it. A duplicated
     fixture list means every legitimate addition to the table fails this test for
     no reason, which is how the two copies drift apart. The assertions that
     actually catch bugs are kept: every configured pattern must still match a
     real test file (so a rename or typo is caught rather than silently selecting
-    nothing), and the selection must not degrade to the whole package directory.
+    nothing), every explicit target remains selected, and the selection must not
+    degrade to the whole package directory. Direct and import-index tests are
+    deliberately additive.
     """
     mod = _load_module()
 
@@ -96,7 +99,7 @@ def test_known_hermes_cli_monoliths_use_explicit_test_mappings():
         )
         selected = mod.affected_pytest_modules(REPO_ROOT, [source])
 
-        assert selected == expected
+        assert set(expected) <= set(selected)
         # No package-wide fallback: that would turn the targeted gate into a
         # de-facto full-suite run (AC-2 counter-metric).
         assert not any(s.endswith("/") for s in selected), selected
@@ -113,13 +116,8 @@ def test_kanban_worktrees_selects_lifecycle_anchor_checker():
     assert "tests/scripts/test_check_kanban_lifecycle_anchors.py" in selected
 
 
-def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
-    """When the package test directory exceeds _FALLBACK_MAX_TEST_FILES,
-    the fallback downgrades to no selection — the nightly full suite
-    remains the backstop (AC-2 counter-metric)."""
+def test_oversize_package_dir_is_unmapped(tmp_path):
     mod = _load_module()
-    # Build a fake repo: gateway/run.py with no 1:1 test, but a bloated
-    # tests/gateway/ directory that exceeds the cap.
     (tmp_path / "gateway").mkdir()
     (tmp_path / "gateway" / "run.py").write_text("x = 1\n")
     pkg = tmp_path / "tests" / "gateway"
@@ -127,9 +125,18 @@ def test_oversize_package_dir_downgrades_to_no_selection(tmp_path):
     cap = mod._FALLBACK_MAX_TEST_FILES
     for i in range(cap + 1):
         (pkg / f"test_{i:04d}.py").write_text("def t(): pass\n")
-    out = mod.affected_pytest_modules(tmp_path, ["gateway/run.py"])
-    assert "tests/gateway/" not in out
-    assert out == []
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+    plan = mod.classify_changed_paths(
+        tmp_path,
+        ["gateway/run.py"],
+        mode="integration",
+    )
+
+    assert plan.selected_tests == []
+    assert plan.unmapped_paths == ["gateway/run.py"]
+    assert "mode limit is 800" in plan.records[0].warnings[0]
 
 
 def test_fallback_does_not_fire_for_root_source():
@@ -142,34 +149,18 @@ def test_fallback_does_not_fire_for_root_source():
     assert "tests/" not in out
 
 
-def test_matches_kanban_worktrees_mapping():
-    """The standalone copy must agree with the gate's implementation."""
-    mod = _load_module()
-    from hermes_cli.kanban_worktrees import _affected_pytest_modules
-
-    sample = [
-        "hermes_cli/config.py",
-        "gateway/run.py",
-        "tests/hermes_cli/test_kanban_cli.py",
-        "README.md",
-        "tests/stress/test_x.py",
-    ]
-    assert mod.affected_pytest_modules(REPO_ROOT, sample) == _affected_pytest_modules(
-        REPO_ROOT, sample
-    )
-
-
 def test_changed_module_selects_feature_named_sibling_tests_from_imports():
-    """The explicit kanban DB mapping retains its feature-split DB tests.
+    """The explicit kanban DB mapping unions feature-split and import tests.
 
     tests/hermes_cli/test_kanban_db.py was split into domain files
-    (2213f85be), so the mapping must retain those files."""
+    (2213f85be), so the mapping must retain those files without discarding
+    other tests that import the production module."""
     mod = _load_module()
 
     selected = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/kanban_db.py"])
 
     assert "tests/hermes_cli/test_kanban_db_schema.py" in selected
-    assert "tests/test_design_board_kanban.py" not in selected
+    assert "tests/test_design_board_kanban.py" in selected
 
 
 def test_changed_module_selects_submodule_from_import_sibling_tests():
@@ -194,114 +185,20 @@ def test_changed_module_selects_root_level_sibling_tests():
     assert "tests/test_design_board_store.py" in selected
 
 
-def test_fallback_cap_covers_hermes_cli_package_dir():
-    """tests/hermes_cli/ (592 files at calibration) is under the raised cap,
-    so a hermes_cli source without a 1:1 test file selects the package
-    directory again instead of silently downgrading to no selection."""
+def test_feature_mapping_avoids_hermes_cli_package_fallback():
     mod = _load_module()
-    # tests/hermes_cli/test_design_board_store.py does not exist (the 1:1
-    # test lives at tests/ root), so the directory fallback applies.
+
     out = mod.affected_pytest_modules(REPO_ROOT, ["hermes_cli/design_board_store.py"])
-    assert "tests/hermes_cli/" in out
+
+    assert "tests/test_design_board_store.py" in out
+    assert "tests/hermes_cli/" not in out
 
 
-def test_unmapped_python_source_count_does_not_regress():
-    """Ratchet the measured false-green surface without requiring it to be zero.
-
-    The 2026-07-25 nested-package fix reduced the repository-wide count from
-    417 to 349.  Include untracked worktree files so this guard also catches a
-    new source file before it is committed.
-    """
+def test_repository_inventory_has_zero_unmapped_production_sources():
     mod = _load_module()
-    proc = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(REPO_ROOT),
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.py",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    sources = sorted(
-        path
-        for path in proc.stdout.splitlines()
-        if path
-        and not path.startswith("tests/")
-        and (REPO_ROOT / path).is_file()
-    )
-    imports_by_test_dir: dict[Path, set[str]] = {}
-    for test_path in (REPO_ROOT / "tests").rglob("test_*.py"):
-        imported: set[str] = set()
-        try:
-            lines = test_path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for line in lines:
-            direct = re.match(r"^\s*import\s+(?P<names>.*)$", line)
-            if direct:
-                imported.update(
-                    part.strip().split()[0]
-                    for part in direct.group("names").split(",")
-                    if part.strip()
-                )
-            from_import = re.match(
-                r"^\s*from\s+(?P<module>[A-Za-z_][\w.]*)\s+import\b"
-                r"(?P<names>.*)$",
-                line,
-            )
-            if from_import:
-                package = from_import.group("module")
-                imported.add(package)
-                imported.update(
-                    f"{package}.{name}"
-                    for name in re.findall(
-                        r"\b[A-Za-z_]\w*\b",
-                        from_import.group("names"),
-                    )
-                    if name not in {"as", "import"}
-                )
-        imports_by_test_dir.setdefault(test_path.parent, set()).update(imported)
 
-    def maps_to_test(source_path: str) -> bool:
-        source = Path(source_path)
-        rel_dir = str(source.parent)
-        candidate = Path("tests") / rel_dir / f"test_{source.name}"
-        if (REPO_ROOT / candidate).is_file():
-            return True
-        if mod._mapped_monolith_tests(REPO_ROOT, source_path):
-            return True
-        module_import = str(source.with_suffix("")).replace("/", ".")
-        test_dirs = [REPO_ROOT / "tests"]
-        package_test_dir = Path("tests") / rel_dir
-        while package_test_dir != Path("tests"):
-            absolute = REPO_ROOT / package_test_dir
-            if absolute.is_dir():
-                test_dirs.append(absolute)
-            package_test_dir = package_test_dir.parent
-        if any(
-            module_import in imports_by_test_dir.get(test_dir, set())
-            for test_dir in test_dirs
-        ):
-            return True
-        package_test_dir = REPO_ROOT / "tests" / rel_dir
-        return (
-            package_test_dir != REPO_ROOT / "tests"
-            and package_test_dir.is_dir()
-            and sum(1 for _path in package_test_dir.glob("test_*.py"))
-            <= mod._FALLBACK_MAX_TEST_FILES
-        )
+    worker = mod.census_repository(REPO_ROOT, mode="worker")
+    integration = mod.census_repository(REPO_ROOT, mode="integration")
 
-    unmapped = [source for source in sources if not maps_to_test(source)]
-
-    assert len(unmapped) <= _MAX_UNMAPPED_TRACKED_PYTHON_SOURCES, (
-        f"{len(unmapped)} Python source files select no pytest module "
-        f"(ratchet {_MAX_UNMAPPED_TRACKED_PYTHON_SOURCES}); "
-        f"first new blind spots: {unmapped[:20]}"
-    )
+    assert worker.unmapped_paths == []
+    assert integration.unmapped_paths == []

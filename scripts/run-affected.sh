@@ -22,9 +22,19 @@ if ! "$(dirname "$0")/check-branch-age.sh"; then
   exit 3
 fi
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set +e
 FILES=$("$DIR/affected-tests.sh" "$@")
+mapping_status=$?
+set -e
+if [ "$mapping_status" -eq 4 ]; then
+  echo "run-affected: affected-test mapping is incomplete — NO test ran." >&2
+  exit 4
+elif [ "$mapping_status" -ne 0 ]; then
+  echo "run-affected: affected-test mapping failed with exit ${mapping_status} — NO test ran." >&2
+  exit "$mapping_status"
+fi
 if [ -z "${FILES// /}" ]; then
-  echo "run-affected: no affected test files for this diff — skipping pytest (targeted scope; full suite is nightly only)"
+  echo "run-affected: no applicable Python production paths for this diff — skipping pytest (targeted scope; full suite is nightly only)"
   exit 0
 fi
 set +e

@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 # The real scripts under test (copied verbatim); run_tests.sh is stubbed.
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
+_MAPPING_MODULE = REPO_ROOT / "hermes_cli" / "affected_test_mapping.py"
 _STUB_RUN_TESTS = """#!/usr/bin/env bash
 # Test stub: record the args we were called with, then exit 0 WITHOUT running
 # any real test suite. Its mere existence in the sentinel = "full runner reached".
@@ -48,6 +49,13 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
     scripts.mkdir(parents=True)
     for name in _REAL:
         shutil.copy2(SCRIPTS / name, scripts / name)
+    (repo / "hermes_cli").mkdir()
+    (repo / "hermes_cli" / "__init__.py").write_text("")
+    shutil.copy2(_MAPPING_MODULE, repo / "hermes_cli" / "affected_test_mapping.py")
+    (repo / "config").mkdir()
+    (repo / "config" / "affected-test-exceptions.json").write_text(
+        '{"schema_version": 1, "exceptions": []}\n'
+    )
     (scripts / "run_tests.sh").write_text(_STUB_RUN_TESTS)
     # The real helper checks commit drift against main; the fake repository
     # only needs an executable no-op so the wrapper can reach the behavior tested.
@@ -57,6 +65,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
 
     (repo / "pkg").mkdir()
     (repo / "pkg" / "foo.py").write_text("VALUE = 1\n")
+    (repo / "obsolete.py").write_text("VALUE = 1\n")
     (repo / "tests" / "pkg").mkdir(parents=True)
     (repo / "tests" / "pkg" / "test_foo.py").write_text("def test_foo():\n    assert True\n")
     (repo / "docs").mkdir()
@@ -130,3 +139,34 @@ def test_red_is_held_only_after_reproduced_second_run(tmp_path: Path) -> None:
         "tests/pkg/test_foo.py",
         "tests/pkg/test_foo.py",
     ]
+
+
+def test_unmapped_production_change_exits_four_without_running_pytest(
+    tmp_path: Path,
+) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "orphan").mkdir()
+    (repo / "orphan" / "new_runtime.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "unmapped source")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 4
+    assert "mapping is incomplete" in proc.stderr
+    assert "NO test ran" in proc.stderr
+    assert not sentinel.exists()
+
+
+def test_deleted_production_file_does_not_block_gate(tmp_path: Path) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "obsolete.py").unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "delete obsolete source")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 0, proc.stderr
+    assert "skipping" in proc.stdout
+    assert "unmapped" not in proc.stderr
+    assert not sentinel.exists()

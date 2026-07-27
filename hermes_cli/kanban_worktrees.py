@@ -56,82 +56,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-# Cap for the package-directory fallback in _affected_pytest_modules. Larger
-# directories turn a targeted gate into a broad suite; importing tests remain
-# selected individually and the nightly full suite remains the backstop.
-# Must stay in sync with scripts/affected_tests.py — see the rationale there
-# for why the two gates unify UP at 800 rather than down at the shell's old 200.
-_FALLBACK_MAX_TEST_FILES = 800
+from hermes_cli.affected_test_mapping import (
+    EXPLICIT_TEST_PATTERNS,
+    INTEGRATION_FALLBACK_MAX_TEST_FILES,
+    MappingError as AffectedTestMappingError,
+    affected_pytest_modules as _shared_affected_pytest_modules,
+)
 
-# Source paths with feature-split test suites. Keep this identical to
-# scripts/affected_tests.py so worker and post-merge gates select the same scope.
-_MONOLITH_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
-    "hermes_cli/strategist.py": ("tests/hermes_cli/test_strategist*.py",),
-    "hermes_cli/kanban_db.py": (
-        "tests/hermes_cli/test_kanban_db*.py",
-        "tests/hermes_cli/test_kanban_lanes.py",
-        "tests/hermes_cli/test_kanban_block_kind*.py",
-        "tests/hermes_cli/test_kanban_provider_override*.py",
-        "tests/plugins/test_kanban_model_override*.py",
-        "tests/scripts/test_check_kanban_lifecycle_anchors.py",
-    ),
-    "hermes_cli/kanban_worktrees.py": (
-        "tests/hermes_cli/test_kanban_worktrees*.py",
-        "tests/hermes_cli/test_visual_gate.py",
-    ),
-}
-
-
-def _mapped_monolith_tests(repo_root: Path, source_path: str) -> list[str]:
-    """Expand a known monolith's maintained test patterns to existing files."""
-    return sorted(
-        {
-            str(path.relative_to(repo_root))
-            for pattern in _MONOLITH_TEST_PATTERNS.get(source_path, ())
-            for path in repo_root.glob(pattern)
-            if path.is_file()
-        }
-    )
-
-
-def _imports_changed_module(test_path: Path, module_import: str) -> bool:
-    try:
-        content = test_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return False
-
-    package, _, module_name = module_import.rpartition(".")
-    direct_import = rf"^\s*import\s+.*\b{re.escape(module_import)}\b"
-    if re.search(direct_import, content, re.MULTILINE):
-        return True
-    submodule_from_import = rf"^\s*from\s+{re.escape(module_import)}\s+import\b"
-    if re.search(submodule_from_import, content, re.MULTILINE):
-        return True
-    if package:
-        package_import = rf"^\s*from\s+{re.escape(package)}\s+import\s+.*\b{re.escape(module_name)}\b"
-        if re.search(package_import, content, re.MULTILINE):
-            return True
-    return False
-
-
-def _feature_named_sibling_tests(repo_root: Path, rel_dir: str, source: Path) -> list[str]:
-    module_import = str(source.with_suffix("")).replace("/", ".")
-    # Feature tests also live directly at tests/ root (e.g.
-    # tests/test_design_board_store.py for hermes_cli/design_board_store.py);
-    # glob is non-recursive, so the root scan only matches those.
-    test_dirs = [repo_root / "tests"]
-    pkg_test_dir = Path("tests") / rel_dir
-    while pkg_test_dir != Path("tests"):
-        absolute_pkg_test_dir = repo_root / pkg_test_dir
-        if absolute_pkg_test_dir.is_dir():
-            test_dirs.append(absolute_pkg_test_dir)
-        pkg_test_dir = pkg_test_dir.parent
-    return [
-        str(path.relative_to(repo_root))
-        for test_dir in test_dirs
-        for path in sorted(test_dir.glob("test_*.py"))
-        if _imports_changed_module(path, module_import)
-    ]
+# Compatibility aliases for existing callers/tests.  The implementation and
+# maintained mapping table live in the fork-owned shared classifier.
+_FALLBACK_MAX_TEST_FILES = INTEGRATION_FALLBACK_MAX_TEST_FILES
+_MONOLITH_TEST_PATTERNS = EXPLICIT_TEST_PATTERNS
 
 _log = logging.getLogger(__name__)
 
@@ -4883,48 +4818,12 @@ def remove_worktree(repo_root: Path, wt_path: Path, branch: str) -> None:
 
 
 def _affected_pytest_modules(repo_root: Path, changed_files: list[str]) -> list[str]:
-    """Map a diff to existing pytest modules: changed test files run
-    themselves; ``<pkg>/<name>.py`` runs ``tests/<pkg>/test_<name>.py``.
-
-    Fallback: when the 1:1 test file is absent (monolith source files whose
-    tests are feature-named, e.g. ``gateway/run.py``), select the entire
-    ``tests/<pkg>/`` directory so regressions are caught at the merge gate."""
-    modules: set[str] = set()
-    for f in changed_files:
-        if not f.endswith(".py"):
-            continue
-        name = Path(f).name
-        if f.startswith("tests/stress/") and name.startswith("test_"):
-            # Stress scripts use their own @scenario registry / main(), not
-            # pytest test functions. Feeding them to pytest returns exit 5
-            # ("no tests ran") and falsely parks otherwise valid chains.
-            continue
-        if f.startswith("tests/") and name.startswith("test_"):
-            if (repo_root / f).is_file():
-                modules.add(f)
-            continue
-        source = Path(f)
-        rel_dir = str(source.parent)
-        candidate = Path("tests") / rel_dir / f"test_{name}"
-        if (repo_root / candidate).is_file():
-            modules.add(str(candidate))
-        mapped_tests = _mapped_monolith_tests(repo_root, f)
-        if mapped_tests:
-            modules.update(mapped_tests)
-            continue
-        modules.update(_feature_named_sibling_tests(repo_root, rel_dir, source))
-        if not (repo_root / candidate).is_file():
-            pkg_test_dir = Path("tests") / rel_dir
-            if pkg_test_dir != Path("tests") and (repo_root / pkg_test_dir).is_dir():
-                # Cap: if the directory has too many test files, downgrade to
-                # no selection — the nightly full suite remains the backstop
-                # (AC-2 counter-metric: no gate-tempo-for-coverage trade).
-                test_file_count = sum(
-                    1 for _p in (repo_root / pkg_test_dir).glob("test_*.py")
-                )
-                if test_file_count <= _FALLBACK_MAX_TEST_FILES:
-                    modules.add(str(pkg_test_dir) + "/")
-    return sorted(modules)
+    """Compatibility wrapper around the shared integration classifier."""
+    return _shared_affected_pytest_modules(
+        repo_root,
+        changed_files,
+        mode="integration",
+    )
 
 
 def _resolve_node_bin(repo_root: Path, name: str) -> Optional[Path]:
@@ -5704,7 +5603,14 @@ def _default_quick_gate_pytest(
     repo_root: Path, changed_files: list[str], notes: list[str],
 ) -> Optional[str]:
     """Affected-pytest modules via isolated parallel runner; error or None."""
-    modules = _affected_pytest_modules(repo_root, changed_files)
+    try:
+        modules = _affected_pytest_modules(repo_root, changed_files)
+    except AffectedTestMappingError as exc:
+        if str(exc).startswith("unmapped production paths:"):
+            return f"pytest {exc}"
+        return f"pytest mapping error: {exc}"
+    except RuntimeError as exc:
+        return f"pytest mapping error: {exc}"
     if modules:
         # Run the affected modules through the canonical repository wrapper.
         # It selects the dev/test Python (explicitly rejecting the managed
@@ -5739,7 +5645,7 @@ def _default_quick_gate_pytest(
             [runner, *modules],
             repo_root, 1200, notes,
         )
-    notes.append("pytest skipped (no affected test modules)")
+    notes.append("pytest skipped (no applicable Python production paths)")
     return None
 
 

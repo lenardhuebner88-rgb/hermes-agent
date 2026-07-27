@@ -131,6 +131,19 @@ def test_run_affected_preflight_abort_is_not_a_gate_failure(tmp_path):
     assert log.exists()
 
 
+def test_run_affected_unmapped_is_a_distinct_gate_outcome(tmp_path):
+    repo, base_sha = _init_repo(tmp_path)
+    log = tmp_path / "call.log"
+    _write_fake_run_affected(repo, log, exit_code=4)
+
+    result = _run_gate(repo, base_sha)
+
+    assert result.returncode == 4, result.stdout + result.stderr
+    assert "GATE_UNMAPPED: pytest" in result.stdout
+    assert "GATE_FAIL: pytest" not in result.stdout
+    assert log.exists()
+
+
 # ── (c) ruff-Fail bleibt exit 11, run-affected.sh wird gar nicht erst
 #        aufgerufen (kurzschließt vor dem pytest-Block) ─────────────────────
 

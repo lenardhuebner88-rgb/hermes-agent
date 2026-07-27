@@ -1,13 +1,20 @@
-"""Acceptance coverage for the two affected-pytest mappers."""
+"""Behavioral contracts for the affected-test compatibility wrappers."""
 
 from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
 from hermes_cli import kanban_worktrees
+from hermes_cli.affected_test_mapping import (
+    INTEGRATION_FALLBACK_MAX_TEST_FILES,
+    MappingError,
+    WORKER_FALLBACK_MAX_TEST_FILES,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -23,64 +30,139 @@ def _load_standalone_mapper():
     return module
 
 
-def _selections(changed_files: list[str]) -> tuple[list[str], list[str]]:
-    standalone = _load_standalone_mapper()
-    return (
-        standalone.affected_pytest_modules(REPO_ROOT, changed_files),
-        kanban_worktrees._affected_pytest_modules(REPO_ROOT, changed_files),
-    )
-
-
 def test_dashboard_auth_middleware_selects_real_dedicated_tests_for_both_mappers():
     expected = [
         "tests/hermes_cli/test_dashboard_auth_401_reauth.py",
+        "tests/hermes_cli/test_dashboard_auth_audit.py",
+        "tests/hermes_cli/test_dashboard_auth_cookies.py",
+        "tests/hermes_cli/test_dashboard_auth_gate.py",
         "tests/hermes_cli/test_dashboard_auth_middleware.py",
+        "tests/hermes_cli/test_dashboard_auth_native_flow.py",
+        "tests/hermes_cli/test_dashboard_auth_password_login.py",
+        "tests/hermes_cli/test_dashboard_auth_plugin_hook.py",
+        "tests/hermes_cli/test_dashboard_auth_prefix.py",
+        "tests/hermes_cli/test_dashboard_auth_provider_base.py",
+        "tests/hermes_cli/test_dashboard_auth_status_endpoint.py",
+        "tests/hermes_cli/test_dashboard_auth_stub_provider.py",
+        "tests/hermes_cli/test_dashboard_auth_ws_auth.py",
+        "tests/hermes_cli/test_dashboard_auth_ws_tickets.py",
         "tests/hermes_cli/test_web_server.py",
+        "tests/plugins/test_plugin_dashboard_auth_contract.py",
     ]
+    changed = ["hermes_cli/dashboard_auth/middleware.py"]
+    standalone = _load_standalone_mapper()
 
-    standalone, integration = _selections(
-        ["hermes_cli/dashboard_auth/middleware.py"]
+    assert standalone.affected_pytest_modules(REPO_ROOT, changed) == expected
+    assert kanban_worktrees._affected_pytest_modules(REPO_ROOT, changed) == expected
+
+
+@pytest.mark.parametrize("wrapper", ["standalone", "integration"])
+def test_public_wrappers_raise_instead_of_discarding_unmapped(
+    tmp_path: Path,
+    wrapper: str,
+) -> None:
+    (tmp_path / "orphan.py").write_text("VALUE = 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    standalone = _load_standalone_mapper()
+    call = (
+        standalone.affected_pytest_modules
+        if wrapper == "standalone"
+        else kanban_worktrees._affected_pytest_modules
     )
 
-    assert standalone == expected
-    assert integration == expected
+    with pytest.raises(MappingError, match="unmapped production paths: orphan.py"):
+        call(tmp_path, ["orphan.py"])
 
 
-@pytest.mark.parametrize(
-    "changed_files",
-    [
-        ["hermes_cli/dashboard_auth/middleware.py"],
-        ["hermes_cli/kanban_db.py"],
-        ["tests/hermes_cli/test_dashboard_auth_middleware.py"],
-    ],
-    ids=["nested-package", "kanban-db", "changed-test"],
-)
-def test_both_mappers_agree_for_required_real_inputs(changed_files):
-    standalone, integration = _selections(changed_files)
-
-    assert standalone == integration
-
-
-def test_python_mappers_share_a_cap_and_the_shell_keeps_its_lower_bound():
-    """The two PYTHON mappers must agree; the shell wrapper must NOT join them.
-
-    This is a two-layer design, not drift:
-      - both Python mappers (worker-side selection and the post-merge
-        integration gate) share _FALLBACK_MAX_TEST_FILES = 800;
-      - scripts/affected-tests.sh applies its OWN, lower bound (200) because it
-        is the interactive worker gate and trades the broad package fallback
-        for tempo, announcing the omission on stderr.
-
-    Coupling the shell to the Python constant (2026-07-25) erased that tempo
-    bound and broke test_run_affected_mapping.py. Unifying the Python side DOWN
-    to 200 instead was measured to drop 45 source files to zero merge-gate
-    selection. Both directions are regressions; the layers stay separate.
-    """
+def test_compatibility_wrappers_pin_integration_mode(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "runtime.py").write_text("VALUE = 1\n")
+    tests = tmp_path / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    for index in range(WORKER_FALLBACK_MAX_TEST_FILES + 1):
+        (tests / f"test_{index:03d}.py").write_text(
+            "def test_placeholder():\n    assert True\n"
+        )
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     standalone = _load_standalone_mapper()
-    shell = (REPO_ROOT / "scripts" / "affected-tests.sh").read_text(encoding="utf-8")
 
-    assert standalone._FALLBACK_MAX_TEST_FILES == 800
-    assert kanban_worktrees._FALLBACK_MAX_TEST_FILES == 800
-    # The shell keeps its own, deliberately lower literal.
-    assert "FALLBACK_MAX_TEST_FILES=200" in shell
-    assert "--fallback-max-test-files" not in shell
+    assert standalone.affected_pytest_modules(
+        tmp_path,
+        ["pkg/runtime.py"],
+    ) == ["tests/pkg/"]
+    assert kanban_worktrees._affected_pytest_modules(
+        tmp_path,
+        ["pkg/runtime.py"],
+    ) == ["tests/pkg/"]
+
+
+def test_worker_cap_runs_end_to_end_through_shell_wrapper(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "affected-tests.sh", scripts)
+    shutil.copy2(REPO_ROOT / "scripts" / "affected_tests.py", scripts)
+    (repo / "hermes_cli").mkdir()
+    (repo / "hermes_cli" / "__init__.py").write_text("")
+    shutil.copy2(
+        REPO_ROOT / "hermes_cli" / "affected_test_mapping.py",
+        repo / "hermes_cli",
+    )
+    (repo / "config").mkdir()
+    (repo / "config" / "affected-test-exceptions.json").write_text(
+        '{"schema_version": 1, "exceptions": []}\n'
+    )
+    (repo / "pkg").mkdir()
+    source = repo / "pkg" / "runtime.py"
+    source.write_text("VALUE = 1\n")
+    tests = repo / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    for index in range(WORKER_FALLBACK_MAX_TEST_FILES + 1):
+        (tests / f"test_{index:03d}.py").write_text(
+            "def test_placeholder():\n    assert True\n"
+        )
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    source.write_text("VALUE = 2\n")
+
+    proc = subprocess.run(
+        [str(scripts / "affected-tests.sh"), "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 4
+    assert proc.stdout.strip() == ""
+    assert "mode limit is 200" in proc.stderr
+
+
+def test_shared_classifier_owns_both_caps():
+    standalone = _load_standalone_mapper()
+
+    assert WORKER_FALLBACK_MAX_TEST_FILES == 200
+    assert INTEGRATION_FALLBACK_MAX_TEST_FILES == 800
+    assert standalone._FALLBACK_MAX_TEST_FILES == INTEGRATION_FALLBACK_MAX_TEST_FILES
+    assert (
+        kanban_worktrees._FALLBACK_MAX_TEST_FILES
+        == INTEGRATION_FALLBACK_MAX_TEST_FILES
+    )

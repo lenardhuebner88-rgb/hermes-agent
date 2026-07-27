@@ -500,7 +500,7 @@ def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch)
     monkeypatch.setattr(kwt.shutil, "which", lambda _name: None)
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
 
-    ok, detail = kwt.default_quick_gate(repo, ["hermes_cli/kanban_db.py"])
+    ok, detail = kwt.default_quick_gate(repo, ["docs/agent-dev-guide.md"])
 
     assert ok is True
     assert "pytest skipped" in detail
@@ -509,6 +509,17 @@ def test_default_quick_gate_non_web_diff_skips_frontend_gates(repo, monkeypatch)
     assert not any("vitest run src/control" in cmd for cmd in flattened)
     assert not any("tsc -b --noEmit" in cmd for cmd in flattened)
     assert not any("tsc --noEmit" in cmd for cmd in flattened)
+
+
+def test_default_quick_gate_rejects_unmapped_python_before_pytest(repo):
+    (repo / "orphan").mkdir()
+    (repo / "orphan" / "runtime.py").write_text("VALUE = 1\n")
+
+    ok, detail = kwt.default_quick_gate(repo, ["orphan/runtime.py"])
+
+    assert ok is False
+    assert "pytest unmapped production paths" in detail
+    assert "orphan/runtime.py" in detail
 
 
 def test_default_quick_gate_ruff_uses_main_repo_venv_before_runtime_python(

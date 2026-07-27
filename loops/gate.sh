@@ -46,6 +46,9 @@ affected_rc=$?
 if [[ "$affected_rc" -eq 3 ]]; then
   echo "GATE_NOT_RUN: pytest"
   exit 3
+elif [[ "$affected_rc" -eq 4 ]]; then
+  echo "GATE_UNMAPPED: pytest"
+  exit 4
 elif [[ "$affected_rc" -ne 0 ]]; then
   echo "GATE_FAIL: pytest"
   exit 12

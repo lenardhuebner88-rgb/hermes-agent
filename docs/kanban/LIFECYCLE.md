@@ -236,7 +236,7 @@ worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktr
 `(False, …)` — it fails **closed**.
 
 Gate selection is
-[`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L372):
+[`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L307):
 a per-repo command list from `kanban.integration_gate.repos` if configured, else
 [`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5838) for the FO
 repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5811).
@@ -381,37 +381,38 @@ breaker logic lives in
 Grep finds the old name first, so a change applied only there misses the crash
 and timeout paths that call `_record_task_failure` directly.
 
-**A green gate can be an empty gate.** Both the worker gate and the post-merge
-gate select tests from the diff, and both treat "nothing selected" as pass:
-`scripts/run-affected.sh` prints `skipping pytest` and exits 0, and
-[`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5811) notes
-`pytest skipped (no affected test modules)` and returns green. The mapper,
-[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4885) with
-[`_feature_named_sibling_tests`](../../hermes_cli/kanban_worktrees.py#L117), only
-scans `tests/` root and `tests/<dir-of-the-source-file>` — so a source file in a
-**nested package** whose tests live one level up matched nothing. Measured
-2026-07-25 before the fix: **417 of 1175 tracked non-test `.py` files selected
-zero pytest modules**, including all 13 files of `hermes_cli/dashboard_auth/` —
-for which 14 dedicated `tests/hermes_cli/test_dashboard_auth_*.py` files exist
-and were never selected. Combined with `standard_uses_llm_verifier: false`, such
-a change landed on ruff alone. The mapper now walks the parent chain down to
-`tests/`, which brought that count to **348**; the remainder are genuinely
-untested source files, so the fail-open is still load-bearing. Re-measure before
-claiming a gate covers anything.
+**Affected-test selection is fail-closed.** Both the worker gate and the
+post-merge gate classify every changed path as `selected`, `not_applicable`,
+`allowlisted`, or `unmapped`. `scripts/run-affected.sh` may skip pytest only
+when every changed path is explicitly not applicable or allowlisted; an
+in-scope production Python path with no test selection exits 4 before pytest.
+The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5703)
+enforces the same hold. Its compatibility mapper,
+[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4806), and
+the standalone script both delegate to the shared
+[`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L591).
+The repository census is contract-tested at zero unmapped production paths in
+both modes; a synthetic new production path must still become `unmapped`.
+The compatibility mappers also throw on `unmapped`; they never collapse that
+state into an empty, apparently successful test list. Explicit patterns are
+unioned with direct and AST-derived import tests rather than replacing them.
 
-**The two fallback caps differ on purpose — do not "de-duplicate" them.**
-The Python mappers cap the package-directory fallback at
-[`_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/kanban_worktrees.py#L64) = 800,
-while `scripts/affected-tests.sh` applies its own lower bound of 200 on top.
-That is two layers with different jobs: the post-merge gate runs once and can
-afford the broad fallback, whereas the shell is the interactive worker gate and
-trades it for tempo — announcing the omission on stderr ("nightly full suite
-remains authoritative") rather than dropping it silently. Both attempts to
-unify them regressed something: coupling the shell to the Python constant erased
-the tempo bound (caught by `tests/hermes_cli/test_run_affected_mapping.py`, which
-pins the 201-file case), and lowering the Python side to 200 dropped 45 source
-files to zero merge-gate selection because `tests/agent/`, `tests/gateway/` and
-`tests/hermes_cli/` all exceed 200.
+**The two fallback caps differ on purpose, but live in one classifier.**
+[`WORKER_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L20)
+is 200 for the interactive worker gate, while
+[`INTEGRATION_FALLBACK_MAX_TEST_FILES`](../../hermes_cli/affected_test_mapping.py#L21)
+is 800 for the post-merge integration gate. The selected mode applies its cap
+before assigning the path state. An oversized fallback without a focused test
+is therefore `unmapped`, not a successful mapping whose test directory is
+silently removed afterward. Do not move the cap back into a shell post-filter
+or duplicate the mapping tables across consumers.
+
+An active audited exception is evaluated before the package fallback so its
+meaning does not change between worker and integration mode. Explicit, direct,
+or import-index coverage still conflicts with an active exception. Expired or
+stale entries are ignored with a path-local warning and degrade only their
+affected path to `unmapped`; malformed or duplicate inventory remains a mapping
+error.
 
 **A park cannot demote a task that is already `done`.**
 [`_park_integration`](../../hermes_cli/kanban_db.py#L17722) blocks via an UPDATE

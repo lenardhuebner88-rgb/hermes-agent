@@ -1134,7 +1134,11 @@ def test_land_gates_custom_all_green(tmp_path, fake_engine):
 
 @pytest.mark.parametrize(
     ("affected_exit_code", "expected_phrase"),
-    [(1, "affected rot (rc=1)"), (3, "affected nicht gelaufen (rc=3)")],
+    [
+        (1, "affected rot (rc=1)"),
+        (3, "affected nicht gelaufen (rc=3)"),
+        (4, "affected unmapped (rc=4)"),
+    ],
 )
 def test_land_gates_distinguishes_affected_test_failure_from_preflight_abort(
     tmp_path, fake_engine, monkeypatch, affected_exit_code, expected_phrase
@@ -1159,7 +1163,7 @@ def test_land_gates_distinguishes_affected_test_failure_from_preflight_abort(
 
     assert ok is False
     assert expected_phrase in report
-    if affected_exit_code == 3:
+    if affected_exit_code in {3, 4}:
         assert "rot" not in report
 
 

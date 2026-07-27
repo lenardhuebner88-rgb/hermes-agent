@@ -11,33 +11,8 @@
 #   scripts/run-affected.sh HEAD~1  # since a ref
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-# DELIBERATELY lower than the Python mappers' _FALLBACK_MAX_TEST_FILES (800),
-# and deliberately NOT read from them. Two layers with different jobs:
-#   - the Python mapper emits the raw selection, used by the post-merge
-#     integration gate, which runs once and can afford a broad package fallback;
-#   - this wrapper is the interactive WORKER gate, which trades that fallback
-#     for tempo and says so on stderr ("nightly full suite remains
-#     authoritative") instead of dropping it silently.
-# Coupling the two (2026-07-25) looked like de-duplication but erased the
-# worker-gate tempo bound; test_run_affected_mapping.py pins this behaviour.
-FALLBACK_MAX_TEST_FILES=200
-
-RAW="$(python3 "$SCRIPT_DIR/affected_tests.py" "$@")"
-TOKENS=()
-read -r -a TOKENS <<< "$RAW" || true
-SELECTED=()
-shopt -s globstar nullglob
-for token in "${TOKENS[@]}"; do
-  if [[ "$token" == */ ]]; then
-    test_files=("$REPO_ROOT/$token"**/test_*.py)
-    if (( ${#test_files[@]} > FALLBACK_MAX_TEST_FILES )); then
-      printf 'affected-tests: omitted package fallback %s (%d test files; limit %d); directly mapped/importing tests remain selected; nightly full suite remains authoritative\n' \
-        "$token" "${#test_files[@]}" "$FALLBACK_MAX_TEST_FILES" >&2
-      continue
-    fi
-  fi
-  SELECTED+=("$token")
-done
-
-printf '%s\n' "${SELECTED[*]}"
+# The worker-mode cap is 200 while integration remains 800.  The shared
+# classifier applies the cap before it assigns a final state, so an oversized
+# fallback that leaves no focused test exits 4 as unmapped instead of being
+# silently removed after a successful classification.
+exec python3 "$SCRIPT_DIR/affected_tests.py" --mode worker "$@"

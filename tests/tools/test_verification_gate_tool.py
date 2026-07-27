@@ -154,6 +154,38 @@ def test_affected_test_failure_remains_failed(repo, monkeypatch):
     assert result["status"] == "failed"
 
 
+def test_affected_unmapped_has_distinct_status(repo, monkeypatch):
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setattr(tool, "_run_commands", lambda specs, root: [
+        {"command_id": "run_affected", "exit_code": 4, "timed_out": False,
+         "duration_seconds": 0.1},
+        {"command_id": "worker_gate_ruff", "exit_code": 0, "timed_out": False,
+         "duration_seconds": 0.1},
+    ])
+
+    result = tool.run_verification_gate(action="affected", workspace=repo,
+                                        artifact_dir=repo / ".evidence", phase="review")
+
+    assert result["status"] == "unmapped"
+
+
+def test_affected_unmapped_with_another_failure_remains_failed(repo, monkeypatch):
+    from tools import verification_gate_tool as tool
+
+    monkeypatch.setattr(tool, "_run_commands", lambda specs, root: [
+        {"command_id": "run_affected", "exit_code": 4, "timed_out": False,
+         "duration_seconds": 0.1},
+        {"command_id": "worker_gate_ruff", "exit_code": 1, "timed_out": False,
+         "duration_seconds": 0.1},
+    ])
+
+    result = tool.run_verification_gate(action="affected", workspace=repo,
+                                        artifact_dir=repo / ".evidence", phase="review")
+
+    assert result["status"] == "failed"
+
+
 @pytest.mark.parametrize("ui_status", ["ui_preview_busy", "skipped"])
 def test_ui_shot_incomplete_states_are_red(repo, monkeypatch, ui_status):
     from tools import verification_gate_tool as tool

@@ -19,7 +19,7 @@ from hermes_cli.gate_evidence import GateEvidence, GateEvidenceStore, build_gate
 from hermes_constants import terminal_runs_root
 from tools.registry import registry, tool_error, tool_result
 
-GATE_IMPLEMENTATION_VERSION = "1"
+GATE_IMPLEMENTATION_VERSION = "2"
 ACTIONS = (
     "agent_cli_capabilities",
     "backend_targets",
@@ -367,15 +367,27 @@ def run_verification_gate(
                 for item in results
             )
         )
+        affected_mapping_unmapped = (
+            action == "affected"
+            and any(
+                item["command_id"] == "run_affected" and item["exit_code"] == 4
+                for item in results
+            )
+        )
         other_gate_failed = any(
             item["timed_out"]
             or (
                 item["exit_code"] != 0
-                and not (item["command_id"] == "run_affected" and item["exit_code"] == 3)
+                and not (
+                    item["command_id"] == "run_affected"
+                    and item["exit_code"] in {3, 4}
+                )
             )
             for item in results
         )
-        if affected_preflight_aborted and not other_gate_failed:
+        if affected_mapping_unmapped and not other_gate_failed:
+            status = "unmapped"
+        elif affected_preflight_aborted and not other_gate_failed:
             status = "not_run"
         else:
             status = "passed" if results and not other_gate_failed else "failed"

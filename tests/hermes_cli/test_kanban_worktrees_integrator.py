@@ -956,26 +956,30 @@ def test_affected_pytest_module_fallback_for_monolith(repo):
     assert mods == ["tests/gateway/"]
 
 
-def test_affected_pytest_module_oversize_dir_downgrades(repo):
-    """When the package test dir exceeds _FALLBACK_MAX_TEST_FILES, the
-    fallback downgrades to no selection — nightly full suite remains the
-    backstop (AC-2 counter-metric: no gate-tempo-for-coverage trade)."""
+def test_affected_pytest_module_oversize_dir_fails_closed(repo):
+    """An oversized fallback cannot be collapsed into an empty successful list."""
     (repo / "gateway").mkdir(parents=True)
     pkg = repo / "tests" / "gateway"
     pkg.mkdir(parents=True)
     cap = kwt._FALLBACK_MAX_TEST_FILES
     for i in range(cap + 1):
         (pkg / f"test_{i:04d}.py").write_text("")
-    mods = kwt._affected_pytest_modules(repo, ["gateway/run.py"])
-    assert mods == []
+    with pytest.raises(
+        kwt.AffectedTestMappingError,
+        match="unmapped production paths: gateway/run.py",
+    ):
+        kwt._affected_pytest_modules(repo, ["gateway/run.py"])
 
 
 def test_affected_pytest_module_no_fallback_for_root_source(repo):
     """Root-level source without a package dir must not select tests/ root."""
     (repo / "tests").mkdir(parents=True)
     (repo / "tests" / "test_something.py").write_text("")
-    mods = kwt._affected_pytest_modules(repo, ["run_agent.py"])
-    assert mods == []
+    with pytest.raises(
+        kwt.AffectedTestMappingError,
+        match="unmapped production paths: run_agent.py",
+    ):
+        kwt._affected_pytest_modules(repo, ["run_agent.py"])
 
 
 def test_affected_pytest_module_selects_root_level_sibling(repo):

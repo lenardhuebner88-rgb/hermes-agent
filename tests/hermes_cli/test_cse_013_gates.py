@@ -109,6 +109,7 @@ def test_default_quick_gate_ruff_uses_changed_py_files_not_dot(repo, monkeypatch
 
     monkeypatch.setattr(kwt.shutil, "which", lambda name: "/usr/bin/ruff" if name == "ruff" else None)
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    monkeypatch.setattr(kwt, "_affected_pytest_modules", lambda _root, _changed: [])
 
     ok, detail = kwt.default_quick_gate(repo, ["hermes_cli/kanban_db.py"])
 
@@ -134,6 +135,7 @@ def test_default_quick_gate_ruff_skipped_when_no_py_files(repo, monkeypatch):
 
     monkeypatch.setattr(kwt.shutil, "which", lambda name: "/usr/bin/ruff" if name == "ruff" else None)
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    monkeypatch.setattr(kwt, "_affected_pytest_modules", lambda _root, _changed: [])
 
     ok, detail = kwt.default_quick_gate(repo, ["README.md", "docs/architecture.md"])
 
@@ -154,6 +156,7 @@ def test_default_quick_gate_ruff_multiple_py_files_all_passed(repo, monkeypatch)
 
     monkeypatch.setattr(kwt.shutil, "which", lambda name: "/usr/bin/ruff" if name == "ruff" else None)
     monkeypatch.setattr(kwt.subprocess, "run", fake_run)
+    monkeypatch.setattr(kwt, "_affected_pytest_modules", lambda _root, _changed: [])
 
     changed = ["hermes_cli/kanban_db.py", "hermes_cli/kanban_decompose.py"]
     ok, detail = kwt.default_quick_gate(repo, changed)
