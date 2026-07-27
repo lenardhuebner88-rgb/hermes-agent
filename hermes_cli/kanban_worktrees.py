@@ -6663,7 +6663,14 @@ def _enforce_lane_scope_on_complete(
                 allowlisted_paths_for_parent,
             )
 
-            allow = allowlisted_paths_for_parent(conn, task_id)
+            allow = allowlisted_paths_for_parent(
+                conn,
+                task_id,
+                violating_paths=violating,
+                expected_lane=expected_lane,
+                repo_root=repo_root,
+                branch=branch,
+            )
             if allow:
                 violating = [path for path in violating if path not in allow]
         except Exception:

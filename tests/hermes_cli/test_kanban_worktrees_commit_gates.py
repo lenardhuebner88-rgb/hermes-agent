@@ -1740,7 +1740,12 @@ def test_lane_scope_allowlist_prevents_repark_after_fixer(
             conn.execute(
                 "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
             )
-        allow = lane_fixer.allowlisted_paths_for_parent(conn, task_id)
+        allow = lane_fixer.allowlisted_paths_for_parent(
+            conn,
+            task_id,
+            violating_paths=["web/src/control/Foo.tsx"],
+            expected_lane="coder-frontend",
+        )
         assert "web/src/control/Foo.tsx" in allow
 
         # Re-run lane enforcement: same attributed paths, but allowlisted.
@@ -1750,3 +1755,81 @@ def test_lane_scope_allowlist_prevents_repark_after_fixer(
         assert _events(conn, task_id, "worker_gate_blocked")  # original park only
         # No second park payload beyond the first.
         assert len(_events(conn, task_id, "worker_gate_blocked")) == 1
+
+
+def test_lane_scope_allowlist_does_not_cover_new_commits_after_fixer(
+    repo, kanban_home, monkeypatch,
+):
+    """B5: after a successful fixer resume, NEW parent commits on a formerly
+    allowlisted path must re-arm the lane gate (not permanently disable it)."""
+    monkeypatch.setattr(kwt, "default_quick_gate", _ok_gate)
+    from hermes_cli import kanban_lane_fixer as lane_fixer
+
+    with kb.connect() as conn:
+        task_id, info = _lane_scope_task(
+            conn,
+            repo,
+            "t_ls_retouch",
+            assignee="coder",
+            commits=[("web/src/control/Foo.tsx", "export const Foo = 1\n")],
+        )
+        out = _complete(conn, task_id)
+        assert out is not None and out["action"] == "parked"
+        fixer_events = _events(conn, task_id, "lane_scope_fixer_dispatched")
+        child_id = fixer_events[0]["child_id"]
+        tip_before = _git(info["path"], "rev-parse", "HEAD").strip()
+
+        # Force a blocked park + structured lane-scope event (no claim_task —
+        # that would insert non-materialized pre_run stamps and skip the gate).
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'blocked', block_kind = 'integration' "
+                "WHERE id = ?",
+                (task_id,),
+            )
+            kb._append_event(
+                conn,
+                task_id,
+                "blocked",
+                {
+                    "reason": (
+                        "integration parked: lane-scope violation: assignee "
+                        "'coder' changed paths outside its lane: "
+                        "web/src/control/Foo.tsx — this task should have been "
+                        "assigned to lane 'coder-frontend'."
+                    ),
+                    "kind": "integration",
+                },
+            )
+
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?", (child_id,),
+            )
+        assert lane_fixer.resume_parent_for_completed_lane_fixer(conn, child_id) is True
+        tip_events = _events(conn, task_id, lane_fixer.LANE_FIXER_PARENT_RESUMED_EVENT)
+        assert tip_events
+        assert tip_events[0].get("resume_branch_tip")
+
+        # Parent makes NEW work on the formerly allowlisted path after resume.
+        _commit_in(
+            info["path"],
+            "web/src/control/Foo.tsx",
+            "export const Foo = 2\n",
+            msg=f"kanban({task_id}): new work after fixer",
+        )
+        assert _git(info["path"], "rev-parse", "HEAD").strip() != tip_before
+
+        # Ensure no poisoned task_runs stamps skip the gate (legacy path uses
+        # cumulative branch diff, which still sees Foo.tsx).
+        with kb.write_txn(conn):
+            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (task_id,))
+
+        out2 = _complete(conn, task_id)
+        assert out2 is not None
+        assert out2["action"] == "parked", out2
+        assert "lane-scope" in (out2.get("reason") or "").lower()
+        # Second park recorded (original + re-arm).
+        assert len(_events(conn, task_id, "worker_gate_blocked")) >= 2
+
+
