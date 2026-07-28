@@ -16160,17 +16160,10 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
         return
 
     from hermes_cli import kanban_db as _kb
+    from hermes_cli.goal_judge_rendering import render_task_goal as _render_task_goal
     from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
 
-    def _goal_text_from_task(t) -> str:
-        """Build the judge criterion from a card: title + body."""
-        parts = [t.title or ""]
-        if t.body:
-            parts.append(t.body)
-        return "\n\n".join(p for p in parts if p).strip()
-
-    # Resolve the goal text from the card (title + body); the judge retains
-    # explicit acceptance criteria when it trims a long body.
+    # Resolve one canonical criterion from title, structured ACs, and body.
     conn = _kb.connect()
     try:
         task = _kb.get_task(conn, task_id)
@@ -16182,16 +16175,18 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
     if task is None:
         return
 
-    goal_text = _goal_text_from_task(task)
+    goal_text = _render_task_goal(task)
     if not goal_text:
         return
 
     max_turns = task.goal_max_turns or _DEF_TURNS
 
     def _goal_text_live() -> "str | None":
-        """Re-read the card's title+body fresh so a mid-run respec (operator
-        edits body/AC) is judged against the CURRENT criterion. Returns None
-        on a vanished task / DB error so the loop keeps the last known goal."""
+        """Re-read title, body, and structured ACs after a live respec.
+
+        Returns None on a vanished task / DB error so the loop keeps the last
+        known goal.
+        """
         c = _kb.connect()
         try:
             t = _kb.get_task(c, task_id)
@@ -16202,7 +16197,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
                 pass
         if t is None:
             return None
-        return _goal_text_from_task(t) or None
+        return _render_task_goal(t) or None
 
     def _run_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(
