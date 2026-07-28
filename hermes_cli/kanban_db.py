@@ -14968,6 +14968,7 @@ def _run_evidence_freshness_preflight(
         task.id,
         result="Evidence finding is no longer reproducible; recorded test files passed before worker spawn.",
         summary="Evidence-freshness preflight closed the task after its recorded tests passed.",
+        expected_run_id=None,
         metadata={
             "evidence_freshness_preflight": {
                 "argv": argv,

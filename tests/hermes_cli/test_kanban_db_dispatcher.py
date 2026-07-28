@@ -149,7 +149,9 @@ def test_dispatch_preflights_stamped_evidence_tests_before_spawning(
 ):
     calls = []
     spawns = []
+    complete_calls = []
     real_run = kb.subprocess.run
+    real_complete_task = kb.complete_task
 
     def fake_run(argv, **kwargs):
         if argv[:2] != ["bash", "scripts/run_tests.sh"]:
@@ -157,11 +159,16 @@ def test_dispatch_preflights_stamped_evidence_tests_before_spawning(
         calls.append((argv, kwargs))
         return subprocess.CompletedProcess(argv, returncode, "test output", "test errors")
 
-    monkeypatch.setattr(kb, "_evidence_freshness_preflight_enabled", lambda: True)
-    monkeypatch.setattr(kb.subprocess, "run", fake_run)
-
     def fake_spawn(task, workspace):
         spawns.append((task.id, workspace))
+
+    def record_complete_task(*args, **kwargs):
+        complete_calls.append(kwargs)
+        return real_complete_task(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "_evidence_freshness_preflight_enabled", lambda: True)
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+    monkeypatch.setattr(kb, "complete_task", record_complete_task)
 
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
@@ -192,12 +199,15 @@ def test_dispatch_preflights_stamped_evidence_tests_before_spawning(
     assert len(spawns) == expected_spawns
     if returncode == 0:
         assert task_id not in {spawned_task_id for spawned_task_id, _assignee in result.spawned}
+        assert [call["expected_run_id"] for call in complete_calls] == [None]
         assert any(
             "Evidence-freshness preflight: finding not reproducible" in comment.body
             and "Exit code: 0" in comment.body
             and "test output" in comment.body
             for comment in comments
         )
+    else:
+        assert complete_calls == []
 
 
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
