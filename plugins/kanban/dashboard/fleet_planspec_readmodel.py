@@ -59,6 +59,28 @@ def classify_plan_record(record: dict[str, Any]) -> tuple[str, str, str]:
         ):
             return "held", "Die Kette wartet auf Operator-Freigabe.", "release"
         return "handed_off", "Der Plan wurde als Kette ans Board übergeben.", "open_task"
+    # A CLOSED PlanSpec is a TERMINAL state -- never a blocker and never a draft.
+    #
+    # The ingest precheck answers "may I hand this to the board?", and for a
+    # closed spec "no" is the CORRECT answer (``closed status: shipped``).  That
+    # verdict used to fall through to ``ingest_would_block`` below and painted
+    # every shipped or obsolete plan red as "Blockiert" -- measured 2026-07-29:
+    # 59 of 67 blocked badges were closed specs, and closing one MORE plan made
+    # the count go UP.  Likewise an unparseable spec that shipped last month is
+    # not a "draft" waiting to be written.
+    #
+    # Match on ``open``/``closed_reason``, NOT on a set of status strings: the
+    # real vault carries free text like "SHIPPED 2026-06-19 (89527c494 -- ...)"
+    # and "obsolete -- fix shipped+dogfood-proven 2026-06-18", so any literal
+    # enumeration would silently miss them.
+    # ``open is False`` -- NOT ``not open``: a record that simply does not carry
+    # the field (other callers, fixtures) must stay in the normal flow rather
+    # than be silently declared closed.
+    if record.get("open") is False or closed_reason:
+        closed_slug = f"{closed_reason} {record_status}"
+        if any(mark in closed_slug for mark in ("obsolete", "superseded", "not-needed")):
+            return "archived", "Die PlanSpec wurde als nicht mehr nötig geschlossen.", "none"
+        return "completed", "Die PlanSpec ist abgeschlossen.", "open_result"
     if not valid:
         reason = findings[0] if findings else "Der Plan ist noch nicht bindend."
         return "draft", reason, "edit"

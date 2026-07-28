@@ -579,7 +579,7 @@ describe("FleetView PlanSpec detail drawer", () => {
       expect(params.get("planSegment")).toBe("ready");
     });
     fireEvent.change(search, { target: { value: "Hermes Agent" } });
-    fireEvent.click(screen.getByRole("tab", { name: "Alle1" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Offen1" }));
     await waitFor(() => {
       const params = new URLSearchParams(screen.getByLabelText("Aktuelle URL-Suche").textContent ?? "");
       expect(params.has("planSegment")).toBe(false);

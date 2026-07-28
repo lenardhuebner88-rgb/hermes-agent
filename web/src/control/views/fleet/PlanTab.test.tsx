@@ -112,7 +112,7 @@ describe("PlanTab register", () => {
     renderPlanTab();
 
     expect(screen.queryByLabelText("Plan-Kennzahlen")).toBeNull();
-    expect(screen.getByRole("tab", { name: "Alle46" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Offen22" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Im Board7" })).toBeTruthy();
     expect(screen.getByRole("tab", { name: "Erledigt24" })).toBeTruthy();
   });
@@ -137,7 +137,7 @@ describe("PlanTab register", () => {
     expect(screen.getByText("Gehaltene Migration")).toBeTruthy();
     expect(screen.queryByText(longTopic)).toBeNull();
 
-    fireEvent.click(screen.getByRole("tab", { name: "Alle46" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Offen22" }));
     fireEvent.change(screen.getByLabelText("PlanSpecs durchsuchen"), { target: { value: "family-organizer" } });
     expect(screen.getByText("Gehaltene Migration")).toBeTruthy();
     expect(screen.queryByText(longTopic)).toBeNull();
@@ -158,16 +158,77 @@ describe("PlanTab register", () => {
       (node) => node.textContent,
     );
 
-    expect(orderedTopics()).toEqual(["Klärung", "Bereit zuerst", "Bereit danach", "Mit Befunden", "Erledigt"]);
+    expect(orderedTopics()).toEqual(["Klärung", "Bereit zuerst", "Bereit danach", "Mit Befunden"]);
 
     fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "findings" } });
-    expect(orderedTopics()).toEqual(["Mit Befunden", "Bereit zuerst", "Erledigt", "Bereit danach", "Klärung"]);
+    expect(orderedTopics()).toEqual(["Mit Befunden", "Bereit zuerst", "Bereit danach", "Klärung"]);
 
     fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "agent" } });
-    expect(orderedTopics()).toEqual(["Bereit danach", "Erledigt", "Klärung", "Mit Befunden", "Bereit zuerst"]);
+    expect(orderedTopics()).toEqual(["Bereit danach", "Klärung", "Mit Befunden", "Bereit zuerst"]);
 
     fireEvent.change(screen.getByRole("combobox", { name: "Pläne sortieren" }), { target: { value: "board" } });
-    expect(orderedTopics()).toEqual(["Bereit zuerst", "Klärung", "Mit Befunden", "Erledigt", "Bereit danach"]);
+    expect(orderedTopics()).toEqual(["Bereit zuerst", "Klärung", "Mit Befunden", "Bereit danach"]);
+
+    // Geschlossene Pläne sortieren sich im Erledigt-Register weiterhin ein.
+    fireEvent.click(screen.getByRole("tab", { name: "Erledigt24" }));
+    expect(orderedTopics()).toEqual(["Erledigt"]);
+  });
+
+  it("blendet geschlossene Pläne aus der Hauptansicht aus — Zähler bleibt, Register erreichbar", () => {
+    renderPlanTab({
+      plans: [
+        plan({ topic: "Offener Plan" }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/shipped.md",
+          filename: "shipped.md",
+          topic: "Ausgelieferter Plan",
+          open: false,
+          status: "shipped",
+          closed_reason: "SHIPPED 2026-06-19 (89527c494)",
+          action_state: "completed",
+        }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/archived.md",
+          filename: "archived.md",
+          topic: "Archivierter Plan",
+          open: false,
+          status: "archived",
+          closed_reason: "archived 2026-05-30",
+          action_state: "archived",
+        }),
+      ],
+    });
+
+    // Hauptansicht („Offen"): keine geschlossenen Pläne …
+    expect(screen.getByText("Offener Plan")).toBeTruthy();
+    expect(screen.queryByText("Ausgelieferter Plan")).toBeNull();
+    expect(screen.queryByText("Archivierter Plan")).toBeNull();
+    // … aber der Zähler am Erledigt-Register beweist: nichts ist gelöscht.
+    expect(screen.getByRole("tab", { name: "Erledigt24" })).toBeTruthy();
+
+    // Über das vorhandene Register erreichbar.
+    fireEvent.click(screen.getByRole("tab", { name: "Erledigt24" }));
+    expect(screen.getByText("Ausgelieferter Plan")).toBeTruthy();
+    expect(screen.getByText("Archivierter Plan")).toBeTruthy();
+    expect(screen.queryByText("Offener Plan")).toBeNull();
+  });
+
+  it("erklärt den Bereit-Zähler neben den wartenden Freigaben (Hermes-Default startet ohne)", () => {
+    renderPlanTab({
+      plans: [
+        plan({ topic: "Wartet auf Operator", freigabe: "operator" }),
+        plan({
+          path: "vault/03-Agents/Codex/plans/hermes-default.md",
+          filename: "hermes-default.md",
+          topic: "Hermes-Default ohne Operator-Gate",
+          freigabe: "GO",
+        }),
+      ],
+    });
+
+    expect(screen.getByText(
+      "Bereit heißt übergabereif: 1 wartet auf deine Freigabe · 1 startet ohne Operator-Freigabe (z. B. Hermes-Defaults).",
+    )).toBeTruthy();
   });
 
   it("opens the selected PlanSpec detail from the row", () => {

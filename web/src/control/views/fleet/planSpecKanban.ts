@@ -10,12 +10,27 @@ export function planSpecKanbanTone(state: PlanSpecRecord["kanban_state"]): ToneN
   return "zinc";
 }
 
+/**
+ * Ruhige deutsche Label für geschlossene Pläne ohne Board-Endzustand —
+ * die Dispositionen aus planSpecClosedDispositionLabel, übersetzt. Ein
+ * geschlossener Plan ist ein Endzustand, nie „offen" und nie „blocked".
+ */
+const CLOSED_DISPOSITION_LABELS: Record<string, string> = {
+  shipped: "ausgeliefert",
+  "obsolete/not-needed": "obsolet",
+  "kanban-archived": "archiviert",
+  "kanban-completed": "erledigt",
+};
+
 export function planSpecKanbanLabel(item: PlanSpecRecord): string {
   if (item.kanban_state === "archived") return "archiviert";
   if (item.kanban_state === "completed" || item.kanban_state === "done") return "erledigt";
   if (item.kanban_state === "blocked") return "blocked";
   if (item.kanban_state === "running") return "läuft";
   if (item.kanban_state === "queued") return "geplant";
+  if (planSpecIsClosed(item)) {
+    return CLOSED_DISPOSITION_LABELS[planSpecClosedDispositionLabel(item)] ?? "geschlossen";
+  }
   return item.valid ? "offen" : "blocked";
 }
 
