@@ -243,3 +243,100 @@ taskgraph_hints:
     assert detail["subtasks"][0]["body"] == "Read the final evidence."
     assert detail["subtasks"][0]["scope_files"] == ["RESULT.md"]
     assert any("closed status" in item for item in detail["source_findings"])
+
+
+# --- Geschlossene PlanSpecs sind Endzustaende, keine Blocker (2026-07-29) ---
+#
+# Gemessen am echten Vault-Bestand: 59 von 67 roten "Blockiert"-Badges im
+# Plan-Tab waren geschlossene Specs. Der Ingest-Precheck sagt fuer sie korrekt
+# would_block=true ("darf ich das uebergeben?" -> nein, ist ausgeliefert), und
+# genau diese richtige Antwort wurde als Alarm gerendert.
+
+_CLOSED_BASE = {
+    "valid": True,
+    "binding": True,
+    "kanban_state": "not_ingested",
+    "kanban_root_task_id": None,
+    "ingest_would_block": True,
+    "ingest_findings": ["closed status: shipped"],
+}
+
+
+def test_shipped_planspec_is_completed_not_blocked():
+    record = {**_CLOSED_BASE, "open": False, "status": "shipped",
+              "closed_reason": "closed status: shipped"}
+    state, reason, action = classify_plan_record(record)
+    assert state == "completed", (state, reason)
+    assert action == "open_result"
+    assert "closed status" not in reason
+
+
+def test_obsolete_planspec_is_archived_not_blocked():
+    record = {**_CLOSED_BASE, "open": False, "status": "obsolete",
+              "closed_reason": "closed status: obsolete",
+              "ingest_findings": ["closed status: obsolete"]}
+    assert classify_plan_record(record)[0] == "archived"
+
+
+def test_superseded_planspec_is_archived():
+    record = {**_CLOSED_BASE, "open": False, "status": "superseded",
+              "closed_reason": "closed status: superseded"}
+    assert classify_plan_record(record)[0] == "archived"
+
+
+def test_closed_status_free_text_still_resolves_to_a_terminal_state():
+    """Echte Vault-Form: der Status ist Freitext, keine Aufzaehlung traegt.
+
+    Beide Strings stehen woertlich so im Vault (Stand 2026-07-29). Eine
+    Klassifikation per Status-Menge wuerde sie still verfehlen.
+    """
+    shipped = {**_CLOSED_BASE, "open": False,
+               "status": "SHIPPED 2026-06-19 (89527c494 — live main + FE-Build + Gateway-Restart)",
+               "closed_reason": "closed status: SHIPPED 2026-06-19 (89527c494 — live main"}
+    obsolete = {**_CLOSED_BASE, "open": False,
+                "status": "obsolete — fix shipped+dogfood-proven 2026-06-18 (in main)",
+                "closed_reason": "closed status: obsolete — fix shipped+dogfood-proven"}
+    assert classify_plan_record(shipped)[0] == "completed"
+    assert classify_plan_record(obsolete)[0] == "archived"
+
+
+def test_closed_but_unparseable_planspec_is_not_a_draft():
+    """Eine im Juni ausgelieferte, heute nicht mehr parsbare Spec ist kein Entwurf."""
+    record = {"valid": False, "binding": False, "open": False, "status": "",
+              "closed_reason": "closed status: shipped", "kanban_state": "not_ingested",
+              "kanban_root_task_id": None, "ingest_would_block": True}
+    assert classify_plan_record(record)[0] == "completed"
+
+
+def test_open_planspec_with_real_finding_stays_blocked():
+    """Der Schutz bleibt: ein echter Ingest-Befund ist weiterhin rot."""
+    record = {**_CLOSED_BASE, "open": True, "status": "proposed", "closed_reason": None,
+              "ingest_findings": ["unknown board slug: lifecycle-canary-20260714"]}
+    state, reason, action = classify_plan_record(record)
+    assert state == "blocked"
+    assert action == "review_findings"
+    assert "unknown board slug" in reason
+
+
+def test_live_blocked_chain_outranks_a_closed_spec():
+    """Eine laufende, blockierte Kette bleibt handlungsrelevant."""
+    record = {**_CLOSED_BASE, "open": False, "status": "shipped",
+              "closed_reason": "closed status: shipped",
+              "kanban_state": "blocked", "kanban_root_task_id": "t_root"}
+    assert classify_plan_record(record)[0] == "blocked"
+
+
+def test_record_without_open_field_keeps_its_previous_classification():
+    """Fehlendes ``open`` heisst NICHT geschlossen.
+
+    ``not record.get("open")`` waere hier True und haette jeden Fixture-Record
+    still als Endzustand klassifiziert -- deshalb ``is False``.
+    """
+    ready = {"valid": True, "kanban_state": "not_ingested",
+             "kanban_root_task_id": None, "ingest_would_block": False}
+    assert "open" not in ready
+    assert classify_plan_record(ready)[0] == "ready"
+    assert classify_plan_record({**ready, "valid": False})[0] == "draft"
+    assert classify_plan_record(
+        {**ready, "ingest_would_block": True, "ingest_findings": ["unknown lane: ghost"]}
+    )[0] == "blocked"
