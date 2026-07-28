@@ -63,7 +63,11 @@ def client(plugin_module, kanban_home):
 @pytest.mark.parametrize(
     ("provider", "model", "expected"),
     [
-        ("openai-codex", "gpt-5.6-sol", ["minimal", "low", "medium", "high"]),
+        # 2026-07-28 live gemessen: der Endpoint lehnt `minimal` fuer dieses
+        # Modell mit HTTP 400 ab, `xhigh` geht durch. Der offizielle
+        # openai-Endpoint ist ein anderer und bleibt unangetastet.
+        ("openai-codex", "gpt-5.6-sol", ["low", "medium", "high", "xhigh"]),
+        ("openai", "gpt-5.6-sol", ["minimal", "low", "medium", "high"]),
         (None, "claude-fable-5", ["low", "medium", "high"]),
         ("moonshotai", "kimi-k2.6", ["low", "medium", "high"]),
         # F-REASONING-K3: short kimi-family ids on the kimi/kimi-coding transport
@@ -473,7 +477,7 @@ def test_model_probe_status_cache_and_get_lanes_join(
     data = response.json()
     coder = next(row for row in data["profiles"] if row["name"] == "coder")
     assert coder["reasoning_effort"] == "high"
-    assert coder["reasoning_support"] == ["minimal", "low", "medium", "high"]
+    assert coder["reasoning_support"] == ["low", "medium", "high", "xhigh"]
 
     model = next(
         row
@@ -485,7 +489,7 @@ def test_model_probe_status_cache_and_get_lanes_join(
     assert model["price_in_per_mtok_usd"] == 1.25
     assert model["price_out_per_mtok_usd"] == 10.0
     assert model["context_window"] == 400_000
-    assert model["reasoning_support"] == ["minimal", "low", "medium", "high"]
+    assert model["reasoning_support"] == ["low", "medium", "high", "xhigh"]
     assert model["probe"]["status"] == "ok"
     assert {
         "authenticated",
@@ -832,10 +836,10 @@ def test_lane_reasoning_support_claude_cli_is_full_effort_set(plugin_module):
     assert plugin_module._lane_reasoning_support("claude-cli", None, "") == full
     # hermes: unchanged delegation to reasoning_support_for.
     assert plugin_module._lane_reasoning_support("hermes", "openai-codex", "gpt-5.6-sol") == [
-        "minimal",
         "low",
         "medium",
         "high",
+        "xhigh",
     ]
     assert plugin_module._lane_reasoning_support("hermes", "xai", "grok-4") == []
 

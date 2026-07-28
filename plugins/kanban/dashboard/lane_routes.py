@@ -23,7 +23,28 @@ def reasoning_support_for(provider: str | None, model_id: str) -> list[str]:
     """Return the reasoning-effort values Hermes can actually transport."""
     provider = (provider or "").strip().lower()
     model_id = (model_id or "").strip().lower()
-    if provider in {"openai-codex", "openai"} and model_id.startswith("gpt-5"):
+    if provider == "openai-codex" and model_id.startswith("gpt-5"):
+        # Live gegen den Codex-Responses-Endpoint gemessen (2026-07-28,
+        # gpt-5.6-sol, Kontrollprobe mit 'bogus' → 400, der Test lehnt also
+        # wirklich ab):
+        #   minimal → HTTP 400 "Unsupported value: 'minimal' is not supported
+        #             with the 'gpt-5.6-sol-…' model. Supported values are:
+        #             'none', 'low', 'medium', 'high', and 'xhigh'."
+        #   xhigh   → exit 0
+        # `minimal` erreichte den Endpoint ohnehin nie: agent/transports/
+        # codex.py klemmt es still auf `low` (_effort_clamp), das UI bot also
+        # eine Stufe an, die der Nutzer nie bekommt. `xhigh` dagegen geht durch
+        # — die xhigh-Klemme dort haengt an ``is_xai_responses``, nicht an
+        # diesem Transport — und fehlte im Angebot.
+        # Bewusst NICHT aufgenommen: `none` (schaltet Reasoning ab, ist kein
+        # Effort-Grad) und `max` (kam mit exit 0 durch, wird vom Modell in der
+        # Fehlermeldung oben aber nicht als unterstuetzt gefuehrt — kein
+        # belegter eigener Grad).
+        return ["low", "medium", "high", "xhigh"]
+    if provider == "openai" and model_id.startswith("gpt-5"):
+        # Die offizielle OpenAI-API ist ein anderer Endpoint als der
+        # ChatGPT-Abo-Transport oben und wurde hier nicht gemessen — deshalb
+        # unveraendert, statt den Codex-Befund ungeprueft zu uebertragen.
         return ["minimal", "low", "medium", "high"]
     if model_id.startswith("claude") or provider == "anthropic":
         return ["low", "medium", "high"]
