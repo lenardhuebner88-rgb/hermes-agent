@@ -567,3 +567,44 @@ def test_synthesize_to_wav_real_piper_smoke(tmp_path):
         assert wav_file.getsampwidth() == 2
         assert wav_file.getframerate() > 0
         assert wav_file.getnframes() > 0
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_resolve_claude_bin_prefers_env(monkeypatch):
+    """Kill bool_op_swap L130: or -> and.
+
+    With the mutant, ``os.environ.get(...) and shutil.which(...)`` is
+    falsy when the env var is set but which() returns None, so the
+    fallback "claude" is returned instead of the env value.
+    """
+    monkeypatch.setenv("HERMES_CLAUDE_BIN", "/custom/claude")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    from hermes_cli.voice_spar_session import resolve_claude_bin
+
+    assert resolve_claude_bin() == "/custom/claude"
+
+
+def test_resolve_codex_bin_prefers_env(monkeypatch):
+    """Kill bool_op_swap L134: or -> and."""
+    monkeypatch.setenv("HERMES_CODEX_BIN", "/custom/codex")
+    monkeypatch.setattr("shutil.which", lambda _: None)
+    from hermes_cli.voice_spar_session import resolve_codex_bin
+
+    assert resolve_codex_bin() == "/custom/codex"
+
+
+def test_persistent_claude_lane_defaults_cwd_to_home():
+    """Kill bool_op_swap L479: or -> and.
+
+    With the mutant, ``cwd and str(Path.home())`` is falsy when cwd is
+    None, so _cwd becomes None instead of the home directory.
+    """
+    lane = PersistentClaudeLane(
+        model="claude-sonnet-4-20250514",
+        timeout=30.0,
+        cwd=None,
+        system_instruction="test",
+    )
+    assert lane._cwd == str(Path.home())
