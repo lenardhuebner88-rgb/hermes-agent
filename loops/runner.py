@@ -1995,7 +1995,20 @@ class LoopRunner:
                     )
                     self.notify(msg)
                     self.report()
-                    return True
+                    # RuntimeError statt `return True`: der Rückgabewert hätte
+                    # diesen Abbruch nicht nach außen getragen. main() rechnet
+                    # `rc = 0 if night_ok or not pack.autoland else 4` — für jeden
+                    # Pack ohne autoland (die Mehrheit) wäre selbst ein
+                    # `return False` noch Exit 0 geworden, und die Unit hätte
+                    # Erfolg gemeldet, während der Planner zweimal hintereinander
+                    # seinen Statuskontrakt gebrochen hat.
+                    #
+                    # Die Verify-Phase macht es nebenan bereits richtig
+                    # (fail-closed Revert); nur die Plan-Phase endete grün. Über
+                    # RuntimeError greift der vorhandene ABBRUCH-Pfad in main()
+                    # und liefert Exit 3 — vorbei am autoland-Rewrite, der genau
+                    # dafür nicht gedacht ist (Befund 2026-07-28).
+                    raise RuntimeError(msg)
                 # Retry hat Pläne geliefert → normal weiter in cmd_run.
         # Nicht-DRY-Ende (Pläne vorhanden / skip_plan / Build-Pfad) → Streak nullen.
         # Sweep-DRY in cmd_run bleibt unberührt (kein _note_dry_end dort).
@@ -2545,7 +2558,11 @@ def main(argv: list[str] | None = None) -> int:
             runner.say(f"START cmd={args.cmd} {datetime.now().strftime('%F %H:%M:%S')}")
             rc = 0
             if args.cmd == "plan":
-                runner.cmd_plan(fresh=args.fresh)
+                # Rückgabewert NICHT verwerfen: `cmd_plan` meldet mit False einen
+                # abgebrochenen Planner (z.B. Usage-Limit). Der Wert wurde hier
+                # bisher weggeworfen, `rc` blieb 0 — ein gescheiterter Planlauf
+                # meldete Erfolg. Gleiche Konvention wie `land` darunter.
+                rc = 0 if runner.cmd_plan(fresh=args.fresh) else 4
             elif args.cmd == "run":
                 runner.cmd_run(fresh=args.fresh)
             elif args.cmd == "land":
