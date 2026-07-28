@@ -1,0 +1,11 @@
+[Unit]
+Description=Wächter über die Wächter — meldet still gescheiterte systemd-User-Units nach Discord
+Documentation=file:/home/piet/.hermes/scripts/failed-unit-watch.sh
+
+[Service]
+Type=oneshot
+# Login-Shell: das Skript ruft python3, systemctl und journalctl über den
+# Nutzer-PATH auf. Genau dieser Punkt ist der Grund, warum pa-backup.service
+# seit Tagen scheitert (rclone: command not found) — nicht wiederholen.
+ExecStart=/bin/bash -lc '/home/piet/.hermes/scripts/failed-unit-watch.sh'
+TimeoutStartSec=180
