@@ -1940,9 +1940,15 @@ from tools.registry import registry, tool_error
 
 
 def _check_file_reqs():
-    """Lazy wrapper to avoid circular import with tools/__init__.py."""
-    from tools import check_file_requirements
-    return check_file_requirements()
+    """File tools only require the terminal backend to be available.
+
+    Import the concrete submodule instead of relying on an attribute exported by
+    ``tools.__init__``. Editable installs can resolve child modules while a
+    foreign ``tools/`` directory has already created a namespace-package parent.
+    """
+    from .terminal_tool import check_terminal_requirements
+
+    return check_terminal_requirements()
 
 READ_FILE_SCHEMA = {
     "name": "read_file",

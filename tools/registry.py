@@ -218,9 +218,12 @@ def _check_fn_cached(fn: Callable) -> bool:
             )
             return True
 
-        # No recent success (or grace expired) — honor the failure. Log it so
-        # silent tool loss in quiet mode (subagents) is diagnosable.
-        logger.warning(
+        # No recent success (or grace expired) — honor the failure. An exception
+        # is an error rather than a warning: otherwise an import failure leaves
+        # the turn without its toolset and looks like a model-choice failure.
+        # A normal False result remains a warning for optional requirements.
+        logger.log(
+            logging.ERROR if error_detail else logging.WARNING,
             "check_fn %s %s%s; dependent tools will be unavailable this turn",
             getattr(fn, "__qualname__", fn),
             "raised" if error_detail else "returned False",
