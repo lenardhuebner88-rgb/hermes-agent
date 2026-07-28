@@ -6,22 +6,39 @@ import subprocess
 
 import pytest
 
+import hermes_cli.affected_test_mapping as affected_test_mapping
+from hermes_cli.affected_test_budget import check_affected_test_budget
 from hermes_cli.affected_test_mapping import (
+    AFFECTED_TIME_BUDGET_EXIT_CODE,
+    AffectedTestBudgetExceeded,
     EXPLICIT_TEST_PATTERNS,
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError,
+    SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
     UNMAPPED_EXIT_CODE,
     WORKER_FALLBACK_MAX_TEST_FILES,
-    WORKER_UNION_MAX_TEST_FILES,
     affected_pytest_modules,
     build_test_index,
     changed_paths,
     census_repository,
     classify_changed_paths,
 )
+from hermes_cli.symbol_test_narrowing import SymbolDiffSpec
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mapping_contracts_from_operational_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1000000")
+
+
+@pytest.fixture(scope="module")
+def real_test_index():
+    return build_test_index(REPO_ROOT)
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -448,39 +465,242 @@ def test_explicit_direct_and_import_strategies_are_unioned(tmp_path: Path) -> No
     }
 
 
-def test_worker_union_cap_is_deterministic_and_integration_is_complete() -> None:
-    first_worker = classify_changed_paths(
+def test_real_historical_diff_exposes_symbol_narrowing_strategy() -> None:
+    index = build_test_index(REPO_ROOT)
+
+    record = classify_changed_paths(
         REPO_ROOT,
-        ["hermes_cli/__init__.py"],
-        mode="worker",
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=index,
+        diff_spec=SymbolDiffSpec(ref="15ac3b65d^", right="15ac3b65d"),
     ).records[0]
-    second_worker = classify_changed_paths(
+
+    assert SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD == 60
+    assert "import→symbol" in record.strategies
+    assert "import" not in record.strategies
+    assert record.state == "selected"
+
+
+def test_real_uncovered_symbol_selects_curated_tests_and_warns(
+    real_test_index,
+) -> None:
+    plan = classify_changed_paths(
         REPO_ROOT,
-        ["hermes_cli/__init__.py"],
-        mode="worker",
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="7f5e4f848^", right="7f5e4f848"),
+    )
+    record = plan.records[0]
+    expected_tests = {
+        str(path.relative_to(REPO_ROOT))
+        for pattern in EXPLICIT_TEST_PATTERNS["hermes_cli/kanban_db.py"]
+        for path in REPO_ROOT.glob(pattern)
+        if path.is_file()
+    }
+
+    assert len(expected_tests) == 29
+    assert record.state == "selected"
+    assert set(record.tests) == expected_tests
+    assert record.warnings == (
+        "symbol coverage gap for hermes_cli/kanban_db.py: changed symbol without "
+        "test references: _run_evidence_freshness_preflight; the 29 curated/direct "
+        "test files for this path ran instead of the module-level import set and "
+        "the affected-test gate intentionally remains non-red",
+    )
+    assert plan.unmapped_paths == []
+    assert UNMAPPED_EXIT_CODE == 4
+
+
+def test_real_diff_outside_symbols_keeps_module_imports_without_a4_warning(
+    real_test_index,
+) -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="c1f623fcc^", right="c1f623fcc"),
     ).records[0]
+
+    assert "import" in record.strategies
+    assert "import→symbol" not in record.strategies
+    assert set(real_test_index.imports["hermes_cli.kanban_db"]).issubset(record.tests)
+    assert record.warnings == ()
+
+
+def test_mixed_referenced_and_unreferenced_symbols_do_not_warn(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "pkg" / "runtime.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    for index in range(SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1):
+        (tests / f"test_runtime_{index:03d}.py").write_text(
+            "from pkg import runtime\n\n"
+            f"def test_runtime_{index:03d}():\n"
+            "    assert runtime.covered() == 1\n",
+            encoding="utf-8",
+        )
+    _init_repo(tmp_path)
+    source.write_text(
+        "def covered():\n"
+        "    return 2\n\n"
+        "def uncovered():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    record = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="integration",
+        diff_spec=SymbolDiffSpec(ref="HEAD"),
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.strategies == ("import→symbol",)
+    assert len(record.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
+    assert record.warnings == ()
+
+
+def test_uncovered_symbol_without_curated_or_direct_net_keeps_module_imports(
+    tmp_path: Path,
+) -> None:
+    """A named gap must never turn into a green run over zero test files.
+
+    Freigabe 3 ("run the curated EXPLICIT_TEST_PATTERNS plus a loud warning")
+    presumes a curated net exists. Measured 2026-07-28: 6 of the 14 modules above
+    the fan-out threshold have neither a curated pattern nor a direct test
+    (gateway/run.py, gateway/platforms/base.py, run_agent.py, cli.py,
+    hermes_cli/main.py, hermes_cli/auth.py). Without the fallback below, a change
+    to an untested symbol in those selects nothing at all and still passes.
+    """
+    source = tmp_path / "pkg" / "runtime.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    # No tests/pkg/test_runtime.py => no `direct` hit; pkg/runtime.py has no
+    # EXPLICIT_TEST_PATTERNS entry => no curated hit. Only the import fan-out.
+    for index in range(SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1):
+        (tests / f"test_runtime_{index:03d}.py").write_text(
+            "from pkg import runtime\n\n"
+            f"def test_runtime_{index:03d}():\n"
+            "    assert runtime.covered() == 1\n",
+            encoding="utf-8",
+        )
+    _init_repo(tmp_path)
+    # Change ONLY the symbol no test references.
+    source.write_text(
+        "def covered():\n"
+        "    return 1\n\n"
+        "def uncovered():\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    record = classify_changed_paths(
+        tmp_path,
+        ["pkg/runtime.py"],
+        mode="integration",
+        diff_spec=SymbolDiffSpec(ref="HEAD"),
+    ).records[0]
+
+    assert record.state == "selected"
+    # The module-level set survives instead of collapsing to zero files.
+    assert len(record.tests) == SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD + 1
+    assert record.strategies == ("import",)
+    assert len(record.warnings) == 1
+    warning = record.warnings[0]
+    assert "symbol coverage gap for pkg/runtime.py" in warning
+    assert "uncovered" in warning
+    # The message must not claim a curated net that does not exist.
+    assert "no curated or direct test covers this path" in warning
+    assert "EXPLICIT_TEST_PATTERNS ran" not in warning
+
+
+def test_real_gateway_config_commit_does_not_warn(
+    real_test_index,
+) -> None:
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["gateway/config.py"],
+        mode="integration",
+        index=real_test_index,
+        diff_spec=SymbolDiffSpec(ref="9cd729684^", right="9cd729684"),
+    ).records[0]
+
+    assert record.state == "selected"
+    assert record.tests
+    assert "import→symbol" in record.strategies
+    assert record.warnings == ()
+
+
+def test_worker_union_budget_failure_is_deterministic_and_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     integration = classify_changed_paths(
         REPO_ROOT,
         ["hermes_cli/__init__.py"],
         mode="integration",
     ).records[0]
+    cache = tmp_path / "durations.json"
+    cache.write_text(
+        json.dumps({path: 10.0 for path in integration.tests}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1")
+    monkeypatch.setattr(
+        affected_test_mapping,
+        "check_affected_test_budget",
+        lambda repo_root, targets: check_affected_test_budget(
+            repo_root,
+            targets,
+            durations_path=cache,
+        ),
+    )
 
-    assert WORKER_UNION_MAX_TEST_FILES == 217
-    assert first_worker.state == "selected"
-    assert first_worker.strategies == ("explicit", "import")
-    assert first_worker.tests == second_worker.tests
-    assert len(first_worker.tests) == WORKER_UNION_MAX_TEST_FILES
-    assert len(integration.tests) > WORKER_UNION_MAX_TEST_FILES
-    assert set(first_worker.tests) < set(integration.tests)
-    assert (
-        f"selected 217 of {len(integration.tests)} tests and discarded "
-        f"{len(integration.tests) - 217}"
-    ) in first_worker.warnings[0]
-    assert integration.warnings == ()
-    assert "package_fallback" not in first_worker.strategies
+    with pytest.raises(AffectedTestBudgetExceeded) as first:
+        classify_changed_paths(
+            REPO_ROOT,
+            ["hermes_cli/__init__.py"],
+            mode="worker",
+        )
+    with pytest.raises(AffectedTestBudgetExceeded) as repeated:
+        classify_changed_paths(
+            REPO_ROOT,
+            ["hermes_cli/__init__.py"],
+            mode="worker",
+        )
+
+    assert str(first.value) == str(repeated.value)
+    assert first.value.estimate.file_count == len(integration.tests)
+    assert first.value.estimate.file_count > 217
+    assert "predicted loaded wall time" in str(first.value)
+    assert "budget 1.0s" in str(first.value)
+    assert "files without duration forecast" in str(first.value)
+    assert "top-5 estimated files" in str(first.value)
+    assert "discarded" not in str(first.value)
 
 
-def test_worker_union_cap_prioritizes_direct_then_explicit_then_import(
+def test_worker_union_budget_failure_keeps_direct_explicit_import_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -505,38 +725,40 @@ def test_worker_union_cap_prioritizes_direct_then_explicit_then_import(
         "pkg/runtime.py",
         ("tests/test_explicit.py",),
     )
-    monkeypatch.setattr(
-        "hermes_cli.affected_test_mapping.WORKER_UNION_MAX_TEST_FILES",
-        2,
+    (tmp_path / "test_durations.json").write_text(
+        json.dumps(
+            {
+                "tests/pkg/test_runtime.py": 100.0,
+                "tests/test_explicit.py": 100.0,
+                "tests/test_importer.py": 100.0,
+            }
+        ),
+        encoding="utf-8",
     )
-
-    worker = classify_changed_paths(
-        tmp_path,
-        ["pkg/runtime.py"],
-        mode="worker",
-    ).records[0]
-    repeated = classify_changed_paths(
-        tmp_path,
-        ["pkg/runtime.py"],
-        mode="worker",
-    ).records[0]
     integration = classify_changed_paths(
         tmp_path,
         ["pkg/runtime.py"],
         mode="integration",
     ).records[0]
 
-    assert worker.tests == repeated.tests
-    assert set(worker.tests) == {
-        "tests/pkg/test_runtime.py",
-        "tests/test_explicit.py",
-    }
-    assert integration.tests == (
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1")
+    with pytest.raises(AffectedTestBudgetExceeded) as caught:
+        classify_changed_paths(
+            tmp_path,
+            ["pkg/runtime.py"],
+            mode="worker",
+        )
+
+    assert set(integration.tests) == {
         "tests/pkg/test_runtime.py",
         "tests/test_explicit.py",
         "tests/test_importer.py",
-    )
-    assert "selected 2 of 3 tests and discarded 1" in worker.warnings[0]
+    }
+    assert caught.value.estimate.file_count == 3
+    assert "3 selected test files" in str(caught.value)
+    assert "0 files without duration forecast" in str(caught.value)
+    assert "top-3 estimated files" in str(caught.value)
+    assert "discarded" not in str(caught.value)
 
 
 def test_stress_registry_files_are_not_pytest_import_evidence() -> None:
@@ -662,5 +884,6 @@ def test_synthetic_production_path_is_unmapped(tmp_path: Path) -> None:
     )
 
     assert UNMAPPED_EXIT_CODE == 4
+    assert AFFECTED_TIME_BUDGET_EXIT_CODE == 5
     assert plan.unmapped_paths == ["synthetic/unmapped_contract.py"]
     assert plan.selected_tests == []

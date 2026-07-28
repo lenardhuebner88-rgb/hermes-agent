@@ -17,6 +17,9 @@ empty list as sufficient evidence. Its path states are:
 
 `unmapped` stops before pytest with exit 4. Exit 3 remains exclusively the
 branch-age preflight (`not_run`), exit 1 remains a reproduced test failure, and
+exit 5 means the complete selection exceeded its affected-test time budget.
+All three pre-test holds preserve their distinct meaning; `loops/gate.sh`
+continues to map exit 5 through its ordinary `GATE_FAIL` path.
 exit 0 without pytest is allowed only when every changed path is
 `not_applicable` or `allowlisted`. Mapper/configuration errors also stop before
 pytest, but are reported as errors rather than as `unmapped`.
@@ -27,23 +30,30 @@ interactive worker mode and 800 in integration. An oversized fallback that
 leaves no focused test is `unmapped` instead of being discarded after a
 successful classification.
 
-The worker additionally caps each focused `direct ∪ explicit ∪ import` union at
-217 test files. That number is the smallest cap which preserves the measured
-217-file `hermes_cli/kanban_db.py` core case without truncation; the same run
-used 982.51 seconds of the 1200-second worker budget, leaving 217.49 seconds
-(18.1 percent) of observed reserve. Oversized unions are deterministically
-truncated by evidence strength—direct first, explicit second, import third,
-stable-sorted within each tier—and remain `selected`, not `unmapped`. The
-standalone worker prints the selected/discarded counts and source path to
-stderr. Integration never applies this union cap and therefore runs the full
-evidence set; the nightly full suite remains the final backstop. This is an
-explicit tempo/coverage trade at the interactive edge, not a reversal of the
-additive mapping contract.
+Focused `direct ∪ explicit ∪ import` unions are never truncated. Their complete,
+deduplicated selection is estimated against the execution path's time budget.
+The default is 1200 seconds, matching the narrower post-merge integrator gate;
+`scripts/run-affected.sh` supplies 3600 seconds for the worker/loop path.
+`HERMES_AFFECTED_TIME_BUDGET` can override either value.
 
-**Accepted limit — thin worker-union headroom.** The current
-`hermes_cli/kanban_db.py` union selects 212 files, only five below the 217-file
-cap. Any adjustment must follow fresh runtime measurements rather than a
-guessed performance margin.
+The estimator reads `test_durations.json` but accepts only finite,
+non-negative, repository-relative `tests/…` entries. Cache values are treated
+as serial per-file subprocess seconds. The loaded wall estimate is
+`max(serial sum / HERMES_TEST_WORKERS, slowest file) × 3.5`, where the default
+worker count is 8 and 3.5 represents the measured 3.3–3.6× shared-host
+dilation. A selected file without a forecast receives a conservative 60-second
+estimate and is counted explicitly. A missing or corrupt cache does not block
+the gate: the full selection remains intact and the standalone mapper prints a
+visible note that the budget check was skipped.
+
+An over-budget selection stops fail-closed before pytest with exit 5. Its
+message includes predicted loaded wall time, budget, selected-file count,
+missing-forecast count, and the five most expensive estimated files. The
+former 217-file cap was removed because it was backward-derived from one
+measured selection and then alphabetically discarded real coverage. After A2,
+the fixed file count was also meaningless as a runtime metric—even though a
+real `gateway/config.py` case still exceeded the numeric cap—because the
+remaining selections vary materially in per-file cost.
 
 Explicit patterns are additive precision hints, not coverage filters. For a
 production Python path their existing targets are unioned with mirrored direct

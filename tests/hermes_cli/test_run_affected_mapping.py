@@ -54,4 +54,6 @@ def test_core_edit_selects_focused_import_test_before_fallback_cap(tmp_path: Pat
     )
 
     assert bounded.stdout.split() == ["tests/hermes_cli/test_core_contract.py"]
-    assert bounded.stderr == ""
+    assert "time-budget check skipped" in bounded.stderr
+    assert "duration cache missing" in bounded.stderr
+    assert "complete selection retained (1 file)" in bounded.stderr

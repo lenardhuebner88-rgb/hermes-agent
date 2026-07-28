@@ -11,17 +11,28 @@ import json
 import os
 import subprocess
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
+from hermes_cli.affected_test_budget import (
+    AffectedTestBudgetConfigError,
+    AffectedTestTimeEstimate,
+    check_affected_test_budget,
+)
+from hermes_cli.symbol_test_narrowing import (
+    SymbolDiffSpec,
+    narrow_imported_tests,
+)
 
 WORKER_FALLBACK_MAX_TEST_FILES = 200
 INTEGRATION_FALLBACK_MAX_TEST_FILES = 800
-WORKER_UNION_MAX_TEST_FILES = 217
+# Import fan-out is the measured noise axis; modules at 60 files or below stay exact.
+SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD = 60
 UNMAPPED_EXIT_CODE = 4
+AFFECTED_TIME_BUDGET_EXIT_CODE = 5
 EXCEPTIONS_PATH = Path("config/affected-test-exceptions.json")
 
 _EXCEPTION_DISPOSITIONS = frozenset(
@@ -204,6 +215,14 @@ class MappingError(RuntimeError):
     """Git, configuration or classification failure."""
 
 
+class AffectedTestBudgetExceeded(MappingError):
+    """The complete selected test set cannot fit its configured time budget."""
+
+    def __init__(self, estimate: AffectedTestTimeEstimate) -> None:
+        self.estimate = estimate
+        super().__init__(estimate.fail_closed_message())
+
+
 class GitTimeoutError(MappingError):
     """A git invocation exceeded the shared worktree timeout."""
 
@@ -242,6 +261,7 @@ class AffectedTestPlan:
     mode: str
     fallback_max_test_files: int
     records: tuple[PathClassification, ...]
+    notes: tuple[str, ...] = ()
 
     @property
     def selected_tests(self) -> list[str]:
@@ -264,13 +284,16 @@ class AffectedTestPlan:
         return result
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "mode": self.mode,
             "fallback_max_test_files": self.fallback_max_test_files,
             "counts": self.counts,
             "selected_tests": self.selected_tests,
             "records": [record.to_dict() for record in self.records],
         }
+        if self.notes:
+            payload["notes"] = list(self.notes)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -345,12 +368,35 @@ def tracked_and_untracked_python_paths(repo_root: Path) -> list[str]:
     )
 
 
-def changed_paths(
+def _default_diff_base(repo_root: Path) -> str:
+    try:
+        base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
+    except GitTimeoutError:
+        raise
+    except MappingError:
+        base = ""
+    return base or "HEAD"
+
+
+def _resolve_diff_spec(
     repo_root: Path,
     ref: str | None,
     right: str | None = None,
+) -> SymbolDiffSpec:
+    return SymbolDiffSpec(
+        ref=ref,
+        right=right,
+        default_base=_default_diff_base(repo_root)
+        if right is None and ref is None
+        else None,
+    )
+
+
+def _changed_paths_for_spec(
+    repo_root: Path,
+    diff_spec: SymbolDiffSpec,
 ) -> list[str]:
-    if right is not None:
+    if diff_spec.right is not None:
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -358,12 +404,12 @@ def changed_paths(
                 "diff",
                 "--diff-filter=ACDMRT",
                 "--name-only",
-                ref or "HEAD",
-                right,
+                diff_spec.ref or "HEAD",
+                diff_spec.right,
             ).splitlines()
             if line
         }
-    elif ref:
+    elif diff_spec.ref:
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -371,18 +417,12 @@ def changed_paths(
                 "diff",
                 "--diff-filter=ACDMRT",
                 "--name-only",
-                ref,
+                diff_spec.ref,
             ).splitlines()
             if line
         }
     else:
-        try:
-            base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
-        except GitTimeoutError:
-            raise
-        except MappingError:
-            base = ""
-        base_ref = base or "HEAD"
+        base_ref = diff_spec.default_base or "HEAD"
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -405,6 +445,26 @@ def changed_paths(
             if line
         )
     return sorted(changed)
+
+
+def changed_paths_with_diff_spec(
+    repo_root: Path,
+    ref: str | None,
+    right: str | None = None,
+) -> tuple[list[str], SymbolDiffSpec]:
+    """Return changed paths and the one resolved diff used to derive them."""
+
+    diff_spec = _resolve_diff_spec(repo_root, ref, right)
+    return _changed_paths_for_spec(repo_root, diff_spec), diff_spec
+
+
+def changed_paths(
+    repo_root: Path,
+    ref: str | None,
+    right: str | None = None,
+) -> list[str]:
+    paths, _ = changed_paths_with_diff_spec(repo_root, ref, right)
+    return paths
 
 
 def _is_test_path(path: str) -> bool:
@@ -653,13 +713,15 @@ def load_exceptions(
     return result, rejected
 
 
-def classify_changed_paths(
+def _classify_changed_paths(
     repo_root: Path,
     paths: Sequence[str],
     *,
     mode: str = "integration",
     exceptions_path: Path | None = None,
     index: TestIndex | None = None,
+    diff_spec: SymbolDiffSpec | None = None,
+    enforce_time_budget: bool,
 ) -> AffectedTestPlan:
     if mode not in {"worker", "integration"}:
         raise MappingError(f"unknown affected-test mode: {mode}")
@@ -769,8 +831,36 @@ def classify_changed_paths(
         if test_index is None:
             test_index = build_test_index(repo_root)
         imported = test_index.imports.get(module_import, ())
+        uncovered_symbols: tuple[str, ...] = ()
+        uncovered_without_net = False
         if imported:
-            strategies.append("import")
+            broad_imported = imported
+            narrowing = narrow_imported_tests(
+                repo_root=repo_root,
+                source_path=source_path,
+                module_import=module_import,
+                imported_tests=imported,
+                all_test_paths=test_index.paths,
+                threshold=SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
+                diff_spec=diff_spec,
+                run_git=_run_git,
+                git_error_type=MappingError,
+                git_timeout_error_type=GitTimeoutError,
+            )
+            imported = narrowing.tests
+            if narrowing.reason == "no_symbol_test_matches":
+                uncovered_symbols = narrowing.changed_symbols
+                # Dropping the module-level set on an untested symbol is only safe
+                # where a curated or direct test still covers the path. Measured
+                # 2026-07-28: of the 14 modules above the fan-out threshold, 6 have
+                # neither (gateway/run.py, gateway/platforms/base.py, run_agent.py,
+                # cli.py, hermes_cli/main.py, hermes_cli/auth.py) — zeroing there
+                # would select no test at all and still report green.
+                if not direct and not explicit:
+                    imported = broad_imported
+                    uncovered_without_net = True
+            narrowed = narrowing.applied and not uncovered_without_net
+            strategies.append("import→symbol" if narrowed else "import")
         prioritized_tests: list[str] = []
         seen_tests: set[str] = set()
         for evidence in (direct, explicit, imported):
@@ -781,20 +871,25 @@ def classify_changed_paths(
         selected_warnings = (
             [rejected_warning] if rejected_warning is not None else []
         )
-        if (
-            mode == "worker"
-            and len(prioritized_tests) > WORKER_UNION_MAX_TEST_FILES
-        ):
-            original_count = len(prioritized_tests)
-            prioritized_tests = prioritized_tests[:WORKER_UNION_MAX_TEST_FILES]
+        if uncovered_symbols:
+            symbol_label = "symbol" if len(uncovered_symbols) == 1 else "symbols"
+            if uncovered_without_net:
+                coverage_note = (
+                    "no curated or direct test covers this path, so all "
+                    f"{len(prioritized_tests)} module-level import matches still run"
+                )
+            else:
+                coverage_note = (
+                    f"the {len(prioritized_tests)} curated/direct test files for "
+                    "this path ran instead of the module-level import set"
+                )
             selected_warnings.append(
-                "worker union cap selected "
-                f"{len(prioritized_tests)} of {original_count} tests and discarded "
-                f"{original_count - len(prioritized_tests)}; integration mode runs "
-                "the full selection and the nightly full suite remains the backstop"
+                f"symbol coverage gap for {source_path}: changed {symbol_label} "
+                f"without test references: {', '.join(uncovered_symbols)}; "
+                f"{coverage_note} and the affected-test gate intentionally "
+                "remains non-red"
             )
-
-        if prioritized_tests:
+        if prioritized_tests or uncovered_symbols:
             if source_path in exceptions:
                 raise MappingError(
                     f"mapped path must not remain allowlisted: {source_path}"
@@ -893,10 +988,44 @@ def classify_changed_paths(
             )
         )
 
-    return AffectedTestPlan(
+    plan = AffectedTestPlan(
         mode=mode,
         fallback_max_test_files=fallback_limit,
         records=tuple(records),
+    )
+    if not enforce_time_budget:
+        return plan
+    try:
+        budget_check = check_affected_test_budget(repo_root, plan.selected_tests)
+    except AffectedTestBudgetConfigError as exc:
+        raise MappingError(str(exc)) from exc
+    if budget_check.note:
+        plan = replace(plan, notes=(budget_check.note,))
+    if (
+        budget_check.estimate is not None
+        and budget_check.estimate.exceeds_budget
+    ):
+        raise AffectedTestBudgetExceeded(budget_check.estimate)
+    return plan
+
+
+def classify_changed_paths(
+    repo_root: Path,
+    paths: Sequence[str],
+    *,
+    mode: str = "integration",
+    exceptions_path: Path | None = None,
+    index: TestIndex | None = None,
+    diff_spec: SymbolDiffSpec | None = None,
+) -> AffectedTestPlan:
+    return _classify_changed_paths(
+        repo_root,
+        paths,
+        mode=mode,
+        exceptions_path=exceptions_path,
+        index=index,
+        diff_spec=diff_spec,
+        enforce_time_budget=True,
     )
 
 
@@ -912,6 +1041,8 @@ def affected_pytest_modules(
         raise MappingError(
             "unmapped production paths: " + ", ".join(plan.unmapped_paths)
         )
+    for note in plan.notes:
+        warnings.warn(note, RuntimeWarning, stacklevel=2)
     return plan.selected_tests
 
 
@@ -926,9 +1057,11 @@ def census_repository(
         for path in tracked_python_paths(repo_root)
         if not _is_under_tests(path) and (repo_root / path).is_file()
     ]
-    return classify_changed_paths(
+    return _classify_changed_paths(
         repo_root,
         sources,
         mode=mode,
         exceptions_path=exceptions_path,
+        # Census classifies inventory but never executes its aggregate test set.
+        enforce_time_budget=False,
     )

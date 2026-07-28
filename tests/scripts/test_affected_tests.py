@@ -5,7 +5,18 @@ import importlib.util
 from pathlib import Path
 import subprocess
 
+import pytest
+
+from hermes_cli.affected_test_budget import AffectedTestTimeEstimate
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mapping_contracts_from_operational_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1000000")
 
 
 def _load_module():
@@ -204,31 +215,38 @@ def test_repository_inventory_has_zero_unmapped_production_sources():
     assert integration.unmapped_paths == []
 
 
-def test_worker_union_cap_warning_is_printed_to_stderr(monkeypatch, capsys):
+def test_worker_union_budget_failure_is_printed_to_stderr(monkeypatch, capsys):
     mod = _load_module()
-    integration_count = len(
-        mod.classify_changed_paths(
-            REPO_ROOT,
-            ["hermes_cli/__init__.py"],
-            mode="integration",
-        ).selected_tests
+    estimate = AffectedTestTimeEstimate(
+        predicted_seconds=1400.0,
+        budget_seconds=1200.0,
+        serial_seconds=3200.0,
+        slowest_seconds=400.0,
+        file_count=218,
+        missing_forecast_count=2,
+        workers=8,
+        top_files=(),
     )
     monkeypatch.setattr(mod, "_repo_root", lambda: REPO_ROOT)
     monkeypatch.setattr(
         mod,
-        "changed_paths",
-        lambda repo_root, ref: ["hermes_cli/__init__.py"],
+        "changed_paths_with_diff_spec",
+        lambda repo_root, ref: (["hermes_cli/__init__.py"], None),
+    )
+    monkeypatch.setattr(
+        mod,
+        "classify_changed_paths",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            mod.AffectedTestBudgetExceeded(estimate)
+        ),
     )
 
     rc = mod.main(["affected_tests.py", "--mode", "worker"])
 
     captured = capsys.readouterr()
-    assert rc == 0
-    assert len(captured.out.split()) == 217
-    assert "affected-tests: hermes_cli/__init__.py:" in captured.err
-    assert (
-        f"selected 217 of {integration_count} tests and discarded "
-        f"{integration_count - 217}"
-    ) in captured.err
-    assert "integration mode runs the full selection" in captured.err
-    assert "nightly full suite remains the backstop" in captured.err
+    assert rc == 5
+    assert captured.out == ""
+    assert "predicted loaded wall time 1400.0s" in captured.err
+    assert "budget 1200.0s" in captured.err
+    assert "218 selected test files" in captured.err
+    assert "2 files without duration forecast" in captured.err
