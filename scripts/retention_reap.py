@@ -29,6 +29,28 @@ DEFAULT_KANBAN_DB = Path("/home/piet/.hermes/kanban.db")
 DEFAULT_LOCK_FILE = Path("/home/piet/.hermes/retention-reap.lock")
 DEFAULT_OUTPUT_DAYS = 14.0
 DEFAULT_BACKUP_SETS = 3
+# Generation-based retention for ~/.hermes/backups.  Age alone cannot bound this
+# directory: measured 2026-07-28 it held 16.7 GB, of which everything older than
+# 30 days was 0.04 GB.  The bulk is young and periodic — a ~0.5 GB state.db
+# snapshot every night plus a ~5 GB zip per deploy.  Each class keeps its own
+# newest N sets, so a busy class can never evict another class's last recovery
+# point (which a single shared pool does: with keep_sets=3 the whole directory
+# collapses to its three newest files).
+BACKUP_CLASS_POLICIES: tuple[tuple[str, "re.Pattern[str]", int], ...] = (
+    ("pre-deploy", re.compile(r"^pre-deploy-"), 2),
+    ("state-db", re.compile(r"^state\.db\."), 3),
+    ("kanban-pre", re.compile(r"^kanban-pre-"), 5),
+)
+# Files matching no class are bounded by age only, never by count: an unknown
+# name may well be the only copy of something, and counting would evict it as
+# soon as a few unrelated siblings show up.
+DEFAULT_BACKUP_OTHER_DAYS = 30.0
+# A half-written backup is not a recovery point and must never occupy a
+# generation slot: a `pre-deploy-*.zip.partial` still being written was observed
+# displacing the last complete deploy zip under a keep=2 policy.  These fall
+# through to the age-bounded remainder, so a live one is kept (it is young) while
+# an abandoned one still expires.
+_BACKUP_IN_FLIGHT_SUFFIXES = (".partial", ".part", ".tmp", ".incomplete")
 DEFAULT_WORKTREE_CACHE_DAYS = 14.0
 # Each root must contain worktrees directly.  These are deliberately a narrow,
 # explicit allowlist: this reaper never discovers arbitrary repositories.
@@ -276,8 +298,74 @@ def _plan_backup_file_sets(
     ]
 
 
+def _backup_class_for(
+    key: str, policies: Sequence[tuple[str, "re.Pattern[str]", int]]
+) -> tuple[str, int] | None:
+    for label, pattern, keep in policies:
+        if pattern.search(key):
+            return label, keep
+    return None
+
+
+def _plan_classified_backup_actions(
+    paths: Iterator[Path],
+    *,
+    policies: Sequence[tuple[str, "re.Pattern[str]", int]],
+    other_max_age_seconds: float,
+    now: float,
+) -> list[DeleteAction]:
+    """Retain the newest ``keep`` sets per class; bound the remainder by age.
+
+    Sidecars (``-wal``/``-shm``) stay grouped with their primary via
+    :func:`_backup_file_set_key`, so a set is always deleted as a whole.
+    """
+    classified: dict[str, dict[str, list[Path]]] = {}
+    unclassified: dict[str, list[Path]] = {}
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            continue
+        key = _backup_file_set_key(path)
+        matched = None if key.endswith(_BACKUP_IN_FLIGHT_SUFFIXES) else _backup_class_for(key, policies)
+        if matched is None:
+            unclassified.setdefault(key, []).append(path)
+        else:
+            classified.setdefault(matched[0], {}).setdefault(key, []).append(path)
+
+    actions: list[DeleteAction] = []
+    for label, _pattern, keep in policies:
+        groups = classified.get(label)
+        if not groups:
+            continue
+        ordered = sorted(
+            groups.values(),
+            key=lambda members: max(path.stat().st_mtime_ns for path in members),
+            reverse=True,
+        )
+        actions.extend(
+            DeleteAction(path, path.stat().st_size, f"hermes-backup:{label}")
+            for members in ordered[max(keep, 0) :]
+            for path in sorted(members)
+        )
+
+    cutoff = now - other_max_age_seconds
+    for members in unclassified.values():
+        if max(path.stat().st_mtime for path in members) >= cutoff:
+            continue
+        actions.extend(
+            DeleteAction(path, path.stat().st_size, "hermes-backup:other")
+            for path in sorted(members)
+        )
+    return actions
+
+
 def plan_backup_actions(
-    base: Path, *, keep_sets: int, backups_root: Path | None = None
+    base: Path,
+    *,
+    keep_sets: int,
+    backups_root: Path | None = None,
+    class_policies: Sequence[tuple[str, "re.Pattern[str]", int]] | None = None,
+    other_max_age_seconds: float | None = None,
+    now: float | None = None,
 ) -> list[DeleteAction]:
     """Keep the newest backup sets in each bounded Hermes backup location.
 
@@ -285,6 +373,11 @@ def plan_backup_actions(
     ``~/.hermes/backups`` are independent retention pools, so activity in one
     cannot evict every recovery point from the other. Directories and symlinks
     in the general backup root are deliberately outside this file-only policy.
+
+    ``class_policies`` switches the general backup root to generation-based
+    retention (see :data:`BACKUP_CLASS_POLICIES`). Left at ``None`` the root
+    keeps its historical single-pool behaviour, which only bounds a directory
+    whose file names are homogeneous.
     """
     backups_root = base.parent / "backups" if backups_root is None else backups_root
     actions: list[DeleteAction] = []
@@ -298,14 +391,28 @@ def plan_backup_actions(
             )
         )
     if backups_root.is_dir():
-        actions.extend(
-            _plan_backup_file_sets(
-                backups_root.iterdir(),
-                keep_sets=keep_sets,
-                category="hermes-backup",
-                key_for=_backup_file_set_key,
+        if class_policies:
+            actions.extend(
+                _plan_classified_backup_actions(
+                    backups_root.iterdir(),
+                    policies=class_policies,
+                    other_max_age_seconds=(
+                        DEFAULT_BACKUP_OTHER_DAYS * 24 * 60 * 60
+                        if other_max_age_seconds is None
+                        else other_max_age_seconds
+                    ),
+                    now=time.time() if now is None else now,
+                )
             )
-        )
+        else:
+            actions.extend(
+                _plan_backup_file_sets(
+                    backups_root.iterdir(),
+                    keep_sets=keep_sets,
+                    category="hermes-backup",
+                    key_for=_backup_file_set_key,
+                )
+            )
     return actions
 
 
@@ -865,6 +972,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lock-file", type=Path, default=DEFAULT_LOCK_FILE)
     parser.add_argument("--output-days", type=float, default=DEFAULT_OUTPUT_DAYS)
     parser.add_argument("--keep-backup-sets", type=int, default=DEFAULT_BACKUP_SETS)
+    parser.add_argument(
+        "--backup-other-days", type=_non_negative_days, default=DEFAULT_BACKUP_OTHER_DAYS
+    )
+    parser.add_argument(
+        "--legacy-backup-pool",
+        action="store_true",
+        help=(
+            "treat ~/.hermes/backups as one pool bounded by --keep-backup-sets "
+            "instead of per-class generations (unsafe on mixed directories)"
+        ),
+    )
     parser.add_argument("--worktree-root", type=Path, action="append", dest="worktree_roots")
     parser.add_argument(
         "--worktree-cache-days", type=_non_negative_days, default=DEFAULT_WORKTREE_CACHE_DAYS
@@ -893,7 +1011,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 roots,
                 browsers_path_override=os.environ.get("PLAYWRIGHT_BROWSERS_PATH"),
             )
-        backup_actions = plan_backup_actions(args.kanban_db, keep_sets=args.keep_backup_sets)
+        backup_actions = plan_backup_actions(
+            args.kanban_db,
+            keep_sets=args.keep_backup_sets,
+            class_policies=None if args.legacy_backup_pool else BACKUP_CLASS_POLICIES,
+            other_max_age_seconds=args.backup_other_days * 24 * 60 * 60,
+            now=now,
+        )
         requested_roots = args.worktree_roots or list(DEFAULT_WORKTREE_ROOTS)
         worktree_roots, allow_status = allowlisted_worktree_roots(
             requested_roots, allowlist=DEFAULT_WORKTREE_ROOTS

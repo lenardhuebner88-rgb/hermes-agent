@@ -206,9 +206,9 @@ def test_main_dry_run_includes_default_backups_directory_without_deleting(
     backups_root.mkdir(parents=True)
     backups = []
     for index in range(5):
-        path = backups_root / f"backup-{index}.zip"
+        path = backups_root / f"pre-deploy-2026-07-{10 + index:02d}-000000.zip"
         path.write_bytes(str(index).encode())
-        os.utime(path, (NOW - index, NOW - index))
+        os.utime(path, (NOW - index * DAY, NOW - index * DAY))
         backups.append(path)
     worktree_root = tmp_path / "worktrees"
     worktree_root.mkdir()
@@ -230,10 +230,49 @@ def test_main_dry_run_includes_default_backups_directory_without_deleting(
     captured = capsys.readouterr()
     assert rc == 0
     assert all(path.exists() for path in backups)
+    # main() applies the per-class policy, so the pre-deploy class keeps its
+    # newest 2 rather than the single-pool default of 3.
+    assert {line.split(" path=")[1].split(" size=")[0] for line in captured.out.splitlines()} == {
+        str(path) for path in backups[2:]
+    }
+    assert all("category=hermes-backup:pre-deploy" in line for line in captured.out.splitlines())
+
+
+def test_main_legacy_backup_pool_flag_restores_single_pool_behaviour(
+    tmp_path, capsys, monkeypatch
+):
+    hermes_home = tmp_path / ".hermes"
+    backups_root = hermes_home / "backups"
+    backups_root.mkdir(parents=True)
+    backups = []
+    for index in range(5):
+        path = backups_root / f"backup-{index}.zip"
+        path.write_bytes(str(index).encode())
+        os.utime(path, (NOW - index, NOW - index))
+        backups.append(path)
+    worktree_root = tmp_path / "worktrees"
+    worktree_root.mkdir()
+
+    monkeypatch.setattr(rr, "active_worktree_paths", lambda _db: (set(), "ok"))
+    monkeypatch.setattr(rr, "DEFAULT_WORKTREE_ROOTS", (worktree_root,))
+    rc = rr.main(
+        [
+            "--legacy-backup-pool",
+            "--outputs-root", str(tmp_path / "outputs"),
+            "--browser-cache", str(tmp_path / "browser"),
+            "--package-root", str(tmp_path / "packages"),
+            "--kanban-db", str(hermes_home / "kanban.db"),
+            "--lock-file", str(tmp_path / "retention.lock"),
+            "--worktree-root", str(worktree_root),
+            "--now", str(NOW),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 0
     assert {line.split(" path=")[1].split(" size=")[0] for line in captured.out.splitlines()} == {
         str(path) for path in backups[3:]
     }
-    assert all("category=hermes-backup" in line for line in captured.out.splitlines())
 
 
 def test_dry_run_logs_path_and_size_without_deleting_then_apply_is_idempotent(tmp_path):
@@ -1065,3 +1104,148 @@ def test_worktree_cache_normal_case_deletes_via_pinned_fd(tmp_path):
         "DELETE category=worktree-dependency-cache" in line and str(cache) in line
         for line in logs
     )
+
+
+def _backup_root(tmp_path: Path) -> tuple[Path, Path]:
+    base = tmp_path / "kanban.db"
+    root = tmp_path / "backups"
+    root.mkdir()
+    return base, root
+
+
+def _classified(base: Path, root: Path, **kwargs):
+    return rr.plan_backup_actions(
+        base,
+        backups_root=root,
+        keep_sets=3,
+        class_policies=rr.BACKUP_CLASS_POLICIES,
+        now=NOW,
+        **kwargs,
+    )
+
+
+def test_each_backup_class_keeps_its_own_generations(tmp_path):
+    base, root = _backup_root(tmp_path)
+    made: dict[str, list[Path]] = {"pre-deploy": [], "state-db": [], "kanban-pre": []}
+    for index in range(6):
+        for label, name in (
+            ("pre-deploy", f"pre-deploy-2026-07-{10 + index:02d}.zip"),
+            ("state-db", f"state.db.2026071{index}T011500Z.before-stale-sweep.db"),
+            ("kanban-pre", f"kanban-pre-t_{index}-finalize.db"),
+        ):
+            path = root / name
+            path.write_text(str(index))
+            _age(path, index)
+            made[label].append(path)
+
+    deleted = {action.path for action in _classified(base, root)}
+
+    # keep 2 / 3 / 5 newest per class -> the older remainder goes
+    assert deleted == {
+        *made["pre-deploy"][2:],
+        *made["state-db"][3:],
+        *made["kanban-pre"][5:],
+    }
+    for label, keep in (("pre-deploy", 2), ("state-db", 3), ("kanban-pre", 5)):
+        survivors = [p for p in made[label] if p not in deleted]
+        assert len(survivors) == keep, label
+
+
+def test_busy_backup_class_cannot_evict_another_classes_last_copy(tmp_path):
+    """The single-pool policy deleted the only pre-deploy zip once a few nightly
+    state.db snapshots appeared. Classes must be bounded independently."""
+    base, root = _backup_root(tmp_path)
+    lone_zip = root / "pre-deploy-2026-06-01-000000.zip"
+    lone_zip.write_text("the only deploy rollback point")
+    _age(lone_zip, 40)
+    for index in range(10):
+        snapshot = root / f"state.db.2026072{index}T011500Z.before-stale-sweep.db"
+        snapshot.write_text(str(index))
+        _age(snapshot, index)
+
+    deleted = {action.path for action in _classified(base, root)}
+    assert lone_zip not in deleted
+
+    # the historical single-pool behaviour would have evicted it
+    legacy = {action.path for action in rr.plan_backup_actions(base, backups_root=root, keep_sets=3)}
+    assert lone_zip in legacy
+
+
+def test_unclassified_backups_are_bounded_by_age_not_by_count(tmp_path):
+    base, root = _backup_root(tmp_path)
+    young = []
+    for index in range(8):
+        path = root / f"lane-api-profiles-{index}.json"
+        path.write_text(str(index))
+        _age(path, index)
+        young.append(path)
+    ancient = root / "crontab-backup-inventur.txt"
+    ancient.write_text("old")
+    _age(ancient, 45)
+
+    deleted = {action.path for action in _classified(base, root)}
+
+    assert deleted == {ancient}
+    assert not deleted.intersection(young)
+
+
+def test_classified_backup_sets_delete_their_sidecars_together(tmp_path):
+    base, root = _backup_root(tmp_path)
+    sets = []
+    for index in range(5):
+        primary = root / f"state.db.2026071{index}T011500Z.before-stale-sweep.db"
+        wal = Path(str(primary) + "-wal")
+        shm = Path(str(primary) + "-shm")
+        for path in (primary, wal, shm):
+            path.write_text(str(index))
+            _age(path, index)
+        sets.append((primary, wal, shm))
+
+    deleted = {action.path for action in _classified(base, root)}
+
+    assert deleted == {path for group in sets[3:] for path in group}
+
+
+def test_classified_backup_categories_name_their_class(tmp_path):
+    base, root = _backup_root(tmp_path)
+    for index in range(4):
+        path = root / f"pre-deploy-2026-07-{10 + index:02d}.zip"
+        path.write_text(str(index))
+        _age(path, index)
+
+    categories = {action.category for action in _classified(base, root)}
+    assert categories == {"hermes-backup:pre-deploy"}
+
+
+def test_in_flight_backup_does_not_occupy_a_generation_slot(tmp_path):
+    """A `.partial` still being written was displacing the last complete deploy
+    zip: it counted as one of the two kept generations."""
+    base, root = _backup_root(tmp_path)
+    complete = []
+    for index in range(2):
+        path = root / f"pre-deploy-2026-07-2{4 + index}-000000.zip"
+        path.write_text(str(index))
+        _age(path, 4 - index)
+        complete.append(path)
+    in_flight = root / "pre-deploy-2026-07-28-083444.zip.partial"
+    in_flight.write_text("half written")
+    _age(in_flight, 0)
+
+    deleted = {action.path for action in _classified(base, root)}
+
+    assert not deleted, "both complete zips and the live partial must survive"
+
+    # an abandoned partial still expires via the age-bounded remainder
+    _age(in_flight, 45)
+    assert {action.path for action in _classified(base, root)} == {in_flight}
+
+
+def test_backup_directories_stay_untouched_under_class_policy(tmp_path):
+    base, root = _backup_root(tmp_path)
+    stale_directory = root / "code-before-proposal-20260601T202054Z"
+    stale_directory.mkdir()
+    (stale_directory / "payload.txt").write_text("x")
+    _age(stale_directory, 90)
+
+    deleted = {action.path for action in _classified(base, root)}
+    assert stale_directory not in deleted
