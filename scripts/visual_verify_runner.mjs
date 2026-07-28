@@ -166,10 +166,28 @@ async function readUxSignals() {
   }
   return {
     interactiveControlCount: controls.length,
+    // Rendered-Text-Laenge als zweites, unabhaengiges Inhaltssignal: eine
+    // Seite, die weder Bedienelemente noch nennenswerten Text hat, ist nicht
+    // fertig geladen. Siehe emptyPage-Check unten.
+    renderedTextLength: (document.body?.innerText ?? "").trim().length,
     undersizedControls: undersizedControls.slice(0, 50),
     unlabeledControls: unlabeledControls.slice(0, 50),
     truncated: undersizedControls.length > 50 || unlabeledControls.length > 50,
   };
+}
+
+// Eine leere Seite besteht sonst JEDEN Check: keine Konsolenfehler, kein
+// Overflow, und `undersizedControls: []` / `unlabeledControls: []` sind auf
+// einer Seite ohne Controls trivial wahr. Belegt am 2026-07-28: /control/loops
+// lieferte auf mobile-390 ein leeres <main>, interactiveControlCount 0 — und
+// summary.json meldete `status: "passed"`, `allPassed: true`. Das ist dieselbe
+// Evidenz, auf die sich die Loop-Verifier stuetzen.
+const EMPTY_PAGE_TEXT_FLOOR = 200;
+
+function isEmptyPage(uxSignals) {
+  if (!uxSignals) return false;
+  return uxSignals.interactiveControlCount === 0
+    && (uxSignals.renderedTextLength ?? 0) < EMPTY_PAGE_TEXT_FLOOR;
 }
 
 async function clickFirstVisible(locator) {
@@ -255,6 +273,23 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport, scenario) 
   try {
     await page.goto(routeUrl(baseUrl, route), { waitUntil: "domcontentloaded", timeout: CONNECT_TIMEOUT_MS });
     await page.waitForLoadState("networkidle", { timeout: CONNECT_TIMEOUT_MS }).catch(() => {});
+    // Auf gerenderten Inhalt warten statt auf eine feste Frist: die Views sind
+    // lazy-importierte Chunks, deren Render nach `networkidle` noch aussteht.
+    // Ohne dieses Warten kam am 2026-07-28 reproduzierbar ein leerer erster
+    // Screenshot zustande (kalter Chunk-Cache). Laeuft die Frist ab, faengt der
+    // emptyPage-Check unten den Fall — hier wird nichts verschluckt.
+    await page.waitForFunction(
+      (floor) => {
+        const body = document.body;
+        if (!body) return false;
+        const controls = body.querySelectorAll(
+          "button, input, select, textarea, [role=button], [role=tab], [role=switch]",
+        ).length;
+        return controls > 0 || (body.innerText ?? "").trim().length >= floor;
+      },
+      EMPTY_PAGE_TEXT_FLOOR,
+      { timeout: CONNECT_TIMEOUT_MS },
+    ).catch(() => {});
     await page.waitForTimeout(250);
     overflow = await page.evaluate(readOverflow);
     uxSignals = await page.evaluate(readUxSignals);
@@ -271,16 +306,24 @@ async function checkOne(browser, baseUrl, outputDir, route, viewport, scenario) 
       ariaSnapshotError = caught instanceof Error ? caught.message : String(caught);
     }
     await page.screenshot({ path: screenshotPath, fullPage: scenario !== "terminal_bridge" });
+    const emptyPage = isEmptyPage(uxSignals);
     checks = {
       console_error_count: consoleErrors.length,
       page_error_count: pageErrors.length,
       horizontal_overflow: !Boolean(overflow?.ok),
+      empty_page: emptyPage,
       ...geometry,
       ...fixture,
     };
     ok = consoleErrors.length === 0 && pageErrors.length === 0 && Boolean(overflow?.ok)
+      && !emptyPage
       && Object.values(geometry).filter((value) => typeof value === "boolean").every(Boolean)
       && Object.values(fixture).every(Boolean);
+    if (emptyPage) {
+      error = `Leere Seite: ${uxSignals?.interactiveControlCount ?? 0} Bedienelemente, `
+        + `${uxSignals?.renderedTextLength ?? 0} Zeichen Text (Boden ${EMPTY_PAGE_TEXT_FLOOR}). `
+        + "Nicht fertig gerendert — die Evidenz dieses Viewports ist wertlos.";
+    }
   } catch (caught) {
     ok = false;
     error = caught instanceof Error ? caught.message : String(caught);
