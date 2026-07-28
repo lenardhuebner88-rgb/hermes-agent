@@ -237,7 +237,12 @@ describe("BibliothekCorrectionEditor", () => {
     resolvePreview(previewResponse);
     expect(await screen.findByRole("dialog", { name: "Korrektur verbindlich speichern" })).toBeTruthy();
     expect(fetchJSONMock).toHaveBeenCalledTimes(2); // Audit-GET + mutationsfreie Preview
-    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Abbrechen" }));
+    // waitFor, nicht direkt: dieser Dialog mountet aus der awaiteten Preview,
+    // also AUSSERHALB von act(). `findByRole` löst schon bei der DOM-Mutation
+    // aus, der Erstfokus von useFocusTrap ist ein passiver Effekt und kann
+    // einen Tick später liegen (lastabhängiger Flake, s. Kommentar unten am
+    // Speichern-Test).
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Abbrechen" })));
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(reviewButton);
@@ -343,6 +348,18 @@ describe("BibliothekCorrectionEditor", () => {
         fields: { path: "Receipt", auftraggeber: "Receipt-Quelle" },
       }),
     });
+    // Dieser Dialog öffnet aus einem awaiteten Preview-Request, der Mount
+    // passiert also AUSSERHALB von act(). `findByRole` löst schon bei der
+    // DOM-Mutation aus — der Erstfokus von useFocusTrap („Abbrechen") ist ein
+    // passiver Effekt und kann dann noch anstehen; er liefe beim nächsten
+    // act()-Flush (dem Klick unten) NACH dem manuellen Fokus und überschriebe
+    // ihn. jsdom blurrt „Abbrechen" nicht, wenn es gleich darauf disabled
+    // wird, also blieb der Fokus dort hängen und der Test sah unter Last den
+    // falschen activeElement (~1/12 Läufe mit --maxWorkers=4, Gate rot am
+    // 28.07.). Erst warten, bis der Trap den Fokus in den Dialog gezogen hat;
+    // danach ist kein Fokus-Effekt mehr offen.
+    const saveDialog = screen.getByRole("dialog", { name: "Korrektur verbindlich speichern" });
+    await waitFor(() => expect(saveDialog.contains(document.activeElement)).toBe(true));
     const confirmSaveWithDelay = screen.getByRole("button", { name: "Jetzt verbindlich speichern" }) as HTMLButtonElement;
     confirmSaveWithDelay.focus();
     fireEvent.click(confirmSaveWithDelay);

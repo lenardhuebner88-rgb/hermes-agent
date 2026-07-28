@@ -108,3 +108,89 @@ def test_board_uses_first_member_title_when_chain_has_no_planspec_source(client)
     payload = client.get("/api/plugins/kanban/board").json()
 
     assert payload["chain_identities"] == {gate: "Human-readable first step"}
+
+
+def test_done_page_keeps_visible_chain_member_context_from_full_board(client):
+    """Done pagination cannot truncate a visible member's chain identity."""
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO tasks (id, title, status, created_at) VALUES (?, ?, ?, ?)",
+                [
+                    ("t_unrelated_done", "Earlier completed task", "done", 1),
+                    ("t_paged_source", "Paged source", "done", 100),
+                    ("t_paged_middle", "Paged middle", "done", 101),
+                    ("t_paged_sink", "Visible sink", "scheduled", 102),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                [
+                    ("t_paged_source", "t_paged_middle"),
+                    ("t_paged_middle", "t_paged_sink"),
+                ],
+            )
+
+    response = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 1, "card_diagnostics": "summary", "card_body": "none"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    cards = _task_payloads(payload)
+    assert set(cards) == {"t_unrelated_done", "t_paged_sink"}
+    assert cards["t_paged_sink"]["chain"] == {
+        "identity_id": "t_paged_sink",
+        "position": 3,
+        "total": 3,
+    }
+    summary = next(
+        row
+        for row in payload["chain_summaries"]
+        if row["root_id"] == "t_paged_sink"
+    )
+    assert summary["total"] == cards["t_paged_sink"]["chain"]["total"]
+
+
+def test_done_page_keeps_position_for_visible_member_of_finished_chain(client):
+    """Finished-chain stations stay hidden, but visible cards keep positions."""
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.executemany(
+                "INSERT INTO tasks (id, title, status, created_at) VALUES (?, ?, ?, ?)",
+                [
+                    ("t_earlier_done", "Earlier completed task", "done", 1),
+                    ("t_finished_source", "Finished source", "done", 100),
+                    ("t_finished_middle", "Finished middle", "done", 101),
+                    ("t_finished_sink", "Finished sink", "done", 102),
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                [
+                    ("t_finished_source", "t_finished_middle"),
+                    ("t_finished_middle", "t_finished_sink"),
+                ],
+            )
+
+    response = client.get(
+        "/api/plugins/kanban/board",
+        params={"done_limit": 2, "card_diagnostics": "summary", "card_body": "none"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    cards = _task_payloads(payload)
+    assert cards["t_finished_source"]["chain"] == {
+        "identity_id": "t_finished_sink",
+        "position": 1,
+        "total": 3,
+    }
+    summary = next(
+        row
+        for row in payload["chain_summaries"]
+        if row["root_id"] == "t_finished_sink"
+    )
+    assert summary["state"] == "fertig"
+    assert summary["stations"] == []

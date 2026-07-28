@@ -639,6 +639,77 @@ def test_silent_block_autonomy_hold_integration(
         assert _operator_escalations(conn, t) == []
 
 
+def test_silent_block_autonomy_prefers_newest_parked_reason(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """A historical blocked summary must not steer a later integration park."""
+    clock = {"now": 1_800_000_000}
+    monkeypatch.setattr(kb.time, "time", lambda: clock["now"])
+    stale_reason = "Root filesystem 100% full; kanban.db cannot be written"
+    newest_reason = "post-merge gate failed: current conflict"
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="stale block reason", assignee="coder")
+        kb.claim_task(conn, t)
+        old_run_id = kb.get_task(conn, t).current_run_id
+        assert kb.block_task(
+            conn, t, reason=stale_reason, expected_run_id=old_run_id
+        )
+
+        # This reproduces the live history: an old blocked run, then multiple
+        # newer integration parks after operator unblocks/retries.
+        for reason in ("first integration retry", newest_reason):
+            clock["now"] += 10
+            assert kb.unblock_task(conn, t)
+            kb.claim_task(conn, t)
+            run_id = kb.get_task(conn, t).current_run_id
+            assert kb._park_integration(
+                conn, t, {"reason": reason}, expected_run_id=run_id
+            )
+
+        assert t in kb.silent_block_task_ids(conn, now=clock["now"])
+        res = kb.escalate_silent_blocks_sweep(conn, now=clock["now"])
+        assert any(h["action"] == "hold_integration" for h in res["autonomy_held"])
+        route = [
+            event
+            for event in kb.list_events(conn, t)
+            if event.kind == kb.AUTONOMY_ROUTED_EVENT
+        ][-1]
+        assert route.payload["reason"] == f"integration parked: {newest_reason}"
+        assert stale_reason not in route.payload["reason"]
+
+
+def test_silent_block_autonomy_keeps_only_blocked_run_reason(
+    kanban_home, all_assignees_spawnable, monkeypatch
+):
+    """Without a newer ended run, the blocked run remains the decision source."""
+    base = 1_800_000_000
+    monkeypatch.setattr(kb.time, "time", lambda: base)
+    reason = "Root filesystem 100% full; kanban.db cannot be written"
+
+    with kb.connect_closing() as conn:
+        t = kb.create_task(conn, title="only blocked reason", assignee="coder")
+        kb.claim_task(conn, t)
+        run_id = kb.get_task(conn, t).current_run_id
+        assert kb.block_task(conn, t, reason=reason, expected_run_id=run_id)
+        # Capacity blocks normally receive an immediate operator event.  Model
+        # the silent, already-settled retry state without creating a newer run.
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (t,))
+        conn.execute(
+            "UPDATE tasks SET auto_retry_count = ? WHERE id = ?",
+            (kb.DEFAULT_AUTO_RETRY_BLOCKED_LIMIT, t),
+        )
+        conn.commit()
+
+        assert t in kb.silent_block_task_ids(conn, now=base)
+        res = kb.escalate_silent_blocks_sweep(conn, now=base)
+        assert res["autonomy_held"] or res["escalated"]
+        assert (
+            _operator_escalations(conn, t)[-1].payload["evidence"]["last_error"]
+            == reason
+        )
+
+
 def test_review_request_changes_never_false_operator_question():
     """Autonomy gap: review findings often contain regex bait (token, ?,
     migration, delete). After the first auto-retry those must stay retryable

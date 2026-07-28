@@ -1025,7 +1025,7 @@ def get_board(
                     all_task_ids,
                 ).fetchall()
             }
-
+        chain_context_tasks = tasks
         chain_summaries: Optional[list[dict[str, Any]]] = None
         if done_limit is not None:
             # Authoritative roll-up over the FULL board, before the done page is
@@ -1213,7 +1213,7 @@ def get_board(
         # not repeated for every member of the chain. ``planspec_source_map``
         # is already built above over the full board.
         identity_groups: dict[str, list[Any]] = {}
-        for task in tasks:
+        for task in chain_context_tasks:
             identity_groups.setdefault(_resolve_root(task.id), []).append(task)
         chain_context_by_task: dict[str, dict[str, Any]] = {}
         chain_identities: dict[str, str] = {}
