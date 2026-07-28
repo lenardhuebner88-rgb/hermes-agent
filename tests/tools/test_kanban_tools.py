@@ -943,6 +943,55 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
         conn2.close()
 
 
+def test_complete_review_gated_code_goal_skips_aux_judge(monkeypatch, tmp_path):
+    """Review-gated code tasks complete through the native review chain."""
+    from pathlib import Path as _Path
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    review_gate_config = kb._review_gate_config()
+    monkeypatch.setattr(
+        kb,
+        "_review_gate_config",
+        lambda: {
+            **review_gate_config,
+            "code_roles": frozenset({"test-worker"}),
+        },
+    )
+    conn = kb.connect()
+    try:
+        goal_task_id = kb.create_task(
+            conn,
+            title="review-gated-code-goal",
+            assignee="test-worker",
+            body="Must achieve X with verified evidence.",
+            goal_mode=True,
+            kind="code",
+        )
+        kb.claim_task(conn, goal_task_id)
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", goal_task_id)
+    monkeypatch.setattr("hermes_cli.goals.goal_judge_available", lambda: True)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("judge_goal must not run for review-gated code tasks")
+
+    monkeypatch.setattr("hermes_cli.goals.judge_goal", fail_if_called)
+
+    d = json.loads(kt._handle_complete({"summary": "implemented and verified"}))
+    assert d.get("ok") is True
+
+
 def test_complete_goal_mode_allows_when_judge_unavailable(monkeypatch, tmp_path):
     """Fail-open: an unreachable judge must not wedge a goal_mode worker.
 
