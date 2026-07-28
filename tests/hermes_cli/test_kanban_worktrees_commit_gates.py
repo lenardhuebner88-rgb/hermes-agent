@@ -2502,3 +2502,77 @@ def test_retrigger_skips_done_children_without_workspace(repo, kanban_home, monk
         f"(root still {root_after.status!r})"
     )
     assert (repo / "feature_a.py").read_text() == "A = 1\n"
+
+
+def test_lane_scope_skips_when_branch_lands_nothing_over_base(repo, kanban_home):
+    # A verification-only slice can legitimately finish with ZERO own commits:
+    # its criteria are already met by an earlier, archived predecessor whose
+    # code is on the target.  Meanwhile the target advances with other cards'
+    # backend work, and the branch is refreshed onto it.  The two-dot
+    # `pre_run_sha..branch` range then consists ENTIRELY of foreign paths, and
+    # because the branch adds nothing over the target the net-set intersection
+    # never runs — so every foreign path used to be charged to this card.
+    # A re-dispatch reproduced it exactly, so the card could never clear itself.
+    # Live case 2026-07-28: t_292bfb57 parked on 19 files from five other cards.
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="frontend verification-only slice",
+            assignee="coder-frontend",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, task_id)
+        _claim_and_materialize(conn, task_id)
+
+        # The target advances with unrelated BACKEND work after the stamp.
+        (repo / "hermes_cli").mkdir(parents=True, exist_ok=True)
+        (repo / "hermes_cli" / "other_card.py").write_text("OTHER = 1\n")
+        _git(repo, "add", "hermes_cli/other_card.py")
+        _git(repo, "commit", "-m", "unrelated backend card lands on target")
+
+        # The slice picks the target up and commits nothing of its own.
+        _git(info["path"], "reset", "--hard", "main")
+        assert _git(repo, "diff", "--name-only", f"main...{info['branch']}").strip() == ""
+
+        out = _complete(conn, task_id)
+
+    assert out is None or out["action"] != "parked"
+
+
+def test_lane_scope_still_parks_own_violation_when_branch_also_carries_base(
+    repo, kanban_home,
+):
+    """Counterprobe: the skip above must not swallow a REAL violation.
+
+    Same shape as the test before it, except the slice does commit — and out of
+    its lane.  The branch then adds something over the target, so the net set is
+    non-empty, the containment shortcut must not apply, and the park must stand.
+    """
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="frontend slice that reaches into the backend",
+            assignee="coder-frontend",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, task_id)
+        _claim_and_materialize(conn, task_id)
+
+        (repo / "hermes_cli").mkdir(parents=True, exist_ok=True)
+        (repo / "hermes_cli" / "other_card.py").write_text("OTHER = 1\n")
+        _git(repo, "add", "hermes_cli/other_card.py")
+        _git(repo, "commit", "-m", "unrelated backend card lands on target")
+
+        _git(info["path"], "reset", "--hard", "main")
+        _commit_in(
+            info["path"], "hermes_cli/owned_by_this_card.py", "MINE = 1\n",
+            msg="frontend card edits the backend",
+        )
+
+        out = _complete(conn, task_id)
+
+    assert out is not None and out["action"] == "parked"
+    assert "hermes_cli/owned_by_this_card.py" in out["reason"]
+    assert "hermes_cli/other_card.py" not in out["reason"]
