@@ -536,7 +536,6 @@ export const de = {
     detailLabelStatus: "Status",
     detailLabelAssignee: "Task-Lane",
     detailLabelModell: "Laufprofil",
-    detailLabelActiveModel: "Modell",
     detailLabelModelRoute: "Modellroute",
     detailLabelBranch: "Branch",
     detailLabelReviewTier: "Review-Tier",

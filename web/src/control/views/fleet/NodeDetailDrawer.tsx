@@ -766,10 +766,6 @@ export function UebersichtTab({
         </div>
         <div className="fleet-kv">
           <div className="fleet-kv-k">{de.fleet.detailLabelModell}</div>
-          <div className="fleet-kv-v">{latestRun?.profile ?? "—"}</div>
-        </div>
-        <div className="fleet-kv">
-          <div className="fleet-kv-k">{de.fleet.detailLabelActiveModel}</div>
           <div className="fleet-kv-v">{latestRun?.active_model ?? latestRun?.requested_model ?? task.model_override ?? "—"}</div>
         </div>
         <div className="fleet-kv">
