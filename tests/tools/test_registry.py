@@ -1,6 +1,7 @@
 """Tests for the central tool registry."""
 
 import json
+import logging
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -147,6 +148,25 @@ class TestGetDefinitions:
         defs = reg.get_definitions({"available", "unavailable"})
         assert len(defs) == 1
         assert defs[0]["function"]["name"] == "available"
+
+    def test_reports_check_function_exception_as_an_error(self, caplog):
+        reg = ToolRegistry()
+
+        def broken_check():
+            raise ImportError("namespace package shadowed tools")
+
+        reg.register(
+            name="unavailable",
+            toolset="s",
+            schema=_make_schema("unavailable"),
+            handler=_dummy_handler,
+            check_fn=broken_check,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="tools.registry"):
+            assert reg.get_definitions({"unavailable"}) == []
+
+        assert "dependent tools will be unavailable this turn" in caplog.text
 
     def test_reuses_shared_check_fn_once_per_call(self):
         reg = ToolRegistry()

@@ -6,6 +6,10 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from tools.file_tools import (
@@ -871,3 +875,72 @@ class TestSilentFileMisplacementE2E:
             "file silently misplaced into config default (the #26211 bug)"
 
         tt.clear_session_cwd(task_id)
+
+
+class TestNamespacePackageShadowing:
+    def test_file_requirements_use_a_submodule_when_tools_is_namespace_package(self, tmp_path):
+        """File requirements must not rely on ``tools.__init__`` being loaded.
+
+        Editable installs resolve project submodules through a meta-path finder.
+        If the working directory has a foreign ``tools/`` without ``__init__.py``,
+        Python creates a namespace parent from that directory before the editable
+        finder resolves ``tools.file_tools``. The subprocess mirrors that import
+        topology without relying on the host's editable-install implementation.
+        """
+        (tmp_path / "tools").mkdir()
+        source_root = Path(__file__).resolve().parents[2]
+        script = textwrap.dedent(
+            f"""
+            import importlib.abc
+            import importlib.util
+            import os
+            import sys
+            from pathlib import Path
+
+            SOURCE_ROOT = Path({str(source_root)!r})
+
+            class ProjectModuleFinder(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname == "tools":
+                        return None
+                    candidate = SOURCE_ROOT.joinpath(*fullname.split("."))
+                    package_init = candidate / "__init__.py"
+                    if package_init.is_file():
+                        return importlib.util.spec_from_file_location(
+                            fullname,
+                            package_init,
+                            submodule_search_locations=[str(candidate)],
+                        )
+                    module_file = candidate.with_suffix(".py")
+                    if module_file.is_file():
+                        return importlib.util.spec_from_file_location(fullname, module_file)
+                    return None
+
+            # Exclude the source root so PathFinder chooses the foreign namespace
+            # package; the finder then behaves like the editable-project finder.
+            sys.path[:] = [
+                entry for entry in sys.path
+                if Path(entry or os.getcwd()).resolve() != SOURCE_ROOT
+            ]
+            sys.meta_path.insert(0, ProjectModuleFinder())
+
+            import tools
+            assert tools.__spec__.origin is None
+            assert str(Path.cwd() / "tools") in list(tools.__path__)
+
+            from tools.file_tools import _check_file_reqs
+            import tools.terminal_tool as terminal_tool
+
+            terminal_tool.check_terminal_requirements = lambda: True
+            assert _check_file_reqs() is True
+            """
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
