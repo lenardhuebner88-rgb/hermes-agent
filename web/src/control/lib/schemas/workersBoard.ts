@@ -281,17 +281,6 @@ export const BoardTaskSchema = z.object({
   tenant: z.string().nullable().catch(null),
   root_id: z.string().nullable().catch(null),
   epic_id: z.string().nullable().catch(null),
-  // KF-5: Ketten-Kontext je Karte (additiv; nur Kettenmitglieder tragen das Feld).
-  // identity_id = Root-Id der Kette, position/total aus deterministischer
-  // Topo-Sortierung; die lesbare Kennung steht top-level in chain_identities.
-  chain: z
-    .object({
-      identity_id: z.string().catch(""),
-      position: z.coerce.number().int().positive().catch(1),
-      total: z.coerce.number().int().positive().catch(1),
-    })
-    .nullable()
-    .catch(null),
   // Phase C: staged-review tier (Phase B column). Additiv — ältere Server / Karten
   // ohne das Feld fallen auf null zurück (= standard / kein Tier-Pill).
   review_tier: z.enum(["standard", "review", "critical"]).nullable().catch(null),

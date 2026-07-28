@@ -348,11 +348,14 @@ describe("BoardTab BV-2 Ketten-Bezug", () => {
 
   it("führt der Tipp auf den Ketten-Bezug zur Laufkarte (AC-3)", () => {
     const onOpenChain = vi.fn();
+    const onOpenNodeDetail = vi.fn();
     const member = task({ id: "t_ch1", title: "Chain member one", status: "running", root_id: "t_root1", link_counts: { parents: 1, children: 0 } });
-    render(<BoardTab board={chainBoard([member])} onOpenNodeDetail={vi.fn()} onOpenChain={onOpenChain} />);
+    render(<BoardTab board={chainBoard([member])} onOpenNodeDetail={onOpenNodeDetail} onOpenChain={onOpenChain} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Kette Kettenweite/ }));
     expect(onOpenChain).toHaveBeenCalledWith("t_root1");
+    // Aus KF-5 uebernommen: der Ketten-Bezug oeffnet NICHT zusaetzlich den Detail-Drawer.
+    expect(onOpenNodeDetail).not.toHaveBeenCalled();
   });
 
   it("bevorzugt den Backend-Kettenkontext (KF-4) vor der Ableitung", () => {
