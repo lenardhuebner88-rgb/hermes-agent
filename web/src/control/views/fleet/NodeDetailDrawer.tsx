@@ -71,6 +71,13 @@ interface NodeDetailDrawerProps {
   onClose: () => void;
   /** Board nach einer Steuerungs-Aktion (Unblock/Retry/Cancel) neu laden. */
   onChanged?: () => void | Promise<void>;
+  /**
+   * LK-3: Interne Stations-Navigation (Vorgänger/Nachfolger aus dem
+   * Ketten-Kontext). Gibt der Aufrufer keinen Handler, führt der Inhalt eine
+   * lokale Override-taskId — der Operator erreicht die Nachbarstation ohne
+   * den Umweg über die Listenansicht.
+   */
+  onNavigateTask?: (taskId: string) => void;
 }
 
 export function NodeDetailDrawer({
@@ -82,23 +89,26 @@ export function NodeDetailDrawer({
   onClose,
   onChanged,
 }: NodeDetailDrawerProps) {
+  const [navTaskId, setNavTaskId] = useState<string | null>(null);
+  const effectiveTaskId = navTaskId ?? taskId;
   return (
     <DrawerShell
       eyebrow="Fleet"
-      title={`Task ${taskId}`}
+      title={`Task ${effectiveTaskId}`}
       onClose={onClose}
-      ariaLabel={`Task ${taskId} Details`}
+      ariaLabel={`Task ${effectiveTaskId} Details`}
       closeLabel={de.fleet.detailSchliessen}
       widthClassName="tab:w-[min(560px,calc(100vw-2rem))]"
     >
       <NodeDetailContent
-        taskId={taskId}
+        taskId={effectiveTaskId}
         board={board}
         readOnly={readOnly}
         chainNodes={chainNodes}
         now={now}
         onClose={onClose}
         onChanged={onChanged}
+        onNavigateTask={setNavTaskId}
       />
     </DrawerShell>
   );
@@ -112,14 +122,19 @@ export function NodeDetailContent({
   now,
   onClose,
   onChanged,
+  onNavigateTask,
 }: NodeDetailDrawerProps) {
   const [tab, setTab] = useState<DetailTab>("uebersicht");
   const [copied, setCopied] = useState(false);
+  // LK-3: Ohne externen Handler wandert der Inhalt lokal zur Nachbarstation.
+  const [localNavTaskId, setLocalNavTaskId] = useState<string | null>(null);
+  const effectiveTaskId = onNavigateTask ? taskId : (localNavTaskId ?? taskId);
+  const navigateTask = onNavigateTask ?? setLocalNavTaskId;
 
   // On-Demand-Daten (nur bei offenem Drawer)
-  const taskBody = useTaskBodyOnDemand(taskId, board);
-  const deliverablesResult = useTaskDeliverablesOnDemand(taskId, board);
-  const activity = useWorkerActivity(taskId, board);
+  const taskBody = useTaskBodyOnDemand(effectiveTaskId, board);
+  const deliverablesResult = useTaskDeliverablesOnDemand(effectiveTaskId, board);
+  const activity = useWorkerActivity(effectiveTaskId, board);
   const verdicts = useHermesReviewVerdicts(board);
 
   const task = taskBody.data?.task ?? null;
@@ -165,7 +180,7 @@ export function NodeDetailContent({
   const events = activity.data?.events ?? [];
 
   // Review-Verdict für diesen Task
-  const taskVerdicts = (verdicts.data?.reviews ?? []).filter((r) => r.task_id === taskId).map((v) => ({
+  const taskVerdicts = (verdicts.data?.reviews ?? []).filter((r) => r.task_id === effectiveTaskId).map((v) => ({
     task_id: v.task_id,
     reviewer_profile: v.reviewer_profile,
     review_run_state: v.review_run_state ?? "pending",
@@ -186,7 +201,7 @@ export function NodeDetailContent({
   );
 
   function handleCopy() {
-    void navigator.clipboard.writeText(taskId).then(() => {
+    void navigator.clipboard.writeText(effectiveTaskId).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     });
@@ -233,7 +248,7 @@ export function NodeDetailContent({
             {profileInitial(task?.assignee ?? "?")}
           </div>
           <div className="fleet-dr-title">
-            <span className="text-sec">{task?.title || taskId}</span>
+            <span className="text-sec">{task?.title || effectiveTaskId}</span>
             <span>
               <button
                 type="button"
@@ -242,7 +257,7 @@ export function NodeDetailContent({
                 title={de.fleet.detailKopieren}
                 aria-label={de.fleet.detailKopieren}
               >
-                {taskId}
+                {effectiveTaskId}
                 <span className="text-[9px] opacity-70">{copied ? " ✓" : " ⊕"}</span>
               </button>
             </span>
@@ -294,13 +309,14 @@ export function NodeDetailContent({
               readOnly={readOnly}
               loading={taskBody.loading && !taskBody.data}
               error={taskBody.error}
+              onNavigateTask={navigateTask}
             />
           )}
           {tab === "aktivitaet" && (
             <AktivitaetTab events={events} now={now} loading={activity.loading && !activity.data} />
           )}
           {tab === "log" && (
-            <LogTab taskId={taskId} board={board} />
+            <LogTab taskId={effectiveTaskId} board={board} />
           )}
           {tab === "ergebnis" && (
             <ErgebnisTab
@@ -318,13 +334,13 @@ export function NodeDetailContent({
         {task && !readOnly ? (
           <div className="fleet-dr-actions">
             <TaskReassignControl
-              taskId={taskId}
+              taskId={effectiveTaskId}
               status={task.status ?? ""}
               currentProfile={task.assignee ?? null}
               onChanged={onChanged}
             />
             <FleetTaskActions
-              taskId={taskId}
+              taskId={effectiveTaskId}
               status={task.status ?? ""}
               chainRootId={chainRootId}
               heldChain={heldChain}
@@ -500,6 +516,16 @@ interface UebersichtTabProps {
     closure?: string | null;
     diagnostics?: Array<{ kind?: string; severity?: string | null; title?: string; detail?: string | null }>;
     planspec_source?: string | null;
+    /** LV-3 (Ketten-Lesevertrag): fehlt das Feld, entfällt der Abschnitt still. */
+    chain_context?: {
+      root_id: string;
+      chain_identifier?: string | null;
+      chain_state: string;
+      position: number;
+      total: number;
+      previous_station?: { id: string; title?: string | null } | null;
+      next_station?: { id: string; title?: string | null } | null;
+    } | null;
   } | null;
   latestRun: {
     profile?: string | null;
@@ -528,6 +554,99 @@ interface UebersichtTabProps {
   readOnly?: boolean;
   loading?: boolean;
   error?: string | null;
+  /** LK-3: Vorgänger/Nachfolger-Station direkt aus dem Ketten-Kontext öffnen. */
+  onNavigateTask?: (taskId: string) => void;
+}
+
+type KettenKontextData = NonNullable<NonNullable<UebersichtTabProps["task"]>["chain_context"]>;
+
+/** Kettenzustand (LV-3 wire) → Eyebrow-Label, wie auf der Laufkarte. */
+const KETTEN_STATE_LABEL: Record<string, string> = {
+  laeuft: "Läuft",
+  angebrochen: "Angebrochen",
+  gehalten: "Gehalten",
+  fertig: "Fertig",
+};
+
+/**
+ * LK-3 — Ketten-Kontext im Kopf der Detailansicht. Bildsprache der Laufkarte
+ * (Design-Board c_ee80d956 / e_a4b27b43): Eyebrow mit Zustand und Position,
+ * Kennung als lautestes Element, Stationsfolge als kompakte Stanzkanten-Leiste
+ * (gestempelt = matte Stahl-Tinte, laufend = heisse Bronze, offen = Kontur),
+ * Vorgänger/Nachfolger direkt erreichbar. Datenquelle ist ausschließlich das
+ * LV-3-Feld `chain_context`; ohne Kette (oder ohne Feld) rendert nichts.
+ */
+function KettenKontext({
+  ctx,
+  taskTitle,
+  onNavigateTask,
+}: {
+  ctx: KettenKontextData;
+  taskTitle: string;
+  onNavigateTask?: (taskId: string) => void;
+}) {
+  if (!Number.isInteger(ctx.total) || ctx.total < 2) return null;
+  if (!Number.isInteger(ctx.position) || ctx.position < 1 || ctx.position > ctx.total) return null;
+  const stateLabel = KETTEN_STATE_LABEL[ctx.chain_state] ?? (ctx.chain_state || "Kette");
+  const kennung = ctx.chain_identifier ?? ctx.root_id;
+  const segments = Array.from({ length: ctx.total }, (_, index) => {
+    const n = index + 1;
+    const kind = n < ctx.position ? "is-done" : n === ctx.position ? "is-now" : "is-open";
+    let label = `Station ${n} von ${ctx.total}`;
+    if (n === ctx.position) label += ` · ${taskTitle}`;
+    else if (n === ctx.position - 1 && ctx.previous_station?.title) label += ` · ${ctx.previous_station.title}`;
+    else if (n === ctx.position + 1 && ctx.next_station?.title) label += ` · ${ctx.next_station.title}`;
+    return (
+      <span
+        key={n}
+        role="listitem"
+        className={`lkd-seg ${kind}`}
+        title={label}
+        aria-label={label}
+        aria-current={n === ctx.position ? "step" : undefined}
+      />
+    );
+  });
+  return (
+    <section className="lkd" data-state={ctx.chain_state || undefined} aria-label="Ketten-Kontext">
+      <div className="lkd-eyeb">
+        <span className="lkd-led" aria-hidden="true" />
+        {`${stateLabel} · Station ${ctx.position} von ${ctx.total}`}
+      </div>
+      <div className="lkd-kennung">{kennung}</div>
+      <div className="lkd-strip" role="list" aria-label="Stationsfolge">
+        {segments}
+      </div>
+      {onNavigateTask && (ctx.previous_station || ctx.next_station) ? (
+        <div className="lkd-nav">
+          {ctx.previous_station ? (
+            <button
+              type="button"
+              className="lkd-nav-btn"
+              onClick={() => onNavigateTask(ctx.previous_station!.id)}
+              title={`Vorige Station: ${ctx.previous_station.title ?? ctx.previous_station.id}`}
+            >
+              <span aria-hidden="true">←</span>
+              <span className="lkd-nav-title">{ctx.previous_station.title ?? ctx.previous_station.id}</span>
+            </button>
+          ) : (
+            <span />
+          )}
+          {ctx.next_station ? (
+            <button
+              type="button"
+              className="lkd-nav-btn lkd-nav-next"
+              onClick={() => onNavigateTask(ctx.next_station!.id)}
+              title={`Nächste Station: ${ctx.next_station.title ?? ctx.next_station.id}`}
+            >
+              <span className="lkd-nav-title">{ctx.next_station.title ?? ctx.next_station.id}</span>
+              <span aria-hidden="true">→</span>
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function taskTimestamp(value: unknown, now: number): { dateTime: string | null; label: string } | null {
@@ -557,6 +676,7 @@ export function UebersichtTab({
   readOnly = false,
   loading = false,
   error = null,
+  onNavigateTask,
 }: UebersichtTabProps) {
   if (!task) {
     return (
@@ -596,6 +716,11 @@ export function UebersichtTab({
   });
   return (
     <>
+      {/* LK-3: Ketten-Kontext im Kopf der Ansicht — nur bei echter Kette. */}
+      {task.chain_context ? (
+        <KettenKontext ctx={task.chain_context} taskTitle={task.title ?? task.id ?? ""} onNavigateTask={onNavigateTask} />
+      ) : null}
+
       {/* Status-Badge — LED + Label, nie farb-only (DESIGN.md Regel 2). */}
       <div className="flex flex-wrap items-center gap-2">
         <span

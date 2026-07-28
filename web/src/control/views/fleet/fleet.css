@@ -1842,8 +1842,152 @@ body:has([data-fleet-theme]) [data-control] {
   white-space: nowrap;
 }
 
+/* LK-2 AC-6: Ladezustand behält die Kettengeometrie (Karte mit Notch-Stationen),
+   damit die Liste beim Eintreffen der Daten nicht springt. */
+.ketten-v4 .lk-skeleton { pointer-events: none; }
+.ketten-v4 .lk-sk {
+  display: block;
+  height: 9px;
+  border-radius: 3px;
+  background: color-mix(in oklab, var(--fleet-t3) 16%, transparent);
+  animation: lk-sk-puls 2.4s ease-in-out infinite;
+}
+.ketten-v4 .lk-sk-eyeb { width: 32%; height: 7px; }
+.ketten-v4 .lk-sk-kennung { width: 48%; height: 12px; }
+.ketten-v4 .lk-sk-titel { width: 78%; }
+.ketten-v4 .lk-sk-name { width: 58%; height: 8px; }
+.ketten-v4 .lk-sk-meta { width: 22%; height: 8px; }
+.ketten-v4 .lk-sk-foot { width: 40%; height: 7px; }
+@keyframes lk-sk-puls { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
 @media (prefers-reduced-motion: reduce) {
   .ketten-v4 .lk-card[data-state="laeuft"] .lk-led { animation: none; }
+  .ketten-v4 .lk-sk { animation: none; }
+}
+
+/* ── LK-3: Ketten-Kontext im Kopf der Task-Detailansicht ────────────────────
+ * Dieselbe Bildsprache wie die Laufkarte (.ketten-v4 .lk-*), aber nicht unter
+ * .ketten-v4 gescoped, damit der Abschnitt in der Detail-Pane und im portalten
+ * Drawer funktioniert (der Drawer-Inhalt trägt selbst data-fleet-theme). */
+.lkd {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-line-strong);
+  border-radius: 10px;
+}
+.lkd[data-state="laeuft"] { border-color: rgba(196, 122, 58, 0.45); }
+.lkd[data-state="angebrochen"] { border-color: rgba(207, 106, 106, 0.45); }
+.lkd[data-state="gehalten"] { border-color: rgba(224, 169, 62, 0.4); }
+
+.lkd-eyeb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 650 10.5px/1.2 var(--hc-font-sans);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fleet-t2);
+}
+.lkd[data-state="laeuft"] .lkd-eyeb { color: var(--color-bronze-hi); }
+.lkd[data-state="angebrochen"] .lkd-eyeb { color: var(--color-status-alert); }
+.lkd[data-state="gehalten"] .lkd-eyeb { color: var(--color-status-warn); }
+
+.lkd-led {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-bronze-hi);
+  box-shadow: 0 0 6px var(--color-bronze-glow);
+  flex: none;
+}
+.lkd[data-state="angebrochen"] .lkd-led { background: var(--color-status-alert); box-shadow: none; }
+.lkd[data-state="gehalten"] .lkd-led { background: var(--color-status-warn); box-shadow: none; }
+.lkd[data-state="fertig"] .lkd-led { background: var(--color-stamp); box-shadow: none; }
+
+.lkd-kennung {
+  font: 700 16px/1.2 var(--hc-font-sans);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--fleet-t1);
+  overflow-wrap: anywhere;
+}
+.lkd[data-state="gehalten"] .lkd-kennung { color: var(--fleet-t2); }
+
+/* Stationsfolge als kompakte Stanzkanten-Leiste: gestempelt = matte
+ * Stahl-Tinte mit Querkerbe, aktuell = heisse Bronze, offen = Kontur. */
+.lkd-strip {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 1px;
+}
+.lkd-strip::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: var(--color-line-strong);
+}
+.lkd-seg {
+  position: relative;
+  z-index: 1;
+  flex: 0 1 3px;
+  width: 3px;
+  min-width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: transparent;
+  border: 1px solid var(--color-line-strong);
+}
+.lkd-seg.is-done {
+  background: var(--color-stamp);
+  border-color: transparent;
+  box-shadow: inset 0 3px 0 var(--color-surface-2), inset 0 -3px 0 var(--color-surface-2);
+}
+.lkd-seg.is-now {
+  height: 20px;
+  background: var(--color-bronze-hi);
+  border-color: transparent;
+  box-shadow: 0 0 8px var(--color-bronze-glow);
+}
+
+.lkd-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.lkd-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  max-width: 48%;
+  padding: 5px 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--fleet-t2);
+  font: 500 12px/1.2 var(--hc-font-sans);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.lkd-nav-btn:hover { border-color: var(--color-bronze); color: var(--color-bronze-hi); }
+.lkd-nav-btn:focus-visible {
+  outline: 2px solid var(--color-bronze);
+  outline-offset: 2px;
+}
+.lkd-nav-next { margin-left: auto; }
+.lkd-nav-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Karten-Detail-Drawer (Node-Detail) ──────────────────────────────────── */

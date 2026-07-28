@@ -125,7 +125,7 @@ vi.mock("@/lib/api", async () => {
 });
 
 import { KettenTab } from "./KettenTab";
-import type { BoardResponse, BoardTask, ChainStationSummary } from "../../lib/types";
+import type { BoardResponse, BoardTask, ChainStationSummary, ChainSummary } from "../../lib/types";
 import { de } from "../../i18n/de";
 
 const ROOT_ID = "t_231b62fc";
@@ -643,3 +643,157 @@ describe("KettenTab LK-1 — Laufkarte mit Stanzkante und Stationen", () => {
 function eyb_led(eyeb: Element | null): Element | null {
   return eyeb?.querySelector(".lk-led") ?? null;
 }
+
+// ─── LK-2: Aufmerksamkeits-Ordnung, Kopf-Zähler, Leer/Laden/Fehler ───────────
+// Verbindliche Vorlage wie LK-1: Design-Board c_ee80d956 / e_a4b27b43.
+
+function lk2Summary(over: Partial<ChainSummary> & { root_id: string }): ChainSummary {
+  return {
+    root_title: over.root_id,
+    total: 3,
+    done: 0,
+    status_counts: { todo: 3 },
+    latest_completed_at: null,
+    kennung: over.root_id,
+    ...over,
+  };
+}
+
+const LK2_SUMMARIES: ChainSummary[] = [
+  // Bewusst „falsche“ Eingabereihenfolge — die Komponente muss selbst ordnen.
+  lk2Summary({ root_id: "t_lk2_done1", kennung: "Fertig alt", done: 3, status_counts: { done: 3 }, latest_completed_at: 900 }),
+  lk2Summary({ root_id: "t_lk2_hold", kennung: "Gehalten", done: 2, status_counts: { done: 2, parked: 1 }, state: "gehalten", state_age_seconds: 3600 }),
+  lk2Summary({ root_id: "t_lk2_run", kennung: "Laeuft", done: 1, status_counts: { done: 1, running: 1, todo: 1 }, state: "laeuft", state_age_seconds: 120 }),
+  lk2Summary({ root_id: "t_lk2_brk1", kennung: "Angebrochen eins", done: 2, status_counts: { done: 2, todo: 1 }, state: "angebrochen", state_age_seconds: 7200 }),
+  lk2Summary({ root_id: "t_lk2_wait", kennung: "Wartet", done: 0, status_counts: { todo: 3 } }),
+  lk2Summary({ root_id: "t_lk2_brk2", kennung: "Angebrochen zwei", done: 1, status_counts: { done: 1, todo: 2 }, state: "angebrochen", state_age_seconds: 600 }),
+  lk2Summary({ root_id: "t_lk2_done2", kennung: "Fertig neu", done: 3, status_counts: { done: 3 }, latest_completed_at: 1900 }),
+  lk2Summary({ root_id: "t_lk2_done3", kennung: "Fertig mitte", done: 3, status_counts: { done: 3 }, latest_completed_at: 1400 }),
+];
+
+function lk2Board(summaries: ChainSummary[]): BoardResponse {
+  return {
+    ...BOARD,
+    columns: [{
+      name: "running",
+      tasks: [{ ...ROOT_TASK, id: "t_lk2_run_child", title: "Laufendes Kind", status: "running", root_id: "t_lk2_run" }],
+    }],
+    chain_summaries: summaries,
+  };
+}
+
+const LK2_KENNUNG_ORDER = [
+  "Angebrochen eins", "Angebrochen zwei", "Laeuft", "Gehalten", "Wartet",
+  "Fertig neu", "Fertig mitte", "Fertig alt",
+];
+
+function lk2ListKennungen(container: HTMLElement): string[] {
+  return [...container.querySelectorAll(".lk-list .lk-kennung, .lk-list .lk-done-kennung")]
+    .map((el) => el.textContent ?? "");
+}
+
+describe("KettenTab LK-2 — Aufmerksamkeits-Ordnung, Kopf-Zähler, Zustände", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    routeFetch();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("AC-1: ordnet angebrochen → laufend → gehalten → wartend → fertig, nicht nach Alter", () => {
+    const { container } = render(
+      <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const states = [...container.querySelectorAll(".lk-list > *")].map((el) =>
+      el.classList.contains("lk-done-row") ? "fertig" : (el as HTMLElement).dataset.state);
+    expect(states).toEqual([
+      "angebrochen", "angebrochen", "laeuft", "gehalten", "wartet", "fertig", "fertig", "fertig",
+    ]);
+    expect(lk2ListKennungen(container)).toEqual(LK2_KENNUNG_ORDER);
+  });
+
+  it("AC-2: fertige Kette belegt genau eine Zeile mit Kennung, Fortschritt und Zeitangabe", () => {
+    const { container } = render(
+      <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const rows = container.querySelectorAll(".lk-done-row");
+    expect(rows).toHaveLength(3);
+    const first = rows[0];
+    expect(first.querySelector(".lk-done-kennung")?.textContent).toBe("Fertig neu");
+    const meta = first.querySelector(".lk-done-meta")?.textContent ?? "";
+    expect(meta).toContain("3/3"); // Fortschritt
+    expect(meta).toMatch(/·/); // kompakte Zeitangabe dahinter
+  });
+
+  it("AC-3: Kopf nennt Gesamtzahl und angebrochene getrennt", () => {
+    render(
+      <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    expect(screen.getByText("8 · 2 angebrochen")).toBeTruthy();
+  });
+
+  it("AC-4: Reihenfolge ist bei gleichem Zustand stabil — permutierte Eingabe, gleiche Ausgabe", () => {
+    const { container: a } = render(
+      <KettenTab board={lk2Board(LK2_SUMMARIES)} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const forward = lk2ListKennungen(a);
+    cleanup();
+    const { container: b } = render(
+      <KettenTab board={lk2Board([...LK2_SUMMARIES].reverse())} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    expect(lk2ListKennungen(b)).toEqual(forward);
+    expect(lk2ListKennungen(b)).toEqual(LK2_KENNUNG_ORDER);
+  });
+
+  it("AC-5: Leerzustand folgt der Doktrin — Situation, Bewertung, nächste Aktion, kein ok-Grün", () => {
+    const emptyBoard: BoardResponse = { ...BOARD, columns: [], chain_summaries: [] };
+    const { container } = render(
+      <KettenTab board={emptyBoard} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const empty = container.querySelector(".kt-empty");
+    expect(empty).not.toBeNull();
+    const lines = empty!.querySelectorAll("p");
+    expect(lines).toHaveLength(3);
+    expect(lines[0].textContent).toBe(de.fleet.kettenLeer); // Situation
+    expect(lines[1].textContent).toBe(de.fleet.kettenLeerDesc); // Bewertung
+    expect(lines[2].textContent).toContain(de.fleet.kettenLeerAktion); // nächste Aktion
+    // CSS-Vertrag: kein ok-Grün im Leerzustand
+    const emptyRules = kettenCss.match(/\.kt-empty[^{]*\{[^}]*\}/g) ?? [];
+    expect(emptyRules.length).toBeGreaterThan(0);
+    for (const rule of emptyRules) {
+      expect(rule).not.toMatch(/status-ok|--kt-live\b/);
+    }
+  });
+
+  it("AC-6: Ladezustand behält die Kettengeometrie und ist von leer unterscheidbar", () => {
+    const { container } = render(
+      <KettenTab board={null} initialRootId={null} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    const loading = container.querySelector('.lk-list-loading[role="status"]');
+    expect(loading).not.toBeNull();
+    const skeletons = loading!.querySelectorAll(".lk-skeleton");
+    expect(skeletons).toHaveLength(3);
+    // Kettengeometrie: Stationen mit Notch bleiben erhalten, damit nichts springt
+    expect(skeletons[0].querySelectorAll(".lk-stationen .lk-notch").length).toBeGreaterThan(0);
+    expect(container.querySelector(".kt-empty")).toBeNull();
+  });
+
+  it("AC-6: Fehlerzustand ist von leer und ladend unterscheidbar", async () => {
+    fetchJSONMock.mockImplementation((url: string) => {
+      const u = String(url);
+      if (u.includes("/chain-graph")) return Promise.reject(new Error("boom"));
+      return Promise.resolve({});
+    });
+    const { container } = render(
+      <KettenTab board={LAUF_BOARD} initialRootId={LAUF_ROOT} now={2000} onOpenNodeDetail={() => undefined} />,
+    );
+    await waitFor(() => {
+      expect(container.querySelector('.kt-error[role="alert"]')).not.toBeNull();
+    });
+    expect(container.querySelector(".kt-error")!.textContent).toContain(de.fleet.kettenGraphFehler);
+    expect(container.querySelector(".kt-empty")).toBeNull();
+    expect(container.querySelector(".lk-list-loading")).toBeNull();
+  });
+});
