@@ -12,10 +12,22 @@
 # (tsc MUSS -b sein: web/ ist eine Solution-Config mit files:[], bare `tsc --noEmit`
 # prüft nichts — belegte Falle 2026-06-16.)
 #
-# --skip-build: prüfen ohne zu bauen. `npm run build` schreibt direkt nach
-# hermes_cli/web_dist (= de-facto Asset-Deploy des parallel editierten Live-Checkouts).
-# Nur bauen, wenn der aktuelle Working-Tree-Stand auch serviert werden soll —
-# bei fremdem dirty web/-Stand (git status prüfen!) --skip-build nutzen.
+# Der Build schreibt in ein gate-eigenes Wegwerf-Verzeichnis, NIE in ein
+# ausgeliefertes. Bis 2026-07-28 lief `npm run build` in den Default aus
+# web/vite.config.ts — `hermes_cli/web_dist`, und das ist im Live-Checkout exakt
+# das Verzeichnis, das hermes-dashboard.service serviert. Das Gate veröffentlichte
+# damit, bevor es sein eigenes Urteil kannte: am 2026-07-27 endete ein Lauf mit
+# EXIT=1, während die neue Oberfläche längst ausgeliefert wurde. Ein Gate, das vor
+# seinem Urteil veröffentlicht, ist keins.
+#
+# mktemp pro Lauf statt eines festen Pfades: zwei gleichzeitige Gates (Worker,
+# Loop, Mensch) würden sich sonst gegenseitig das Artefakt wegräumen, und ein
+# liegengebliebener Stand sähe für den nächsten Konsumenten frisch aus. Gleiches
+# Muster wie in green-gate-heartbeat.sh. Veröffentlicht wird ausschließlich über
+# scripts/deploy_dashboard.sh bzw. scripts/rollback_dashboard.sh.
+#
+# --skip-build: prüfen ohne zu bauen. Seit der Build nichts Ausgeliefertes mehr
+# anfasst, ist das nur noch eine Zeitersparnis und keine Schutzmaßnahme.
 #
 # Dependency-Preflight (entkoppelt vom Shared-node_modules-Zustand):
 # Historisch vertraute das Gate blind dem umgebenden `node_modules/.bin/tsc`.
@@ -72,6 +84,33 @@ elif [[ $# -gt 0 ]]; then
 fi
 
 step() { printf '\n=== GATE: %s ===\n' "$1"; }
+
+# --- Gate-eigenes Build-Ziel + zentrales Aufräumen ---------------------------
+# EIN EXIT-Trap für das ganze Skript. Der E2E-Block registrierte frueher seinen
+# eigenen `trap … EXIT` und haette einen hier gesetzten stillschweigend ersetzt —
+# das Build-Verzeichnis waere dann bei jedem E2E-Lauf liegengeblieben. Die
+# Aufraeumfunktion liest ihre Variablen zur Laufzeit, deshalb genuegt eine
+# Registrierung vor allen Schritten.
+gate_build_dir=""
+preview_pid=""
+preview_log=""
+
+_gate_cleanup() {
+  if [[ -n "${preview_pid:-}" ]] && kill -0 "$preview_pid" 2>/dev/null; then
+    kill "$preview_pid" 2>/dev/null || true
+    wait "$preview_pid" 2>/dev/null || true
+  fi
+  if [[ -n "${preview_log:-}" ]]; then
+    rm -f "$preview_log"
+  fi
+  # Nur unterhalb von TMPDIR loeschen — ein versehentlich gesetztes
+  # HERMES_WEB_DIST darf hier niemals ein echtes Verzeichnis mitnehmen.
+  if [[ -n "${gate_build_dir:-}" && "$gate_build_dir" == "${TMPDIR:-/tmp}"/hermes-gate-dist.* ]]; then
+    rm -rf "$gate_build_dir"
+  fi
+  return 0
+}
+trap _gate_cleanup EXIT
 
 # --- Dependency-Preflight -----------------------------------------------------
 # Required frontend toolchain binaries. Each is "ok" if it resolves to a real
@@ -402,7 +441,14 @@ step "vitest run (worktree-local, maxWorkers=$vitest_max_workers)"
 if [[ $skip_build -eq 1 ]]; then
   step "build ÜBERSPRUNGEN (--skip-build)"
 else
-  step "npm run build"
+  step "npm run build (gate-eigenes Ziel, faesst nichts Ausgeliefertes an)"
+  gate_build_dir="$(mktemp -d "${TMPDIR:-/tmp}/hermes-gate-dist.XXXXXXXX")"
+  echo "build outdir: $gate_build_dir"
+  # export, nicht nur als Praefix: `vite preview` im E2E-Block unten liest
+  # denselben Wert aus web/vite.config.ts. Nur den Build zu praefixen wuerde die
+  # Vorschau auf den Default zurueckfallen lassen — sie servierte dann ein altes
+  # Bundle und das E2E waere still gruen auf fremdem Stand.
+  export HERMES_WEB_DIST="$gate_build_dir"
   npm run build
 fi
 
@@ -444,16 +490,19 @@ if [[ "${GATE_E2E:-0}" == "1" ]]; then
     exit 1
   fi
   preview_log="$(mktemp -t gate-e2e-preview.XXXXXX.log)"
-  preview_pid=""
-  _gate_e2e_cleanup() {
-    if [[ -n "${preview_pid:-}" ]] && kill -0 "$preview_pid" 2>/dev/null; then
-      kill "$preview_pid" 2>/dev/null || true
-      wait "$preview_pid" 2>/dev/null || true
-    fi
-    rm -f "$preview_log"
-  }
-  trap _gate_e2e_cleanup EXIT
-  # Serve the dist just built (web/ dist → hermes_cli/web_dist or vite outDir).
+  # Aufraeumen macht _gate_cleanup (oben, EIN EXIT-Trap fuer das ganze Skript).
+  # Hier keinen eigenen `trap … EXIT` registrieren: er wuerde den aeusseren
+  # ersetzen und das Build-Verzeichnis liegen lassen.
+
+  # Sentinel: beweist, dass die Vorschau GENAU dieses Lauf-Artefakt serviert und
+  # nicht ein altes Bundle aus dem Default-Verzeichnis. Ohne diesen Beweis waere
+  # ein gruenes E2E auf fremdem Stand nicht von einem echten gruenen zu
+  # unterscheiden — dieselbe Falle wie beim belegten Port oben.
+  gate_sentinel="gate-sentinel-$$-${RANDOM}.txt"
+  printf '%s\n' "$gate_sentinel" >"$gate_build_dir/$gate_sentinel"
+
+  # Serve the dist just built — HERMES_WEB_DIST ist exportiert, vite preview
+  # liest denselben outDir wie der Build oben.
   # --strictPort so a foreign process on 4173 fails loudly instead of drifting.
   ( cd "$repo_root/web" && "$vite_bin" preview --host 127.0.0.1 --strictPort --port "$preview_port" ) \
     >"$preview_log" 2>&1 &
@@ -477,14 +526,30 @@ if [[ "${GATE_E2E:-0}" == "1" ]]; then
     cat "$preview_log" >&2 || true
     exit 1
   fi
+  # Sentinel-Beweis VOR dem eigentlichen E2E — sonst testet Playwright
+  # moeglicherweise minutenlang einen fremden Bundle-Stand.
+  served_sentinel="$(curl -sf --max-time 5 "http://127.0.0.1:${preview_port}/${gate_sentinel}" || true)"
+  if [[ "$served_sentinel" != "$gate_sentinel" ]]; then
+    echo "FAIL (gate-e2e): Vorschau serviert nicht das Lauf-Artefakt." >&2
+    echo "  erwartet: $gate_sentinel" >&2
+    echo "  bekommen: ${served_sentinel:-<leer/404>}" >&2
+    echo "  outdir:   $gate_build_dir" >&2
+    exit 1
+  fi
+  echo "gate-e2e: Vorschau serviert das Lauf-Artefakt (Sentinel bestaetigt)."
   (
     cd "$repo_root/web"
     PLAYWRIGHT_BASE_URL="http://127.0.0.1:${preview_port}" \
       "$playwright_bin" test e2e/agent-questions.spec.ts
   )
   e2e_rc=$?
-  _gate_e2e_cleanup
-  trap - EXIT
+  # Vorschau sofort beenden (Port freigeben), Build-Verzeichnis bleibt bis zum
+  # EXIT-Trap stehen — der raeumt beide Faelle auf, gruen wie rot.
+  if [[ -n "${preview_pid:-}" ]] && kill -0 "$preview_pid" 2>/dev/null; then
+    kill "$preview_pid" 2>/dev/null || true
+    wait "$preview_pid" 2>/dev/null || true
+  fi
+  preview_pid=""
   if [[ "$e2e_rc" -ne 0 ]]; then
     exit "$e2e_rc"
   fi
