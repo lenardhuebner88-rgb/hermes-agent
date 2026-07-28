@@ -424,20 +424,25 @@ class TestCLIJudgeGate:
     full kanban_db schema; the gate logic is the unit under test.
     """
 
-    def _run(self, monkeypatch, *, goal_mode=True, judge_available=True,
-             verdict="done", reason="", complete_ok=True, summary="done"):
+    def _run(self, monkeypatch, *, goal_mode=True, kind="research",
+             assignee="worker", judge_available=True, verdict="done",
+             reason="", complete_ok=True, summary="done"):
         import argparse
         import types
         from unittest.mock import MagicMock
         from hermes_cli.kanban import _cmd_complete
 
         fake_task = types.SimpleNamespace(
+            id="t1",
             goal_mode=goal_mode,
+            kind=kind,
+            assignee=assignee,
             title="Finish report",
             body="acceptance: criteria",
         )
         fake_conn = MagicMock()
         complete_calls: list = []
+        judge_calls: list = []
 
         def fake_connect_closing():
             from contextlib import contextmanager
@@ -463,16 +468,17 @@ class TestCLIJudgeGate:
         )
         # Match the real judge_goal contract:
         # (verdict, reason, parse_failed, wait_directive, transport_failed)
-        monkeypatch.setattr(
-            "hermes_cli.goals.judge_goal",
-            lambda **kw: (verdict, reason, False, None, False),
-        )
+        def fake_judge_goal(**kwargs):
+            judge_calls.append(kwargs)
+            return verdict, reason, False, None, False
+
+        monkeypatch.setattr("hermes_cli.goals.judge_goal", fake_judge_goal)
 
         args = argparse.Namespace(task_ids=["t1"], summary=summary, result=None, metadata=None)
-        return _cmd_complete(args), complete_calls
+        return _cmd_complete(args), complete_calls, judge_calls
 
     def test_judge_rejects_premature_completion(self, monkeypatch):
-        rc, complete_calls = self._run(
+        rc, complete_calls, _ = self._run(
             monkeypatch, verdict="continue", reason="criteria not met"
         )
         assert rc != 0, "judge rejection must produce non-zero exit code"
@@ -481,18 +487,36 @@ class TestCLIJudgeGate:
         )
 
     def test_judge_allows_accepted_completion(self, monkeypatch):
-        rc, complete_calls = self._run(monkeypatch, verdict="done")
+        rc, complete_calls, _ = self._run(monkeypatch, verdict="done")
         assert rc == 0
         assert complete_calls == ["t1"]
 
     def test_judge_unavailable_fails_open(self, monkeypatch):
         """No auxiliary client configured → gate skipped, task completes."""
-        rc, complete_calls = self._run(monkeypatch, judge_available=False)
+        rc, complete_calls, _ = self._run(monkeypatch, judge_available=False)
         assert rc == 0
         assert complete_calls == ["t1"]
 
     def test_non_goal_mode_task_skips_gate(self, monkeypatch):
         """Plain (non-goal_mode) tasks are never sent to the judge."""
-        rc, complete_calls = self._run(monkeypatch, goal_mode=False)
+        rc, complete_calls, _ = self._run(monkeypatch, goal_mode=False)
         assert rc == 0
         assert complete_calls == ["t1"]
+
+    def test_review_gated_code_task_skips_aux_judge(self, monkeypatch):
+        from hermes_cli import kanban_db as kb
+
+        review_gate_config = kb._review_gate_config()
+        monkeypatch.setattr(
+            kb,
+            "_review_gate_config",
+            lambda: {**review_gate_config, "code_roles": frozenset({"coder"})},
+        )
+
+        rc, complete_calls, judge_calls = self._run(
+            monkeypatch, kind="code", assignee="coder", verdict="continue"
+        )
+
+        assert rc == 0
+        assert complete_calls == ["t1"]
+        assert judge_calls == []
