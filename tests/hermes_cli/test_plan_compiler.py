@@ -11,8 +11,11 @@ import yaml
 from pydantic import ValidationError
 
 from hermes_cli.plan_compiler import (
+    AcceptanceCriterion,
     BindingSubtask,
     TaskgraphHints,
+    _ac_items_for_subtask,
+    _ac_token,
     compile_plan,
     main,
     taskgraph_hints_to_children,
@@ -890,3 +893,52 @@ def test_subtask_max_iterations_must_be_positive():
     """A non-positive explicit max_iterations is rejected at model validation."""
     with pytest.raises(ValidationError):
         BindingSubtask(id="S1", title="Build", lane="coder", max_iterations=0)
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_binding_subtask_rejects_whitespace_only_id():
+    """Kill bool_op_swap L81: or -> and.
+
+    With the mutant, ``not isinstance(v, str) and not v.strip()`` is False
+    for a whitespace-only string (isinstance is True, so the first conjunct
+    is False), letting ``"  "`` through as a valid id.
+    """
+    with pytest.raises(ValidationError):
+        BindingSubtask(id="  ", title="Build", lane="coder")
+
+
+def test_ac_token_uses_core_when_present_and_fallback_when_empty():
+    """Kill bool_op_swap L462 (or -> and on ``ac_id or ""``) and
+    L463 (or -> and on ``core or fallback``).
+
+    L462 mutant: ``(ac_id and "")`` collapses a truthy ac_id to ``""``,
+    so the core is lost and the fallback is used instead.
+    L463 mutant: ``core and fallback`` returns the fallback even when
+    core is non-empty, and returns ``""`` when core is empty.
+    """
+    assert _ac_token("AC-1", fallback="X") == "AC-1"
+    assert _ac_token("AC-", fallback="X") == "AC-X"
+
+
+def test_plan_wide_ac_threads_into_subtask_without_own_criteria():
+    """Kill bool_op_swap L491: or -> and.
+
+    With the mutant, ``not item.applies_to and subtask.id in item.applies_to``
+    is False for a plan-wide AC (empty applies_to), so it is silently dropped
+    instead of threading into every subtask.
+    """
+    subtask = BindingSubtask(id="S1", title="Build", lane="coder")
+    plan_ac: list[str | AcceptanceCriterion] = [
+        AcceptanceCriterion(
+            id="AC-1",
+            scope_level="plan",
+            statement="works",
+            verification="pytest green",
+            done_signal="exit 0",
+        )
+    ]
+    result = _ac_items_for_subtask(subtask, plan_ac)
+    assert len(result) == 1, f"plan-wide AC was dropped: {result}"
+    assert result[0].id == "AC-1"
