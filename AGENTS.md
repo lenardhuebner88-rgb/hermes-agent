@@ -181,9 +181,25 @@ and invariants over snapshots or counts of expected-to-change catalogs.
   `git diff --name-only $(git merge-base main <branch>)..<branch>`, and
   `branch_name` for a chain slice is the *chain* branch (`kanban/<root>`), not
   `kanban/<task-id>` — guessing it yields an empty diff and a wrong conclusion.
-  Two distinct causes: the chain branch merging `main` mid-flight (fixed), and an
-  attribution basis orphaned by a rebase (open). Never answer a park with another
-  lane-scope fixer before measuring; the second bounce means diagnose, not retry.
+  Four distinct causes existed; all are fixed as of 2026-07-28. **Read the code
+  path in the wrong order and you will fix the wrong one — measure this first:**
+  `_lane_scope_review_snapshot_diff_spec(conn, task_id, repo_root)`. When it
+  returns non-`None`, a review snapshot pins the diff and the *entire* per-task
+  attribution is skipped — receipts, orphaned-basis branch, merge-base
+  subtraction all become dead code for that completion. For a chain slice the
+  snapshot candidate is the shared chain **tip**, so the slice is charged with
+  its siblings' commits. That single mechanism produced seven consecutive false
+  parks on one card while three earlier fixes looked correct and never ran.
+  Never answer a park with another lane-scope fixer before measuring; the second
+  bounce means diagnose, not retry.
+- **`done` + `MERGED_GREEN` does not prove the code is on `main`.** Verified
+  2026-07-28: a card carried `INTEGRATOR_VERIFIED` with a green gate while its
+  four files were absent from `main` — the stamp named the *sibling's* branch and
+  file list, because `chain_root_id` walks `task_links` upward and resolved a
+  foreign, already-finished card as the chain root. Confirm with
+  `git merge-base --is-ancestor <card branch> main` (and `git patch-id --stable`
+  if a rebase may have reminted it). A `done` card is never revisited by the
+  board, so unlanded work there is silent and permanent.
 
 Use `opensrc` from the project for dependency internals at the installed version.
 More examples and subsystem detail remain in `docs/agent-dev-guide.md`.
