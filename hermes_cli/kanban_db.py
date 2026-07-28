@@ -25613,8 +25613,8 @@ def _conflict_fixer_body(
         "commit your fix on this branch.\n\n"
         "HARD RULES: work ONLY in this worktree/branch. NEVER push, merge, "
         "switch, or reset another branch — re-integration happens outside your "
-        "run after review. If the conflict is not something a focused fix can "
-        "resolve, stop and explain why so it escalates to the operator."
+        "run after review. TERMINATE YOUR RUN: after committing a focused, gated fix, immediately call kanban_complete with commit and gate evidence; do not wait for timeout; if a focused "
+        "fix cannot resolve, call kanban_block with its reason, then stop so it escalates to the operator."
     )
 
 
