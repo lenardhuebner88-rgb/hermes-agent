@@ -3746,7 +3746,11 @@ def test_cmd_night_empty_status_zero_plans_retries_once_then_loud_stop(
         AssertionError("Build darf nach Plan-Anomalie nicht starten")
     )
 
-    assert runner.cmd_night() is True
+    # Fail-closed: bis 2026-07-28 stand hier `assert runner.cmd_night() is True` —
+    # der Test schrieb den Defekt als Sollverhalten fest. Ein Planner, der zweimal
+    # hintereinander seinen Statuskontrakt bricht, darf nicht als Erfolg enden.
+    with pytest.raises(RuntimeError, match="Statuskontrakt"):
+        runner.cmd_night()
 
     assert calls.count("plan") == 2, f"erwartet 2× plan (1 Retry), got {calls}"
     assert "build" not in calls
@@ -3757,6 +3761,44 @@ def test_cmd_night_empty_status_zero_plans_retries_once_then_loud_stop(
     assert stop_msgs, f"notify mit 'gestoppt' erwartet, got {notifies!r}"
     assert "2×" in stop_msgs[0] or "2x" in stop_msgs[0].lower()
     assert "Statuskontrakt" in stop_msgs[0]
+
+
+def test_plan_stop_reaches_the_unit_as_nonzero_exit(tmp_path, fake_engine, monkeypatch):
+    """Der Abbruch muss bis zum Exit-Code durchschlagen — auch ohne autoland.
+
+    Das ist der eigentliche Befund: `cmd_night` meldete den Stop nach Discord und
+    gab True zurück, und selbst ein False wäre in main() an
+    `rc = 0 if night_ok or not pack.autoland else 4` hängengeblieben. Für jeden
+    Pack ohne autoland — die Mehrheit — endete die Unit grün, während der Loop
+    seinen Vertrag gebrochen hatte. Dieser Test prüft deshalb den CLI-Exitcode
+    und nicht den Rückgabewert: nur der erreicht systemd.
+    """
+    behaviors, calls = fake_engine
+    repo = init_repo(tmp_path / "repo")
+    write_pack(tmp_path / "packs", "plan-stop-rc", "pipeline", repo)
+    pack = load_pack(tmp_path / "packs", "plan-stop-rc")
+    assert pack.autoland is False, "Fixture muss den Mehrheitsfall abbilden"
+
+    # main() baut seinen eigenen Runner — deshalb auf der Klasse patchen.
+    monkeypatch.setattr(LoopRunner, "notify", lambda self, msg: None)
+
+    # Planner-Turn ohne Statuskontrakt: rc=0, leerer Output, kein Plan.
+    behaviors["plan"] = lambda kv, cwd: engines.EngineResult(
+        rc=0, output="", usage_limit=False
+    )
+    behaviors["build"] = lambda kv, cwd: (_ for _ in ()).throw(
+        AssertionError("Build darf nach Plan-Abbruch nicht starten")
+    )
+
+    rc = runner_module.main([
+        "--pack", "plan-stop-rc",
+        "--cmd", "night",
+        "--packs-dir", str(tmp_path / "packs"),
+        "--state-root", str(tmp_path / "state"),
+    ])
+    assert rc != 0, "Plan-Abbruch muss die Unit rot machen, nicht gruen"
+    assert rc == 3, f"ABBRUCH-Pfad liefert 3, got {rc}"
+    assert calls.count("plan") == 2, f"erwartet 2x plan (1 Retry), got {calls}"
 
 
 def test_cmd_night_dry_zero_plans_no_retry(tmp_path, fake_engine, monkeypatch):
