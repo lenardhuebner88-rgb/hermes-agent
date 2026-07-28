@@ -38,6 +38,16 @@ def empty_db(tmp_path: Path) -> Path:
     return db
 
 
+@pytest.fixture()
+def kimi_index(tmp_path: Path) -> Path:
+    """Materialize the captured Kimi index with this checkout's fixture path."""
+    record = json.loads((FIXTURES / "kimi" / "session_index.jsonl").read_text())
+    record["sessionDir"] = str(FIXTURES / "kimi" / "session_dir")
+    index = tmp_path / "session_index.jsonl"
+    index.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return index
+
+
 def _count_origin(db: Path, origin: str) -> int:
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
@@ -179,12 +189,11 @@ def test_codex_write_persists_rate_limit_sidecar(empty_db: Path, tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
-def test_kimi_resume_handle_to_wire_extraction():
+def test_kimi_resume_handle_to_wire_extraction(kimi_index: Path):
     expected = json.loads((FIXTURES / "kimi" / "expected.json").read_text())
-    index = FIXTURES / "kimi" / "session_index.jsonl"
     sid = expected["sessionId"]
 
-    wire = resolve_kimi_wire_path(sid, index_path=index)
+    wire = resolve_kimi_wire_path(sid, index_path=kimi_index)
     assert wire is not None
     assert wire.is_file()
 
@@ -199,7 +208,7 @@ def test_kimi_resume_handle_to_wire_extraction():
     assert extracted.run_fields["model"] == expected["model"]
     assert extracted.run_fields["llm_call_count"] == expected["turn_sums"]["turn_count"]
 
-    via_handle = load_kimi_usage_for_handle(sid, index_path=index)
+    via_handle = load_kimi_usage_for_handle(sid, index_path=kimi_index)
     assert via_handle is not None
     assert via_handle["input_tokens"] == expected["total_input_tokens"]
 
@@ -249,7 +258,7 @@ def test_kimi_input_formula_other_plus_cache():
         assert extracted.run_fields["llm_call_count"] == 1
 
 
-def test_kimi_distill_pulls_wire_via_handle():
+def test_kimi_distill_pulls_wire_via_handle(kimi_index: Path):
     expected = json.loads((FIXTURES / "kimi" / "expected.json").read_text())
     sid = expected["sessionId"]
     # Mimic stream-json events: handle only, no usage field.
@@ -259,7 +268,7 @@ def test_kimi_distill_pulls_wire_via_handle():
     distilled = distill_foreign_events(
         "kimi",
         events,
-        kimi_session_index=FIXTURES / "kimi" / "session_index.jsonl",
+        kimi_session_index=kimi_index,
     )
     assert distilled["handle"] == sid
     assert distilled["usage"] is not None
@@ -333,14 +342,15 @@ def test_grok_inference_done_tokens_and_missing_model():
 # ---------------------------------------------------------------------------
 
 
-def test_harvest_all_idempotent_second_pass(tmp_path: Path, empty_db: Path):
+def test_harvest_all_idempotent_second_pass(
+    tmp_path: Path, empty_db: Path, kimi_index: Path
+):
     # Mini source trees
     codex_root = tmp_path / "codex" / "2026" / "07" / "27"
     codex_root.mkdir(parents=True)
     golden = (FIXTURES / "codex" / "rollout-golden.jsonl").read_text()
     (codex_root / "rollout-golden.jsonl").write_text(golden)
 
-    kimi_index = FIXTURES / "kimi" / "session_index.jsonl"
     qwen_dir = tmp_path / "qwen"
     qwen_dir.mkdir()
     (qwen_dir / "token-usage-2026-07.jsonl").write_text(
