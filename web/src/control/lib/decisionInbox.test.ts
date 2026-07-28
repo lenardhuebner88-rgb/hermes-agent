@@ -469,6 +469,120 @@ describe("buildDecisionInbox — kanban surface", () => {
     expect(items[1].tone).toBe("amber");
   });
 
+  it("integration_parked: ANSI-Gate-Ausgabe vom Live-Board wird zu einer lesbaren Zeile", () => {
+    // Echter Parkgrund vom Board, 28.07.2026 (task_events id 86415, t_2bf50879):
+    // 2071 Zeichen, 32 Zeilen, mit ESC-Sequenzen aus der Vitest-Ausgabe.
+    const rawReason =
+      "integration parked: post-merge gate failed: frontend bootstrap: exit 1\n" +
+      "thod: without installing the canvas npm package\n" +
+      "\n" +
+      "\x1b[31m⎯⎯⎯⎯⎯⎯⎯\x1b[39m\x1b[1m\x1b[41m Failed Tests 1 \x1b[49m\x1b[22m\x1b[31m⎯⎯⎯⎯⎯⎯⎯\x1b[39m\n" +
+      "\n" +
+      "\x1b[41m\x1b[1m FAIL \x1b[22m\x1b[49m src/control/views/BibliothekCorrectionEditor.test.tsx\x1b[2m > \x1b[22mBibliothekCorrectionEditor\x1b[2m > \x1b[22mSpeichern sendet exakt {item_id} per PUT\n" +
+      "\x1b[31m\x1b[1mAssertionError\x1b[22m: expected <button type=\"button\" …(2)></button> to be <button type=\"button\" …(3)></button> // Object.is equality\x1b[39m\n" +
+      "\n" +
+      "\x1b[32m- Expected\x1b[39m\n" +
+      "\x1b[31m+ Received\x1b[39m\n" +
+      "\n" +
+      "\x1b[2m  <button\x1b[22m\n" +
+      "\x1b[32m-   aria-busy=\"true\"\x1b[39m\n" +
+      "\x1b[32m-   class=\"inline-flex min-h-12 items-center justify-center rounded-card border border-live/40 bg-live/10 px-4 text-sec font-medium text-bronze-hi transition hover:bg-live/15 aria-disabled:pointer-events-none aria-disabled:cursor-wait aria-disabled:opacity-50\"\x1b[39m\n" +
+      "\x1b[31m+   class=\"inline-flex min-h-12 items-center justify-center rounded-card border border-line px-4 text-sec text-ink-2 transition hover:bg-surface-3 disabled:opacity-50\"\x1b[39m\n" +
+      "\x1b[31m+   disabled=\"\"\x1b[39m\n" +
+      "\x1b[2m    type=\"button\"\x1b[22m\n" +
+      "\x1b[2m  >\x1b[22m\n" +
+      "\x1b[32m-   Wird gespeichert…\x1b[39m\n" +
+      "\x1b[31m+   Abbrechen\x1b[39m\n" +
+      "\x1b[2m  </button>\x1b[22m\n" +
+      "\n" +
+      "\x1b[36m \x1b[2m❯\x1b[22m src/control/views/BibliothekCorrectionEditor.test.tsx:\x1b[2m356:36\x1b[22m\x1b[39m\n" +
+      "    \x1b[90m354|\x1b[39m     \x1b[34mexpect\x1b[39m(busySave\x1b[33m.\x1b[39m\x1b[34mgetAttribute\x1b[39m(\x1b[32m\"aria-disabled\"\x1b[39m))\x1b[33m.\x1b[39m\x1b[34mtoBe\x1b[39m(\x1b[32m\"true\"\x1b[39m)\x1b[33m;\x1b[39m\n" +
+      "    \x1b[90m355|\x1b[39m     expect(screen.getByRole(\"dialog\", { name: \"Korrektur verbindlich s…\n" +
+      "    \x1b[90m356|\x1b[39m     \x1b[34mexpect\x1b[39m(document\x1b[33m.\x1b[39m\x1b[34mactiveElement)\x1b[33m.\x1b[39m\x1b[34mtoBe\x1b[39m(busySave)\x1b[33m;\x1b[39m\n" +
+      "    \x1b[90m   |\x1b[39m                                    \x1b[31m^\x1b[39m\n" +
+      "    \x1b[90m357|\x1b[39m     \x1b[34mexpect\x1b[39m(editorClose\x1b[33m.\x1b[39m\x1b[34mdisabled)\x1b[33m.\x1b[39m\x1b[34mtoBe\x1b[39m(\x1b[35mtrue\x1b[39m)\x1b[33m;\x1b[39m\n" +
+      "    \x1b[90m358|\x1b[39m     resolveSave({ correction: savedCorrection, provenance: savedProven…\n" +
+      "\n" +
+      "\x1b[31m\x1b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\x1b[22m\x1b[39m";
+    expect(rawReason.length).toBeGreaterThan(2000);
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        {
+          kind: "integration_parked",
+          task_id: "t_2bf50879",
+          title: "Integration t_2bf50879 parken",
+          reason: rawReason,
+          age_seconds: 8,
+          suggested_command: null,
+        },
+      ],
+    });
+    const why = items[0].why;
+    // AC-1: kein Steuerzeichen im gerenderten Grund.
+    // eslint-disable-next-line no-control-regex -- Test prueft explizit auf ESC-Reste
+    expect(why).not.toMatch(/\x1b/);
+    // AC-2: auf die erste bedeutungstragende Zeile reduziert.
+    expect(why).toContain(
+      "integration parked: post-merge gate failed: frontend bootstrap: exit 1",
+    );
+    expect(why).not.toContain("BibliothekCorrectionEditor.test.tsx");
+    expect(why).not.toContain("Failed Tests");
+    // Ein Eintrag flutet die Inbox nicht mehr.
+    expect(why.length).toBeLessThan(400);
+    // AC-6: Ton und Ziel-Link bleiben unveraendert.
+    expect(items[0].tone).toBe("amber");
+    expect(items[0].target).toBe("/control/fleet?task=t_2bf50879");
+  });
+
+  it("integration_parked: sehr lange einzeilige Gruende werden sichtbar gekuerzt", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        {
+          kind: "integration_parked",
+          task_id: "t1",
+          title: "Merge parked",
+          reason: `integration parked: ${"x".repeat(400)}`,
+          age_seconds: 8,
+          suggested_command: null,
+        },
+      ],
+    });
+    // AC-3: die Kuerzung ist sichtbar, der Grund endet nicht stillschweigend.
+    expect(items[0].why).toMatch(/…$/);
+    expect(items[0].why).not.toContain("x".repeat(200));
+  });
+
+  it("kanban: kurze saubere Gruende anderer Eintragsarten bleiben unveraendert", () => {
+    const items = buildDecisionInbox({
+      proposals: [],
+      foItems: [],
+      foNowSec: NOW,
+      interventions: [],
+      kanbanDecisions: [
+        {
+          kind: "sticky_blocked",
+          task_id: "t1",
+          title: "Review pruefen",
+          reason: "2 Reviews laufen seit 3h ohne Verdict",
+          age_seconds: 99,
+          suggested_command: null,
+        },
+      ],
+    });
+    // AC-5: Label, Signal und Grund exakt wie bisher zusammengesetzt.
+    expect(items[0].why).toBe(
+      "Blockiert — Unblock nötig · 2 Reviews laufen seit 3h ohne Verdict",
+    );
+  });
+
   it("R1: deliverable_posted_not_completed carries the inline repair anchor and outranks sticky", () => {
     const items = buildDecisionInbox({
       proposals: [],

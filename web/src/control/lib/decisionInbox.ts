@@ -137,6 +137,29 @@ function operatorEscalationSignal(d: KanbanDecision): string | null {
   return signal ? `Signal ${signal}` : null;
 }
 
+// Das Kanban-Gateway liefert für integration_parked den vollständigen
+// Post-Merge-Gate-Output als `reason` (gemessen 2026-07-28 auf dem Live-Board:
+// >2600 Zeichen, mehrzeilig, mit ANSI-Farbcodes wie ESC[31m/ESC[41m). Roh in
+// die why-Zeile gejoint sieht der Operator Steuerzeichen-Müll statt einer
+// Entscheidungshilfe — ausgerechnet bei der Eintragsart, die eine festsitzende
+// Kette meldet. Vor der Anzeige: ANSI-Escape-Sequenzen entfernen, auf die
+// erste bedeutungstragende Zeile reduzieren und längenbegrenzen — sichtbar
+// gekürzt (…), nicht stillschweigend abgeschnitten.
+// eslint-disable-next-line no-control-regex -- genau der Zweck: ESC-Steuersequenzen matchen und entfernen
+const ANSI_ESCAPE_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
+const KANBAN_REASON_MAX_CHARS = 180;
+
+function sanitizeKanbanReason(reason: string): string {
+  const text =
+    reason
+      .replace(ANSI_ESCAPE_RE, "")
+      .split(/\r?\n/)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .find((line) => line.length > 0) ?? "";
+  if (text.length <= KANBAN_REASON_MAX_CHARS) return text;
+  return `${text.slice(0, KANBAN_REASON_MAX_CHARS - 1).trimEnd()}…`;
+}
+
 // FO backlog: only items that represent a fresh operator decision earn a row.
 // `later`/`done` are not inbox-worthy; a missing owner or a stale claim lifts the floor.
 function foWeight(item: BacklogItem): number {
@@ -245,9 +268,10 @@ export function buildDecisionInbox(input: {
           ? "1 offenes Risiko aus Abschluss"
           : `${riskCount ? `${riskCount} ` : ""}offene Risiken aus Abschluss`)
       : (d.title || d.task_id);
+    const reason = d.reason ? sanitizeKanbanReason(d.reason) : d.reason;
     const why = isDispositionRisk
-      ? [d.title || d.task_id, d.reason].filter(Boolean).join(" · ")
-      : [label, signal, d.reason].filter(Boolean).join(" · ");
+      ? [d.title || d.task_id, reason].filter(Boolean).join(" · ")
+      : [label, signal, reason].filter(Boolean).join(" · ");
     items.push({
       key: `kanban:${d.kind}:${d.task_id}`,
       surface: "kanban",
