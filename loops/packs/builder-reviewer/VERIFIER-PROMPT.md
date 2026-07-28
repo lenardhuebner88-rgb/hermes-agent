@@ -18,7 +18,7 @@ als ein zu Unrecht abgelehnter.
 2. **Gates SELBST ausführen** (Exit-Codes zählen, nicht Builder-Behauptungen):
    ```bash
    ./loops/gate.sh HEAD~1
-   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider --timeout=120
+   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider
    ```
    Wenn der Diff `web/` berührt, zusätzlich aus `{{WT}}/web`:
    `npm run lint:control && npx tsc -b --noEmit && npx vitest run <betroffene Pfade>`
@@ -27,7 +27,7 @@ als ein zu Unrecht abgelehnter.
    ```bash
    # Quell-Dateien (NICHT die Testdateien) auf den Stand vor dem Commit setzen:
    git checkout HEAD~1 -- <geänderte Quell-Dateien>
-   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider --timeout=120  # MUSS ROT sein
+   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider  # MUSS ROT sein
    git checkout HEAD -- .                                                  # wiederherstellen
    ```
    Ist der Test auf dem alten Code GRÜN, beweist er nichts → FAIL („tautologischer Test").

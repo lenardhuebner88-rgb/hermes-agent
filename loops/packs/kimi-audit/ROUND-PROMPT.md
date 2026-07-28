@@ -19,7 +19,7 @@ Parameter: {{PARAMS}} (FOKUS = zu auditierendes Subsystem). Führe GENAU EINE Ru
    synthetischer Idealfall; tautologische Tests flogen im Kimi-Loop im Review raus).
    Dann minimaler Fix.
 5. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt) + den neuen Test explizit:
-   `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider --timeout=120`
+   `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider`
 6. **Grün** → GENAU EIN Commit (ein Fund = ein Commit, cherry-pick-bar):
    `loop(kimi-audit): <modul> <fund kurz>` + Ledger-Zeile (Fund, Datei:Zeile,
    Eingabemuster, Testpfad).

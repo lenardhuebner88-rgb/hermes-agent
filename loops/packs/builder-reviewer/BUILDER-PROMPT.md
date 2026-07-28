@@ -23,7 +23,7 @@ dann beende den Turn.
    ```bash
    git add -A          # erst stagen: neue (Test-)Dateien sind sonst für das Gate unsichtbar
    ./loops/gate.sh     # ruff + affected pytest (uncommitteter Diff)
-   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider --timeout=120
+   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider
    ```
    Wenn du `web/` berührt hast, zusätzlich aus `{{WT}}/web`:
    ```bash

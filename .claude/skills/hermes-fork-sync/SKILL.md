@@ -53,7 +53,7 @@ scripts/merge-audit.sh HEAD        # (exists since 2026-07-03; --strict for hook
 
 # C. Verify (targeted; the full suite has a known trap — see below)
 ( cd web && ../node_modules/.bin/tsc -b --noEmit )              # root-hoisted binary; npx is a stub trap in worktrees
-scripts/run_tests.sh tests/ --co -q 2>&1 | tail -3            # collection sweep: want "0 errors" (catches dropped imports)
+scripts/collect_check.sh -q tests/ 2>&1 | tail -3             # collection sweep: want "0 errors" (catches dropped imports)
 scripts/run_tests.sh tests/<touched_or_new>... -q             # run the files the merge actually touched
 
 # D. Push (outward — confirm first). NOT a fast-forward → STOP and report, never --force
@@ -91,9 +91,10 @@ recent `backup/*` and any branch checked out in a worktree (`git worktree list`)
   fails on missing imports, repair the *test* environment the selector picks (typically `.venv/`:
   `uv sync --locked --extra all --extra dev --extra messaging`). Also ensure no stray `/tmp/.git`.
 - **Full-suite hang:** `scripts/run_tests.sh tests/ -q` (large suite, ~1.4k test files) **hangs** on a
-  pre-existing `delegate`/`tui` flake. If you must run it all: pass `--timeout=120
-  --timeout-method=thread` so a hang becomes a failure. For routine sync, tsc + collection sweep +
-  touched/new files is enough.
+  pre-existing `delegate`/`tui` flake. The runner already caps each file (default 300 s) and SIGKILLs
+  its process tree; tighten it with `HERMES_TEST_FILE_TIMEOUT=120` if you must run it all. Do **not**
+  reach for pytest's `--timeout` — `pytest-timeout` is not installed, so that flag aborts the run with
+  `unrecognized arguments`. For routine sync, tsc + collection sweep + touched/new files is enough.
 
 ## Landing a worktree branch while other sessions are active
 
