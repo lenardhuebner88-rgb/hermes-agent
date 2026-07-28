@@ -171,6 +171,27 @@ export function isManagedWindow(window: AgentTerminalWindow): boolean {
   return window.managed !== false;
 }
 
+/**
+ * Inhaltsgleichheit zweier Ziele — Session, Fenstername und window_id.
+ *
+ * Bewusst Inhalt und nicht `targetKey`: zwei Ziele mit gleicher window_id, aber
+ * unterschiedlichem Namen (Umbenennung) sind ein echter Wechsel und müssen
+ * durchschlagen. `targetKey` würde die Umbenennung schlucken und einen veralteten
+ * Namen in localStorage einfrieren.
+ */
+export function sameTarget(
+  a: { session: string; window: string; window_id?: string | null } | null,
+  b: { session: string; window: string; window_id?: string | null } | null,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.session === b.session &&
+    a.window === b.window &&
+    (a.window_id ?? null) === (b.window_id ?? null)
+  );
+}
+
 export function pickInitialTarget(
   windows: AgentTerminalWindow[],
   preferredKind: AgentTerminalKind,
@@ -184,7 +205,23 @@ export function pickInitialTarget(
           : candidate.session === previous.session && candidate.window === previous.window,
       )
     : undefined;
-  if (previousWindow) return targetFromWindow(previousWindow);
+  if (previousWindow) {
+    const resolved = targetFromWindow(previousWindow);
+    // Identität bewahren, wenn sich inhaltlich nichts geändert hat: der Aufrufer
+    // steckt das Ergebnis in setTarget(), und `target` haengt in der Dependency-Liste
+    // des Attach-Effekts. Ein frisches Objekt mit gleichem Inhalt reichte, um den
+    // Socket zu schliessen, term.reset() zu fahren und "Attaching …" zu zeigen.
+    //
+    // Der Inventar-Poll liefert alle WINDOW_INVENTORY_POLL_MS ein neues `activity`
+    // je aktivem Fenster; der JSON-Guard des Aufrufers schlug damit bei laufender
+    // Flotte auf JEDEM Tick an. Ergebnis: das Terminal lud sich im Poll-Takt selbst
+    // neu, obwohl das Ziel unveraendert war (Befund 2026-07-28, gemessen: 3 von 6
+    // Fenstern aendern `activity` in jedem 5-Sekunden-Sample).
+    //
+    // Gleiche Referenz zurueckgeben heisst: React bricht das Update ab — kein
+    // Re-Render, kein Re-Attach.
+    return sameTarget(previous, resolved) ? previous : resolved;
+  }
   const preferred = windows.find((w) => w.window === preferredKind);
   return targetFromWindow(preferred ?? windows[0]);
 }

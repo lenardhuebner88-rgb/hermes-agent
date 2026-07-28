@@ -166,6 +166,45 @@ describe("AgentTerminalsView state helpers", () => {
     expect(pickInitialTarget([], "hermes", null)).toBeNull();
   });
 
+  // Regression 2026-07-28: das Terminal lud sich im Takt des Inventar-Polls neu.
+  // `activity` aendert sich bei laufender Flotte bei jedem Poll (gemessen: 3 von 6
+  // Fenstern je 5-Sekunden-Sample), der JSON-Guard des Aufrufers schlug also immer
+  // an und rief setTarget(). Ein inhaltsgleiches, aber NEUES Objekt genuegt, um den
+  // Attach-Effekt (dep: target) neu laufen zu lassen: Socket zu, term.reset(),
+  // "Attaching …". Deshalb hier bewusst toBe (Referenz) statt toEqual (Inhalt) —
+  // toEqual wuerde den Bug nicht sehen.
+  it("returns the identical previous target object when nothing but activity changed", () => {
+    const previous = { session: running.session, window: running.window };
+    const firstPoll = pickInitialTarget([{ ...running, activity: 1000 }], "codex", previous);
+    expect(firstPoll).toBe(previous);
+
+    const secondPoll = pickInitialTarget([{ ...running, activity: 2000 }], "codex", previous);
+    expect(secondPoll).toBe(previous);
+  });
+
+  it("keeps identity across polls when the target carries a window_id", () => {
+    const previous = { session: running.session, window: running.window, window_id: "@140" };
+    const inventory = [{ ...running, window_id: "@140", activity: 4242 }];
+    expect(pickInitialTarget(inventory, "codex", previous)).toBe(previous);
+  });
+
+  // Die Gegenprobe: Identitaet bewahren darf keine echte Aenderung verschlucken.
+  // Beides muss ein NEUES Objekt liefern, sonst haengt das Terminal am alten Pane.
+  it("returns a fresh target when the window was renamed under a stable window_id", () => {
+    const previous = { session: running.session, window: running.window, window_id: "@140" };
+    const renamed = [{ ...running, window: "claude-2", window_id: "@140" }];
+    const next = pickInitialTarget(renamed, "codex", previous);
+    expect(next).not.toBe(previous);
+    expect(next).toEqual({ session: running.session, window: "claude-2", window_id: "@140" });
+  });
+
+  it("returns a fresh target when the previous window disappeared", () => {
+    const previous = { session: "hermes-agents", window: "hermes" };
+    const next = pickInitialTarget([dead], "codex", previous);
+    expect(next).not.toBe(previous);
+    expect(next).toEqual({ session: dead.session, window: dead.window });
+  });
+
   it("migrates a legacy stored name target to the inventory window_id", () => {
     const inventory = [{ ...running, window_id: "@140" }];
     expect(
