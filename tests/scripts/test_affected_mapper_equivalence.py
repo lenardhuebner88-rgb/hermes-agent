@@ -112,6 +112,10 @@ def test_worker_cap_runs_end_to_end_through_shell_wrapper(tmp_path: Path) -> Non
         REPO_ROOT / "hermes_cli" / "affected_test_mapping.py",
         repo / "hermes_cli",
     )
+    shutil.copy2(
+        REPO_ROOT / "hermes_cli" / "symbol_test_narrowing.py",
+        repo / "hermes_cli",
+    )
     (repo / "config").mkdir()
     (repo / "config" / "affected-test-exceptions.json").write_text(
         '{"schema_version": 1, "exceptions": []}\n'

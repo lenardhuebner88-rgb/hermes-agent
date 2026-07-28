@@ -10,6 +10,7 @@ from hermes_cli.affected_test_mapping import (
     EXPLICIT_TEST_PATTERNS,
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError,
+    SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
     UNMAPPED_EXIT_CODE,
     WORKER_FALLBACK_MAX_TEST_FILES,
     WORKER_UNION_MAX_TEST_FILES,
@@ -19,6 +20,7 @@ from hermes_cli.affected_test_mapping import (
     census_repository,
     classify_changed_paths,
 )
+from hermes_cli.symbol_test_narrowing import SymbolDiffSpec
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -446,6 +448,23 @@ def test_explicit_direct_and_import_strategies_are_unioned(tmp_path: Path) -> No
         "tests/hermes_cli/test_kanban_db.py",
         "tests/hermes_cli/test_kanban_db_explicit.py",
     }
+
+
+def test_real_historical_diff_exposes_symbol_narrowing_strategy() -> None:
+    index = build_test_index(REPO_ROOT)
+
+    record = classify_changed_paths(
+        REPO_ROOT,
+        ["hermes_cli/kanban_db.py"],
+        mode="integration",
+        index=index,
+        diff_spec=SymbolDiffSpec(ref="15ac3b65d^", right="15ac3b65d"),
+    ).records[0]
+
+    assert SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD == 60
+    assert "import→symbol" in record.strategies
+    assert "import" not in record.strategies
+    assert record.state == "selected"
 
 
 def test_worker_union_cap_is_deterministic_and_integration_is_complete() -> None:

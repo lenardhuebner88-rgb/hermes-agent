@@ -17,10 +17,16 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
+from hermes_cli.symbol_test_narrowing import (
+    SymbolDiffSpec,
+    narrow_imported_tests,
+)
 
 WORKER_FALLBACK_MAX_TEST_FILES = 200
 INTEGRATION_FALLBACK_MAX_TEST_FILES = 800
 WORKER_UNION_MAX_TEST_FILES = 217
+# Import fan-out is the measured noise axis; modules at 60 files or below stay exact.
+SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD = 60
 UNMAPPED_EXIT_CODE = 4
 EXCEPTIONS_PATH = Path("config/affected-test-exceptions.json")
 
@@ -345,12 +351,35 @@ def tracked_and_untracked_python_paths(repo_root: Path) -> list[str]:
     )
 
 
-def changed_paths(
+def _default_diff_base(repo_root: Path) -> str:
+    try:
+        base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
+    except GitTimeoutError:
+        raise
+    except MappingError:
+        base = ""
+    return base or "HEAD"
+
+
+def _resolve_diff_spec(
     repo_root: Path,
     ref: str | None,
     right: str | None = None,
+) -> SymbolDiffSpec:
+    return SymbolDiffSpec(
+        ref=ref,
+        right=right,
+        default_base=_default_diff_base(repo_root)
+        if right is None and ref is None
+        else None,
+    )
+
+
+def _changed_paths_for_spec(
+    repo_root: Path,
+    diff_spec: SymbolDiffSpec,
 ) -> list[str]:
-    if right is not None:
+    if diff_spec.right is not None:
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -358,12 +387,12 @@ def changed_paths(
                 "diff",
                 "--diff-filter=ACDMRT",
                 "--name-only",
-                ref or "HEAD",
-                right,
+                diff_spec.ref or "HEAD",
+                diff_spec.right,
             ).splitlines()
             if line
         }
-    elif ref:
+    elif diff_spec.ref:
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -371,18 +400,12 @@ def changed_paths(
                 "diff",
                 "--diff-filter=ACDMRT",
                 "--name-only",
-                ref,
+                diff_spec.ref,
             ).splitlines()
             if line
         }
     else:
-        try:
-            base = _run_git(repo_root, "merge-base", "HEAD", "main").strip()
-        except GitTimeoutError:
-            raise
-        except MappingError:
-            base = ""
-        base_ref = base or "HEAD"
+        base_ref = diff_spec.default_base or "HEAD"
         changed = {
             _normalize_path(line)
             for line in _run_git(
@@ -405,6 +428,26 @@ def changed_paths(
             if line
         )
     return sorted(changed)
+
+
+def changed_paths_with_diff_spec(
+    repo_root: Path,
+    ref: str | None,
+    right: str | None = None,
+) -> tuple[list[str], SymbolDiffSpec]:
+    """Return changed paths and the one resolved diff used to derive them."""
+
+    diff_spec = _resolve_diff_spec(repo_root, ref, right)
+    return _changed_paths_for_spec(repo_root, diff_spec), diff_spec
+
+
+def changed_paths(
+    repo_root: Path,
+    ref: str | None,
+    right: str | None = None,
+) -> list[str]:
+    paths, _ = changed_paths_with_diff_spec(repo_root, ref, right)
+    return paths
 
 
 def _is_test_path(path: str) -> bool:
@@ -660,6 +703,7 @@ def classify_changed_paths(
     mode: str = "integration",
     exceptions_path: Path | None = None,
     index: TestIndex | None = None,
+    diff_spec: SymbolDiffSpec | None = None,
 ) -> AffectedTestPlan:
     if mode not in {"worker", "integration"}:
         raise MappingError(f"unknown affected-test mode: {mode}")
@@ -770,7 +814,20 @@ def classify_changed_paths(
             test_index = build_test_index(repo_root)
         imported = test_index.imports.get(module_import, ())
         if imported:
-            strategies.append("import")
+            narrowing = narrow_imported_tests(
+                repo_root=repo_root,
+                source_path=source_path,
+                module_import=module_import,
+                imported_tests=imported,
+                all_test_paths=test_index.paths,
+                threshold=SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
+                diff_spec=diff_spec,
+                run_git=_run_git,
+                git_error_type=MappingError,
+                git_timeout_error_type=GitTimeoutError,
+            )
+            imported = narrowing.tests
+            strategies.append("import→symbol" if narrowing.applied else "import")
         prioritized_tests: list[str] = []
         seen_tests: set[str] = set()
         for evidence in (direct, explicit, imported):

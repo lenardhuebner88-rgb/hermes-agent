@@ -8,7 +8,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
-_MAPPING_MODULE = REPO_ROOT / "hermes_cli" / "affected_test_mapping.py"
+_MAPPING_MODULES = ("affected_test_mapping.py", "symbol_test_narrowing.py")
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -29,7 +29,8 @@ def _make_repo(tmp_path: Path, *, branch_age_exit: int, test_exit: int = 0) -> t
         shutil.copy2(SCRIPTS / name, scripts / name)
     (repo / "hermes_cli").mkdir()
     (repo / "hermes_cli" / "__init__.py").write_text("")
-    shutil.copy2(_MAPPING_MODULE, repo / "hermes_cli" / "affected_test_mapping.py")
+    for name in _MAPPING_MODULES:
+        shutil.copy2(REPO_ROOT / "hermes_cli" / name, repo / "hermes_cli" / name)
     (repo / "config").mkdir()
     (repo / "config" / "affected-test-exceptions.json").write_text(
         '{"schema_version": 1, "exceptions": []}\n'

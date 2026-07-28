@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 # The real scripts under test (copied verbatim); run_tests.sh is stubbed.
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
-_MAPPING_MODULE = REPO_ROOT / "hermes_cli" / "affected_test_mapping.py"
+_MAPPING_MODULES = ("affected_test_mapping.py", "symbol_test_narrowing.py")
 _STUB_RUN_TESTS = """#!/usr/bin/env bash
 # Test stub: record the args we were called with, then exit 0 WITHOUT running
 # any real test suite. Its mere existence in the sentinel = "full runner reached".
@@ -51,7 +51,8 @@ def _make_repo(tmp_path: Path) -> tuple[Path, Path]:
         shutil.copy2(SCRIPTS / name, scripts / name)
     (repo / "hermes_cli").mkdir()
     (repo / "hermes_cli" / "__init__.py").write_text("")
-    shutil.copy2(_MAPPING_MODULE, repo / "hermes_cli" / "affected_test_mapping.py")
+    for name in _MAPPING_MODULES:
+        shutil.copy2(REPO_ROOT / "hermes_cli" / name, repo / "hermes_cli" / name)
     (repo / "config").mkdir()
     (repo / "config" / "affected-test-exceptions.json").write_text(
         '{"schema_version": 1, "exceptions": []}\n'

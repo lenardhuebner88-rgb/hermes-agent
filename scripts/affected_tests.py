@@ -26,6 +26,7 @@ from hermes_cli.affected_test_mapping import (  # noqa: E402
     UNMAPPED_EXIT_CODE,
     affected_pytest_modules as _shared_affected_pytest_modules,
     changed_paths,
+    changed_paths_with_diff_spec,
     census_repository,
     classify_changed_paths,
 )
@@ -110,10 +111,12 @@ def main(argv: list[str]) -> int:
         if args.census:
             plan = census_repository(repo_root, mode=args.mode)
         else:
+            changed, diff_spec = changed_paths_with_diff_spec(repo_root, args.ref)
             plan = classify_changed_paths(
                 repo_root,
-                changed_paths(repo_root, args.ref),
+                changed,
                 mode=args.mode,
+                diff_spec=diff_spec,
             )
     except MappingError as exc:
         print(f"affected-tests: mapping error: {exc}", file=sys.stderr)

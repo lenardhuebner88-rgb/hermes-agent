@@ -216,8 +216,8 @@ def test_worker_union_cap_warning_is_printed_to_stderr(monkeypatch, capsys):
     monkeypatch.setattr(mod, "_repo_root", lambda: REPO_ROOT)
     monkeypatch.setattr(
         mod,
-        "changed_paths",
-        lambda repo_root, ref: ["hermes_cli/__init__.py"],
+        "changed_paths_with_diff_spec",
+        lambda repo_root, ref: (["hermes_cli/__init__.py"], None),
     )
 
     rc = mod.main(["affected_tests.py", "--mode", "worker"])
