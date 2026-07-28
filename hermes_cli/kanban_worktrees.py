@@ -6503,6 +6503,82 @@ def _lane_scope_review_snapshot_diff_spec(
     return f"{resolved_base}..{resolved_candidate}"
 
 
+def _lane_scope_recorded_task_commit_paths(
+    conn: sqlite3.Connection,
+    task_id: str,
+    repo_root: Path,
+    completion_metadata: Optional[dict[str, Any]],
+) -> Optional[set[str]]:
+    """Return paths from this task's recorded worker commits, if available.
+
+    A rebase can orphan ``pre_run_commit_sha`` even though git still retains
+    the worker's original commit object.  The per-run completion metadata is
+    an explicit receipt of that commit, unlike a shared-branch range or a
+    commit-subject convention.  Keep the attribution strictly task-local:
+    chain siblings may have their own completion receipts, but their paths
+    must never be charged to this task.
+    """
+    metadata: list[dict[str, Any]] = []
+    if isinstance(completion_metadata, dict):
+        metadata.append(completion_metadata)
+    rows = conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id = ? ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        raw = row["metadata"] if isinstance(row, sqlite3.Row) else row[0]
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            metadata.append(parsed)
+
+    commits: list[str] = []
+    seen: set[str] = set()
+    for meta in metadata:
+        commit = str(meta.get("commit") or "").strip()
+        if commit and commit not in seen:
+            seen.add(commit)
+            commits.append(commit)
+    if not commits:
+        return None
+
+    paths: set[str] = set()
+    resolved = 0
+    for commit in commits:
+        try:
+            resolved_commit = _git(
+                repo_root, "rev-parse", "--verify", f"{commit}^{{commit}}",
+            )
+            resolved += 1
+            paths.update(
+                path
+                for path in _git(
+                    repo_root,
+                    "diff-tree",
+                    "--root",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    resolved_commit,
+                ).splitlines()
+                if path
+            )
+        except WorktreeError:
+            _log.warning(
+                "lane-scope: recorded worker commit %s of task %s does not "
+                "resolve; ignoring that attribution receipt",
+                commit,
+                task_id,
+            )
+    if not resolved:
+        return None
+    return paths
+
+
 def _enforce_lane_scope_on_complete(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6510,6 +6586,7 @@ def _enforce_lane_scope_on_complete(
     branch: str,
     merge_target: Optional[str],
     kb,
+    completion_metadata: Optional[dict[str, Any]] = None,
 ) -> Optional[dict]:
     """Hard lane-scope check at the worker-commit boundary.
 
@@ -6678,20 +6755,36 @@ def _enforce_lane_scope_on_complete(
             if path
         ]
         if exclude_pre_own_basis:
-            merge_base_sha = _git(
-                repo_root, "merge-base", exclude_pre_own_basis, branch,
+            recorded_paths = _lane_scope_recorded_task_commit_paths(
+                conn, task_id, repo_root, completion_metadata,
             )
-            pre_existing = {
-                path
-                for path in _git(
-                    repo_root, "diff", "--name-only",
-                    f"{merge_base_sha}..{exclude_pre_own_basis}",
-                ).splitlines()
-                if path
-            }
-            changed_files = [
-                path for path in changed_files if path not in pre_existing
-            ]
+            if recorded_paths is not None:
+                changed_files = sorted(recorded_paths)
+            else:
+                # A merge-base subtraction cannot identify siblings that
+                # committed after this task's claim.  Preserve it only as a
+                # compatibility fallback and make the uncertainty auditable.
+                _log.warning(
+                    "lane-scope: orphaned pre_run_commit_sha %s of task %s "
+                    "has no resolvable task-local worker commit receipt; "
+                    "falling back to uncertain merge-base attribution",
+                    exclude_pre_own_basis,
+                    task_id,
+                )
+                merge_base_sha = _git(
+                    repo_root, "merge-base", exclude_pre_own_basis, branch,
+                )
+                pre_existing = {
+                    path
+                    for path in _git(
+                        repo_root, "diff", "--name-only",
+                        f"{merge_base_sha}..{exclude_pre_own_basis}",
+                    ).splitlines()
+                    if path
+                }
+                changed_files = [
+                    path for path in changed_files if path not in pre_existing
+                ]
         # A chain branch that merges `base` mid-flight (the normal way a
         # long-running slice picks up main) carries every foreign commit of
         # that merge inside the two-dot `pre_run_sha..branch` range — a
@@ -7644,6 +7737,7 @@ def maybe_integrate_on_complete(
             chain_branch(root_id),
             frozen_merge_target(conn, root_id),
             kb,
+            completion_metadata=completion_metadata,
         )
         if lane_block is not None:
             return lane_block

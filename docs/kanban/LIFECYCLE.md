@@ -255,9 +255,9 @@ respawn guard or per-profile stats.
 
 ### Chain semantics: only the last task merges
 
-[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7590) only
+[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7683) only
 integrates when this completion closes the **last open task** of a provisioned
-chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6803)
+chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6896)
 ORs two signals conservatively: `task_links` membership from the chain root, and
 any task whose `workspace_path` lives under the same worktree. Consequence: an
 ordinary mid-chain slice goes `done` with **nothing merged**, and the merge
