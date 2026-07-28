@@ -40,6 +40,11 @@ evidence set; the nightly full suite remains the final backstop. This is an
 explicit tempo/coverage trade at the interactive edge, not a reversal of the
 additive mapping contract.
 
+**Accepted limit — thin worker-union headroom.** The current
+`hermes_cli/kanban_db.py` union selects 212 files, only five below the 217-file
+cap. Any adjustment must follow fresh runtime measurements rather than a
+guessed performance margin.
+
 Explicit patterns are additive precision hints, not coverage filters. For a
 production Python path their existing targets are unioned with mirrored direct
 tests and imports discovered from the test suite's Python AST. Imports written
@@ -48,10 +53,11 @@ production paths still select surviving direct or importing tests, but become
 `not_applicable` rather than `unmapped` when no such test survives.
 
 Stress-registry scenarios are excluded from the normal pytest import index in
-both directions. Python support files under `tests/` that are not themselves
-`test_*.py` are deliberately `not_applicable` in both modes. This is a named
-boundary of the affected gate: a diff containing only `tests/conftest.py` or a
-shared test helper can therefore exit 0 without running pytest.
+both directions. **Accepted limit — test-support-only diffs.** Python support
+files under `tests/` that are not themselves `test_*.py` are deliberately
+`not_applicable` in both modes, so a diff containing only `tests/conftest.py` or
+a shared test helper can exit 0 without running pytest. The nightly full suite
+is the fallback for this named boundary of the affected gate.
 
 A fail-closed test-support fallback was tried and rejected. The global
 `tests/conftest.py` scope exceeded both caps with no legal exception path;
