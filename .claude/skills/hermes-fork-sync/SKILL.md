@@ -49,7 +49,7 @@ git merge --no-edit origin/main
 # B2. MANDATORY merge audit — compares the actual merge result against the clean
 # automerge of both parents. Every listed file was a manual resolution decision;
 # each one needs a one-line justification in the merge receipt BEFORE pushing.
-scripts/merge-audit.sh HEAD        # (exists since 2026-07-03; --strict for hook use)
+scripts/merge-audit.sh HEAD        # --strict for hook use
 
 # C. Verify (targeted; the full suite has a known trap — see below)
 ( cd web && ../node_modules/.bin/tsc -b --noEmit )              # root-hoisted binary; npx is a stub trap in worktrees
@@ -119,17 +119,17 @@ seconds wide, so **prepare first, land fast**:
 5. **Editable-install restart trap (the sharp edge):** services import `.py` straight from the
    live tree. NEVER restart gateway/dashboard or run `deploy_dashboard.sh` while foreign
    uncommitted `.py` edits sit in the live checkout — you would ship half-done foreign code
-   (near-miss 2026-07-03: an in-flight auth middleware). Your merge can be safely on main
-   while the RESTART/DEPLOY waits for its own clean window.
-6. **Post-merge cleanup (Regel, operator-approved 2026-07-17): merged ⇒ aufgeräumt.**
+   (the near-miss that produced this rule: an in-flight auth middleware). Your merge can be
+   safely on main while the RESTART/DEPLOY waits for its own clean window.
+6. **Post-merge cleanup (operator-approved Regel): merged ⇒ aufgeräumt.**
    The landing session cleans up its OWN artifacts right after merge + verified push:
    `git branch -d <branch>` (safe — refuses unmerged/checked-out) and, once nothing runs in
    it, `git worktree remove <its worktree>`. Backstop only: the nightly janitor
    (`~/.hermes/prune-stale-worktrees.sh`, timer `hermes-prune-worktrees`) sweeps leftover
    merged branches + stale worktrees — don't plan on leaving your trash for it.
    Before the NEXT landing: `git fetch piet-fork` first and reconcile ff-only, so local
-   `main` never silently diverges from `piet-fork/main` (seen 2026-07-17: 1/1 split from
-   two sessions landing without fetch).
+   `main` never silently diverges from `piet-fork/main` — two sessions landing without a
+   fetch produce a 1/1 split.
 
 ## Plain-language reporting
 Piet is not a coder. Summarize in a small table (what changed · risk · reversible?), name the backup
