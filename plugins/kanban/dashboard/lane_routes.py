@@ -678,6 +678,17 @@ def _annotate_lane_model_relevance(
         )
         row["used_in_profiles"] = used_in_profiles
         row["admitted"] = admitted
+        # xAI's SuperGrok credential is OAuth-backed rather than an API-key
+        # config entry.  Grok 4.5 is an explicitly supported subscription
+        # offer, but only after the canonical inventory has established that
+        # xai-oauth is authenticated.  An absent or expired OAuth session
+        # therefore remains outside the selectable/probeable working set.
+        oauth_subscription_offer = bool(
+            row.get("runtime") == "hermes"
+            and provider == "xai-oauth"
+            and model == "grok-4.5"
+            and row.get("authenticated") is True
+        )
         # Operator-curated offer exclusions (W1 codex -pro, W2 image/video models)
         # drop a model out of the selectable / sinnvoll / probe-able OFFER even when
         # a generic relevance rule would mark it relevant. A persisted override
@@ -692,6 +703,7 @@ def _annotate_lane_model_relevance(
                 row.get("runtime") == "claude-cli"
                 or used_in_profiles
                 or admitted
+                or oauth_subscription_offer
                 or (provider and provider in lane_providers)
                 or (model and model in lane_models)
             )

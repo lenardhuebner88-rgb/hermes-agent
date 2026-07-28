@@ -90,6 +90,16 @@ const REASONING_MODELS: LaneModelOption[] = [
     provider: "alibaba-token-plan",
     reasoning_support: [], // ehrlich: kein Reasoning-Knopf
   },
+  {
+    id: "grok-4.5",
+    label: "Grok 4.5",
+    runtime: "hermes",
+    group: "xAI Grok OAuth (SuperGrok / Premium+)",
+    provider: "xai-oauth",
+    authenticated: true,
+    sinnvoll: true,
+    reasoning_support: [],
+  },
 ];
 
 const REASONING_CATALOG: LaneCatalogProfile[] = [
@@ -241,6 +251,25 @@ describe("reasoning stage roundtrip", () => {
     const same = applyChoice(row, "hermes|openai-codex|gpt-5.6-sol", REASONING_MODELS);
     expect(same.reasoning).toBe("high");
     expect(same.reasoningSupport).toContain("high");
+  });
+
+  it("keeps an authenticated SuperGrok selection visible and round-trips provider plus model", () => {
+    const grok = REASONING_MODELS.find((model) => model.provider === "xai-oauth")!;
+    expect(isModelReachable(grok)).toBe(true);
+    expect(filterSinnvoll([grok])).toEqual([grok]);
+
+    const selected = applyChoice(
+      { ...coderRow(), touched: true },
+      "hermes|xai-oauth|grok-4.5",
+      REASONING_MODELS,
+    );
+    expect(selected.provider).toBe("xai-oauth");
+    expect(selected.model).toBe("grok-4.5");
+    expect(persistPayloadFromEditorRows([selected]).coder).toMatchObject({
+      worker_runtime: "hermes",
+      provider: "xai-oauth",
+      model: "grok-4.5",
+    });
   });
 
   it("seeds config fallbacks when the lane has no profile entry", () => {
