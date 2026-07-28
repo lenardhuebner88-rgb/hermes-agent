@@ -6697,6 +6697,28 @@ def _enforce_lane_scope_on_complete(
             changed_files = [
                 path for path in changed_files if path not in pre_existing
             ]
+        # A chain branch that merges `base` mid-flight (the normal way a
+        # long-running slice picks up main) carries every foreign commit of
+        # that merge inside the two-dot `pre_run_sha..branch` range — a
+        # backend card then gets a night of other lanes' frontend work
+        # attributed to it and parks on paths it never touched. The branch's
+        # net effect against `base` is the ground truth for "what does this
+        # branch actually contribute": a path whose branch content equals
+        # base's is nobody's change here, whatever range it appears in.
+        # Intersect only when that net set is non-empty — an empty one means
+        # the branch adds nothing over base, and clearing every violation
+        # from it would fail open.
+        net_vs_base = {
+            path
+            for path in _git(
+                repo_root, "diff", "--name-only", f"{base}...{branch}",
+            ).splitlines()
+            if path
+        }
+        if net_vs_base:
+            changed_files = [
+                path for path in changed_files if path in net_vs_base
+            ]
     except WorktreeError as exc:
         _log.warning(
             "lane-scope check could not diff %s: %s", diff_spec, exc,
