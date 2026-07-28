@@ -1281,6 +1281,14 @@ export const de = {
     queueVerified: "Verifiziert",
     queueLanded: "Gelandet",
     queueBounced: "abgeprallt",
+    // Queue als Zeile statt vier gleich grosser Kaesten: vier Nullen in
+    // Kastengroesse trugen keine Information (Entwurf 28.07., Punkt 3).
+    queueEmpty: "Queue leer",
+    // Zugeklappte Konfiguration — die Zeile muss den Zustand zeigen,
+    // sonst muss man zum Nachsehen aufklappen (Punkt 1).
+    configSummary: (timer: string) => `Timer ${timer} · Modelle`,
+    configTimerOff: "aus",
+    configOpen: "Timer und Nachtmodelle anzeigen",
     sourceRepo: "Repo",
     sourceCustom: "Custom",
     allRepos: "Alle Projekte",

@@ -243,6 +243,18 @@ function renderGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) 
   );
 }
 
+/** Klappt den Konfigurationsblock einer Karte auf.
+ *
+ *  Timer und Nachtmodelle liegen seit dem Verdichtungs-Umbau (28.07., Punkt 1)
+ *  in einem zugeklappten Disclosure — dessen Kinder rendert AnimatePresence
+ *  nicht, solange es zu ist. Tests, die an diese Controls wollen, muessen es
+ *  also oeffnen; genau das tut ein Operator auch. */
+function openConfig(container: HTMLElement) {
+  const trigger = within(container).getAllByText(/· Modelle$/)[0].closest("button");
+  if (!trigger) throw new Error("Konfigurations-Disclosure nicht gefunden");
+  fireEvent.click(trigger);
+}
+
 function renderInteractiveGrid(packs: LoopPack[], overrides: Partial<LoopsGridProps> = {}) {
   return render(
     <LoopsGrid
@@ -418,6 +430,90 @@ describe("LoopsGrid", () => {
 // `pack.repo.is_dir()` und wirft "Pack-Repo existiert nicht", was als
 // kryptischer 502 "Loop-Unit sofort gescheitert" im UI ankam. Der Tab sagt es
 // jetzt vorher UND sperrt den Start, statt in die Sackgasse laufen zu lassen.
+// Verdichtung des Bedien-Flusses (Entwurf 28.07., Punkte 1-5). Der Tab war
+// nicht kaputt — er war zu weitlaeufig: bei 1366x900 passte keine einzige Karte
+// vollstaendig auf den Schirm, und der Start-Knopf lag unter dem
+// Konfigurationsblock.
+describe("LoopsGrid — verdichteter Bedien-Fluss", () => {
+  it("haelt Timer und Nachtmodelle zugeklappt (Punkt 1)", () => {
+    const { container } = renderInteractiveGrid([runningPipeline]);
+    // Zugeklappt = gar nicht im DOM (AnimatePresence), nicht nur unsichtbar.
+    expect(within(container).queryByLabelText(`${t.timerLabel} builder-reviewer`)).toBeNull();
+  });
+
+  it("zeigt den Timer-Zustand schon in der zugeklappten Zeile (Punkt 1)", () => {
+    // Sonst muesste man zum Nachsehen jede Karte einzeln aufklappen.
+    const withTimer = { ...runningPipeline, timer_enabled: true, timer_schedule: "22:45" };
+    expect(renderGrid([withTimer])).toContain(t.configSummary("22:45"));
+    expect(renderGrid([{ ...runningPipeline, timer_enabled: false }]))
+      .toContain(t.configSummary(t.configTimerOff));
+  });
+
+  it("gibt der zugeklappten Zeile den Touch-Boden (min-h-12)", () => {
+    const { container } = renderInteractiveGrid([runningPipeline]);
+    const trigger = within(container).getAllByText(/· Modelle$/)[0];
+    expect(trigger.className).toMatch(/\bmin-h-12\b/);
+  });
+
+  it("stellt den Start-Knopf VOR den Konfigurationsblock (Punkt 2)", () => {
+    // Positionsvergleich im Markup: der Knopf muss frueher kommen als die
+    // Konfig-Zeile, sonst liegt er wieder unterhalb und ausserhalb des Schirms.
+    const html = renderGrid([{ ...runningPipeline, running: false }]);
+    expect(html.indexOf(t.actions.start)).toBeGreaterThan(-1);
+    expect(html.indexOf(t.actions.start)).toBeLessThan(html.indexOf("· Modelle"));
+  });
+
+  it("zeigt bei laufendem Pack den Stopp-Knopf oben statt des Starts (Punkt 2)", () => {
+    const html = renderGrid([runningPipeline]);
+    expect(html).toContain(t.actions.stop);
+    expect(html.indexOf(t.actions.stop)).toBeLessThan(html.indexOf("· Modelle"));
+  });
+
+  it("zeigt die Queue als Zeile und nur gefuellte Stufen (Punkt 3)", () => {
+    const busy = {
+      ...runningPipeline,
+      queue: { "00-planned": 2, "10-building": 0, "20-verified": 1, "30-landed": 0, "90-bounced": 0 },
+    };
+    const html = renderGrid([busy]);
+    expect(html).toContain(t.queuePlanned);
+    expect(html).toContain(t.queueVerified);
+    // Leere Stufen tauchen nicht mehr als Kasten mit 0 auf.
+    expect(html).not.toContain(t.queueLanded);
+  });
+
+  it("sagt bei leerer Queue 'Queue leer' statt vier Nullen (Punkt 3)", () => {
+    const empty = {
+      ...runningPipeline,
+      queue: { "00-planned": 0, "10-building": 0, "20-verified": 0, "30-landed": 0, "90-bounced": 0 },
+    };
+    const html = renderGrid([empty]);
+    expect(html).toContain(t.queueEmpty);
+    expect(html).not.toContain(t.queueBuilding);
+  });
+
+  it("sortiert das laufende Pack nach oben (Punkt 4)", () => {
+    // Kartenreihenfolge aus dem DOM lesen, NICHT per indexOf ueber das ganze
+    // Markup: "doc-sweep" kommt auch im Repo-Filter und im Lagebild vor, und
+    // ein indexOf-Vergleich blieb deshalb gruen, selbst wenn die Sortierung
+    // ausgehaengt war (als Tautologie belegt und behoben, 28.07.).
+    const { container } = renderInteractiveGrid([
+      { ...runningPipeline, running: false },
+      { ...idleSweepWithCommits, running: true },
+    ]);
+    // Nur die Pack-KARTEN, nicht das Lagebild: das laufende Pack wird oben im
+    // Hero ebenfalls genannt, ein Namensvergleich ueber den ganzen Baum haette
+    // also den Hero gemessen statt die Reihenfolge.
+    // Eine Pack-Karte ist eine Blatt-<section>, die die Konfigurationszeile
+    // traegt — das Lagebild oben ist ebenfalls eine rounded-2xl-<section> und
+    // nennt das laufende Pack, wuerde also mitgezaehlt.
+    const namesInOrder = Array.from(container.querySelectorAll("section"))
+      .filter((node) => !node.querySelector("section") && (node.textContent ?? "").includes("· Modelle"))
+      .map((card) => card.querySelector(".truncate")?.textContent?.trim())
+      .filter((name): name is string => Boolean(name));
+    expect(namesInOrder).toEqual(["doc-sweep", "builder-reviewer"]);
+  });
+});
+
 describe("LoopsGrid — verwaistes Pack (totes repo)", () => {
   const orphan = { ...runningPipeline, name: "orphan-pack", running: false, repo_exists: false };
 
@@ -452,6 +548,7 @@ describe("LoopsGrid — Touch-Target-Boden (W3-5)", () => {
     // handgeschriebene Fixture-Objekt direkt.
     const parsed = LoopsResponseSchema.parse({ packs: [runningPipeline] }).packs[0] as LoopPack;
     const { container } = renderInteractiveGrid([parsed]);
+    openConfig(container);
     const checkbox = within(container).getByLabelText(`${t.timerLabel} ${parsed.name}`) as HTMLInputElement;
     expect(checkbox.className).toMatch(/\bsize-12\b/);
   });
@@ -495,6 +592,9 @@ describe("LoopsGrid — Mono-Konsolidierung (W3-5)", () => {
 
   it("überschreibt den Mono-Default der Dependency für alle sichtbaren Aktionslabels mit Display-Schrift", () => {
     const { container } = renderInteractiveGrid([runningPipeline, idleSweepWithCommits]);
+    // Der "Zeit speichern"-Knopf liegt seit dem Verdichtungs-Umbau im
+    // Konfigurations-Disclosure — aufklappen, sonst prueft der Test ihn nicht mit.
+    openConfig(container);
     for (const action of [t.actions.stop, t.actions.start, t.actions.workshop, t.timerSave]) {
       const buttons = within(container).getAllByRole("button", { name: action });
       expect(buttons.length).toBeGreaterThan(0);
@@ -510,6 +610,7 @@ describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
 
   it("zeigt gespeicherte lokale Uhrzeit und den echten nächsten Lauf", () => {
     const { container } = renderInteractiveGrid([runningPipeline]);
+    openConfig(container);
     const view = within(container);
     const input = view.getByLabelText(`${t.timerTimeLabel} builder-reviewer`) as HTMLInputElement;
     expect(input.value).toBe("23:37");
@@ -519,6 +620,7 @@ describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
   it("aktiviert Speichern erst nach einer gültigen Änderung und reicht die Uhrzeit weiter", () => {
     const onSaveTimerSchedule = vi.fn();
     const { container } = renderInteractiveGrid([idleSweepWithCommits], { onSaveTimerSchedule });
+    openConfig(container);
     const input = within(container).getByLabelText(`${t.timerTimeLabel} doc-sweep`) as HTMLInputElement;
     const timeControls = input.parentElement;
     expect(timeControls).not.toBeNull();
@@ -534,6 +636,7 @@ describe("LoopsGrid — frei einstellbarer Nachttimer", () => {
 
   it("erklärt bei deaktiviertem Timer, welche Uhrzeit beim Aktivieren gilt", () => {
     const { container } = renderInteractiveGrid([idleSweepWithCommits]);
+    openConfig(container);
     const input = within(container).getByLabelText(`${t.timerTimeLabel} doc-sweep`);
     const timerPanel = input.parentElement?.parentElement?.parentElement;
     expect(timerPanel).not.toBeNull();
@@ -568,6 +671,7 @@ describe("LoopsGrid — Nachtmodelle", () => {
     });
 
     const { container } = renderInteractiveGrid([nightPipeline]);
+    openConfig(container);
     await waitFor(() => {
       expect(getLoopNightOverrides).toHaveBeenCalledWith("builder-reviewer-idle");
     });
@@ -611,6 +715,7 @@ describe("LoopsGrid — Nachtmodelle", () => {
     putLoopNightOverrides.mockResolvedValueOnce({ pack: "builder-reviewer-idle", overrides: {}, ok: true });
 
     const { container } = renderInteractiveGrid([nightPipeline]);
+    openConfig(container);
     await waitFor(() => {
       expect(within(container).getByTestId("night-models-manual-land-builder-reviewer-idle")).toBeTruthy();
     });
@@ -631,6 +736,7 @@ describe("LoopsGrid — Nachtmodelle", () => {
   it("zeigt Load-Fehler aus dem GET", async () => {
     getLoopNightOverrides.mockRejectedValueOnce(new Error("boom"));
     const { container } = renderInteractiveGrid([nightPipeline]);
+    openConfig(container);
     await waitFor(() => {
       const night = within(container).getByTestId("night-models-builder-reviewer-idle");
       expect(within(night).getByRole("alert").textContent).toContain(t.nightModelsLoadFailed);

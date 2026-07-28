@@ -49,6 +49,7 @@ import {
   routeAfterEngineChange,
   type PhaseRoute,
 } from "./loops/routeOverrides";
+import { sortPacksByAttention } from "./loops/packOrder";
 
 const t = de.loops;
 
@@ -478,32 +479,28 @@ function PhaseHistoryBars({ last }: { last: LoopHeartbeatHistoryEntry[] }) {
 /** Queue-Stufenleiste als Stepper: Geplant → Gebaut → Verifiziert → Gelandet,
  *  90-bounced separat als roter Chip. Zahl je Stufe bleibt ein eigenständiger
  *  Textknoten (nicht mit dem Label verklebt). */
+/** Queue als eine Zeile: nur die Stufen, in denen etwas liegt.
+ *
+ *  Vorher vier gleich grosse Kaesten — bei einem ruhigen Pack also vier Nullen
+ *  in voller Groesse, die nichts aussagen (Entwurf 28.07., Punkt 3). Die
+ *  Stufenfolge selbst steht weiterhin im Detail-Panel. */
 function LoopQueueStepper({ queue }: { queue: Record<string, number> }) {
   const bounced = queue["90-bounced"] ?? 0;
+  const filled = QUEUE_STAGE_KEYS.filter((key) => (queue[key] ?? 0) > 0);
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-1">
-      {QUEUE_STAGE_KEYS.map((key, idx) => {
-        const n = queue[key] ?? 0;
-        return (
-          <span key={key} className="inline-flex items-center gap-1">
-            {idx > 0 ? (
-              <span aria-hidden className="text-xs" style={{ color: "var(--ln-ink-mute)" }}>→</span>
-            ) : null}
-            <span
-              className="flex min-w-[3.75rem] flex-col items-center rounded-md border px-2 py-1"
-              style={{
-                borderColor: n > 0 ? "var(--ln-sodium)" : "var(--ln-line)",
-                background: n > 0 ? "var(--ln-raised)" : "transparent",
-              }}
-            >
-              <span className="block font-data text-sm font-semibold" style={{ color: "var(--ln-ink)" }}>{n}</span>
-              <span className="block text-[10px] uppercase tracking-[0.06em]" style={{ color: "var(--ln-ink-soft)" }}>
-                {QUEUE_STAGE_LABEL[key]}
-              </span>
+    <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      {filled.length === 0 ? (
+        <span className="font-data text-xs" style={{ color: "var(--ln-ink-mute)" }}>{t.queueEmpty}</span>
+      ) : (
+        filled.map((key) => (
+          <span key={key} className="inline-flex items-baseline gap-1.5 font-data text-xs">
+            <span className="font-data text-sm font-semibold tabular-nums" style={{ color: "var(--ln-sodium)" }}>
+              {queue[key] ?? 0}
             </span>
+            <span style={{ color: "var(--ln-ink-soft)" }}>{QUEUE_STAGE_LABEL[key]}</span>
           </span>
-        );
-      })}
+        ))
+      )}
       {bounced > 0 ? (
         <NightPill tone="warn"><AlertTriangle aria-hidden className="h-3 w-3" />{bounced} {t.queueBounced}</NightPill>
       ) : null}
@@ -1684,6 +1681,35 @@ function LoopCard({
             <NightPill tone="warn" icon={AlertTriangle}>{t.repoMissing}</NightPill>
           </span>
         )}
+        {/* Primaeraktion in der Kopfzeile: unter dem Konfigurationsblock war sie
+            bei KEINER Karte ohne Scrollen erreichbar (Entwurf 28.07., Punkt 2). */}
+        <span className="ml-auto inline-flex flex-wrap items-center gap-2">
+          {pack.running ? (
+            pendingStop ? (
+              <>
+                <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
+                <LoopCardAction disabled={busy} onClick={() => onStop(pack.name)} tone="alert" filled>
+                  {busy ? "…" : t.confirmYes}
+                </LoopCardAction>
+                <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(null)}>{t.confirmNo}</LoopCardAction>
+              </>
+            ) : (
+              <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(pack.name)} tone="alert">
+                <Square className="h-3.5 w-3.5" />{t.actions.stop}
+              </LoopCardAction>
+            )
+          ) : (
+            <LoopCardAction
+              disabled={busy || !pack.repo_exists}
+              title={pack.repo_exists ? undefined : t.repoMissingHint(pack.repo)}
+              onClick={() => onOpenStart(pack.name)}
+              tone="bronze"
+              filled
+            >
+              <Play className="h-3.5 w-3.5" />{t.actions.start}
+            </LoopCardAction>
+          )}
+        </span>
       </div>
 
       <p className="mt-1 text-[11px] uppercase tracking-[0.08em]" style={{ color: "var(--ln-ink-soft)" }}>{statusLabel}</p>
@@ -1711,57 +1737,42 @@ function LoopCard({
       ) : null}
 
       <div className="mt-3 space-y-3 border-t pt-3" style={{ borderColor: "var(--ln-line)" }}>
-        <TimerScheduleControl
-          key={`${pack.name}:${pack.timer_schedule}`}
-          pack={pack}
-          models={models}
-          busy={busy}
-          onToggleTimer={onToggleTimer}
-          onSaveTimerSchedule={onSaveTimerSchedule}
-        />
+        {/* Timer + Nachtmodelle zugeklappt: 13 Karten trugen diesen Block
+            permanent offen, sodass keine Karte ganz auf den Schirm passte
+            (Entwurf 28.07., Punkt 1). Die Summary-Zeile zeigt den Zustand,
+            damit man zum Nachsehen nicht aufklappen muss. */}
+        <Disclosure
+          summary={
+            <span className="inline-flex min-h-12 items-center text-xs" style={{ color: "var(--ln-ink-soft)" }}>
+              {t.configSummary(pack.timer_enabled ? pack.timer_schedule : t.configTimerOff)}
+            </span>
+          }
+        >
+          <TimerScheduleControl
+            key={`${pack.name}:${pack.timer_schedule}`}
+            pack={pack}
+            models={models}
+            busy={busy}
+            onToggleTimer={onToggleTimer}
+            onSaveTimerSchedule={onSaveTimerSchedule}
+          />
+        </Disclosure>
         <div className="flex flex-wrap items-center justify-end gap-2">
-          {pack.running ? (
-            pendingStop ? (
+          {!pack.running && canLand ? (
+            pendingLand ? (
               <span className="inline-flex flex-wrap items-center gap-2">
-                <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmStop}</span>
-                <LoopCardAction disabled={busy} onClick={() => onStop(pack.name)} tone="alert" filled>
+                <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmLand}</span>
+                <LoopCardAction disabled={busy} onClick={() => onLand(pack.name)} tone="bronze" filled>
                   {busy ? "…" : t.confirmYes}
                 </LoopCardAction>
-                <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(null)}>{t.confirmNo}</LoopCardAction>
+                <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(null)}>{t.confirmNo}</LoopCardAction>
               </span>
             ) : (
-              <LoopCardAction disabled={busy} onClick={() => onSetPendingStop(pack.name)} tone="alert">
-                <Square className="h-3.5 w-3.5" />{t.actions.stop}
+              <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(pack.name)} tone="bronze">
+                <Anchor className="h-3.5 w-3.5" />{t.actions.land}
               </LoopCardAction>
             )
-          ) : (
-            <>
-              <LoopCardAction
-                disabled={busy || !pack.repo_exists}
-                title={pack.repo_exists ? undefined : t.repoMissingHint(pack.repo)}
-                onClick={() => onOpenStart(pack.name)}
-                tone="bronze"
-                filled
-              >
-                <Play className="h-3.5 w-3.5" />{t.actions.start}
-              </LoopCardAction>
-              {canLand ? (
-                pendingLand ? (
-                  <span className="inline-flex flex-wrap items-center gap-2">
-                    <span className="text-xs" style={{ color: "var(--ln-ink-soft)" }}>{t.confirmLand}</span>
-                    <LoopCardAction disabled={busy} onClick={() => onLand(pack.name)} tone="bronze" filled>
-                      {busy ? "…" : t.confirmYes}
-                    </LoopCardAction>
-                    <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(null)}>{t.confirmNo}</LoopCardAction>
-                  </span>
-                ) : (
-                  <LoopCardAction disabled={busy} onClick={() => onSetPendingLand(pack.name)} tone="bronze">
-                    <Anchor className="h-3.5 w-3.5" />{t.actions.land}
-                  </LoopCardAction>
-                )
-              ) : null}
-            </>
-          )}
+          ) : null}
           <LoopCardAction disabled={busy} onClick={() => onToggleWorkshop(pack.name)}>
             <Wrench className="h-3.5 w-3.5" />{t.actions.workshop}
           </LoopCardAction>
@@ -2032,26 +2043,27 @@ function LoopsHero({
           </div>
         </>
       ) : (
-        <div className="flex flex-wrap items-center gap-4">
-          <LoopRing size={112} state="idle" />
-          <div className="min-w-0 flex-1">
-            <p className="text-xl font-semibold" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.heroSleeping}</p>
-            <p className="mt-1 text-sm" style={{ color: "var(--ln-ink-soft)" }}>
-              {(() => {
-                const timerCount = packs.filter((p) => p.timer_enabled).length;
-                return timerCount > 0 ? t.heroTimerActive(timerCount) : t.heroTimerNone;
-              })()}
-            </p>
+        /* Ruhezustand als EINE Zeile: der 112px-Ring plus drei Textzeilen
+           belegten rund 150px fuer "es passiert nichts" (Entwurf 28.07.,
+           Punkt 5). Laeuft etwas, greift der Zweig darueber unveraendert. */
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+          <LoopRing size={22} state="idle" />
+          <span className="font-semibold" style={{ ...displayFont, color: "var(--ln-ink)" }}>{t.heroSleeping}</span>
+          <span style={{ color: "var(--ln-ink-soft)" }}>
             {(() => {
-              const last = newestGlobalEvent(packs);
-              if (!last) return null;
-              return (
-                <p className="mt-0.5 text-sm" style={{ color: "var(--ln-ink-soft)" }}>
-                  {t.heroLastEvent(last.phase, last.rc === 0, ageFromIso(last.at, nowMs))}
-                </p>
-              );
+              const timerCount = packs.filter((p) => p.timer_enabled).length;
+              return timerCount > 0 ? t.heroTimerActive(timerCount) : t.heroTimerNone;
             })()}
-          </div>
+          </span>
+          {(() => {
+            const last = newestGlobalEvent(packs);
+            if (!last) return null;
+            return (
+              <span style={{ color: "var(--ln-ink-soft)" }}>
+                {t.heroLastEvent(last.phase, last.rc === 0, ageFromIso(last.at, nowMs))}
+              </span>
+            );
+          })()}
         </div>
       )}
     </section>
@@ -2156,7 +2168,11 @@ export function LoopsGrid({
     visible.filter((pack): pack is LoopPackSummary => !isLoopPackError(pack)).map((pack) => pack.repo || t.sourceRepo),
   )).map((repo) => ({
     repo,
-    packs: visible.filter((pack): pack is LoopPackSummary => !isLoopPackError(pack) && (pack.repo || t.sourceRepo) === repo),
+    // Innerhalb einer Repo-Gruppe zaehlt Dringlichkeit, nicht Aufloesungsreihenfolge:
+    // bei 19 Packs konnte das eine laufende ganz unten stehen (Entwurf 28.07., Punkt 4).
+    packs: sortPacksByAttention(
+      visible.filter((pack): pack is LoopPackSummary => !isLoopPackError(pack) && (pack.repo || t.sourceRepo) === repo),
+    ),
   }));
   const broken = visible.filter(isLoopPackError);
   const repoName = (repo: string) => repo.replace(/\/+$/, "").split("/").pop() || repo;
