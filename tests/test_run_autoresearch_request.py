@@ -147,6 +147,13 @@ def test_discovery_skips_archived_and_hidden_skills(env):
     assert any("demo/needy-skill" in p for p in paths)
 
 
+def test_capability_finding_key_normalizes_missing_fields_to_empty_strings(env):
+    """Findings without skill/category/evidence must dedupe under empty
+    strings — a literal "None" key would let duplicate findings through
+    the attempted-set and re-report the same weakness every night."""
+    assert env["runner"]._capability_finding_key({}) == ("", "", "")
+
+
 def test_self_test_configured_when_model_in_config(env):
     status, detail = env["runner"].self_test()
     assert status == "configured"
@@ -337,6 +344,25 @@ def test_double_run_refused_while_fresh_lock(env):
     summary = env["runner"].run(req, apply=False, confirm=False)
     assert summary["ok"] is False
     assert "already in progress" in summary["refused"]
+
+
+def test_apply_confirm_flag_alone_satisfies_operator_gate(env):
+    """--confirm and approved_by_operator are ALTERNATIVES: the CLI flag
+    alone must open the gate even when the request carries no approval."""
+    req = _make_request(env, approved=False)
+    summary = env["runner"].run(req, apply=True, confirm=True, max_iterations=1)
+    assert summary["ok"] is True
+    assert summary["mode"] == "apply"
+
+
+def test_finish_status_reports_stopped_by_signal_note(env):
+    """A SIGTERM-stopped run must surface 'stopped by signal' in the idle
+    status note — the dashboard reads it; without it the stop is silent."""
+    summary = {"stopped": True, "refused": None, "steps": []}
+    env["runner"]._finish_status(env["state"], "configured", summary)
+    status = json.loads((env["state"] / "current.status").read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["note"] == "stopped by signal"
 
 
 # --------------------------------------------------------------------------
