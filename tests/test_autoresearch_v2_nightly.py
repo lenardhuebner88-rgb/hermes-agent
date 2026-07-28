@@ -142,6 +142,34 @@ def test_deep_audit_generic_whole_lane_failure_is_infra_failed():
     assert outcome.outcome == "infra_failed"
 
 
+def test_deep_audit_lane_normalizes_sparse_result_to_safe_defaults(monkeypatch):
+    """A bare ``{"ok": True}`` result (every counter absent) must map to the
+    documented zero defaults instead of crashing the nightly — a sparse
+    payload is exactly what the quiet nights produce."""
+    monkeypatch.setattr(
+        nightly.deep_audit, "write_request",
+        lambda *, subsystem, focus, max_files: {"request_path": f"/tmp/{subsystem}.json"},
+    )
+    monkeypatch.setattr(nightly.deep_audit, "run_request_file", lambda _p: {"ok": True})
+
+    summary = nightly.run_deep_audit_lane("kanban", max_files=10)
+
+    assert summary["findings"] == 0
+    assert summary["scanned"] == 0
+    assert summary["tokens"] == 0
+    assert summary["usage_source"] == "measured"
+    assert summary["llm_calls"] == 0
+    assert summary["reason"] == ""
+    assert summary["errors"] == 0
+    assert summary["ok"] is True
+
+
+def test_expected_skip_error_tolerates_none():
+    """Lanes without a tf_error carry None — the classifier must answer
+    'not an expected skip', not crash."""
+    assert nightly._expected_skip_error(None) is None
+
+
 # ---------------------------------------------------------------- discord contract
 
 def test_post_summary_uses_send_message_contract():
