@@ -302,3 +302,41 @@ def test_snapshot_reuses_cached_inventory(monkeypatch):
     assert calls == {"actors": 1, "worktrees": 1}
     assert second["summary"]["worktrees_total"] == 0
     operator_inventory._CACHE = None
+
+
+# --- mutation-hardening tests (night-run 2026-07-28) ---
+
+
+def test_scrub_redacts_home_path():
+    """Kill bool_op_swap L66: or -> and.
+
+    With the mutant, a string containing only '/home/' (but not '\\Users\\'
+    AND '.worktrees/') would NOT be redacted because all three conjuncts
+    must be True.  The correct behaviour redacts on any single marker.
+    """
+    from hermes_cli.operator_inventory import _scrub
+
+    assert _scrub("/home/piet/secret") == "redacted"
+
+
+def test_classify_process_handles_none_name():
+    """Kill bool_op_swap L373: or -> and on ``(name or "")``.
+
+    With the mutant, ``(None and "")`` evaluates to ``None``, and
+    ``None.lower()`` raises AttributeError.  The correct behaviour
+    falls back to ``""`` and classifies by cmdline alone.
+    """
+    from hermes_cli.operator_inventory import _classify_process
+
+    assert _classify_process(None, ["pytest", "-x"]) == "test_runner"
+
+
+def test_task_hint_returns_none_for_bare_kanban_prefix():
+    """Kill bool_op_swap L263: or -> and on ``removeprefix(...) or None``.
+
+    With the mutant, ``"" and None`` evaluates to ``""`` instead of
+    ``None`` when the branch is exactly ``"kanban/"`` with no task id.
+    """
+    from hermes_cli.operator_inventory import _task_hint_for
+
+    assert _task_hint_for("kanban:", "kanban/", "kanban") is None
