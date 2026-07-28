@@ -3467,6 +3467,35 @@ def _bind_release_gate_runner(injected_gate_runner, commands: list):
     return release_gate
 
 
+_RELEASE_GATE_ARTIFACT_PATH_PREFIXES = (
+    "web/",
+    "apps/shared/",
+)
+
+
+def _release_gate_artifact_drift(
+    repo_root: Path, validated_commit: str, live_head: str,
+) -> list[str]:
+    """Return changed dashboard-build inputs between two commits.
+
+    The release gate builds ``web/``. Its Vite configuration resolves
+    ``@hermes/shared`` from ``apps/shared/``, so both trees are direct build
+    inputs. Server/plugin changes are intentionally not treated as bundle-input
+    drift: the activation still owns its runtime health check, while this guard
+    asks the narrower question whether the already-built artifact remains valid.
+    """
+    changed_paths = _git(
+        repo_root,
+        "diff",
+        "--name-only",
+        f"{validated_commit}..{live_head}",
+    ).splitlines()
+    return [
+        path for path in changed_paths
+        if path.startswith(_RELEASE_GATE_ARTIFACT_PATH_PREFIXES)
+    ]
+
+
 def _activate_if_still_current(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3475,8 +3504,9 @@ def _activate_if_still_current(
     attempts: int,
     activation_runner,
     repo_root: Path,
+    release_gate=None,
 ) -> dict:
-    """Never deploy a different live commit than the one just validated."""
+    """Activate only an ancestor-safe, artifact-current release candidate."""
     if not validated_commit:
         return _activate_and_finalize(
             conn, task_id, root_id, attempts, activation_runner,
@@ -3503,12 +3533,50 @@ def _activate_if_still_current(
                         f"release activation HEAD guard failed: {exc}"
                     )
                 else:
-                    guard_error = (
-                        "release activation refused: live HEAD advanced from "
-                        f"validated {expected} to {live_head}"
-                        if expected != live_head
-                        else None
-                    )
+                    if not _branch_is_ancestor(repo_root, expected, live_head):
+                        guard_error = (
+                            "release activation refused: validated commit "
+                            f"{expected} is not an ancestor of live HEAD {live_head}"
+                        )
+                    elif expected != live_head:
+                        try:
+                            artifact_drift = _release_gate_artifact_drift(
+                                repo_root, expected, live_head,
+                            )
+                        except WorktreeError as exc:
+                            guard_error = (
+                                "release activation drift check failed: "
+                                f"{exc}"
+                            )
+                        else:
+                            if artifact_drift:
+                                if release_gate is None:
+                                    guard_error = (
+                                        "release activation revalidation unavailable "
+                                        "for artifact-relevant live HEAD drift"
+                                    )
+                                else:
+                                    ok, output = _run_release_gate_at_commit(
+                                        repo_root,
+                                        live_head,
+                                        release_gate,
+                                        allow_injected_legacy_fallback=False,
+                                    )
+                                    _record_release_gate_executed(
+                                        conn,
+                                        task_id,
+                                        attempt=attempts,
+                                        ok=ok,
+                                        output=output,
+                                        root_id=root_id,
+                                        phase="live_head_revalidation",
+                                        validation_commit=live_head,
+                                    )
+                                    if not ok:
+                                        guard_error = (
+                                            "release activation revalidation failed "
+                                            f"at live HEAD {live_head}: {output}"
+                                        )
                 if not guard_error:
                     return _activate_and_finalize(
                         conn,
@@ -3655,7 +3723,7 @@ def _run_release_gate_fixer_cycle(
             _activate_if_still_current(
                 conn, task_id, root_id,
                 integration.get("merge_commit"), fixer_attempts,
-                activation_runner, repo_root,
+                activation_runner, repo_root, release_gate,
             ),
             output,
         )
@@ -3666,7 +3734,7 @@ def _run_release_gate_fixer_cycle(
                 _activate_if_still_current(
                     conn, task_id, root_id,
                     live_commit, fixer_attempts,
-                    activation_runner, repo_root,
+                    activation_runner, repo_root, release_gate,
                 ),
                 output,
             )
@@ -3755,7 +3823,7 @@ def execute_release_gate(
                 guarded_commit = None
         return _activate_if_still_current(
             conn, task_id, root_id, guarded_commit, 0,
-            activation_runner, repo_root,
+            activation_runner, repo_root, release_gate,
         )
 
     fixer_attempts = 0

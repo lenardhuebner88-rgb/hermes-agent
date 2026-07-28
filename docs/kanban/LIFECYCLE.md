@@ -217,29 +217,29 @@ single write. The order matters and is load-bearing:
 
 ### The serialized integrator
 
-[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6153) is *the* single
+[`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6221) is *the* single
 merge point and it never pushes. It holds a file lock in the repo's `.git` dir
 (invisible to `git status`), then runs these stages, each of which can park:
 
 | # | stage | anchored | parks when |
 |---|---|---|---|
-| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5821) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
-| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5858) | chain worktree dirty with non-preservable files |
-| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5911) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
+| 0 | live-checkout precheck | [`_integrate_precheck_live`](../../hermes_cli/kanban_worktrees.py#L5889) | `MERGE_HEAD`/rebase in progress, or checked-out branch ≠ frozen merge target |
+| 1 | artifact preservation | [`_preserve_or_park_chain_artifacts`](../../hermes_cli/kanban_worktrees.py#L5926) | chain worktree dirty with non-preservable files |
+| 2 | nothing-to-merge | [`_integrate_empty_or_already_merged`](../../hermes_cli/kanban_worktrees.py#L5979) | handles `ahead == 0`: already-integrated, or replays a previously reverted merge |
 | 3 | dirty overlap | inline in `integrate_chain` | a foreign dirty file in the live checkout overlaps the branch diff |
-| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6039) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
-| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6089) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
+| 4 | rebase onto target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6107) | conflict → `rebase_conflict` (routed back to the coder, **not** a park) |
+| 5 | merge + post-merge gate | [`_integrate_merge_and_gate`](../../hermes_cli/kanban_worktrees.py#L6157) | merge conflict → `merge --abort`; red gate → `revert -m 1` + park |
 
 The post-merge gate runs at the exact merge commit inside a detached validation
-worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5462)
+worktree — [`_run_gate_in_validation_worktree`](../../hermes_cli/kanban_worktrees.py#L5530)
 — never in the possibly-dirty live checkout. Every exception path there returns
 `(False, …)` — it fails **closed**.
 
 Gate selection is
 [`_integration_gate_for_repo`](../../hermes_cli/kanban_worktrees.py#L309):
 a per-repo command list from `kanban.integration_gate.repos` if configured, else
-[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5755) for the FO
-repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5728).
+[`fo_integration_gate`](../../hermes_cli/kanban_worktrees.py#L5823) for the FO
+repo, else [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5796).
 **This repo is not in `integration_gate.repos`, so it uses `default_quick_gate`.**
 
 `default_quick_gate` = ruff over the changed `.py` files, then the *affected*
@@ -255,9 +255,9 @@ respawn guard or per-profile stats.
 
 ### Chain semantics: only the last task merges
 
-[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7522) only
+[`maybe_integrate_on_complete`](../../hermes_cli/kanban_worktrees.py#L7590) only
 integrates when this completion closes the **last open task** of a provisioned
-chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6735)
+chain. [`_find_open_chain_sibling`](../../hermes_cli/kanban_worktrees.py#L6803)
 ORs two signals conservatively: `task_links` membership from the chain root, and
 any task whose `workspace_path` lives under the same worktree. Consequence: an
 ordinary mid-chain slice goes `done` with **nothing merged**, and the merge
@@ -338,8 +338,8 @@ own profile config must not be able to disable the gate it is subject to.
 | Worker exits without terminal lifecycle call | subprocess exits zero while task is still running | [`detect_crashed_workers`](../../hermes_cli/kanban_db.py#L22830) | `protocol_violation` or `deliverable_posted_not_completed`; bounded repeats end in `gave_up` | recover posted evidence or rerun with the required complete/block call; operator unblocks after breaker trip |
 | Spawn/config failure breaker | model route, executable, workspace, or repeated spawn fails | [`_record_spawn_failure`](../../hermes_cli/kanban_db.py#L24411) | failure counter and spawn events accumulate; terminal attempt becomes blocked/auto-blocked | repair deterministic config; allow bounded transient retry, then explicitly unblock after correction |
 | Sticky worker/operator block | latest block or active escalation requires a decision | [`_has_sticky_block`](../../hermes_cli/kanban_db.py#L11567) | card stays `blocked` even when every parent is done | [`unblock_task`](../../hermes_cli/kanban_db.py#L19104) after resolving the stated cause |
-| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6153) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17722) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
-| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6039) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
+| Integration park | a precheck, the merge, or the post-merge gate failed | [`integrate_chain`](../../hermes_cli/kanban_worktrees.py#L6221) → [`_park_integration`](../../hermes_cli/kanban_db.py#L17722) | `integration_parked` event; closing run outcome is `integration_parked`, task `blocked` | fix the stated cause, then unblock; a red gate means the merge was already reverted |
+| Rebase conflict | chain branch does not replay onto the live target | [`_integrate_rebase_branch`](../../hermes_cli/kanban_worktrees.py#L6107) | `integration_rebase_conflict`; rebase aborted, worktree back at its committed state | routed back to the coder as fixer work, deliberately NOT an operator park |
 | Integration retry exhausted | a `transient`-classed park kept failing | [`_integration_park_class`](../../hermes_cli/kanban_worktrees.py#L422) | bounded `integration_retry` events; re-park once reclassified non-transient | resolve the underlying dirt/lock; the retry counter is separate from the failure breaker |
 
 ## Traps
@@ -386,9 +386,9 @@ post-merge gate classify every changed path as `selected`, `not_applicable`,
 `allowlisted`, or `unmapped`. `scripts/run-affected.sh` may skip pytest only
 when every changed path is explicitly not applicable or allowlisted; an
 in-scope production Python path with no test selection exits 4 before pytest.
-The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5728)
+The post-merge [`default_quick_gate`](../../hermes_cli/kanban_worktrees.py#L5796)
 enforces the same hold. Its compatibility mapper,
-[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4824), and
+[`_affected_pytest_modules`](../../hermes_cli/kanban_worktrees.py#L4892), and
 the standalone script both delegate to the shared
 [`classify_changed_paths`](../../hermes_cli/affected_test_mapping.py#L656).
 The repository census is contract-tested at zero unmapped production paths in

@@ -643,11 +643,82 @@ def test_default_release_runner_rebinds_absolute_commands_to_validation_root(
     assert str(kwt.LIVE_CHECKOUT_ROOT) not in captured["argv"][2]
 
 
-def test_release_gate_refuses_activation_when_live_head_advanced(
+def test_release_gate_activates_when_live_head_advanced_only_by_irrelevant_paths(
     kanban_home, repo,
 ):
     validated_commit = _git(repo, "rev-parse", "HEAD")
     _commit_in(repo, "later.txt", "later\n", msg="concurrent integration")
+    activation = _fake_activation()
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=validated_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=lambda _validation_root: (True, "old commit green"),
+            activation_runner=activation,
+            max_retries=0,
+            repo_root=repo,
+        )
+        child = kb.get_task(conn, child_id)
+
+    assert result["status"] == "green"
+    assert child.status == "done"
+    assert activation.calls == [True]
+
+
+def test_release_gate_revalidates_live_head_after_artifact_relevant_drift(
+    kanban_home, repo,
+):
+    validated_commit = _git(repo, "rev-parse", "HEAD")
+    _commit_in(repo, "web/index.txt", "changed bundle input\n", msg="web change")
+    live_head = _git(repo, "rev-parse", "HEAD")
+    validation_heads = []
+    activation = _fake_activation()
+
+    def gate(validation_root):
+        validation_heads.append(_git(validation_root, "rev-parse", "HEAD"))
+        return True, "green"
+
+    with kb.connect() as conn:
+        _, child_id, _ = _make_release_gate_child(
+            conn, merge_commit=validated_commit,
+        )
+        result = kwt.execute_release_gate(
+            conn,
+            child_id,
+            gate_runner=gate,
+            activation_runner=activation,
+            max_retries=0,
+            repo_root=repo,
+        )
+        child = kb.get_task(conn, child_id)
+        executed = _events(conn, child_id, "release_gate_executed")
+
+    assert result["status"] == "green"
+    assert child.status == "done"
+    assert activation.calls == [True]
+    assert validation_heads == [validated_commit, live_head]
+    assert [(event["phase"], event["validation_commit"]) for event in executed] == [
+        ("merged_commit", validated_commit),
+        ("live_head_revalidation", live_head),
+    ]
+
+
+def test_release_gate_refuses_activation_when_validated_commit_is_not_ancestor(
+    kanban_home, repo,
+):
+    validated_commit = _git(repo, "rev-parse", "HEAD")
+    unrelated_commit = _git(
+        repo,
+        "commit-tree",
+        _git(repo, "write-tree"),
+        "-m",
+        "unrelated replacement history",
+    )
+    _git(repo, "reset", "--hard", unrelated_commit)
     activation = _fake_activation()
 
     with kb.connect() as conn:
@@ -668,7 +739,7 @@ def test_release_gate_refuses_activation_when_live_head_advanced(
     assert result["status"] == "escalated"
     assert child.status == "blocked"
     assert activation.calls == []
-    assert "live HEAD advanced" in escalations[0]["evidence"]["last_error"]
+    assert "not an ancestor" in escalations[0]["evidence"]["last_error"]
 
 
 def test_release_activation_holds_integrator_process_and_file_locks(
