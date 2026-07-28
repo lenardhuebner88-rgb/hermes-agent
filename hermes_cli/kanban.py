@@ -3216,9 +3216,10 @@ def _cmd_comment(args: argparse.Namespace) -> int:
             body = body[: max(0, args.max_len - len(suffix))].rstrip() + suffix
     author = args.author or _profile_author()
     with kb.connect_closing() as conn:
-        kb.add_comment(conn, args.task_id, author, body, kind=kind)
+        delivery = kb.add_comment(conn, args.task_id, author, body, kind=kind)
     label = "Directive" if kind == "directive" else "Comment"
     print(f"{label} added to {args.task_id}")
+    print(delivery.message)
     return 0
 
 def _worker_run_id_for(task_id: str) -> Optional[int]:

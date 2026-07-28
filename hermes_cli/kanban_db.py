@@ -107,7 +107,7 @@ from hermes_cli.kanban_chain_status import (
     on_fixer_card_failed,
 )
 from hermes_cli.kanban_scores_digest import scores_digest as _fork_scores_digest
-from hermes_cli import kanban_templates
+from hermes_cli import kanban_templates, kanban_comment_delivery as _comment_delivery
 from hermes_cli import kanban_worker_runtime as _worker_runtime
 
 _log = logging.getLogger(__name__)
@@ -6827,12 +6827,12 @@ def add_comment(
     author: str,
     body: str,
     kind: str = "comment",
-) -> int:
-    """Insert a comment. ``kind`` is validated against COMMENT_KINDS but is NOT
-    policy-gated here: ``kind="directive"`` carries operator-override weight and
-    MUST be cage-gated by the caller (the CLI rejects ``--directive`` when
-    HERMES_KANBAN_TASK is set). Never pass kind="directive" from a spawned-worker
-    code path — the env cage lives at the CLI layer, not in this DB function.
+) -> _comment_delivery.CommentDelivery:
+    """Insert a comment and report which rendered worker brief can see it.
+
+    ``kind`` is validated against COMMENT_KINDS but is NOT policy-gated here:
+    ``kind="directive"`` carries operator-override weight and MUST be cage-gated
+    by the caller (the CLI rejects it when HERMES_KANBAN_TASK is set).
     """
     if not body or not body.strip():
         raise ValueError("comment body is required")
@@ -6857,7 +6857,7 @@ def add_comment(
             "commented",
             {"author": author, "len": len(body), "kind": kind},
         )
-        return int(cur.lastrowid or 0)
+        return _comment_delivery.build_comment_delivery(conn, task_id, cur.lastrowid or 0, now, _pid_alive)
 
 
 def add_event(
