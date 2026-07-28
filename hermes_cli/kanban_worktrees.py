@@ -4169,10 +4169,17 @@ def _auto_complete_decompose_root(
         return
 
     now = int(time.time())
-    summary = (
-        "auto-completed decomposed root after all children completed and "
-        f"`{outcome.get('branch', chain_branch(root_id))}` integrated"
-    )
+    branch = outcome.get("branch", chain_branch(root_id))
+    if outcome.get("merge_commit") is None:
+        summary = (
+            "auto-completed decomposed root after all children completed; "
+            f"`{branch}` was already integrated"
+        )
+    else:
+        summary = (
+            "auto-completed decomposed root after all children completed and "
+            f"`{branch}` integrated"
+        )
     stamp_after_commit = False
     with kb.write_txn(conn):
         cur = conn.execute(
@@ -6001,6 +6008,7 @@ def _integrate_empty_or_already_merged(
 ) -> dict:
     """Handle ``ahead == 0``: reintegrate-after-revert, already-integrated, or empty."""
     already_integrated = _branch_is_ancestor(repo_root, branch, cur)
+    diff_files: list[str] = []
     if already_integrated:
         merged_commits = _first_parent_merges_reaching_branch(
             repo_root, branch, cur
@@ -6096,6 +6104,46 @@ def _integrate_empty_or_already_merged(
                 if artifact_receipt:
                     result["artifact_receipt"] = artifact_receipt
                 return result
+        if not diff_files:
+            fork_point = _git(
+                repo_root, "merge-base", "--fork-point", cur, branch,
+                check=False,
+            ).strip()
+            branch_head = _git(repo_root, "rev-parse", branch)
+            if fork_point and fork_point != branch_head:
+                diff_files = _changed_files_between(repo_root, fork_point, branch)
+            else:
+                target_ref = _git(
+                    repo_root, "symbolic-ref", "--short", "HEAD", check=False,
+                ).strip()
+                reflog_heads = (
+                    _git(
+                        repo_root, "reflog", "show", "--format=%H", target_ref,
+                        check=False,
+                    ).splitlines()
+                    if target_ref
+                    else []
+                )
+                prior_target = next(
+                    (
+                        head for head in reflog_heads
+                        if head != branch_head
+                        and _branch_is_ancestor(repo_root, head, branch)
+                    ),
+                    "",
+                )
+                if prior_target:
+                    diff_files = _changed_files_between(
+                        repo_root, prior_target, branch,
+                    )
+                else:
+                    try:
+                        diff_files = _changed_files_between(
+                            repo_root, f"{branch}^", branch,
+                        )
+                    except AffectedTestMappingError:
+                        # No revision is available from which to derive a diff.
+                        diff_files = []
         if cleanup:
             remove_worktree(repo_root, wt_path, branch)
         result = {
@@ -6104,6 +6152,7 @@ def _integrate_empty_or_already_merged(
             "target": cur,
             "already_integrated": True,
             "reason": f"chain branch already reachable from {cur}",
+            "changed_files": diff_files,
         }
         if artifact_receipt:
             result["artifact_receipt"] = artifact_receipt
@@ -7570,6 +7619,20 @@ def _record_integration_events_and_receipts(
             )
         except Exception:
             _log.debug("already-integrated receipt comment failed", exc_info=True)
+        if outcome.get("release_gate_required"):
+            try:
+                _create_parked_release_gate_child(conn, task_id, root_id, outcome)
+            except Exception as exc:
+                _log.warning(
+                    "could not create parked release-gate child for %s",
+                    task_id, exc_info=True,
+                )
+                return {
+                    **outcome,
+                    "action": "parked",
+                    "reason": f"required release-gate creation failed: {exc}",
+                    "release_gate_creation_failed": True,
+                }
         _maybe_auto_complete_after_integration(
             conn, auto_complete_root_id, task_id, outcome,
         )
@@ -7932,9 +7995,16 @@ def maybe_integrate_on_complete(
                 "target": effective_target or target,
                 "approved_commit": approved_commit,
             }
-    if outcome.get("action") == "merged" and any(
-        str(path).startswith("web/")
-        for path in outcome.get("changed_files", [])
+    if (
+        outcome.get("action") in {"merged", "clean"}
+        and (
+            outcome.get("action") == "merged"
+            or outcome.get("already_integrated")
+        )
+        and any(
+            str(path).startswith("web/")
+            for path in outcome.get("changed_files", [])
+        )
     ):
         outcome["release_gate_required"] = True
 
