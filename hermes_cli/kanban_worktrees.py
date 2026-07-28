@@ -135,6 +135,15 @@ _PRESERVABLE_ARTIFACT_PREFIXES = (
     # the Vault receipt tree via shutil.copy2. It is ignored in dirty_files()
     # via _IGNORED_DIRTY_PREFIXES instead, so it neither parks nor preserves.
     "screenshots/",
+    # Output dir of our own `scripts/visual-verify.sh`. A coder-frontend card
+    # that commits its own acceptance screenshots was accused of touching paths
+    # outside its lane and parked, with the "fix" suggestion to move it to
+    # `coder` — doubly wrong: the code part is pure frontend, and the accused
+    # paths are not source code at all (observed 2026-07-28 on t_4ba847c0, 8
+    # files / 1.6 MB). Deliberately NOT gitignored: git-ignored paths never
+    # reach dirty_files(), so the evidence would be silently lost instead of
+    # preserved into the receipt tree.
+    "visual-verify-output/",
 )
 
 

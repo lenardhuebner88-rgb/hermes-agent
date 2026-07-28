@@ -390,6 +390,62 @@ def test_preservable_screenshots_with_source_change_still_parks():
     assert kwt._classify_dirty_paths(paths) == kwt.DIRTY_WORKTREE_CLASS
 
 
+def test_visual_verify_output_does_not_accuse_the_frontend_lane():
+    # Regression against the live 2026-07-28 symptom on t_4ba847c0: a
+    # coder-frontend card that committed its own acceptance screenshots under
+    # `visual-verify-output/` (the output dir of scripts/visual-verify.sh) was
+    # parked for touching paths outside its lane, with the recovery hint to
+    # reassign it to `coder`. Both halves were wrong — the code part is pure
+    # frontend, and the accused paths are not source code.
+    violations, expected_lane = kwt._lane_scope_violations(
+        "coder-frontend",
+        [
+            "visual-verify-output/t_4ba847c0/bv2-board-open-desktop-1366.png",
+            "visual-verify-output/t_4ba847c0/capture-metrics.json",
+            "web/src/control/views/fleet/BoardTab.tsx",
+        ],
+    )
+    assert violations == []
+    assert expected_lane == "coder"
+
+
+def test_visual_verify_output_preserves_instead_of_parking():
+    paths = [
+        "visual-verify-output/t_4ba847c0/bv2-board-side-by-side.png",
+        "visual-verify-output/20260728T070102Z/summary.json",
+    ]
+    assert all(kwt._is_preservable_artifact_path(p) for p in paths)
+    assert kwt._classify_dirty_paths(paths) == kwt.PRESERVABLE_ARTIFACTS_CLASS
+
+
+def test_visual_verify_output_with_source_change_still_parks():
+    # Same counter-metric as for screenshots/: the wider allowlist must not
+    # swallow a genuine uncommitted source edit sitting next to the artifacts.
+    paths = [
+        "visual-verify-output/t_4ba847c0/bv2-board-side-by-side.png",
+        "web/src/control/views/fleet/BoardTab.tsx",
+    ]
+    assert kwt._classify_dirty_paths(paths) == kwt.DIRTY_WORKTREE_CLASS
+
+
+def test_visual_verify_output_still_accuses_a_backend_lane_correctly():
+    # The artifact exemption must not become a blanket pass: a `coder` card
+    # that edits real frontend source is still routed to coder-frontend, and
+    # the artifacts alone never trigger that routing.
+    assert kwt._lane_scope_violations(
+        "coder", ["visual-verify-output/t_x/shot.png"],
+    ) == ([], "coder-frontend")
+    violations, expected_lane = kwt._lane_scope_violations(
+        "coder",
+        [
+            "visual-verify-output/t_x/shot.png",
+            "web/src/control/views/fleet/BoardTab.tsx",
+        ],
+    )
+    assert violations == ["web/src/control/views/fleet/BoardTab.tsx"]
+    assert expected_lane == "coder-frontend"
+
+
 def test_default_quick_gate_web_diff_runs_control_frontend_gates(repo, monkeypatch):
     _install_fake_web_bins(repo)
     calls = []
