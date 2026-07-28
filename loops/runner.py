@@ -214,10 +214,14 @@ AUTOLAND_CONTRACTS: dict[str, AutolandContract] = {
         path_prefixes=("web/src/control/",),
         deny_prefixes=(),
         safety_sha256="cedbcf5ea93cdb72f7f70f82b258a212fcca0380a76239d3c8f7c7e787e9207f",
+        # Re-signiert 2026-07-28 (Operator-Freigabe): VERIFIER benennt
+        # {{STATE_DIR}}/last-status jetzt als Datei statt nur als Namen (Vorfall
+        # hermes-hardening R1 vom 28.07.), PLANNER traegt statt "(Opus 4.8)" die
+        # Platzhalter seiner Schwesterphasen. BUILDER unveraendert.
         prompt_sha256={
-        "PLANNER-PROMPT.md": "61046b4b5bb5df2be27772ec103614ce0f939bb8fbe97aab2702f1af1a39130f",
+        "PLANNER-PROMPT.md": "00ec377ef1d1a753d4ea01f593b1f6ee65b171e383136416f78f5312061027da",
         "BUILDER-PROMPT.md": "4a6eb2e5e558901a0d3e06a0f5785b30295e56c84c51d3f0321a7eed06ec8d93",
-        "VERIFIER-PROMPT.md": "cc76ab3f0a602a0a54d3e8ce01f0df5c89ef9b929f23a2ef52133e0ee10fc2cb",
+        "VERIFIER-PROMPT.md": "b1b7c2702820e8974491b3173e5594949534239818c17dff201f233ec1cbb972",
         },
         require_visual="always",
     ),

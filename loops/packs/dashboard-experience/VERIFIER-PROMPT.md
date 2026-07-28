@@ -51,17 +51,23 @@ PASS nur wenn alles gilt:
 
 ## Verdict
 
-- PASS: `last-status` exakt `PASS <plan-id>` und eine knappe Begründung unter
-  `## Verifier-Evidence` im Plan.
-- FAIL: `last-status` exakt `FAIL <hauptgrund>` und konkrete, umsetzbare Punkte unter
-  `## Verifier-Feedback`. Der Driver revertiert und erlaubt höchstens einen Retry.
-- HART: Beende deinen Turn NIEMALS, bevor `last-status` geschrieben ist. Keine
-  Hintergrund-Tasks, auf die du „wartest" — führe Evidence-Builds und alle Checks
-  im Vordergrund aus. Schreibe `last-status` als **ALLERLETZTEN Schritt** des
-  Turns; davor Selbstkontrolle: `cat` der geschriebenen Datei und prüfe, dass
-  exakt `PASS <plan-id>` bzw. `FAIL <grund>` steht. Ein beendeter Turn ohne
-  `last-status` zählt als FAIL ohne Begründung und revertiert den Build
-  (Vorfälle 2026-07-12 R1, 2026-07-17 R1 leerer Status trotz Prosa-PASS).
+- PASS: `PASS <plan-id>` als einzige Zeile in die DATEI
+  `{{STATE_DIR}}/last-status`; die knappe Begründung getrennt davon unter
+  `## Verifier-Evidence` im Plan `{{PLAN_PATH}}`.
+- FAIL: `FAIL <hauptgrund>` als einzige Zeile in dieselbe DATEI
+  `{{STATE_DIR}}/last-status`; die konkreten, umsetzbaren Punkte unter
+  `## Verifier-Feedback` im Plan. Der Driver revertiert und erlaubt höchstens
+  einen Retry.
+- HART: `{{STATE_DIR}}/last-status` ist eine DATEI, kein Feld im Plan — eine
+  Statuszeile im Plan zählt NICHT. Beende deinen Turn NIEMALS, bevor sie
+  geschrieben ist. Keine Hintergrund-Tasks, auf die du „wartest" — führe
+  Evidence-Builds und alle Checks im Vordergrund aus. Schreibe die Datei als
+  **ALLERLETZTEN Schritt** des Turns; davor Selbstkontrolle:
+  `cat {{STATE_DIR}}/last-status` und prüfe, dass exakt `PASS <plan-id>` bzw.
+  `FAIL <grund>` steht. Ein beendeter Turn ohne geschriebene Datei zählt als
+  FAIL ohne Begründung und revertiert den Build (Vorfälle 2026-07-12 R1,
+  2026-07-17 R1 leerer Status trotz Prosa-PASS, 2026-07-28 hermes-hardening R1
+  Statuszeile in die Plan-Datei statt in `last-status`).
 
 Du fixt nichts. NIE push, merge, deploy, Service-Restart oder Live-Dashboard-Zugriff.
 Nur der deterministische Runner darf nach deinem PASS ff-only landen, Gates erneut

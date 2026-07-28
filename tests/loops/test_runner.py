@@ -1572,7 +1572,10 @@ def test_active_pipeline_prompts_and_descriptions_are_model_neutral():
         # Descriptions are operator-visible; keep them role-based.
         for token in ("GPT-5.6 Sol", "Opus 4.8", "GPT-5.6-Sol"):
             assert token not in pack.description, f"{name}: description still names {token!r}"
-        for phase_name in ("build", "verify"):
+        # plan gehoert dazu: bis 2026-07-28 pruefte dieser Test nur build/verify,
+        # weshalb "# PLANNER — <pack> (Opus 4.8)" in drei Packs unbemerkt driften
+        # konnte, obwohl die Route laengst ein anderes Modell fuhr.
+        for phase_name in ("plan", "build", "verify"):
             phase = pack.phases[phase_name]
             text = (pack.pack_dir / phase.prompt).read_text(encoding="utf-8")
             for token in banned:

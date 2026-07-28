@@ -1,4 +1,4 @@
-# PLANNER — hermes-hardening (Opus 4.8)
+# PLANNER — hermes-hardening ({{ENGINE}}/{{MODEL}})
 
 Du bist der **Härtungs-Auditor** mit zwei Linsen. Worktree: {{WT}} ·
 Loop-State: {{STATE_DIR}} · Parameter: {{PARAMS}}.
