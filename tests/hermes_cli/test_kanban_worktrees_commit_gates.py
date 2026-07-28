@@ -657,8 +657,13 @@ def _lane_scope_task(conn, repo, root_id, *, assignee, commits):
     return task_id, info
 
 
-def _complete(conn, task_id):
-    return kwt.maybe_integrate_on_complete(conn, task_id, gate_runner=_ok_gate)
+def _complete(conn, task_id, *, completion_metadata=None):
+    return kwt.maybe_integrate_on_complete(
+        conn,
+        task_id,
+        completion_metadata=completion_metadata,
+        gate_runner=_ok_gate,
+    )
 
 
 def _record_review_snapshot_event(
@@ -1167,6 +1172,70 @@ def test_lane_scope_non_ancestor_basis_excludes_sibling_after_rebase(
     # The full chain — A's backend file AND B's frontend file — landed.
     assert (repo / "hermes_cli" / "foo.py").exists()
     assert (repo / "web" / "src" / "control" / "Rebased.tsx").exists()
+
+
+def test_lane_scope_orphaned_basis_uses_own_recorded_commit_after_late_sibling(
+    repo, kanban_home,
+):
+    # B is materialized first, then sibling A commits before B's own commit.
+    # A later rebase orphans B's claim-time basis.  A cumulative branch diff
+    # cannot distinguish those commits, but B's completion receipt names the
+    # exact commit produced by B without relying on its commit subject.
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="frontend slice",
+            assignee="coder-frontend",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+        info = kwt.ensure_worktree(repo, task_id)
+        _commit_in(
+            info["path"], "docs/earlier.md", "EARLIER = 1\n",
+            msg="earlier sibling before frontend run",
+        )
+
+        _claimed, materialized, _prepared = _claim_and_materialize(conn, task_id)
+        old_basis = conn.execute(
+            "SELECT pre_run_commit_sha FROM task_runs WHERE task_id = ? "
+            "ORDER BY id ASC LIMIT 1",
+            (task_id,),
+        ).fetchone()["pre_run_commit_sha"]
+
+        _commit_in(
+            info["path"], "hermes_cli/late_sibling.py", "SIBLING = 1\n",
+            msg="unrelated sibling commit subject",
+        )
+        _commit_in(
+            materialized.path,
+            "web/src/control/Owned.tsx",
+            "export const Owned = 1\n",
+            msg="unstructured worker subject",
+        )
+        own_commit = _git(materialized.path, "rev-parse", "HEAD").strip()
+
+        (repo / "main-only.txt").write_text("target advanced\n")
+        _git(repo, "add", "main-only.txt")
+        _git(repo, "commit", "-m", "advance target before chain rebase")
+        _git(info["path"], "rebase", "main")
+        assert subprocess.run(
+            [
+                "git", "-C", str(repo), "merge-base", "--is-ancestor",
+                old_basis, info["branch"],
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode == 1
+
+        out = _complete(
+            conn, task_id, completion_metadata={"commit": own_commit},
+        )
+
+        assert out is not None and out["action"] == "merged", out
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+    assert (repo / "hermes_cli" / "late_sibling.py").exists()
+    assert (repo / "web" / "src" / "control" / "Owned.tsx").exists()
 
 
 def test_lane_scope_rebase_exclusion_still_catches_own_violation(
