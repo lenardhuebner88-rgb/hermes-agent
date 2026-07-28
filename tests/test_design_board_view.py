@@ -25,7 +25,10 @@ class _CompatTestClient:
 
     def _request(self, method: str, url: str, **kwargs):
         async def _send():
-            transport = httpx.ASGITransport(app=self.app)
+            transport = httpx.ASGITransport(
+                app=self.app,
+                raise_app_exceptions=False,
+            )
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://testserver",
@@ -42,6 +45,117 @@ def client(tmp_path, monkeypatch):
     app = FastAPI()
     view.register_design_board_routes(app)
     return _CompatTestClient(app)
+
+
+def test_create_missing_title_returns_structured_400(client):
+    response = client.post(
+        "/api/design-board/cards",
+        json={"kind": "bug"},
+    )
+
+    assert response.status_code != 500
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {"error": "missing_field", "message": "title"}
+    }
+
+
+def test_create_invalid_json_returns_structured_400(client):
+    response = client.post(
+        "/api/design-board/cards",
+        content=b'{"kind": "bug",',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code != 500
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {
+            "error": "invalid_json",
+            "message": "Request body is not valid JSON",
+        }
+    }
+
+
+def test_entry_missing_kind_differs_from_missing_card_and_controls_stay_stable(client):
+    cid = client.post(
+        "/api/design-board/cards",
+        json={"kind": "bug", "title": "Input validation"},
+    ).json()["id"]
+
+    missing_kind = client.post(
+        f"/api/design-board/cards/{cid}/entries",
+        json={"author": "piet"},
+    )
+    missing_card = client.post(
+        "/api/design-board/cards/c_not_there/entries",
+        json={"author": "piet", "kind": "comment"},
+    )
+    valid_patch = client.patch(
+        f"/api/design-board/cards/{cid}",
+        json={"status": "open"},
+    )
+    invalid_status = client.patch(
+        f"/api/design-board/cards/{cid}",
+        json={"status": "quatsch"},
+    )
+
+    assert missing_kind.status_code != 500
+    assert missing_kind.status_code == 400
+    assert missing_kind.json() == {
+        "detail": {"error": "missing_field", "message": "kind"}
+    }
+    assert missing_card.status_code == 404
+    assert missing_card.json() == {"detail": "card not found"}
+    assert missing_kind.json() != missing_card.json()
+    assert valid_patch.status_code == 200
+    assert valid_patch.json()["status"] == "open"
+    assert invalid_status.status_code == 400
+    assert invalid_status.json() == {"detail": "bad status"}
+
+
+def test_patch_invalid_json_returns_structured_400(client):
+    cid = client.post(
+        "/api/design-board/cards",
+        json={"kind": "bug", "title": "Invalid patch"},
+    ).json()["id"]
+
+    response = client.patch(
+        f"/api/design-board/cards/{cid}",
+        content=b'{"status":',
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code != 500
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {
+            "error": "invalid_json",
+            "message": "Request body is not valid JSON",
+        }
+    }
+
+
+def test_upload_mockup_non_utf8_html_returns_structured_400(client):
+    cid = client.post(
+        "/api/design-board/cards",
+        json={"kind": "mockup", "title": "Latin-1 mockup"},
+    ).json()["id"]
+    html = "<html><body>Grüße mit Umlaut</body></html>".encode("latin-1")
+
+    response = client.post(
+        f"/api/design-board/cards/{cid}/mockups",
+        files={"file": ("latin-1.html", html, "text/html")},
+    )
+
+    assert response.status_code != 500
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": {
+            "error": "invalid_encoding",
+            "message": "HTML mockup is not valid UTF-8",
+        }
+    }
 
 
 def test_create_list_get_card(client):
