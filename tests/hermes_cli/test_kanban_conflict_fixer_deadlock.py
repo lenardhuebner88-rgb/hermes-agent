@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import time
 from pathlib import Path
 
@@ -91,6 +92,56 @@ def _after_fixer_backoff(conn, parent_id: str) -> int:
     ).fetchone()
     assert row is not None and row["created_at"] is not None
     return int(row["created_at"]) + kb.CONFLICT_FIXER_BACKOFF_SECONDS + 1
+
+
+def _init_fixer_worktree(worktree: Path) -> None:
+    """Create a small real git worktree so claim-time commit baselines exist."""
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    git("init")
+    git("config", "user.email", "fixer@test.invalid")
+    git("config", "user.name", "fixer test")
+    (worktree / "fix.py").write_text("base = 1\n", encoding="utf-8")
+    git("add", "fix.py")
+    git("commit", "-m", "baseline")
+
+
+def _commit_fixer_progress(worktree: Path) -> None:
+    (worktree / "fix.py").write_text("base = 1\nresolved = True\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(worktree), "add", "fix.py"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["git", "-C", str(worktree), "commit", "-m", "resolve conflict"],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _claim_at_runtime_limit(conn, task_id: str, *, now: int) -> None:
+    assert kb.claim_task(conn, task_id) is not None
+    kb._set_worker_pid(conn, task_id, 987654)
+    run_id = kb.get_task(conn, task_id).current_run_id
+    assert run_id is not None
+    conn.execute(
+        "UPDATE task_runs SET started_at = ? WHERE id = ?",
+        (now - kb.CONFLICT_FIXER_MAX_RUNTIME_SECONDS, run_id),
+    )
+    conn.execute(
+        "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
+        (now - 1, task_id),
+    )
+    conn.commit()
 
 
 def test_gave_up_conflict_fixer_releases_in_flight_guard_for_second_attempt(
@@ -446,3 +497,129 @@ def test_pending_root_finalizer_ignores_settled_fixer_card(
         )
 
     assert pending_id == root_id
+
+
+def test_conflict_fixer_commit_near_runtime_limit_gets_bounded_extension(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        parent_id, root_id, worktree = _parked_parent(conn, tmp_path)
+        _init_fixer_worktree(worktree)
+        fixer_id = _create_fixer(
+            conn,
+            parent_id=parent_id,
+            root_id=root_id,
+            worktree=worktree,
+            attempt=1,
+        )
+        _claim_at_runtime_limit(conn, fixer_id, now=now)
+        _commit_fixer_progress(worktree)
+
+        monkeypatch.setattr(kb.time, "time", lambda: now)
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("a progressing fixer must not be terminated")
+            ),
+        )
+
+        assert kb.enforce_max_runtime(conn) == []
+        task = kb.get_task(conn, fixer_id)
+        extension = next(
+            event
+            for event in kb.list_events(conn, fixer_id)
+            if event.kind == kb.FIXER_RUNTIME_EXTENSION_GRANTED_EVENT
+        )
+
+    assert task is not None and task.status == "running"
+    assert extension.payload["reason"] == "fresh_heartbeat_and_new_commit"
+    assert extension.payload["prior_limit_seconds"] == kb.CONFLICT_FIXER_MAX_RUNTIME_SECONDS
+    assert extension.payload["new_limit_seconds"] > extension.payload["prior_limit_seconds"]
+    assert extension.payload["new_limit_seconds"] <= kb.CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP
+    assert extension.payload["commit_sha"]
+
+
+def test_conflict_fixer_heartbeat_without_new_commit_times_out_at_base_limit(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        parent_id, root_id, worktree = _parked_parent(conn, tmp_path)
+        _init_fixer_worktree(worktree)
+        fixer_id = _create_fixer(
+            conn,
+            parent_id=parent_id,
+            root_id=root_id,
+            worktree=worktree,
+            attempt=1,
+        )
+        _claim_at_runtime_limit(conn, fixer_id, now=now)
+
+        monkeypatch.setattr(kb.time, "time", lambda: now)
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_args, **_kwargs: {
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            },
+        )
+
+        assert kb.enforce_max_runtime(conn) == [fixer_id]
+        events = kb.list_events(conn, fixer_id)
+
+    assert "timed_out" in [event.kind for event in events]
+    assert kb.FIXER_RUNTIME_EXTENSION_GRANTED_EVENT not in [event.kind for event in events]
+
+
+def test_conflict_fixer_progress_cannot_extend_past_hard_runtime_cap(
+    kanban_home,
+    tmp_path,
+    monkeypatch,
+):
+    now = 1_900_000_000
+    with kb.connect_closing() as conn:
+        parent_id, root_id, worktree = _parked_parent(conn, tmp_path)
+        _init_fixer_worktree(worktree)
+        fixer_id = _create_fixer(
+            conn,
+            parent_id=parent_id,
+            root_id=root_id,
+            worktree=worktree,
+            attempt=1,
+        )
+        _claim_at_runtime_limit(conn, fixer_id, now=now)
+        task = kb.get_task(conn, fixer_id)
+        assert task is not None and task.current_run_id is not None
+        conn.execute(
+            "UPDATE task_runs SET started_at = ? WHERE id = ?",
+            (now - kb.CONFLICT_FIXER_MAX_RUNTIME_SECONDS_CAP, task.current_run_id),
+        )
+        conn.commit()
+        _commit_fixer_progress(worktree)
+
+        monkeypatch.setattr(kb.time, "time", lambda: now)
+        monkeypatch.setattr(
+            kb,
+            "_terminate_reclaimed_worker",
+            lambda *_args, **_kwargs: {
+                "host_local": True,
+                "termination_attempted": True,
+                "terminated": True,
+                "sigkill": False,
+            },
+        )
+
+        assert kb.enforce_max_runtime(conn) == [fixer_id]
+        events = kb.list_events(conn, fixer_id)
+
+    assert "timed_out" in [event.kind for event in events]
+    assert kb.FIXER_RUNTIME_EXTENSION_GRANTED_EVENT not in [event.kind for event in events]
