@@ -324,3 +324,43 @@ def test_executable_script_passes(tmp_path: Path) -> None:
     )
     findings = [f for f in hygiene.scan_tree(tmp_path) if f.rule == "script-executable"]
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Report-helper units
+# ---------------------------------------------------------------------------
+
+def test_finding_and_path_exception_are_frozen() -> None:
+    """The report records are immutable — a later mutation would let a
+    finding quietly change its rule or message after the scan."""
+    finding = hygiene.Finding(Path("skills/x/SKILL.md"), 3, "rule", "msg")
+    exception = hygiene.PathException("some/path", "reason", "2026-10-28")
+    try:
+        finding.rule = "mutated"
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("Finding must be frozen")
+    try:
+        exception.path = "mutated"
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("PathException must be frozen")
+
+
+def test_line_of_counts_lines_from_offset_zero() -> None:
+    """Line numbers are 1-based over the WHOLE text prefix — counting from
+    offset 1 would report line 1 for matches on line 2 when the file
+    starts with a newline."""
+    assert hygiene._line_of("\nab", 2) == 2
+    assert hygiene._line_of("ab", 1) == 1
+
+
+def test_snippet_truncates_to_exactly_the_limit() -> None:
+    """A long snippet must come back at EXACTLY the limit (ellipsis
+    included) — the boundary (len == limit) stays untruncated."""
+    assert hygiene._snippet("a" * 120, 0, 120) == "a" * 120
+    long = hygiene._snippet("b" * 200, 0, 200)
+    assert len(long) == 120
+    assert long.endswith("...")
