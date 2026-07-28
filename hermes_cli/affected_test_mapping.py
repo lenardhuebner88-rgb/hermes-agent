@@ -187,6 +187,15 @@ EXPLICIT_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
 # These are real test mappings, not exceptions: touching any source in the
 # feature selects its focused maintained suite.
 FEATURE_PREFIX_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
+    # Skills and loop prompts are not Python, but they carry executable
+    # instructions — a dead path or a stale interpreter in one of them misleads
+    # every worker that reads it.  scripts/check_skill_hygiene.py is that gate
+    # and its test runs the checker over the real tree.  Measured 2026-07-28:
+    # without these two prefixes a SKILL.md or *-PROMPT.md change selected zero
+    # test files, so the checker only ever ran when someone edited the checker
+    # itself — the gate could not fail on the very change it polices.
+    ".claude/skills/": ("tests/scripts/test_check_skill_hygiene.py",),
+    "loops/packs/": ("tests/scripts/test_check_skill_hygiene.py",),
     "agent/pet/": (
         "tests/agent/test_pet*.py",
         "tests/cli/test_cli_pet_pane.py",

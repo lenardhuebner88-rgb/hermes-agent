@@ -635,6 +635,32 @@ def test_uncovered_symbol_without_curated_or_direct_net_keeps_module_imports(
     assert "EXPLICIT_TEST_PATTERNS ran" not in warning
 
 
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ".claude/skills/hermes-loops/SKILL.md",
+        "loops/packs/dashboard-polish/BUILDER-PROMPT.md",
+    ],
+)
+def test_skill_and_prompt_changes_select_the_hygiene_gate(changed: str) -> None:
+    """The hygiene checker must run on the very files it polices.
+
+    Measured 2026-07-28 against the real tree: before the two
+    FEATURE_PREFIX_TEST_PATTERNS entries, a SKILL.md or *-PROMPT.md change was
+    classified not_applicable/non_python and selected zero test files. The
+    checker therefore only ever ran when someone edited the checker itself, so a
+    skill pointing at a dead path stayed green — exactly the silent failure the
+    gate exists to prevent.
+    """
+    assert (REPO_ROOT / changed).is_file(), f"fixture path vanished: {changed}"
+
+    record = classify_changed_paths(REPO_ROOT, [changed], mode="worker").records[0]
+
+    assert record.state == "selected"
+    assert record.scope == "gate_control"
+    assert "tests/scripts/test_check_skill_hygiene.py" in record.tests
+
+
 def test_real_gateway_config_commit_does_not_warn(
     real_test_index,
 ) -> None:
