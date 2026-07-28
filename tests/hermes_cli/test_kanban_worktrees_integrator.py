@@ -373,6 +373,86 @@ def test_finalreview_parks_on_ambiguous_approved_chain_commits(repo, kanban_home
     assert card["path"].exists()
 
 
+def test_rebased_merge_completion_stamp_is_not_an_approved_code_candidate(
+    repo, kanban_home,
+):
+    """A merge of main into the chain is transport history, not card output.
+
+    A worker can stamp its current HEAD in ``metadata.commit`` after updating
+    its worktree.  Once that merge is rebased away it has no patch-id, so it
+    used to remain an off-branch candidate forever and make the genuine
+    approved worker commit look ambiguous.
+    """
+    with kb.connect() as conn:
+        root_id = kb.create_task(
+            conn,
+            title="chain root",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(repo),
+        )
+
+    chain = _provisioned_chain(
+        repo, root_id, relpath="chain.py", content="CHAIN = True\n",
+    )
+    _commit_in(repo, "main_only.py", "MAIN = True\n", msg="advance main")
+    _git(chain["path"], "merge", "main", "--no-edit")
+    merge_commit = _git(chain["path"], "rev-parse", "HEAD")
+    assert len(_git(chain["path"], "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3
+
+    # Normal rebasing removes the historic merge from the chain branch but not
+    # from an already persisted completion record.
+    _git(chain["path"], "rebase", "main")
+    assert not kwt._branch_is_ancestor(repo, merge_commit, chain["branch"])
+
+    approved = _provisioned_chain(
+        repo, "t_real_approved", relpath="approved.py", content="APPROVED = True\n",
+    )
+    approved_commit = _git(approved["path"], "rev-parse", "HEAD")
+
+    with kb.connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET workspace_path = ? WHERE id = ?",
+            (str(chain["path"]), root_id),
+        )
+        _insert_ended_run(
+            conn,
+            root_id,
+            profile="coder",
+            metadata={"commit": merge_commit, "workspace_path": str(chain["path"])},
+        )
+        _insert_ended_run(
+            conn,
+            root_id,
+            profile="coder",
+            metadata={"commit": approved_commit, "workspace_path": str(approved["path"])},
+        )
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (root_id,))
+        finalreview_id = kb.create_task(
+            conn,
+            title="chain final review",
+            assignee="reviewer",
+            parents=[root_id],
+            workspace_kind="dir",
+            workspace_path=str(chain["path"]),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'done' WHERE id = ?", (finalreview_id,),
+        )
+        conn.commit()
+
+        out = kwt.maybe_integrate_on_complete(
+            conn,
+            finalreview_id,
+            completion_metadata={"review_verdict": "APPROVED"},
+            gate_runner=_ok_gate,
+        )
+
+    assert out is not None and out["action"] == "merged"
+    assert out["approved_commit"] == approved_commit
+    assert (repo / "approved.py").read_text() == "APPROVED = True\n"
+
+
 def test_rebased_review_stamps_resolve_to_chain_tip(repo):
     """Nacht M5.1: pre-rebase stamps replaced patch-for-patch are not divergent."""
     info = _provisioned_chain(
