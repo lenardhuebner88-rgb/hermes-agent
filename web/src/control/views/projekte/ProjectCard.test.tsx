@@ -173,6 +173,28 @@ describe("ProjectCard kanban chips → Fleet deep-link", () => {
 describe("ProjectCard attention badge + reason chips (2.3 Ampel)", () => {
   afterEach(() => cleanup());
 
+  it("uses the warn channel for active badges and keeps alert on the alert channel", () => {
+    renderCard({
+      agents: [],
+      attention: { level: "active", reasons: [] },
+    });
+
+    const activeBadge = document.querySelector<HTMLElement>('[data-attention-badge="active"]');
+    expect(activeBadge).toBeTruthy();
+    expect(activeBadge?.className).toContain("status-warn");
+    expect(activeBadge?.className).not.toContain("bronze");
+
+    cleanup();
+    renderCard({
+      agents: [],
+      attention: { level: "alert", reasons: [] },
+    });
+
+    const alertBadge = document.querySelector<HTMLElement>('[data-attention-badge="alert"]');
+    expect(alertBadge).toBeTruthy();
+    expect(alertBadge?.className).toContain("status-alert");
+  });
+
   it("shows badge + needs_input / blocked / stale / loop_red chips for alert", () => {
     renderCard({
       agents: [],

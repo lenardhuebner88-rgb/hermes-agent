@@ -99,7 +99,7 @@ const ATTENTION_DOT: Record<ProjectAttention, string> = {
 /** Badge surface for the v2 Ampel (tokens only). Quiet is never rendered. */
 const ATTENTION_BADGE: Record<Exclude<ProjectAttention, "quiet">, string> = {
   alert: "border-status-alert/40 bg-status-alert/10 text-status-alert",
-  active: "border-bronze/40 bg-bronze/10 text-bronze-hi",
+  active: "border-status-warn/40 bg-status-warn/10 text-status-warn",
 };
 
 function reasonChipLabel(reason: AttentionReason): string {
