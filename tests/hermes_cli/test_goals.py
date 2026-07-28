@@ -255,6 +255,104 @@ class TestJudgeGoal:
         assert reason == "not yet"
 
 
+class TestJudgeGoalPromptRendering:
+    """Long card bodies must retain the acceptance criteria sent to the judge."""
+
+    @staticmethod
+    def _capture_prompt(monkeypatch, goal, config=None):
+        from hermes_cli import goals
+
+        captured = {}
+
+        def _fake_call_llm(**kwargs):
+            captured["prompt"] = next(
+                message["content"]
+                for message in kwargs["messages"]
+                if message["role"] == "user"
+            )
+            return MagicMock(
+                choices=[MagicMock(message=MagicMock(content='{"done": true, "reason": "ok"}'))]
+            )
+
+        monkeypatch.setattr("agent.auxiliary_client.call_llm", _fake_call_llm)
+        if config is not None:
+            monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        goals.judge_goal(goal, "completed")
+        return captured["prompt"]
+
+    def test_default_config_exposes_goal_judge_goal_chars(self):
+        from hermes_cli.config import DEFAULT_CONFIG
+        from hermes_cli import goals
+
+        assert (
+            DEFAULT_CONFIG["auxiliary"]["goal_judge"]["goal_chars"]
+            == goals.DEFAULT_GOAL_JUDGE_GOAL_CHARS
+        )
+
+    def test_long_german_card_body_sends_ac_after_character_3000(self, monkeypatch):
+        acceptance_sentence = "AC7: FALLBACK_CLAUSE_MUST_REACH_THE_JUDGE"
+        body = (
+            "## Problem\n"
+            + "M" * 3_300
+            + "\n## Akzeptanzkriterien\n"
+            + f"- {acceptance_sentence}\n"
+            + "N" * 2_900
+        )
+        goal = f"Kanban-Karte\n\n{body}"
+
+        assert len(body) > 6_000
+        assert goal.index("## Akzeptanzkriterien") > 3_000
+
+        prompt = self._capture_prompt(monkeypatch, goal)
+
+        assert acceptance_sentence in prompt
+
+    def test_truncated_english_heading_keeps_goal_head_and_ac_with_marker(self, monkeypatch):
+        goal_head = "GOAL_HEAD_MUST_REMAIN"
+        acceptance_sentence = "AC-ENGLISH_CRITERION_MUST_REMAIN"
+        goal = (
+            f"{goal_head}\n\n"
+            + "middle " * 300
+            + "\n## Acceptance Criteria\n"
+            + f"- {acceptance_sentence}\n"
+        )
+        config = {"auxiliary": {"goal_judge": {"goal_chars": 240}}}
+
+        prompt = self._capture_prompt(monkeypatch, goal, config)
+        rendered_goal = prompt.split("Goal:\n", 1)[1].split(
+            "\n\nAgent's most recent response:", 1
+        )[0]
+
+        assert goal_head in prompt
+        assert acceptance_sentence in prompt
+        assert "[... omitted middle content ...]" in prompt
+        assert len(rendered_goal) <= config["auxiliary"]["goal_judge"]["goal_chars"]
+
+    def test_ac_line_prefix_is_kept_without_a_heading(self, monkeypatch):
+        goal_head = "GOAL_HEAD_WITH_PREFIX_CRITERIA"
+        acceptance_sentence = "AC-LINE_PREFIX_CRITERION_MUST_REMAIN"
+        goal = f"{goal_head}\n\n" + "middle " * 300 + f"\n- {acceptance_sentence}\n"
+        config = {"auxiliary": {"goal_judge": {"goal_chars": 240}}}
+
+        prompt = self._capture_prompt(monkeypatch, goal, config)
+
+        assert goal_head in prompt
+        assert acceptance_sentence in prompt
+        assert "[... omitted middle content ...]" in prompt
+
+    def test_freeform_goal_without_acceptance_criteria_uses_configured_prefix_budget(self, monkeypatch):
+        goal = "F" * 256
+        config = {"auxiliary": {"goal_judge": {"goal_chars": 64}}}
+
+        prompt = self._capture_prompt(monkeypatch, goal, config)
+        rendered_goal = prompt.split("Goal:\n", 1)[1].split(
+            "\n\nAgent's most recent response:", 1
+        )[0]
+
+        assert len(rendered_goal) == 64
+        assert rendered_goal.endswith("… [truncated]")
+
+
 class TestCheckGoalModeCompletion:
     """``check_goal_mode_completion`` (Issue #38367) is the pre-completion
     judge gate shared by the kanban_complete model tool

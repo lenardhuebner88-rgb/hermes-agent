@@ -16169,8 +16169,8 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
             parts.append(t.body)
         return "\n\n".join(p for p in parts if p).strip()
 
-    # Resolve goal text from the card (title + body = the acceptance
-    # criteria the judge evaluates against).
+    # Resolve the goal text from the card (title + body); the judge retains
+    # explicit acceptance criteria when it trims a long body.
     conn = _kb.connect()
     try:
         task = _kb.get_task(conn, task_id)
