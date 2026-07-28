@@ -27591,12 +27591,11 @@ def escalate_silent_blocks_sweep(
             if _autonomy_hold_active(conn, tid):
                 continue
             blocked_run = _latest_blocked_run_for_auto_retry(conn, tid)
-            # REASON-FIDELITY (HEILER-SILENTBLOCK-REASON-FIDELITY-S1): the
-            # blocked-only query above misses the TRUE terminal outcome when a
-            # task settled via a non-blocked path (budget exhaustion, crash,
-            # timeout, raw flip). Pull the genuine last ended run for the real
-            # ``trigger_outcome`` + a message fallback so the classifier grips on
-            # the real reason instead of the real-bug default.
+            # REASON-FIDELITY (HEILER-SILENTBLOCK-REASON-FIDELITY-S1): routing
+            # must use the newest terminal context.  A blocked-only lookup is
+            # retained for its run identity/verdict, but its older summary must
+            # never override a later completed, parked, crashed, or timed-out
+            # run's reason.
             last_run = _latest_ended_run(conn, tid)
             trigger_outcome = (
                 last_run["outcome"] if last_run is not None else None
@@ -27606,21 +27605,24 @@ def escalate_silent_blocks_sweep(
                 if blocked_run is not None
                 else (int(last_run["id"]) if last_run is not None else None)
             )
+            has_newer_ended_run = last_run is not None and (
+                blocked_run is None or int(last_run["id"]) != int(blocked_run["id"])
+            )
             blocked_event = conn.execute(
                 "SELECT id, payload FROM task_events WHERE task_id = ? "
                 "AND kind = 'blocked' ORDER BY id DESC LIMIT 1",
                 (tid,),
             ).fetchone()
             reason = ""
-            if blocked_run is not None:
-                reason = (blocked_run["summary"] or "").strip() or (
-                    blocked_run["error"] or ""
-                ).strip()
-            if not reason and last_run is not None:
+            if last_run is not None:
                 reason = (last_run["summary"] or "").strip() or (
                     last_run["error"] or ""
                 ).strip()
-            if not reason and blocked_event is not None:
+            if not reason and last_run is None and blocked_run is not None:
+                reason = (blocked_run["summary"] or "").strip() or (
+                    blocked_run["error"] or ""
+                ).strip()
+            if not reason and not has_newer_ended_run and blocked_event is not None:
                 reason = (
                     _decision_event_reason(blocked_event["payload"]) or ""
                 ).strip()
