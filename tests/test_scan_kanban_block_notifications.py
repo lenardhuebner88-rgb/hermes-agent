@@ -460,3 +460,129 @@ def test_ambiguous_short_sha_does_not_transitively_group_distinct_full_shas():
     )
     report = scanner.run_report(conn, days=1, focus_task="ambiguous")
     assert report["metrics"]["tasks_with_repeated_blocks_within_5m"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Helper units
+# ---------------------------------------------------------------------------
+
+def test_same_candidate_needs_two_bounded_non_empty_spells():
+    """An empty side can never match (and must not crash), and a side
+    shorter than 7 chars is too ambiguous to claim SHA equality."""
+    assert scanner.candidates_refer_to_same_candidate("", "abc1234567") is False
+    assert scanner.candidates_refer_to_same_candidate("abc123", "abc1234567890") is False
+    assert scanner.candidates_refer_to_same_candidate("abc1234567890", "abc1234") is True
+
+
+def test_copy_readonly_snapshot_copies_the_given_database(tmp_path):
+    """The snapshot must back up the GIVEN database through the ro URI —
+    treating the URI as a plain filename would scan a brand-new empty db
+    and report zero blocks on a real board."""
+    db = tmp_path / "kanban.db"
+    source = sqlite3.connect(db)
+    source.execute("CREATE TABLE probe (x INTEGER)")
+    source.execute("INSERT INTO probe VALUES (41)")
+    source.commit()
+    source.close()
+
+    snapshot = scanner.copy_readonly_snapshot(db)
+    try:
+        assert snapshot.execute("SELECT x FROM probe").fetchone()[0] == 41
+    finally:
+        snapshot.close()
+
+
+def _bare_board() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    return conn
+
+
+def test_block_without_payload_kind_counts_as_unclassified():
+    """A blocked event with an empty payload must land in the literal
+    'unclassified' kind bucket — the string 'None' would split the
+    metrics and hide the block."""
+    conn = _bare_board()
+    conn.execute(
+        "INSERT INTO task_events VALUES (1, 't1', NULL, 'blocked', '{}', 100)"
+    )
+    report = scanner.run_report(conn, days=1, focus_task="t1")
+    assert report["metrics"]["blocks_by_kind"] == {"unclassified": 1}
+
+
+def test_main_requires_the_output_flag(monkeypatch, tmp_path, capsys):
+    """--output is required: without it the CLI must exit with a usage
+    error, not crash later on a None path."""
+    db = tmp_path / "kanban.db"
+    sqlite3.connect(db).close()
+    monkeypatch.setattr(
+        "sys.argv", ["scan_kanban_block_notifications.py", "--db", str(db)]
+    )
+    try:
+        scanner.main()
+    except SystemExit as exc:
+        assert exc.code != 0
+    else:
+        raise AssertionError("main without --output must exit non-zero")
+
+
+def test_main_creates_nested_output_dir_and_tolerates_existing_one(
+    monkeypatch, tmp_path
+):
+    """The report writer must create a missing nested output directory
+    AND survive a second run into the same existing directory."""
+    db = tmp_path / "board.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE task_events (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id INTEGER,
+            kind TEXT NOT NULL,
+            payload TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE task_runs (
+            id INTEGER PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            profile TEXT,
+            outcome TEXT,
+            verdict TEXT,
+            status TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    out = tmp_path / "nested" / "deep" / "report.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["scan_kanban_block_notifications.py", "--db", str(db), "--output", str(out)],
+    )
+    assert scanner.main() == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["schema_version"] == 1
+
+    # second run: the parent directory now EXISTS — exist_ok must hold
+    assert scanner.main() == 0
