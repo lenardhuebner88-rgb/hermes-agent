@@ -29,6 +29,7 @@ function record(overrides: Partial<PlanSpecRecord>): PlanSpecRecord {
     ingest_disposition: "clean",
     ingest_would_block: false,
     ingest_findings: [],
+    action_state: "ready",
     ...overrides,
   };
 }
@@ -53,5 +54,51 @@ describe("planSpecKanban closed provenance", () => {
 
   it("does not collapse archived kanban state into not-ingested wording", () => {
     expect(planSpecKanbanLabel(record({ kanban_state: "archived" }))).toBe("archiviert");
+  });
+
+  it("never calls a closed plan offen or blocked — ruhige deutsche Endzustands-Label", () => {
+    // Echte Vault-Formen (Bestand 2026-07-29): Freitext in closed_reason/status,
+    // kanban_state ohne Board-Endzustand. Genau diese Records fielen vorher auf
+    // „offen" zurück — direkt neben einem COMPLETE-Badge.
+    const shipped = record({
+      open: false,
+      status: "shipped",
+      closed_reason: "SHIPPED 2026-06-19 (89527c494 - lane-scope fix)",
+      kanban_state: "not_ingested",
+      action_state: "completed",
+    });
+    expect(planSpecKanbanLabel(shipped)).toBe("ausgeliefert");
+
+    const obsolete = record({
+      open: false,
+      status: "obsolete - fix shipped+dogfood-proven 2026-06-18",
+      closed_reason: null,
+      kanban_state: "not_ingested",
+      action_state: "completed",
+    });
+    expect(planSpecKanbanLabel(obsolete)).toBe("obsolet");
+
+    const notNeeded = record({
+      open: false,
+      status: "closed",
+      closed_reason: "not needed anymore",
+      kanban_state: "not_ingested",
+      action_state: "archived",
+    });
+    expect(planSpecKanbanLabel(notNeeded)).toBe("obsolet");
+
+    const unknownClosed = record({
+      open: false,
+      status: "closed",
+      closed_reason: "weg damit",
+      kanban_state: "not_ingested",
+      action_state: "archived",
+    });
+    expect(planSpecKanbanLabel(unknownClosed)).toBe("geschlossen");
+  });
+
+  it("keeps the open fallbacks for genuinely open records", () => {
+    expect(planSpecKanbanLabel(record({ open: true, valid: true }))).toBe("offen");
+    expect(planSpecKanbanLabel(record({ open: true, valid: false }))).toBe("blocked");
   });
 });

@@ -8,6 +8,8 @@ import { useMemo, useState } from "react";
 import { FilePlus2, Search } from "lucide-react";
 
 import type { PlanSpecsResponse } from "../../lib/schemas";
+import { planSpecAwaitsPlanAction } from "../../lib/fleetHub";
+import { de } from "../../i18n/de";
 import { PlanComposer } from "../../components/fleet/PlanComposer";
 import { AutoReleaseTile } from "../../components/fleet/AutoReleaseTile";
 import { SignalChip, type SignalTone } from "../../components/leitstand";
@@ -68,7 +70,9 @@ const STATE_META: Record<PlanActionState, { label: string; tone: SignalTone }> =
 };
 
 function matchesSegment(item: PlanSpecRecord, state: PlanActionState, segment: PlanSegment): boolean {
-  if (segment === "all") return true;
+  // „Offen" (Default/Hauptansicht): geschlossene Pläne (completed/archived)
+  // sind Endzustände und bleiben ausgeblendet — erreichbar über „Erledigt".
+  if (segment === "all") return state !== "completed" && state !== "archived";
   if (segment === "draft" || segment === "ready" || segment === "held") return state === segment;
   if (segment === "attention") return state === "blocked" && !item.kanban_root_task_id;
   if (segment === "board") {
@@ -195,7 +199,9 @@ export function PlanTab({
   const boardCount = counts.handed_off + counts.running + blockedOnBoard;
   const doneCount = counts.completed + counts.archived;
   const segments: Array<[PlanSegment, string, number]> = [
-    ["all", "Alle", counts.total_matching],
+    // „Offen" zählt nur, was die Hauptansicht auch zeigt; der Erledigt-Zähler
+    // bleibt sichtbar, damit geschlossene Pläne nicht wie gelöscht wirken.
+    ["all", "Offen", counts.total_matching - doneCount],
     ["draft", "Entwurf", counts.draft],
     ["ready", "Bereit", counts.ready],
     ["attention", "Klärung", blockedBeforeHandoff],
@@ -203,6 +209,20 @@ export function PlanTab({
     ["board", "Im Board", boardCount],
     ["done", "Erledigt", doneCount],
   ];
+
+  // „Bereit 5" vs. „4 Pläne warten auf deine Freigabe": beide Zahlen stimmen —
+  // Bereit zählt Übergabereife, die Freigabe-Zahl nur Pläne mit Operator-Gate.
+  // Der Überzählige (z. B. eine Hermes-Default-Karte) startet ohne Freigabe.
+  const readyBreakdown = useMemo(() => {
+    let awaiting = 0;
+    let total = 0;
+    for (const item of allPlanspecs) {
+      if (planState(item) !== "ready") continue;
+      total += 1;
+      if (planSpecAwaitsPlanAction(item)) awaiting += 1;
+    }
+    return { total, awaiting, auto: total - awaiting };
+  }, [allPlanspecs]);
 
   return (
     <div className="fleet-plantab">
@@ -252,6 +272,12 @@ export function PlanTab({
           </button>
         ))}
       </div>
+
+      {readyBreakdown.total > 0 ? (
+        <p className="fleet-plan-hint" role="status">
+          {de.fleet.planReadyHint(readyBreakdown.awaiting, readyBreakdown.auto)}
+        </p>
+      ) : null}
 
       <div className="fleet-boardtab-filter">
         <label className="fleet-plan-search">

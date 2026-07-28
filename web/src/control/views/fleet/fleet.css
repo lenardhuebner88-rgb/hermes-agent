@@ -124,6 +124,10 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-subtabs {
   mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+  /* Der rechte Fade ist eine Scroll-Affordanz, kein Abschneider: ein
+   * Innenabstand in Fade-Breite laesst den letzten Chip vollstaendig aus
+   * der Fade-Zone scrollen (sonst bliebe „Risiko" dauerhaft halb verblasst). */
+  padding-right: 26px;
 }
 .fleet-chip {
   font-size: 13px;
@@ -2638,9 +2642,12 @@ body:has([data-fleet-theme]) [data-control] {
 .fleet-boardtab-register {
   border-bottom: 0;
   /* Scroll-Affordanz wie .fleet-subtabs (L3-Spec, Befund 8): der rechte Rand
-   * fadet aus statt das letzte Register mobil hart abzuschneiden. */
+   * fadet aus statt das letzte Register mobil hart abzuschneiden. Der
+   * Innenabstand in Fade-Breite macht das letzte Register („Erledigt")
+   * vollstaendig lesbar — ohne ihn laege es dauerhaft unter dem Fade. */
   mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 26px), transparent 100%);
+  padding-right: 26px;
 }
 
 .fleet-boardtab-register button,

@@ -295,6 +295,20 @@ export const de = {
     // PlanSpec-Badge
     psWaitsForOperator: "wartet auf dich",
     kartenGeplant: (n: number) => `${n} ${n === 1 ? "Karte" : "Karten"} geplant`,
+    // Erklärt „Bereit N" neben „M Pläne warten auf deine Freigabe": Bereit =
+    // übergabereif; nur Pläne mit Operator-Gate warten, der Rest startet ohne.
+    planReadyHint: (awaiting: number, auto: number) => {
+      const waitPart = `${awaiting} ${awaiting === 1 ? "wartet" : "warten"} auf deine Freigabe`;
+      const autoPart = auto > 0
+        ? ` · ${auto} ${auto === 1 ? "startet" : "starten"} ohne Operator-Freigabe (z. B. Hermes-Defaults)`
+        : "";
+      return `Bereit heißt übergabereif: ${waitPart}${autoPart}.`;
+    },
+    // Datenfrische-Strip (FleetSourceFreshness): Aktion + Ursachenhinweis.
+    // Ein Hintergrund-Tab pausiert das Polling absichtlich (document.hidden) —
+    // „Daten von vor 13m" ist dann korrekt, kein Defekt.
+    freshnessReload: "Neu laden",
+    freshnessPausedNote: "Tab im Hintergrund? Dann pausiert die Aktualisierung absichtlich — die Zeitangabe ist korrekt, kein Defekt.",
     // Worker-Drawer
     drawerModell: "Modell",
     drawerHeartbeat: "Heartbeat",

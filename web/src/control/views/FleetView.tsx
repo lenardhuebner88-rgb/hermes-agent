@@ -467,13 +467,20 @@ export function FleetView() {
       </div>
 
       {(activeBoardState.isStale || activeBoardState.error) ? (
-        <div className="mb-2 flex justify-end" role="status" aria-live="polite">
+        <div className="mb-2 flex items-center justify-end gap-2" role="status" aria-live="polite">
           <StaleBadge
             isStale={activeBoardState.isStale}
             lastUpdated={activeBoardState.lastUpdated}
             errorObj={activeBoardState.errorObj}
             error={activeBoardState.error}
           />
+          <button
+            type="button"
+            className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-micro font-medium text-ink-2 transition hover:border-live hover:text-ink"
+            onClick={() => void activeBoardState.reload()}
+          >
+            {de.fleet.freshnessReload}
+          </button>
         </div>
       ) : null}
 
