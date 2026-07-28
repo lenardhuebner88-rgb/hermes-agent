@@ -464,3 +464,48 @@ def test_judge_fix_closed_gate_on_model_exception(monkeypatch):
     assert res["resolved"] is False
     assert "judge model call failed" in res["reason"]
     assert "RuntimeError" in res["reason"]
+
+
+def test_parse_fix_reply_uses_reason_field_and_normalises_absence_to_none():
+    """The rationale falls back rationale -> reason -> None: a reply with
+    only 'reason' must carry it, and a reply with neither must yield None
+    (not an empty string the receipt would render as '')."""
+    after, _block, rationale = writer._parse_fix_reply(
+        json.dumps({"text": "New skill.\n", "reason": "because"}), "# Old\n"
+    )
+    assert after == "New skill.\n"
+    assert rationale == "because"
+
+    _after2, _block2, rationale2 = writer._parse_fix_reply(
+        json.dumps({"text": "New skill.\n"}), "# Old\n"
+    )
+    assert rationale2 is None
+
+
+def test_parse_fix_reply_replacement_not_in_skill_is_rejected():
+    """A replacement whose old_text does not occur in the skill must fail
+    closed (None) — applying it would be a no-op masquerading as a fix."""
+    after, block, rationale = writer._parse_fix_reply(
+        json.dumps({"old_text": "zzz-missing", "new_text": "yyy"}),
+        "Some skill.\n",
+    )
+    assert (after, block, rationale) == (None, None, None)
+
+
+def test_parse_fix_reply_preserves_a_missing_trailing_newline():
+    """A skill without a trailing newline must stay without one — the fix
+    may only re-add the newline the original HAD, never invent one."""
+    after, _block, _rationale = writer._parse_fix_reply(
+        json.dumps({"old_text": "aa", "new_text": "cc"}), "aa\nbb"
+    )
+    assert after == "cc\nbb"
+
+
+def test_configured_aux_model_none_model_is_empty_not_literal_none(monkeypatch):
+    """A configured slot with model: null must read as '' — the literal
+    string 'None' would leak into receipts and status lines."""
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"auxiliary": {"skills_hub": {"model": None}}},
+    )
+    assert writer._configured_aux_model("skills_hub") == ""
