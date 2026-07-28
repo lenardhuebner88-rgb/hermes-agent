@@ -233,10 +233,11 @@ Re-measured 2026-07-25 — this supersedes the 2026-07-24 guidance.
 39,727 lines. You cannot read it, and you should not try. Read these three first, in order:
 
 1. **`docs/kanban/LIFECYCLE.md`** — the map: state diagram, transition table, dispatch path
-   (tick → worker), landing path, decision order inside `complete_task`, traps. Its 144 symbol
-   anchors are mechanically verified by `scripts/check_kanban_lifecycle_anchors.py` (exit 0),
-   so its line numbers are the one set in this repo you may trust — and re-run that checker
-   after any change that moves symbols.
+   (tick → worker), landing path, decision order inside `complete_task`, traps. Its 145 symbol
+   and banner anchors are mechanically verified by
+   `scripts/check_kanban_lifecycle_anchors.py` (exit 0), making it the repo's mechanically
+   checked source map — re-run that checker after renaming or removing a top-level symbol or
+   exact banner text.
 2. **`docs/refactor/ownership.kanban_db.md`** — answers the question that comes *before* any
    edit: does this symbol belong to the fork or to upstream? Editing an upstream-owned body is
    what created the merge problem in the first place; put new fork code in a fork-owned module

@@ -74,6 +74,9 @@ EXPLICIT_TEST_PATTERNS: dict[str, tuple[str, ...]] = {
     "config/affected-test-exceptions.json": (
         "tests/hermes_cli/test_affected_test_mapping.py",
     ),
+    "docs/kanban/LIFECYCLE.md": (
+        "tests/scripts/test_check_kanban_lifecycle_anchors.py",
+    ),
     "gateway/__init__.py": (
         "tests/gateway/test_config.py",
         "tests/gateway/test_delivery.py",
