@@ -331,6 +331,15 @@ def _plan_classified_backup_actions(
         else:
             classified.setdefault(matched[0], {}).setdefault(key, []).append(path)
 
+    # A group of pure sidecars (-wal/-shm with no primary file) is not a recovery
+    # point -- SQLite cannot be restored from them alone. One such orphan was
+    # found occupying a state.db generation, leaving only two real restore points
+    # under a keep=3 policy. Demote them to the age-bounded remainder.
+    for label in list(classified):
+        for key, members in list(classified[label].items()):
+            if not any(not m.name.endswith(("-wal", "-shm")) for m in members):
+                unclassified.setdefault(key, []).extend(classified[label].pop(key))
+
     actions: list[DeleteAction] = []
     for label, _pattern, keep in policies:
         groups = classified.get(label)

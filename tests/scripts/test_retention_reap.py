@@ -1240,6 +1240,35 @@ def test_in_flight_backup_does_not_occupy_a_generation_slot(tmp_path):
     assert {action.path for action in _classified(base, root)} == {in_flight}
 
 
+def test_orphaned_sidecars_do_not_occupy_a_generation_slot(tmp_path):
+    """Leftover -wal/-shm without their .db cannot restore anything. One such
+    orphan was found holding a state.db generation, so keep=3 preserved only two
+    real restore points."""
+    base, root = _backup_root(tmp_path)
+    real = []
+    for index in range(3):
+        path = root / f"state.db.2026072{5 + index}T011500Z.before-stale-sweep.db"
+        path.write_text(str(index))
+        _age(path, 3 - index)
+        real.append(path)
+    orphans = []
+    for suffix in ("-wal", "-shm"):
+        path = root / f"state.db.20260723T011500Z.before-stale-sweep.db{suffix}"
+        path.write_text("")
+        _age(path, 1.5)
+        orphans.append(path)
+
+    deleted = {action.path for action in _classified(base, root)}
+
+    # all three genuine snapshots survive; the orphan pair claims no slot
+    assert not deleted.intersection(real)
+
+    # and it expires on age like any other unclassified leftover
+    for path in orphans:
+        _age(path, 45)
+    assert {action.path for action in _classified(base, root)} == set(orphans)
+
+
 def test_backup_directories_stay_untouched_under_class_policy(tmp_path):
     base, root = _backup_root(tmp_path)
     stale_directory = root / "code-before-proposal-20260601T202054Z"
