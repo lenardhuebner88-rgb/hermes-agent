@@ -15,7 +15,9 @@ Parameter: {{PARAMS}}. Führe GENAU EINE Runde aus (ein Fund), dann beende den T
       Netz-/Port-Bindung ohne Freigabe, ContextVar-Leaks.
    c. Verdächtige Datei 3× hintereinander laufen lassen (Beweis der Instabilität):
       `scripts/run_tests.sh <datei> -q -p no:cacheprovider`
-      (3× hintereinander denselben Aufruf; NIE die Vollsuite).
+      (3× hintereinander denselben Aufruf; NIE die Vollsuite.
+      Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+      kein pytest-Timeout-Flag.)
    WICHTIG (Repo-Eigenheit): die Suite läuft nachts per-File-isoliert — Cross-File-Leaks
    zeigen sich oft NUR, wenn zwei bestimmte Dateien nacheinander im selben Prozess
    laufen. Reproduktion dann: beide Dateien zusammen in EINEM pytest-Aufruf.

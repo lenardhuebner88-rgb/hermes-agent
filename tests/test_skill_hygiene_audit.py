@@ -73,6 +73,47 @@ def test_packs_and_skills_do_not_hardcode_venv_for_pytest():
     )
 
 
+# pytest-timeout is not installed; any `--timeout=<n>` / `--timeout <n>` aborts the run
+# before a test starts. Match only the *invocation* form (flag + value). Trap-prose that
+# names the flag without a value (e.g. "do not use pytest's `--timeout`") stays green.
+_PYTEST_TIMEOUT_FLAG = re.compile(r"--timeout(?:=\S+|\s+\S+)")
+
+
+def _find_pytest_timeout_flags(text: str) -> list[str]:
+    """Return 'start_line: snippet' for each pytest --timeout=<value> style flag."""
+    hits: list[str] = []
+    for match in _PYTEST_TIMEOUT_FLAG.finditer(text):
+        start_line = text.count("\n", 0, match.start()) + 1
+        snippet = " ".join(match.group(0).split())
+        if len(snippet) > 160:
+            snippet = snippet[:157] + "..."
+        hits.append(f"{start_line}: {snippet}")
+    return hits
+
+
+def test_packs_and_skills_do_not_pass_pytest_timeout_flag():
+    """Real tree: no pack/skill may pass pytest's --timeout flag with a value.
+
+    pytest-timeout is not installed; the flag aborts with unrecognized arguments.
+    Per-file caps live in scripts/run_tests.sh (HERMES_TEST_FILE_TIMEOUT / --file-timeout).
+    Trap-prose that only *names* the flag without a value must stay green.
+    """
+    scanned = _iter_prompt_and_skill_files()
+    assert scanned, "expected pack PROMPT.md and skill SKILL.md files under repo root"
+
+    offenders: list[str] = []
+    for path in scanned:
+        rel = path.relative_to(_REPO_ROOT)
+        for hit in _find_pytest_timeout_flags(path.read_text(encoding="utf-8")):
+            offenders.append(f"{rel}:{hit}")
+
+    assert not offenders, (
+        "pytest --timeout flag is not available (pytest-timeout not installed); "
+        "use the runner per-file timeout instead:\n"
+        + "\n".join(offenders)
+    )
+
+
 def _write_skill(root: Path, content: str) -> None:
     skill_dir = root / "audit-skill"
     skill_dir.mkdir(parents=True)

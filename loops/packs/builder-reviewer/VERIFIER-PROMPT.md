@@ -20,6 +20,8 @@ als ein zu Unrecht abgelehnter.
    ./loops/gate.sh HEAD~1
    scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider
    ```
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
    Wenn der Diff `web/` berührt, zusätzlich aus `{{WT}}/web`:
    `npm run lint:control && npx tsc -b --noEmit && npx vitest run <betroffene Pfade>`
 3. **Tautologie-Check** (Pflicht, wenn Tests neu/geändert — die teuerste bekannte
@@ -30,6 +32,8 @@ als ein zu Unrecht abgelehnter.
    scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider  # MUSS ROT sein
    git checkout HEAD -- .                                                  # wiederherstellen
    ```
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag. Der Lauf auf altem Code MUSS ROT sein.)
    Ist der Test auf dem alten Code GRÜN, beweist er nichts → FAIL („tautologischer Test").
 4. **Adversarial lesen**: Edge-Cases des `done_when`; Aufrufer geänderter Symbole
    (`rg`-Caller-Check) auf stille Regressionen; wurde der Test an die Implementierung

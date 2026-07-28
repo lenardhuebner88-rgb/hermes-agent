@@ -25,6 +25,8 @@ dann beende den Turn.
    ./loops/gate.sh     # ruff + affected pytest (uncommitteter Diff)
    scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider
    ```
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
    Wenn du `web/` berührt hast, zusätzlich aus `{{WT}}/web`:
    ```bash
    npm run lint:control && npx tsc -b --noEmit && npx vitest run <betroffene Testpfade>

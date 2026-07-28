@@ -24,6 +24,8 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
    alten Code rot sein.
 6. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt) + den neuen Test explizit:
    `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider`
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
 7. **Grün** → GENAU EIN Commit: `loop(error-sweep): <service> <fehlermuster kurz>`
    + Ledger-Zeile: Muster, Vorkommen-Zahl, Evidenz-Zeitstempel, Datei:Zeile, Testpfad.
 8. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):

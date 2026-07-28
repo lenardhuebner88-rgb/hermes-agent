@@ -124,6 +124,14 @@ scripts/gate-frontend.sh
 - Interpreter selection lives once, in `scripts/lib/select_test_python.sh`. Both
   `run_tests.sh` and `collect_check.sh` source it. Do not re-inline it — the two inline
   copies drifted on 2026-07-25 while a comment claimed they matched.
+- Canonical single-file / targeted run (extra pytest flags pass through; no `--` separator):
+  `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider`
+- Never pass pytest `--timeout` — `pytest-timeout` is not installed, so the flag aborts with
+  `unrecognized arguments` before any test runs. Per-file caps live in the runner (default 300 s,
+  SIGKILL of the process tree); tune via `HERMES_TEST_FILE_TIMEOUT=<seconds>` or `--file-timeout`.
+- Collection sweep is a different script: `scripts/collect_check.sh -q tests/ 2>&1 | tail -3`
+  (want `0 errors`). It runs `pytest --co` in one process. Do not route `--co` through
+  `run_tests.sh` — that fans collection out to ~one process per test file.
 
 ### Test runtime — what actually costs time
 
