@@ -134,3 +134,49 @@ def test_post_to_discord_uses_existing_send_message_contract_and_surfaces_errors
 
     with pytest.raises(RuntimeError, match="boom"):
         post_to_discord("hello", channel_id="123", sender=failing_sender)
+
+
+# ---------------------------------------------------------------------------
+# Parsing helpers — None-safe and frozen
+# ---------------------------------------------------------------------------
+
+def test_source_config_is_frozen():
+    """Source defaults are an immutable contract — a runtime mutation would
+    silently change which feeds the next post reads."""
+    from scripts.daily_research_post import SourceConfig
+
+    source = SourceConfig("n", "u")
+    with pytest.raises(AttributeError):
+        source.name = "mutated"
+
+
+def test_clean_text_and_parse_datetime_tolerate_none():
+    """Feed fields are routinely absent; both helpers must answer the empty
+    default instead of crashing the whole collection run."""
+    from scripts.daily_research_post import _clean_text, _parse_datetime
+
+    assert _clean_text(None) == ""
+    assert _parse_datetime(None) is None
+
+
+def test_xml_text_skips_missing_tags_and_uses_the_first_present():
+    """A missing tag must be skipped, not crash on .text — RSS items omit
+    optional fields all the time."""
+    import xml.etree.ElementTree as ET
+
+    from scripts.daily_research_post import _xml_text
+
+    parent = ET.fromstring("<item><title>Hello &amp; more</title></item>")
+    assert _xml_text(parent, ["missing", "title"]) == "Hello & more"
+    assert _xml_text(parent, ["missing", "absent_too"]) == ""
+
+
+def test_xml_link_falls_back_to_element_text_without_href():
+    """RSS <link> carries the URL as TEXT (no href attribute); only Atom
+    uses href. Requiring href would silently drop every RSS link."""
+    import xml.etree.ElementTree as ET
+
+    from scripts.daily_research_post import _xml_link
+
+    rss = ET.fromstring("<item><link>https://example.com/a</link></item>")
+    assert _xml_link(rss) == "https://example.com/a"
