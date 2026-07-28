@@ -19,8 +19,9 @@ Parameter: {{PARAMS}} (FOKUS = zu auditierendes Subsystem). Führe GENAU EINE Ru
    synthetischer Idealfall; tautologische Tests flogen im Kimi-Loop im Review raus).
    Dann minimaler Fix.
 5. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt) + den neuen Test explizit:
-   `PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest -q \
-     -p no:cacheprovider --timeout=120 <testpfad>`
+   `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider`
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
 6. **Grün** → GENAU EIN Commit (ein Fund = ein Commit, cherry-pick-bar):
    `loop(kimi-audit): <modul> <fund kurz>` + Ledger-Zeile (Fund, Datei:Zeile,
    Eingabemuster, Testpfad).
@@ -43,4 +44,4 @@ Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, DB-Schreibpfade/Dispatch/Auth
 anfassen (→ BLOCKED + Ledger), Schema-Migrationen, kanban.db-Schreibzugriff, Secrets,
-Upstream-Dateien (`web/src/App.tsx`), `web/package-lock.json`, Test-Assertions aufweichen.
+Upstream-Dateien (`web/src/App.tsx`), `package-lock.json`, Test-Assertions aufweichen.

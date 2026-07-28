@@ -23,9 +23,10 @@ dann beende den Turn.
    ```bash
    git add -A          # erst stagen: neue (Test-)Dateien sind sonst für das Gate unsichtbar
    ./loops/gate.sh     # ruff + affected pytest (uncommitteter Diff)
-   PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python \
-     -m pytest -q -p no:cacheprovider --timeout=120 <tests: aus dem Plan>
+   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider
    ```
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
    Wenn du `web/` berührt hast, zusätzlich aus `{{WT}}/web`:
    ```bash
    npm run lint:control && npx tsc -b --noEmit && npx vitest run <betroffene Testpfade>
@@ -55,6 +56,6 @@ dann beende den Turn.
 
 ## Verbote
 - NIE: push, merge, deploy, Service-Restart, DB-Schreibzugriff auf `~/.hermes/kanban.db`,
-  Secrets/Auth-Dateien, `web/package-lock.json`, Schema-Migrationen.
+  Secrets/Auth-Dateien, `package-lock.json`, Schema-Migrationen.
 - Kein zweites Item „mitnehmen". Kein Scope-Creep. Lieber ehrliches BUILD_FAIL
   als ein Commit, der das done_when nur behauptet.

@@ -8,8 +8,8 @@ description: 'Primary build target - das /control SPA (FastAPI + React/TS, Port 
 The operator builds **only the dashboard** (everything else runs via Hermes) and is **not a strong
 coder** — keep changes minimal, follow the existing patterns exactly, explain in plain language. The
 dashboard is part of a fork that syncs with NousResearch upstream, so **match house style** to avoid
-merge pain. (OpenClaw was shut down 2026-06-01 — it is no longer a tab/data source; ignore any older
-OpenClaw/Mission-Control references.)
+merge pain. (OpenClaw is not a tab or data source; ignore any OpenClaw/Mission-Control
+references you still find.)
 
 ## Where things live
 
@@ -86,15 +86,15 @@ Then a colocated `*.test.ts` for any non-trivial `lib/` logic (vitest).
 **A. Live checkout (`~/.hermes/hermes-agent`), tree clean:**
 ```bash
 scripts/gate-frontend.sh                 # ONE call: lint:control → tsc -b → vitest → build.
-                                         # Exists because freehand `vitest | tail` swallowed a red
-                                         # exit (2026-07-01). --skip-build if web_dist must survive.
+                                         # Exists because freehand `vitest | tail` swallows a red
+                                         # exit. --skip-build if web_dist must survive.
 ```
 Or the steps by hand:
 ```bash
 cd web
 npm run lint:control
 ../node_modules/.bin/tsc -b --noEmit --force   # binaries are HOISTED to the repo-root node_modules;
-                                               # --force: stale .tsbuildinfo yields false-green (belegt 2026-06-16/21)
+                                               # --force: stale .tsbuildinfo yields false-green
 ../node_modules/.bin/vitest run          # ALWAYS the full suite — tests pin cross-file source
 npm run build                            # only when web_dist may be overwritten (deploy path)
 ```
@@ -115,7 +115,7 @@ local/dedicated node_modules layout" (the error names the fix: `rm -rf` the path
 gate). `scripts/gate-frontend.sh` runs `npm ci` the safe way, via a manifest-only shadow root.
 Python gates in a worktree (no venv there — use the live checkout's). There are **two**
 venvs and they are not interchangeable: **pytest lives only in `.venv`** (`venv/bin/python
--m pytest` → `ModuleNotFoundError`, re-measured 2026-07-28), ruff exists in both.
+-m pytest` → `ModuleNotFoundError`), ruff exists in both.
 `scripts/lib/select_test_python.sh` probes `.venv` first for exactly this reason — prefer
 `scripts/run_tests.sh`/`run-affected.sh` over a hand-rolled pytest call and you inherit
 the right one automatically.

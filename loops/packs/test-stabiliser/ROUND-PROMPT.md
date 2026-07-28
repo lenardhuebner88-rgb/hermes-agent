@@ -14,8 +14,10 @@ Parameter: {{PARAMS}}. Führe GENAU EINE Runde aus (ein Fund), dann beende den T
       Weitere Muster: modul-globale Mutation ohne Fixture-Restore, `time.sleep`-Timing,
       Netz-/Port-Bindung ohne Freigabe, ContextVar-Leaks.
    c. Verdächtige Datei 3× hintereinander laufen lassen (Beweis der Instabilität):
-      `PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest -q \
-        -p no:cacheprovider --timeout=120 <datei>` (3 Läufe; NIE die Vollsuite).
+      `scripts/run_tests.sh <datei> -q -p no:cacheprovider`
+      (3× hintereinander denselben Aufruf; NIE die Vollsuite.
+      Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+      kein pytest-Timeout-Flag.)
    WICHTIG (Repo-Eigenheit): die Suite läuft nachts per-File-isoliert — Cross-File-Leaks
    zeigen sich oft NUR, wenn zwei bestimmte Dateien nacheinander im selben Prozess
    laufen. Reproduktion dann: beide Dateien zusammen in EINEM pytest-Aufruf.
@@ -50,4 +52,4 @@ Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 NIE: push, merge, deploy, Vollsuite, Produktions-Code ändern um einen Test grün zu
 bekommen (nur echte Bugfixes mit Regressionstest sind erlaubt — im Zweifel BLOCKED),
 Schema-Migrationen, Auth-/Secret-Pfade, kanban.db-Schreibzugriff, Upstream-Dateien,
-`web/package-lock.json`, `tests/conftest.py`-Invarianten aufweichen.
+`package-lock.json`, `tests/conftest.py`-Invarianten aufweichen.

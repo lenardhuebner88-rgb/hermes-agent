@@ -19,8 +19,9 @@ Parameter: {{PARAMS}} (FOKUS = Signalwörter/Suchraum). Führe GENAU EINE Runde 
      reiner Lese-/Parse-Pfad ist (keine DB-Schreibpfade/Dispatch/Auth) — sonst
      `BLOCKED <grund>` melden (Per-Funktions-Regel wie error-sweep).
 4. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt) + bei neuem Test explizit:
-   `PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest -q \
-     -p no:cacheprovider --timeout=120 <testpfad>`
+   `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider`
+   (Test-Umgebung und Fallen: AGENTS.md → „Python test environment". Kein Interpreter-Pfad,
+   kein pytest-Timeout-Flag.)
 5. **Grün** → GENAU EIN Commit: `loop(promise-to-proof): <behauptung kurz>`
    + Ledger-Zeile: Behauptung, Fundort, Beweis-Test oder Doku-Korrektur, Beleg.
 6. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):
@@ -42,5 +43,5 @@ Die Morgen-Review liest diese Datei — so bekommt dein Fund einen Besitzer.
 
 ## Verbote
 NIE: push, merge, deploy, Service-Restarts, Vollsuite, Schema-Migrationen, Auth-/Secret-
-Pfade, kanban.db-Schreibzugriff, Upstream-Dateien (`web/src/App.tsx`), `web/package-lock.json`,
+Pfade, kanban.db-Schreibzugriff, Upstream-Dateien (`web/src/App.tsx`), `package-lock.json`,
 Code-Fixes an DB-Schreibpfaden/Dispatch/Auth (→ BLOCKED + Ledger).
