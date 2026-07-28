@@ -600,6 +600,25 @@
 }
 .ketten-v4 .kt-empty-title { font-size: 13px; color: var(--kt-ink-2); font-weight: 500; }
 .ketten-v4 .kt-empty-sub { font-size: 11px; color: var(--kt-ink-3); }
+/* LK-2 AC-5: nächste Aktion im Leerzustand (Doktrin Situation/Bewertung/Aktion) */
+.ketten-v4 .kt-empty-action { font-size: 11px; color: var(--kt-ink-2); }
+.ketten-v4 .kt-empty-action::before { content: "→ "; color: var(--kt-brand); }
+
+/* LK-2 AC-6: Fehlerzustand — klar von leer und ladend unterscheidbar. */
+.ketten-v4 .kt-error {
+  border-left: 2px solid var(--color-status-alert);
+  background: color-mix(in oklab, var(--color-status-alert) 8%, transparent);
+  border-radius: 0 6px 6px 0;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.ketten-v4 .kt-error-title { font-size: 12px; color: var(--kt-ink); font-weight: 500; }
+.ketten-v4 .kt-error-sub {
+  font: 400 11px/1.5 var(--font-data);
+  color: var(--kt-ink-3);
+  margin-top: 2px;
+  word-break: break-word;
+}
 
 /* Focus-visible accessibility */
 .ketten-v4 button:focus-visible {

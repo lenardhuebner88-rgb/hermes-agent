@@ -496,7 +496,8 @@ export const de = {
     planBudgetNichtVerfuegbar: "Budget-Daten nicht verfügbar.",
     // Ketten-Subtab
     kettenLeer: "Keine Laufkarte auf dem Board.",
-    kettenLeerDesc: "Sobald eine Kette aus mehreren Tasks startet, erscheint sie hier.",
+    kettenLeerDesc: "Kein Fehler, aber auch kein Erfolg — der Reiter wartet auf die erste Kette.",
+    kettenLeerAktion: "Mehrgliedrige Kette anlegen — sie erscheint hier, sobald sie startet.",
     kettenKarteLaeuft: (x: number, y: number) => `Karte ${x} von ${y} läuft`,
     kettenKarteWartet: (x: number, y: number) => `Karte ${x} von ${y} wartet`,
     kettenFertigGruppe: "Fertig",
@@ -522,6 +523,10 @@ export const de = {
     laufFreigeben: "Kette freigeben",
     laufFreigebenBusy: "Freigabe läuft …",
     laufFreigebenFehler: (detail: string) => `Freigabe fehlgeschlagen — ${detail}`,
+    // Laufkarte LK-2 (Aufmerksamkeits-Ordnung, Kopf-Zähler, Lade-/Fehlerzustand)
+    laufKopfCount: (total: number, angebrochen: number) => `${total} · ${angebrochen} angebrochen`,
+    kettenLaden: "Laufkarten werden geladen …",
+    kettenGraphFehler: "Kette konnte nicht geladen werden.",
     // Karten-Detail-Drawer
     detailTabUebersicht: "Übersicht",
     detailTabAktivitaet: "Aktivität",

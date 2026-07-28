@@ -50,7 +50,19 @@ import "./ketten-v4.css";
 // Zusammenfassung die Liste noch nicht, degradiert die Karte sichtbar auf
 // Kennung, Zustand und Fortschritt — sie zeigt nie erfundene Stationen.
 
-type LaufChainState = "laeuft" | "angebrochen" | "gehalten" | "fertig" | "wartet";
+type LaufChainState = "laeuft" | "angebrochen" | "gehalten" | "wartet" | "fertig";
+
+/**
+ * LK-2 AC-1: Sichtbarkeit folgt dem Bedarf an Aufmerksamkeit, nicht dem Alter.
+ * angebrochen (höchste Aufmerksamkeit) → laeuft → gehalten → wartet → fertig.
+ */
+const LAUF_ATTENTION_RANK: Record<LaufChainState, number> = {
+  angebrochen: 0,
+  laeuft: 1,
+  gehalten: 2,
+  wartet: 3,
+  fertig: 4,
+};
 
 /** Sichtbare Stationen, bevor die Kürzungszeile mit der Gesamtzahl greift (AC-6). */
 const LAUF_VISIBLE_STATIONS = 4;
@@ -240,25 +252,70 @@ interface KettenTabProps {
 }
 
 export function KettenTab({ board, boardSlug = null, workers, readOnly = false, initialRootId, now, onOpenNodeDetail, selectedNodeId = null, detailControlsId }: KettenTabProps) {
-  const allBoardTasks: BoardTask[] = (board?.columns ?? []).flatMap((c) => c.tasks);
+  const allBoardTasks: BoardTask[] = useMemo(() => (board?.columns ?? []).flatMap((c) => c.tasks), [board]);
 
-  const chips = buildChainChips(
-    allBoardTasks.map((t) => ({
-      id: t.id,
-      title: t.title,
-      root_id: t.root_id,
-      status: t.status,
-      completed_at: t.completed_at,
-    })),
-    board?.chain_summaries,
+  const chips = useMemo(
+    () => buildChainChips(
+      allBoardTasks.map((t) => ({
+        id: t.id,
+        title: t.title,
+        root_id: t.root_id,
+        status: t.status,
+        completed_at: t.completed_at,
+      })),
+      board?.chain_summaries,
+    ),
+    [allBoardTasks, board?.chain_summaries],
   );
+
+  const summaryByRoot = useMemo(() => {
+    const m = new Map<string, ChainSummary>();
+    for (const s of board?.chain_summaries ?? []) m.set(s.root_id, s);
+    return m;
+  }, [board?.chain_summaries]);
+
+  // LK-2 AC-1: sichtbare Reihenfolge folgt dem Bedarf an Aufmerksamkeit, nicht
+  // dem Alter — angebrochen zuerst, dann laufend, gehalten, wartend, fertig.
+  // LK-2 AC-4: bei gleichem Zustand deterministisch (Abschlusszeit absteigend,
+  // dann root_id), damit zwei Darstellungen derselben unveränderten Daten
+  // dieselbe Reihenfolge liefern.
+  const laufChips = useMemo(() => {
+    const ordered = [...chips];
+    ordered.sort((a, b) => {
+      const rankDelta =
+        LAUF_ATTENTION_RANK[deriveChainState(a, summaryByRoot.get(a.rootId))] -
+        LAUF_ATTENTION_RANK[deriveChainState(b, summaryByRoot.get(b.rootId))];
+      if (rankDelta !== 0) return rankDelta;
+      const completedDelta = (b.completedAt ?? 0) - (a.completedAt ?? 0);
+      if (completedDelta !== 0) return completedDelta;
+      return a.rootId.localeCompare(b.rootId);
+    });
+    return ordered;
+  }, [chips, summaryByRoot]);
+
+  const angebrochenCount = laufChips.filter(
+    (chip) => deriveChainState(chip, summaryByRoot.get(chip.rootId)) === "angebrochen",
+  ).length;
 
   const [userSelectedRootId, setUserSelectedRootId] = useState<string | null>(initialRootId);
 
-  const selectedRootId = useMemo(() => {
-    if (userSelectedRootId && chips.some((chip) => chip.rootId === userSelectedRootId)) return userSelectedRootId;
-    return chips.find((c) => c.state === "active")?.rootId ?? chips[0]?.rootId ?? null;
-  }, [userSelectedRootId, chips]);
+  // FIX-2: offene Ketten (angebrochen/laufend/gehalten/wartend) in
+  // Aufmerksamkeits-Reihenfolge zeigen, fertige auf die jüngsten 3 cappen.
+  const [completedExpanded, setCompletedExpanded] = useState(false);
+  const activeOrPendingChips = laufChips.filter(
+    (chip) => deriveChainState(chip, summaryByRoot.get(chip.rootId)) !== "fertig",
+  );
+  const completedChips = laufChips.filter(
+    (chip) => deriveChainState(chip, summaryByRoot.get(chip.rootId)) === "fertig",
+  );
+  const visibleCompletedChips = completedExpanded ? completedChips : completedChips.slice(0, 3);
+  const hiddenCompletedCount = completedChips.length - 3;
+
+  // Auswahl folgt der Aufmerksamkeits-Ordnung: oberste offene Laufkarte,
+  // sonst die zuletzt fertiggestellte.
+  const selectedRootId = (userSelectedRootId && chips.some((chip) => chip.rootId === userSelectedRootId))
+    ? userSelectedRootId
+    : activeOrPendingChips[0]?.rootId ?? completedChips[0]?.rootId ?? null;
 
   // Board-Switch Race-Fix: fetch nur mit einer rootId, die auch im aktuellen Board
   // vorkommt. Solange der alte selectedRootId noch nicht auf den neuen Chip-Bestand
@@ -277,12 +334,6 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
   const handleChipSelect = useCallback((rootId: string) => {
     setUserSelectedRootId(rootId);
   }, []);
-
-  const summaryByRoot = useMemo(() => {
-    const m = new Map<string, ChainSummary>();
-    for (const s of board?.chain_summaries ?? []) m.set(s.root_id, s);
-    return m;
-  }, [board?.chain_summaries]);
 
   // AC-7: „Kette freigeben“ wirkt über das bestehende Flow-Release auf die
   // ganze Kette (dasselbe Backend wie die Freigabe im Plan-Reiter).
@@ -304,14 +355,6 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
       setReleaseBusyRoot(null);
     }
   }, [boardSlug]);
-
-  // FIX-2: aktive + wartende Ketten immer zeigen, fertige auf die jüngsten 3
-  // cappen (chips sind bereits active→pending→completed sortiert).
-  const [completedExpanded, setCompletedExpanded] = useState(false);
-  const activeOrPendingChips = chips.filter((c) => c.state !== "completed");
-  const completedChips = chips.filter((c) => c.state === "completed");
-  const visibleCompletedChips = completedExpanded ? completedChips : completedChips.slice(0, 3);
-  const hiddenCompletedCount = completedChips.length - 3;
 
   const chainGraphState = useChainGraph(validRootId, boardSlug);
   const { data: chainGraph, loading: chainLoading } = chainGraphState;
@@ -341,13 +384,54 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
     ]} />
   );
 
+  // LK-2 AC-6: Ladend, leer und Fehler sind drei visuell unterscheidbare
+  // Zustände. Der Ladezustand behält die Kettengeometrie (Karte mit Notch-
+  // Stationen), damit die Liste beim Eintreffen der Daten nicht springt.
+  if (board == null) {
+    return (
+      <div className="ketten-v4">
+        {freshness}
+        <div className="chain-list-header">
+          <span className="section-title">{de.fleet.laufkartenTitle}</span>
+          <span className="section-count" aria-hidden="true">···</span>
+        </div>
+        <div className="lk-list lk-list-loading" role="status" aria-label={de.fleet.kettenLaden}>
+          {[0, 1, 2].map((n) => (
+            <div className="lk-card lk-skeleton" data-state="wartet" aria-hidden="true" key={n}>
+              <p className="lk-eyeb"><span className="lk-led" /><span className="lk-sk lk-sk-eyeb" /></p>
+              <span className="lk-sk lk-sk-kennung" />
+              <span className="lk-sk lk-sk-titel" />
+              <ol className="lk-stationen">
+                {[0, 1, 2].map((s) => (
+                  <li className="lk-st is-wait" key={s}>
+                    <span className="lk-notch"><b /></span>
+                    <span className="lk-sk lk-sk-name" />
+                    <span className="lk-sk lk-sk-meta" />
+                  </li>
+                ))}
+              </ol>
+              <span className="lk-sk lk-sk-foot" />
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // LK-2 AC-5: Leerzustand nach Doktrin — Situation, Bewertung, nächste Aktion.
+  // Eine leere Kettenliste ist kein Erfolgszustand und rendert ohne ok-Grün.
   if (chips.length === 0) {
     return (
       <div className="ketten-v4">
         {freshness}
+        <div className="chain-list-header">
+          <span className="section-title">{de.fleet.laufkartenTitle}</span>
+          <span className="section-count">{de.fleet.laufKopfCount(0, 0)}</span>
+        </div>
         <div className="kt-empty">
           <p className="kt-empty-title">{de.fleet.kettenLeer}</p>
           <p className="kt-empty-sub">{de.fleet.kettenLeerDesc}</p>
+          <p className="kt-empty-action">{de.fleet.kettenLeerAktion}</p>
         </div>
       </div>
     );
@@ -359,7 +443,8 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
       {/* ── SECTION 1: Ketten-Liste als Laufkarten ─────────────────────────── */}
       <div className="chain-list-header">
         <span className="section-title">{de.fleet.laufkartenTitle}</span>
-        <span className="section-count">{chips.length}</span>
+        {/* LK-2 AC-3: Gesamtzahl und angebrochene getrennt, ohne Scrollen sichtbar. */}
+        <span className="section-count">{de.fleet.laufKopfCount(chips.length, angebrochenCount)}</span>
       </div>
       <div className="lk-list">
         {activeOrPendingChips.map((chip) => (
@@ -422,6 +507,11 @@ export function KettenTab({ board, boardSlug = null, workers, readOnly = false, 
           detailControlsId={detailControlsId}
           readOnly={readOnly}
         />
+      ) : selectedRootId && chainGraphState.error ? (
+        <div className="kt-error" role="alert">
+          <p className="kt-error-title">{de.fleet.kettenGraphFehler}</p>
+          <p className="kt-error-sub">{chainGraphState.error}</p>
+        </div>
       ) : selectedRootId ? (
         <div className="kt-empty">
           <p className="kt-empty-sub">Keine Ketten-Nodes geladen.</p>
