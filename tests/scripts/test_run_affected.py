@@ -20,7 +20,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 # The real scripts under test (copied verbatim); run_tests.sh is stubbed.
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
-_MAPPING_MODULES = ("affected_test_mapping.py", "symbol_test_narrowing.py")
+_MAPPING_MODULES = (
+    "affected_test_budget.py",
+    "affected_test_mapping.py",
+    "symbol_test_narrowing.py",
+)
 _STUB_RUN_TESTS = """#!/usr/bin/env bash
 # Test stub: record the args we were called with, then exit 0 WITHOUT running
 # any real test suite. Its mere existence in the sentinel = "full runner reached".
@@ -146,6 +150,31 @@ def test_mapped_diff_forwards_exactly_the_affected_test(tmp_path: Path) -> None:
     assert sentinel.exists(), "run_tests.sh was not invoked for a mapped diff"
     forwarded = sentinel.read_text().split()
     assert forwarded == ["tests/pkg/test_foo.py"], forwarded
+    assert "time-budget check skipped" in proc.stderr
+
+
+def test_over_budget_diff_exits_five_without_running_pytest(
+    tmp_path: Path,
+) -> None:
+    repo, sentinel = _make_repo(tmp_path)
+    (repo / "test_durations.json").write_text(
+        '{"tests/pkg/test_foo.py": 4000.0}\n',
+        encoding="utf-8",
+    )
+    (repo / "pkg" / "foo.py").write_text("VALUE = 2\n")
+    _git(repo, "add", "pkg/foo.py")
+    _git(repo, "commit", "-q", "-m", "change source")
+
+    proc = _run_affected(repo, "HEAD~1")
+
+    assert proc.returncode == 5
+    assert not sentinel.exists()
+    assert "predicted loaded wall time 14000.0s" in proc.stderr
+    assert "budget 3600.0s" in proc.stderr
+    assert "1 selected test file" in proc.stderr
+    assert "0 files without duration forecast" in proc.stderr
+    assert "top-1 estimated files: tests/pkg/test_foo.py=4000.0s" in proc.stderr
+    assert "affected-test time budget exceeded — NO test ran" in proc.stderr
 
 
 def test_red_is_held_only_after_reproduced_second_run(tmp_path: Path) -> None:

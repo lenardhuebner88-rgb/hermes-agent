@@ -11,12 +11,17 @@ import json
 import os
 import subprocess
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
+from hermes_cli.affected_test_budget import (
+    AffectedTestBudgetConfigError,
+    AffectedTestTimeEstimate,
+    check_affected_test_budget,
+)
 from hermes_cli.symbol_test_narrowing import (
     SymbolDiffSpec,
     narrow_imported_tests,
@@ -24,10 +29,10 @@ from hermes_cli.symbol_test_narrowing import (
 
 WORKER_FALLBACK_MAX_TEST_FILES = 200
 INTEGRATION_FALLBACK_MAX_TEST_FILES = 800
-WORKER_UNION_MAX_TEST_FILES = 217
 # Import fan-out is the measured noise axis; modules at 60 files or below stay exact.
 SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD = 60
 UNMAPPED_EXIT_CODE = 4
+AFFECTED_TIME_BUDGET_EXIT_CODE = 5
 EXCEPTIONS_PATH = Path("config/affected-test-exceptions.json")
 
 _EXCEPTION_DISPOSITIONS = frozenset(
@@ -210,6 +215,14 @@ class MappingError(RuntimeError):
     """Git, configuration or classification failure."""
 
 
+class AffectedTestBudgetExceeded(MappingError):
+    """The complete selected test set cannot fit its configured time budget."""
+
+    def __init__(self, estimate: AffectedTestTimeEstimate) -> None:
+        self.estimate = estimate
+        super().__init__(estimate.fail_closed_message())
+
+
 class GitTimeoutError(MappingError):
     """A git invocation exceeded the shared worktree timeout."""
 
@@ -248,6 +261,7 @@ class AffectedTestPlan:
     mode: str
     fallback_max_test_files: int
     records: tuple[PathClassification, ...]
+    notes: tuple[str, ...] = ()
 
     @property
     def selected_tests(self) -> list[str]:
@@ -270,13 +284,16 @@ class AffectedTestPlan:
         return result
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload = {
             "mode": self.mode,
             "fallback_max_test_files": self.fallback_max_test_files,
             "counts": self.counts,
             "selected_tests": self.selected_tests,
             "records": [record.to_dict() for record in self.records],
         }
+        if self.notes:
+            payload["notes"] = list(self.notes)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -696,7 +713,7 @@ def load_exceptions(
     return result, rejected
 
 
-def classify_changed_paths(
+def _classify_changed_paths(
     repo_root: Path,
     paths: Sequence[str],
     *,
@@ -704,6 +721,7 @@ def classify_changed_paths(
     exceptions_path: Path | None = None,
     index: TestIndex | None = None,
     diff_spec: SymbolDiffSpec | None = None,
+    enforce_time_budget: bool,
 ) -> AffectedTestPlan:
     if mode not in {"worker", "integration"}:
         raise MappingError(f"unknown affected-test mode: {mode}")
@@ -871,19 +889,6 @@ def classify_changed_paths(
                 f"{coverage_note} and the affected-test gate intentionally "
                 "remains non-red"
             )
-        if (
-            mode == "worker"
-            and len(prioritized_tests) > WORKER_UNION_MAX_TEST_FILES
-        ):
-            original_count = len(prioritized_tests)
-            prioritized_tests = prioritized_tests[:WORKER_UNION_MAX_TEST_FILES]
-            selected_warnings.append(
-                "worker union cap selected "
-                f"{len(prioritized_tests)} of {original_count} tests and discarded "
-                f"{original_count - len(prioritized_tests)}; integration mode runs "
-                "the full selection and the nightly full suite remains the backstop"
-            )
-
         if prioritized_tests or uncovered_symbols:
             if source_path in exceptions:
                 raise MappingError(
@@ -983,10 +988,44 @@ def classify_changed_paths(
             )
         )
 
-    return AffectedTestPlan(
+    plan = AffectedTestPlan(
         mode=mode,
         fallback_max_test_files=fallback_limit,
         records=tuple(records),
+    )
+    if not enforce_time_budget:
+        return plan
+    try:
+        budget_check = check_affected_test_budget(repo_root, plan.selected_tests)
+    except AffectedTestBudgetConfigError as exc:
+        raise MappingError(str(exc)) from exc
+    if budget_check.note:
+        plan = replace(plan, notes=(budget_check.note,))
+    if (
+        budget_check.estimate is not None
+        and budget_check.estimate.exceeds_budget
+    ):
+        raise AffectedTestBudgetExceeded(budget_check.estimate)
+    return plan
+
+
+def classify_changed_paths(
+    repo_root: Path,
+    paths: Sequence[str],
+    *,
+    mode: str = "integration",
+    exceptions_path: Path | None = None,
+    index: TestIndex | None = None,
+    diff_spec: SymbolDiffSpec | None = None,
+) -> AffectedTestPlan:
+    return _classify_changed_paths(
+        repo_root,
+        paths,
+        mode=mode,
+        exceptions_path=exceptions_path,
+        index=index,
+        diff_spec=diff_spec,
+        enforce_time_budget=True,
     )
 
 
@@ -1002,6 +1041,8 @@ def affected_pytest_modules(
         raise MappingError(
             "unmapped production paths: " + ", ".join(plan.unmapped_paths)
         )
+    for note in plan.notes:
+        warnings.warn(note, RuntimeWarning, stacklevel=2)
     return plan.selected_tests
 
 
@@ -1016,9 +1057,11 @@ def census_repository(
         for path in tracked_python_paths(repo_root)
         if not _is_under_tests(path) and (repo_root / path).is_file()
     ]
-    return classify_changed_paths(
+    return _classify_changed_paths(
         repo_root,
         sources,
         mode=mode,
         exceptions_path=exceptions_path,
+        # Census classifies inventory but never executes its aggregate test set.
+        enforce_time_budget=False,
     )

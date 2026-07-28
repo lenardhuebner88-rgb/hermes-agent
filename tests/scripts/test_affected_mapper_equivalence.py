@@ -19,6 +19,13 @@ from hermes_cli.affected_test_mapping import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mapping_contracts_from_operational_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1000000")
+
+
 def _load_standalone_mapper():
     spec = importlib.util.spec_from_file_location(
         "affected_tests_equivalence",
@@ -110,6 +117,10 @@ def test_worker_cap_runs_end_to_end_through_shell_wrapper(tmp_path: Path) -> Non
     (repo / "hermes_cli" / "__init__.py").write_text("")
     shutil.copy2(
         REPO_ROOT / "hermes_cli" / "affected_test_mapping.py",
+        repo / "hermes_cli",
+    )
+    shutil.copy2(
+        REPO_ROOT / "hermes_cli" / "affected_test_budget.py",
         repo / "hermes_cli",
     )
     shutil.copy2(

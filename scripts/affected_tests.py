@@ -4,7 +4,8 @@
 Use ``scripts/run-affected.sh`` to execute the selection.  The classifier is
 fail-closed: changed in-scope production Python without a selected test or an
 audited exception exits 4 before pytest.  Exit 3 remains reserved for the
-branch-age preflight in ``run-affected.sh``.
+branch-age preflight in ``run-affected.sh``; an over-budget complete selection
+exits 5 before pytest.
 """
 from __future__ import annotations
 
@@ -20,6 +21,8 @@ if str(_IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(_IMPORT_ROOT))
 
 from hermes_cli.affected_test_mapping import (  # noqa: E402
+    AFFECTED_TIME_BUDGET_EXIT_CODE,
+    AffectedTestBudgetExceeded,
     EXPLICIT_TEST_PATTERNS,
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError,
@@ -83,8 +86,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         choices=("worker", "integration"),
         default="integration",
         help=(
-            "worker caps package fallback at 200 and focused unions at 217; "
-            "integration applies only the package-fallback cap 800"
+            "worker caps package fallback at 200; integration uses 800; "
+            "both keep complete focused unions and enforce the time budget"
         ),
     )
     parser.add_argument(
@@ -118,6 +121,9 @@ def main(argv: list[str]) -> int:
                 mode=args.mode,
                 diff_spec=diff_spec,
             )
+    except AffectedTestBudgetExceeded as exc:
+        print(f"affected-tests: {exc}", file=sys.stderr)
+        return AFFECTED_TIME_BUDGET_EXIT_CODE
     except MappingError as exc:
         print(f"affected-tests: mapping error: {exc}", file=sys.stderr)
         return 2
@@ -127,6 +133,8 @@ def main(argv: list[str]) -> int:
     else:
         print(" ".join(plan.selected_tests))
 
+    for note in plan.notes:
+        print(f"affected-tests: note: {note}", file=sys.stderr)
     for record in plan.records:
         for warning in record.warnings:
             print(f"affected-tests: {record.path}: {warning}", file=sys.stderr)

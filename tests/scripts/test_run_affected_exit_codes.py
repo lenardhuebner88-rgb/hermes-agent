@@ -8,7 +8,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 _REAL = ("run-affected.sh", "affected-tests.sh", "affected_tests.py")
-_MAPPING_MODULES = ("affected_test_mapping.py", "symbol_test_narrowing.py")
+_MAPPING_MODULES = (
+    "affected_test_budget.py",
+    "affected_test_mapping.py",
+    "symbol_test_narrowing.py",
+)
 
 
 def _git(repo: Path, *args: str) -> None:

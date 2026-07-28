@@ -6,14 +6,17 @@ import subprocess
 
 import pytest
 
+import hermes_cli.affected_test_mapping as affected_test_mapping
+from hermes_cli.affected_test_budget import check_affected_test_budget
 from hermes_cli.affected_test_mapping import (
+    AFFECTED_TIME_BUDGET_EXIT_CODE,
+    AffectedTestBudgetExceeded,
     EXPLICIT_TEST_PATTERNS,
     INTEGRATION_FALLBACK_MAX_TEST_FILES,
     MappingError,
     SYMBOL_NARROWING_IMPORT_FANOUT_THRESHOLD,
     UNMAPPED_EXIT_CODE,
     WORKER_FALLBACK_MAX_TEST_FILES,
-    WORKER_UNION_MAX_TEST_FILES,
     affected_pytest_modules,
     build_test_index,
     changed_paths,
@@ -24,6 +27,13 @@ from hermes_cli.symbol_test_narrowing import SymbolDiffSpec
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mapping_contracts_from_operational_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1000000")
 
 
 @pytest.fixture(scope="module")
@@ -642,39 +652,55 @@ def test_real_gateway_config_commit_does_not_warn(
     assert record.warnings == ()
 
 
-def test_worker_union_cap_is_deterministic_and_integration_is_complete() -> None:
-    first_worker = classify_changed_paths(
-        REPO_ROOT,
-        ["hermes_cli/__init__.py"],
-        mode="worker",
-    ).records[0]
-    second_worker = classify_changed_paths(
-        REPO_ROOT,
-        ["hermes_cli/__init__.py"],
-        mode="worker",
-    ).records[0]
+def test_worker_union_budget_failure_is_deterministic_and_complete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     integration = classify_changed_paths(
         REPO_ROOT,
         ["hermes_cli/__init__.py"],
         mode="integration",
     ).records[0]
+    cache = tmp_path / "durations.json"
+    cache.write_text(
+        json.dumps({path: 10.0 for path in integration.tests}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1")
+    monkeypatch.setattr(
+        affected_test_mapping,
+        "check_affected_test_budget",
+        lambda repo_root, targets: check_affected_test_budget(
+            repo_root,
+            targets,
+            durations_path=cache,
+        ),
+    )
 
-    assert WORKER_UNION_MAX_TEST_FILES == 217
-    assert first_worker.state == "selected"
-    assert first_worker.strategies == ("explicit", "import")
-    assert first_worker.tests == second_worker.tests
-    assert len(first_worker.tests) == WORKER_UNION_MAX_TEST_FILES
-    assert len(integration.tests) > WORKER_UNION_MAX_TEST_FILES
-    assert set(first_worker.tests) < set(integration.tests)
-    assert (
-        f"selected 217 of {len(integration.tests)} tests and discarded "
-        f"{len(integration.tests) - 217}"
-    ) in first_worker.warnings[0]
-    assert integration.warnings == ()
-    assert "package_fallback" not in first_worker.strategies
+    with pytest.raises(AffectedTestBudgetExceeded) as first:
+        classify_changed_paths(
+            REPO_ROOT,
+            ["hermes_cli/__init__.py"],
+            mode="worker",
+        )
+    with pytest.raises(AffectedTestBudgetExceeded) as repeated:
+        classify_changed_paths(
+            REPO_ROOT,
+            ["hermes_cli/__init__.py"],
+            mode="worker",
+        )
+
+    assert str(first.value) == str(repeated.value)
+    assert first.value.estimate.file_count == len(integration.tests)
+    assert first.value.estimate.file_count > 217
+    assert "predicted loaded wall time" in str(first.value)
+    assert "budget 1.0s" in str(first.value)
+    assert "files without duration forecast" in str(first.value)
+    assert "top-5 estimated files" in str(first.value)
+    assert "discarded" not in str(first.value)
 
 
-def test_worker_union_cap_prioritizes_direct_then_explicit_then_import(
+def test_worker_union_budget_failure_keeps_direct_explicit_import_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -699,38 +725,40 @@ def test_worker_union_cap_prioritizes_direct_then_explicit_then_import(
         "pkg/runtime.py",
         ("tests/test_explicit.py",),
     )
-    monkeypatch.setattr(
-        "hermes_cli.affected_test_mapping.WORKER_UNION_MAX_TEST_FILES",
-        2,
+    (tmp_path / "test_durations.json").write_text(
+        json.dumps(
+            {
+                "tests/pkg/test_runtime.py": 100.0,
+                "tests/test_explicit.py": 100.0,
+                "tests/test_importer.py": 100.0,
+            }
+        ),
+        encoding="utf-8",
     )
-
-    worker = classify_changed_paths(
-        tmp_path,
-        ["pkg/runtime.py"],
-        mode="worker",
-    ).records[0]
-    repeated = classify_changed_paths(
-        tmp_path,
-        ["pkg/runtime.py"],
-        mode="worker",
-    ).records[0]
     integration = classify_changed_paths(
         tmp_path,
         ["pkg/runtime.py"],
         mode="integration",
     ).records[0]
 
-    assert worker.tests == repeated.tests
-    assert set(worker.tests) == {
-        "tests/pkg/test_runtime.py",
-        "tests/test_explicit.py",
-    }
-    assert integration.tests == (
+    monkeypatch.setenv("HERMES_AFFECTED_TIME_BUDGET", "1")
+    with pytest.raises(AffectedTestBudgetExceeded) as caught:
+        classify_changed_paths(
+            tmp_path,
+            ["pkg/runtime.py"],
+            mode="worker",
+        )
+
+    assert set(integration.tests) == {
         "tests/pkg/test_runtime.py",
         "tests/test_explicit.py",
         "tests/test_importer.py",
-    )
-    assert "selected 2 of 3 tests and discarded 1" in worker.warnings[0]
+    }
+    assert caught.value.estimate.file_count == 3
+    assert "3 selected test files" in str(caught.value)
+    assert "0 files without duration forecast" in str(caught.value)
+    assert "top-3 estimated files" in str(caught.value)
+    assert "discarded" not in str(caught.value)
 
 
 def test_stress_registry_files_are_not_pytest_import_evidence() -> None:
@@ -856,5 +884,6 @@ def test_synthetic_production_path_is_unmapped(tmp_path: Path) -> None:
     )
 
     assert UNMAPPED_EXIT_CODE == 4
+    assert AFFECTED_TIME_BUDGET_EXIT_CODE == 5
     assert plan.unmapped_paths == ["synthetic/unmapped_contract.py"]
     assert plan.selected_tests == []

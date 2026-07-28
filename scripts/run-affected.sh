@@ -16,7 +16,10 @@
 # a silent full-suite run. Forwards an optional <ref> straight to affected-tests.sh
 # (e.g. HEAD~1, main...HEAD).
 # Frontend gates stay separate as before — this wrapper covers only the pytest part.
+# The classifier's own default is the narrow 1200s post-merge integrator budget
+# used by hermes_cli/kanban_worktrees.py. This worker/loop path is allowed 3600s.
 set -euo pipefail
+export HERMES_AFFECTED_TIME_BUDGET="${HERMES_AFFECTED_TIME_BUDGET:-3600}"
 if ! "$(dirname "$0")/check-branch-age.sh"; then
   echo "run-affected: branch-age preflight failed — NO test ran. Fix: git merge main; for a deliberate stale-worktree override use HERMES_GATE_STALE_OK=1." >&2
   exit 3
@@ -29,6 +32,9 @@ set -e
 if [ "$mapping_status" -eq 4 ]; then
   echo "run-affected: affected-test mapping is incomplete — NO test ran." >&2
   exit 4
+elif [ "$mapping_status" -eq 5 ]; then
+  echo "run-affected: affected-test time budget exceeded — NO test ran." >&2
+  exit 5
 elif [ "$mapping_status" -ne 0 ]; then
   echo "run-affected: affected-test mapping failed with exit ${mapping_status} — NO test ran." >&2
   exit "$mapping_status"
