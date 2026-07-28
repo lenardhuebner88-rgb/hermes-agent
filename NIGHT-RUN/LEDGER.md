@@ -77,3 +77,12 @@ REJECTED hermes_cli/autoresearch_reconcile.py — probe generated 0 mutants (not
 - probe after: 13/20 = 65%
 - gate: narrow pytest 43 passed, 1 skipped | ruff clean
 - commit: 20a6ba959
+
+REJECTED hermes_cli/subcommands/vision.py — 18/20 survivors are equivalent mutants: boolean_flip on getattr(args, "json", False) defaults is unobservable because argparse store_true always sets the attribute on the namespace
+
+## 11. hermes_cli/pa_brief.py — 2026-07-28T23:07:56Z
+- probe before: 11/20 = 55%
+- killed survivors: [K] bool_op_swap L158, [K] bool_op_swap L159, [K] bool_op_swap L160, [K] bool_op_swap L325, [K] bool_op_swap L542
+- probe after: 16/20 = 80%
+- gate: narrow pytest 11 passed | ruff clean
+- commit: 66f0091a9
