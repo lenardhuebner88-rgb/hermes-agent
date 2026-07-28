@@ -6413,34 +6413,63 @@ def _lane_scope_review_snapshot_diff_spec(
 ) -> Optional[str]:
     """Return the latest usable reviewed ``base..candidate`` pair for a task.
 
-    Review provisioning records immutable commit pairs, unlike a shared chain
-    branch whose tip can acquire sibling commits or be rebased before this
-    completion hook runs.  Ignore malformed or incomplete events and retain
-    the existing task-run attribution as the caller's fallback.
+    The latest same-tree fallback submission is the immutable task candidate:
+    a verifier snapshot taken later from that shared branch can include sibling
+    commits.  Otherwise use review provisioning's immutable commit pair.
+    Ignore malformed or incomplete events and retain the existing task-run
+    attribution as the caller's fallback.
     """
-    rows = conn.execute(
+    snapshot_pair: Optional[tuple[str, str]] = None
+    snapshot_source = "review snapshot"
+    submission_rows = conn.execute(
         "SELECT payload FROM task_events "
-        "WHERE task_id = ? AND kind = 'review_snapshot_provisioned' "
-        "ORDER BY id DESC",
+        "WHERE task_id = ? AND kind = 'submitted_for_review' "
+        "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchall()
-    snapshot_pair: Optional[tuple[str, str]] = None
-    for row in rows:
+    for row in submission_rows:
         try:
             payload = json.loads(row["payload"])
         except (TypeError, json.JSONDecodeError):
             continue
         if not isinstance(payload, dict):
             continue
-        base_commit = payload.get("base_commit")
-        candidate_commit = payload.get("candidate_commit")
+        if payload.get("diff_baseline") != "candidate_parent_same_tree_fallback":
+            continue
+        base_commit = payload.get("diff_base_commit")
+        candidate_commit = payload.get("diff_candidate_commit")
         if not isinstance(base_commit, str) or not isinstance(candidate_commit, str):
             continue
         base_commit = base_commit.strip()
         candidate_commit = candidate_commit.strip()
         if base_commit and candidate_commit:
             snapshot_pair = (base_commit, candidate_commit)
+            snapshot_source = "same-tree fallback submission"
             break
+
+    if snapshot_pair is None:
+        rows = conn.execute(
+            "SELECT payload FROM task_events "
+            "WHERE task_id = ? AND kind = 'review_snapshot_provisioned' "
+            "ORDER BY id DESC",
+            (task_id,),
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            base_commit = payload.get("base_commit")
+            candidate_commit = payload.get("candidate_commit")
+            if not isinstance(base_commit, str) or not isinstance(candidate_commit, str):
+                continue
+            base_commit = base_commit.strip()
+            candidate_commit = candidate_commit.strip()
+            if base_commit and candidate_commit:
+                snapshot_pair = (base_commit, candidate_commit)
+                break
 
     if snapshot_pair is None:
         _log.info(
@@ -6460,8 +6489,9 @@ def _lane_scope_review_snapshot_diff_spec(
         ).strip()
     except WorktreeError:
         _log.warning(
-            "lane-scope: review snapshot commit pair %s..%s for task %s does "
+            "lane-scope: %s commit pair %s..%s for task %s does "
             "not resolve; falling back to task-run attribution",
+            snapshot_source,
             base_commit,
             candidate_commit,
             task_id,
@@ -6469,7 +6499,8 @@ def _lane_scope_review_snapshot_diff_spec(
         return None
 
     _log.info(
-        "lane-scope: using review snapshot commit pair %s..%s for task %s",
+        "lane-scope: using %s commit pair %s..%s for task %s",
+        snapshot_source,
         resolved_base,
         resolved_candidate,
         task_id,

@@ -666,6 +666,23 @@ def _record_review_snapshot_event(
         )
 
 
+def _record_same_tree_fallback_submission(
+    conn, task_id, *, base_commit, candidate_commit,
+):
+    """Record the immutable task candidate captured at review submission."""
+    with kb.write_txn(conn):
+        kb._append_event(
+            conn,
+            task_id,
+            "submitted_for_review",
+            {
+                "diff_base_commit": base_commit,
+                "diff_candidate_commit": candidate_commit,
+                "diff_baseline": "candidate_parent_same_tree_fallback",
+            },
+        )
+
+
 def test_lane_scope_coder_frontend_allows_control_only(repo, kanban_home):
     with kb.connect() as conn:
         task_id, _info = _lane_scope_task(
@@ -1432,6 +1449,53 @@ def test_lane_scope_review_snapshot_excludes_foreign_later_chain_commit(
             task_id,
             base_commit=base,
             candidate_commit=candidate,
+        )
+
+        out = _complete(conn, task_id)
+
+        assert out is not None and out["action"] == "merged"
+        assert _events(conn, task_id, "worker_gate_blocked") == []
+
+
+def test_lane_scope_same_tree_fallback_uses_submitted_candidate_not_cohort_tip(
+    repo, kanban_home,
+):
+    """A shared-tree verifier snapshot must not replace its task candidate."""
+    with kb.connect() as conn:
+        info = kwt.ensure_worktree(repo, "t_ls_same_tree_fallback")
+        base = _git(info["path"], "rev-parse", "HEAD")
+        _commit_in(
+            info["path"],
+            "hermes_cli/candidate_backend.py",
+            "CANDIDATE = 1\n",
+            msg="kanban(candidate): backend-only candidate",
+        )
+        candidate = _git(info["path"], "rev-parse", "HEAD")
+        _commit_in(
+            info["path"],
+            "web/src/control/Foreign.tsx",
+            "export const Foreign = 1\n",
+            msg="kanban(cohort): unrelated frontend commit",
+        )
+        cohort_tip = _git(info["path"], "rev-parse", "HEAD")
+        task_id = kb.create_task(
+            conn,
+            title="backend candidate with same-tree review fallback",
+            assignee="coder",
+            workspace_kind="dir",
+            workspace_path=str(info["path"]),
+        )
+        _record_same_tree_fallback_submission(
+            conn,
+            task_id,
+            base_commit=base,
+            candidate_commit=candidate,
+        )
+        _record_review_snapshot_event(
+            conn,
+            task_id,
+            base_commit=base,
+            candidate_commit=cohort_tip,
         )
 
         out = _complete(conn, task_id)
