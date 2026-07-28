@@ -23,8 +23,7 @@ dann beende den Turn.
    ```bash
    git add -A          # erst stagen: neue (Test-)Dateien sind sonst für das Gate unsichtbar
    ./loops/gate.sh     # ruff + affected pytest (uncommitteter Diff)
-   PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python \
-     -m pytest -q -p no:cacheprovider --timeout=120 <tests: aus dem Plan>
+   scripts/run_tests.sh <tests: aus dem Plan> -q -p no:cacheprovider --timeout=120
    ```
    Wenn du `web/` berührt hast, zusätzlich aus `{{WT}}/web`:
    ```bash

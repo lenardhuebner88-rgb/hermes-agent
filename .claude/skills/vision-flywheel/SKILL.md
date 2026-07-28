@@ -11,7 +11,7 @@ Self-improving PlanSpec pipeline, three control-plane roles: **Härter** (ingest
 Design/history (don't duplicate here): vault `2026-06-18-vision-flywheel-phase2-design.md`, `2026-06-19-vision-flywheel-runway-{design,runbook}.md`; memory `project_vision_flywheel_design`, `reference_kanban_holds_and_links`.
 
 ## Run commands with `hermes` (login shell)
-`hermes …` is on PATH in a login shell (`/home/piet/.local/bin/hermes` → `venv/bin/hermes`). In a non-login shell it's NOT on PATH — use `cd ~/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main …` (the `venv` editable install reflects live code). `.venv/` is consumer-free/deprecated since 2026-07-02 — always use `venv/`.
+`hermes …` is on PATH in a login shell (`/home/piet/.local/bin/hermes` → `venv/bin/hermes`). In a non-login shell it's NOT on PATH — use `cd ~/.hermes/hermes-agent && venv/bin/python -m hermes_cli.main …` (the `venv` editable install is the Hermes **runtime** and reflects live code). That `venv/` path is for **runtime** only (`hermes_cli.main`, services) — never for the test suite. Run the suite via `scripts/run_tests.sh` / `scripts/run-affected.sh` (they resolve the interpreter themselves).
 
 ## Quick reference
 | Do | Command / location |

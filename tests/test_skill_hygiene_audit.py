@@ -1,10 +1,76 @@
 import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
 import skill_hygiene_audit as audit_module
+
+# Repo root: tests/ lives one level below the checkout root.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Hardcoded release-venv used as a pytest *runner* (copy-paste form agents execute).
+# Matches `venv/bin/python -m pytest` and the split form with a trailing `\`,
+# absolute `…/venv/bin/python` included. Does NOT match:
+#   - `.venv/bin/python …` (test env; broader "no path at all" gate = later slice)
+#   - runtime uses (`-c`, `-m hermes_cli.main`, `-m loops.runner`)
+#   - prose that merely *mentions* the anti-pattern without a shell continuation
+# Negative lookbehind: not preceded by `.` or word char.
+_VENV_PYTEST_INVOCATION = re.compile(
+    r"(?<![.\w])venv/bin/python\b"
+    r"(?:"
+    r"[^\n\\]*-m\s+pytest\b"  # same line
+    r"|"
+    r"[^\n]*\\\s*\n[^\n]*-m\s+pytest\b"  # backslash continuation
+    r")",
+    re.MULTILINE,
+)
+
+
+def _iter_prompt_and_skill_files() -> list[Path]:
+    files: list[Path] = []
+    packs = _REPO_ROOT / "loops" / "packs"
+    if packs.is_dir():
+        files.extend(sorted(packs.rglob("*PROMPT.md")))
+    skills = _REPO_ROOT / ".claude" / "skills"
+    if skills.is_dir():
+        files.extend(sorted(skills.rglob("SKILL.md")))
+    return files
+
+
+def _find_venv_pytest_invocations(text: str) -> list[str]:
+    """Return 'start_line: snippet' for each hardcoded venv→pytest invocation."""
+    hits: list[str] = []
+    for match in _VENV_PYTEST_INVOCATION.finditer(text):
+        start_line = text.count("\n", 0, match.start()) + 1
+        snippet = " ".join(match.group(0).split())
+        if len(snippet) > 160:
+            snippet = snippet[:157] + "..."
+        hits.append(f"{start_line}: {snippet}")
+    return hits
+
+
+def test_packs_and_skills_do_not_hardcode_venv_for_pytest():
+    """Real tree: no pack/skill may invoke pytest via a hardcoded venv path.
+
+    Canonical runner is scripts/run_tests.sh (selects the interpreter).
+    Anti-scope must stay green: runtime `venv/bin/python -c` / `-m hermes_cli`
+    / `-m loops.runner`, and trap-prose that only *names* the anti-pattern.
+    """
+    scanned = _iter_prompt_and_skill_files()
+    assert scanned, "expected pack PROMPT.md and skill SKILL.md files under repo root"
+
+    offenders: list[str] = []
+    for path in scanned:
+        rel = path.relative_to(_REPO_ROOT)
+        for hit in _find_venv_pytest_invocations(path.read_text(encoding="utf-8")):
+            offenders.append(f"{rel}:{hit}")
+
+    assert not offenders, (
+        "hardcoded venv interpreter used for pytest — use scripts/run_tests.sh:\n"
+        + "\n".join(offenders)
+    )
 
 
 def _write_skill(root: Path, content: str) -> None:

@@ -23,8 +23,7 @@ Führe GENAU EINE Runde aus (ein Fund), dann beende den Turn.
    nachstellt (Log-Payload/Input aus Schritt 2, nicht synthetisch). Test muss auf dem
    alten Code rot sein.
 6. **Gate**: `git add -A && ./loops/gate.sh` (Exit-Code zählt) + den neuen Test explizit:
-   `PYTHONPATH="$PWD" /home/piet/.hermes/hermes-agent/venv/bin/python -m pytest -q \
-     -p no:cacheprovider --timeout=120 <testpfad>`
+   `scripts/run_tests.sh <testpfad> -q -p no:cacheprovider --timeout=120`
 7. **Grün** → GENAU EIN Commit: `loop(error-sweep): <service> <fehlermuster kurz>`
    + Ledger-Zeile: Muster, Vorkommen-Zahl, Evidenz-Zeitstempel, Datei:Zeile, Testpfad.
 8. **last-status** ({{STATE_DIR}}/last-status, GENAU eine Zeile):

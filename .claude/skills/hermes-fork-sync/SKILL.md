@@ -53,8 +53,8 @@ scripts/merge-audit.sh HEAD        # (exists since 2026-07-03; --strict for hook
 
 # C. Verify (targeted; the full suite has a known trap — see below)
 ( cd web && ../node_modules/.bin/tsc -b --noEmit )              # root-hoisted binary; npx is a stub trap in worktrees
-venv/bin/python -m pytest --co -q tests/ 2>&1 | tail -3       # collection sweep: want "0 errors" (catches dropped imports)
-venv/bin/python -m pytest -q tests/<touched_or_new>...        # run the files the merge actually touched
+scripts/run_tests.sh tests/ --co -q 2>&1 | tail -3            # collection sweep: want "0 errors" (catches dropped imports)
+scripts/run_tests.sh tests/<touched_or_new>... -q             # run the files the merge actually touched
 
 # D. Push (outward — confirm first). NOT a fast-forward → STOP and report, never --force
 git fetch piet-fork --prune
@@ -85,13 +85,15 @@ recent `backup/*` and any branch checked out in a worktree (`git worktree list`)
   list vs. the clean automerge IS the checklist of manual decisions to justify one by one.
 
 **Traps:**
-- **venv:** the test venv is the main `venv/` (`venv/bin/python`; `.venv/` is consumer-free/deprecated
-  since 2026-07-02 — do not reinstall into it). `venv` must have `acp` + friends (verified 2026-07-02:
-  full collection sweep 0 errors) — if imports fail, run `uv pip install -e ".[all,dev]"` in `venv`.
-  Also ensure no stray `/tmp/.git`.
-- **Full-suite hang:** `pytest -q tests/` (large suite, ~1.4k test files) **hangs** on a pre-existing
-  `delegate`/`tui` flake. If you must run it all: `--timeout=120 --timeout-method=thread` so a hang
-  becomes a failure. For routine sync, tsc + collection sweep + touched/new files is enough.
+- **Tests:** never hardcode an interpreter path for pytest. Run tests via `scripts/run_tests.sh` or
+  `scripts/run-affected.sh` — both resolve the interpreter through `scripts/lib/select_test_python.sh`
+  (first candidate where `import pytest` succeeds; skips the Hermes release `venv/`). If collection
+  fails on missing imports, repair the *test* environment the selector picks (typically `.venv/`:
+  `uv sync --locked --extra all --extra dev --extra messaging`). Also ensure no stray `/tmp/.git`.
+- **Full-suite hang:** `scripts/run_tests.sh tests/ -q` (large suite, ~1.4k test files) **hangs** on a
+  pre-existing `delegate`/`tui` flake. If you must run it all: pass `--timeout=120
+  --timeout-method=thread` so a hang becomes a failure. For routine sync, tsc + collection sweep +
+  touched/new files is enough.
 
 ## Landing a worktree branch while other sessions are active
 
