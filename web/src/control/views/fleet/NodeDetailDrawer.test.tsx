@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -77,7 +77,7 @@ vi.mock("../../hooks/planSpecsLanes", async () => {
   };
 });
 
-import { AktivitaetTab, NodeDetailDrawer, UebersichtTab } from "./NodeDetailDrawer";
+import { AktivitaetTab, NodeDetailContent, NodeDetailDrawer, UebersichtTab } from "./NodeDetailDrawer";
 import { useTaskBodyOnDemand } from "../../hooks/taskBodyOnDemand";
 import { useHermesReviewVerdicts } from "../../hooks/reviewVerdicts";
 import { useWorkerActivity } from "../../hooks/workersBoard";
@@ -427,5 +427,193 @@ describe("NodeDetailDrawer dependency action guard", () => {
     } finally {
       (hookState.taskBody as { data: unknown }).data = original;
     }
+  });
+});
+
+// ─── LK-3: Ketten-Kontext in der Detailansicht ────────────────────────────
+
+describe("LK-3 Ketten-Kontext in der Detailansicht", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  const CHAIN_CONTEXT = {
+    root_id: "t_chain0",
+    chain_identifier: "LK-SEED Demo-Kette",
+    chain_state: "laeuft",
+    position: 2,
+    total: 5,
+    previous_station: { id: "t_chain1", title: "Erste Station" },
+    next_station: { id: "t_chain3", title: "Dritte Station" },
+  };
+
+  function renderUebersicht(task: Record<string, unknown>, onNavigateTask?: (id: string) => void) {
+    return render(
+      <UebersichtTab
+        now={1_783_800_300}
+        task={task as never}
+        latestRun={null}
+        elapsedSec={null}
+        deliverables={[]}
+        onNavigateTask={onNavigateTask}
+      />,
+    );
+  }
+
+  it("zeigt Kette, Kettenzustand und Position im Kopf der Ansicht (AC-1)", () => {
+    renderUebersicht(
+      { id: "t_chain2", title: "Zweite Station", status: "running", body: null, chain_context: CHAIN_CONTEXT },
+      vi.fn(),
+    );
+    const section = screen.getByLabelText("Ketten-Kontext");
+    expect(within(section).getByText("Läuft · Station 2 von 5")).toBeTruthy();
+    expect(within(section).getByText("LK-SEED Demo-Kette")).toBeTruthy();
+  });
+
+  it("zeigt die Stationsfolge als kompakte Leiste mit hervorgehobener aktueller Station (AC-2)", () => {
+    renderUebersicht(
+      { id: "t_chain2", title: "Zweite Station", status: "running", body: null, chain_context: CHAIN_CONTEXT },
+      vi.fn(),
+    );
+    const strip = screen.getByRole("list", { name: "Stationsfolge" });
+    const segments = within(strip).getAllByRole("listitem");
+    expect(segments).toHaveLength(5);
+    expect(segments[0].className).toContain("is-done");
+    expect(segments[1].className).toContain("is-now");
+    expect(segments[1].getAttribute("aria-current")).toBe("step");
+    expect(segments[2].className).toContain("is-open");
+    expect(segments[4].className).toContain("is-open");
+  });
+
+  it("Vorgänger und Nachfolger sind ohne Listen-Umweg erreichbar (AC-3)", () => {
+    const onNavigate = vi.fn();
+    renderUebersicht(
+      { id: "t_chain2", title: "Zweite Station", status: "running", body: null, chain_context: CHAIN_CONTEXT },
+      onNavigate,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Erste Station/ }));
+    expect(onNavigate).toHaveBeenCalledWith("t_chain1");
+    fireEvent.click(screen.getByRole("button", { name: /Dritte Station/ }));
+    expect(onNavigate).toHaveBeenCalledWith("t_chain3");
+  });
+
+  it("entfällt vollständig bei einer Karte ohne Kette — keine leere Hülle (AC-4)", () => {
+    renderUebersicht({ id: "t1", title: "Solo-Task", status: "running", body: null });
+    expect(screen.queryByLabelText("Ketten-Kontext")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Stationsfolge" })).toBeNull();
+  });
+
+  it("rendert keine Kette der Länge eins (AC-4)", () => {
+    renderUebersicht(
+      {
+        id: "t1", title: "Solo", status: "running", body: null,
+        chain_context: { ...CHAIN_CONTEXT, position: 1, total: 1, previous_station: null, next_station: null },
+      },
+      vi.fn(),
+    );
+    expect(screen.queryByLabelText("Ketten-Kontext")).toBeNull();
+  });
+
+  it("navigiert ohne externen Handler intern zur Nachbarstation (AC-3, Desktop-Pane)", () => {
+    const original = hookState.taskBody.data;
+    (hookState.taskBody as { data: unknown }).data = {
+      ...original,
+      task: { id: "t_chain2", title: "Zweite Station", status: "running", body: null, chain_context: CHAIN_CONTEXT },
+    };
+    try {
+      render(
+        <NodeDetailContent
+          taskId="t_chain2"
+          chainNodes={[]}
+          now={1_783_800_300}
+          onClose={() => {}}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Dritte Station/ }));
+      expect(vi.mocked(useTaskBodyOnDemand).mock.calls.some((call) => call[0] === "t_chain3")).toBe(true);
+    } finally {
+      (hookState.taskBody as { data: unknown }).data = original;
+    }
+  });
+
+  it("behält nach dem Ketten-Einbau alle heutigen Angaben der Detailansicht (AC-5/AC-6)", () => {
+    render(
+      <UebersichtTab
+        now={1_783_800_300}
+        task={{
+          id: "t_full",
+          title: "Volle Karte",
+          status: "blocked",
+          assignee: "premium",
+          body: "Auftragsbeschreibung mit Inhalt",
+          review_tier: "review",
+          block_reason: "Wartet auf Operator",
+          priority: 5,
+          branch_name: "kanban/t_full",
+          workspace_path: "/tmp/ws/t_full",
+          model_override: "k3",
+          acceptance_criteria: ["Kriterium eins", "Kriterium zwei"],
+          created_at: 1_783_800_000,
+          started_at: 1_783_800_100,
+          completed_at: null,
+          archived_at: null,
+          due_at: 1_783_900_000,
+          last_heartbeat_at: 1_783_800_200,
+          diagnostics: [{ kind: "warn", severity: "warn", title: "Befund X", detail: "Detail Y" }],
+          chain_context: CHAIN_CONTEXT,
+        } as never}
+        latestRun={{
+          profile: "premium",
+          status: "running",
+          runtime_seconds: 90,
+          cost_usd: 0.42,
+          requested_model: "k3",
+          active_model: "claude-sonnet",
+          input_tokens: 1200,
+          output_tokens: 3400,
+        } as never}
+        elapsedSec={90}
+        deliverables={[]}
+        onNavigateTask={vi.fn()}
+      />,
+    );
+    // Ketten-Kontext (neu)
+    expect(screen.getByLabelText("Ketten-Kontext")).toBeTruthy();
+    // Status + Review-Tier
+    expect(screen.getByText("blocked")).toBeTruthy();
+    expect(screen.getByText("review")).toBeTruthy();
+    // Blockiergrund
+    expect(screen.getByText(/Wartet auf Operator/)).toBeTruthy();
+    // Zuweisung, Modell, Laufzeit, Kosten
+    expect(screen.getByText("Task-Lane")).toBeTruthy();
+    expect(screen.getByText("premium")).toBeTruthy();
+    expect(screen.getByText("Laufprofil")).toBeTruthy();
+    expect(screen.getByText("claude-sonnet")).toBeTruthy();
+    expect(screen.getByText("Laufzeit")).toBeTruthy();
+    expect(screen.getByText("Kosten")).toBeTruthy();
+    expect(screen.getByText("$0,42")).toBeTruthy();
+    // Branch, Modell-Route, Tokens, Workspace
+    expect(screen.getByText("Branch")).toBeTruthy();
+    expect(screen.getByText(/kanban\/t_full/)).toBeTruthy();
+    expect(screen.getByText("Modellroute")).toBeTruthy();
+    expect(screen.getByText("Tokens")).toBeTruthy();
+    expect(screen.getByText(/1,2k/)).toBeTruthy();
+    expect(screen.getByText(/3,4k/)).toBeTruthy();
+    expect(screen.getByText("Workspace")).toBeTruthy();
+    // Zeitstempel
+    for (const label of ["Erstellt", "Gestartet", "Fällig", "Heartbeat"]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    // Priorität, Diagnostik, Body, Abnahmekriterien
+    expect(screen.getByText("Priorität")).toBeTruthy();
+    expect(screen.getByText("Diagnostik")).toBeTruthy();
+    expect(screen.getByText("Befund X")).toBeTruthy();
+    expect(screen.getByText("Detail Y")).toBeTruthy();
+    expect(screen.getByText("Beschreibung")).toBeTruthy();
+    expect(screen.getByText(/Auftragsbeschreibung mit Inhalt/)).toBeTruthy();
+    expect(screen.getByText("Acceptance-Criteria")).toBeTruthy();
+    expect(screen.getByText("Kriterium eins")).toBeTruthy();
+    expect(screen.getByText("Kriterium zwei")).toBeTruthy();
   });
 });

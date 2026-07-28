@@ -16,6 +16,32 @@ export const TaskDeliverablesResponseSchema = z.object({
 export type TaskDeliverablesResponse = z.infer<typeof TaskDeliverablesResponseSchema>;
 export type TaskDeliverable = z.infer<typeof TaskDeliverableSchema>;
 
+// LV-3 (Ketten-Lesevertrag): Kettenkontext an der Einzelkarte. Fehlt der Key
+// (Backend ohne LV-3), bleibt das Feld undefined und der Abschnitt in der
+// Detailansicht entfällt still — es wird nichts aus Verknüpfungszahlen geraten.
+export const TaskChainStationRefSchema = z
+  .object({
+    id: z.string().catch(""),
+    title: z.string().nullable().optional().catch(null),
+  })
+  .nullable()
+  .optional()
+  .catch(null);
+
+export const TaskChainContextSchema = z
+  .object({
+    root_id: z.string().catch(""),
+    chain_identifier: z.string().nullable().optional().catch(null),
+    chain_state: z.string().catch(""),
+    position: z.coerce.number().int().catch(0),
+    total: z.coerce.number().int().catch(0),
+    previous_station: TaskChainStationRefSchema,
+    next_station: TaskChainStationRefSchema,
+  })
+  .nullable()
+  .optional()
+  .catch(null);
+
 // Fleet Ketten-Detail-Drawer: GET /tasks/{id} — Body + Acceptance-Criteria
 // für die Übersicht-Tab. Wir picken hier nur die für den Drawer relevanten Felder.
 // (Vollständig: TaskDetailResponseSchema oben — derselbe Endpoint.)
@@ -60,6 +86,7 @@ export const TaskBodySchema = z.object({
       z.array(z.object({ statement: z.string().catch("") }).passthrough()),
       z.string(),
     ]).nullable().catch(null),
+    chain_context: TaskChainContextSchema,
   }).nullable().catch(null),
   // Laufzeit aus dem jüngsten Run (für den Übersicht-Tab)
   runs: z.array(z.object({
