@@ -14843,6 +14843,142 @@ def _git_head_sha_for_workspace(workspace_path: Optional[str]) -> Optional[str]:
     return sha or None
 
 
+def _git_commit_distance(
+    older_sha: str,
+    newer_sha: str,
+    workspace_path: Optional[str],
+) -> Optional[int]:
+    """Return the number of commits from ``older_sha`` to ``newer_sha``."""
+    if not workspace_path:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "rev-list", "--count", f"{older_sha}..{newer_sha}"],
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return int(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _evidence_freshness_stamp(task: "Task") -> Optional[dict[str, Any]]:
+    scope_contract = task.scope_contract if isinstance(task.scope_contract, dict) else {}
+    stamp = scope_contract.get("evidence_freshness")
+    if not isinstance(stamp, dict):
+        return None
+    commit = stamp.get("commit")
+    recorded_at = stamp.get("recorded_at")
+    test_files = stamp.get("test_files", [])
+    if not isinstance(commit, str) or not commit.strip() or not isinstance(recorded_at, str):
+        return None
+    if not isinstance(test_files, list) or not all(isinstance(path, str) for path in test_files):
+        return None
+    return {
+        "commit": commit.strip(),
+        "recorded_at": recorded_at,
+        "test_files": [path for path in test_files if path.strip()],
+    }
+
+
+def _evidence_freshness_context(
+    task: "Task", workspace_path: Optional[str]
+) -> Optional[dict[str, Any]]:
+    stamp = _evidence_freshness_stamp(task)
+    if stamp is None:
+        return None
+    current_sha = _git_head_sha_for_workspace(workspace_path)
+    if not current_sha or current_sha == stamp["commit"]:
+        return None
+    return {
+        **stamp,
+        "current_commit": current_sha,
+        "commit_distance": _git_commit_distance(stamp["commit"], current_sha, workspace_path),
+    }
+
+
+def _evidence_freshness_preflight_enabled() -> bool:
+    """Resolve the opt-out switch without making a stale board non-dispatchable."""
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        return True
+    kanban = config.get("kanban") if isinstance(config, dict) else None
+    policy = kanban.get("evidence_freshness_preflight") if isinstance(kanban, dict) else None
+    if isinstance(policy, dict):
+        return _coerce_config_bool(policy.get("enabled"), default=True)
+    return _coerce_config_bool(policy, default=True)
+
+
+def _run_evidence_freshness_preflight(
+    conn: sqlite3.Connection,
+    task: "Task",
+    workspace_path: str,
+) -> bool:
+    """Close a stale-test task only after its recorded test files are green."""
+    if not _evidence_freshness_preflight_enabled():
+        return False
+    stamp = _evidence_freshness_stamp(task)
+    if stamp is None or not stamp["test_files"]:
+        return False
+
+    argv = ["bash", "scripts/run_tests.sh", *stamp["test_files"]]
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=workspace_path,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log.warning("kanban evidence-freshness preflight could not run for %s: %s", task.id, exc)
+        return False
+    if proc.returncode != 0:
+        return False
+
+    output_tail = ((proc.stdout or "") + ("\n" if proc.stderr else "") + (proc.stderr or ""))[-4000:]
+    add_comment(
+        conn,
+        task.id,
+        "dispatcher",
+        "\n".join([
+            "## Evidence-freshness preflight: finding not reproducible",
+            "",
+            f"Command: `{shlex.join(argv)}`",
+            f"Exit code: {proc.returncode}",
+            "Output tail:",
+            "```text",
+            output_tail.rstrip(),
+            "```",
+        ]),
+    )
+    complete_task(
+        conn,
+        task.id,
+        result="Evidence finding is no longer reproducible; recorded test files passed before worker spawn.",
+        summary="Evidence-freshness preflight closed the task after its recorded tests passed.",
+        metadata={
+            "evidence_freshness_preflight": {
+                "argv": argv,
+                "exit_code": proc.returncode,
+                "test_files": stamp["test_files"],
+            }
+        },
+    )
+    return True
+
+
 # B1 (N-B1): machine-readable diff snapshot captured at the review handoff.
 # Feeds the verifier's caller-grep duty (A2) and any later regression check.
 # Strictly fail-soft: no git workspace, a vanished workspace, or any git error
@@ -30619,6 +30755,18 @@ def _dispatch_once_locked(
                 conn, claimed, workspace, resolved_branch_name
             )
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        evidence_context = _evidence_freshness_context(claimed, str(workspace))
+        if evidence_context is not None:
+            with write_txn(conn):
+                _append_event(
+                    conn,
+                    claimed.id,
+                    "evidence_freshness_changed",
+                    evidence_context,
+                    run_id=_current_run_id(conn, claimed.id),
+                )
+        if _run_evidence_freshness_preflight(conn, claimed, str(workspace)):
+            continue
         if _cand_writer_identity is not None:
             _writer_key, _writer_root, _writer_path = _cand_writer_identity
             now = int(time.time())
@@ -33425,6 +33573,24 @@ def _worker_brief_input(
         header.append(f"Branch:   {task.branch_name}")
 
     assignment: list[_kanban_context.BriefRecord] = []
+    evidence_context = _evidence_freshness_context(task, task.workspace_path)
+    if evidence_context is not None:
+        distance = evidence_context["commit_distance"]
+        distance_text = (
+            f"{distance} commit(s)" if distance is not None else "an unknown number of commits"
+        )
+        assignment.append(
+            _kanban_context.BriefRecord(
+                text="\n".join([
+                    "## Evidence freshness: reproduce first",
+                    "The recorded evidence predates this worker base. Reproduce the finding before changing code.",
+                    f"Evidence commit: `{evidence_context['commit']}`",
+                    f"Current base commit: `{evidence_context['current_commit']}`",
+                    f"Difference: {distance_text}",
+                ]),
+                key="evidence-freshness",
+            )
+        )
     if task.body and task.body.strip():
         expanded = expand_contract_for_body(task.body)
         body = _strip_contract_profile_line(task.body) if expanded is not None else task.body

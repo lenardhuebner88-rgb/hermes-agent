@@ -2469,6 +2469,19 @@ KANBAN_CREATE_SCHEMA = {
                     "its context."
                 ),
             },
+            "evidence_commit": {
+                "type": "string",
+                "description": "Commit SHA against which the card's evidence was recorded. Requires evidence_recorded_at.",
+            },
+            "evidence_recorded_at": {
+                "type": "string",
+                "description": "Timestamp for evidence_commit. Requires evidence_commit.",
+            },
+            "evidence_test_files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional exact test files that reproduce the recorded evidence before worker spawn.",
+            },
             "parents": {
                 "type": "array",
                 "items": {"type": "string"},

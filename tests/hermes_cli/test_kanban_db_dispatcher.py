@@ -134,6 +134,72 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         assert kb.get_task(conn, c).status == "running"
 
 
+@pytest.mark.parametrize(
+    ("returncode", "expected_status", "expected_spawns"),
+    [(0, "done", 0), (1, "running", 1)],
+)
+def test_dispatch_preflights_stamped_evidence_tests_before_spawning(
+    kanban_home,
+    all_assignees_spawnable,
+    monkeypatch,
+    tmp_path,
+    returncode,
+    expected_status,
+    expected_spawns,
+):
+    calls = []
+    spawns = []
+    real_run = kb.subprocess.run
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] != ["bash", "scripts/run_tests.sh"]:
+            return real_run(argv, **kwargs)
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, returncode, "test output", "test errors")
+
+    monkeypatch.setattr(kb, "_evidence_freshness_preflight_enabled", lambda: True)
+    monkeypatch.setattr(kb.subprocess, "run", fake_run)
+
+    def fake_spawn(task, workspace):
+        spawns.append((task.id, workspace))
+
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title="reproduce evidence before worker",
+            assignee="alice",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            scope_contract={"evidence_freshness": {
+                "commit": "0123456789abcdef",
+                "recorded_at": "2026-07-28T01:00:00Z",
+                "test_files": ["tests/unit/test_evidence.py"],
+            }},
+        )
+        result = kb.dispatch_once(conn, spawn_fn=fake_spawn)
+        task = kb.get_task(conn, task_id)
+        comments = kb.list_comments(conn, task_id)
+
+    assert calls == [
+        (["bash", "scripts/run_tests.sh", "tests/unit/test_evidence.py"], {
+            "capture_output": True,
+            "cwd": str(tmp_path),
+            "text": True,
+            "timeout": 900,
+        })
+    ]
+    assert task.status == expected_status
+    assert len(spawns) == expected_spawns
+    if returncode == 0:
+        assert task_id not in {spawned_task_id for spawned_task_id, _assignee in result.spawned}
+        assert any(
+            "Evidence-freshness preflight: finding not reproducible" in comment.body
+            and "Exit code: 0" in comment.body
+            and "test output" in comment.body
+            for comment in comments
+        )
+
+
 def test_dispatch_spawn_failure_releases_claim(kanban_home, all_assignees_spawnable):
     def boom(task, workspace):
         raise RuntimeError("spawn failed")

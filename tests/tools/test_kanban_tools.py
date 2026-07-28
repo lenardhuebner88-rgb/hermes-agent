@@ -1285,6 +1285,35 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
+def test_create_persists_optional_evidence_freshness_stamp(worker_env):
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    props = kt.KANBAN_CREATE_SCHEMA["parameters"]["properties"]
+    assert {"evidence_commit", "evidence_recorded_at", "evidence_test_files"} <= set(props)
+
+    out = kt._handle_create({
+        "title": "reproduce evidence",
+        "assignee": "peer",
+        "parents": [worker_env],
+        "evidence_commit": "0123456789abcdef",
+        "evidence_recorded_at": "2026-07-28T01:00:00Z",
+        "evidence_test_files": ["tests/unit/test_evidence.py"],
+    })
+    created = json.loads(out)
+    assert created["ok"] is True
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, created["task_id"])
+        assert task.scope_contract["evidence_freshness"] == {
+            "commit": "0123456789abcdef",
+            "recorded_at": "2026-07-28T01:00:00Z",
+            "test_files": ["tests/unit/test_evidence.py"],
+        }
+    finally:
+        conn.close()
+
+
 def test_create_worker_empty_parents_auto_links_to_self(worker_env):
     """B3a: HERMES_KANBAN_TASK set + empty parents → auto-parent to self."""
     from tools import kanban_tools as kt
