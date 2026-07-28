@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_worktrees as kwt
+from hermes_cli import strategist_specs
 from hermes_cli.goals import check_goal_mode_completion
 from hermes_cli.kanban_decompose import _VALID_TASK_KINDS
 from hermes_cli import kanban_swarm as ks
@@ -2193,6 +2194,10 @@ def _cmd_release_freigabe(args: argparse.Namespace) -> int:
     author = getattr(args, "author", None) or _profile_author()
     with kb.connect_closing() as conn:
         released = kb.release_freigabe_hold(conn, args.task_id, author=author)
+        if released:
+            strategist_specs.persist_task_decision(
+                conn, args.task_id, status="released", author=author
+            )
     if getattr(args, "json", False):
         print(json.dumps({
             "task_id": args.task_id, "released": released, "author": author,
@@ -2257,6 +2262,10 @@ def _cmd_veto_freigabe(args: argparse.Namespace) -> int:
     author = getattr(args, "author", None) or _profile_author()
     with kb.connect_closing() as conn:
         vetoed = kb.dismiss_freigabe_hold(conn, args.task_id, author=author)
+        if vetoed:
+            strategist_specs.persist_task_decision(
+                conn, args.task_id, status="vetoed", author=author
+            )
     if getattr(args, "json", False):
         print(json.dumps({
             "task_id": args.task_id, "vetoed": vetoed, "author": author,
