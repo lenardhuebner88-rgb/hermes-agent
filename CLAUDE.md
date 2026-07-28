@@ -41,8 +41,9 @@ Overrides the global "CodeGraph first" rule **for this repo**. Re-measured 2026-
 > navigators and every doc in this repo have been caught serving line numbers that are
 > thousands of lines stale while looking perfectly plausible. Resolve the location at the
 > moment you need it — `codegraph query <symbol>`, or `ast.parse` + `lineno`. The anchor
-> checker (`scripts/check_kanban_lifecycle_anchors.py`) is the only line-number source here
-> that is mechanically verified; everything else drifts silently.
+> checker (`scripts/check_kanban_lifecycle_anchors.py`) is the only mechanically verified
+> source map here: it resolves top-level symbols through the AST and module banner texts by
+> exact match; line numbers everywhere else drift silently.
 
 - **`codegraph query|node|explore` now covers the whole repo, including the two big files.**
   Until 2026-07-25 it skipped every file >1 MiB, which silently excluded `hermes_cli/kanban_db.py`

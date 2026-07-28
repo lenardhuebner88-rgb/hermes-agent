@@ -661,6 +661,19 @@ def test_skill_and_prompt_changes_select_the_hygiene_gate(changed: str) -> None:
     assert "tests/scripts/test_check_skill_hygiene.py" in record.tests
 
 
+def test_lifecycle_document_change_selects_the_anchor_gate() -> None:
+    changed = "docs/kanban/LIFECYCLE.md"
+    assert (REPO_ROOT / changed).is_file(), f"fixture path vanished: {changed}"
+
+    record = classify_changed_paths(REPO_ROOT, [changed], mode="worker").records[0]
+
+    assert record.state == "selected"
+    assert record.scope == "gate_control"
+    assert record.tests == (
+        "tests/scripts/test_check_kanban_lifecycle_anchors.py",
+    )
+
+
 def test_real_gateway_config_commit_does_not_warn(
     real_test_index,
 ) -> None:
